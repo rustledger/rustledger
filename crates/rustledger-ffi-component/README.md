@@ -115,10 +115,11 @@ map). The contract validates with `wasm-tools` and generates ~35k lines via
       run the source path, matching the handlers (single file, no includes).
 - [x] `builder`: `create` / `create-batch` (WIT input → `input_entry_to_directive`
       → core → WIT) and `filter` (date-range `[begin, end)` over WIT directives).
-- [ ] `builder`: `clamp` — synthesizes opening-balance/summary directives via the
-      JSON-based `clamp_entries`, but `DirectiveJson` is serialize-only, so there
-      is no clean WIT↔JSON round-trip. Needs a typed clamp (on core directives)
-      or a bidirectional conversion; deferred.
+- [ ] `builder`: `clamp` — **deferred to rustledger/rustledger#1401.** It
+      synthesizes directives via the JSON-based `clamp_entries`; wiring it here
+      cleanly needs a *typed* `clamp` on core directives in `rustledger-ops`,
+      rather than ~250 lines of `DirectiveJson` `Deserialize` + reverse-conversion
+      glue to bridge an algorithm that shouldn't be JSON-based.
 - [x] `util` (`types` / `is-encrypted` / `get-account-type`) and `format`
       (`format-source` / `-file` / `-entry` / `-entries`) wired. `format-*-entry`
       reuse the builder input conversion + `canonicalize_directives`.

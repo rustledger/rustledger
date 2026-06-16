@@ -81,7 +81,10 @@ impl BuilderGuest for Component {
         convert::filter(entries, &begin_date, &end_date)
     }
     fn clamp(_entries: Vec<Directive>, _begin_date: String, _end_date: String) -> Vec<Directive> {
-        unimplemented!("{TODO}")
+        // Deferred: the underlying `clamp_entries` is JSON-based (synthesizes
+        // directives via `json!`). Wiring it here cleanly needs a *typed* clamp
+        // on core directives — tracked in rustledger/rustledger#1401.
+        unimplemented!("entry.clamp: pending typed clamp (#1401)")
     }
 }
 

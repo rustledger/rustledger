@@ -1,0 +1,32 @@
+[package]
+name = "rustledger-ffi-component"
+description = "Rustledger embedding via WASI Preview 2 / the Component Model (WIT)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+readme = "README.md"
+# Work in progress (#1384 Phase 2): not yet a published/release artifact.
+publish = false
+
+[lib]
+# wasm32-wasip2 emits a component directly from a cdylib (no cargo-component).
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen.workspace = true
+rustledger-core.workspace = true
+rustledger-parser.workspace = true
+rustledger-loader.workspace = true
+rustledger-booking.workspace = true
+rustledger-validate.workspace = true
+rustledger-query.workspace = true
+rustledger-plugin.workspace = true
+
+[lints]
+workspace = true

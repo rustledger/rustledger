@@ -1,13 +1,22 @@
-# rustledger-ffi-component (WIT contract — Phase 1)
+# rustledger-ffi-component
 
-The typed **WIT** embedding contract for rustledger, replacing the hand-rolled
-JSON-RPC wire shape of `rustledger-ffi-wasi`. Part of the WASI-p1 → p2 /
-Component Model migration ([#1384](https://github.com/rustledger/rustledger/issues/1384)).
+Rustledger embedding as a **WASI Preview 2 / Component Model** component,
+replacing the hand-rolled JSON-RPC wire shape of `rustledger-ffi-wasi`. Part of
+the WASI-p1 → p2 migration ([#1384](https://github.com/rustledger/rustledger/issues/1384)).
 
-**This iteration is Phase 1: the contract only.** `wit/world.wit` is the single
-source of truth for the wire shape; the production guest crate that implements
-these exports (wiring them to the loader/query) is Phase 2. There is no
-`Cargo.toml` here yet — this is not a workspace member.
+`wit/world.wit` is the single source of truth for the wire shape; `src/lib.rs`
+implements the `rustledger` world's exports.
+
+**Status: Phase 1 done (the contract); Phase 2 in progress (the guest).** The
+crate **builds as a real wasip2 component** today — `version` is wired
+end-to-end; the remaining exports are honest `unimplemented!()` stubs being
+filled in against the existing loader/query logic, one interface at a time.
+
+```bash
+# the wasip2 target lives in the default dev shell (flake.nix)
+cargo build -p rustledger-ffi-component --target wasm32-wasip2
+wasm-tools print target/wasm32-wasip2/debug/rustledger_ffi_component.wasm | head -1   # => (component …
+```
 
 ## Status
 
@@ -85,8 +94,17 @@ carries `count` + a proper `interval-unit` enum; `metadata` is a flat string
 map). The contract validates with `wasm-tools` and generates ~35k lines via
 `wit-bindgen`.
 
-## Next (Phase 2+)
+## Phase 2 (in progress)
 
-Production guest crate (`wit_bindgen::generate!`, exports wired to the real
-loader/query), parity tests vs. the JSON-RPC output (extend the #1200 harness),
-release artifact, then the rustfava migration. See #1384 for the full plan.
+- [x] Crate scaffold + `wit_bindgen::generate!`; builds as a wasip2 component.
+- [x] Toolchain wired: `wasm32-wasip2` target in `flake.nix`, workspace member,
+      `wit-bindgen` workspace dep.
+- [x] `version` export wired.
+- [ ] Wire `load` / `validate` (core `Directive` → WIT `directive` conversion).
+- [ ] Wire `query` (the `query-value` projection, incl. the `json` escape hatch).
+- [ ] Wire `builder` (input → core via the existing `input_entry_to_directive`),
+      `util`, `format`.
+- [ ] Parity tests: component output ≡ JSON-RPC output for identical inputs
+      (extend the cross-binding equivalence harness #1200).
+
+Then Phase 3+ (release artifact, rustfava migration). See #1384 for the full plan.

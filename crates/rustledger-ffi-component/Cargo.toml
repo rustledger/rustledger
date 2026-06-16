@@ -20,13 +20,13 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wit-bindgen.workspace = true
+serde_json.workspace = true
 rustledger-core.workspace = true
-rustledger-parser.workspace = true
-rustledger-loader.workspace = true
-rustledger-booking.workspace = true
-rustledger-validate.workspace = true
-rustledger-query.workspace = true
-rustledger-plugin.workspace = true
+# Reused for the loader orchestration (`load_source`) and the core->DTO
+# conversion (`directive_to_json`); the component maps those DTOs into WIT
+# types. During the dual-ship window both crates coexist; the shared logic
+# moves to a neutral home when the wasip1 surface is retired (Phase 5).
+rustledger-ffi-wasi.workspace = true
 
 [lints]
 workspace = true

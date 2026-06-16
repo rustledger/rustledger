@@ -100,10 +100,15 @@ map). The contract validates with `wasm-tools` and generates ~35k lines via
 - [x] Toolchain wired: `wasm32-wasip2` target in `flake.nix`, workspace member,
       `wit-bindgen` workspace dep.
 - [x] `version` export wired.
-- [ ] Wire `load` / `validate` (core `Directive` → WIT `directive` conversion).
-- [ ] Wire `query` (the `query-value` projection, incl. the `json` escape hatch).
-- [ ] Wire `builder` (input → core via the existing `input_entry_to_directive`),
-      `util`, `format`.
+- [x] `load` wired — reuses `ffi-wasi`'s `load_source` (loader orchestration) and
+      `directive_to_json` (core→DTO), then maps DTO→WIT for all 12 directive
+      kinds plus options/errors/plugins/includes (`src/convert.rs`).
+- [ ] Wire `validate` / `load-file` / `query` (the `query-value` projection,
+      incl. the `json` escape hatch).
+- [ ] Wire `builder` (`input_entry_to_directive`), `util`, `format`.
+- [ ] Close the metadata fidelity gap: numeric metadata currently surfaces as
+      `meta-value::text` because the reused DTO stringifies it — faithful typing
+      needs the core `MetaValue` (`directive_to_json` flattens it).
 - [ ] Parity tests: component output ≡ JSON-RPC output for identical inputs
       (extend the cross-binding equivalence harness #1200).
 

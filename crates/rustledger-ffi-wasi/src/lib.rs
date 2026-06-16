@@ -31,14 +31,18 @@ pub mod convert;
 pub mod jsonrpc;
 
 pub(crate) mod commands;
-pub(crate) mod helpers;
+// `helpers` is `pub` so the WIT/Component-Model crate
+// (`rustledger-ffi-component`, #1384) can reuse the loader orchestration
+// (`load_source`) instead of duplicating it.
+pub mod helpers;
 pub(crate) mod types;
 
-// Re-export the wire-format DTOs that cross-binding tests inspect.
-// Keeping the surface narrow avoids documenting every RPC-response
-// type that lives in `types::*` but isn't part of the
-// `Directive → JSON` conversion contract.
-pub use types::{Amount, CostNumber, DirectiveJson, Meta, Posting, PostingCost, TypedValue};
+// Re-export the wire-format DTOs that cross-binding tests inspect, plus the
+// load-result DTOs the component crate maps into WIT types.
+pub use types::{
+    Amount, CostNumber, DirectiveJson, Error, Include, LedgerOptions, Meta, Plugin, Posting,
+    PostingCost, TypedValue,
+};
 
 /// API version this server compiled against. Reported as the
 /// `api_version` field on every method's response (`util.version`,

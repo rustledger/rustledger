@@ -21,6 +21,8 @@ wit_bindgen::generate!({
     world: "rustledger",
 });
 
+mod convert;
+
 use exports::rustledger::ledger::builder::{
     Directive, Guest as BuilderGuest, InputDirective,
 };
@@ -42,8 +44,8 @@ impl LedgerGuest for Component {
     fn version() -> String {
         API_VERSION.to_string()
     }
-    fn load(_source: String) -> LoadResult {
-        unimplemented!("{TODO}")
+    fn load(source: String) -> LoadResult {
+        convert::load(&source, "<stdin>")
     }
     fn load_file(_path: String) -> LoadResult {
         unimplemented!("{TODO}")

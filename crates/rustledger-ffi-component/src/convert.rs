@@ -871,3 +871,137 @@ pub fn format_entries(entries: &[wit::InputDirective]) -> Result<String, String>
     }
     format_directives(&dirs)
 }
+
+// ---- builder: clamp (WIT loaded directives -> core -> ops::clamp -> WIT) ----
+
+fn loaded_meta(m: &wit::Meta) -> std::collections::HashMap<String, Json> {
+    // Drop source location (filename/lineno/hash); keep user key/values.
+    m.user.iter().map(|(k, v)| (k.clone(), json_from_meta_value(v))).collect()
+}
+
+fn loaded_cost_to_input(c: &wit::Cost) -> ffi::InputCost {
+    ffi::InputCost {
+        number: c.number.as_ref().map(input_cost_number),
+        currency: c.currency.clone(),
+        date: c.date.clone(),
+        label: c.label.clone(),
+        merge: false,
+    }
+}
+
+fn loaded_posting_to_input(p: &wit::Posting) -> ffi::InputPosting {
+    ffi::InputPosting {
+        account: p.account.clone(),
+        units: p.units.as_ref().map(input_amount),
+        cost: p.cost.as_ref().map(loaded_cost_to_input),
+        price: p.price.as_ref().map(input_amount),
+        meta: p.meta.iter().map(|(k, v)| (k.clone(), json_from_meta_value(v))).collect(),
+    }
+}
+
+/// A loaded WIT `directive` -> `InputEntry`, so it can be reconstructed into a
+/// core `Directive` via `input_entry_to_directive` (dropping the source-location
+/// metadata, which is re-derived on output).
+fn loaded_directive_to_input(d: &wit::Directive) -> ffi::InputEntry {
+    use ffi::InputEntry as E;
+    use wit::Directive as D;
+    match d {
+        D::Transaction(t) => E::Transaction {
+            date: t.date.clone(),
+            flag: t.flag.clone(),
+            payee: t.payee.clone(),
+            narration: t.narration.clone(),
+            tags: t.tags.clone(),
+            links: t.links.clone(),
+            postings: t.postings.iter().map(loaded_posting_to_input).collect(),
+            meta: loaded_meta(&t.meta),
+        },
+        D::Open(o) => E::Open {
+            date: o.date.clone(),
+            account: o.account.clone(),
+            currencies: o.currencies.clone(),
+            booking: o.booking.clone(),
+            meta: loaded_meta(&o.meta),
+        },
+        D::Close(c) => E::Close {
+            date: c.date.clone(),
+            account: c.account.clone(),
+            meta: loaded_meta(&c.meta),
+        },
+        D::Balance(b) => E::Balance {
+            date: b.date.clone(),
+            account: b.account.clone(),
+            amount: input_amount(&b.amount),
+            meta: loaded_meta(&b.meta),
+        },
+        D::Pad(p) => E::Pad {
+            date: p.date.clone(),
+            account: p.account.clone(),
+            source_account: p.source_account.clone(),
+            meta: loaded_meta(&p.meta),
+        },
+        D::Commodity(c) => E::Commodity {
+            date: c.date.clone(),
+            currency: c.currency.clone(),
+            meta: loaded_meta(&c.meta),
+        },
+        D::Price(p) => E::Price {
+            date: p.date.clone(),
+            currency: p.currency.clone(),
+            amount: input_amount(&p.amount),
+            meta: loaded_meta(&p.meta),
+        },
+        D::Event(e) => E::Event {
+            date: e.date.clone(),
+            event_type: e.event_type.clone(),
+            value: e.value.clone(),
+            meta: loaded_meta(&e.meta),
+        },
+        D::Note(n) => E::Note {
+            date: n.date.clone(),
+            account: n.account.clone(),
+            comment: n.comment.clone(),
+            meta: loaded_meta(&n.meta),
+        },
+        D::Document(doc) => E::Document {
+            date: doc.date.clone(),
+            account: doc.account.clone(),
+            path: doc.path.clone(),
+            tags: doc.tags.clone(),
+            links: doc.links.clone(),
+            meta: loaded_meta(&doc.meta),
+        },
+        D::Query(q) => E::Query {
+            date: q.date.clone(),
+            name: q.name.clone(),
+            query_string: q.query_string.clone(),
+            meta: loaded_meta(&q.meta),
+        },
+        D::Custom(c) => E::Custom {
+            date: c.date.clone(),
+            custom_type: c.custom_type.clone(),
+            values: c.values.iter().map(json_from_meta_value).collect(),
+            meta: loaded_meta(&c.meta),
+        },
+    }
+}
+
+/// `entry.clamp` — clamp loaded directives to `[begin, end)` via the typed
+/// `rustledger_ops::clamp`. Round-trips WIT -> core -> ops -> WIT.
+pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::Directive> {
+    let (Ok(begin_date), Ok(end_date)) = (
+        begin.parse::<rustledger_core::NaiveDate>(),
+        end.parse::<rustledger_core::NaiveDate>(),
+    ) else {
+        // Unparseable bounds: return the input unchanged (no error channel).
+        return entries;
+    };
+    let core: Vec<rustledger_core::Directive> = entries
+        .iter()
+        .filter_map(|d| ffi::input_entry_to_directive(&loaded_directive_to_input(d)).ok())
+        .collect();
+    rustledger_ops::clamp::clamp(&core, begin_date, end_date)
+        .iter()
+        .map(|d| directive(ffi::convert::directive_to_json(d, 0, "<clamped>")))
+        .collect()
+}

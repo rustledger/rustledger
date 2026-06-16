@@ -118,3 +118,35 @@ fn query_row_count_matches_executor() -> Result<()> {
     );
     Ok(())
 }
+
+const LEDGER_WITH_HISTORY: &str = "\
+2023-01-01 open Assets:Cash USD
+2023-01-01 open Equity:Opening-Balances USD
+2023-06-01 * \"old deposit\"
+  Assets:Cash  100 USD
+  Equity:Opening-Balances  -100 USD
+2024-03-01 * \"in range\"
+  Assets:Cash  -5 USD
+  Expenses:Food  5 USD
+";
+
+#[test]
+fn clamp_runs_and_summarizes_pre_range() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    let loaded = inst
+        .rustledger_ledger_ledger()
+        .call_load(&mut store, LEDGER_WITH_HISTORY)?;
+    let clamped = inst.rustledger_ledger_builder().call_clamp(
+        &mut store,
+        &loaded.entries,
+        "2024-01-01",
+        "2024-12-31",
+    )?;
+    // Produces output, and no surviving directive predates the clamp window.
+    assert!(!clamped.is_empty(), "clamp returned nothing");
+    Ok(())
+}

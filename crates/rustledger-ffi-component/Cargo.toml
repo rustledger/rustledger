@@ -23,6 +23,7 @@ wit-bindgen.workspace = true
 serde_json.workspace = true
 jiff.workspace = true
 rustledger-core.workspace = true
+rustledger-ops.workspace = true
 rustledger-parser.workspace = true
 rustledger-query.workspace = true
 rustledger-validate.workspace = true

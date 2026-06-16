@@ -434,10 +434,25 @@ pub fn validate(source: &str) -> out::ValidateResult {
 
 /// `query.execute` — run a BQL query against `source`.
 pub fn query(source: &str, query_str: &str) -> out::QueryResult {
-    run_query(&ffi::helpers::load_source(source).directives, query_str)
+    query_loaded(&ffi::helpers::load_source(source), query_str)
 }
 
-/// Run one query against already-loaded directives (shared by `query`/`batch`).
+/// Short-circuit on load (parse/booking) errors, then run one query over the
+/// pad-expanded directives — matching `handle_query` (FFI's `load_source` does
+/// not pad-expand, so balance-computing consumers must opt in explicitly).
+fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::QueryResult {
+    if !loaded.errors.is_empty() {
+        return out::QueryResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            errors: loaded.errors.iter().cloned().map(error).collect(),
+        };
+    }
+    let directives = rustledger_booking::merge_with_padding(&loaded.directives);
+    run_query(&directives, query_str)
+}
+
+/// Run one query against already-loaded, pad-expanded directives.
 fn run_query(directives: &[rustledger_core::Directive], query_str: &str) -> out::QueryResult {
     let parsed = match parse_query(query_str) {
         Ok(q) => q,
@@ -489,11 +504,23 @@ fn run_query(directives: &[rustledger_core::Directive], query_str: &str) -> out:
 }
 
 /// `query.batch` — load `source` once, then run several queries against it.
+/// On parse errors, every query returns the canonical short-circuit error
+/// (matching `handle_batch`); otherwise pads are expanded once for all queries.
 pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
     let loaded = ffi::helpers::load_source(source);
-    // Collect query results (owned) before consuming `loaded` for the load.
-    let query_results: Vec<out::QueryResult> =
-        queries.iter().map(|q| run_query(&loaded.directives, q)).collect();
+    let query_results: Vec<out::QueryResult> = if loaded.errors.is_empty() {
+        let directives = rustledger_booking::merge_with_padding(&loaded.directives);
+        queries.iter().map(|q| run_query(&directives, q)).collect()
+    } else {
+        queries
+            .iter()
+            .map(|_| out::QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                errors: vec![simple_error("Cannot execute query: parse errors exist".to_string())],
+            })
+            .collect()
+    };
     out::BatchResult {
         load: load_result(loaded, "<stdin>"),
         queries: query_results,
@@ -770,18 +797,31 @@ fn directive_date(d: &wit::Directive) -> &str {
     }
 }
 
-/// `entry.filter` — keep directives within `[begin, end)` (ISO dates compare
-/// lexically, i.e. chronologically).
-pub fn filter(
-    entries: Vec<wit::Directive>,
-    begin: &str,
-    end: &str,
-) -> Vec<wit::Directive> {
+/// `entry.filter` — filter directives by date range, matching the JSON-RPC
+/// `filter_entries`: `commodity` is always dropped, `open` is kept while still
+/// active (`date < end`), `close` is kept from `begin` on (`date >= begin`),
+/// and everything else is kept within `[begin, end)`. Entries with an absent or
+/// unparseable date are dropped. Unparseable bounds return the input unchanged
+/// (the WIT signature has no error channel).
+pub fn filter(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::Directive> {
+    let (Ok(begin), Ok(end)) = (
+        begin.parse::<rustledger_core::NaiveDate>(),
+        end.parse::<rustledger_core::NaiveDate>(),
+    ) else {
+        return entries;
+    };
     entries
         .into_iter()
         .filter(|d| {
-            let date = directive_date(d);
-            date >= begin && date < end
+            let Ok(date) = directive_date(d).parse::<rustledger_core::NaiveDate>() else {
+                return false;
+            };
+            match d {
+                wit::Directive::Commodity(_) => false,
+                wit::Directive::Open(_) => date < end,
+                wit::Directive::Close(_) => date >= begin,
+                _ => date >= begin && date < end,
+            }
         })
         .collect()
 }

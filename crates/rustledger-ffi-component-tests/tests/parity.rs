@@ -150,3 +150,78 @@ fn clamp_runs_and_summarizes_pre_range() -> Result<()> {
     assert!(!clamped.is_empty(), "clamp returned nothing");
     Ok(())
 }
+
+// Regression tests for the parity bugs the deep review found (the conversion
+// layer was diverging from the JSON-RPC handlers on these cases).
+
+#[test]
+fn query_expands_pads() -> Result<()> {
+    if !component_path().exists() {
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    let src = "\
+2024-01-01 open Assets:Cash USD
+2024-01-01 open Equity:Opening USD
+2024-01-01 pad Assets:Cash Equity:Opening
+2024-06-01 balance Assets:Cash 500 USD
+";
+    let r = inst.rustledger_ledger_ledger().call_query(
+        &mut store,
+        src,
+        "SELECT account, balance WHERE account = \"Assets:Cash\"",
+    )?;
+    assert!(r.errors.is_empty(), "query errored: {:?}", r.errors);
+    assert!(!r.rows.is_empty(), "expected a row for Assets:Cash");
+    // With pad expansion the balance is 500; without it the pad contributes nothing.
+    let dump = format!("{:?}", r.rows);
+    assert!(dump.contains("500"), "expected padded balance 500, got: {dump}");
+    Ok(())
+}
+
+#[test]
+fn query_short_circuits_on_parse_error() -> Result<()> {
+    if !component_path().exists() {
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    // `oepn` is a typo -> parse error.
+    let r = inst
+        .rustledger_ledger_ledger()
+        .call_query(&mut store, "2024-01-01 oepn Assets:Cash\n", "SELECT account")?;
+    assert!(!r.errors.is_empty(), "parse error must surface, not be swallowed");
+    assert!(r.rows.is_empty(), "no rows on parse error");
+    Ok(())
+}
+
+#[test]
+fn filter_keeps_pre_begin_open_and_drops_commodity() -> Result<()> {
+    if !component_path().exists() {
+        return Ok(());
+    }
+    use rustledger::ledger::types::Directive;
+    let (mut store, inst) = instantiate()?;
+    let src = "\
+2020-01-01 open Assets:Cash USD
+2024-03-01 commodity USD
+2024-06-01 * \"x\"
+  Assets:Cash  1 USD
+  Expenses:Y  -1 USD
+";
+    let loaded = inst.rustledger_ledger_ledger().call_load(&mut store, src)?;
+    let filtered = inst.rustledger_ledger_builder().call_filter(
+        &mut store,
+        &loaded.entries,
+        "2024-01-01",
+        "2024-12-31",
+    )?;
+    assert!(
+        filtered.iter().any(|d| matches!(d, Directive::Open(_))),
+        "pre-begin open must be kept (open < end)",
+    );
+    assert!(
+        filtered.iter().all(|d| !matches!(d, Directive::Commodity(_))),
+        "commodity must be dropped",
+    );
+    Ok(())
+}

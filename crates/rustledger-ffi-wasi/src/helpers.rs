@@ -474,11 +474,12 @@ pub fn apply_plugins(
             errors.push(Error::new(err.message));
         }
 
-        // Validate the op set against the shared contract (same check the loader
-        // pipeline runs). On violation, record it and keep the directives as-is
-        // for this plugin rather than materializing a malformed op set.
+        // Validate the op set against the shared contract (the same coverage
+        // check the loader pipeline runs). On violation, record it — naming the
+        // plugin, since this surface runs a caller-supplied list — and keep the
+        // directives as-is rather than materializing a malformed op set.
         if let Err(msg) = rustledger_plugin::validate_op_coverage(directives.len(), &output.ops) {
-            errors.push(Error::new(msg));
+            errors.push(Error::new(format!("plugin '{plugin_name}': {msg}")));
             continue;
         }
 

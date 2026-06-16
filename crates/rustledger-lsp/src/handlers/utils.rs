@@ -449,12 +449,10 @@ pub fn is_account_like(s: &str) -> bool {
             || s.starts_with("Expenses"))
 }
 
-/// Check if a string is a standard account type.
+/// Check if a string is a standard root account type.
+#[must_use]
 pub fn is_account_type(s: &str) -> bool {
-    matches!(
-        s,
-        "Assets" | "Liabilities" | "Equity" | "Income" | "Expenses"
-    )
+    rustledger_core::ACCOUNT_TYPES.contains(&s)
 }
 
 /// Check if a string looks like a currency (simple format check).

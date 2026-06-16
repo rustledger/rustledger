@@ -357,9 +357,17 @@ fn load_file_path_security_confines_cross_tree_includes() -> Result<()> {
         false,
         &[],
     )?;
+    // Assert specifically on the path-traversal rejection, not just any error,
+    // so an incidental I/O or parse failure can't make this pass for the wrong
+    // reason. (The unrestricted branch below resolving cleanly already proves
+    // the file is readable and well-formed.)
     assert!(
-        !confined.errors.is_empty(),
-        "cross-tree include must error when confined (path security on)",
+        confined
+            .errors
+            .iter()
+            .any(|e| e.message.contains("path traversal not allowed")),
+        "confined load must reject the cross-tree include with a path-traversal error, got: {:?}",
+        confined.errors,
     );
     // Unrestricted (true): the same include resolves cleanly.
     let open = inst.rustledger_ledger_ledger().call_load_file(

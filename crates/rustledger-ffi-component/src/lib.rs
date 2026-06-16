@@ -8,6 +8,12 @@
 //! the loader/query logic reused from `rustledger-ffi-wasi`. Parity with the
 //! JSON-RPC surface is exercised by `rustledger-ffi-component-tests`.
 
+// This is a wasip2 component: `wit-bindgen`'s `export!` emits canonical-ABI
+// shims that don't link as a native `cdylib` (e.g. a `cargo build --workspace`
+// on x86_64, as the Arch PKGBUILD runs). Gate the whole crate to wasm targets
+// so the native build is a trivially-linkable empty cdylib; the real component
+// is only ever built with `--target wasm32-wasip2`.
+#![cfg(target_arch = "wasm32")]
 // wit-bindgen's `export!` macro emits `#[unsafe(export_name = …)]` shims and
 // unsafe blocks for the canonical ABI; the workspace denies `unsafe_code`, so
 // allow it here (the hand-written code below contains no unsafe). `missing_docs`

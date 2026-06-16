@@ -148,6 +148,11 @@ pub fn load_source(source: &str) -> LoadResult {
     // unresolved-include reporting), so it invokes the shared synth stage
     // directly. Without this, a file-declared `plugin "auto_accounts"` never
     // generated Open directives through `ledger.load`/`validate`/`query`.
+    // Booking is gated only on *parse* success (it must run on the same input
+    // the canonical pipeline books, regardless of synth/plugin diagnostics).
+    // Capture that state now, before the synth pass appends its own errors.
+    let no_parse_errors = errors.is_empty();
+
     let mut synth_dirs: Vec<Spanned<Directive>> = parse_result.directives.clone();
     let mut source_map = rustledger_loader::SourceMap::new();
     source_map.add_file(
@@ -157,16 +162,22 @@ pub fn load_source(source: &str) -> LoadResult {
     let synth_plugins: Vec<rustledger_loader::Plugin> = parse_result
         .plugins
         .iter()
-        .map(|(name, config, span)| rustledger_loader::Plugin {
-            name: name.clone(),
-            config: config.clone(),
-            span: *span,
-            file_id: 0,
-            force_python: false,
+        .map(|(name, config, span)| {
+            // Mirror the loader: a `python:` prefix forces Python execution and
+            // is stripped from the resolved module name.
+            let force_python = name.starts_with("python:");
+            let name = name.strip_prefix("python:").unwrap_or(name).to_string();
+            rustledger_loader::Plugin {
+                name,
+                config: config.clone(),
+                span: *span,
+                file_id: 0,
+                force_python,
+            }
         })
         .collect();
     let mut synth_errors: Vec<rustledger_loader::LedgerError> = Vec::new();
-    let _ = rustledger_loader::run_plugins(
+    let synth_result = rustledger_loader::run_plugins(
         &mut synth_dirs,
         &synth_plugins,
         &rustledger_loader::Options::default(),
@@ -176,6 +187,11 @@ pub fn load_source(source: &str) -> LoadResult {
         rustledger_loader::PluginPass::PreBookingSynth,
     );
     errors.extend(synth_errors.iter().map(ledger_error_to_ffi));
+    if let Err(e) = synth_result {
+        // A fatal synth-pass error must not be silently dropped (it is tagged
+        // non-parse so it does not suppress booking or `ledger.validate`).
+        errors.push(Error::new(format!("synth plugin pass failed: {e}")).validate_phase());
+    }
 
     // Collect directive line numbers, commodities, and precision
     let mut directive_lines: Vec<u32> = Vec::new();
@@ -238,8 +254,9 @@ pub fn load_source(source: &str) -> LoadResult {
     // Run booking and interpolation on transactions (sequential)
     // This fills in empty cost specs via lot matching, normalizes total prices,
     // and interpolates missing amounts. Must be sequential because lot matching
-    // depends on prior inventory state.
-    if errors.is_empty() {
+    // depends on prior inventory state. Gated on parse success only — synth
+    // diagnostics appended above must not suppress booking.
+    if no_parse_errors {
         let booking_method = options
             .booking_method
             .parse()
@@ -445,9 +462,11 @@ pub fn load_file(path: &std::path::Path, path_security: bool) -> Result<FileLoad
 
 /// Convert a loader [`rustledger_loader::LedgerError`] (produced by the
 /// canonical `process::load` pipeline) into the FFI wire [`Error`], preserving
-/// the message, source line, and processing phase. Errors tagged `"validate"`
-/// keep that phase (the `ledger.validate`/`query` handlers count phases); all
-/// others map to the default `"parse"` phase, matching the wire contract.
+/// the message and source line. The wire `Error` distinguishes only two phases:
+/// `"parse"`-phase errors keep the default `"parse"`; every other phase
+/// (`"validate"`, `"plugin"`) maps to `"validate"`. The `ledger.validate`/
+/// `query` handlers gate semantic validation on parse-phase errors only, so
+/// non-parse diagnostics must not be reported as `"parse"`.
 fn ledger_error_to_ffi(e: &rustledger_loader::LedgerError) -> Error {
     let mut err = Error::new(e.message.clone());
     if let Some(loc) = &e.location {

@@ -499,23 +499,8 @@ pub fn apply_plugins(
     (directives, directive_lines, directive_files)
 }
 
-/// The five account-type roots, in declaration order.
-///
-/// Single source of truth for `util.types`' `account_types` and
-/// `util.getAccountType`, shared by both the JSON-RPC and Component-Model (WIT)
-/// surfaces so they cannot drift.
-pub const ACCOUNT_TYPES: [&str; 5] = ["Assets", "Liabilities", "Equity", "Income", "Expenses"];
-
-/// The lowercased account-type root for `account` — the segment before the
-/// first `:` — or `"unknown"` if it is not one of [`ACCOUNT_TYPES`].
-#[must_use]
-pub fn account_type(account: &str) -> &'static str {
-    match account.split(':').next() {
-        Some("Assets") => "assets",
-        Some("Liabilities") => "liabilities",
-        Some("Equity") => "equity",
-        Some("Income") => "income",
-        Some("Expenses") => "expenses",
-        _ => "unknown",
-    }
-}
+// The account-type taxonomy lives in `rustledger-core` (the type-owning crate)
+// so every crate shares one source of truth. Re-exported here for the FFI
+// call sites (`util.types`, `util.getAccountType`) that already reference
+// `helpers::{ACCOUNT_TYPES, account_type}`.
+pub use rustledger_core::{ACCOUNT_TYPES, account_type};

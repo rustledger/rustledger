@@ -329,6 +329,42 @@ pub fn directive_to_json(directive: &Directive, line: u32, filename: &str) -> Di
     }
 }
 
+/// Serialize a position's units and, when present, its realized cost.
+///
+/// The `cost` field reuses the same wire shape as a directive [`PostingCost`]
+/// — `number` is a tagged [`CostNumber`], `currency`/`date`/`label` follow,
+/// and absent optional fields are omitted — so `cost.number` is uniform across
+/// the API and consumers switch on `kind` everywhere. A booked position always
+/// carries a concrete per-unit cost, so the kind is always `per_unit`. The
+/// `cost` field is omitted entirely for holdings held without cost (booking
+/// method `NONE`), leaving units-only consumers unaffected.
+fn position_to_json(p: &rustledger_core::Position) -> serde_json::Value {
+    use crate::types::output::CostNumber;
+
+    let mut obj = serde_json::json!({
+        "units": {
+            "number": p.units.number.to_string(),
+            "currency": p.units.currency
+        }
+    });
+    if let Some(cost) = &p.cost {
+        // Embed the typed CostNumber so the tagged shape stays in sync with
+        // PostingCost rather than being hand-rolled here.
+        let mut cost_obj = serde_json::json!({
+            "number": CostNumber::PerUnit { value: cost.number.to_string() },
+            "currency": cost.currency,
+        });
+        if let Some(date) = cost.date {
+            cost_obj["date"] = serde_json::Value::String(date.to_string());
+        }
+        if let Some(label) = &cost.label {
+            cost_obj["label"] = serde_json::Value::String(label.clone());
+        }
+        obj["cost"] = cost_obj;
+    }
+    obj
+}
+
 /// Convert query Value to JSON.
 pub fn value_to_json(value: &rustledger_query::Value) -> serde_json::Value {
     use rustledger_query::Value;
@@ -343,24 +379,9 @@ pub fn value_to_json(value: &rustledger_query::Value) -> serde_json::Value {
             "number": a.number.to_string(),
             "currency": a.currency
         }),
-        Value::Position(p) => serde_json::json!({
-            "units": {
-                "number": p.units.number.to_string(),
-                "currency": p.units.currency
-            }
-        }),
+        Value::Position(p) => position_to_json(p),
         Value::Inventory(inv) => {
-            let positions: Vec<_> = inv
-                .positions()
-                .map(|p| {
-                    serde_json::json!({
-                        "units": {
-                            "number": p.units.number.to_string(),
-                            "currency": p.units.currency
-                        }
-                    })
-                })
-                .collect();
+            let positions: Vec<_> = inv.positions().map(position_to_json).collect();
             serde_json::json!({ "positions": positions })
         }
         Value::StringSet(set) => {
@@ -415,5 +436,115 @@ pub const fn value_datatype(value: &rustledger_query::Value) -> &'static str {
         Value::Metadata(_) => "Metadata",
         Value::Interval(_) => "Interval",
         Value::Set(_) => "set",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{position_to_json, value_to_json};
+    use rustledger_core::{Amount, Cost, Decimal, Inventory, Position, naive_date};
+    use rustledger_query::Value;
+
+    fn dec(s: &str) -> Decimal {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn position_without_cost_serializes_units_only() {
+        let pos = Position::simple(Amount::new(dec("1000.00"), "USD"));
+
+        let json = position_to_json(&pos);
+
+        assert_eq!(json["units"]["number"], "1000.00");
+        assert_eq!(json["units"]["currency"], "USD");
+        // No cost key at all for at-NONE holdings (units-only consumers unaffected).
+        assert!(json.get("cost").is_none());
+    }
+
+    #[test]
+    fn position_with_cost_includes_realized_cost_object() {
+        let cost = Cost::new(dec("150.00"), "USD")
+            .with_date(naive_date(2024, 1, 15).unwrap())
+            .with_label("lot-a");
+        let pos = Position::with_cost(Amount::new(dec("10"), "AAPL"), cost);
+
+        let json = position_to_json(&pos);
+
+        // Same wire shape as a directive PostingCost: number is a tagged
+        // CostNumber (always per_unit for a booked position).
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "units": {"number": "10", "currency": "AAPL"},
+                "cost": {
+                    "number": {"kind": "per_unit", "value": "150.00"},
+                    "currency": "USD",
+                    "date": "2024-01-15",
+                    "label": "lot-a"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn position_cost_without_date_or_label_omits_them() {
+        let pos = Position::with_cost(
+            Amount::new(dec("10"), "AAPL"),
+            Cost::new(dec("150.00"), "USD"),
+        );
+
+        let json = position_to_json(&pos);
+
+        // Absent optional fields are omitted (like PostingCost), not null.
+        assert!(json["cost"].get("date").is_none());
+        assert!(json["cost"].get("label").is_none());
+        assert_eq!(json["cost"]["number"]["kind"], "per_unit");
+        assert_eq!(json["cost"]["number"]["value"], "150.00");
+    }
+
+    // Integration through value_to_json: the actual #1398 scenario — an
+    // inventory holding two lots of the same currency at different costs must
+    // serialize as two positions, each carrying its own cost.
+    #[test]
+    fn inventory_value_to_json_emits_cost_per_lot() {
+        let lot1 = Position::with_cost(
+            Amount::new(dec("2"), "ITOT"),
+            Cost::new(dec("10"), "USD").with_date(naive_date(2024, 1, 1).unwrap()),
+        );
+        let lot2 = Position::with_cost(
+            Amount::new(dec("3"), "ITOT"),
+            Cost::new(dec("11"), "USD").with_date(naive_date(2024, 2, 1).unwrap()),
+        );
+        let inv: Inventory = vec![lot1, lot2].into_iter().collect();
+
+        let json = value_to_json(&Value::Inventory(Box::new(inv)));
+
+        let positions = json["positions"].as_array().expect("positions array");
+        assert_eq!(positions.len(), 2, "distinct cost lots must stay separate");
+        let pairs: Vec<(String, String)> = positions
+            .iter()
+            .map(|p| {
+                (
+                    p["units"]["number"].as_str().unwrap().to_string(),
+                    p["cost"]["number"]["value"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert!(pairs.contains(&("2".to_string(), "10".to_string())));
+        assert!(pairs.contains(&("3".to_string(), "11".to_string())));
+    }
+
+    #[test]
+    fn scalar_position_value_to_json_includes_cost() {
+        let pos = Position::with_cost(
+            Amount::new(dec("10"), "AAPL"),
+            Cost::new(dec("150.00"), "USD"),
+        );
+
+        let json = value_to_json(&Value::Position(Box::new(pos)));
+
+        assert_eq!(json["units"]["currency"], "AAPL");
+        assert_eq!(json["cost"]["number"]["kind"], "per_unit");
+        assert_eq!(json["cost"]["number"]["value"], "150.00");
     }
 }

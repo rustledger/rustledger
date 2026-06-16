@@ -57,7 +57,7 @@
           "result": {
             "name": "Result",
             "value": {
-              "api_version": "2.0",
+              "api_version": "2.1",
               "entries": [],
               "errors": [],
               "options": {},

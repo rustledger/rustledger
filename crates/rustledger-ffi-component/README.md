@@ -103,8 +103,12 @@ map). The contract validates with `wasm-tools` and generates ~35k lines via
 - [x] `load` wired — reuses `ffi-wasi`'s `load_source` (loader orchestration) and
       `directive_to_json` (core→DTO), then maps DTO→WIT for all 12 directive
       kinds plus options/errors/plugins/includes (`src/convert.rs`).
-- [ ] Wire `validate` / `load-file` / `query` (the `query-value` projection,
-      incl. the `json` escape hatch).
+- [x] `validate` wired — `load_source` + `ValidationSession` (early/late/finalize).
+- [x] `query` wired — runs the executor directly for typed rows and projects
+      `rustledger_query::Value` → WIT `query-value`; `object`/`set` cells use the
+      `json` escape hatch (WIT can't type them recursively).
+- [ ] Wire `load-file` / `validate-file` / `query-file` / `batch` (the file +
+      multi-query variants).
 - [ ] Wire `builder` (`input_entry_to_directive`), `util`, `format`.
 - [ ] Close the metadata fidelity gap: numeric metadata currently surfaces as
       `meta-value::text` because the reused DTO stringifies it — faithful typing

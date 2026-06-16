@@ -50,14 +50,14 @@ impl LedgerGuest for Component {
     fn load_file(_path: String) -> LoadResult {
         unimplemented!("{TODO}")
     }
-    fn validate(_source: String) -> ValidateResult {
-        unimplemented!("{TODO}")
+    fn validate(source: String) -> ValidateResult {
+        convert::validate(&source)
     }
     fn validate_file(_path: String) -> ValidateResult {
         unimplemented!("{TODO}")
     }
-    fn query(_source: String, _query: String) -> QueryResult {
-        unimplemented!("{TODO}")
+    fn query(source: String, query: String) -> QueryResult {
+        convert::query(&source, &query)
     }
     fn query_file(_path: String, _query: String) -> QueryResult {
         unimplemented!("{TODO}")

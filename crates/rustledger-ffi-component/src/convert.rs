@@ -12,6 +12,7 @@
 //! directive values keep their type via `TypedValue`, so they are unaffected.)
 
 use rustledger_ffi_wasi as ffi;
+use rustledger_query::{Executor, IntervalUnit, Value, parse as parse_query};
 use serde_json::Value as Json;
 
 use crate::exports::rustledger::ledger::ledger as out;
@@ -326,5 +327,154 @@ pub fn load(source: &str, filename: &str) -> out::LoadResult {
                 lineno: i.lineno,
             })
             .collect(),
+    }
+}
+
+// ---- query + validate ----
+
+fn realized_cost(c: &rustledger_core::Cost) -> wit::Cost {
+    // A booked position carries a concrete per-unit cost (mirrors #1399).
+    wit::Cost {
+        number: Some(wit::CostNumber::PerUnit(c.number.to_string())),
+        currency: Some(c.currency.to_string()),
+        date: c.date.map(|d| d.to_string()),
+        label: c.label.clone(),
+    }
+}
+
+fn position(p: &rustledger_core::Position) -> wit::Position {
+    wit::Position {
+        units: wit::Amount {
+            number: p.units.number.to_string(),
+            currency: p.units.currency.to_string(),
+        },
+        cost: p.cost.as_ref().map(realized_cost),
+    }
+}
+
+/// `rustledger_query::Value` → WIT `query-value` (mirrors `value_to_json`,
+/// but typed). `object`/`set` are self-referential — WIT can't type them, so
+/// they fall to the `json` escape hatch via the reused `value_to_json`.
+fn query_value(v: &Value) -> wit::QueryValue {
+    use wit::QueryValue as Q;
+    match v {
+        Value::Null => Q::Null,
+        Value::Boolean(b) => Q::Boolean(*b),
+        Value::Integer(i) => Q::Integer(*i),
+        Value::String(s) => Q::Text(s.clone()),
+        Value::Date(d) => Q::Date(d.to_string()),
+        Value::Number(n) => Q::Number(n.to_string()),
+        Value::Amount(a) => Q::Amount(wit::Amount {
+            number: a.number.to_string(),
+            currency: a.currency.to_string(),
+        }),
+        Value::Position(p) => Q::Position(position(p)),
+        Value::Inventory(inv) => Q::Inventory(inv.positions().map(position).collect()),
+        Value::StringSet(set) => Q::StringSet(set.clone()),
+        Value::Metadata(m) => {
+            Q::Metadata(m.iter().map(|(k, val)| (k.to_string(), format!("{val:?}"))).collect())
+        }
+        Value::Interval(iv) => Q::Interval(wit::Interval {
+            count: iv.count,
+            unit: match iv.unit {
+                IntervalUnit::Day => wit::IntervalUnit::Day,
+                IntervalUnit::Week => wit::IntervalUnit::Week,
+                IntervalUnit::Month => wit::IntervalUnit::Month,
+                IntervalUnit::Quarter => wit::IntervalUnit::Quarter,
+                IntervalUnit::Year => wit::IntervalUnit::Year,
+            },
+        }),
+        Value::Object(_) | Value::Set(_) => Q::Json(ffi::convert::value_to_json(v).to_string()),
+    }
+}
+
+fn simple_error(message: String) -> wit::Error {
+    error(ffi::Error::new(message))
+}
+
+/// `ledger.validate` — parse + semantic validation. Mirrors the JSON-RPC
+/// `handle_validate` orchestration (`load_source` + `ValidationSession`).
+pub fn validate(source: &str) -> out::ValidateResult {
+    let load = ffi::helpers::load_source(source);
+    let parse_error_count = load.errors.iter().filter(|e| e.phase == "parse").count();
+    let mut errors = load.errors;
+
+    // Only run semantic validation when there are no syntactic errors.
+    if parse_error_count == 0 {
+        let today = jiff::Zoned::now().date();
+        let session = rustledger_validate::ValidationSession::new(
+            rustledger_validate::ValidationOptions::default(),
+        );
+        let (session, mut verrs) = session.run_early_spanned(&load.spanned_directives, today);
+        let (session, late) = session.run_late_spanned(&load.spanned_directives, today);
+        verrs.extend(late);
+        verrs.extend(session.finalize());
+        for err in verrs {
+            let mut e = ffi::Error::new(&err.message).validate_phase();
+            if let Some(span) = err.span {
+                e = e.with_line(load.line_lookup.byte_to_line(span.start));
+            }
+            errors.push(e);
+        }
+    }
+
+    let validate_error_count = errors.iter().filter(|e| e.phase == "validate").count();
+    out::ValidateResult {
+        valid: errors.is_empty(),
+        errors: errors.into_iter().map(error).collect(),
+        parse_error_count: parse_error_count as u32,
+        validate_error_count: validate_error_count as u32,
+    }
+}
+
+/// `query.execute` — run a BQL query against `source`.
+pub fn query(source: &str, query_str: &str) -> out::QueryResult {
+    let loaded = ffi::helpers::load_source(source);
+    let parsed = match parse_query(query_str) {
+        Ok(q) => q,
+        Err(e) => {
+            return out::QueryResult {
+                columns: vec![],
+                rows: vec![],
+                errors: vec![simple_error(e.to_string())],
+            };
+        }
+    };
+    let mut executor = Executor::new(&loaded.directives);
+    match executor.execute(&parsed) {
+        Ok(result) => {
+            // Infer column datatypes from the first row (reusing value_datatype).
+            let columns = if let Some(first) = result.rows.first() {
+                result
+                    .columns
+                    .iter()
+                    .zip(first.iter())
+                    .map(|(name, value)| wit::ColumnInfo {
+                        name: name.clone(),
+                        datatype: ffi::convert::value_datatype(value).to_string(),
+                    })
+                    .collect()
+            } else {
+                result
+                    .columns
+                    .iter()
+                    .map(|name| wit::ColumnInfo {
+                        name: name.clone(),
+                        datatype: "str".to_string(),
+                    })
+                    .collect()
+            };
+            let rows = result
+                .rows
+                .iter()
+                .map(|row| row.iter().map(query_value).collect())
+                .collect();
+            out::QueryResult { columns, rows, errors: vec![] }
+        }
+        Err(e) => out::QueryResult {
+            columns: vec![],
+            rows: vec![],
+            errors: vec![simple_error(format!("Query error: {e}"))],
+        },
     }
 }

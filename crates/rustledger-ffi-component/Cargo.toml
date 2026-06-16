@@ -21,7 +21,10 @@ crate-type = ["cdylib"]
 [dependencies]
 wit-bindgen.workspace = true
 serde_json.workspace = true
+jiff.workspace = true
 rustledger-core.workspace = true
+rustledger-query.workspace = true
+rustledger-validate.workspace = true
 # Reused for the loader orchestration (`load_source`) and the core->DTO
 # conversion (`directive_to_json`); the component maps those DTOs into WIT
 # types. During the dual-ship window both crates coexist; the shared logic

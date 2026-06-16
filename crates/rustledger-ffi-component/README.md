@@ -31,13 +31,18 @@ and their `-file` variants — translated 1:1 from `types/output.rs`: `amount`,
 `error`, `plugin`, `source-include`, `ledger-options`, `position`,
 `column-info`, `query-value`, and the load/validate/query result records.
 
-**Construction surface** (`interface builder`) — `create` / `create-batch`
-(replacing `entry.create` / `entry.createBatch`) — translated from
-`types/input.rs`: `input-cost` (= `cost` + the `merge` average-cost marker),
-`input-posting`, all 12 `input-directive` cases. Reuses `amount`,
-`cost-number`, and `meta-value`; input metadata is user key/values only (no
-source location — assigned on load). Both calls are fallible; the batch is
-all-or-nothing, matching the handler's `?`-propagation.
+**Construction & transformation** (`interface builder`) — `create` /
+`create-batch` (from `types/input.rs`: `input-cost` = `cost` + the `merge`
+average-cost marker, `input-posting`, 12 `input-directive` cases; both fallible,
+batch all-or-nothing per the handler) plus `filter` / `clamp` over a date window
+(`entry.filter` / `entry.clamp`). Reuses `amount`, `cost-number`, `meta-value`;
+input metadata is user key/values only (source location is assigned on load).
+
+**Batch** (`interface ledger`) — `batch` / `batch-file` (`query.batch`): load
+once, run several queries.
+
+**Util** (`interface util`) — `types` / `is-encrypted` / `get-account-type`
+(`util.types` / `util.isEncrypted` / `util.getAccountType`).
 
 ## Modeling decisions (and what the translation surfaced)
 
@@ -69,13 +74,16 @@ all-or-nothing, matching the handler's `?`-propagation.
    `display_precision`, `inferred_tolerance_default` become key/value lists
    (which also preserves source order).
 
-## Remaining Phase 1 work
+## Phase 1 complete
 
-- **Ops methods**: `entry.clamp`, `entry.filter`, and the `query.batch` /
-  `query.batchFile` result envelope.
-- **Util helpers**: `util.getAccountType`, `util.isEncrypted`, `util.types`.
-- **Verify a few cell shapes** against `convert.rs::value_to_json` — notably the
-  exact `interval` fields and the `metadata` debug-string projection.
+The **entire** JSON-RPC method surface is now modeled across five interfaces —
+`ledger` (load/validate/query/batch + `-file` variants), `builder`
+(create/create-batch/filter/clamp), `util` (types/is-encrypted/get-account-type),
+`format` (format-source/format-entries), exported by the `rustledger` world. The
+query cell shapes were verified against `convert.rs::value_to_json` (`interval`
+carries `count` + a proper `interval-unit` enum; `metadata` is a flat string
+map). The contract validates with `wasm-tools` and generates ~35k lines via
+`wit-bindgen`.
 
 ## Next (Phase 2+)
 

@@ -191,8 +191,11 @@ interface types {
   /// A booked inventory position: units + optional realized cost (#1399).
   record position { units: amount, cost: option<cost> }
 
+  /// The unit of a date GROUP-BY interval bucket.
+  enum interval-unit { day, week, month, quarter, year }
+
   /// An interval bucket (GROUP BY date functions).
-  record interval { unit: string }
+  record interval { count: s64, unit: interval-unit }
 
   /// A query result cell. Mirrors `rustledger_query::Value` as projected by
   /// `value_to_json`.
@@ -362,6 +365,12 @@ interface ledger {
     errors: list<error>,
   }
 
+  /// Load + run several queries in one parse (replaces `query.batch`).
+  record batch-result {
+    load: load-result,
+    queries: list<query-result>,
+  }
+
   /// The api-version string this component implements (e.g. "2.1"). The WIT
   /// contract is itself the versioned wire shape; this exists for runtime
   /// negotiation, replacing the `api_version` field formerly stamped onto every
@@ -382,13 +391,21 @@ interface ledger {
   query: func(source: string, query: string) -> query-result;
   /// Like `query`, but the ledger is loaded from a file path.
   query-file: func(path: string, query: string) -> query-result;
+
+  /// Load source once, then run several queries against it.
+  batch: func(source: string, queries: list<string>) -> batch-result;
+  /// Like `batch`, but the ledger is loaded from a file path.
+  batch-file: func(path: string, queries: list<string>) -> batch-result;
 }
 
-/// Directive construction — replaces `entry.create` / `entry.createBatch`.
-/// Each input is validated and round-tripped through core, so the result is a
-/// loaded `directive`. Both calls are fallible; the batch is all-or-nothing
-/// (the first invalid entry fails the whole call), matching the JSON-RPC
-/// handler's `?`-propagation.
+/// Directive construction & transformation — replaces `entry.create`,
+/// `entry.createBatch`, `entry.filter`, `entry.clamp`.
+///
+/// `create`/`create-batch` validate and round-trip typed input through core, so
+/// the result is a loaded `directive`; both are fallible and the batch is
+/// all-or-nothing (first invalid entry fails the call), matching the JSON-RPC
+/// handler's `?`-propagation. `filter`/`clamp` operate on already-loaded
+/// directives over a date window (`begin` inclusive, `end` exclusive).
 interface builder {
   use types.{input-directive, directive};
 
@@ -396,10 +413,59 @@ interface builder {
   create: func(entry: input-directive) -> result<directive, string>;
   /// Construct many; the first failure fails the whole call.
   create-batch: func(entries: list<input-directive>) -> result<list<directive>, string>;
+
+  /// Keep only directives within [begin, end).
+  filter: func(entries: list<directive>, begin-date: string, end-date: string) -> list<directive>;
+  /// Clamp directives to [begin, end), synthesizing opening-balance and
+  /// summary directives at the boundaries.
+  clamp: func(entries: list<directive>, begin-date: string, end-date: string) -> list<directive>;
+}
+
+/// Utility helpers — replaces `util.types` / `util.isEncrypted` /
+/// `util.getAccountType`.
+interface util {
+  /// Description of the MISSING sentinel.
+  record missing-sentinel {
+    description: string,
+    json-representation: string,
+  }
+
+  /// Static type metadata about this build (was `util.types`).
+  record types-info {
+    all-directives: list<string>,
+    booking-methods: list<string>,
+    missing: missing-sentinel,
+    account-types: list<string>,
+  }
+
+  /// The directive kinds, booking methods, MISSING sentinel, and account types.
+  types: func() -> types-info;
+  /// Whether the file at `path` is an encrypted (GPG) ledger.
+  is-encrypted: func(path: string) -> bool;
+  /// The account-type root (Assets/Liabilities/…) for an account name.
+  get-account-type: func(account: string) -> string;
+}
+
+/// Pretty-printing — replaces `format.source` / `format.entries`. Renders
+/// beancount text in canonical form.
+interface format {
+  use types.{input-directive};
+
+  /// Canonically reformat beancount source text.
+  format-source: func(source: string) -> string;
+  /// Canonically reformat the beancount file at `path`.
+  format-file: func(path: string) -> string;
+  /// Render one constructed directive to canonical beancount text. Fallible.
+  format-entry: func(entry: input-directive) -> result<string, string>;
+  /// Render constructed directives to canonical beancount text. Fallible: an
+  /// invalid input entry fails the call.
+  format-entries: func(entries: list<input-directive>) -> result<string, string>;
 }
 
 /// The component a host instantiates.
 world rustledger {
   export ledger;
   export builder;
+  export util;
+  export format;
 }

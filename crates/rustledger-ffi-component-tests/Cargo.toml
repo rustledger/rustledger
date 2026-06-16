@@ -1,0 +1,19 @@
+[package]
+name = "rustledger-ffi-component-tests"
+description = "Parity tests: WIT component output vs the JSON-RPC surface (#1384)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+wasmtime = { version = "45", features = ["component-model"] }
+wasmtime-wasi = "45"
+anyhow = "1"
+rustledger-ffi-wasi.workspace = true
+
+[lints]
+workspace = true

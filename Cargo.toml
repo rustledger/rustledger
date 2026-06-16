@@ -16,6 +16,7 @@ members = [
   "crates/rustledger-wasm",
   "crates/rustledger-ffi-wasi",
   "crates/rustledger-ffi-component",
+  "crates/rustledger-ffi-component-tests",
   "crates/rustledger-lsp",
   "crates/rustledger-wire-format-tests",
 ]

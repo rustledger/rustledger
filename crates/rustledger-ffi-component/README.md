@@ -125,7 +125,12 @@ map). The contract validates with `wasm-tools` and generates ~35k lines via
 - [ ] Close the metadata fidelity gap: numeric metadata currently surfaces as
       `meta-value::text` because the reused DTO stringifies it — faithful typing
       needs the core `MetaValue` (`directive_to_json` flattens it).
-- [ ] Parity tests: component output ≡ JSON-RPC output for identical inputs
-      (extend the cross-binding equivalence harness #1200).
+- [x] Parity harness (`rustledger-ffi-component-tests`): instantiates the built
+      component in a wasmtime host (typed `bindgen!`, no JSON-RPC) and asserts
+      `version`/`load`/`query` agree with the reused `ffi-wasi` path — the first
+      thing that *runs* the conversion code. Skips if the wasm isn't built.
+- [ ] Broaden parity coverage (all exports; field-level diff) and wire the
+      component-build step into CI (#1200 harness).
+- [ ] `entry.clamp`; the metadata-fidelity refinement (numeric meta → `text`).
 
 Then Phase 3+ (release artifact, rustfava migration). See #1384 for the full plan.

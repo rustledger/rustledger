@@ -1,16 +1,17 @@
 // rustledger embedding interface — typed WIT contract.
 //
-// Phase 1 of the WASI-p1 (JSON-RPC) -> p2 (Component Model) migration (#1384).
-// This is the single source of truth for the embedding wire shape, replacing
-// the hand-mirrored DTOs in `crates/rustledger-ffi-wasi/src/types`. Generated
+// The WASI-p1 (JSON-RPC) -> p2 (Component Model) migration (#1384). This is the
+// single source of truth for the embedding wire shape, replacing the
+// hand-mirrored DTOs in `crates/rustledger-ffi-wasi/src/types`. Generated
 // bindings (wit-bindgen guest / wasmtime::component::bindgen! host) enforce the
-// shapes that are currently kept consistent by hand + review (e.g. the cost
+// shapes that were previously kept consistent by hand + review (e.g. the cost
 // shape footgun in #1399).
 //
-// Scope (this iteration): the read surface rustfava actually consumes —
-// version / load / validate / query (+ `-file` variants). The directive
-// construction surface (entry.create/clamp/filter) and util helpers
-// (getAccountType/isEncrypted/types) are tracked as remaining Phase 1 work.
+// Scope: the full former JSON-RPC method surface, across four interfaces —
+// `ledger` (version / load / validate / query / batch + `-file` variants),
+// `builder` (create / create-batch / filter / clamp), `util` (types /
+// is-encrypted / get-account-type), and `format` (source / file / entry /
+// entries). All 20 exports are implemented in `crates/rustledger-ffi-component`.
 
 package rustledger:ledger@2.1.0;
 

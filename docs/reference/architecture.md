@@ -52,14 +52,22 @@ This document describes rustledger's crate structure and data flow.
               └────────────────────────► core, parser, booking, validate, loader, query, completion
                                                             └──► core, ops, plugin, plugin-types
 
-    ┌─────────────────────┐
-    │   rustledger-ops    │
-    │ (dedup, categorize, │
-    │  reconcile, etc.)   │
-    └────────┬────────────┘
-              │
+    ┌─────────────────────┐   ┌──────────────────────────┐
+    │   rustledger-ops    │   │ rustledger-ffi-component │
+    │ (dedup, categorize, │   │ (WASI p2 / Component     │
+    │  reconcile, etc.)   │   │  Model, typed WIT)       │
+    └────────┬────────────┘   └────────┬─────────────────┘
+              │                         │
+              │                         └──► ffi-wasi (shared loader/conversion during dual-ship), core, ops, query, ...
               └──► plugin-types only
 ```
+
+> The two FFI/embedding surfaces — `rustledger-ffi-wasi` (wasip1 JSON-RPC, the
+> current shipping path) and `rustledger-ffi-component` (wasip2 Component Model,
+> the typed-WIT successor) — coexist during the [#1384](https://github.com/rustledger/rustledger/issues/1384)
+> dual-ship window. The component reuses `ffi-wasi`'s loader/conversion logic;
+> that shared code moves to a neutral home when the JSON-RPC surface is retired
+> (Phase 5).
 
 ## Crate Descriptions
 
@@ -95,7 +103,8 @@ This document describes rustledger's crate structure and data flow.
 |-------|---------|
 | `rustledger` | CLI binary (`rledger`, `bean-*` commands) |
 | `rustledger-wasm` | WebAssembly bindings for JS/TS |
-| `rustledger-ffi-wasi` | FFI via WASI JSON-RPC for embedding |
+| `rustledger-ffi-wasi` | FFI via WASI (wasip1) JSON-RPC for embedding — current shipping surface |
+| `rustledger-ffi-component` | FFI via WASI Preview 2 / Component Model (typed WIT contract); successor to `-ffi-wasi`, dual-shipped during the [#1384](https://github.com/rustledger/rustledger/issues/1384) migration |
 
 ## Data Flow
 

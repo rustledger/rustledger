@@ -7,9 +7,9 @@ How to cut a new release of rustledger.
 Releases are cut manually:
 
 1. Bump versions across the workspace and npm packages.
-2. Run a pre-flight smoke check (`tsc`, `wasm-pack build`) — catches the surfaces CI doesn't exercise per-PR.
-3. Open a `chore: release vX.Y.Z` PR and merge it once CI is green.
-4. Create the GitHub Release for the new tag — this triggers the build and publish workflows.
+1. Run a pre-flight smoke check (`tsc`, `wasm-pack build`) — catches the surfaces CI doesn't exercise per-PR.
+1. Open a `chore: release vX.Y.Z` PR and merge it once CI is green.
+1. Create the GitHub Release for the new tag — this triggers the build and publish workflows.
 
 There is no automatic version-bump bot. We removed `release-plz` because it was creating more friction than it was saving.
 
@@ -37,7 +37,7 @@ The version surface is:
 - Workspace `Cargo.toml`:
   - `[workspace.package].version`.
   - All 13 entries under `[workspace.dependencies]` that path-depend on a sibling crate (`rustledger-core`, `rustledger-parser`, `rustledger-loader`, `rustledger-booking`, `rustledger-validate`, `rustledger-query`, `rustledger-completion`, `rustledger-plugin`, `rustledger-plugin-types`, `rustledger-importer`, `rustledger-ops`, `rustledger-ffi-wasi`, `rustledger-wasm`). Their pinned `version = "X.Y.Z"` must match — `cargo publish` rejects a crate whose dep version doesn't match what's on crates.io.
-- All 16 crate `Cargo.toml` files under `crates/` (each currently hardcodes its own `version = "X.Y.Z"` rather than inheriting from the workspace).
+- All 15 publishable crate `Cargo.toml` files under `crates/` that pin `version = "X.Y.Z"` (each hardcodes its own version rather than inheriting from the workspace). Note the exceptions, which you do **not** bump by hand: `rustledger-ffi-component` and `rustledger-ffi-component-tests` use `version.workspace = true` (they inherit the `[workspace.package].version` bump above), and `rustledger-wire-format-tests` pins `0.0.0` and is never released.
 - `packages/mcp-server/package.json`: both `version` and the `@rustledger/wasm` entry under `dependencies`. **Don't try to update `package-lock.json`** — `@rustledger/wasm@X.Y.Z` doesn't exist on npm yet during the bump PR, so `npm install` fails with `ETARGET`. The publish workflow regenerates the lockfile after wasm is published.
 - `packaging/rpm/rustledger.spec`:
   - `Version`, `Source0` URL, and the `%setup -n rustledger-X.Y.Z` directory all hardcode the version. COPR pulls this file from the release tag via SCM integration, so missing this means COPR keeps building the old version.
@@ -162,9 +162,9 @@ Three places must be updated when introducing a new `rustledger-*` crate. Skippi
 
 1. **Workspace `Cargo.toml`**: add a `[workspace.dependencies]` entry with the version pinned to the current workspace version. Crates that depend on it use `path = "..."` from there.
 
-2. **`.github/workflows/release-publish.yml`** — add the crate to the `CRATES=()` array in the `Publish to crates.io` step, **in dependency order**. If your new crate is depended on by `rustledger-plugin`, it must appear before plugin in the array, otherwise plugin's publish fails with `failed to select a version for the requirement`. (This was the bug we hit in v0.14.0 with `rustledger-ops`; fixed in #924.)
+1. **`.github/workflows/release-publish.yml`** — add the crate to the `CRATES=()` array in the `Publish to crates.io` step, **in dependency order**. If your new crate is depended on by `rustledger-plugin`, it must appear before plugin in the array, otherwise plugin's publish fails with `failed to select a version for the requirement`. (This was the bug we hit in v0.14.0 with `rustledger-ops`; fixed in #924.)
 
-3. **First crates.io publish must be manual** — trusted-publishing OIDC tokens *cannot create new crates*, only push new versions of existing ones. Before the first release that includes the new crate:
+1. **First crates.io publish must be manual** — trusted-publishing OIDC tokens *cannot create new crates*, only push new versions of existing ones. Before the first release that includes the new crate:
 
    ```bash
    cargo login <a personal API token from crates.io>

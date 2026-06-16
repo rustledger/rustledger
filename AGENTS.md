@@ -18,12 +18,16 @@ The project is a Cargo workspace with these crates:
 | `rustledger-booking` | Interpolation and booking engine (7 methods) |
 | `rustledger-validate` | Validation with 26 error codes |
 | `rustledger-query` | BQL query engine |
+| `rustledger-completion` | Editor-agnostic completion logic (shared by LSP + WASM) |
 | `rustledger-plugin` | Native and WASM plugin system (30 plugins) |
+| `rustledger-plugin-types` | Shared plugin type definitions |
 | `rustledger-importer` | Import framework for bank statements |
+| `rustledger-ops` | Pure operations on directives — dedup, categorize, reconcile |
 | `rustledger` | CLI tool (`rledger check`, `rledger query`, etc.) |
 | `rustledger-wasm` | WebAssembly library target |
 | `rustledger-lsp` | Language Server Protocol implementation |
-| `rustledger-ffi-wasi` | FFI via WASI for embedding in any language |
+| `rustledger-ffi-wasi` | FFI via WASI (wasip1) JSON-RPC for embedding — current shipping surface |
+| `rustledger-ffi-component` | FFI via WASI Preview 2 / Component Model (typed WIT contract); successor to `-ffi-wasi`, dual-shipped during #1384 |
 
 ## Rust-Specific Patterns
 

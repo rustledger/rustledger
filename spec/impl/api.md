@@ -311,6 +311,23 @@ if (ledger.is_valid()) {
 }
 ```
 
+## Embedding / FFI Surfaces
+
+Beyond the in-process Rust API and the JS/TS WASM bindings, rustledger exposes
+two cross-language embedding surfaces over WebAssembly. Both coexist during the
+[#1384](https://github.com/rustledger/rustledger/issues/1384) dual-ship window:
+
+- **JSON-RPC over WASI (wasip1)** — `rustledger-ffi-wasi`. A JSON-RPC 2.0
+  request/response wire shape over stdin/stdout. The current shipping surface
+  (consumed by rustfava). See `crates/rustledger-ffi-wasi/README.md`.
+- **Component Model (wasip2), typed WIT** — `rustledger-ffi-component`. A typed
+  WIT contract (`wit/world.wit`, package `rustledger:ledger`) is the single
+  source of truth for the wire shape; the same operations are exposed as
+  strongly-typed component functions (no JSON envelope), consumed via
+  `wit-bindgen` (guest) or `wasmtime::component::bindgen!` (host). The successor
+  surface; the JSON-RPC one is retired in Phase 5. See
+  `crates/rustledger-ffi-component/README.md`.
+
 ## Serialization Format
 
 ### Binary Format (for caching)

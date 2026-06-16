@@ -53,40 +53,46 @@ not stay current.
 ### What ts-rs got right
 
 1. **Discriminated unions narrow correctly.** `DirectiveJson` emits
+
    ```ts
    export type DirectiveJson =
      | { "type": "transaction", ..., postings: Array<PostingJson>, ... }
      | { "type": "balance", ..., tolerance: string | null, ... }
      | ...
    ```
+
    so `switch (d.type) { case "balance": d.tolerance ... }` narrows. Same for `CostNumberJson` with its `kind` discriminator.
 
-2. **Untagged unions render exactly.** `MetaValueJson` becomes `string | boolean | { number: string, currency: string } | null` — identical to what we ship by hand.
+1. **Untagged unions render exactly.** `MetaValueJson` becomes `string | boolean | { number: string, currency: string } | null` — identical to what we ship by hand.
 
-3. **Doc comments translate to JSDoc.** Rustdoc on a field shows up as `/** ... */` above the TS field.
+1. **Doc comments translate to JSDoc.** Rustdoc on a field shows up as `/** ... */` above the TS field.
 
-4. **Cross-file imports compose cleanly.** Per-type files reference each other via `import type { MetaValueJson } from "./MetaValueJson"`.
+1. **Cross-file imports compose cleanly.** Per-type files reference each other via `import type { MetaValueJson } from "./MetaValueJson"`.
 
-5. **`#[ts(optional)]` solves the `Option<T> + skip_serializing_if = "Option::is_none"` mismatch.** Without it, ts-rs emits `field: T | null` (present-but-null); with it, `field?: T` (optional, matching wire absence). One attribute per Option field.
+1. **`#[ts(optional)]` solves the `Option<T> + skip_serializing_if = "Option::is_none"` mismatch.** Without it, ts-rs emits `field: T | null` (present-but-null); with it, `field?: T` (optional, matching wire absence). One attribute per Option field.
 
 ### Where ts-rs falls short
 
 1. **`TypedValueJson` discriminated narrowing is lost.** The Rust DTO is `struct TypedValueJson { value_type: String, value: MetaValueJson }` — a struct with two fields. ts-rs emits the corresponding wide TS:
+
    ```ts
    export type TypedValueJson = { type: string, value: MetaValueJson };
    ```
+
    The hand-written shape we ship today (post-#1215) is narrower:
+
    ```ts
    export type TypedValue =
      | { type: "string"; value: string }
      | { type: "amount"; value: { number: string; currency: string } }
      | ...
    ```
+
    This is a **structural Rust-side limitation**, not a ts-rs bug. The hand-written TS encodes per-variant payload constraints (`type: "amount"` implies `value` is an `AmountValue`) that the Rust DTO doesn't express. Restructuring the Rust DTO as a serde-tagged enum is awkward because the `null` variant needs `value: ()` (which doesn't serialize cleanly) or a custom `Deserialize` impl.
 
-2. **Per-type file output** doesn't directly produce our two `.d.ts` files (`beancount.d.ts`, `beancount_wasm.d.ts`). Needs a collation step.
+1. **Per-type file output** doesn't directly produce our two `.d.ts` files (`beancount.d.ts`, `beancount_wasm.d.ts`). Needs a collation step.
 
-3. **Cosmetic differences** — `Array<T>` instead of `T[]`; trailing commas in object types. tsc accepts both; ESLint may complain but it's a one-line `.eslintrc` exception.
+1. **Cosmetic differences** — `Array<T>` instead of `T[]`; trailing commas in object types. tsc accepts both; ESLint may complain but it's a one-line `.eslintrc` exception.
 
 ## Decision
 
@@ -149,7 +155,7 @@ hand-maintained:
 1. **Python compat layer** — `crates/rustledger-ffi-wasi/python/compat.py`
    was hand-edited. Same class of drift bug ADR-0004 closed for TS was
    still live for Python.
-2. **External integrator contract** — no machine-readable wire-format
+1. **External integrator contract** — no machine-readable wire-format
    schema for non-Rust/non-TS consumers (LLM tool builders, third-party
    SDK authors, the MCP server).
 
@@ -163,13 +169,12 @@ into `datamodel-code-generator`:
    serde attributes already on the DTOs (`#[serde(tag = "type")]`,
    `#[serde(rename = ...)]`, `#[serde(skip_serializing_if = ...)]`) so
    the cost is one extra derive per type, no per-field annotation.
-2. A new `#[ignore]`-by-default test (`export_index_schema`) walks the
+1. A new `#[ignore]`-by-default test (`export_index_schema`) walks the
    graph from `ParseResult` and writes `bindings/index.schema.json`
    (draft-2020-12, with all DTOs under `$defs`).
-3. `scripts/regen-bindings.sh` (renamed from `regen-ts-bindings.sh`)
+1. `scripts/regen-bindings.sh` (renamed from `regen-ts-bindings.sh`)
    gains two new phases: run the schema export test, then invoke
-   `datamodel-codegen --output-model-type pydantic_v2.BaseModel
-   --input-file-type jsonschema` to emit `bindings/types.py`. CI's
+   `datamodel-codegen --output-model-type pydantic_v2.BaseModel --input-file-type jsonschema` to emit `bindings/types.py`. CI's
    `bindings-fresh` job (renamed from `ts-bindings-fresh`) checks all
    three artifacts via `git diff --exit-code`.
 
@@ -199,8 +204,7 @@ is what the ecosystem actually supports.
 - **`TypedValueJson` narrowing is NOT applied to JSON Schema.** TS
   consumers get the hand-tuned discriminated union (per Phase 1).
   Python consumers get the wide `{type, value}` form. Pydantic v2's
-  discriminated-union ergonomics (`Annotated[Union[...],
-  Field(discriminator=...)]`) don't map cleanly from a TS literal-union
+  discriminated-union ergonomics (`Annotated[Union[...], Field(discriminator=...)]`) don't map cleanly from a TS literal-union
   override; rather than maintain two narrowings, we ship the wide form
   to Python. JSON Schema consumers can apply their own narrowing if
   needed.
@@ -222,3 +226,10 @@ is what the ecosystem actually supports.
 - #1232 — Phase 3 design issue (Python + JSON Schema).
 - PRs #1209, #1210, #1211, #1212, #1215, #1216 — the audit cascade that motivated this work.
 - `crates/rustledger-wasm/examples/tsrs_spike.rs` — the spike code this ADR is based on.
+- [ADR-0006](0006-wit-component-model-embedding.md) — the WIT/Component-Model
+  embedding contract (#1384). It supersedes the **FFI-WASI/embedding** portion
+  of this ADR's remit (the "equivalent FFI-WASI types" of Decision §1 and the
+  embedding Python stubs of Phase 3): the typed WIT contract eliminates the
+  hand-mirrored embedding DTOs rather than generating consumers from them. This
+  ADR continues to govern the `rustledger-wasm` npm/TypeScript surface, which is
+  unaffected.

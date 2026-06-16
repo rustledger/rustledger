@@ -68,7 +68,7 @@ rustledger is a pure Rust implementation of Beancount, the double-entry bookkeep
 
 ## Architecture
 
-The project is a Cargo workspace with 14 crates plus editor extensions:
+The project is a Cargo workspace with 16 crates plus editor extensions:
 
 | Crate | Purpose |
 |-------|---------|
@@ -78,6 +78,7 @@ The project is a Cargo workspace with 14 crates plus editor extensions:
 | `rustledger-booking` | Interpolation and booking engine (7 methods) |
 | `rustledger-validate` | Validation with 26 error codes |
 | `rustledger-query` | BQL query engine |
+| `rustledger-completion` | Editor-agnostic completion logic (shared by LSP + WASM) |
 | `rustledger-plugin` | Native and WASM plugin system (30 plugins) |
 | `rustledger-plugin-types` | Shared plugin type definitions |
 | `rustledger-importer` | Import framework for bank statements |
@@ -85,7 +86,8 @@ The project is a Cargo workspace with 14 crates plus editor extensions:
 | `rustledger` | CLI tool (`rledger check`, `rledger query`, etc.) |
 | `rustledger-wasm` | WebAssembly library target |
 | `rustledger-lsp` | Language Server Protocol implementation |
-| `rustledger-ffi-wasi` | FFI via WASI for embedding in any language |
+| `rustledger-ffi-wasi` | FFI via WASI (wasip1) JSON-RPC for embedding — current shipping surface |
+| `rustledger-ffi-component` | FFI via WASI Preview 2 / Component Model (typed WIT contract); successor to `-ffi-wasi`, dual-shipped during #1384 |
 
 | Package | Purpose |
 |---------|---------|
@@ -231,9 +233,9 @@ Each Python bug we encounter falls into one of three buckets:
 
 1. **Fixable** — we deviate, stay stricter or more correct than Python. Examples: cost-spec precision (beanquery#275, fixed in #1106 / #1113), `FIRST` aggregator short-circuit (beanquery#279, we evaluate eagerly), empty-aggregate quirk (beanquery#1055, we return the SQL identity), elided-zero-to-unopened-account check (Python #877-equivalent, we catch via two-phase validation).
 
-2. **Not fixable locally** — we match Python and document the limitation. Example: the `rust_decimal` 28-digit ceiling (would require migrating to an arbitrary-precision library like `bigdecimal` — significant refactor for negligible practical benefit).
+1. **Not fixable locally** — we match Python and document the limitation. Example: the `rust_decimal` 28-digit ceiling (would require migrating to an arbitrary-precision library like `bigdecimal` — significant refactor for negligible practical benefit).
 
-3. **Out of scope** — we mask the Python-side divergence in the compat suite so it doesn't pollute the metric. Example: `KNOWN_PYTHON_DIVERGENCES` entries in `scripts/compat-bql-test.py`.
+1. **Out of scope** — we mask the Python-side divergence in the compat suite so it doesn't pollute the metric. Example: `KNOWN_PYTHON_DIVERGENCES` entries in `scripts/compat-bql-test.py`.
 
 ### Checklist for a deliberate Python deviation
 

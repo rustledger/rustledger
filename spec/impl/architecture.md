@@ -49,12 +49,15 @@ rustledger/
 │   ├── rustledger-booking/      # Interpolation and booking engine (7 methods)
 │   ├── rustledger-validate/     # Validation rules (26 error codes)
 │   ├── rustledger-query/        # BQL query engine
+│   ├── rustledger-completion/   # Editor-agnostic completion logic (LSP + WASM)
 │   ├── rustledger-plugin/       # Native + WASM + Python plugin system
 │   ├── rustledger-plugin-types/ # WASM plugin interface types
 │   ├── rustledger-importer/     # CSV/OFX bank statement import
+│   ├── rustledger-ops/          # Pure operations on directives (dedup, categorize, reconcile)
 │   ├── rustledger-lsp/          # Language Server Protocol
 │   ├── rustledger-wasm/         # WebAssembly bindings for JS/TS
-│   ├── rustledger-ffi-wasi/     # FFI via WASI JSON-RPC
+│   ├── rustledger-ffi-wasi/     # FFI via WASI (wasip1) JSON-RPC — current surface
+│   ├── rustledger-ffi-component/ # FFI via WASI p2 / Component Model (typed WIT) — successor (#1384)
 │   └── rustledger/              # CLI tools (rledger, bean-* commands)
 ├── packages/
 │   ├── vscode/                  # VS Code extension (LSP client)

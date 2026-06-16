@@ -5,31 +5,33 @@ replacing the hand-rolled JSON-RPC wire shape of `rustledger-ffi-wasi`. Part of
 the WASI-p1 → p2 migration ([#1384](https://github.com/rustledger/rustledger/issues/1384)).
 
 `wit/world.wit` is the single source of truth for the wire shape; `src/lib.rs`
-implements the `rustledger` world's exports.
 
-**Status: Phase 1 done (the contract); Phase 2 — all 20 exports wired.** The
-crate **builds as a real wasip2 component** and every export
-(`ledger`/`builder`/`util`/`format`) is implemented against the reused
-loader/query/ops logic and exercised by the parity harness.
+- `src/convert.rs` implement the `rustledger` world's exports.
+
+## Status
+
+- **Workspace member**, but not yet a published release artifact (`publish = false`).
+- **All 20 exports are implemented and build as a real wasip2 component**, across
+  four interfaces: `ledger` (load / validate / query / batch + their `-file`
+  variants), `builder` (create / create-batch / filter / clamp), `util` (types /
+  is-encrypted / get-account-type), `format` (source / file / entry / entries).
+- Exports reuse `rustledger-ffi-wasi`'s loader/query/ops logic via shared
+  helpers; the DTO↔WIT conversion lives in `src/convert.rs`.
+- **Parity-tested** by `rustledger-ffi-component-tests`: it instantiates the
+  built component in a wasmtime host (typed `bindgen!`, no JSON-RPC) and asserts
+  agreement with the reused `rustledger-ffi-wasi` path.
+- **Not yet wired to a consumer** — rustfava still uses the JSON-RPC surface.
+  Both coexist during the dual-ship window; the JSON-RPC surface is retired in
+  Phase 5.
 
 ```bash
 # the wasip2 target lives in the default dev shell (flake.nix)
 cargo build -p rustledger-ffi-component --target wasm32-wasip2
 wasm-tools print target/wasm32-wasip2/debug/rustledger_ffi_component.wasm | head -1   # => (component …
-```
 
-## Status
-
-- `wit/world.wit` **validates** with `wasm-tools component wit` (fully resolves
-  and round-trips).
-- **`wit-bindgen rust` generates** ~9k lines of typed Rust from it — so the
-  contract compiles with the real binding generator, not just the parser.
-
-Reproduce:
-
-```bash
-wasm-tools component wit crates/rustledger-ffi-component/wit/world.wit   # validate
-wit-bindgen rust crates/rustledger-ffi-component/wit/world.wit --out-dir /tmp/g  # codegen
+# validate / regenerate the contract directly
+wasm-tools component wit crates/rustledger-ffi-component/wit/world.wit
+wit-bindgen rust crates/rustledger-ffi-component/wit/world.wit --out-dir /tmp/g
 ```
 
 ## Scope covered
@@ -53,19 +55,23 @@ once, run several queries.
 **Util** (`interface util`) — `types` / `is-encrypted` / `get-account-type`
 (`util.types` / `util.isEncrypted` / `util.getAccountType`).
 
+**Format** (`interface format`) — `format-source` / `-file` / `-entry` /
+`-entries`; the entry variants reuse the builder input conversion +
+`canonicalize_directives`.
+
 ## Modeling decisions (and what the translation surfaced)
 
 1. **`cost` is defined once and reused for posting cost *and* position cost.**
    The consistency that #1399 had to enforce by hand + review is now structural
    — `cost.number` is one `cost-number` variant everywhere, by construction.
 
-2. **`meta-value` is a closed, non-recursive variant.** The JSON DTO types user
+1. **`meta-value` is a closed, non-recursive variant.** The JSON DTO types user
    metadata as arbitrary `serde_json::Value`, but it is only ever produced from
    `MetaValue` — a finite set (text / number / bool / amount / null) with no
    nesting. So the "recursive meta-value" risk flagged in the plan does **not**
    exist on this side; it maps cleanly.
 
-3. **The Component Model forbids recursive types.** Verified: `wasm-tools`
+1. **The Component Model forbids recursive types.** Verified: `wasm-tools`
    rejects a `query-value` that contains itself, even through a `list`. The only
    self-referential query cells — BQL `object` (map of cells) and `set` (list of
    cells) — are therefore carried in a single, clearly-named `json(string)`
@@ -74,62 +80,23 @@ once, run several queries.
    because its values are already flat strings. **This is the one place WIT
    can't fully express the JSON shape** — the key finding of Phase 1.
 
-4. **Per-result `api_version` dropped in favour of a `version()` func.** Under a
+1. **Per-result `api_version` dropped in favor of a `version()` func.** Under a
    versioned WIT contract the wire shape *is* the version; stamping an
    `api_version` string onto every response is a JSON-RPC-ism. `version()`
    remains for runtime negotiation.
 
-5. **Maps → ordered `list<tuple<...>>`.** WIT has no map type; `Meta.user`,
+1. **Maps → ordered `list<tuple<...>>`.** WIT has no map type; `Meta.user`,
    `display_precision`, `inferred_tolerance_default` become key/value lists
    (which also preserves source order).
 
-## Phase 1 complete
+## Known gaps / remaining work
 
-The **entire** JSON-RPC method surface is now modeled across five interfaces —
-`ledger` (load/validate/query/batch + `-file` variants), `builder`
-(create/create-batch/filter/clamp), `util` (types/is-encrypted/get-account-type),
-`format` (format-source/format-entries), exported by the `rustledger` world. The
-query cell shapes were verified against `convert.rs::value_to_json` (`interval`
-carries `count` + a proper `interval-unit` enum; `metadata` is a flat string
-map). The contract validates with `wasm-tools` and generates ~35k lines via
-`wit-bindgen`.
-
-## Phase 2 (in progress)
-
-- [x] Crate scaffold + `wit_bindgen::generate!`; builds as a wasip2 component.
-- [x] Toolchain wired: `wasm32-wasip2` target in `flake.nix`, workspace member,
-      `wit-bindgen` workspace dep.
-- [x] `version` export wired.
-- [x] `load` wired — reuses `ffi-wasi`'s `load_source` (loader orchestration) and
-      `directive_to_json` (core→DTO), then maps DTO→WIT for all 12 directive
-      kinds plus options/errors/plugins/includes (`src/convert.rs`).
-- [x] `validate` wired — `load_source` + `ValidationSession` (early/late/finalize).
-- [x] `query` wired — runs the executor directly for typed rows and projects
-      `rustledger_query::Value` → WIT `query-value`; `object`/`set` cells use the
-      `json` escape hatch (WIT can't type them recursively).
-- [x] `batch` wired (source-based: `load_source` once, run N queries).
-- [x] file variants wired. `load-file` uses a new reusable `helpers::load_file`
-      in `ffi-wasi` (Loader + booking + options) — extracted from the
-      `handle_load_file` handler, which now calls it too (DRY; all `ffi-wasi`
-      tests green). `validate-file`/`query-file`/`batch-file` read the file and
-      run the source path, matching the handlers (single file, no includes).
-- [x] `builder`: `create` / `create-batch` (WIT input → `input_entry_to_directive`
-      → core → WIT) and `filter` (date-range `[begin, end)` over WIT directives).
-- [x] `builder`: `clamp` — wired via the typed `rustledger_ops::clamp` (#1401):
-      WIT loaded-directive → `InputEntry` → core → `ops::clamp` → WIT. **All 20
-      exports are now implemented** and parity-tested.
-- [x] `util` (`types` / `is-encrypted` / `get-account-type`) and `format`
-      (`format-source` / `-file` / `-entry` / `-entries`) wired. `format-*-entry`
-      reuse the builder input conversion + `canonicalize_directives`.
-- [ ] Close the metadata fidelity gap: numeric metadata currently surfaces as
-      `meta-value::text` because the reused DTO stringifies it — faithful typing
-      needs the core `MetaValue` (`directive_to_json` flattens it).
-- [x] Parity harness (`rustledger-ffi-component-tests`): instantiates the built
-      component in a wasmtime host (typed `bindgen!`, no JSON-RPC) and asserts
-      `version`/`load`/`query` agree with the reused `ffi-wasi` path — the first
-      thing that *runs* the conversion code. Skips if the wasm isn't built.
-- [ ] Broaden parity coverage (all exports; field-level diff) and wire the
-      component-build step into CI (#1200 harness).
-- [ ] `entry.clamp`; the metadata-fidelity refinement (numeric meta → `text`).
-
-Then Phase 3+ (release artifact, rustfava migration). See #1384 for the full plan.
+- **Metadata fidelity:** numeric metadata currently surfaces as
+  `meta-value::text` because the reused DTO stringifies it — faithful typing
+  needs the core `MetaValue` (`directive_to_json` flattens it).
+- **Broaden parity coverage** (all exports; field-level diff) and wire the
+  component-build step + an end-to-end `load-file` parity test into CI ([#1402](https://github.com/rustledger/rustledger/issues/1402)).
+- **Phase 3+:** release artifact, then rustfava migration; **Phase 5** retires
+  the JSON-RPC surface and moves the shared loader/conversion logic to a neutral
+  home. See [#1384](https://github.com/rustledger/rustledger/issues/1384) for the
+  full plan.

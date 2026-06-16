@@ -6,6 +6,14 @@ A WASI module providing JSON-RPC 2.0 API for embedding Rustledger in any languag
 
 This crate compiles to a WebAssembly module that can be run via [wasmtime](https://wasmtime.dev/) or any WASI-compatible runtime. It provides a fast, portable way to use Rustledger's Beancount parsing, validation, and querying capabilities from any language.
 
+> **Dual-ship note.** This JSON-RPC-over-WASI (wasip1) surface is the current,
+> shipping embedding path (used by rustfava). A typed **WASI Preview 2 /
+> Component Model** successor is in development in `rustledger-ffi-component`
+> ([#1384](https://github.com/rustledger/rustledger/issues/1384)): it replaces
+> this hand-rolled JSON-RPC wire shape with a generated WIT contract. Both
+> coexist during the dual-ship window; this surface is retired in Phase 5. New
+> integrators who can target wasip2 should track the component surface.
+
 ## Usage
 
 Send JSON-RPC 2.0 requests via stdin:
@@ -95,12 +103,12 @@ echo '[
 
 Each element of `error.data.errors` is an object with the following fields:
 
-| Field       | Type           | Description |
+| Field | Type | Description |
 |-------------|----------------|-------------|
-| `message`   | string         | Rendered Display of the parser error. |
-| `kind_code` | integer        | Stable numeric discriminant (1-26, see `openrpc.json`'s `ParseErrorEntry` schema). Use this for structural detection — e.g., `kind_code === 26` is `BomInDirectiveBody` (mid-file BOM; clients can surface a 'Remove BOM' quick-fix). |
-| `hint`      | string \| null | Optional actionable suggestion (e.g., 'Remove the U+FEFF byte at this position…'). Render as a separate help/fix-it line below `message`. |
-| `span`      | object         | `{start: integer, end: integer}` byte range into the source. |
+| `message` | string | Rendered Display of the parser error. |
+| `kind_code` | integer | Stable numeric discriminant (1-26, see `openrpc.json`'s `ParseErrorEntry` schema). Use this for structural detection — e.g., `kind_code === 26` is `BomInDirectiveBody` (mid-file BOM; clients can surface a 'Remove BOM' quick-fix). |
+| `hint` | string | null | Optional actionable suggestion (e.g., 'Remove the U+FEFF byte at this position…'). Render as a separate help/fix-it line below `message`. |
+| `span` | object | `{start: integer, end: integer}` byte range into the source. |
 
 Example error response:
 
@@ -128,9 +136,9 @@ Example error response:
 ```
 
 > **Wire-shape note (v2.0):** prior to API version 2.0, `error.data.errors` was a `string[]` of rendered messages. As of 2.0 each entry is the `ParseErrorEntry` object above. The change is a wire-shape break and earned the major bump per the version policy on `API_VERSION`. Migration recipe for cross-version clients that want to bridge both: `errors.map(e => typeof e === 'string' ? { message: e, kind_code: null, hint: null, span: null } : e)`.
-| -32001 | Beancount validation error | The directives parsed but validation (account openness, balance assertion, etc.) failed. |
-| -32002 | BQL query error | The BQL query string did not parse or did not execute. |
-| -32003 | File I/O error | Could not read/open the requested file path. |
+> | -32001 | Beancount validation error | The directives parsed but validation (account openness, balance assertion, etc.) failed. |
+> | -32002 | BQL query error | The BQL query string did not parse or did not execute. |
+> | -32003 | File I/O error | Could not read/open the requested file path. |
 
 ## Examples
 

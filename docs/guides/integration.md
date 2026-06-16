@@ -16,6 +16,7 @@ rustledger provides multiple integration paths:
 | [Rust Crates](#rust-crates) | Rust applications | Rust |
 | [WASM Library](#webassembly-library) | Browsers, Node.js | JavaScript, TypeScript |
 | [WASI FFI](#wasi-ffi-json-rpc) | Embedding in any language | Python, Ruby, Go, etc. |
+| [Component Model (WIT)](#component-model-wit) | Typed embedding on wasip2 hosts (experimental) | Any wasip2 host |
 | [LSP](#language-server-protocol) | Editor integrations | Any LSP client |
 
 ## Command-Line Interface
@@ -358,6 +359,34 @@ echo '[
   {"jsonrpc":"2.0","method":"ledger.validate","params":{"source":"..."},"id":2}
 ]' | wasmtime rustledger-ffi-wasi.wasm
 ```
+
+## Component Model (WIT)
+
+> **Experimental / in development.** A typed WASI Preview 2 component
+> (`rustledger-ffi-component`, [#1384](https://github.com/rustledger/rustledger/issues/1384))
+> is the successor to the JSON-RPC WASI FFI above. It is not yet wired to a
+> consumer (rustfava still uses the JSON-RPC surface), and the JSON-RPC surface
+> is planned for retirement once this stabilizes.
+
+Instead of a hand-rolled JSON-RPC wire shape, this surface exposes a generated
+**WIT contract** (`crates/rustledger-ffi-component/wit/world.wit`, package
+`rustledger:ledger`). The same operations — `load` / `validate` / `query` /
+`batch` (+ `-file` variants), entry `create` / `filter` / `clamp`, `util`, and
+`format` — are strongly-typed component functions with no JSON envelope.
+
+A host consumes it via `wasmtime`'s component bindings; a guest/other language
+binds with `wit-bindgen`:
+
+```rust
+// Host side (Rust), via wasmtime's component model:
+wasmtime::component::bindgen!({ world: "rustledger", path: "world.wit" });
+// ... instantiate the component, then call typed methods:
+let version = inst.rustledger_ledger_ledger().call_version(&mut store)?;
+let result  = inst.rustledger_ledger_ledger().call_query(&mut store, source, "SELECT account, position")?;
+```
+
+Build the component with `cargo build -p rustledger-ffi-component --target wasm32-wasip2`. See `crates/rustledger-ffi-component/README.md` for the full
+surface and modeling decisions.
 
 ## Language Server Protocol
 

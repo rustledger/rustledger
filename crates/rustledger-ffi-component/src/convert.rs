@@ -538,7 +538,12 @@ fn read_file(path: &str) -> Result<String, String> {
 }
 
 /// `ledger.loadFile` — load from a path, resolving `include` directives, with
-/// optional path-security confinement and a post-booking plugin pass.
+/// a post-booking plugin pass.
+///
+/// Includes are confined to the entry file's directory tree by default;
+/// `allow_unrestricted_includes == true` lifts that path-traversal protection
+/// (so the safe state is the `false`/zero default). The flag is negated into
+/// the loader's `path_security` at the boundary.
 pub fn load_file(
     path: &str,
     allow_unrestricted_includes: bool,

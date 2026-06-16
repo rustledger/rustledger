@@ -329,10 +329,7 @@ pub struct FileLoad {
 /// # Errors
 ///
 /// Returns the loader error string if the entry file cannot be read/parsed.
-pub fn load_file(
-    path: &std::path::Path,
-    path_security: bool,
-) -> Result<FileLoad, String> {
+pub fn load_file(path: &std::path::Path, path_security: bool) -> Result<FileLoad, String> {
     let mut loader = rustledger_loader::Loader::new().with_path_security(path_security);
     let load_result = loader
         .load(path)
@@ -409,4 +406,116 @@ pub fn load_file(
         plugins,
         loaded_files,
     })
+}
+
+/// Run the named regular (post-booking) plugins over loaded directives, shared
+/// by the JSON-RPC `ledger.loadFile` handler and the WIT component (#1384).
+///
+/// Returns the (possibly rewritten) directives + their line numbers/files;
+/// plugin errors and unknown-plugin errors are pushed onto `errors`. No-ops if
+/// `plugin_names` is empty or `errors` is already non-empty (don't run plugins
+/// over a broken load).
+#[must_use]
+pub fn apply_plugins(
+    plugin_names: &[&str],
+    mut directives: Vec<Directive>,
+    mut directive_lines: Vec<u32>,
+    mut directive_files: Vec<String>,
+    errors: &mut Vec<Error>,
+    options: &LedgerOptions,
+) -> (Vec<Directive>, Vec<u32>, Vec<String>) {
+    use rustledger_plugin::{
+        NativePluginRegistry, PluginInput, PluginOptions, directive_to_wrapper,
+        wrapper_to_directive,
+    };
+
+    if plugin_names.is_empty() || !errors.is_empty() {
+        return (directives, directive_lines, directive_files);
+    }
+    let registry = NativePluginRegistry::global();
+
+    for plugin_name in plugin_names {
+        // External API runs plugins on already-booked input — synth plugins are
+        // a loader-internal concern and would re-emit Opens for already-opened
+        // accounts.
+        let Some(plugin) = registry.find_regular(plugin_name) else {
+            errors.push(Error::new(format!("Unknown plugin: {plugin_name}")));
+            continue;
+        };
+        let wrappers: Vec<_> = directives
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let mut wrapper = directive_to_wrapper(d);
+                wrapper.filename = Some(
+                    directive_files
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| "<unknown>".to_string()),
+                );
+                wrapper.lineno = Some(directive_lines.get(i).copied().unwrap_or(0));
+                wrapper
+            })
+            .collect();
+
+        let input = PluginInput {
+            directives: wrappers,
+            options: PluginOptions {
+                operating_currencies: options.operating_currency.clone(),
+                title: options.title.clone(),
+            },
+            config: None,
+        };
+
+        let input_dirs = input.directives.clone();
+        let output = plugin.process(input);
+
+        for err in output.errors {
+            errors.push(Error::new(err.message));
+        }
+
+        let mut new_directives = Vec::new();
+        let mut new_lines = Vec::new();
+        let mut new_files = Vec::new();
+        for op in &output.ops {
+            let wrapper = match op {
+                rustledger_plugin::PluginOp::Keep(i) => input_dirs.get(*i).cloned(),
+                rustledger_plugin::PluginOp::Modify(_, w)
+                | rustledger_plugin::PluginOp::Insert(w) => Some(w.clone()),
+                rustledger_plugin::PluginOp::Delete(_) => None,
+            };
+            if let Some(wrapper) = wrapper
+                && let Ok(directive) = wrapper_to_directive(&wrapper)
+            {
+                new_directives.push(directive);
+                new_lines.push(wrapper.lineno.unwrap_or(0));
+                new_files.push(wrapper.filename.unwrap_or_else(|| "<plugin>".to_string()));
+            }
+        }
+        directives = new_directives;
+        directive_lines = new_lines;
+        directive_files = new_files;
+    }
+    (directives, directive_lines, directive_files)
+}
+
+/// The five account-type roots, in declaration order.
+///
+/// Single source of truth for `util.types`' `account_types` and
+/// `util.getAccountType`, shared by both the JSON-RPC and Component-Model (WIT)
+/// surfaces so they cannot drift.
+pub const ACCOUNT_TYPES: [&str; 5] = ["Assets", "Liabilities", "Equity", "Income", "Expenses"];
+
+/// The lowercased account-type root for `account` — the segment before the
+/// first `:` — or `"unknown"` if it is not one of [`ACCOUNT_TYPES`].
+#[must_use]
+pub fn account_type(account: &str) -> &'static str {
+    match account.split(':').next() {
+        Some("Assets") => "assets",
+        Some("Liabilities") => "liabilities",
+        Some("Equity") => "equity",
+        Some("Income") => "income",
+        Some("Expenses") => "expenses",
+        _ => "unknown",
+    }
 }

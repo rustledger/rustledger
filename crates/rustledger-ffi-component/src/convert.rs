@@ -63,7 +63,7 @@ fn meta_value(v: Json) -> wit::MetaValue {
             }
         }
         Json::String(s) => wit::MetaValue::Text(s),
-        other => wit::MetaValue::Text(other.to_string()),
+        arr @ Json::Array(_) => wit::MetaValue::Text(arr.to_string()),
     }
 }
 
@@ -258,13 +258,9 @@ fn error(e: ffi::Error) -> wit::Error {
     }
 }
 
-fn pairs_u32(m: std::collections::HashMap<String, u32>) -> Vec<(String, u32)> {
-    let mut v: Vec<_> = m.into_iter().collect();
-    v.sort_by(|a, b| a.0.cmp(&b.0));
-    v
-}
-
-fn pairs_str(m: std::collections::HashMap<String, String>) -> Vec<(String, String)> {
+/// Flatten a map into a key-sorted `list<tuple>` (WIT has no map type, so the
+/// surface models maps as deterministically-ordered pair lists).
+fn pairs<V>(m: std::collections::HashMap<String, V>) -> Vec<(String, V)> {
     let mut v: Vec<_> = m.into_iter().collect();
     v.sort_by(|a, b| a.0.cmp(&b.0));
     v
@@ -282,9 +278,9 @@ fn options(o: ffi::LedgerOptions) -> wit::LedgerOptions {
         documents: o.documents,
         commodities: o.commodities,
         booking_method: o.booking_method,
-        display_precision: pairs_u32(o.display_precision),
+        display_precision: pairs(o.display_precision),
         render_commas: o.render_commas,
-        inferred_tolerance_default: pairs_str(o.inferred_tolerance_default),
+        inferred_tolerance_default: pairs(o.inferred_tolerance_default),
         inferred_tolerance_multiplier: o.inferred_tolerance_multiplier,
         infer_tolerance_from_cost: o.infer_tolerance_from_cost,
         account_rounding: o.account_rounding,
@@ -376,9 +372,11 @@ fn query_value(v: &Value) -> wit::QueryValue {
         Value::Position(p) => Q::Position(position(p)),
         Value::Inventory(inv) => Q::Inventory(inv.positions().map(position).collect()),
         Value::StringSet(set) => Q::StringSet(set.clone()),
-        Value::Metadata(m) => {
-            Q::Metadata(m.iter().map(|(k, val)| (k.to_string(), format!("{val:?}"))).collect())
-        }
+        Value::Metadata(m) => Q::Metadata(
+            m.iter()
+                .map(|(k, val)| (k.clone(), format!("{val:?}")))
+                .collect(),
+        ),
         Value::Interval(iv) => Q::Interval(wit::Interval {
             count: iv.count,
             unit: match iv.unit {
@@ -493,7 +491,11 @@ fn run_query(directives: &[rustledger_core::Directive], query_str: &str) -> out:
                 .iter()
                 .map(|row| row.iter().map(query_value).collect())
                 .collect();
-            out::QueryResult { columns, rows, errors: vec![] }
+            out::QueryResult {
+                columns,
+                rows,
+                errors: vec![],
+            }
         }
         Err(e) => out::QueryResult {
             columns: vec![],
@@ -517,7 +519,9 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
             .map(|_| out::QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: vec![simple_error("Cannot execute query: parse errors exist".to_string())],
+                errors: vec![simple_error(
+                    "Cannot execute query: parse errors exist".to_string(),
+                )],
             })
             .collect()
     };
@@ -533,26 +537,39 @@ fn read_file(path: &str) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("Failed to read file '{path}': {e}"))
 }
 
-/// `ledger.loadFile` — load from a path, resolving `include` directives.
-pub fn load_file(path: &str) -> out::LoadResult {
-    match ffi::helpers::load_file(std::path::Path::new(path), true) {
+/// `ledger.loadFile` — load from a path, resolving `include` directives, with
+/// optional path-security confinement and a post-booking plugin pass.
+pub fn load_file(path: &str, path_security: bool, plugins: &[String]) -> out::LoadResult {
+    match ffi::helpers::load_file(std::path::Path::new(path), path_security) {
         Ok(fl) => {
-            let entries = fl
-                .directives
+            let mut errors = fl.errors;
+            let opts = fl.options;
+            let plugin_dtos = fl.plugins;
+            let loaded_files = fl.loaded_files;
+            // Run requested plugins via the same helper the JSON-RPC handler uses.
+            let plugin_names: Vec<&str> = plugins.iter().map(String::as_str).collect();
+            let (directives, directive_lines, directive_files) = ffi::helpers::apply_plugins(
+                &plugin_names,
+                fl.directives,
+                fl.directive_lines,
+                fl.directive_files,
+                &mut errors,
+                &opts,
+            );
+            let entries = directives
                 .iter()
                 .enumerate()
                 .map(|(i, d)| {
-                    let line = fl.directive_lines.get(i).copied().unwrap_or(0);
-                    let file = fl.directive_files.get(i).map_or("<unknown>", String::as_str);
+                    let line = directive_lines.get(i).copied().unwrap_or(0);
+                    let file = directive_files.get(i).map_or("<unknown>", String::as_str);
                     directive(ffi::convert::directive_to_json(d, line, file))
                 })
                 .collect();
             out::LoadResult {
                 entries,
-                errors: fl.errors.into_iter().map(error).collect(),
-                options: options(fl.options),
-                plugins: fl
-                    .plugins
+                errors: errors.into_iter().map(error).collect(),
+                options: options(opts),
+                plugins: plugin_dtos
                     .into_iter()
                     .map(|p| wit::Plugin {
                         name: p.name,
@@ -561,8 +578,7 @@ pub fn load_file(path: &str) -> out::LoadResult {
                     .collect(),
                 // File load reports the resolved file set (no per-include line),
                 // carried in `includes` with lineno 0.
-                includes: fl
-                    .loaded_files
+                includes: loaded_files
                     .into_iter()
                     .map(|p| wit::SourceInclude { path: p, lineno: 0 })
                     .collect(),
@@ -581,6 +597,9 @@ pub fn load_file(path: &str) -> out::LoadResult {
 // validate/query/batch over a file match the JSON-RPC handlers: read the file
 // and run the single-source path (these do not resolve includes).
 
+/// Validate the ledger at `path`. Reads the file and runs the single-source
+/// [`validate`] path (no include resolution); a read failure becomes an
+/// invalid result carrying the I/O error.
 pub fn validate_file(path: &str) -> out::ValidateResult {
     match read_file(path) {
         Ok(src) => validate(&src),
@@ -593,6 +612,9 @@ pub fn validate_file(path: &str) -> out::ValidateResult {
     }
 }
 
+/// Run a single BQL query against the ledger at `path`. Reads the file and
+/// runs the single-source [`query`] path (no include resolution); a read
+/// failure becomes an errored result carrying the I/O error.
 pub fn query_file(path: &str, query_str: &str) -> out::QueryResult {
     match read_file(path) {
         Ok(src) => query(&src, query_str),
@@ -604,6 +626,10 @@ pub fn query_file(path: &str, query_str: &str) -> out::QueryResult {
     }
 }
 
+/// Run several BQL queries against the ledger at `path`, loading it once.
+/// Reads the file and runs the single-source [`batch`] path (no include
+/// resolution); a read failure becomes an errored result carrying the I/O
+/// error.
 pub fn batch_file(path: &str, queries: &[String]) -> out::BatchResult {
     match read_file(path) {
         Ok(src) => batch(&src, queries),
@@ -771,7 +797,11 @@ fn input_entry(d: &wit::InputDirective) -> ffi::InputEntry {
 /// `entry.create` — build one directive from typed input.
 pub fn create(entry: &wit::InputDirective) -> Result<wit::Directive, String> {
     let core = ffi::input_entry_to_directive(&input_entry(entry))?;
-    Ok(directive(ffi::convert::directive_to_json(&core, 0, "<created>")))
+    Ok(directive(ffi::convert::directive_to_json(
+        &core,
+        0,
+        "<created>",
+    )))
 }
 
 /// `entry.createBatch` — all-or-nothing (first failure fails the call).
@@ -801,7 +831,7 @@ fn directive_date(d: &wit::Directive) -> &str {
 /// `filter_entries`: `commodity` is always dropped, `open` is kept while still
 /// active (`date < end`), `close` is kept from `begin` on (`date >= begin`),
 /// and everything else is kept within `[begin, end)`. Entries with an absent or
-/// unparseable date are dropped. Unparseable bounds return the input unchanged
+/// unparsable date are dropped. Unparsable bounds return the input unchanged
 /// (the WIT signature has no error channel).
 pub fn filter(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::Directive> {
     let (Ok(begin), Ok(end)) = (
@@ -835,17 +865,33 @@ pub fn types_info() -> out_util::TypesInfo {
     let strs = |xs: &[&str]| xs.iter().map(|s| (*s).to_string()).collect();
     out_util::TypesInfo {
         all_directives: strs(&[
-            "transaction", "balance", "open", "close", "commodity", "pad", "event", "note",
-            "document", "price", "query", "custom",
+            "transaction",
+            "balance",
+            "open",
+            "close",
+            "commodity",
+            "pad",
+            "event",
+            "note",
+            "document",
+            "price",
+            "query",
+            "custom",
         ]),
         booking_methods: strs(&[
-            "STRICT", "STRICT_WITH_SIZE", "NONE", "AVERAGE", "FIFO", "LIFO", "HIFO",
+            "STRICT",
+            "STRICT_WITH_SIZE",
+            "NONE",
+            "AVERAGE",
+            "FIFO",
+            "LIFO",
+            "HIFO",
         ]),
         missing: out_util::MissingSentinel {
             description: "Represents a missing/interpolated amount in a posting".to_string(),
             json_representation: "null or {currency_only: string}".to_string(),
         },
-        account_types: strs(&["Assets", "Liabilities", "Equity", "Income", "Expenses"]),
+        account_types: strs(&ffi::helpers::ACCOUNT_TYPES),
     }
 }
 
@@ -860,15 +906,7 @@ pub fn is_encrypted(path: &str) -> bool {
 /// `util.getAccountType` — the (lowercased) type root of an account name.
 #[must_use]
 pub fn get_account_type(account: &str) -> String {
-    match account.split(':').next() {
-        Some("Assets") => "assets",
-        Some("Liabilities") => "liabilities",
-        Some("Equity") => "equity",
-        Some("Income") => "income",
-        Some("Expenses") => "expenses",
-        _ => "unknown",
-    }
-    .to_string()
+    ffi::helpers::account_type(account).to_string()
 }
 
 // ---- format ----
@@ -915,8 +953,9 @@ pub fn format_entries(entries: &[wit::InputDirective]) -> Result<String, String>
 // ---- builder: clamp (WIT loaded directives -> core -> ops::clamp -> WIT) ----
 
 fn loaded_meta(m: &wit::Meta) -> std::collections::HashMap<String, Json> {
-    // Drop source location (filename/lineno/hash); keep user key/values.
-    m.user.iter().map(|(k, v)| (k.clone(), json_from_meta_value(v))).collect()
+    // Drop source location (filename/lineno/hash); keep user key/values. The
+    // user pairs have the same shape as an input entry's meta.
+    input_meta(&m.user)
 }
 
 fn loaded_cost_to_input(c: &wit::Cost) -> ffi::InputCost {
@@ -935,7 +974,11 @@ fn loaded_posting_to_input(p: &wit::Posting) -> ffi::InputPosting {
         units: p.units.as_ref().map(input_amount),
         cost: p.cost.as_ref().map(loaded_cost_to_input),
         price: p.price.as_ref().map(input_amount),
-        meta: p.meta.iter().map(|(k, v)| (k.clone(), json_from_meta_value(v))).collect(),
+        meta: p
+            .meta
+            .iter()
+            .map(|(k, v)| (k.clone(), json_from_meta_value(v)))
+            .collect(),
     }
 }
 
@@ -1033,7 +1076,7 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
         begin.parse::<rustledger_core::NaiveDate>(),
         end.parse::<rustledger_core::NaiveDate>(),
     ) else {
-        // Unparseable bounds: return the input unchanged (no error channel).
+        // Unparsable bounds: return the input unchanged (no error channel).
         return entries;
     };
     let core: Vec<rustledger_core::Directive> = entries

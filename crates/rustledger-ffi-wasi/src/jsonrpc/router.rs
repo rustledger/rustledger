@@ -6,9 +6,6 @@ use std::fs;
 use std::path::Path;
 
 use rustledger_core::NaiveDate;
-use rustledger_plugin::{
-    NativePluginRegistry, PluginInput, PluginOptions, directive_to_wrapper, wrapper_to_directive,
-};
 use rustledger_validate::{ValidationOptions, ValidationSession};
 
 use super::error::RpcError;
@@ -128,102 +125,22 @@ fn handle_load_file(params: &serde_json::Value) -> Result<serde_json::Value, Rpc
     // defaults to `true` (confines includes to the entry file's directory
     // tree) — FFI is the most security-sensitive surface. Callers needing
     // cross-tree includes opt out via the request's `path_security: false`.
-    let fl = crate::helpers::load_file(path, params.path_security)
-        .map_err(|e| RpcError::file_error(e))?;
-    let mut directives = fl.directives;
-    let mut directive_lines = fl.directive_lines;
-    let mut directive_files = fl.directive_files;
+    let fl = crate::helpers::load_file(path, params.path_security).map_err(RpcError::file_error)?;
     let mut errors = fl.errors;
     let options = fl.options;
     let plugins = fl.plugins;
     let loaded_files = fl.loaded_files;
 
-    // Run plugins if requested
+    // Run requested plugins via the shared helper (also used by the WIT component).
     let run_plugins: Vec<&str> = params.plugins.iter().map(String::as_str).collect();
-    if !run_plugins.is_empty() && errors.is_empty() {
-        let registry = NativePluginRegistry::global();
-
-        for plugin_name in run_plugins {
-            // External API runs plugins on already-booked input — synth
-            // plugins are a loader-internal concern and would re-emit
-            // Opens for accounts the booking pass already opened.
-            if let Some(plugin) = registry.find_regular(plugin_name) {
-                let wrappers: Vec<_> = directives
-                    .iter()
-                    .enumerate()
-                    .map(|(i, d)| {
-                        let mut wrapper = directive_to_wrapper(d);
-                        wrapper.filename = Some(
-                            directive_files
-                                .get(i)
-                                .cloned()
-                                .unwrap_or_else(|| "<unknown>".to_string()),
-                        );
-                        wrapper.lineno = Some(directive_lines.get(i).copied().unwrap_or(0));
-                        wrapper
-                    })
-                    .collect();
-
-                let input = PluginInput {
-                    directives: wrappers,
-                    options: PluginOptions {
-                        operating_currencies: options.operating_currency.clone(),
-                        title: options.title.clone(),
-                    },
-                    config: None,
-                };
-
-                // Materialize the plugin's ops back into a flat wrapper list.
-                let input_dirs = input.directives.clone();
-                let output = plugin.process(input);
-
-                for err in output.errors {
-                    errors.push(Error::new(err.message));
-                }
-
-                let materialized = {
-                    let mut out: Vec<rustledger_plugin::types::DirectiveWrapper> =
-                        Vec::with_capacity(output.ops.len());
-                    for op in &output.ops {
-                        match op {
-                            rustledger_plugin::PluginOp::Keep(i) => {
-                                if let Some(w) = input_dirs.get(*i) {
-                                    out.push(w.clone());
-                                }
-                            }
-                            rustledger_plugin::PluginOp::Modify(_, w)
-                            | rustledger_plugin::PluginOp::Insert(w) => out.push(w.clone()),
-                            rustledger_plugin::PluginOp::Delete(_) => {}
-                        }
-                    }
-                    out
-                };
-
-                let mut new_directives = Vec::new();
-                let mut new_lines = Vec::new();
-                let mut new_files = Vec::new();
-
-                for wrapper in &materialized {
-                    if let Ok(directive) = wrapper_to_directive(wrapper) {
-                        new_directives.push(directive);
-                        new_lines.push(wrapper.lineno.unwrap_or(0));
-                        new_files.push(
-                            wrapper
-                                .filename
-                                .clone()
-                                .unwrap_or_else(|| "<plugin>".to_string()),
-                        );
-                    }
-                }
-
-                directives = new_directives;
-                directive_lines = new_lines;
-                directive_files = new_files;
-            } else {
-                errors.push(Error::new(format!("Unknown plugin: {plugin_name}")));
-            }
-        }
-    }
+    let (directives, directive_lines, directive_files) = crate::helpers::apply_plugins(
+        &run_plugins,
+        fl.directives,
+        fl.directive_lines,
+        fl.directive_files,
+        &mut errors,
+        &options,
+    );
 
     // `options`, `plugins`, `loaded_files` come from `helpers::load_file` above.
 
@@ -687,7 +604,7 @@ fn handle_types() -> Result<serde_json::Value, RpcError> {
             description: "Represents a missing/interpolated amount in a posting",
             json_representation: "null or {currency_only: string}",
         },
-        account_types: vec!["Assets", "Liabilities", "Equity", "Income", "Expenses"],
+        account_types: crate::helpers::ACCOUNT_TYPES.to_vec(),
     };
 
     serde_json::to_value(output).map_err(|e| RpcError::internal_error(e.to_string()))
@@ -710,21 +627,8 @@ fn handle_get_account_type(params: &serde_json::Value) -> Result<serde_json::Val
     let params: GetAccountTypeParams = serde_json::from_value(params.clone())
         .map_err(|e| RpcError::invalid_params(format!("Invalid params: {e}")))?;
 
-    let account_type = if let Some(first_component) = params.account.split(':').next() {
-        match first_component {
-            "Assets" => "assets",
-            "Liabilities" => "liabilities",
-            "Equity" => "equity",
-            "Income" => "income",
-            "Expenses" => "expenses",
-            _ => "unknown",
-        }
-    } else {
-        "unknown"
-    };
-
     let result = GetAccountTypeResult {
-        account_type: account_type.to_string(),
+        account_type: crate::helpers::account_type(&params.account).to_string(),
     };
     serde_json::to_value(result).map_err(|e| RpcError::internal_error(e.to_string()))
 }

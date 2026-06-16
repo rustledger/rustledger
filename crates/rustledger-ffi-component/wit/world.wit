@@ -380,7 +380,10 @@ interface ledger {
   /// Parse + book a ledger from source text.
   load: func(source: string) -> load-result;
   /// Like `load`, but from a file path (the host grants filesystem access).
-  load-file: func(path: string) -> load-result;
+  /// `path-security` confines the include graph to the entry file's directory
+  /// tree (pass `true` unless cross-tree includes are needed). `plugins` names
+  /// the regular (post-booking) plugins to run, e.g. `["auto_accounts"]`.
+  load-file: func(path: string, path-security: bool, plugins: list<string>) -> load-result;
 
   /// Validate source text (parse + semantic checks).
   validate: func(source: string) -> validate-result;

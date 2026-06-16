@@ -14,6 +14,8 @@ writeable = "writeable"
 labelled = "labelled"
 # Intentional typos in parser for typo-correction suggestions
 opne = "opne"
+# Intentional typo in ffi-component parity test (triggers a parse error)
+oepn = "oepn"
 clsoe = "clsoe"
 colse = "colse"
 closee = "closee"

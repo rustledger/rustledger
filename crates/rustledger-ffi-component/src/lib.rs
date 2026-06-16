@@ -3,11 +3,10 @@
 //! Implements the WIT `rustledger` world (`wit/world.wit`) — the typed
 //! replacement for the `rustledger-ffi-wasi` JSON-RPC surface.
 //!
-//! Phase 2 is in progress (tracer-bullet): the toolchain and binding wiring are
-//! proven end-to-end via `version`; the remaining exports are stubbed and are
-//! being filled in against the existing loader/query logic, one interface at a
-//! time. Stubs `unimplemented!()` (a wasm trap) rather than returning silently
-//! wrong data.
+//! All four interfaces (`ledger`, `builder`, `util`, `format`) are wired: each
+//! Guest method delegates to [`convert`], which maps between the WIT types and
+//! the loader/query logic reused from `rustledger-ffi-wasi`. Parity with the
+//! JSON-RPC surface is exercised by `rustledger-ffi-component-tests`.
 
 // wit-bindgen's `export!` macro emits `#[unsafe(export_name = …)]` shims and
 // unsafe blocks for the canonical ABI; the workspace denies `unsafe_code`, so
@@ -15,6 +14,8 @@
 // is allowed because the generated bindings are undocumented by construction.
 #![allow(unsafe_code)]
 #![allow(missing_docs)]
+// wit-bindgen's canonical-ABI lowering emits `Vec::from_raw_parts(p, n, n)`.
+#![allow(clippy::same_length_and_capacity)]
 
 wit_bindgen::generate!({
     path: "wit/world.wit",
@@ -23,9 +24,7 @@ wit_bindgen::generate!({
 
 mod convert;
 
-use exports::rustledger::ledger::builder::{
-    Directive, Guest as BuilderGuest, InputDirective,
-};
+use exports::rustledger::ledger::builder::{Directive, Guest as BuilderGuest, InputDirective};
 use exports::rustledger::ledger::format::Guest as FormatGuest;
 use exports::rustledger::ledger::ledger::{
     BatchResult, Guest as LedgerGuest, LoadResult, QueryResult, ValidateResult,
@@ -36,8 +35,6 @@ use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 /// `rustledger-ffi-wasi`'s `API_VERSION` (additive 2.1 — per-position cost).
 const API_VERSION: &str = "2.1";
 
-const TODO: &str = "rustledger-ffi-component: export not yet wired (#1384 Phase 2)";
-
 struct Component;
 
 impl LedgerGuest for Component {
@@ -47,8 +44,8 @@ impl LedgerGuest for Component {
     fn load(source: String) -> LoadResult {
         convert::load(&source, "<stdin>")
     }
-    fn load_file(path: String) -> LoadResult {
-        convert::load_file(&path)
+    fn load_file(path: String, path_security: bool, plugins: Vec<String>) -> LoadResult {
+        convert::load_file(&path, path_security, &plugins)
     }
     fn validate(source: String) -> ValidateResult {
         convert::validate(&source)

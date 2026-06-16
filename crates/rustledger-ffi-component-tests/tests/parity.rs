@@ -90,7 +90,9 @@ fn load_entry_count_matches_jsonrpc() -> Result<()> {
     let result = inst
         .rustledger_ledger_ledger()
         .call_load(&mut store, LEDGER)?;
-    let expected = rustledger_ffi_wasi::helpers::load_source(LEDGER).directives.len();
+    let expected = rustledger_ffi_wasi::helpers::load_source(LEDGER)
+        .directives
+        .len();
     assert_eq!(
         result.entries.len(),
         expected,
@@ -111,7 +113,11 @@ fn query_row_count_matches_executor() -> Result<()> {
     let result = inst
         .rustledger_ledger_ledger()
         .call_query(&mut store, LEDGER, q)?;
-    assert!(result.errors.is_empty(), "query errored: {:?}", result.errors);
+    assert!(
+        result.errors.is_empty(),
+        "query errored: {:?}",
+        result.errors
+    );
     assert!(
         !result.rows.is_empty(),
         "expected query rows for a non-empty ledger",
@@ -175,7 +181,10 @@ fn query_expands_pads() -> Result<()> {
     assert!(!r.rows.is_empty(), "expected a row for Assets:Cash");
     // With pad expansion the balance is 500; without it the pad contributes nothing.
     let dump = format!("{:?}", r.rows);
-    assert!(dump.contains("500"), "expected padded balance 500, got: {dump}");
+    assert!(
+        dump.contains("500"),
+        "expected padded balance 500, got: {dump}"
+    );
     Ok(())
 }
 
@@ -186,10 +195,15 @@ fn query_short_circuits_on_parse_error() -> Result<()> {
     }
     let (mut store, inst) = instantiate()?;
     // `oepn` is a typo -> parse error.
-    let r = inst
-        .rustledger_ledger_ledger()
-        .call_query(&mut store, "2024-01-01 oepn Assets:Cash\n", "SELECT account")?;
-    assert!(!r.errors.is_empty(), "parse error must surface, not be swallowed");
+    let r = inst.rustledger_ledger_ledger().call_query(
+        &mut store,
+        "2024-01-01 oepn Assets:Cash\n",
+        "SELECT account",
+    )?;
+    assert!(
+        !r.errors.is_empty(),
+        "parse error must surface, not be swallowed"
+    );
     assert!(r.rows.is_empty(), "no rows on parse error");
     Ok(())
 }
@@ -220,7 +234,9 @@ fn filter_keeps_pre_begin_open_and_drops_commodity() -> Result<()> {
         "pre-begin open must be kept (open < end)",
     );
     assert!(
-        filtered.iter().all(|d| !matches!(d, Directive::Commodity(_))),
+        filtered
+            .iter()
+            .all(|d| !matches!(d, Directive::Commodity(_))),
         "commodity must be dropped",
     );
     Ok(())

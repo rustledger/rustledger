@@ -426,3 +426,71 @@ fn load_file_runs_requested_plugin() -> Result<()> {
     );
     Ok(())
 }
+
+/// The component must run the pre-booking SYNTH pass (`auto_accounts`) declared
+/// in a ledger, generating `Open` directives that surface with the generated
+/// marker (`meta.lineno == 0`) — through BOTH `load` (string) and `load-file`.
+///
+/// Regression guard for the duplicated-pipeline bug where the reused `ffi-wasi`
+/// helpers hand-rolled a partial loader that skipped synth entirely.
+const AUTO_ACCOUNTS_LEDGER: &str = "\
+option \"operating_currency\" \"USD\"
+plugin \"auto_accounts\"
+
+2024-01-15 * \"Paycheck\"
+  Assets:Bank:Checking                    5000 USD
+  Income:Salary                          -5000 USD
+
+2024-01-20 * \"Groceries\"
+  Expenses:Food                            50 USD
+  Assets:Bank:Checking                    -50 USD
+";
+
+const SYNTH_ACCOUNTS: [&str; 3] = ["Assets:Bank:Checking", "Income:Salary", "Expenses:Food"];
+
+fn assert_generated_opens(entries: &[rustledger::ledger::types::Directive], surface: &str) {
+    use rustledger::ledger::types::Directive;
+    let opens: Vec<(String, u32)> = entries
+        .iter()
+        .filter_map(|d| match d {
+            Directive::Open(o) => Some((o.account.clone(), o.meta.lineno)),
+            _ => None,
+        })
+        .collect();
+    for acct in SYNTH_ACCOUNTS {
+        assert!(
+            opens.iter().any(|(a, line)| a == acct && *line == 0),
+            "{surface}: auto_accounts should synthesize a generated Open (lineno 0) for {acct}; got: {opens:?}",
+        );
+    }
+}
+
+#[test]
+fn load_runs_auto_accounts_synth() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    let loaded = inst
+        .rustledger_ledger_ledger()
+        .call_load(&mut store, AUTO_ACCOUNTS_LEDGER)?;
+    assert_generated_opens(&loaded.entries, "component load");
+    Ok(())
+}
+
+#[test]
+fn load_file_runs_auto_accounts_synth() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let dir = tempfile::tempdir()?;
+    std::fs::write(dir.path().join("main.bean"), AUTO_ACCOUNTS_LEDGER)?;
+    let (mut store, inst) = instantiate_in(dir.path())?;
+    let loaded =
+        inst.rustledger_ledger_ledger()
+            .call_load_file(&mut store, "/work/main.bean", true, &[])?;
+    assert_generated_opens(&loaded.entries, "component load_file");
+    Ok(())
+}

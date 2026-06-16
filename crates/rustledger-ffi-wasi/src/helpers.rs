@@ -140,14 +140,58 @@ pub fn load_source(source: &str) -> LoadResult {
         }
     }
 
+    // Run the pre-booking SYNTH pass (`auto_accounts`, `document_discovery`)
+    // over the parsed directives, reusing the *canonical* loader entry point
+    // (`run_plugins` — the same function `process::load` calls) instead of a
+    // fork. The string surface cannot use the file-based pipeline wholesale
+    // (it has no filesystem to resolve `include`s against and must preserve
+    // unresolved-include reporting), so it invokes the shared synth stage
+    // directly. Without this, a file-declared `plugin "auto_accounts"` never
+    // generated Open directives through `ledger.load`/`validate`/`query`.
+    let mut synth_dirs: Vec<Spanned<Directive>> = parse_result.directives.clone();
+    let mut source_map = rustledger_loader::SourceMap::new();
+    source_map.add_file(
+        std::path::PathBuf::from("<source>"),
+        std::sync::Arc::from(source),
+    );
+    let synth_plugins: Vec<rustledger_loader::Plugin> = parse_result
+        .plugins
+        .iter()
+        .map(|(name, config, span)| rustledger_loader::Plugin {
+            name: name.clone(),
+            config: config.clone(),
+            span: *span,
+            file_id: 0,
+            force_python: false,
+        })
+        .collect();
+    let mut synth_errors: Vec<rustledger_loader::LedgerError> = Vec::new();
+    let _ = rustledger_loader::run_plugins(
+        &mut synth_dirs,
+        &synth_plugins,
+        &rustledger_loader::Options::default(),
+        &rustledger_loader::LoadOptions::default(),
+        &source_map,
+        &mut synth_errors,
+        rustledger_loader::PluginPass::PreBookingSynth,
+    );
+    errors.extend(synth_errors.iter().map(ledger_error_to_ffi));
+
     // Collect directive line numbers, commodities, and precision
     let mut directive_lines: Vec<u32> = Vec::new();
     let mut commodities: HashSet<String> = HashSet::new();
     let mut precision_tracker = PrecisionTracker::new();
 
     let mut directives: Vec<Directive> = Vec::new();
-    for spanned in &parse_result.directives {
-        let line = lookup.byte_to_line(spanned.span.start);
+    for spanned in &synth_dirs {
+        // Synth-generated directives carry `SYNTHESIZED_FILE_ID`, absent from
+        // the single-file source map, so they surface as line 0 — the
+        // "generated entry" fingerprint embedders key on.
+        let line = if source_map.get(spanned.file_id as usize).is_some() {
+            lookup.byte_to_line(spanned.span.start)
+        } else {
+            0
+        };
         directive_lines.push(line);
 
         // Collect commodities and track precision
@@ -250,8 +294,10 @@ pub fn load_source(source: &str) -> LoadResult {
         })
         .collect();
 
-    // Clone spanned directives for validation
-    let spanned_directives: Vec<Spanned<Directive>> = parse_result.directives.clone();
+    // Spanned directives for validation — the synth-expanded set, so the
+    // `ledger.validate` session sees auto-generated Opens (no spurious
+    // "account not opened" diagnostics).
+    let spanned_directives: Vec<Spanned<Directive>> = synth_dirs;
 
     LoadResult {
         directives,
@@ -330,25 +376,36 @@ pub struct FileLoad {
 ///
 /// Returns the loader error string if the entry file cannot be read/parsed.
 pub fn load_file(path: &std::path::Path, path_security: bool) -> Result<FileLoad, String> {
-    let mut loader = rustledger_loader::Loader::new().with_path_security(path_security);
-    let load_result = loader
-        .load(path)
-        .map_err(|e| format!("Failed to load file: {e}"))?;
-
-    let mut errors: Vec<Error> = load_result
-        .errors
-        .iter()
-        .map(|e| Error::new(e.to_string()))
-        .collect();
+    // Route through the single canonical pipeline (`process::load`:
+    // sort → synth → book → regular → finalize) rather than re-implementing a
+    // partial loader here. This keeps the FFI surface in lock-step with the
+    // native loader — crucially it runs the pre-booking SYNTH pass
+    // (`auto_accounts`, `document_discovery`) that the previous hand-rolled
+    // parse-and-book path silently skipped (see `tests/load_synth_plugins.rs`).
+    //
+    // `validate: false` preserves this surface's historical load-only error
+    // contract (booking errors surface; semantic-validation errors do not, and
+    // remain the concern of the `ledger.validate` endpoint); `run_plugins`
+    // (default `true`) is what enables the synth pass.
+    let options = rustledger_loader::LoadOptions {
+        path_security,
+        validate: false,
+        ..Default::default()
+    };
+    let ledger =
+        rustledger_loader::load(path, &options).map_err(|e| format!("Failed to load file: {e}"))?;
 
     // Directives + their line numbers / originating files (multi-file).
+    // Synth-generated directives carry a `file_id` absent from the source map,
+    // so they fall through to line 0 / `<unknown>` — the "generated entry"
+    // fingerprint embedders key on to forbid editing synthesized directives.
     let mut directives: Vec<Directive> = Vec::new();
     let mut directive_lines: Vec<u32> = Vec::new();
     let mut directive_files: Vec<String> = Vec::new();
-    for spanned in &load_result.directives {
+    for spanned in &ledger.directives {
         directives.push(spanned.value.clone());
         let file_id = spanned.file_id as usize;
-        if let Some(sf) = load_result.source_map.get(file_id) {
+        if let Some(sf) = ledger.source_map.get(file_id) {
             let (line, _col) = sf.line_col(spanned.span.start);
             directive_lines.push(line as u32);
             directive_files.push(sf.path.display().to_string());
@@ -358,31 +415,9 @@ pub fn load_file(path: &std::path::Path, path_security: bool) -> Result<FileLoad
         }
     }
 
-    // Booking + interpolation (loader does not book).
-    let booking_method = load_result
-        .options
-        .booking_method
-        .parse()
-        .unwrap_or(rustledger_core::BookingMethod::Strict);
-    let mut booking_engine = BookingEngine::with_method(booking_method);
-    booking_engine.register_account_methods(directives.iter());
-    for (i, directive) in directives.iter_mut().enumerate() {
-        if let Directive::Transaction(txn) = directive {
-            match booking_engine.book_and_interpolate(txn) {
-                Ok(result) => {
-                    booking_engine.apply(&result.transaction);
-                    *txn = result.transaction;
-                    rustledger_booking::normalize_prices(txn);
-                }
-                Err(e) => {
-                    errors.push(Error::new(e.to_string()).with_line(directive_lines[i]));
-                }
-            }
-        }
-    }
-
-    let options = build_ledger_options(&load_result.options);
-    let plugins: Vec<Plugin> = load_result
+    let errors: Vec<Error> = ledger.errors.iter().map(ledger_error_to_ffi).collect();
+    let options = build_ledger_options(&ledger.options);
+    let plugins: Vec<Plugin> = ledger
         .plugins
         .iter()
         .map(|p| Plugin {
@@ -390,7 +425,7 @@ pub fn load_file(path: &std::path::Path, path_security: bool) -> Result<FileLoad
             config: p.config.clone(),
         })
         .collect();
-    let loaded_files: Vec<String> = load_result
+    let loaded_files: Vec<String> = ledger
         .source_map
         .files()
         .iter()
@@ -406,6 +441,27 @@ pub fn load_file(path: &std::path::Path, path_security: bool) -> Result<FileLoad
         plugins,
         loaded_files,
     })
+}
+
+/// Convert a loader [`rustledger_loader::LedgerError`] (produced by the
+/// canonical `process::load` pipeline) into the FFI wire [`Error`], preserving
+/// the message, source line, and processing phase. Errors tagged `"validate"`
+/// keep that phase (the `ledger.validate`/`query` handlers count phases); all
+/// others map to the default `"parse"` phase, matching the wire contract.
+fn ledger_error_to_ffi(e: &rustledger_loader::LedgerError) -> Error {
+    let mut err = Error::new(e.message.clone());
+    if let Some(loc) = &e.location {
+        err = err.with_line(loc.line as u32);
+    }
+    // The wire `Error` distinguishes only "parse" vs "validate". The
+    // `ledger.validate`/`query` handlers gate semantic validation on
+    // *parse*-phase errors only, so anything that is not a parse error
+    // (booking → "validate", plugin/synth → "plugin") must NOT be reported as
+    // "parse", or it would wrongly suppress validation.
+    if e.phase != "parse" {
+        err = err.validate_phase();
+    }
+    err
 }
 
 /// Run the named regular (post-booking) plugins over loaded directives, shared

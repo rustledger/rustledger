@@ -43,20 +43,33 @@ pub fn handle_completion_resolve(
     if resolved.documentation.is_none() {
         let label = &item.label;
         if is_account_like(label) {
-            resolved.documentation = Some(resolve_account_documentation(label, directives));
+            let (doc, detail) = resolve_account_documentation(label, directives);
+            resolved.documentation = Some(doc);
+            // Surface the ledger-wide summary in `detail` too — clients that
+            // show `detail` inline (and not the documentation popup) otherwise
+            // only see the generic kind hint set by the producer (issue #1408).
+            if let Some(detail) = detail {
+                resolved.detail = Some(detail);
+            }
         } else if is_currency_like_simple(label) {
-            resolved.documentation = Some(resolve_currency_documentation(label, directives));
+            let (doc, detail) = resolve_currency_documentation(label, directives);
+            resolved.documentation = Some(doc);
+            if let Some(detail) = detail {
+                resolved.detail = Some(detail);
+            }
         }
     }
 
     resolved
 }
 
-/// Resolve documentation for an account completion.
+/// Resolve documentation (and a concise `detail` summary) for an account
+/// completion. Returns the markdown popup plus, when the account has activity,
+/// a one-line `detail` like `"3500 USD · 2 txns"`.
 fn resolve_account_documentation(
     account: &str,
     directives: &[Spanned<Directive>],
-) -> Documentation {
+) -> (Documentation, Option<String>) {
     let mut balances: HashMap<String, Decimal> = HashMap::new();
     let mut transaction_count = 0;
     let mut first_date: Option<rustledger_core::NaiveDate> = None;
@@ -107,17 +120,38 @@ fn resolve_account_documentation(
         doc.push_str("_No transactions found_");
     }
 
-    Documentation::MarkupContent(MarkupContent {
+    // One-line summary for the completion `detail` field: balances
+    // (currency-sorted for stable output) and the transaction count.
+    let detail = if transaction_count > 0 {
+        let mut parts: Vec<String> = balances
+            .iter()
+            .map(|(currency, amount)| format!("{amount} {currency}"))
+            .collect();
+        parts.sort();
+        let balance_str = parts.join(", ");
+        Some(if balance_str.is_empty() {
+            format!("{transaction_count} txns")
+        } else {
+            format!("{balance_str} · {transaction_count} txns")
+        })
+    } else {
+        None
+    };
+
+    let documentation = Documentation::MarkupContent(MarkupContent {
         kind: MarkupKind::Markdown,
         value: doc,
-    })
+    });
+    (documentation, detail)
 }
 
-/// Resolve documentation for a currency completion.
+/// Resolve documentation (and a concise `detail` summary) for a currency
+/// completion. Returns the markdown popup plus, when the currency is used, a
+/// one-line `detail` like `"12 postings · 155 USD"` (latest price).
 fn resolve_currency_documentation(
     currency: &str,
     directives: &[Spanned<Directive>],
-) -> Documentation {
+) -> (Documentation, Option<String>) {
     let mut prices: Vec<(rustledger_core::NaiveDate, Decimal, String)> = Vec::new();
     let mut usage_count = 0;
 
@@ -161,10 +195,22 @@ fn resolve_currency_documentation(
         }
     }
 
-    Documentation::MarkupContent(MarkupContent {
+    // One-line `detail`: usage count plus the latest price, when known.
+    let detail = if usage_count > 0 || !prices.is_empty() {
+        let mut summary = format!("{usage_count} postings");
+        if let Some((_, amount, quote)) = prices.first() {
+            summary.push_str(&format!(" · {amount} {quote}"));
+        }
+        Some(summary)
+    } else {
+        None
+    };
+
+    let documentation = Documentation::MarkupContent(MarkupContent {
         kind: MarkupKind::Markdown,
         value: doc,
-    })
+    });
+    (documentation, detail)
 }
 
 #[cfg(test)]
@@ -192,6 +238,11 @@ mod tests {
 
         let resolved = handle_completion_resolve(item, &result.directives);
         assert!(resolved.documentation.is_some());
+
+        // `detail` now carries the ledger summary too (issue #1408).
+        let detail = resolved.detail.clone().expect("detail summary set");
+        assert!(detail.contains("95"), "detail balance; got: {detail}");
+        assert!(detail.contains("2 txns"), "detail count; got: {detail}");
 
         if let Some(Documentation::MarkupContent(content)) = resolved.documentation {
             assert!(content.value.contains("Assets:Bank"));
@@ -282,6 +333,11 @@ mod tests {
 
         let resolved = handle_completion_resolve(item, &result.directives);
         assert!(resolved.documentation.is_some());
+
+        // `detail` carries usage + latest price (issue #1408).
+        let detail = resolved.detail.clone().expect("detail summary set");
+        assert!(detail.contains("postings"), "detail usage; got: {detail}");
+        assert!(detail.contains("155"), "detail latest price; got: {detail}");
 
         if let Some(Documentation::MarkupContent(content)) = resolved.documentation {
             assert!(content.value.contains("AAPL"));

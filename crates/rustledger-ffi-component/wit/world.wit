@@ -467,6 +467,7 @@ interface ledger {
 /// directives over a date window (`begin` inclusive, `end` exclusive).
 interface builder {
   use types.{input-directive, directive};
+  use ledger.{query-result};
 
   /// Construct one directive. `err` carries the validation message.
   create: func(entry: input-directive) -> result<directive, string>;
@@ -478,6 +479,12 @@ interface builder {
   /// Clamp directives to [begin, end), synthesizing opening-balance and
   /// summary directives at the boundaries.
   clamp: func(entries: list<directive>, begin-date: string, end-date: string) -> list<directive>;
+
+  /// Run a BQL query directly against an already-loaded directive set
+  /// (rustfava#173). The typed counterpart to `filter`/`clamp`: the embedder
+  /// passes the directives it holds (e.g. a filtered view) instead of source
+  /// text, so there is no re-parse and no re-render to beancount.
+  query-entries: func(entries: list<directive>, query: string) -> query-result;
 }
 
 /// Utility helpers — replaces `util.types` / `util.isEncrypted` /

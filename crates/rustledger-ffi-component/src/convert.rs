@@ -1113,6 +1113,19 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
         .collect()
 }
 
+/// Run a BQL query against an already-loaded directive set (rustfava#173).
+/// The typed counterpart to `filter`/`clamp`: converts the WIT directives to
+/// core, expands pads (as the source-based query does), then runs the query —
+/// so the embedder queries the directives it holds with no re-parse/re-render.
+pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryResult {
+    let core: Vec<rustledger_core::Directive> = entries
+        .iter()
+        .filter_map(|d| ffi::input_entry_to_directive(&loaded_directive_to_input(d)).ok())
+        .collect();
+    let directives = rustledger_booking::merge_with_padding(&core);
+    run_query(&directives, query_str)
+}
+
 // ---- stateful ledger handle (`resource session`, rustfava#173) -------------------
 //
 // Normalizes the source and file load paths into one held state so the

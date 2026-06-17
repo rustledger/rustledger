@@ -130,6 +130,9 @@ impl BuilderGuest for Component {
     fn clamp(entries: Vec<Directive>, begin_date: String, end_date: String) -> Vec<Directive> {
         convert::clamp(entries, &begin_date, &end_date)
     }
+    fn query_entries(entries: Vec<Directive>, query: String) -> QueryResult {
+        convert::query_entries(&entries, &query)
+    }
 }
 
 impl UtilGuest for Component {

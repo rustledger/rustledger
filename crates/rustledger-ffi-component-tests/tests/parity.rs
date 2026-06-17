@@ -558,3 +558,37 @@ fn session_clamp_preserves_cost_basis() -> Result<()> {
     handle.resource_drop(&mut store)?;
     Ok(())
 }
+
+/// `builder.query-entries` (rustfava#173): query an already-loaded directive
+/// set directly, matching the source-based `query` — the typed alternative to
+/// re-rendering entries to source.
+#[test]
+fn query_entries_matches_source_query() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    let q = "SELECT account, position";
+    let loaded = inst
+        .rustledger_ledger_ledger()
+        .call_load(&mut store, LEDGER)?;
+    let via_entries =
+        inst.rustledger_ledger_builder()
+            .call_query_entries(&mut store, &loaded.entries, q)?;
+    let via_source = inst
+        .rustledger_ledger_ledger()
+        .call_query(&mut store, LEDGER, q)?;
+    assert!(
+        via_entries.errors.is_empty(),
+        "query-entries errored: {:?}",
+        via_entries.errors
+    );
+    assert!(!via_entries.rows.is_empty());
+    assert_eq!(
+        via_entries.rows.len(),
+        via_source.rows.len(),
+        "query-entries must match source query row count",
+    );
+    Ok(())
+}

@@ -448,7 +448,10 @@ pub fn query(source: &str, query_str: &str) -> out::QueryResult {
 /// Short-circuit on load (parse/booking) errors, then run one query over the
 /// pad-expanded directives — matching `handle_query` (FFI's `load_source` does
 /// not pad-expand, so balance-computing consumers must opt in explicitly).
-fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::QueryResult {
+pub(crate) fn query_loaded(
+    loaded: &ffi::helpers::LoadResult,
+    query_str: &str,
+) -> out::QueryResult {
     if !loaded.errors.is_empty() {
         return out::QueryResult {
             columns: Vec::new(),

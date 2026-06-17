@@ -44,6 +44,8 @@ const API_VERSION: &str = "2.1";
 struct Component;
 
 impl LedgerGuest for Component {
+    type Session = LedgerSession;
+
     fn version() -> String {
         API_VERSION.to_string()
     }
@@ -74,6 +76,30 @@ impl LedgerGuest for Component {
     }
     fn batch_file(path: String, queries: Vec<String>) -> BatchResult {
         convert::batch_file(&path, &queries)
+    }
+}
+
+/// SPIKE (#173): stateful ledger handle. Parses + books once in `new`; methods
+/// run against the held `LoadResult` with no re-parse — the load-once value B
+/// is meant to deliver. Proves the Component-Model `resource` lifecycle drives
+/// from wasmtime-py before committing to the full `resource ledger` contract.
+struct LedgerSession {
+    loaded: rustledger_ffi_wasi::helpers::LoadResult,
+}
+
+impl exports::rustledger::ledger::ledger::GuestSession for LedgerSession {
+    fn new(source: String) -> Self {
+        Self {
+            loaded: rustledger_ffi_wasi::helpers::load_source(&source),
+        }
+    }
+
+    fn entry_count(&self) -> u32 {
+        u32::try_from(self.loaded.directives.len()).unwrap_or(u32::MAX)
+    }
+
+    fn query(&self, query: String) -> QueryResult {
+        convert::query_loaded(&self.loaded, &query)
     }
 }
 

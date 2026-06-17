@@ -422,6 +422,15 @@ interface ledger {
   batch: func(source: string, queries: list<string>) -> batch-result;
   /// Like `batch`, but the ledger is loaded from a file path.
   batch-file: func(path: string, queries: list<string>) -> batch-result;
+
+  /// SPIKE (#173): a stateful ledger handle. `open` parses + books once; the
+  /// methods run against the held ledger with no re-parse / re-render. Proves
+  /// the Component-Model `resource` lifecycle drives cleanly from wasmtime-py.
+  resource session {
+    constructor(source: string);
+    entry-count: func() -> u32;
+    query: func(query: string) -> query-result;
+  }
 }
 
 /// Directive construction & transformation — replaces `entry.create`,

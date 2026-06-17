@@ -494,3 +494,67 @@ fn load_file_runs_auto_accounts_synth() -> Result<()> {
     assert_generated_opens(&loaded.entries, "component load_file");
     Ok(())
 }
+
+const LEDGER_WITH_COST: &str = "\
+2023-01-01 open Assets:Cash USD
+2023-01-01 open Expenses:Food USD
+2023-06-15 * \"old\"
+  Expenses:Food  5 USD
+  Assets:Cash
+2024-02-10 * \"Coffee\"
+  Expenses:Food  7 USD {2 USD}
+  Assets:Cash  -14 USD
+";
+
+/// The stateful `resource session` (#173): construct once, then info/query/
+/// clamp run against the held ledger. Crucially `clamp` operates on the held
+/// core directives, so cost basis survives with no WIT->core->WIT round-trip.
+#[test]
+fn session_clamp_preserves_cost_basis() -> Result<()> {
+    use rustledger::ledger::types::{CostNumber, Directive};
+
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    let ledger = inst.rustledger_ledger_ledger();
+    let session = ledger.session();
+
+    let handle = session.call_constructor(&mut store, LEDGER_WITH_COST)?;
+
+    // `info` materializes the load result once; entry count matches the loader.
+    let info = session.call_info(&mut store, handle)?;
+    let expected = rustledger_ffi_wasi::helpers::load_source(LEDGER_WITH_COST)
+        .directives
+        .len();
+    assert_eq!(info.entries.len(), expected);
+    assert!(info.errors.is_empty(), "load errored: {:?}", info.errors);
+
+    // Query runs against the held ledger.
+    let q = session.call_query(&mut store, handle, "SELECT account, position")?;
+    assert!(q.errors.is_empty(), "query errored: {:?}", q.errors);
+    assert!(!q.rows.is_empty());
+
+    // Clamp on the held core directives preserves the per-unit cost basis.
+    let clamped = session.call_clamp(&mut store, handle, "2024-01-01", "2024-12-31")?;
+    let coffee = clamped
+        .iter()
+        .find_map(|d| match d {
+            Directive::Transaction(t) if t.narration.as_deref() == Some("Coffee") => Some(t),
+            _ => None,
+        })
+        .expect("Coffee transaction survived the clamp window");
+    let cost = coffee.postings[0]
+        .cost
+        .as_ref()
+        .expect("Coffee posting kept its cost");
+    assert!(
+        matches!(&cost.number, Some(CostNumber::PerUnit(v)) if v == "2"),
+        "cost basis preserved through clamp: {:?}",
+        cost.number,
+    );
+
+    handle.resource_drop(&mut store)?;
+    Ok(())
+}

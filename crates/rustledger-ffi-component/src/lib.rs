@@ -33,7 +33,8 @@ mod convert;
 use exports::rustledger::ledger::builder::{Directive, Guest as BuilderGuest, InputDirective};
 use exports::rustledger::ledger::format::Guest as FormatGuest;
 use exports::rustledger::ledger::ledger::{
-    BatchResult, Guest as LedgerGuest, LoadResult, QueryResult, ValidateResult,
+    BatchResult, Guest as LedgerGuest, GuestSession, LoadResult, QueryResult, Session,
+    ValidateResult,
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
@@ -44,6 +45,8 @@ const API_VERSION: &str = "2.1";
 struct Component;
 
 impl LedgerGuest for Component {
+    type Session = LedgerSession;
+
     fn version() -> String {
         API_VERSION.to_string()
     }
@@ -74,6 +77,43 @@ impl LedgerGuest for Component {
     }
     fn batch_file(path: String, queries: Vec<String>) -> BatchResult {
         convert::batch_file(&path, &queries)
+    }
+}
+
+/// A loaded, booked ledger held in the component (`resource session`, rustfava#173).
+/// Parses + books once in `new`/`from_file`; `query`/`filter`/`clamp` run on
+/// the held ledger via [`convert::SessionState`] with no re-parse or re-render.
+struct LedgerSession {
+    state: convert::SessionState,
+}
+
+impl GuestSession for LedgerSession {
+    fn new(source: String) -> Self {
+        Self {
+            state: convert::SessionState::from_source(&source),
+        }
+    }
+
+    fn from_file(path: String, allow_unrestricted_includes: bool, plugins: Vec<String>) -> Session {
+        Session::new(Self {
+            state: convert::SessionState::from_file(&path, allow_unrestricted_includes, &plugins),
+        })
+    }
+
+    fn info(&self) -> LoadResult {
+        self.state.info()
+    }
+
+    fn query(&self, query: String) -> QueryResult {
+        self.state.query(&query)
+    }
+
+    fn filter(&self, begin_date: String, end_date: String) -> Vec<Directive> {
+        self.state.filter(&begin_date, &end_date)
+    }
+
+    fn clamp(&self, begin_date: String, end_date: String) -> Vec<Directive> {
+        self.state.clamp(&begin_date, &end_date)
     }
 }
 

@@ -461,7 +461,7 @@ fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::Quer
 }
 
 /// Run one query against already-loaded, pad-expanded directives.
-fn run_query(directives: &[rustledger_core::Directive], query_str: &str) -> out::QueryResult {
+pub fn run_query(directives: &[rustledger_core::Directive], query_str: &str) -> out::QueryResult {
     let parsed = match parse_query(query_str) {
         Ok(q) => q,
         Err(e) => {
@@ -1111,4 +1111,169 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
         .iter()
         .map(|d| directive(ffi::convert::directive_to_json(d, 0, "<clamped>")))
         .collect()
+}
+
+// ---- stateful ledger handle (`resource session`, rustfava#173) -------------------
+//
+// Normalizes the source and file load paths into one held state so the
+// `query`/`filter`/`clamp` methods don't care which produced it. The win over
+// the free functions: these run against the held *core* directives, so they
+// never re-parse source nor round-trip a directive list through the host.
+
+/// Held state behind a `session` resource: the booked core directives + their
+/// per-directive provenance, plus the load metadata, normalized across the
+/// source and file load paths. Errors are pre-converted to WIT form (the file
+/// path's failure case has only a message, not a rich `ffi::Error`).
+pub struct SessionState {
+    directives: Vec<rustledger_core::Directive>,
+    lines: Vec<u32>,
+    files: Vec<String>,
+    errors: Vec<wit::Error>,
+    options: wit::LedgerOptions,
+    plugins: Vec<ffi::Plugin>,
+    includes: Vec<(String, u32)>,
+    /// Pad-expanded directives for querying, computed once on first `query`.
+    padded: std::cell::OnceCell<Vec<rustledger_core::Directive>>,
+}
+
+impl SessionState {
+    /// Parse + book from source text (single synthetic `<stdin>` filename).
+    pub fn from_source(source: &str) -> Self {
+        let loaded = ffi::helpers::load_source(source);
+        let files = vec!["<stdin>".to_string(); loaded.directives.len()];
+        Self {
+            directives: loaded.directives,
+            lines: loaded.directive_lines,
+            files,
+            errors: loaded.errors.into_iter().map(error).collect(),
+            options: options(loaded.options),
+            plugins: loaded.plugins,
+            includes: loaded
+                .includes
+                .into_iter()
+                .map(|i| (i.path, i.lineno))
+                .collect(),
+            padded: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Parse + book from a file path. Mirrors the free `load_file`'s handling
+    /// (path-security flag inversion, requested-plugin pass, per-directive
+    /// file provenance); a load failure becomes an empty ledger whose single
+    /// error carries the message.
+    pub fn from_file(path: &str, allow_unrestricted_includes: bool, plugins: &[String]) -> Self {
+        let path_security = !allow_unrestricted_includes;
+        match ffi::helpers::load_file(std::path::Path::new(path), path_security) {
+            Ok(fl) => {
+                let mut errors = fl.errors;
+                let opts = fl.options;
+                let plugin_dtos = fl.plugins;
+                let loaded_files = fl.loaded_files;
+                let plugin_names: Vec<&str> = plugins.iter().map(String::as_str).collect();
+                let (directives, lines, files) = ffi::helpers::apply_plugins(
+                    &plugin_names,
+                    fl.directives,
+                    fl.directive_lines,
+                    fl.directive_files,
+                    &mut errors,
+                    &opts,
+                );
+                Self {
+                    directives,
+                    lines,
+                    files,
+                    errors: errors.into_iter().map(error).collect(),
+                    options: options(opts),
+                    plugins: plugin_dtos,
+                    includes: loaded_files.into_iter().map(|p| (p, 0)).collect(),
+                    padded: std::cell::OnceCell::new(),
+                }
+            }
+            Err(e) => Self {
+                directives: vec![],
+                lines: vec![],
+                files: vec![],
+                errors: vec![simple_error(e)],
+                options: options(ffi::LedgerOptions::default()),
+                plugins: vec![],
+                includes: vec![],
+                padded: std::cell::OnceCell::new(),
+            },
+        }
+    }
+
+    /// The held directives as WIT, carrying their real line/file provenance.
+    fn entries(&self) -> Vec<wit::Directive> {
+        self.directives
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let line = self.lines.get(i).copied().unwrap_or(0);
+                let file = self.files.get(i).map_or("<unknown>", String::as_str);
+                directive(ffi::convert::directive_to_json(d, line, file))
+            })
+            .collect()
+    }
+
+    /// The load result the host materializes once (entries/errors/options/...).
+    pub fn info(&self) -> out::LoadResult {
+        out::LoadResult {
+            entries: self.entries(),
+            errors: self.errors.clone(),
+            options: self.options.clone(),
+            plugins: self
+                .plugins
+                .iter()
+                .map(|p| wit::Plugin {
+                    name: p.name.clone(),
+                    config: p.config.clone(),
+                })
+                .collect(),
+            includes: self
+                .includes
+                .iter()
+                .map(|(path, lineno)| wit::SourceInclude {
+                    path: path.clone(),
+                    lineno: *lineno,
+                })
+                .collect(),
+        }
+    }
+
+    /// Run a BQL query against the held ledger (no re-parse).
+    pub fn query(&self, query_str: &str) -> out::QueryResult {
+        if !self.errors.is_empty() {
+            return out::QueryResult {
+                columns: vec![],
+                rows: vec![],
+                errors: self.errors.clone(),
+            };
+        }
+        let directives = self
+            .padded
+            .get_or_init(|| rustledger_booking::merge_with_padding(&self.directives));
+        run_query(directives, query_str)
+    }
+
+    /// Keep only directives within `[begin, end)`. Reuses the free `filter`'s
+    /// date predicate over the held directives (filter is lossless).
+    pub fn filter(&self, begin: &str, end: &str) -> Vec<wit::Directive> {
+        filter(self.entries(), begin, end)
+    }
+
+    /// Clamp to `[begin, end)`, running `rustledger_ops::clamp` **directly on
+    /// the held core directives** — no WIT -> core -> WIT round-trip, the value
+    /// the resource exists to deliver (rustfava#173).
+    pub fn clamp(&self, begin: &str, end: &str) -> Vec<wit::Directive> {
+        let (Ok(begin_date), Ok(end_date)) = (
+            begin.parse::<rustledger_core::NaiveDate>(),
+            end.parse::<rustledger_core::NaiveDate>(),
+        ) else {
+            return self.entries();
+        };
+        rustledger_ops::clamp::clamp(&self.directives, begin_date, end_date)
+            .iter()
+            .map(|d| directive(ffi::convert::directive_to_json(d, 0, "<clamped>")))
+            .collect()
+    }
 }

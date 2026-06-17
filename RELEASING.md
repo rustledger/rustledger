@@ -89,7 +89,7 @@ gh release create v0.14.0 --target "$(git rev-parse HEAD)" --generate-notes
 
 This creates the `v0.14.0` tag and triggers two workflows:
 
-- `release-build.yml` — builds binaries for all 8 platforms, the WASM package, the FFI-WASI binary, and the VS Code extension; attaches them to the release.
+- `release-build.yml` — builds binaries for all 8 platforms, the WASM package, the FFI-WASI binary, the FFI-Component (wasip2) wasm, and the VS Code extension; attaches them to the release.
 - `release-publish.yml` — distributes to crates.io, npm, Docker, Scoop, COPR, AUR (Homebrew autobumps separately).
 
 The full release takes ~30–45 minutes.
@@ -153,7 +153,7 @@ Trusted-publish tokens are publish-scoped only — they cannot run `npm dist-tag
 
 | File | Purpose |
 |------|---------|
-| `release-build.yml` | Builds binaries, WASM, FFI-WASI, VSCode extension; attaches to GitHub Release |
+| `release-build.yml` | Builds binaries, WASM, FFI-WASI, FFI-Component, VSCode extension; attaches to GitHub Release |
 | `release-publish.yml` | Distributes to crates.io, npm, Docker, Scoop, COPR, AUR (Homebrew autobumps separately) |
 
 ## Adding a new workspace crate

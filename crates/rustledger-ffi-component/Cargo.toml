@@ -11,7 +11,9 @@ keywords.workspace = true
 categories.workspace = true
 authors.workspace = true
 readme = "README.md"
-# Work in progress (#1384 Phase 2): not yet a published/release artifact.
+# Shipped as a prebuilt wasip2 component attached to GitHub releases
+# (`rustledger-ffi-component-<version>.wasm`, see release-build.yml), but not
+# published to crates.io — it is a wasm artifact, not a consumable Rust library.
 publish = false
 
 [lib]

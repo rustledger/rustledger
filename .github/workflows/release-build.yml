@@ -363,6 +363,35 @@ jobs:
           path: |
             rustledger-ffi-wasi-*.wasm
             rustledger-ffi-wasi-*.sha256
+  build-ffi-component:
+    name: Build FFI-Component
+    needs: validate-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-wasip2
+      - name: Build FFI-Component binary
+        # wasm32-wasip2 emits the WASI Preview 2 component directly from the
+        # cdylib (no cargo-component needed).
+        run: cargo build --release --target wasm32-wasip2 -p rustledger-ffi-component
+      - name: Package FFI-Component
+        run: |
+          VERSION=$RELEASE_TAG
+          cp target/wasm32-wasip2/release/rustledger_ffi_component.wasm "rustledger-ffi-component-${VERSION}.wasm"
+          shasum -a 256 "rustledger-ffi-component-${VERSION}.wasm" > "rustledger-ffi-component-${VERSION}.wasm.sha256"
+      - name: Upload FFI-Component artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ffi-component-package
+          path: |
+            rustledger-ffi-component-*.wasm
+            rustledger-ffi-component-*.sha256
   build-vscode:
     name: Build VS Code Extension
     needs: validate-version
@@ -397,7 +426,7 @@ jobs:
             packages/vscode/rustledger-vscode.vsix.sha256
   release:
     name: Create Release
-    needs: [build, build-wasm, build-ffi-wasi, build-vscode]
+    needs: [build, build-wasm, build-ffi-wasi, build-ffi-component, build-vscode]
     runs-on: ubuntu-latest
     steps:
       - name: Generate GitHub App token

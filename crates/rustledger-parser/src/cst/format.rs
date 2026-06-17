@@ -1343,8 +1343,10 @@ fn emit_open(d: &ast::OpenDirective, out: &mut String) {
     out.push_str(&date);
     out.push_str(" open ");
     out.push_str(&account);
-    for currency in d.currencies() {
-        out.push(' ');
+    // The currency constraint list is comma-separated (`USD,EUR`), not
+    // space-separated — emitting spaces produces invalid beancount (#1405).
+    for (i, currency) in d.currencies().enumerate() {
+        out.push_str(if i == 0 { " " } else { "," });
         out.push_str(currency.text());
     }
     if let Some(booking) = d.booking_method() {
@@ -2302,11 +2304,24 @@ mod tests {
 
     #[test]
     fn open_with_currencies_and_booking_canonical() {
+        // The currency constraint list is comma-separated; emitting spaces
+        // produced invalid beancount (#1405).
         let src = "2024-01-15 open Assets:Brokerage USD,EUR \"STRICT\"\n";
         assert_eq!(
             format_source(src),
-            "2024-01-15 open Assets:Brokerage USD EUR \"STRICT\"\n"
+            "2024-01-15 open Assets:Brokerage USD,EUR \"STRICT\"\n"
         );
+    }
+
+    /// Regression for #1405: `format` must keep the open currency list
+    /// comma-separated, not rewrite it space-separated (invalid syntax), and
+    /// the result must be idempotent.
+    #[test]
+    fn open_currency_list_stays_comma_separated() {
+        let src = "2026-01-01 open Assets:Wallet USD,EUR\n";
+        let once = format_source(src);
+        assert_eq!(once, "2026-01-01 open Assets:Wallet USD,EUR\n");
+        assert_eq!(format_source(&once), once, "format must be idempotent");
     }
 
     #[test]

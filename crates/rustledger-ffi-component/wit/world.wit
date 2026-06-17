@@ -423,7 +423,7 @@ interface ledger {
   /// Like `batch`, but the ledger is loaded from a file path.
   batch-file: func(path: string, queries: list<string>) -> batch-result;
 
-  /// A loaded, booked ledger held inside the component (#173, rustfava#173).
+  /// A loaded, booked ledger held inside the component (rustfava#173, rustfava#173).
   ///
   /// The stateful, typed successor to the free `load`/`query`/`clamp`
   /// functions: the host constructs one handle, then runs `query`/`filter`/
@@ -435,7 +435,7 @@ interface ledger {
   ///
   /// `query`/`filter`/`clamp` operate on the held *core* directives directly,
   /// so they never round-trip through the host's directive representation —
-  /// removing a whole class of shape-translation bugs (rustfava #173).
+  /// removing a whole class of shape-translation bugs (rustfava rustfava#173).
   resource session {
     /// Parse + book a ledger from source text.
     constructor(source: string);

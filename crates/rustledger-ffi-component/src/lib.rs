@@ -80,7 +80,7 @@ impl LedgerGuest for Component {
     }
 }
 
-/// A loaded, booked ledger held in the component (`resource session`, #173).
+/// A loaded, booked ledger held in the component (`resource session`, rustfava#173).
 /// Parses + books once in `new`/`from_file`; `query`/`filter`/`clamp` run on
 /// the held ledger via [`convert::SessionState`] with no re-parse or re-render.
 struct LedgerSession {

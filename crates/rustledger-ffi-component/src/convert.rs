@@ -662,6 +662,7 @@ pub fn batch_file(path: &str, queries: &[String]) -> out::BatchResult {
                 options: options(ffi::LedgerOptions::default()),
                 plugins: vec![],
                 includes: vec![],
+                padded: std::cell::OnceCell::new(),
             },
             queries: vec![],
         },
@@ -1113,7 +1114,7 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
         .collect()
 }
 
-// ---- stateful ledger handle (`resource session`, #173) -------------------
+// ---- stateful ledger handle (`resource session`, rustfava#173) -------------------
 //
 // Normalizes the source and file load paths into one held state so the
 // `query`/`filter`/`clamp` methods don't care which produced it. The win over
@@ -1132,6 +1133,8 @@ pub struct SessionState {
     options: wit::LedgerOptions,
     plugins: Vec<ffi::Plugin>,
     includes: Vec<(String, u32)>,
+    /// Pad-expanded directives for querying, computed once on first `query`.
+    padded: std::cell::OnceCell<Vec<rustledger_core::Directive>>,
 }
 
 impl SessionState {
@@ -1151,6 +1154,7 @@ impl SessionState {
                 .into_iter()
                 .map(|i| (i.path, i.lineno))
                 .collect(),
+            padded: std::cell::OnceCell::new(),
         }
     }
 
@@ -1183,6 +1187,7 @@ impl SessionState {
                     options: options(opts),
                     plugins: plugin_dtos,
                     includes: loaded_files.into_iter().map(|p| (p, 0)).collect(),
+                    padded: std::cell::OnceCell::new(),
                 }
             }
             Err(e) => Self {
@@ -1193,6 +1198,7 @@ impl SessionState {
                 options: options(ffi::LedgerOptions::default()),
                 plugins: vec![],
                 includes: vec![],
+                padded: std::cell::OnceCell::new(),
             },
         }
     }
@@ -1244,8 +1250,10 @@ impl SessionState {
                 errors: self.errors.clone(),
             };
         }
-        let directives = rustledger_booking::merge_with_padding(&self.directives);
-        run_query(&directives, query_str)
+        let directives = self
+            .padded
+            .get_or_init(|| rustledger_booking::merge_with_padding(&self.directives));
+        run_query(directives, query_str)
     }
 
     /// Keep only directives within `[begin, end)`. Reuses the free `filter`'s
@@ -1256,7 +1264,7 @@ impl SessionState {
 
     /// Clamp to `[begin, end)`, running `rustledger_ops::clamp` **directly on
     /// the held core directives** — no WIT -> core -> WIT round-trip, the value
-    /// the resource exists to deliver (#173).
+    /// the resource exists to deliver (rustfava#173).
     pub fn clamp(&self, begin: &str, end: &str) -> Vec<wit::Directive> {
         let (Ok(begin_date), Ok(end_date)) = (
             begin.parse::<rustledger_core::NaiveDate>(),

@@ -27,6 +27,7 @@ const KNOWN_OPTIONS: &[&str] = &[
     "infer_tolerance_from_cost",
     "use_legacy_fixed_tolerances",
     "experiment_explicit_tolerances",
+    "use_precise_interpolation",
     "booking_method",
     "render_commas",
     "display_precision",
@@ -132,6 +133,12 @@ pub struct Options {
     /// Enable experimental explicit tolerances in balance assertions.
     pub experiment_explicit_tolerances: bool,
 
+    /// Beancount 3.x `use_precise_interpolation` flag, parsed for compatibility.
+    /// rustledger always interpolates with exact `rust_decimal` arithmetic, so
+    /// this is effectively always-on; the field records the user's declared
+    /// value but does not change booking results (issue #1416).
+    pub use_precise_interpolation: bool,
+
     /// Default booking method.
     pub booking_method: String,
 
@@ -197,6 +204,7 @@ impl Options {
             infer_tolerance_from_cost: false,
             use_legacy_fixed_tolerances: false,
             experiment_explicit_tolerances: false,
+            use_precise_interpolation: false,
             booking_method: "STRICT".to_string(),
             render_commas: false, // Python beancount default is FALSE
             display_precision: FxHashMap::default(),
@@ -490,6 +498,12 @@ impl Options {
             "experiment_explicit_tolerances" => {
                 self.experiment_explicit_tolerances = value.eq_ignore_ascii_case("true");
             }
+            "use_precise_interpolation" => {
+                // Accepted for beancount 3.x compatibility. rustledger already
+                // interpolates with exact decimals, so this is a no-op on
+                // results — recorded only to reflect the user's declaration.
+                self.use_precise_interpolation = value.eq_ignore_ascii_case("true");
+            }
             "allow_pipe_separator" => {
                 // This option is deprecated in Python beancount
                 self.warnings.push(OptionWarning {
@@ -644,6 +658,21 @@ mod tests {
         assert_eq!(opts.warnings.len(), 1);
         assert_eq!(opts.warnings[0].code, "E7001");
         assert!(opts.warnings[0].message.contains("Invalid option"));
+    }
+
+    /// #1416: the beancount 3.x `use_precise_interpolation` option must be
+    /// accepted (no E7001) — rustledger already interpolates precisely.
+    #[test]
+    fn test_use_precise_interpolation_accepted() {
+        let mut opts = Options::new();
+        opts.set("use_precise_interpolation", "TRUE");
+
+        assert!(
+            opts.warnings.is_empty(),
+            "should not warn on a known option: {:?}",
+            opts.warnings
+        );
+        assert!(opts.use_precise_interpolation);
     }
 
     #[test]

@@ -815,3 +815,81 @@ fn scratch_file_not_in_journal_uses_single_file_mode() {
         cmd.title
     );
 }
+
+/// Reproduction for #1408: `completionItem/resolve` must return a SINGLE
+/// `CompletionItem` (not an array — a protocol violation), and when a
+/// `journalFile` is configured its documentation must aggregate over the whole
+/// loaded ledger, not the ephemeral buffer the completion was triggered in.
+#[cfg(unix)]
+#[test]
+fn completion_resolve_returns_single_item_and_uses_journal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let journal_path = tmp.path().join("main.beancount");
+    std::fs::write(
+        &journal_path,
+        "2024-01-01 open Assets:Bank:Checking USD\n\
+         2024-01-01 open Income:Salary\n\
+         2024-01-15 * \"Paycheck\"\n  \
+           Assets:Bank:Checking   5000 USD\n  \
+           Income:Salary\n\
+         2024-02-20 * \"Rent\"\n  \
+           Assets:Bank:Checking  -1500 USD\n  \
+           Expenses:Rent\n",
+    )
+    .expect("write journal");
+
+    let mut client = LspTestClient::spawn_with_journal(Some(journal_path.clone()));
+    client.initialize();
+
+    // An *ephemeral* buffer distinct from the journal (mirrors a client's
+    // __test__.bean completion buffer).
+    let buf_uri = format!("file://{}", tmp.path().join("__buf__.beancount").display());
+    client.open_document(&buf_uri, "2024-03-01 * \"x\"\n  Assets:Bank:Checking\n");
+
+    // Resolve an account completion item whose `data.uri` points at the
+    // ephemeral buffer — resolve must still aggregate over the loaded journal.
+    let item = serde_json::json!({
+        "label": "Assets:Bank:Checking",
+        "detail": "Account",
+        "data": { "uri": buf_uri },
+    });
+    let id = client.next_request_id();
+    let req = lsp_server::Request {
+        id: id.clone(),
+        method: <lsp_types::request::ResolveCompletionItem as lsp_types::request::Request>::METHOD
+            .to_string(),
+        params: item,
+    };
+    client.raw_send_request(req).expect("send resolve");
+    let resp = client.expect_response(&id);
+    let result = resp.result.expect("resolve returned a result");
+
+    // Finding 1: the result must be a single object, not an array.
+    assert!(
+        result.is_object(),
+        "completionItem/resolve must return a single CompletionItem object, got: {result}"
+    );
+
+    // Finding 2: documentation must reflect the loaded journal (2 txns, 3500 net).
+    let resolved: lsp_types::CompletionItem =
+        serde_json::from_value(result).expect("deserialize CompletionItem");
+    // The ledger summary is also surfaced in `detail` (issue #1408), where
+    // clients that don't render the documentation popup can still see it.
+    let detail = resolved.detail.clone().expect("detail summary set");
+    assert!(
+        detail.contains("3500") && detail.contains("2 txns"),
+        "detail should summarize the journal balance/count; got: {detail}"
+    );
+    let doc = match resolved.documentation {
+        Some(lsp_types::Documentation::MarkupContent(m)) => m.value,
+        other => panic!("expected markdown documentation, got {other:?}"),
+    };
+    assert!(
+        doc.contains("2 transactions"),
+        "resolve should aggregate over the journal (2 txns); got:\n{doc}"
+    );
+    assert!(
+        doc.contains("3500"),
+        "resolve should show the journal balance 5000-1500=3500; got:\n{doc}"
+    );
+}

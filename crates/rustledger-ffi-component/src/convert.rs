@@ -662,7 +662,6 @@ pub fn batch_file(path: &str, queries: &[String]) -> out::BatchResult {
                 options: options(ffi::LedgerOptions::default()),
                 plugins: vec![],
                 includes: vec![],
-                padded: std::cell::OnceCell::new(),
             },
             queries: vec![],
         },

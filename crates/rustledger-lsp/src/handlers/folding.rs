@@ -131,8 +131,12 @@ fn format_transaction_summary(txn: &rustledger_core::Transaction) -> String {
         format!("{} {} ...", date, payee)
     } else if !txn.narration.is_empty() {
         let narration = txn.narration.to_string();
-        let truncated = if narration.len() > 30 {
-            format!("{}...", &narration[..30])
+        // Truncate by characters, not bytes: byte-slicing (`&narration[..30]`)
+        // panics when byte 30 falls inside a multibyte UTF-8 char, e.g. Korean
+        // (3 bytes/char) — issue #1415.
+        let truncated = if narration.chars().count() > 30 {
+            let prefix: String = narration.chars().take(30).collect();
+            format!("{prefix}...")
         } else {
             narration
         };
@@ -167,6 +171,40 @@ fn is_section_header(line: &str) -> bool {
 mod tests {
     use super::*;
     use rustledger_parser::parse;
+
+    /// Regression for #1415: folding must not panic on a non-ASCII narration
+    /// longer than the 30-char truncation threshold. The old code byte-sliced
+    /// `&narration[..30]`, which panics when byte 30 falls inside a multibyte
+    /// UTF-8 char (e.g. Korean, 3 bytes/char).
+    #[test]
+    fn folding_long_non_ascii_narration_does_not_panic() {
+        // 26 ASCII chars then Korean, so byte 30 lands inside a 3-byte char.
+        let narration = "aaaaaaaaaaaaaaaaaaaaaaaaaa가나다라마바사";
+        // The exact condition the old byte-slice violated.
+        assert!(!narration.is_char_boundary(30));
+        assert!(narration.chars().count() > 30);
+
+        let source =
+            format!("2024-01-15 * \"{narration}\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n");
+        let result = parse(&source);
+        let params = FoldingRangeParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        // Must not panic, and the collapsed summary truncates on a char boundary.
+        let ranges =
+            handle_folding_ranges(&params, &source, &result, PositionEncoding::Utf16).unwrap();
+        let txn_fold = ranges
+            .iter()
+            .find(|r| r.start_line == 0)
+            .expect("transaction fold range");
+        let collapsed = txn_fold.collapsed_text.as_ref().expect("collapsed summary");
+        assert!(collapsed.ends_with("..."), "got: {collapsed}");
+    }
 
     #[test]
     fn test_folding_transaction() {

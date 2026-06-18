@@ -392,8 +392,9 @@ interface ledger {
   /// JSON-RPC response.
   version: func() -> string;
 
-  /// Parse + book a ledger from source text.
-  load: func(source: string) -> load-result;
+  /// Parse + book a ledger from source text. `filename` is recorded as the
+  /// directives' source location (e.g. `<string>`); pass `<stdin>` if unknown.
+  load: func(source: string, filename: string) -> load-result;
   /// Like `load`, but from a file path (the host grants filesystem access).
   /// By default the include graph is confined to the entry file's directory
   /// tree (path-traversal protection); set `allow-unrestricted-includes` to

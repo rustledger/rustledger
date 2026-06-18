@@ -50,8 +50,8 @@ impl LedgerGuest for Component {
     fn version() -> String {
         API_VERSION.to_string()
     }
-    fn load(source: String) -> LoadResult {
-        convert::load(&source, "<stdin>")
+    fn load(source: String, filename: String) -> LoadResult {
+        convert::load(&source, &filename)
     }
     fn load_file(
         path: String,

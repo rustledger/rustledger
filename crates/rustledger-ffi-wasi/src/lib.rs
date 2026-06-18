@@ -30,7 +30,7 @@
 pub mod convert;
 pub mod jsonrpc;
 
-pub(crate) mod commands;
+pub mod commands;
 // `helpers` is `pub` so the WIT/Component-Model crate
 // (`rustledger-ffi-component`, #1384) can reuse the loader orchestration
 // (`load_source`) instead of duplicating it.

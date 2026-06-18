@@ -1103,14 +1103,133 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
         // Unparsable bounds: return the input unchanged (no error channel).
         return entries;
     };
-    let core: Vec<rustledger_core::Directive> = entries
+
+    // Route through the shared, meta-preserving `commands::clamp` (the path the
+    // JSON-RPC surface uses) so in-window entries keep their original
+    // `filename`/`lineno`. We index the inputs by location and feed JSON
+    // entries carrying that meta; in-window outputs are then matched back to the
+    // original WIT directive (full fidelity + provenance), and only the
+    // synthesized boundary transactions are built from JSON. (rustfava#173)
+    let mut by_loc: std::collections::HashMap<(String, u32), wit::Directive> =
+        std::collections::HashMap::new();
+    let mut json_entries: Vec<serde_json::Value> = Vec::new();
+    for d in &entries {
+        let (file, line) = wit_directive_location(d);
+        if let Ok(core) = ffi::input_entry_to_directive(&loaded_directive_to_input(d))
+            && let Ok(value) =
+                serde_json::to_value(ffi::convert::directive_to_json(&core, line, &file))
+        {
+            json_entries.push(value);
+        }
+        by_loc.insert((file, line), d.clone());
+    }
+
+    let result = ffi::commands::clamp::clamp_entries(json_entries, begin_date, end_date);
+    result
+        .entries
         .iter()
-        .filter_map(|d| ffi::input_entry_to_directive(&loaded_directive_to_input(d)).ok())
-        .collect();
-    rustledger_ops::clamp::clamp(&core, begin_date, end_date)
-        .iter()
-        .map(|d| directive(ffi::convert::directive_to_json(d, 0, "<clamped>")))
+        .map(|entry| {
+            let file = entry
+                .pointer("/meta/filename")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let line = entry
+                .pointer("/meta/lineno")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0);
+            by_loc
+                .get(&(file.to_string(), line))
+                .cloned()
+                .unwrap_or_else(|| synthesized_transaction_to_wit(entry))
+        })
         .collect()
+}
+
+/// The source location (`filename`, `lineno`) of a loaded WIT directive.
+fn wit_directive_location(d: &wit::Directive) -> (String, u32) {
+    let m = match d {
+        wit::Directive::Transaction(x) => &x.meta,
+        wit::Directive::Open(x) => &x.meta,
+        wit::Directive::Close(x) => &x.meta,
+        wit::Directive::Balance(x) => &x.meta,
+        wit::Directive::Pad(x) => &x.meta,
+        wit::Directive::Commodity(x) => &x.meta,
+        wit::Directive::Price(x) => &x.meta,
+        wit::Directive::Event(x) => &x.meta,
+        wit::Directive::Note(x) => &x.meta,
+        wit::Directive::Document(x) => &x.meta,
+        wit::Directive::Query(x) => &x.meta,
+        wit::Directive::Custom(x) => &x.meta,
+    };
+    (m.filename.clone(), m.lineno)
+}
+
+/// Build a WIT transaction from a synthesized clamp boundary entry. These are
+/// opening-balance transactions (`<summarization>`, simple `account` + `units`
+/// postings) — the only directive kind `commands::clamp` synthesizes.
+fn synthesized_transaction_to_wit(entry: &serde_json::Value) -> wit::Directive {
+    let s = |k: &str| {
+        entry
+            .get(k)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let postings = entry
+        .get("postings")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|p| wit::Posting {
+                    account: p
+                        .get("account")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    units: p.get("units").and_then(|u| {
+                        Some(wit::Amount {
+                            number: u.get("number")?.as_str()?.to_string(),
+                            currency: u.get("currency")?.as_str()?.to_string(),
+                        })
+                    }),
+                    cost: None,
+                    price: None,
+                    flag: p
+                        .get("flag")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    meta: vec![],
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    wit::Directive::Transaction(wit::Transaction {
+        date: s("date"),
+        flag: s("flag"),
+        payee: None,
+        narration: entry
+            .get("narration")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        tags: vec![],
+        links: vec![],
+        postings,
+        meta: wit::Meta {
+            filename: entry
+                .pointer("/meta/filename")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<summarization>")
+                .to_string(),
+            lineno: 0,
+            hash: entry
+                .pointer("/meta/hash")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            user: vec![],
+        },
+    })
 }
 
 /// Run a BQL query against an already-loaded directive set (rustfava#173).

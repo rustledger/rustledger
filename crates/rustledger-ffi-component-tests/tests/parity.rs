@@ -110,7 +110,7 @@ fn load_entry_count_matches_jsonrpc() -> Result<()> {
     let (mut store, inst) = instantiate()?;
     let result = inst
         .rustledger_ledger_ledger()
-        .call_load(&mut store, LEDGER)?;
+        .call_load(&mut store, LEDGER, "<stdin>")?;
     let expected = rustledger_ffi_wasi::helpers::load_source(LEDGER)
         .directives
         .len();
@@ -164,9 +164,9 @@ fn clamp_runs_and_summarizes_pre_range() -> Result<()> {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
-    let loaded = inst
-        .rustledger_ledger_ledger()
-        .call_load(&mut store, LEDGER_WITH_HISTORY)?;
+    let loaded =
+        inst.rustledger_ledger_ledger()
+            .call_load(&mut store, LEDGER_WITH_HISTORY, "<stdin>")?;
     let clamped = inst.rustledger_ledger_builder().call_clamp(
         &mut store,
         &loaded.entries,
@@ -243,7 +243,9 @@ fn filter_keeps_pre_begin_open_and_drops_commodity() -> Result<()> {
   Assets:Cash  1 USD
   Expenses:Y  -1 USD
 ";
-    let loaded = inst.rustledger_ledger_ledger().call_load(&mut store, src)?;
+    let loaded = inst
+        .rustledger_ledger_ledger()
+        .call_load(&mut store, src, "<stdin>")?;
     let filtered = inst.rustledger_ledger_builder().call_filter(
         &mut store,
         &loaded.entries,
@@ -274,7 +276,9 @@ fn custom_directive_values_keep_their_type_tag() -> Result<()> {
     // string. `meta-value` alone would flatten both to `text`; `typed-value`
     // must preserve `value-type` ("account" vs "string").
     let src = "2024-01-01 custom \"budget\" Assets:Cash \"monthly\"\n";
-    let loaded = inst.rustledger_ledger_ledger().call_load(&mut store, src)?;
+    let loaded = inst
+        .rustledger_ledger_ledger()
+        .call_load(&mut store, src, "<stdin>")?;
     let custom = loaded
         .entries
         .iter()
@@ -472,9 +476,9 @@ fn load_runs_auto_accounts_synth() -> Result<()> {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
-    let loaded = inst
-        .rustledger_ledger_ledger()
-        .call_load(&mut store, AUTO_ACCOUNTS_LEDGER)?;
+    let loaded =
+        inst.rustledger_ledger_ledger()
+            .call_load(&mut store, AUTO_ACCOUNTS_LEDGER, "<stdin>")?;
     assert_generated_opens(&loaded.entries, "component load");
     Ok(())
 }
@@ -572,7 +576,7 @@ fn query_entries_matches_source_query() -> Result<()> {
     let q = "SELECT account, position";
     let loaded = inst
         .rustledger_ledger_ledger()
-        .call_load(&mut store, LEDGER)?;
+        .call_load(&mut store, LEDGER, "<stdin>")?;
     let via_entries =
         inst.rustledger_ledger_builder()
             .call_query_entries(&mut store, &loaded.entries, q)?;

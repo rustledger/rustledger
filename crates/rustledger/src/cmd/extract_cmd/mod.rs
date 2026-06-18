@@ -61,9 +61,11 @@ use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use config::{
-    build_config_from_entry, expand_tilde, find_importers_config, find_matching_importers,
-    load_importers_config,
+    build_config_from_entry, find_importers_config, find_matching_importers, load_importers_config,
 };
+// Used only by the WASM-importer-dir resolution path (gated below).
+#[cfg(feature = "python-plugin-wasm")]
+use config::expand_tilde;
 use duplicate::{is_duplicate, load_existing_transactions};
 use format_num_pattern::Locale;
 use rustledger_core::{Directive, FormatConfig};
@@ -322,6 +324,7 @@ fn select_importer(registry: &ImporterRegistry, file: &Path, args: &Args) -> Arc
 /// (no flag, soft-discover from default locations, errors warn-and-
 /// degrade). CLI `--wasm-importer-dir` flags override both and
 /// short-circuit the toml lookup entirely.
+#[cfg(feature = "python-plugin-wasm")]
 fn resolve_scan_dirs(args: &Args) -> Result<Vec<PathBuf>> {
     if !args.wasm_importer_dir.is_empty() {
         return Ok(args.wasm_importer_dir.clone());
@@ -335,6 +338,7 @@ fn resolve_scan_dirs(args: &Args) -> Result<Vec<PathBuf>> {
 /// User passed `--config <path>` explicitly. Missing or malformed
 /// file is a real error — the user asked for this file by name, so
 /// silently degrading would hide the bug they want to know about.
+#[cfg(feature = "python-plugin-wasm")]
 fn resolve_scan_dirs_explicit(path: &Path) -> Result<Vec<PathBuf>> {
     let cfg_path = find_importers_config(Some(path))?
         .ok_or_else(|| anyhow!("Importers config not found: {}", path.display()))?;
@@ -352,6 +356,7 @@ fn resolve_scan_dirs_explicit(path: &Path) -> Result<Vec<PathBuf>> {
 /// A missing file is expected; a malformed file is unusual but not
 /// fatal (the user didn't explicitly point at it). Print a warning
 /// for the malformed case so the user can find their mistake.
+#[cfg(feature = "python-plugin-wasm")]
 fn resolve_scan_dirs_implicit() -> Vec<PathBuf> {
     let cfg_path = match find_importers_config(None) {
         Ok(Some(p)) => p,
@@ -391,38 +396,46 @@ fn resolve_scan_dirs_implicit() -> Vec<PathBuf> {
 /// Per-dir scan failures (a single malformed `.wasm` among many) are
 /// logged to stderr but don't abort startup — see [`register_wasm_dir`]'s
 /// skip-and-collect semantics.
+#[cfg_attr(not(feature = "python-plugin-wasm"), allow(unused_variables))]
 fn build_registry(args: &Args) -> Result<ImporterRegistry> {
     let mut registry = ImporterRegistry::new();
 
-    // 1. CLI --wasm-importer paths (explicit precedence — registered
-    //    first so they win identify()). Single-file failures abort
-    //    because the user explicitly named this path; if it's wrong,
-    //    silently skipping would be worse than erroring out.
-    for path in &args.wasm_importer {
-        let name = registry
-            .register_wasm_from_path(path)
-            .with_context(|| format!("failed to load WASM importer {}", path.display()))?;
-        eprintln!("loaded WASM importer `{name}` from {}", path.display());
-    }
-
-    // 2. Directory scan(s): CLI flags override toml entirely.
-    //    Multiple dirs are scanned in order. `~` is expanded for
-    //    toml-supplied paths (CLI paths get shell expansion).
-    let scan_dirs: Vec<PathBuf> = resolve_scan_dirs(args)?;
-    for dir in &scan_dirs {
-        let report = registry
-            .register_wasm_dir(dir)
-            .with_context(|| format!("failed to scan WASM importer directory {}", dir.display()))?;
-        if !report.loaded.is_empty() || !report.failures.is_empty() {
-            eprintln!(
-                "WASM importer scan {}: loaded {}, failed {}",
-                dir.display(),
-                report.loaded.len(),
-                report.failures.len(),
-            );
+    // 1 + 2. WASM importer loading (sandboxed `.wasm` importers). Gated behind
+    //    `python-plugin-wasm` so a `--no-default-features` build carries no
+    //    `wasmtime`/cranelift dependency (#1427); without the feature the
+    //    `--wasm-importer`/`--wasm-importer-dir` flags are accepted but inert.
+    #[cfg(feature = "python-plugin-wasm")]
+    {
+        // 1. CLI --wasm-importer paths (explicit precedence — registered
+        //    first so they win identify()). Single-file failures abort
+        //    because the user explicitly named this path; if it's wrong,
+        //    silently skipping would be worse than erroring out.
+        for path in &args.wasm_importer {
+            let name = registry
+                .register_wasm_from_path(path)
+                .with_context(|| format!("failed to load WASM importer {}", path.display()))?;
+            eprintln!("loaded WASM importer `{name}` from {}", path.display());
         }
-        for (failed_path, err) in &report.failures {
-            eprintln!("  warning: failed to load {}: {err}", failed_path.display());
+
+        // 2. Directory scan(s): CLI flags override toml entirely.
+        //    Multiple dirs are scanned in order. `~` is expanded for
+        //    toml-supplied paths (CLI paths get shell expansion).
+        let scan_dirs: Vec<PathBuf> = resolve_scan_dirs(args)?;
+        for dir in &scan_dirs {
+            let report = registry.register_wasm_dir(dir).with_context(|| {
+                format!("failed to scan WASM importer directory {}", dir.display())
+            })?;
+            if !report.loaded.is_empty() || !report.failures.is_empty() {
+                eprintln!(
+                    "WASM importer scan {}: loaded {}, failed {}",
+                    dir.display(),
+                    report.loaded.len(),
+                    report.failures.len(),
+                );
+            }
+            for (failed_path, err) in &report.failures {
+                eprintln!("  warning: failed to load {}: {err}", failed_path.display());
+            }
         }
     }
 
@@ -1219,6 +1232,7 @@ default_expense = "Expenses:Uncategorized"
     }
 
     #[test]
+    #[cfg(feature = "python-plugin-wasm")]
     fn resolve_scan_dirs_propagates_error_for_explicit_missing_config() {
         // --config /missing.toml should error loudly, not silently
         // degrade to "no WASM scan dirs".
@@ -1239,6 +1253,7 @@ default_expense = "Expenses:Uncategorized"
     }
 
     #[test]
+    #[cfg(feature = "python-plugin-wasm")]
     fn resolve_scan_dirs_soft_fails_for_implicit_missing_config() {
         // No --config provided, no importers.toml in cwd/XDG → empty
         // scan dirs, no error. This is the right behavior because
@@ -2425,6 +2440,7 @@ filename_pattern = "statement*"
     }
 
     #[test]
+    #[cfg(feature = "python-plugin-wasm")]
     fn expand_tilde_resolves_tilde_prefix() {
         use super::config::expand_tilde;
         if let Some(home) = dirs::home_dir() {

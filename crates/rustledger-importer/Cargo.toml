@@ -15,10 +15,24 @@ readme = "README.md"
 [lib]
 bench = false
 
+[features]
+default = []
+# Load sandboxed `.wasm` importers (wave 2.3b). Pulls `wasmtime` (→
+# `cranelift-codegen`), so it is OFF by default: a `--no-default-features`
+# build stays slim and compiles on platforms where cranelift can't (e.g.
+# Termux/aarch64). See #1427 / #867.
+wasm-importer = [
+  "dep:wasmtime",
+  "dep:rmp-serde",
+  "dep:serde",
+  "dep:thiserror",
+  "dep:rustledger-plugin",
+]
+
 [dependencies]
 rustledger-core.workspace = true
 rustledger-ops.workspace = true
-rustledger-plugin = { workspace = true, features = ["wasm-runtime"] }
+rustledger-plugin = { workspace = true, features = ["wasm-runtime"], optional = true }
 rustledger-plugin-types.workspace = true
 jiff.workspace = true
 rust_decimal.workspace = true
@@ -31,10 +45,10 @@ ofxy.workspace = true
 # rustledger-plugin (not just -plugin-types) for `convert::wrapper_to_directive`
 # — the canonical wire-format → host-Directive converter, shared with the
 # directive plugin path.
-wasmtime = { workspace = true }
-rmp-serde = { workspace = true }
-serde = { workspace = true }
-thiserror = { workspace = true }
+wasmtime = { workspace = true, optional = true }
+rmp-serde = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
 # `ofxy::body::Transaction::date_posted` returns `chrono::DateTime<Utc>`, so
 # we need chrono in the dep tree to call its inherent `.format()` method.
 # IMPORTANT: chrono types must NOT leak into this crate's public API — they

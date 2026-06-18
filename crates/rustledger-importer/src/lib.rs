@@ -38,6 +38,7 @@ pub mod csv_inference;
 pub mod ofx_importer;
 pub mod registry;
 pub mod test_fixtures;
+#[cfg(feature = "wasm-importer")]
 pub mod wasm;
 
 use anyhow::Result;
@@ -47,7 +48,10 @@ use std::path::Path;
 
 pub use config::ImporterConfig;
 pub use ofx_importer::OfxImporter;
-pub use registry::{ImporterRegistry, WasmDirScanReport};
+pub use registry::ImporterRegistry;
+#[cfg(feature = "wasm-importer")]
+pub use registry::WasmDirScanReport;
+#[cfg(feature = "wasm-importer")]
 pub use wasm::{WasmImporter, WasmImporterError, WasmRuntimeConfig};
 
 use rustledger_ops::fingerprint::Fingerprint;

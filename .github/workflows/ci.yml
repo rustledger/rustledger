@@ -354,6 +354,25 @@ jobs:
             issue=$(basename "$f" .beancount | sed 's/issue-//')
             echo "- [#$issue](https://github.com/rustledger/rustledger/issues/$issue)" >> $GITHUB_STEP_SUMMARY
           done
+  # Slim-build ratchet (#1427/#867): `cargo install rustledger
+  # --no-default-features` must stay wasmtime/cranelift-free so the minimal
+  # native binary builds on platforms where cranelift can't (e.g. Termux). Two
+  # regressions shipped without this guard; the script fails if `wasmtime`
+  # re-enters the no-default dependency tree.
+  slim-build-no-wasmtime:
+    name: Slim Build (no wasmtime)
+    needs: [changes]
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      - name: Forbid wasmtime in --no-default-features build
+        run: ./scripts/check-slim-no-wasmtime.sh
+
   # WIT/Component-Model parity (#1384/#1402). The `rustledger-ffi-component-tests`
   # tests SKIP unless the wasip2 artifact exists, and the `Test` job above never
   # builds it — so without this job the entire component surface is unverified by

@@ -42,6 +42,7 @@
 //! round-trip) was never exercised. The first revision of this PR fell
 //! into exactly that trap — the test passed in 180 ms because cargo
 //! couldn't find the wasm32 target and the graceful-skip path ran.
+#![cfg(feature = "wasm-importer")]
 
 use std::path::{Path, PathBuf};
 

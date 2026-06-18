@@ -18,9 +18,17 @@ bench = false
 
 [features]
 default = ["python-plugin-wasm"]
-# Enable Python plugin support via WASM sandbox (adds ~30s to build time)
-# This allows running existing Python beancount plugins
-python-plugin-wasm = ["rustledger-plugin/python-plugins", "rustledger-loader/wasm-plugins", "rustledger-loader/python-plugins"]
+# Enable Python plugin support via WASM sandbox (adds ~30s to build time).
+# This allows running existing Python beancount plugins, the WASM importer
+# loader, and the directive-plugin runtime — all of which pull `wasmtime`
+# (→ `cranelift-codegen`). Off via `--no-default-features` for a slim native
+# binary that builds where cranelift can't (e.g. Termux/aarch64); see #1427.
+python-plugin-wasm = [
+    "rustledger-plugin/python-plugins",
+    "rustledger-importer/wasm-importer",
+    "rustledger-loader/wasm-plugins",
+    "rustledger-loader/python-plugins",
+]
 # Agent-native CLI (#1291). Pulls in the async/agent-only dependencies
 # (`agcli`, `tokio`) so the synchronous `rledger` CLI/lib don't carry them by
 # default. Required to build the `ag-rledger` binary and to run its
@@ -51,6 +59,12 @@ rustledger-loader.workspace = true
 rustledger-booking.workspace = true
 rustledger-validate.workspace = true
 rustledger-query.workspace = true
+# Both default to their wasmtime-free feature set (rustledger-plugin's workspace
+# entry is default-features = false; rustledger-importer's `default` is empty).
+# `python-plugin-wasm` re-enables `rustledger-plugin/python-plugins` and
+# `rustledger-importer/wasm-importer`; the CLI's base build uses only the
+# wasmtime-free APIs (`convert`/`types`) and gates the plugin-runtime + WASM
+# importer paths behind that feature. See #1427.
 rustledger-plugin.workspace = true
 rustledger-ops.workspace = true
 rustledger-importer.workspace = true

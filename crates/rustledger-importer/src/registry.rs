@@ -3,10 +3,13 @@
 use crate::config::ImporterConfig;
 use crate::csv_importer::CsvImporter;
 use crate::ofx_importer::OfxImporter;
+#[cfg(feature = "wasm-importer")]
 use crate::wasm::{WasmImporter, WasmImporterError};
 use crate::{ImportResult, Importer};
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "wasm-importer")]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Registry of importers.
@@ -52,6 +55,7 @@ impl ImporterRegistry {
     /// file I/O, wasmtime compile failure, validation failure (missing
     /// required exports, forbidden imports), or `metadata()` decode
     /// failure.
+    #[cfg(feature = "wasm-importer")]
     pub fn register_wasm_from_path(
         &mut self,
         path: impl Into<PathBuf>,
@@ -96,6 +100,7 @@ impl ImporterRegistry {
     /// (e.g. dir doesn't exist) — without that, the scan can't even
     /// start. Per-file failures land inside
     /// [`WasmDirScanReport::failures`].
+    #[cfg(feature = "wasm-importer")]
     pub fn register_wasm_dir(
         &mut self,
         dir: impl AsRef<Path>,
@@ -206,6 +211,7 @@ impl Default for ImporterRegistry {
 /// failures so callers can log/report both. A single broken module
 /// in a dir with 19 good ones leaves the 19 registered; the broken
 /// one's path + error land in [`Self::failures`].
+#[cfg(feature = "wasm-importer")]
 #[derive(Debug, Default)]
 pub struct WasmDirScanReport {
     /// `metadata.name` of each successfully-loaded module, in load
@@ -396,8 +402,10 @@ mod tests {
 
     // ===== WASM discovery tests =====
 
+    #[cfg(feature = "wasm-importer")]
     use crate::test_fixtures::metadata_wat;
 
+    #[cfg(feature = "wasm-importer")]
     fn write_wat_to(dir: &Path, file_name: &str, importer_name: &str) -> PathBuf {
         let bytes = wat::parse_str(metadata_wat(importer_name)).expect("WAT parses");
         let path = dir.join(file_name);
@@ -406,6 +414,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wasm-importer")]
     fn register_wasm_from_path_loads_and_returns_metadata_name() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = write_wat_to(tmp.path(), "abc.wasm", "abc");
@@ -421,6 +430,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wasm-importer")]
     fn register_wasm_dir_loads_only_wasm_files_in_sorted_order() {
         let tmp = tempfile::tempdir().expect("tempdir");
         // Out-of-order names to verify sort.
@@ -444,6 +454,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wasm-importer")]
     fn register_wasm_dir_returns_empty_for_dir_with_no_wasm_files() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmp.path().join("README.md"), "just docs").unwrap();
@@ -456,6 +467,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wasm-importer")]
     fn register_wasm_dir_matches_uppercase_extension_too() {
         let tmp = tempfile::tempdir().expect("tempdir");
         // Mixed case extensions: all should be picked up.
@@ -472,6 +484,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wasm-importer")]
     fn register_wasm_dir_errors_on_nonexistent_dir() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let missing = tmp.path().join("does-not-exist");
@@ -490,6 +503,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wasm-importer")]
     fn register_wasm_dir_skip_and_collect_keeps_loading_past_failures() {
         // Skip-and-collect semantics: one broken module doesn't
         // prevent the others from loading. The good modules end up
@@ -521,6 +535,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wasm-importer")]
     fn register_wasm_wins_identify_collision_when_registered_before_builtins() {
         // The actual precedence guarantee the CLI helper relies on:
         // when a WASM importer's `identify()` returns true for the

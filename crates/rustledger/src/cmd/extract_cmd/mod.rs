@@ -22,6 +22,8 @@
 //! date_column = "Transaction Date"
 //! amount_column = "Amount"
 //! date_format = "%m/%d/%Y"
+//! # amount_locale = "de_DE"    # optional: comma as the decimal separator
+//! # amount_format = "#.##0,00" # optional: explicit number-format pattern
 //!
 //! [importers.mappings]
 //! "AMAZON" = "Expenses:Shopping"
@@ -931,6 +933,8 @@ narration_column = 1
             amount_column: Some(toml::Value::String("Amount".to_string())),
             debit_column: None,
             credit_column: None,
+            amount_locale: None,
+            amount_format: None,
             delimiter: None,
             skip_rows: None,
             skip_header: None,
@@ -963,6 +967,8 @@ narration_column = 1
             amount_column: None,
             debit_column: None,
             credit_column: None,
+            amount_locale: None,
+            amount_format: None,
             delimiter: None,
             skip_rows: None,
             skip_header: None,
@@ -994,6 +1000,8 @@ narration_column = 1
             amount_column: None,
             debit_column: None,
             credit_column: None,
+            amount_locale: None,
+            amount_format: None,
             delimiter: None,
             skip_rows: None,
             skip_header: None,
@@ -1026,6 +1034,8 @@ narration_column = 1
             amount_column: None,
             debit_column: Some(toml::Value::String("Debit".to_string())),
             credit_column: Some(toml::Value::String("Credit".to_string())),
+            amount_locale: None,
+            amount_format: None,
             delimiter: Some(";".to_string()),
             skip_rows: Some(2),
             skip_header: Some(true),

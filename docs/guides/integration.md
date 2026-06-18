@@ -15,8 +15,8 @@ rustledger provides multiple integration paths:
 | [CLI](#command-line-interface) | Shell scripts, CI/CD pipelines | Any (subprocess) |
 | [Rust Crates](#rust-crates) | Rust applications | Rust |
 | [WASM Library](#webassembly-library) | Browsers, Node.js | JavaScript, TypeScript |
-| [WASI FFI](#wasi-ffi-json-rpc) | Embedding in any language | Python, Ruby, Go, etc. |
-| [Component Model (WIT)](#component-model-wit) | Typed embedding on wasip2 hosts (experimental) | Any wasip2 host |
+| [Component Model (WIT)](#component-model-wit) | **Recommended** typed embedding on wasip2 hosts (primary embedding path) | Any wasip2 host |
+| [WASI FFI](#wasi-ffi-json-rpc) | Embedding via JSON-RPC (legacy — deprecated, slated for Phase 5 removal) | Python, Ruby, Go, etc. |
 | [LSP](#language-server-protocol) | Editor integrations | Any LSP client |
 
 ## Command-Line Interface
@@ -223,6 +223,14 @@ ledger.free();
 
 ## WASI FFI (JSON-RPC)
 
+> **Legacy / deprecated.** This wasip1 JSON-RPC surface
+> (`rustledger-ffi-wasi`) is the older embedding path. New integrations should
+> prefer the typed [Component Model (WIT)](#component-model-wit) surface, which
+> is now the primary, default embedding path (the default backend in rustfava).
+> The JSON-RPC surface is slated for removal in Phase 5
+> ([#1419](https://github.com/rustledger/rustledger/issues/1419)). The reference
+> below remains accurate for as long as it ships.
+
 The WASI FFI module exposes a JSON-RPC 2.0 API that can be embedded in any language with a WASI runtime. This is ideal for building an API server or embedding in Python, Ruby, Go, etc.
 
 ### Quick Start
@@ -362,17 +370,46 @@ echo '[
 
 ## Component Model (WIT)
 
-> **Experimental / in development.** A typed WASI Preview 2 component
+> **Recommended embedding surface.** The typed WASI Preview 2 component
 > (`rustledger-ffi-component`, [#1384](https://github.com/rustledger/rustledger/issues/1384))
-> is the successor to the JSON-RPC WASI FFI above. It is not yet wired to a
-> consumer (rustfava still uses the JSON-RPC surface), and the JSON-RPC surface
-> is planned for retirement once this stabilizes.
+> is the primary, default embedding path. It is the default backend in rustfava
+> as of #1384 Phase 4 (rustfava [#183](https://github.com/rustledger/rustfava/pull/183))
+> and ships as a prebuilt wasip2 component artifact. The legacy JSON-RPC WASI FFI
+> above remains available but is slated for removal in Phase 5
+> ([#1419](https://github.com/rustledger/rustledger/issues/1419)).
 
 Instead of a hand-rolled JSON-RPC wire shape, this surface exposes a generated
-**WIT contract** (`crates/rustledger-ffi-component/wit/world.wit`, package
-`rustledger:ledger`). The same operations — `load` / `validate` / `query` /
-`batch` (+ `-file` variants), entry `create` / `filter` / `clamp`, `util`, and
-`format` — are strongly-typed component functions with no JSON envelope.
+**WIT contract** (`crates/rustledger-ffi-component/wit/world.wit`, versioned
+package `rustledger:ledger@2.1.0`). The same operations — `load` / `validate` /
+`query` / `batch` (+ `-file` variants), entry `create` / `filter` / `clamp`,
+`util`, and `format` — are strongly-typed component functions with no JSON
+envelope. The contract itself is the versioned wire shape; a `version()` func
+remains for runtime negotiation in place of the old per-response `api_version`.
+
+### Surface
+
+The world exports four interfaces — `ledger`, `builder`, `util`, and `format`:
+
+- **`ledger`** — `version`, `load(source, filename)` (the `filename` is recorded
+  as the directives' source location; pass `<stdin>` if unknown), `validate`,
+  `query`, `batch`, plus their `-file` variants.
+- **`ledger.session`** — a stateful `resource` holding a loaded, booked ledger
+  inside the component (rustfava [#173](https://github.com/rustledger/rustfava/issues/173)).
+  The host constructs one handle (`constructor(source)` or
+  `from-file(path, …)`), then runs `info`, `query`, `filter`, and `clamp`
+  against the *held* ledger with no re-parse and no re-render — the typed,
+  stateful successor to the free `load`/`query`/`clamp` functions.
+- **`builder`** — `create` / `create-batch` (validate and round-trip typed input
+  through core; both fallible, batch all-or-nothing), `filter` / `clamp` over a
+  date window, and `query-entries`, which runs a BQL query directly against an
+  already-loaded directive set (the embedder passes the directives it holds, so
+  there is no re-parse and no re-render to beancount text).
+- **`util`** — `types` / `is-encrypted` / `get-account-type`.
+- **`format`** — `format-source` / `-file` / `-entry` / `-entries`.
+
+`clamp` is provenance-preserving: in-window directives keep their original
+`filename`/`lineno`, and only the *synthesized* opening-balance / summary
+boundary directives get synthetic source locations.
 
 A host consumes it via `wasmtime`'s component bindings; a guest/other language
 binds with `wit-bindgen`:
@@ -409,22 +446,29 @@ See [Editor Integration](editor-integration.md) for setup instructions.
 
 ## Comparison
 
-| Feature | CLI | Rust | WASM | WASI FFI | LSP |
-|---------|-----|------|------|----------|-----|
-| Parse ledger | Y | Y | Y | Y | - |
-| Validate | Y | Y | Y | Y | Y |
-| BQL queries | Y | Y | Y | Y | - |
-| Format | Y | Y | Y | Y | Y |
-| File access | Y | Y | - | Y | Y |
-| Plugins | Y | Y | Y | Y | Y |
-| Editor features | - | - | Y | - | Y |
-| Streaming | - | Y | - | - | - |
+The embedding columns below cover both surfaces: **Component** is the
+recommended Component Model (WIT) path, and **WASI FFI** is the legacy JSON-RPC
+surface (slated for Phase 5 removal). They expose the same operations.
+
+| Feature | CLI | Rust | WASM | Component | WASI FFI | LSP |
+|---------|-----|------|------|-----------|----------|-----|
+| Parse ledger | Y | Y | Y | Y | Y | - |
+| Validate | Y | Y | Y | Y | Y | Y |
+| BQL queries | Y | Y | Y | Y | Y | - |
+| Format | Y | Y | Y | Y | Y | Y |
+| File access | Y | Y | - | Y | Y | Y |
+| Plugins | Y | Y | Y | Y | Y | Y |
+| Editor features | - | - | Y | - | - | Y |
+| Streaming | - | Y | - | - | - | - |
 
 ## Which Should I Use?
 
 - **Building a web app?** Use WASM
 - **Building a desktop app in Rust?** Use the crates directly
-- **Building a Python/Ruby/Go service?** Use WASI FFI with JSON-RPC
+- **Embedding in another language / host?** Use the **Component Model (WIT)**
+  surface — it is the recommended, default embedding path. (The legacy JSON-RPC
+  WASI FFI remains available as a transitional option, but is being retired in
+  Phase 5.)
 - **Writing shell scripts?** Use CLI with `--format json`
 - **Building an editor plugin?** Use LSP
-- **Need maximum performance?** Use Rust crates or WASI FFI
+- **Need maximum performance?** Use Rust crates or the Component Model surface

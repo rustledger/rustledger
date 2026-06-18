@@ -8,6 +8,19 @@
 
 //! Library surface for the rustledger FFI-WASI binding.
 //!
+//! # Legacy/fallback surface
+//!
+//! This is the **legacy/fallback** wasip1 JSON-RPC FFI. The typed
+//! WASI Preview 2 / Component Model binding,
+//! [`rustledger-ffi-component`](https://github.com/rustledger/rustledger/issues/1384)
+//! (#1384), is now the **default** embedding path (it ships a generated
+//! WIT contract instead of this hand-rolled JSON-RPC wire shape, and is
+//! the default in rustfava as of Phase 4). This JSON-RPC surface is
+//! slated for deprecation and removal in Phase 5
+//! ([#1419](https://github.com/rustledger/rustledger/issues/1419)). **New
+//! integrators should target the component**; this crate remains only as
+//! a fallback for runtimes that cannot yet host a wasip2 component.
+//!
 //! Most consumers run this crate as a WASI module (see `main.rs` and
 //! the JSON-RPC API doc on the binary). But the `Directive → JSON`
 //! conversion functions and DTO types are also useful as a library

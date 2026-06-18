@@ -5,8 +5,11 @@
 //!
 //! All four interfaces (`ledger`, `builder`, `util`, `format`) are wired: each
 //! Guest method delegates to [`convert`], which maps between the WIT types and
-//! the loader/query logic reused from `rustledger-ffi-wasi`. Parity with the
-//! JSON-RPC surface is exercised by `rustledger-ffi-component-tests`.
+//! the loader/query logic reused from `rustledger-ffi-wasi`. `ledger` also
+//! exports a stateful `session` resource (a held, booked ledger queried/filtered
+//! /clamped without re-parsing) and `builder` a `query-entries` func (BQL over an
+//! already-loaded directive set). Parity with the JSON-RPC surface is exercised
+//! by `rustledger-ffi-component-tests`.
 
 // This is a wasip2 component: `wit-bindgen`'s `export!` emits canonical-ABI
 // shims that don't link as a native `cdylib` (e.g. a `cargo build --workspace`
@@ -80,7 +83,7 @@ impl LedgerGuest for Component {
     }
 }
 
-/// A loaded, booked ledger held in the component (`resource session`, rustfava#173).
+/// A loaded, booked ledger held in the component (`resource session`, #1421).
 /// Parses + books once in `new`/`from_file`; `query`/`filter`/`clamp` run on
 /// the held ledger via [`convert::SessionState`] with no re-parse or re-render.
 struct LedgerSession {

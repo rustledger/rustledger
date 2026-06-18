@@ -1,5 +1,10 @@
 //! Rustledger FFI via WASI - JSON-RPC 2.0 API for embedding in any language.
 //!
+//! **Legacy/fallback surface.** The typed `rustledger-ffi-component`
+//! (wasip2 / Component Model, #1384) is now the default embedding path;
+//! new integrators should target it. This JSON-RPC surface is slated for
+//! removal in Phase 5 (#1419).
+//!
 //! This is a WASI module that can be run via wasmtime (or any WASI runtime).
 //!
 //! # Usage

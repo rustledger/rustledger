@@ -2,13 +2,20 @@
 
 ## Status
 
-Proposed (June 2026). Phase 1 (the typed WIT contract) and Phase 2 (all 20
+Accepted (June 2026). Phase 1 (the typed WIT contract) and Phase 2 (all 20
 exports wired; builds as a real `wasm32-wasip2` component; parity harness)
-landed in #1384. The JSON-RPC embedding surface (`rustledger-ffi-wasi`,
-WASI Preview 1) remains the shipped, supported path during the dual-ship
-window; the Component-Model path (`rustledger-ffi-component`, WASI Preview 2)
-is not yet a release artifact (`publish = false`). The retire-JSON-RPC step
-(Phase 5) is planned, not accepted.
+landed in #1384. Phase 3 (release artifact — the built wasip2 component ships as
+a prebuilt `.wasm` on GitHub releases) and Phase 4 (rustfava default) have since
+**landed**: the Component-Model path (`rustledger-ffi-component`, WASI Preview 2,
+package `rustledger:ledger@2.1.0`) is now the **primary, default embedding
+surface** — the default backend in rustfava (rustfava
+[#183](https://github.com/rustledger/rustfava/pull/183) / rustfava #173). The
+JSON-RPC embedding surface (`rustledger-ffi-wasi`, WASI Preview 1) is now
+**legacy**; the two dual-ship until Phase 5. The component crate is not on
+crates.io (`publish = false`) because it ships as a wasm artifact, not a Rust
+library. The retire-JSON-RPC step (Phase 5,
+[#1419](https://github.com/rustledger/rustledger/issues/1419)) is the
+planned-but-deferred next step.
 
 ## Context
 
@@ -90,10 +97,14 @@ artifact. The plan:
 - **Phase 1–2 (#1384, landed):** the contract + all 20 exports wired, builds as
   a wasip2 component, parity harness asserts the component agrees with the
   JSON-RPC path.
-- **Phase 3+:** release artifact, broaden parity coverage, wire the
-  component build into CI, migrate rustfava to the component.
-- **Phase 5:** retire the WASI-p1 JSON-RPC surface. When it is removed, the
-  shared loader/conversion logic moves out of `rustledger-ffi-wasi` to a
+- **Phase 3 (landed):** release artifact — the built wasip2 component ships as a
+  prebuilt `.wasm` on GitHub releases; broaden parity coverage and wire the
+  component build into CI.
+- **Phase 4 (landed):** migrate rustfava to the component — it is now rustfava's
+  default embedding backend (rustfava #183 / #173).
+- **Phase 5 ([#1419](https://github.com/rustledger/rustledger/issues/1419),
+  planned/deferred):** retire the WASI-p1 JSON-RPC surface. When it is removed,
+  the shared loader/conversion logic moves out of `rustledger-ffi-wasi` to a
   neutral home.
 
 ## Consequences

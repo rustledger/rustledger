@@ -1109,7 +1109,7 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
     // `filename`/`lineno`. We index the inputs by location and feed JSON
     // entries carrying that meta; in-window outputs are then matched back to the
     // original WIT directive (full fidelity + provenance), and only the
-    // synthesized boundary transactions are built from JSON. (rustfava#173)
+    // synthesized boundary transactions are built from JSON. (#1425)
     let mut by_loc: std::collections::HashMap<(String, u32), wit::Directive> =
         std::collections::HashMap::new();
     let mut json_entries: Vec<serde_json::Value> = Vec::new();
@@ -1232,7 +1232,7 @@ fn synthesized_transaction_to_wit(entry: &serde_json::Value) -> wit::Directive {
     })
 }
 
-/// Run a BQL query against an already-loaded directive set (rustfava#173).
+/// Run a BQL query against an already-loaded directive set (#1423).
 /// The typed counterpart to `filter`/`clamp`: converts the WIT directives to
 /// core, expands pads (as the source-based query does), then runs the query —
 /// so the embedder queries the directives it holds with no re-parse/re-render.
@@ -1245,7 +1245,7 @@ pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryR
     run_query(&directives, query_str)
 }
 
-// ---- stateful ledger handle (`resource session`, rustfava#173) -------------------
+// ---- stateful ledger handle (`resource session`, #1421) -------------------
 //
 // Normalizes the source and file load paths into one held state so the
 // `query`/`filter`/`clamp` methods don't care which produced it. The win over
@@ -1395,7 +1395,7 @@ impl SessionState {
 
     /// Clamp to `[begin, end)`, running `rustledger_ops::clamp` **directly on
     /// the held core directives** — no WIT -> core -> WIT round-trip, the value
-    /// the resource exists to deliver (rustfava#173).
+    /// the resource exists to deliver (#1421).
     pub fn clamp(&self, begin: &str, end: &str) -> Vec<wit::Directive> {
         let (Ok(begin_date), Ok(end_date)) = (
             begin.parse::<rustledger_core::NaiveDate>(),

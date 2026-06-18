@@ -1,18 +1,22 @@
 # rustledger-ffi-wasi
 
-A WASI module providing JSON-RPC 2.0 API for embedding Rustledger in any language.
+A WASI module providing JSON-RPC 2.0 API for embedding Rustledger in any language. **Legacy/fallback surface** — the typed WASI Preview 2 component (`rustledger-ffi-component`) is now the default embedding path; see the note below.
 
 ## Overview
 
 This crate compiles to a WebAssembly module that can be run via [wasmtime](https://wasmtime.dev/) or any WASI-compatible runtime. It provides a fast, portable way to use Rustledger's Beancount parsing, validation, and querying capabilities from any language.
 
-> **Dual-ship note.** This JSON-RPC-over-WASI (wasip1) surface is the current,
-> shipping embedding path (used by rustfava). A typed **WASI Preview 2 /
-> Component Model** successor is in development in `rustledger-ffi-component`
-> ([#1384](https://github.com/rustledger/rustledger/issues/1384)): it replaces
-> this hand-rolled JSON-RPC wire shape with a generated WIT contract. Both
-> coexist during the dual-ship window; this surface is retired in Phase 5. New
-> integrators who can target wasip2 should track the component surface.
+> **Legacy/fallback note.** This JSON-RPC-over-WASI (wasip1) surface is now the
+> **legacy/fallback** embedding path. The typed **WASI Preview 2 / Component
+> Model** successor, `rustledger-ffi-component`
+> ([#1384](https://github.com/rustledger/rustledger/issues/1384)), is the
+> **default** surface in rustfava as of Phase 4 — it replaces this hand-rolled
+> JSON-RPC wire shape with a generated WIT contract. This JSON-RPC surface is
+> slated for deprecation and removal in Phase 5
+> ([#1419](https://github.com/rustledger/rustledger/issues/1419)). **New
+> integrators should target the component** (`rustledger-ffi-component`); this
+> surface remains only as a fallback for runtimes that cannot yet host a wasip2
+> component.
 
 ## Usage
 

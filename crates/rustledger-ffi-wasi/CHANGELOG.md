@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **Status:** this JSON-RPC-over-WASI (wasip1) surface is now the
+> legacy/fallback embedding path. The typed `rustledger-ffi-component`
+> (wasip2 / Component Model, #1384) is the default in rustfava as of
+> Phase 4. Deprecation and removal of this surface is planned for Phase 5
+> ([#1419](https://github.com/rustledger/rustledger/issues/1419)).
+
+## [0.16.5](https://github.com/rustledger/rustledger/compare/v0.16.4...v0.16.5) - 2026-06-18
+
+### Features
+
+- *(ffi-component)* preserve clamp provenance metadata and add a load
+  `filename` parameter so component-produced entries carry source
+  context. (#1425)
+
+## [0.16.4](https://github.com/rustledger/rustledger/compare/v0.16.3...v0.16.4) - 2026-06-17
+
+### Features
+
+- *(ffi-component)* `builder.query-entries` — run a BQL query against an
+  already-loaded directive set. (#1423)
+
+## [0.16.3](https://github.com/rustledger/rustledger/compare/v0.16.2...v0.16.3) - 2026-06-17
+
+### Features
+
+- *(ffi-component)* stateful resource session ledger handle, completing
+  the Component Model surface. (#1384, #1421)
+
+## [0.16.2](https://github.com/rustledger/rustledger/compare/v0.16.1...v0.16.2) - 2026-06-17
+
+### Miscellaneous
+
+- *(ci)* build and attach the FFI-Component (wasip2) `.wasm` to releases.
+  (#1410)
+
+## [0.16.1](https://github.com/rustledger/rustledger/compare/v0.16.0...v0.16.1) - 2026-06-16
+
 ### Features
 
 - `Inventory` and `Position` query result values now include an optional
@@ -16,6 +53,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   omitted). Additive and backward compatible — units-only consumers ignore it
   — so `api_version` is bumped to `2.1` (minor). Enables embedders to build
   cost-/lot-aware views from query output. (#1398)
+- *(ffi)* WIT / Component Model embedding surface (`rustledger-ffi-component`):
+  all 20 exports wired (load, validate, query, batch, format, util, builder
+  create/filter/clamp) with a wasmtime parity harness pinning the component
+  output to this JSON-RPC binding. This is the start of the dual-ship window.
+  (#1384, #1401)
+
+### Bug Fixes
+
+- *(ffi)* run the pre-booking synth plugin pass through the FFI load
+  surface so plugin-synthesized Opens are visible to validation. (#1404)
+- *(ffi)* preserve custom-directive value types via WIT typed-value, and
+  gate the wasip2 component crate to wasm targets. (#1384)
+
+## [0.16.0](https://github.com/rustledger/rustledger/compare/v0.15.0...v0.16.0) - 2026-06-15
+
+### Features
+
 - `ParseErrorEntry.kind_code` exposes the stable numeric discriminant
   from `rustledger_parser::ParseError::kind_code()`. Codes 1-26
   documented in `openrpc.json`'s `ParseErrorEntry` schema. Notably,
@@ -27,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   BOM diagnostic). Render below `message` as a help/fix-it line.
 - `ParseErrorEntry.span` carries the byte range of the failed entry
   for source-location-aware UX (highlight, navigate-to).
+- *(ffi-wasi)* emit `Document.tags` and `Document.links`, and accept them
+  on RPC input. (#1208, #1212, #1213, #1216)
 
 ### Breaking Changes
 
@@ -50,7 +106,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kind_code`/`hint`/`span` so legacy entries bridged through the
   recipe above still validate; 2.0+ servers always emit the
   integer/object form. See `README.md` for the full
-  `ParseErrorEntry` shape and an example.
+  `ParseErrorEntry` shape and an example. (#1244)
+
+### Refactoring
+
+- *(core)* make `CostSpec` invalid states unrepresentable, underpinning
+  the typed `CostNumber` wire shape. (#1164, #1178)
+- source-faithful pad architecture across loader/booking/report/ffi/wasm.
+  (#1288, #1300, #1302)
+
+## [0.15.0](https://github.com/rustledger/rustledger/compare/v0.14.1...v0.15.0) - 2026-05-15
+
+Released; see git history / GitHub release v0.15.0. No FFI-WASI wire-shape
+changes — this cycle was primarily BQL query-engine and validation-phase
+work (validate typestate phases, `PluginOp` protocol; refs #1115, #1116,
+#1117).
+
+## [0.14.1](https://github.com/rustledger/rustledger/compare/v0.14.0...v0.14.1) - 2026-04-27
+
+Released; see git history / GitHub release v0.14.1. No FFI-WASI changes.
+
+## [0.14.0](https://github.com/rustledger/rustledger/compare/v0.13.0...v0.14.0) - 2026-04-26
+
+Released; see git history / GitHub release v0.14.0. No FFI-WASI wire-shape
+changes — release/CI tooling, BQL query fixes, and the new
+`rustledger-ops` crate.
 
 ## [0.13.0](https://github.com/rustledger/rustledger/compare/v0.12.0...v0.13.0) - 2026-04-21
 

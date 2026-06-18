@@ -573,19 +573,6 @@
       }
     },
     {
-      "name": "util.schema",
-      "summary": "Get JSON Schema",
-      "description": "Returns the JSON Schema for the API types.",
-      "params": [],
-      "result": {
-        "name": "JsonSchema",
-        "description": "JSON Schema document",
-        "schema": {
-          "type": "object"
-        }
-      }
-    },
-    {
       "name": "util.isEncrypted",
       "summary": "Check if file is encrypted",
       "description": "Checks if the given path appears to be an encrypted file (based on extension).",
@@ -729,9 +716,23 @@
             "items": {
               "$ref": "#/components/schemas/Error"
             }
+          },
+          "parse_error_count": {
+            "type": "integer",
+            "description": "Number of parse-phase errors (syntactic)"
+          },
+          "validate_error_count": {
+            "type": "integer",
+            "description": "Number of validate-phase errors (semantic)"
           }
         },
-        "required": ["api_version", "valid", "errors"]
+        "required": [
+          "api_version",
+          "valid",
+          "errors",
+          "parse_error_count",
+          "validate_error_count"
+        ]
       },
       "QueryOutput": {
         "type": "object",

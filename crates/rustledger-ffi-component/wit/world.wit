@@ -8,10 +8,11 @@
 // shape footgun in #1399).
 //
 // Scope: the full former JSON-RPC method surface, across four interfaces —
-// `ledger` (version / load / validate / query / batch + `-file` variants),
-// `builder` (create / create-batch / filter / clamp), `util` (types /
-// is-encrypted / get-account-type), and `format` (source / file / entry /
-// entries). All 20 exports are implemented in `crates/rustledger-ffi-component`.
+// `ledger` (version / load / validate / query / batch + `-file` variants, plus a
+// stateful `session` resource), `builder` (create / create-batch / filter /
+// clamp / query-entries), `util` (types / is-encrypted / get-account-type), and
+// `format` (source / file / entry / entries). All exports are implemented in
+// `crates/rustledger-ffi-component`.
 
 package rustledger:ledger@2.1.0;
 
@@ -424,7 +425,7 @@ interface ledger {
   /// Like `batch`, but the ledger is loaded from a file path.
   batch-file: func(path: string, queries: list<string>) -> batch-result;
 
-  /// A loaded, booked ledger held inside the component (rustfava#173, rustfava#173).
+  /// A loaded, booked ledger held inside the component (#1421).
   ///
   /// The stateful, typed successor to the free `load`/`query`/`clamp`
   /// functions: the host constructs one handle, then runs `query`/`filter`/
@@ -436,7 +437,7 @@ interface ledger {
   ///
   /// `query`/`filter`/`clamp` operate on the held *core* directives directly,
   /// so they never round-trip through the host's directive representation —
-  /// removing a whole class of shape-translation bugs (rustfava rustfava#173).
+  /// removing a whole class of shape-translation bugs (#1421).
   resource session {
     /// Parse + book a ledger from source text.
     constructor(source: string);
@@ -482,7 +483,7 @@ interface builder {
   clamp: func(entries: list<directive>, begin-date: string, end-date: string) -> list<directive>;
 
   /// Run a BQL query directly against an already-loaded directive set
-  /// (rustfava#173). The typed counterpart to `filter`/`clamp`: the embedder
+  /// (#1423). The typed counterpart to `filter`/`clamp`: the embedder
   /// passes the directives it holds (e.g. a filtered view) instead of source
   /// text, so there is no re-parse and no re-render to beancount.
   query-entries: func(entries: list<directive>, query: string) -> query-result;

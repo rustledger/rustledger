@@ -71,7 +71,8 @@ rustledger/
 │   ├── rustledger-ops/          # Pure directive operations
 │   ├── rustledger-lsp/          # LSP server
 │   ├── rustledger-wasm/         # WASM target
-│   ├── rustledger-ffi-wasi/     # WASI FFI
+│   ├── rustledger-ffi-component/ # Primary embedding surface (wasip2 / Component Model)
+│   ├── rustledger-ffi-wasi/     # WASI FFI (wasip1 JSON-RPC) — legacy
 │   └── rustledger/              # CLI binary
 ├── spec/                     # Specifications
 └── tests/                    # Integration tests

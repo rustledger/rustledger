@@ -1,6 +1,6 @@
 [package]
 name = "rustledger-lsp"
-version = "0.16.4"
+version = "0.16.5"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

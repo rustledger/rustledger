@@ -730,6 +730,36 @@ Python plugin support is experimental and significantly slower than native plugi
 
 rustledger can run some Python beancount plugins using CPython compiled to WebAssembly (WASI). This is primarily for migration purposes.
 
+### Referencing a Python Plugin
+
+How a plugin name resolves depends on whether it matches a built-in:
+
+- **Built-in name → native implementation.** If the name matches a built-in plugin, rustledger runs the native Rust version, regardless of the `beancount.plugins.` prefix. So `plugin "beancount.plugins.auto_accounts"` "just works" — it resolves to the native `auto_accounts`, _not_ to Python. (See [Supported Python Plugins](#supported-python-plugins).)
+
+- **Custom Python plugin → file path required.** A plugin with no native equivalent must be referenced by **file path**, not by module name. beancount's `plugin "mypackage.mymodule"` form is **not** supported:
+
+  ```beancount
+  ; ❌ Not supported — module names do not resolve to the host environment
+  plugin "mypackage.mymodule"
+
+  ; ✅ Reference the file directly (absolute, or relative to the ledger)
+  plugin "/abs/path/to/mymodule.py"
+  plugin "./plugins/mymodule.py"
+  ```
+
+  Referencing a custom plugin by module name fails with `… is not supported by module name; reference the file directly: plugin "…"`. This is intentional: rustledger does not search the system Python path, keeping it explicit which plugins still need native Rust implementations.
+
+### The Plugin Sandbox: Plugins Must Be Self-Contained
+
+Python plugins run in a pinned CPython-WASI sandbox (wasmtime). On `sys.path` it sees only:
+
+- the **plugin source file**, plus a bundled `beancount.core.data` **compatibility shim**, and
+- the **bundled CPython standard library**.
+
+The host's virtualenv / `site-packages` is **never** mounted — there is no `VIRTUAL_ENV` or `site-packages` handling, by design (the sandbox has no host filesystem access). So even with the correct file-path reference, a plugin only loads if it is **self-contained**: standard library plus whatever the compat shim provides.
+
+The compat shim covers the common beancount plugin surface — the `beancount.core.data` namedtuples (`Transaction`, `Posting`, `Amount`, `Open`, `Close`, `Balance`, `Price`, `Custom`, `Cost`, …) and the `beancount.core.{amount,getters,flags}` helpers. A plugin that imports third-party packages, C extensions, or unbundled stdlib modules will not load — rewrite it as a [native Rust plugin](../guides/custom-plugins.md) instead.
+
 ### Supported Python Plugins
 
 Most Python beancount plugins have native equivalents:
@@ -761,6 +791,7 @@ Most Python beancount plugins have native equivalents:
 - **First run**: Downloads ~14MB CPython-WASI runtime
 - **Compilation**: First execution compiles WASM (~30 seconds)
 - **Not all plugins work**: C extensions and some stdlib modules unavailable
+- **File-path references only**: custom Python plugins must be referenced by file path and be self-contained — see [Referencing a Python Plugin](#referencing-a-python-plugin)
 - **Debugging**: Error messages may be less helpful
 
 ### Migrating from Python Plugins

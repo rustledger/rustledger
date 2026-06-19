@@ -126,15 +126,27 @@ For custom Python plugins, you have options:
 
 ### Check Plugin Equivalents
 
-Many Python plugins have native Rust equivalents:
+Many Python plugins have native Rust equivalents. When a plugin name matches a built-in, the declaration is **unchanged** — it resolves to the native Rust implementation:
 
 ```beancount
-; Before (Python)
-plugin "beancount.plugins.auto_accounts"
-
-; After (rustledger) - same syntax, native implementation
+; Before (Python) and after (rustledger) — identical.
+; Resolves to the native `auto_accounts`, not Python.
 plugin "beancount.plugins.auto_accounts"
 ```
+
+### Custom Python Plugins: Reference by File Path
+
+beancount's **module-name** plugin syntax does **not** carry over for custom plugins (those without a native equivalent). rustledger does not search the system Python path, so a bare module name is rejected — reference the file directly instead:
+
+```beancount
+; ❌ Not supported for a custom plugin
+plugin "mypackage.mymodule"
+
+; ✅ Reference the .py file (absolute, or relative to the ledger)
+plugin "/abs/path/to/mymodule.py"
+```
+
+The plugin also runs in a sandbox that cannot see your virtualenv, so it must be **self-contained** (standard library plus the bundled beancount compat shim). See [Referencing a Python Plugin](../reference/plugins.md#referencing-a-python-plugin) for the full model.
 
 ## Performance Comparison
 

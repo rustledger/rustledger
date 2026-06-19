@@ -63,7 +63,8 @@ use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use config::{
-    build_config_from_entry, find_importers_config, find_matching_importers, load_importers_config,
+    apply_column, build_config_from_entry, find_importers_config, find_matching_importers,
+    load_importers_config,
 };
 // Used only by the WASM-importer-dir resolution path (gated below).
 #[cfg(feature = "python-plugin-wasm")]
@@ -71,6 +72,7 @@ use config::expand_tilde;
 use duplicate::{is_duplicate, load_existing_transactions};
 use format_num_pattern::Locale;
 use rustledger_core::{Directive, FormatConfig};
+use rustledger_importer::config::CsvConfigBuilder;
 use rustledger_importer::{Importer, ImporterConfig, ImporterRegistry, csv_importer::CsvImporter};
 use rustledger_parser::format::canonicalize_directives;
 use std::fs;
@@ -639,18 +641,41 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             let mut builder = ImporterConfig::csv()
                 .account(&args.account)
                 .currency(&args.currency)
-                .date_column(&args.date_column)
                 .date_format(&args.date_format)
-                .narration_column(&args.narration_column)
-                .amount_column(&args.amount_column)
                 .delimiter(args.delimiter)
                 .skip_rows(args.skip_rows)
                 .invert_sign(args.invert_sign)
                 .skip_zero_amounts(!args.include_zero_amounts)
                 .has_header(!args.no_header);
 
+            // Column flags accept either a header name or a 0-based index (see
+            // `apply_column`), so headerless CSVs can be imported positionally.
+            builder = apply_column(
+                builder,
+                &args.date_column,
+                CsvConfigBuilder::date_column_index,
+                |b, n| b.date_column(n),
+            );
+            builder = apply_column(
+                builder,
+                &args.narration_column,
+                CsvConfigBuilder::narration_column_index,
+                |b, n| b.narration_column(n),
+            );
+            builder = apply_column(
+                builder,
+                &args.amount_column,
+                CsvConfigBuilder::amount_column_index,
+                |b, n| b.amount_column(n),
+            );
+
             if let Some(payee) = &args.payee_column {
-                builder = builder.payee_column(payee);
+                builder = apply_column(
+                    builder,
+                    payee,
+                    CsvConfigBuilder::payee_column_index,
+                    |b, n| b.payee_column(n),
+                );
             }
 
             if let Some(debit) = &args.debit_column {
@@ -905,6 +930,42 @@ narration_column = 1
         assert_eq!(
             parse_column_value(entry.amount_column.as_ref().unwrap()),
             Some("3".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cli_numeric_column_args_extract_by_index() {
+        // Regression: numeric --date-column/--amount-column/--payee-column
+        // values are treated as 0-based indices (flags documented as "name or
+        // index"), so a headerless CSV imports instead of every row being
+        // dropped because no header matches "0"/"1"/"2".
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noheader.csv");
+        std::fs::write(&path, "2024-01-15,Coffee,-5.00\n2024-01-16,Lunch,-12.00\n").unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            "--no-header",
+            "--date-column",
+            "0",
+            "--payee-column",
+            "1",
+            "--amount-column",
+            "2",
+            path.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        run_with_writer(&args, &path, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(text.contains("Coffee"), "first row not imported: {text}");
+        assert!(text.contains("-5.00"), "first amount missing: {text}");
+        assert!(text.contains("Lunch"), "second row not imported: {text}");
+        assert_eq!(
+            text.matches("2024-01-").count(),
+            2,
+            "both rows should import via positional indices: {text}"
         );
     }
 

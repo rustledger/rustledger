@@ -1314,6 +1314,54 @@ fn test_python_module_plugin_reports_error() {
     );
 }
 
+/// Regression for #1432: a Python plugin referenced by *module name* must give
+/// an actionable error ("not supported by module name; reference the file
+/// directly") rather than the misleading "execution failed: module not found",
+/// which reads as a venv/PYTHONPATH problem the user cannot fix.
+#[cfg(feature = "python-plugins")]
+#[test]
+fn test_python_module_plugin_error_is_actionable() {
+    use rustledger_loader::{LoadOptions, load};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.beancount");
+    // A module name that the host Python cannot resolve, so the message is
+    // deterministic regardless of what is installed.
+    std::fs::write(
+        &path,
+        "plugin \"definitely.not.a.real.module.zzz\"\n2024-01-01 open Assets:Bank USD\n",
+    )
+    .unwrap();
+
+    let options = LoadOptions::default();
+    let ledger = load(&path, &options).expect("should not panic");
+
+    let plugin_err = ledger
+        .errors
+        .iter()
+        .find(|e| e.message.contains("definitely.not.a.real.module.zzz"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a plugin error, got: {:?}",
+                ledger.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+            )
+        });
+
+    // Actionable: names the unsupported form and points at the file-path fix.
+    assert!(
+        plugin_err.message.contains("not supported by module name")
+            && plugin_err.message.contains("reference the file directly"),
+        "expected an actionable file-path message, got: {:?}",
+        plugin_err.message
+    );
+    // Must NOT surface the misleading raw runtime error.
+    assert!(
+        !plugin_err.message.contains("execution failed"),
+        "should not surface the confusing 'execution failed' wrapper, got: {:?}",
+        plugin_err.message
+    );
+}
+
 /// Test that missing WASM file produces a clear error.
 #[cfg(feature = "wasm-plugins")]
 #[test]

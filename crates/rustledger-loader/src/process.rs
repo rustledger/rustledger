@@ -1143,7 +1143,40 @@ pub fn run_plugins(
                             apply_plugin_ops(directives, ops, errors, source_map)?;
                         }
                         Err(e) => {
-                            errors.push(LedgerError::error("E8002", e).with_phase("plugin"));
+                            // A bare module name (beancount's `plugin "pkg.mod"`)
+                            // is unsupported by design — only file-path
+                            // references load (see `discover_module_source`). The
+                            // raw "module not found" reads as a venv/PYTHONPATH
+                            // problem, so say it is unsupported and point at the
+                            // file path instead, resolving it via system Python
+                            // when possible. (#1432)
+                            let is_module_ref =
+                                ext != "py" && !raw_name.contains(std::path::MAIN_SEPARATOR);
+                            if is_module_ref {
+                                use rustledger_plugin::python::{
+                                    is_python_available, suggest_module_path,
+                                };
+                                let hint = is_python_available()
+                                    .then(|| suggest_module_path(raw_name))
+                                    .flatten();
+                                let msg = match hint {
+                                    Some(path) => format!(
+                                        "Python plugin \"{raw_name}\" is not supported by module \
+                                         name; reference the file directly: plugin \"{path}\""
+                                    ),
+                                    None => format!(
+                                        "Python plugin \"{raw_name}\" is not supported by module \
+                                         name; reference the file directly, e.g. plugin \"./{}.py\". \
+                                         The plugin sandbox cannot see the host venv, so the plugin \
+                                         must be self-contained (stdlib plus the beancount compat \
+                                         shim).",
+                                        raw_name.rsplit('.').next().unwrap_or(raw_name)
+                                    ),
+                                };
+                                errors.push(LedgerError::error("E8004", msg).with_phase("plugin"));
+                            } else {
+                                errors.push(LedgerError::error("E8002", e).with_phase("plugin"));
+                            }
                         }
                     }
                 }

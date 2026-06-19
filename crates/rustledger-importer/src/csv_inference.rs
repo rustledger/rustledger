@@ -326,6 +326,24 @@ const DATE_FORMATS: &[&str] = &[
     "%d/%m/%y",  // 15/01/24
 ];
 
+/// Whole-word keyword match against a (lowercased) CSV header.
+///
+/// A keyword matches only when it appears delimited by non-alphanumeric
+/// characters or string boundaries, so short tokens like "in"/"out" no longer
+/// match inside "running balance", "routing number", "beginning balance", etc.
+/// (which made `--auto` steal a running-balance column as the credit/amount).
+/// Multi-word keywords such as "transaction date" are matched as phrases.
+fn header_matches(header_lower: &str, keywords: &[&str]) -> bool {
+    keywords.iter().any(|kw| {
+        header_lower.match_indices(kw).any(|(start, matched)| {
+            let before = header_lower[..start].chars().next_back();
+            let after = header_lower[start + matched.len()..].chars().next();
+            before.is_none_or(|c| !c.is_alphanumeric())
+                && after.is_none_or(|c| !c.is_alphanumeric())
+        })
+    })
+}
+
 /// Find the date column and its format.
 fn find_date_column(
     headers: &[&str],
@@ -344,7 +362,7 @@ fn find_date_column(
 
     for (i, header) in headers.iter().enumerate() {
         let lower = header.to_lowercase();
-        if date_keywords.iter().any(|kw| lower.contains(kw)) {
+        if header_matches(&lower, &date_keywords) {
             candidates.push(i);
         }
     }
@@ -403,11 +421,11 @@ fn find_amount_columns(
     // Check headers first
     for (i, header) in headers.iter().enumerate() {
         let lower = header.to_lowercase();
-        if debit_keywords.iter().any(|kw| lower.contains(kw)) {
+        if header_matches(&lower, &debit_keywords) {
             debit_col = Some(i);
-        } else if credit_keywords.iter().any(|kw| lower.contains(kw)) {
+        } else if header_matches(&lower, &credit_keywords) {
             credit_col = Some(i);
-        } else if amount_keywords.iter().any(|kw| lower.contains(kw)) {
+        } else if header_matches(&lower, &amount_keywords) {
             amount_col = Some(i);
         }
     }
@@ -498,10 +516,9 @@ fn find_text_columns(
             continue;
         }
         let lower = header.to_lowercase();
-        if payee_keywords.iter().any(|kw| lower.contains(kw)) && payee_col.is_none() {
+        if header_matches(&lower, &payee_keywords) && payee_col.is_none() {
             payee_col = Some(i);
-        } else if narration_keywords.iter().any(|kw| lower.contains(kw)) && narration_col.is_none()
-        {
+        } else if header_matches(&lower, &narration_keywords) && narration_col.is_none() {
             narration_col = Some(i);
         }
     }
@@ -674,6 +691,29 @@ Date,Description,Debit,Credit
         assert!(config.debit_column.is_some());
         assert!(config.credit_column.is_some());
         assert!(config.amount_column.is_none());
+    }
+
+    #[test]
+    fn infer_does_not_steal_running_balance_as_credit() {
+        // Regression: "Running Balance" must not be classified as the credit
+        // column. The word "running" contains the letters "in", which the old
+        // substring match treated as the `in` credit keyword, stealing the
+        // running balance as the amount. With Debit + Credit + Running Balance,
+        // the pair must be the real Debit/Credit columns.
+        let csv = "\
+Date,Description,Debit,Credit,Running Balance
+2024-01-15,Deposit,,100.00,1100.00
+2024-01-16,Withdraw,40.00,,1060.00
+";
+        let config = infer_csv_config(csv).expect("should infer config");
+        match &config.debit_column {
+            Some(ColumnSpec::Name(n)) => assert_eq!(n, "Debit"),
+            other => panic!("debit column should be 'Debit', got {other:?}"),
+        }
+        match &config.credit_column {
+            Some(ColumnSpec::Name(n)) => assert_eq!(n, "Credit"),
+            other => panic!("credit column should be 'Credit', got {other:?}"),
+        }
     }
 
     #[test]

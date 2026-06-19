@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, anyhow};
 use format_num_pattern::Locale;
 use rustledger_importer::ImporterConfig;
+use rustledger_importer::config::CsvConfigBuilder;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -124,6 +125,24 @@ pub(super) struct ImporterEntry {
     pub(super) mappings: HashMap<String, String>,
 }
 
+/// Apply a CSV column flag that may be a header name or a bare 0-based index.
+///
+/// CSV column flags are documented as "name or index". A value that parses as a
+/// non-negative integer is treated as a positional index (so headerless CSVs
+/// import correctly); anything else is a column name. Shared by the CLI-argument
+/// and `importers.toml` config paths so both honor numeric columns.
+pub(super) fn apply_column(
+    builder: CsvConfigBuilder,
+    col: &str,
+    by_index: impl FnOnce(CsvConfigBuilder, usize) -> CsvConfigBuilder,
+    by_name: impl FnOnce(CsvConfigBuilder, &str) -> CsvConfigBuilder,
+) -> CsvConfigBuilder {
+    match col.parse::<usize>() {
+        Ok(i) => by_index(builder, i),
+        Err(_) => by_name(builder, col),
+    }
+}
+
 /// Parse a TOML value as a column spec string (either a string name or integer index).
 pub(super) fn parse_column_value(value: &toml::Value) -> Option<String> {
     match value {
@@ -183,7 +202,12 @@ pub(super) fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterC
     if let Some(ref val) = entry.date_column
         && let Some(col) = parse_column_value(val)
     {
-        builder = builder.date_column(&col);
+        builder = apply_column(
+            builder,
+            &col,
+            CsvConfigBuilder::date_column_index,
+            |b, n| b.date_column(n),
+        );
     }
     if let Some(ref fmt) = entry.date_format {
         builder = builder.date_format(fmt);
@@ -191,17 +215,32 @@ pub(super) fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterC
     if let Some(ref val) = entry.narration_column
         && let Some(col) = parse_column_value(val)
     {
-        builder = builder.narration_column(&col);
+        builder = apply_column(
+            builder,
+            &col,
+            CsvConfigBuilder::narration_column_index,
+            |b, n| b.narration_column(n),
+        );
     }
     if let Some(ref val) = entry.payee_column
         && let Some(col) = parse_column_value(val)
     {
-        builder = builder.payee_column(&col);
+        builder = apply_column(
+            builder,
+            &col,
+            CsvConfigBuilder::payee_column_index,
+            |b, n| b.payee_column(n),
+        );
     }
     if let Some(ref val) = entry.amount_column
         && let Some(col) = parse_column_value(val)
     {
-        builder = builder.amount_column(&col);
+        builder = apply_column(
+            builder,
+            &col,
+            CsvConfigBuilder::amount_column_index,
+            |b, n| b.amount_column(n),
+        );
     }
     if let Some(ref val) = entry.debit_column
         && let Some(col) = parse_column_value(val)

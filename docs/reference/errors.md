@@ -259,11 +259,29 @@ Or use `rledger doctor missing-open` to generate them.
 
 ## Document Errors (E8xxx)
 
-### E8001: Document Not Found
+### E8001: Document Not Found / Plugin Not Found
 
-**Cause**: Document directive references missing file.
+**Cause**: A `document` directive references a missing file, or a `plugin` name does not match any built-in, WASM, or resolvable Python plugin.
 
-**Fix**: Ensure file exists at specified path.
+**Fix**: Ensure the document file exists at the specified path; for plugins, check the name against the [Plugins Reference](plugins.md).
+
+### E8002: Plugin Execution Failed
+
+**Cause**: A plugin file was found but failed to load or run (e.g. a Python plugin raised, or its runtime could not be initialized). The message carries the underlying error.
+
+**Fix**: Read the embedded error. For Python plugins, ensure the file is [self-contained](plugins.md#the-plugin-sandbox-plugins-must-be-self-contained) (the sandbox cannot see your virtualenv).
+
+### E8004: Python Plugin Referenced by Module Name
+
+**Cause**: A custom Python plugin was referenced by **module name** (e.g. `plugin "mypackage.mymodule"`). rustledger does not search the system Python path, so only file-path references load.
+
+**Fix**: Reference the `.py` file directly — e.g. `plugin "/abs/path/to/mymodule.py"`. See [Referencing a Python Plugin](plugins.md#referencing-a-python-plugin).
+
+### E8005: Python Plugin Requires Feature
+
+**Cause**: A Python plugin was referenced in a build without the `python-plugins` feature.
+
+**Fix**: Use a build with Python plugin support, or switch to a native/WASM plugin.
 
 ## Date Warnings (E10xxx)
 

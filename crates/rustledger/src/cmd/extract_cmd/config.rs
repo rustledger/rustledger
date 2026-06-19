@@ -1,7 +1,6 @@
 //! Importers TOML configuration for extract command.
 
 use anyhow::{Context, Result, anyhow};
-use format_num_pattern::Locale;
 use rustledger_importer::ImporterConfig;
 use rustledger_importer::config::CsvConfigBuilder;
 use serde::Deserialize;
@@ -9,7 +8,6 @@ use std::collections::HashMap;
 use std::path::Path;
 #[cfg(feature = "python-plugin-wasm")]
 use std::path::PathBuf;
-use std::str::FromStr;
 
 /// Top-level importers configuration file.
 #[derive(Debug, Deserialize)]
@@ -253,9 +251,7 @@ pub(super) fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterC
         builder = builder.credit_column(&col);
     }
     if let Some(ref locale) = entry.amount_locale {
-        let locale =
-            Locale::from_str(locale).map_err(|_| anyhow!("{locale} is not a valid locale"))?;
-        builder = builder.amount_locale(locale);
+        builder = builder.amount_locale(super::parse_amount_locale(locale)?);
     }
     if let Some(ref format) = entry.amount_format {
         builder = builder.amount_format(format);

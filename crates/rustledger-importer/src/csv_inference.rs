@@ -16,9 +16,12 @@ use crate::config::{ColumnSpec, CsvConfig};
 
 /// Result of CSV format inference.
 ///
-/// `#[non_exhaustive]`: constructed only by [`infer_csv_config`]; marked so that
-/// adding inferred fields (as `amount_locale` was) is not a breaking change for
-/// downstream consumers of `rustledger-importer`.
+/// Constructed only by [`infer_csv_config`]. Marked `#[non_exhaustive]` so that
+/// *future* inferred fields can be added without breaking downstream consumers
+/// of `rustledger-importer`. Adding the attribute is itself a one-time breaking
+/// change for any external code that built this struct with a literal or matched
+/// it exhaustively (there is none in this workspace — it is only constructed
+/// here and consumed by field access via [`Self::to_csv_config`]).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct InferredCsvConfig {

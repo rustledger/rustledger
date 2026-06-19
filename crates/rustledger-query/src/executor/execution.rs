@@ -90,7 +90,7 @@ impl Executor<'_> {
             // - Otherwise, implicitly group by non-aggregate columns in SELECT
             //   (matches Python beancount behavior)
             let group_by_exprs: Option<Vec<Expr>> = if let Some(ref group_exprs) = query.group_by {
-                Some(Self::resolve_group_by_aliases(group_exprs, &query.targets))
+                Some(Self::resolve_group_by_aliases(group_exprs, &query.targets)?)
             } else {
                 let implicit = Self::extract_implicit_group_by_exprs(&query.targets);
                 if implicit.is_empty() {
@@ -208,7 +208,8 @@ impl Executor<'_> {
         // means the strip-hidden step below operates on the
         // pre-pivot shape where hidden cols are still trailing).
         if let Some(order_by) = &query.order_by {
-            self.sort_results(&mut result, order_by)?;
+            let visible_cols = result.columns.len() - num_hidden;
+            self.sort_results(&mut result, order_by, visible_cols)?;
         } else if has_grouping && !result.rows.is_empty() && !result.columns.is_empty() {
             // When there's GROUP BY (explicit or implicit) but no ORDER BY, sort by
             // the first column for deterministic output (matches Python beancount behavior).
@@ -223,7 +224,8 @@ impl Executor<'_> {
                 expr: Expr::Column(first_col),
                 direction: SortDirection::Asc,
             }];
-            self.sort_results(&mut result, &default_order)?;
+            let visible_cols = result.columns.len() - num_hidden;
+            self.sort_results(&mut result, &default_order, visible_cols)?;
         }
 
         // Remove hidden columns after sorting (BEFORE PIVOT). With this
@@ -367,7 +369,8 @@ impl Executor<'_> {
 
         // Apply ORDER BY
         if let Some(order_by) = &outer_query.order_by {
-            self.sort_results(&mut result, order_by)?;
+            let visible_cols = result.columns.len();
+            self.sort_results(&mut result, order_by, visible_cols)?;
         }
 
         // Apply LIMIT
@@ -480,7 +483,8 @@ impl Executor<'_> {
 
         // Apply ORDER BY
         if let Some(order_by) = &query.order_by {
-            self.sort_results(&mut result, order_by)?;
+            let visible_cols = result.columns.len() - num_hidden;
+            self.sort_results(&mut result, order_by, visible_cols)?;
         }
 
         // Remove hidden columns after sorting
@@ -519,7 +523,7 @@ impl Executor<'_> {
         // Determine GROUP BY expressions.
         // If no explicit GROUP BY, implicitly group by non-aggregate columns (beancount compat).
         let group_by_exprs: Option<Vec<Expr>> = if let Some(ref exprs) = query.group_by {
-            Some(Self::resolve_group_by_aliases(exprs, &query.targets))
+            Some(Self::resolve_group_by_aliases(exprs, &query.targets)?)
         } else {
             let implicit = Self::extract_implicit_group_by_exprs(&query.targets);
             if implicit.is_empty() {
@@ -619,7 +623,8 @@ impl Executor<'_> {
 
         // Apply ORDER BY
         if let Some(order_by) = &query.order_by {
-            self.sort_results(&mut result, order_by)?;
+            let visible_cols = result.columns.len();
+            self.sort_results(&mut result, order_by, visible_cols)?;
         }
 
         // Apply LIMIT

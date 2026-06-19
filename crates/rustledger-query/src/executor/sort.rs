@@ -13,6 +13,12 @@ impl Executor<'_> {
         &self,
         result: &mut QueryResult,
         order_by: &[OrderSpec],
+        // Number of user-visible SELECT columns. `result.columns` may have
+        // trailing hidden ORDER BY columns appended (stripped after sorting),
+        // so positional ordinals must be range-checked against this, not
+        // `result.columns.len()`, or `ORDER BY <n>` could address a hidden
+        // column instead of erroring.
+        visible_cols: usize,
     ) -> Result<(), QueryError> {
         if order_by.is_empty() {
             return Ok(());
@@ -37,10 +43,9 @@ impl Executor<'_> {
                 // no-ops the sort.
                 Expr::Literal(Literal::Integer(n)) => {
                     let n = *n;
-                    if n < 1 || (n as usize) > result.columns.len() {
+                    if n < 1 || (n as usize) > visible_cols {
                         return Err(QueryError::Evaluation(format!(
-                            "ORDER BY position {n} is out of range (1..={})",
-                            result.columns.len()
+                            "ORDER BY position {n} is out of range (1..={visible_cols})"
                         )));
                     }
                     (n as usize) - 1

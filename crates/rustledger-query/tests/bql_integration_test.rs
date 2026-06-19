@@ -9384,6 +9384,11 @@ fn test_group_by_positional_ordinal() {
         accounts,
         vec!["Assets:Cash", "Expenses:Auto", "Expenses:Food"]
     );
+
+    // Out-of-range position errors instead of silently grouping on the
+    // constant (which would collapse every row into one group).
+    let err = execute_query_err("SELECT account, sum(number) GROUP BY 5", &directives);
+    assert!(err.to_string().contains("out of range"), "got: {err}");
 }
 
 #[test]

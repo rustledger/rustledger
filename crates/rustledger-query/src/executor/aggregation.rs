@@ -67,7 +67,10 @@ impl<'a> Executor<'a> {
     /// replace it with the aliased expression. For example, in:
     ///   `SELECT month(date) AS m, COUNT(*) GROUP BY m`
     /// the GROUP BY `m` is resolved to `month(date)`.
-    pub(super) fn resolve_group_by_aliases(group_exprs: &[Expr], targets: &[Target]) -> Vec<Expr> {
+    pub(super) fn resolve_group_by_aliases(
+        group_exprs: &[Expr],
+        targets: &[Target],
+    ) -> Result<Vec<Expr>, QueryError> {
         let alias_map: HashMap<String, Expr> = targets
             .iter()
             .filter_map(|t| t.alias.as_ref().map(|a| (a.to_uppercase(), t.expr.clone())))
@@ -79,19 +82,24 @@ impl<'a> Executor<'a> {
                 // Positional ordinal: `GROUP BY 1` groups by the 1st SELECT
                 // column (1-based, beanquery/SQL semantics). Without this the
                 // integer is grouped on as a constant, collapsing every row
-                // into one group.
-                if let Expr::Literal(Literal::Integer(n)) = expr
-                    && *n >= 1
-                    && (*n as usize) <= targets.len()
-                {
-                    return targets[(*n as usize) - 1].expr.clone();
+                // into one group. Out-of-range positions error, matching the
+                // `ORDER BY <n>` behavior, rather than silently collapsing.
+                if let Expr::Literal(Literal::Integer(n)) = expr {
+                    let n = *n;
+                    if n < 1 || (n as usize) > targets.len() {
+                        return Err(QueryError::Evaluation(format!(
+                            "GROUP BY position {n} is out of range (1..={})",
+                            targets.len()
+                        )));
+                    }
+                    return Ok(targets[(n as usize) - 1].expr.clone());
                 }
                 if let Expr::Column(name) = expr
                     && let Some(target_expr) = alias_map.get(&name.to_uppercase())
                 {
-                    target_expr.clone()
+                    Ok(target_expr.clone())
                 } else {
-                    expr.clone()
+                    Ok(expr.clone())
                 }
             })
             .collect()

@@ -169,7 +169,8 @@ impl Executor<'_> {
                 Ok(obj.get(&key).cloned().unwrap_or(Value::Null))
             }
             _ => Err(QueryError::Type(
-                "GETITEM expects (inventory|metadata, string)".to_string(),
+                "GETITEM expects (inventory, string), (metadata, string), or (object, string)"
+                    .to_string(),
             )),
         }
     }

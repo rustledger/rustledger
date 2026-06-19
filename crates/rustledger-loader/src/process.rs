@@ -1627,11 +1627,15 @@ fn run_wasm_plugin(
 /// file-vs-module test used by the Python runtime (case-insensitive extension).
 #[cfg(feature = "python-plugins")]
 fn is_python_module_name(resolved: &std::path::Path, raw_name: &str) -> bool {
+    // Treat both `/` and the platform separator as path markers: forward
+    // slashes are common (and accepted) even on Windows, where
+    // `MAIN_SEPARATOR` is `\`, so a `plugins/foo.py` ref must not be mistaken
+    // for a module name.
     !resolved.exists()
         && !std::path::Path::new(raw_name)
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("py"))
-        && !raw_name.contains(std::path::MAIN_SEPARATOR)
+        && !raw_name.contains(['/', std::path::MAIN_SEPARATOR])
 }
 
 /// Actionable error for a Python plugin referenced by module name. `file` is the
@@ -1835,5 +1839,62 @@ mod sanitize_tests {
         });
         sanitize_inner_posting_spans(&mut d, &sm); // no panic, no change
         assert!(matches!(d, Directive::Open(_)));
+    }
+}
+
+#[cfg(all(test, feature = "python-plugins"))]
+mod python_plugin_ref_tests {
+    use super::{is_python_module_name, module_ref_message};
+    use std::path::Path;
+
+    #[test]
+    fn bare_module_name_is_a_module() {
+        // No `.py`, no separator, and the resolved path does not exist.
+        let missing = Path::new("/nonexistent/beancount.plugins.foo");
+        assert!(is_python_module_name(missing, "beancount.plugins.foo"));
+    }
+
+    #[test]
+    fn py_file_is_not_a_module() {
+        let missing = Path::new("/nonexistent/myplugin.py");
+        assert!(!is_python_module_name(missing, "myplugin.py"));
+        // Case-insensitive extension (mirrors the runtime).
+        assert!(!is_python_module_name(
+            Path::new("/nonexistent/MyPlugin.PY"),
+            "MyPlugin.PY"
+        ));
+    }
+
+    #[test]
+    fn path_separated_ref_is_not_a_module() {
+        // Both `/` and the platform separator count as path markers, so a
+        // forward-slash ref is a file even on Windows.
+        assert!(!is_python_module_name(
+            Path::new("/nonexistent/plugins/foo"),
+            "plugins/foo"
+        ));
+    }
+
+    #[test]
+    fn existing_file_is_not_a_module() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pkg.mod");
+        std::fs::write(&file, "").unwrap();
+        // A real file named like a module is still a file reference.
+        assert!(!is_python_module_name(&file, "pkg.mod"));
+    }
+
+    #[test]
+    fn message_uses_resolved_path_when_known() {
+        let msg = module_ref_message("pkg.mod", Some("/abs/pkg/mod.py"));
+        assert!(msg.contains("is not supported by module name"));
+        assert!(msg.contains("plugin \"/abs/pkg/mod.py\""));
+    }
+
+    #[test]
+    fn message_falls_back_to_guidance_when_unresolved() {
+        let msg = module_ref_message("pkg.mod", None);
+        assert!(msg.contains("reference the file directly"));
+        assert!(msg.contains("self-contained"));
     }
 }

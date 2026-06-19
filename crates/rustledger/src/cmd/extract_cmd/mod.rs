@@ -631,6 +631,22 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             if args.include_zero_amounts {
                 csv_config.skip_zero_amounts = false;
             }
+            // An explicit --amount-locale / --amount-format overrides the
+            // separator locale inferred from the data. Report the *effective*
+            // locale (override if given, otherwise the inferred one) so the
+            // printed summary matches what's actually used.
+            if let Some(locale) = &args.amount_locale {
+                let Ok(locale) = Locale::from_str(locale) else {
+                    return Err(anyhow!("{locale} is not a valid locale"));
+                };
+                csv_config.amount_locale = Some(locale);
+                eprintln!("  amount_locale: {locale:?} (from --amount-locale)");
+            } else if let Some(locale) = inferred.amount_locale {
+                eprintln!("  amount_locale: {locale:?} (inferred)");
+            }
+            if let Some(format) = &args.amount_format {
+                csv_config.amount_format = Some(format.clone());
+            }
             ImporterConfig {
                 account: args.account.clone(),
                 currency: Some(args.currency.clone()),

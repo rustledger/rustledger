@@ -10,6 +10,8 @@
 //!
 //! This enables zero-config import for ~80% of bank CSV exports.
 
+use format_num_pattern::Locale;
+
 use crate::config::{ColumnSpec, CsvConfig};
 
 /// Result of CSV format inference.
@@ -33,6 +35,11 @@ pub struct InferredCsvConfig {
     pub narration_column: Option<ColumnSpec>,
     /// Payee column (if separate from narration).
     pub payee_column: Option<ColumnSpec>,
+    /// Inferred amount locale (decimal/grouping separators). `Some(de_DE)` when
+    /// the amounts look comma-decimal (e.g. `-54,23`, `2.500,00`); `None` when
+    /// they look period-decimal or carry no signal (the parser defaults to
+    /// POSIX). An explicit `--amount-locale` overrides this.
+    pub amount_locale: Option<Locale>,
     /// Overall confidence in the inference (0.0 to 1.0).
     pub confidence: f64,
 }
@@ -49,6 +56,7 @@ impl InferredCsvConfig {
             amount_column: self.amount_column.clone(),
             debit_column: self.debit_column.clone(),
             credit_column: self.credit_column.clone(),
+            amount_locale: self.amount_locale.or(Some(Locale::POSIX)),
             has_header: self.has_header,
             delimiter: self.delimiter,
             ..CsvConfig::default()
@@ -171,6 +179,14 @@ pub fn infer_csv_config(content: &str) -> Option<InferredCsvConfig> {
         }
     });
 
+    // Infer the decimal separator from the amount-bearing columns so that
+    // comma-decimal exports (e.g. "-54,23", "2.500,00") parse correctly under
+    // --auto instead of being read with a POSIX (period-decimal) locale.
+    let amount_locale = infer_amount_locale(
+        &sample,
+        [amount_col, debit_col, credit_col].into_iter().flatten(),
+    );
+
     Some(InferredCsvConfig {
         delimiter,
         has_header,
@@ -181,8 +197,55 @@ pub fn infer_csv_config(content: &str) -> Option<InferredCsvConfig> {
         credit_column,
         narration_column,
         payee_column,
+        amount_locale,
         confidence: f64::min(confidence, 1.0),
     })
+}
+
+/// Infer an amount [`Locale`] from the sampled values in the amount-bearing
+/// columns. Returns `Some(de_DE)` when the values look comma-decimal, else
+/// `None` (callers default to POSIX).
+///
+/// When a value has both `.` and `,`, the rightmost is taken as the decimal
+/// separator (`2.500,00` -> comma-decimal, `1,234.56` -> period-decimal). A
+/// lone comma counts as a decimal separator only when it has 1-2 trailing
+/// digits, so a thousands group like `1,234` stays period-style. The columns
+/// vote; the majority wins.
+fn infer_amount_locale(
+    sample: &[&Vec<String>],
+    cols: impl Iterator<Item = usize>,
+) -> Option<Locale> {
+    let cols: Vec<usize> = cols.collect();
+    let mut comma_decimal = 0usize;
+    let mut period_decimal = 0usize;
+    for row in sample {
+        for &col in &cols {
+            let Some(cell) = row.get(col) else { continue };
+            let v = cell.trim();
+            if v.is_empty() {
+                continue;
+            }
+            match (v.rfind(','), v.rfind('.')) {
+                (Some(comma), Some(dot)) => {
+                    if comma > dot {
+                        comma_decimal += 1;
+                    } else {
+                        period_decimal += 1;
+                    }
+                }
+                (Some(comma), None) => {
+                    if (1..=2).contains(&(v.len() - comma - 1)) {
+                        comma_decimal += 1;
+                    } else {
+                        period_decimal += 1;
+                    }
+                }
+                (None, Some(_)) => period_decimal += 1,
+                (None, None) => {}
+            }
+        }
+    }
+    (comma_decimal > period_decimal).then_some(Locale::de_DE)
 }
 
 // ============================================================================
@@ -726,6 +789,49 @@ Date,Payee,Description,Amount
         let config = infer_csv_config(csv).expect("should infer config");
         assert!(config.payee_column.is_some());
         assert!(config.narration_column.is_some());
+    }
+
+    #[test]
+    fn infer_comma_decimal_locale() {
+        // Comma-decimal exports (-54,23 ; 2.500,00) must infer a comma-decimal
+        // locale so --auto parses them correctly instead of as POSIX (which
+        // read -54,23 as -5423 and 2.500,00 as 2.50000).
+        let csv = "\
+Date;Description;Amount
+2024-01-15;Coffee;-54,23
+2024-01-16;Salary;2.500,00
+";
+        let config = infer_csv_config(csv).expect("should infer config");
+        assert!(
+            config.amount_locale.is_some(),
+            "expected a comma-decimal locale, got {:?}",
+            config.amount_locale
+        );
+    }
+
+    #[test]
+    fn infer_period_decimal_locale_is_none() {
+        // Period-decimal amounts must not be mistaken for European.
+        let csv = "\
+Date,Description,Amount
+2024-01-15,Coffee,-54.23
+2024-01-16,Salary,2500.00
+";
+        let config = infer_csv_config(csv).expect("should infer config");
+        assert!(config.amount_locale.is_none());
+    }
+
+    #[test]
+    fn infer_thousands_comma_not_mistaken_for_decimal() {
+        // A lone comma with 3 trailing digits is a thousands group, not a
+        // decimal separator, so it must stay period-style.
+        let csv = "\
+Date;Description;Amount
+2024-01-15;Coffee;1,234
+2024-01-16;Salary;5,678
+";
+        let config = infer_csv_config(csv).expect("should infer config");
+        assert!(config.amount_locale.is_none());
     }
 
     #[test]

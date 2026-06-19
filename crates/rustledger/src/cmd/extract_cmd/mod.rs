@@ -451,6 +451,13 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
     Ok(registry)
 }
 
+/// Parse an `--amount-locale` value (e.g. `de_DE`, `en_US`) into a [`Locale`],
+/// with a consistent error for an unrecognized name. Shared by the `--auto`
+/// and raw-CLI config paths.
+fn parse_amount_locale(name: &str) -> Result<Locale> {
+    Locale::from_str(name).map_err(|_| anyhow!("{name} is not a valid locale"))
+}
+
 /// Run the extract command with the given arguments, writing extracted
 /// directives to stdout.
 ///
@@ -636,9 +643,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             // locale (override if given, otherwise the inferred one) so the
             // printed summary matches what's actually used.
             if let Some(locale) = &args.amount_locale {
-                let Ok(locale) = Locale::from_str(locale) else {
-                    return Err(anyhow!("{locale} is not a valid locale"));
-                };
+                let locale = parse_amount_locale(locale)?;
                 csv_config.amount_locale = Some(locale);
                 eprintln!("  amount_locale: {locale:?} (from --amount-locale)");
             } else if let Some(locale) = inferred.amount_locale {
@@ -703,11 +708,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             }
 
             if let Some(locale) = &args.amount_locale {
-                let Ok(locale) = Locale::from_str(locale) else {
-                    return Err(anyhow!("{locale} is not a valid locale"));
-                };
-
-                builder = builder.amount_locale(locale);
+                builder = builder.amount_locale(parse_amount_locale(locale)?);
             }
 
             if let Some(format) = &args.amount_format {

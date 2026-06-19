@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use rust_decimal::Decimal;
 use rustledger_core::{Amount, Inventory, Position};
 
-use crate::ast::{Expr, Target, UnaryOperator};
+use crate::ast::{Expr, Literal, Target, UnaryOperator};
 use crate::error::QueryError;
 
 use super::Executor;
@@ -76,6 +76,16 @@ impl<'a> Executor<'a> {
         group_exprs
             .iter()
             .map(|expr| {
+                // Positional ordinal: `GROUP BY 1` groups by the 1st SELECT
+                // column (1-based, beanquery/SQL semantics). Without this the
+                // integer is grouped on as a constant, collapsing every row
+                // into one group.
+                if let Expr::Literal(Literal::Integer(n)) = expr
+                    && *n >= 1
+                    && (*n as usize) <= targets.len()
+                {
+                    return targets[(*n as usize) - 1].expr.clone();
+                }
                 if let Expr::Column(name) = expr
                     && let Some(target_expr) = alias_map.get(&name.to_uppercase())
                 {

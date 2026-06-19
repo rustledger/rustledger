@@ -31,6 +31,20 @@ impl Executor<'_> {
         for spec in order_by {
             // Try to resolve the expression to a column index
             let idx = match &spec.expr {
+                // Positional ORDER BY: `ORDER BY 1` sorts by the first SELECT
+                // column (1-based), matching beanquery / SQL. Without this the
+                // integer is treated as a constant expression and silently
+                // no-ops the sort.
+                Expr::Literal(Literal::Integer(n)) => {
+                    let n = *n;
+                    if n < 1 || (n as usize) > result.columns.len() {
+                        return Err(QueryError::Evaluation(format!(
+                            "ORDER BY position {n} is out of range (1..={})",
+                            result.columns.len()
+                        )));
+                    }
+                    (n as usize) - 1
+                }
                 Expr::Column(name) => column_indices
                     .get(name.as_str())
                     .copied()
@@ -395,8 +409,18 @@ impl Executor<'_> {
                 format!("({})", strs.join(", "))
             }
             Value::Metadata(meta) => {
-                // Format metadata as key=value pairs
-                let pairs: Vec<String> = meta.iter().map(|(k, v)| format!("{k}: {v:?}")).collect();
+                // Render each metadata value through the same Value path as
+                // every other cell, so a string shows as `good` rather than
+                // the Debug form `String("good")`.
+                let pairs: Vec<String> = meta
+                    .iter()
+                    .map(|(k, v)| {
+                        format!(
+                            "{k}: {}",
+                            Self::value_to_string(&Self::meta_value_to_value(Some(v)))
+                        )
+                    })
+                    .collect();
                 format!("{{{}}}", pairs.join(", "))
             }
             Value::Interval(i) => format!("{} {:?}", i.count, i.unit),

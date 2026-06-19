@@ -9249,6 +9249,144 @@ fn test_entry_meta_from_postings_table() {
 }
 
 #[test]
+fn test_getitem_reads_posting_metadata() {
+    // Regression: `getitem(meta, key)` must read the metadata dict (beanquery's
+    // `dict.get` semantics), returning the value or null, instead of rejecting
+    // it with "GETITEM expects (inventory, string)". Found by dogfooding;
+    // beanquery returns the value on the matching posting and null elsewhere.
+    let mut food = Posting::new("Expenses:Food", Amount::new(dec!(10), "USD"));
+    food.meta.insert(
+        "rating".to_string(),
+        rustledger_core::MetaValue::String("good".to_string()),
+    );
+    let directives = vec![
+        Directive::Open(Open::new(date(2022, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2022, 1, 1), "Expenses:Food")),
+        Directive::Transaction({
+            let mut txn = Transaction::new(date(2022, 4, 1), "Lunch");
+            txn.postings = vec![
+                rustledger_core::Spanned::synthesized(food),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-10), "USD"),
+                )),
+            ];
+            txn
+        }),
+    ];
+
+    let result = execute_query("SELECT account, getitem(meta, 'rating')", &directives);
+    assert_eq!(result.rows.len(), 2);
+    assert_eq!(result.rows[0][1], Value::String("good".to_string()));
+    assert_eq!(result.rows[1][1], Value::Null);
+}
+
+#[test]
+fn test_order_by_positional_ordinal() {
+    // Regression: `ORDER BY <n>` sorts by the n-th SELECT column (1-based,
+    // beanquery/SQL semantics) instead of treating the integer as a constant
+    // expression, which silently no-ops the sort. Out-of-range positions error.
+    let directives = vec![
+        Directive::Open(Open::new(date(2022, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2022, 1, 1), "Expenses:Food")),
+        Directive::Open(Open::new(date(2022, 1, 1), "Expenses:Auto")),
+        Directive::Transaction({
+            let mut txn = Transaction::new(date(2022, 4, 1), "x");
+            txn.postings = vec![
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(30), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Expenses:Auto",
+                    Amount::new(dec!(10), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-40), "USD"),
+                )),
+            ];
+            txn
+        }),
+    ];
+    let accounts = |q: &str| -> Vec<Value> {
+        execute_query(q, &directives)
+            .rows
+            .iter()
+            .map(|row| row[0].clone())
+            .collect()
+    };
+
+    // ORDER BY 1 -> first column (account) ascending.
+    assert_eq!(
+        accounts("SELECT account, number ORDER BY 1"),
+        vec![
+            Value::String("Assets:Cash".to_string()),
+            Value::String("Expenses:Auto".to_string()),
+            Value::String("Expenses:Food".to_string()),
+        ]
+    );
+    // ORDER BY 2 DESC -> second column (number) descending: 30, 10, -40.
+    assert_eq!(
+        accounts("SELECT account, number ORDER BY 2 DESC"),
+        vec![
+            Value::String("Expenses:Food".to_string()),
+            Value::String("Expenses:Auto".to_string()),
+            Value::String("Assets:Cash".to_string()),
+        ]
+    );
+    // Out-of-range position errors instead of silently no-opping.
+    let err = execute_query_err("SELECT account ORDER BY 5", &directives);
+    assert!(err.to_string().contains("out of range"), "got: {err}");
+}
+
+#[test]
+fn test_group_by_positional_ordinal() {
+    // Regression: `GROUP BY <n>` groups by the n-th SELECT column (1-based)
+    // instead of grouping on the integer as a constant, which collapsed every
+    // row into a single group with a wrong aggregate. Mirrors the ORDER BY fix.
+    let directives = vec![
+        Directive::Open(Open::new(date(2022, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2022, 1, 1), "Expenses:Food")),
+        Directive::Open(Open::new(date(2022, 1, 1), "Expenses:Auto")),
+        Directive::Transaction({
+            let mut txn = Transaction::new(date(2022, 4, 1), "x");
+            txn.postings = vec![
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(30), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Expenses:Auto",
+                    Amount::new(dec!(10), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-40), "USD"),
+                )),
+            ];
+            txn
+        }),
+    ];
+    let result = execute_query("SELECT account, sum(number) GROUP BY 1", &directives);
+    // One group per distinct account, not a single collapsed group.
+    assert_eq!(result.rows.len(), 3);
+    let mut accounts: Vec<String> = result
+        .rows
+        .iter()
+        .map(|r| match &r[0] {
+            Value::String(s) => s.clone(),
+            other => panic!("expected account string, got {other:?}"),
+        })
+        .collect();
+    accounts.sort();
+    assert_eq!(
+        accounts,
+        vec!["Assets:Cash", "Expenses:Auto", "Expenses:Food"]
+    );
+}
+
+#[test]
 fn test_entry_meta_from_entries_table() {
     let directives = vec![
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),

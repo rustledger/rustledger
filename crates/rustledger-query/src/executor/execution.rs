@@ -270,6 +270,13 @@ impl Executor<'_> {
 
         let mut hidden = Vec::new();
         for spec in order_by {
+            // Positional ordinals (`ORDER BY 1`) reference an existing SELECT
+            // column by position; they are resolved in `sort_results` and must
+            // not be materialized as a hidden constant column (which would make
+            // the sort key the literal integer for every row).
+            if matches!(spec.expr, Expr::Literal(crate::ast::Literal::Integer(_))) {
+                continue;
+            }
             // For aggregate queries, only allow ORDER BY on expressions that are
             // in GROUP BY or are themselves aggregates.
             if let Some(group_by) = &query.group_by {

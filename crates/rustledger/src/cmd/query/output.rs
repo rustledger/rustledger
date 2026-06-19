@@ -574,7 +574,7 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
         }
         Value::Metadata(meta) => meta
             .iter()
-            .map(|(k, v)| format!("{k}: {v:?}"))
+            .map(|(k, v)| format!("{k}: {v}"))
             .collect::<Vec<_>>()
             .join(", "),
         Value::Interval(interval) => {
@@ -596,6 +596,28 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
             format!("{{{}}}", pairs.join(", "))
         }
         Value::Null => String::new(),
+    }
+}
+
+/// Convert a metadata value to a typed JSON value, mirroring `value_to_json`'s
+/// conventions (decimals as strings to preserve precision). Without this the
+/// JSON output leaked the Rust Debug form (e.g. `"String(\"good\")"`).
+fn meta_value_to_json(v: &rustledger_core::MetaValue) -> serde_json::Value {
+    use rustledger_core::MetaValue;
+    match v {
+        MetaValue::String(s) => serde_json::Value::String(s.clone()),
+        MetaValue::Number(n) => serde_json::json!(n.to_string()),
+        MetaValue::Bool(b) => serde_json::Value::Bool(*b),
+        MetaValue::Date(d) => serde_json::Value::String(d.to_string()),
+        MetaValue::Amount(a) => serde_json::json!({
+            "number": a.number.to_string(),
+            "currency": a.currency,
+        }),
+        MetaValue::Account(a) => serde_json::Value::String(a.to_string()),
+        MetaValue::Currency(c) => serde_json::Value::String(c.to_string()),
+        MetaValue::Tag(t) => serde_json::Value::String(t.to_string()),
+        MetaValue::Link(l) => serde_json::Value::String(l.to_string()),
+        MetaValue::None => serde_json::Value::Null,
     }
 }
 
@@ -634,7 +656,7 @@ fn value_to_json(value: &Value) -> serde_json::Value {
         Value::Metadata(meta) => {
             let obj: serde_json::Map<String, serde_json::Value> = meta
                 .iter()
-                .map(|(k, v)| (k.clone(), serde_json::json!(format!("{v:?}"))))
+                .map(|(k, v)| (k.clone(), meta_value_to_json(v)))
                 .collect();
             serde_json::Value::Object(obj)
         }
@@ -781,6 +803,27 @@ mod tests {
             "sub-cent USD residual must render as blank to match bean-query; \
              got {rendered:?}"
         );
+    }
+
+    #[test]
+    fn test_metadata_renders_values_not_debug_form() {
+        // Regression: a metadata dict must render its values through the normal
+        // value path, not the Rust Debug form `String("good")`, in both the
+        // text and JSON output.
+        use rustledger_core::{MetaValue, Metadata};
+        let mut meta = Metadata::default();
+        meta.insert("rating".to_string(), MetaValue::String("good".to_string()));
+        let value = Value::Metadata(Box::new(meta));
+
+        let text = format_value(&value, false, &DisplayContext::new());
+        assert!(
+            !text.contains("String("),
+            "Debug form leaked in text: {text:?}"
+        );
+        assert!(text.contains("rating: \"good\""), "got: {text:?}");
+
+        let json = value_to_json(&value);
+        assert_eq!(json["rating"], serde_json::json!("good"));
     }
 
     /// Sister test: a position that's NOT sub-precision should still render.

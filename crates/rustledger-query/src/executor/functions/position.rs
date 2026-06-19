@@ -159,8 +159,17 @@ impl Executor<'_> {
                     Ok(Value::Amount(Amount::new(total, currency)))
                 }
             }
+            // `getitem(meta, "key")` reads the metadata dict, returning the
+            // value or null when absent. Mirrors beanquery, where getitem is
+            // `dict.get(key)` on the meta map.
+            (Value::Metadata(meta), Value::String(key)) => {
+                Ok(Self::meta_value_to_value(meta.get(&key)))
+            }
+            (Value::Object(obj), Value::String(key)) => {
+                Ok(obj.get(&key).cloned().unwrap_or(Value::Null))
+            }
             _ => Err(QueryError::Type(
-                "GETITEM expects (inventory, string)".to_string(),
+                "GETITEM expects (inventory|metadata, string)".to_string(),
             )),
         }
     }

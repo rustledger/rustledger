@@ -395,12 +395,32 @@ jobs:
         run: cargo build -p rustledger-ffi-component --target wasm32-wasip2
       - name: Run parity tests
         run: cargo test -p rustledger-ffi-component-tests
+
+  # Wire-contract version gate (#1395). The Component-Model `world.wit` is the
+  # versioned wire contract that replaced the hand-parsed FFI-WASI JSON format
+  # (#1384). An interface change must bump `package rustledger:ledger@X.Y.Z;` so
+  # a wire-shape change can't ship silently — the failure that pinned rustfava
+  # to v0.11 for five releases (the v0.16 cost-number break).
+  #
+  # Runs on EVERY PR (no `should_build` gate) so it self-validates and stays a
+  # meaningful required check; the script no-ops when the WIT interface is
+  # unchanged (comments/whitespace ignored), so non-WIT PRs pass trivially.
+  wit-version-gate:
+    name: WIT Version Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+      - name: WIT interface change requires a package-version bump
+        run: ./scripts/check-wit-version-bump.sh "${{ github.event.pull_request.base.sha }}"
+
   # Gate job - all core checks must pass (or be skipped on non-code PRs)
   build:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, ci, doctest, regressions, bindings-fresh, component-parity]
+    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, ci, doctest, regressions, bindings-fresh, component-parity, wit-version-gate]
     steps:
       - name: Check results
         run: |
@@ -410,6 +430,15 @@ jobs:
           echo "plugin-test-quality result: $plugin_quality"
           if [[ "$plugin_quality" != "success" ]]; then
             echo "plugin-test-quality must pass"
+            exit 1
+          fi
+
+          # wit-version-gate always runs (no should_build gate), so its result
+          # is always required — a WIT contract change must bump the version.
+          wit_gate="${{ needs.wit-version-gate.result }}"
+          echo "wit-version-gate result: $wit_gate"
+          if [[ "$wit_gate" != "success" ]]; then
+            echo "wit-version-gate must pass"
             exit 1
           fi
 

@@ -89,15 +89,43 @@ const LEDGER: &str = "\
   Assets:Cash
 ";
 
+/// The `major.minor` of the `package rustledger:ledger@X.Y.Z;` line in the WIT
+/// contract — the single source of truth the runtime `version()` (i.e. the
+/// `API_VERSION` const) must mirror.
+fn wit_package_api_version() -> String {
+    const WIT: &str = include_str!("../../rustledger-ffi-component/wit/world.wit");
+    let full = WIT
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("package rustledger:ledger@"))
+        .and_then(|s| s.split(';').next())
+        .expect("world.wit must declare `package rustledger:ledger@X.Y.Z;`")
+        .trim();
+    let mut parts = full.split('.');
+    let major = parts.next().expect("major");
+    let minor = parts.next().expect("minor");
+    format!("{major}.{minor}")
+}
+
+/// The runtime `version()` (the `API_VERSION` const) must stay in lockstep with
+/// the WIT package version (#1395). If a contract change bumps
+/// `package rustledger:ledger@X.Y.Z;` but not `API_VERSION` (or vice-versa),
+/// embedders negotiating on `version()` would see a version that doesn't match
+/// the actual contract. The CI `wit-version-gate` ensures the *package* version
+/// is bumped on a WIT change; this test ensures the *runtime* version tracks it.
 #[test]
-fn version_matches() -> Result<()> {
+fn version_matches_wit_package() -> Result<()> {
     if !component_path().exists() {
         eprintln!("skip: component wasm not built");
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
     let version = inst.rustledger_ledger_ledger().call_version(&mut store)?;
-    assert_eq!(version, "2.1");
+    assert_eq!(
+        version,
+        wit_package_api_version(),
+        "runtime version() / API_VERSION must equal the world.wit package \
+         major.minor — bump them together",
+    );
     Ok(())
 }
 

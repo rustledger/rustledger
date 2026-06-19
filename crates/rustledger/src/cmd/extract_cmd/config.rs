@@ -1,12 +1,14 @@
 //! Importers TOML configuration for extract command.
 
 use anyhow::{Context, Result, anyhow};
+use format_num_pattern::Locale;
 use rustledger_importer::ImporterConfig;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 #[cfg(feature = "python-plugin-wasm")]
 use std::path::PathBuf;
+use std::str::FromStr;
 
 /// Top-level importers configuration file.
 #[derive(Debug, Deserialize)]
@@ -97,6 +99,12 @@ pub(super) struct ImporterEntry {
     pub(super) debit_column: Option<toml::Value>,
     /// Credit column name or index.
     pub(super) credit_column: Option<toml::Value>,
+    /// Amount locale for number parsing (e.g. `de_DE` so `21,12` reads as
+    /// 21.12). Mirrors the `--amount-locale` CLI flag.
+    pub(super) amount_locale: Option<String>,
+    /// Amount format pattern (`format_num_pattern` style). Mirrors the
+    /// `--amount-format` CLI flag.
+    pub(super) amount_format: Option<String>,
     /// CSV delimiter character.
     pub(super) delimiter: Option<String>,
     /// Number of rows to skip.
@@ -205,6 +213,14 @@ pub(super) fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterC
     {
         builder = builder.credit_column(&col);
     }
+    if let Some(ref locale) = entry.amount_locale {
+        let locale =
+            Locale::from_str(locale).map_err(|_| anyhow!("{locale} is not a valid locale"))?;
+        builder = builder.amount_locale(locale);
+    }
+    if let Some(ref format) = entry.amount_format {
+        builder = builder.amount_format(format);
+    }
     if let Some(ref delim) = entry.delimiter
         && let Some(c) = delim.chars().next()
     {
@@ -257,4 +273,45 @@ pub(super) fn find_matching_importers<'a>(
         .iter()
         .filter(|imp| importer_matches_filename(imp, filename))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustledger_importer::config::ImporterType;
+
+    /// Regression for #1133: `amount_locale` / `amount_format` set in
+    /// `importers.toml` were silently ignored — only the matching CLI flags
+    /// (`--amount-locale` / `--amount-format`) applied them.
+    #[test]
+    fn build_config_from_entry_applies_amount_locale_and_format() {
+        let src = r##"
+[[importers]]
+name = "de-locale"
+account = "Assets:Bank"
+amount_locale = "de_DE"
+
+[[importers]]
+name = "de-format"
+account = "Assets:Bank"
+amount_locale = "de_DE"
+amount_format = "#.##0,00"
+"##;
+        let file: ImportersFile = toml::from_str(src).expect("toml parses");
+
+        // amount_locale: in de_DE the comma is the decimal separator, so
+        // "21,12" reads as 21.12 (the #1133 bug read it as 2112).
+        let cfg = build_config_from_entry(&file.importers[0]).expect("config builds");
+        let ImporterType::Csv(csv) = &cfg.importer_type;
+        let fmt = csv.compile_amount_format().expect("format compiles");
+        assert_eq!(
+            fmt.parse("21,12").expect("amount parses").to_string(),
+            "21.12"
+        );
+
+        // amount_format also flows through from the toml entry.
+        let cfg = build_config_from_entry(&file.importers[1]).expect("config builds");
+        let ImporterType::Csv(csv) = &cfg.importer_type;
+        assert_eq!(csv.amount_format.as_deref(), Some("#.##0,00"));
+    }
 }

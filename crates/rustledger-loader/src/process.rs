@@ -1127,6 +1127,25 @@ pub fn run_plugins(
                             continue;
                         }
                     };
+
+                    // A bare module name (beancount's `plugin "pkg.mod"`) is
+                    // unsupported by design — only file-path references load.
+                    // Reject it up front with an actionable message rather than
+                    // spinning up the runtime just to fail and relabel the
+                    // error (which would also mask genuine runtime failures).
+                    // (#1432)
+                    if is_python_module_name(&resolved, raw_name) {
+                        let file = rustledger_plugin::python::suggest_module_path(raw_name);
+                        errors.push(
+                            LedgerError::error(
+                                "E8004",
+                                module_ref_message(raw_name, file.as_deref()),
+                            )
+                            .with_phase("plugin"),
+                        );
+                        continue;
+                    }
+
                     let wrappers = build_wrappers(directives, source_map);
                     match run_python_plugin(
                         raw_name,
@@ -1143,40 +1162,11 @@ pub fn run_plugins(
                             apply_plugin_ops(directives, ops, errors, source_map)?;
                         }
                         Err(e) => {
-                            // A bare module name (beancount's `plugin "pkg.mod"`)
-                            // is unsupported by design — only file-path
-                            // references load (see `discover_module_source`). The
-                            // raw "module not found" reads as a venv/PYTHONPATH
-                            // problem, so say it is unsupported and point at the
-                            // file path instead, resolving it via system Python
-                            // when possible. (#1432)
-                            let is_module_ref =
-                                ext != "py" && !raw_name.contains(std::path::MAIN_SEPARATOR);
-                            if is_module_ref {
-                                use rustledger_plugin::python::{
-                                    is_python_available, suggest_module_path,
-                                };
-                                let hint = is_python_available()
-                                    .then(|| suggest_module_path(raw_name))
-                                    .flatten();
-                                let msg = match hint {
-                                    Some(path) => format!(
-                                        "Python plugin \"{raw_name}\" is not supported by module \
-                                         name; reference the file directly: plugin \"{path}\""
-                                    ),
-                                    None => format!(
-                                        "Python plugin \"{raw_name}\" is not supported by module \
-                                         name; reference the file directly, e.g. plugin \"./{}.py\". \
-                                         The plugin sandbox cannot see the host venv, so the plugin \
-                                         must be self-contained (stdlib plus the beancount compat \
-                                         shim).",
-                                        raw_name.rsplit('.').next().unwrap_or(raw_name)
-                                    ),
-                                };
-                                errors.push(LedgerError::error("E8004", msg).with_phase("plugin"));
-                            } else {
-                                errors.push(LedgerError::error("E8002", e).with_phase("plugin"));
-                            }
+                            // A genuine load/execution failure of a real plugin
+                            // file — surface the underlying error verbatim.
+                            // (Module-name references are rejected up front, so
+                            // this no longer masks runtime failures — #1432.)
+                            errors.push(LedgerError::error("E8002", e).with_phase("plugin"));
                         }
                     }
                 }
@@ -1193,33 +1183,26 @@ pub fn run_plugins(
                     );
                 }
             } else {
-                // Completely unknown plugin name — try to suggest a module path
+                // Completely unknown plugin name. If system Python can resolve
+                // it as a module, point at the file (same guidance as the
+                // module-name path above); otherwise it is genuinely not found.
                 #[cfg(feature = "python-plugins")]
                 {
-                    use rustledger_plugin::python::{is_python_available, suggest_module_path};
-                    let suggestion = if is_python_available() {
-                        suggest_module_path(raw_name)
-                    } else {
-                        None
-                    };
-                    if let Some(module_path) = suggestion {
-                        errors.push(
-                                LedgerError::error(
-                                    "E8004",
-                                    format!(
-                                        "Cannot resolve Python module '{raw_name}'. Replace with: plugin \"{module_path}\""
-                                    ),
-                                )
-                                .with_phase("plugin"),
-                            );
-                    } else {
-                        errors.push(
+                    match rustledger_plugin::python::suggest_module_path(raw_name) {
+                        Some(module_path) => errors.push(
+                            LedgerError::error(
+                                "E8004",
+                                module_ref_message(raw_name, Some(&module_path)),
+                            )
+                            .with_phase("plugin"),
+                        ),
+                        None => errors.push(
                             LedgerError::error(
                                 "E8001",
                                 format!("Plugin not found: \"{raw_name}\""),
                             )
                             .with_phase("plugin"),
-                        );
+                        ),
                     }
                 }
                 #[cfg(not(feature = "python-plugins"))]
@@ -1635,6 +1618,40 @@ fn run_wasm_plugin(
     }
 
     Ok((output.ops, errors))
+}
+
+/// Whether `raw_name` is a bare Python *module name* (beancount's
+/// `plugin "pkg.mod"`) rather than a file reference: no `.py` extension, no
+/// path separator, and no such file at `resolved`. Module names are unsupported
+/// by design — only file paths load (see `discover_module_source`). Mirrors the
+/// file-vs-module test used by the Python runtime (case-insensitive extension).
+#[cfg(feature = "python-plugins")]
+fn is_python_module_name(resolved: &std::path::Path, raw_name: &str) -> bool {
+    !resolved.exists()
+        && !std::path::Path::new(raw_name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("py"))
+        && !raw_name.contains(std::path::MAIN_SEPARATOR)
+}
+
+/// Actionable error for a Python plugin referenced by module name. `file` is the
+/// module's resolved source path when system Python could find it. The raw
+/// "module not found" reads as a venv/PYTHONPATH problem, so name the
+/// unsupported form and point at the file path instead. (#1432)
+#[cfg(feature = "python-plugins")]
+fn module_ref_message(raw_name: &str, file: Option<&str>) -> String {
+    match file {
+        Some(path) => format!(
+            "Python plugin \"{raw_name}\" is not supported by module name; \
+             reference the file directly: plugin \"{path}\""
+        ),
+        None => format!(
+            "Python plugin \"{raw_name}\" is not supported by module name; \
+             reference the file directly, e.g. plugin \"/path/to/plugin.py\". \
+             The plugin sandbox cannot see the host venv, so the plugin must be \
+             self-contained (stdlib plus the beancount compat shim)."
+        ),
+    }
 }
 
 /// Run a Python module plugin via the WASI-based Python runtime.

@@ -208,9 +208,10 @@ pub fn infer_csv_config(content: &str) -> Option<InferredCsvConfig> {
 ///
 /// When a value has both `.` and `,`, the rightmost is taken as the decimal
 /// separator (`2.500,00` -> comma-decimal, `1,234.56` -> period-decimal). A
-/// lone comma counts as a decimal separator only when it has 1-2 trailing
-/// digits, so a thousands group like `1,234` stays period-style. The columns
-/// vote; the majority wins.
+/// lone comma counts as a decimal separator only when it is immediately
+/// followed by 1-2 digits, so a thousands group like `1,234` stays
+/// period-style while a decorated amount like `-54,23€` is still comma-decimal.
+/// Each sampled cell across the amount-bearing columns votes; the majority wins.
 fn infer_amount_locale(
     sample: &[&Vec<String>],
     cols: impl Iterator<Item = usize>,
@@ -234,7 +235,14 @@ fn infer_amount_locale(
                     }
                 }
                 (Some(comma), None) => {
-                    if (1..=2).contains(&(v.len() - comma - 1)) {
+                    // Count the digits immediately after the comma, ignoring any
+                    // trailing currency symbol / suffix (looks_like_number admits
+                    // `$ € £ ¥` etc.), so `-54,23€` stays comma-decimal.
+                    let trailing_digits = v[comma + 1..]
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .count();
+                    if (1..=2).contains(&trailing_digits) {
                         comma_decimal += 1;
                     } else {
                         period_decimal += 1;
@@ -832,6 +840,23 @@ Date;Description;Amount
 ";
         let config = infer_csv_config(csv).expect("should infer config");
         assert!(config.amount_locale.is_none());
+    }
+
+    #[test]
+    fn infer_comma_decimal_with_currency_suffix() {
+        // A trailing currency symbol must not defeat comma-decimal inference:
+        // the digit count after the comma is what matters, not the byte length.
+        let csv = "\
+Date;Description;Amount
+2024-01-15;Coffee;-54,23€
+2024-01-16;Salary;1.500,00€
+";
+        let config = infer_csv_config(csv).expect("should infer config");
+        assert!(
+            config.amount_locale.is_some(),
+            "currency-decorated comma-decimal should infer European, got {:?}",
+            config.amount_locale
+        );
     }
 
     #[test]

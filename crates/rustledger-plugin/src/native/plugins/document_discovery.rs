@@ -131,6 +131,38 @@ impl NativePlugin for DocumentDiscoveryPlugin {
             }
         }
 
+        // Accounts opened in the ledger. This is exactly the set the validator
+        // treats as known (`validate_document` checks `state.accounts`, which
+        // is populated only by `open`), so a document we skip here is precisely
+        // one that would otherwise hard-fail `E1001 AccountNotOpen`.
+        //
+        // Like beancount, we don't synthesize documents for unknown accounts
+        // (so `check` passes, matching `bean-check`). Unlike beancount — which
+        // drops them silently — we surface a *warning* per unknown account, to
+        // catch the common footgun of a stale `documents/` path after an
+        // account rename (a deliberate, more-helpful deviation; #1434). Warnings
+        // don't affect the exit code, so compatibility is preserved.
+        //
+        // Note the asymmetry (intentional — do not "fix" it): an *explicit*
+        // `document` directive to an unopened account still hard-errors via the
+        // validator, matching beancount's `validate_active_accounts`. Only
+        // auto-discovery is lenient, because beancount's discovery never emits
+        // the directive in the first place.
+        let opened: std::collections::HashSet<String> = input
+            .directives
+            .iter()
+            .filter_map(|w| match &w.data {
+                DirectiveData::Open(o) => Some(o.account.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // Files found under directories that map to an unopened account,
+        // grouped by account (BTreeMap → deterministic, one warning per
+        // account instead of one per file).
+        let mut unknown: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+
         // Scan each directory
         for dir in &config.directories {
             let dir_path = Path::new(dir);
@@ -142,7 +174,9 @@ impl NativePlugin for DocumentDiscoveryPlugin {
                 dir_path,
                 dir,
                 &existing_docs,
+                &opened,
                 &mut new_directives,
+                &mut unknown,
                 &mut errors,
                 0, // Initial depth
             ) {
@@ -150,6 +184,13 @@ impl NativePlugin for DocumentDiscoveryPlugin {
                     "Error scanning documents in {dir}: {e}"
                 )));
             }
+        }
+
+        // One aggregated warning per unknown account.
+        for (account, paths) in &unknown {
+            errors.push(PluginError::warning(unknown_account_warning(
+                account, paths, &opened,
+            )));
         }
 
         // Keep all input directives, then insert discovered documents.
@@ -169,6 +210,56 @@ impl NativePlugin for DocumentDiscoveryPlugin {
 /// validator sees them.
 impl SynthPlugin for DocumentDiscoveryPlugin {}
 
+/// Max "did you mean" suggestions to list in a warning.
+const MAX_SUGGESTIONS: usize = 3;
+
+/// Opened accounts that plausibly match `account` — sharing both the root
+/// (first segment) and the leaf (last segment). This finds the sibling-rename
+/// case (`Expenses:Electricity` → `Expenses:Home:Electricity`) without the
+/// false positives of a leaf-only match (e.g. `Income:Refunds:Electricity`).
+fn suggested_accounts(account: &str, opened: &std::collections::HashSet<String>) -> Vec<String> {
+    let root = account.split(':').next();
+    let leaf = account.rsplit(':').next();
+    let mut hits: Vec<String> = opened
+        .iter()
+        .filter(|a| a.split(':').next() == root && a.rsplit(':').next() == leaf)
+        .filter(|a| a.as_str() != account)
+        .cloned()
+        .collect();
+    hits.sort_unstable();
+    hits.truncate(MAX_SUGGESTIONS);
+    hits
+}
+
+/// Build the (aggregated) warning for documents discovered under a directory
+/// that maps to an account that is not open. Names the account, how many files
+/// were skipped (with an example), and suggests likely-intended opened
+/// accounts (the account-rename case).
+fn unknown_account_warning(
+    account: &str,
+    paths: &[String],
+    opened: &std::collections::HashSet<String>,
+) -> String {
+    let example = paths.first().map_or("", String::as_str);
+    let more = paths.len().saturating_sub(1);
+    let files = if more == 0 {
+        example.to_string()
+    } else {
+        format!("{example} (+{more} more)")
+    };
+    let suggestions = suggested_accounts(account, opened);
+    let hint = if suggestions.is_empty() {
+        String::new()
+    } else {
+        format!("; did you mean: {}?", suggestions.join(", "))
+    };
+    format!(
+        "{n} document(s) reference unknown account '{account}' and were skipped \
+         (no such account is open): {files}{hint}",
+        n = paths.len()
+    )
+}
+
 /// Recursively scan a directory for document files.
 ///
 /// # Security
@@ -179,7 +270,9 @@ fn scan_documents(
     path: &std::path::Path,
     base_dir: &str,
     existing: &std::collections::HashSet<String>,
+    opened: &std::collections::HashSet<String>,
     directives: &mut Vec<DirectiveWrapper>,
+    unknown: &mut std::collections::BTreeMap<String, Vec<String>>,
     errors: &mut Vec<PluginError>,
     depth: usize,
 ) -> std::io::Result<()> {
@@ -215,7 +308,9 @@ fn scan_documents(
                 &entry_path,
                 base_dir,
                 existing,
+                opened,
                 directives,
+                unknown,
                 errors,
                 depth + 1,
             )?;
@@ -253,6 +348,17 @@ fn scan_documents(
 
                             // Skip if already exists (compare canonical paths)
                             if existing.contains(&canonical) {
+                                continue;
+                            }
+
+                            // Only synthesize documents for opened accounts
+                            // (see the note in `process`). A file under an
+                            // unopened account — e.g. a stale path after an
+                            // account rename — is collected for an aggregated
+                            // warning and skipped, never synthesized into a
+                            // hard `E1001`. (#1434)
+                            if !opened.contains(&account) {
+                                unknown.entry(account).or_default().push(full_path);
                                 continue;
                             }
 

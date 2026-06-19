@@ -553,8 +553,11 @@ fn validate_phase_inner<D: ValidatableDirective>(
                 }
                 if error.note.is_none() && file_id == SYNTHESIZED_FILE_ID {
                     error.note = Some(
-                        "directive was synthesized by a plugin (no source location); \
-                         check your `plugin \"…\"` declarations for the responsible plugin"
+                        "directive was synthesized by a plugin (no source location \
+                         in your files); the responsible plugin is either an \
+                         enabled auto-plugin (e.g. `auto_accounts`, or document \
+                         discovery via `option \"documents\"`) or one of your \
+                         `plugin \"…\"` declarations"
                             .to_string(),
                     );
                 }

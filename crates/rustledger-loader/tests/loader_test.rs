@@ -978,6 +978,69 @@ fn test_document_discovery_no_duplicates() {
     );
 }
 
+/// Regression for #1434: a discovered document under a directory that maps to
+/// an *unopened* account must not become a hard `E1001` error. `bean-check`
+/// skips such files silently; rustledger skips synthesizing the document but
+/// emits a warning naming the file (so a stale path after an account rename is
+/// noticed), and the load still succeeds without an error.
+#[test]
+fn test_document_discovery_unknown_account_warns_not_errors() {
+    use rustledger_loader::{ErrorSeverity, LoadOptions, load};
+
+    let path = fixtures_path("doc_discovery_unknown.beancount");
+    let ledger = load(&path, &LoadOptions::default()).expect("should load");
+
+    // No document is synthesized for the unopened account.
+    let doc_count = ledger
+        .directives
+        .iter()
+        .filter(|d| matches!(d.value, rustledger_core::Directive::Document(_)))
+        .count();
+    assert_eq!(
+        doc_count, 0,
+        "a document for an unopened account should be skipped, not synthesized"
+    );
+
+    // No error-severity diagnostic — so `rledger check` passes, like bean-check.
+    let errors: Vec<&str> = ledger
+        .errors
+        .iter()
+        .filter(|e| matches!(e.severity, ErrorSeverity::Error))
+        .map(|e| e.message.as_str())
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "should not error on a stale-account document, got: {errors:?}"
+    );
+
+    // ...but a warning names the unopened account, the file, and suggests the
+    // opened account sharing the same leaf (the rename case).
+    let warning = ledger
+        .errors
+        .iter()
+        .find(|e| {
+            matches!(e.severity, ErrorSeverity::Warning)
+                && e.message.contains("Expenses:Electricity")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected an unknown-account warning, got: {:?}",
+                ledger
+                    .errors
+                    .iter()
+                    .map(|e| (&e.severity, &e.message))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(warning.message.contains("unknown account"));
+    assert!(warning.message.contains("edf.txt"), "should name the file");
+    assert!(
+        warning.message.contains("Expenses:Home:Electricity"),
+        "should suggest the renamed account, got: {}",
+        warning.message
+    );
+}
+
 // ============================================================================
 // Plugin execution through process::process() pipeline (Issue #788)
 // ============================================================================

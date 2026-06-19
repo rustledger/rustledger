@@ -1,0 +1,6 @@
+option "title" "Document Discovery — unknown account (#1434)"
+option "documents" "documents_unknown"
+
+; The document tree has documents_unknown/Expenses/Electricity/... but only
+; Expenses:Home:Electricity is opened — a stale path after an account rename.
+2026-01-01 open Expenses:Home:Electricity

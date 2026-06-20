@@ -324,9 +324,7 @@ fn convert_open(
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let account = Account::new(node.account()?.text());
     let currencies: Vec<Currency> = node.currencies().map(|c| Currency::new(c.text())).collect();
-    let booking = node
-        .booking_method()
-        .and_then(|s| s.text_unquoted().map(String::from));
+    let booking = node.booking_method().and_then(|s| s.text_decoded());
     let span = node_span(node.syntax(), bom_offset);
     if let Some(b) = &booking
         && !VALID_BOOKING_METHODS.contains(&b.as_str())
@@ -392,7 +390,7 @@ fn convert_note(
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let account = Account::new(node.account()?.text());
-    let comment = node.text()?.text_unquoted()?.to_string();
+    let comment = node.text()?.text_decoded()?;
     let meta = convert_meta_entries(node.syntax());
 
     let note = rustledger_core::directive::Note {
@@ -412,7 +410,7 @@ fn convert_document(
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let account = Account::new(node.account()?.text());
-    let path = node.path()?.text_unquoted()?.to_string();
+    let path = node.path()?.text_decoded()?;
     // Trailing tags/links on the document header (legacy
     // `parse_document_directive` collects them in a loop after
     // the path STRING). TAG / LINK tokens only appear in the
@@ -456,8 +454,8 @@ fn convert_event(
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
-    let event_type = node.event_type()?.text_unquoted()?.to_string();
-    let value = node.value()?.text_unquoted()?.to_string();
+    let event_type = node.event_type()?.text_decoded()?;
+    let value = node.value()?.text_decoded()?;
     let meta = convert_meta_entries(node.syntax());
 
     let event = rustledger_core::directive::Event {
@@ -476,8 +474,8 @@ fn convert_query(
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
-    let name = node.name()?.text_unquoted()?.to_string();
-    let query = node.query()?.text_unquoted()?.to_string();
+    let name = node.name()?.text_decoded()?;
+    let query = node.query()?.text_decoded()?;
     let meta = convert_meta_entries(node.syntax());
 
     let q = rustledger_core::directive::Query {
@@ -601,7 +599,7 @@ fn convert_custom(
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
-    let custom_type = node.custom_type()?.text_unquoted()?.to_string();
+    let custom_type = node.custom_type()?.text_decoded()?;
     let values = extract_custom_values(node.syntax());
     let meta = convert_meta_entries(node.syntax());
 
@@ -702,8 +700,8 @@ fn strip_string_quotes(raw: &str) -> Option<&str> {
 }
 
 fn convert_option(node: &OptionDirective, bom_offset: u32) -> Option<(String, String, Span)> {
-    let key = node.key()?.text_unquoted()?.to_string();
-    let value = node.value()?.text_unquoted()?.to_string();
+    let key = node.key()?.text_decoded()?;
+    let value = node.value()?.text_decoded()?;
     Some((
         key,
         value,
@@ -712,7 +710,7 @@ fn convert_option(node: &OptionDirective, bom_offset: u32) -> Option<(String, St
 }
 
 fn convert_include(node: &IncludeDirective, bom_offset: u32) -> Option<(String, Span)> {
-    let path = node.path()?.text_unquoted()?.to_string();
+    let path = node.path()?.text_decoded()?;
     Some((path, single_line_directive_span(node.syntax(), bom_offset)))
 }
 
@@ -720,10 +718,8 @@ fn convert_plugin(
     node: &PluginDirective,
     bom_offset: u32,
 ) -> Option<(String, Option<String>, Span)> {
-    let module = node.module()?.text_unquoted()?.to_string();
-    let config = node
-        .config()
-        .and_then(|c| c.text_unquoted().map(String::from));
+    let module = node.module()?.text_decoded()?;
+    let config = node.config().and_then(|c| c.text_decoded());
     Some((
         module,
         config,
@@ -747,10 +743,7 @@ fn convert_transaction(
     // Header strings: with 2 -> payee + narration; with 1 ->
     // narration-only; with 3+ -> ambiguous (typed-AST surface
     // returns None for both, matching the round-2 review fix).
-    let strings: Vec<String> = node
-        .strings()
-        .filter_map(|s| s.text_unquoted().map(String::from))
-        .collect();
+    let strings: Vec<String> = node.strings().filter_map(|s| s.text_decoded()).collect();
     let (payee_str, narration_str) = match strings.len() {
         0 => (None, String::new()),
         1 => (None, strings.into_iter().next().unwrap()),
@@ -1394,7 +1387,7 @@ fn convert_cost_spec(cs: &ast::CostSpec) -> CostSpec {
 
     let currency = cs.currency().map(|c| Currency::new(c.text()));
     let date = cs.date().and_then(|d| parse_date_token(d.text()));
-    let label = cs.label().and_then(|s| s.text_unquoted().map(String::from));
+    let label = cs.label().and_then(|s| s.text_decoded());
 
     CostSpec {
         number: cost_number,
@@ -1516,9 +1509,9 @@ fn meta_entry_has_minus_sign(entry: &MetaEntry) -> bool {
 /// link > bool > none.
 fn meta_value_from_entry(entry: &MetaEntry) -> MetaValue {
     if let Some(s) = entry.value_string()
-        && let Some(text) = s.text_unquoted()
+        && let Some(text) = s.text_decoded()
     {
-        return MetaValue::String(text.to_string());
+        return MetaValue::String(text);
     }
     if let Some(n) = entry.value_number()
         && let Some(mut decimal) = parse_decimal_token(n.text())

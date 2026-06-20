@@ -58,7 +58,7 @@ pub enum MetaValue {
 impl fmt::Display for MetaValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::String(s) => write!(f, "\"{s}\""),
+            Self::String(s) => write!(f, "\"{}\"", crate::format::escape_string(s)),
             Self::Account(a) => write!(f, "{a}"),
             Self::Currency(c) => write!(f, "{c}"),
             Self::Tag(t) => write!(f, "#{t}"),
@@ -791,9 +791,9 @@ impl fmt::Display for Transaction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {} ", self.date, self.flag)?;
         if let Some(payee) = &self.payee {
-            write!(f, "\"{payee}\" ")?;
+            write!(f, "\"{}\" ", crate::format::escape_string(payee))?;
         }
-        write!(f, "\"{}\"", self.narration)?;
+        write!(f, "\"{}\"", crate::format::escape_string(&self.narration))?;
         for tag in &self.tags {
             write!(f, " #{tag}")?;
         }
@@ -941,7 +941,7 @@ impl fmt::Display for Open {
             write!(f, " {}", currencies.join(","))?;
         }
         if let Some(booking) = &self.booking {
-            write!(f, " \"{booking}\"")?;
+            write!(f, " \"{}\"", crate::format::escape_string(booking))?;
         }
         Ok(())
     }
@@ -1133,7 +1133,9 @@ impl fmt::Display for Event {
         write!(
             f,
             "{} event \"{}\" \"{}\"",
-            self.date, self.event_type, self.value
+            self.date,
+            crate::format::escape_string(&self.event_type),
+            crate::format::escape_string(&self.value)
         )
     }
 }
@@ -1183,7 +1185,9 @@ impl fmt::Display for Query {
         write!(
             f,
             "{} query \"{}\" \"{}\"",
-            self.date, self.name, self.query
+            self.date,
+            crate::format::escape_string(&self.name),
+            crate::format::escape_string(&self.query)
         )
     }
 }
@@ -1237,7 +1241,9 @@ impl fmt::Display for Note {
         write!(
             f,
             "{} note {} \"{}\"",
-            self.date, self.account, self.comment
+            self.date,
+            self.account,
+            crate::format::escape_string(&self.comment)
         )
     }
 }
@@ -1311,7 +1317,9 @@ impl fmt::Display for Document {
         write!(
             f,
             "{} document {} \"{}\"",
-            self.date, self.account, self.path
+            self.date,
+            self.account,
+            crate::format::escape_string(&self.path)
         )
     }
 }
@@ -1411,7 +1419,12 @@ impl Custom {
 
 impl fmt::Display for Custom {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} custom \"{}\"", self.date, self.custom_type)?;
+        write!(
+            f,
+            "{} custom \"{}\"",
+            self.date,
+            crate::format::escape_string(&self.custom_type)
+        )?;
         for value in &self.values {
             write!(f, " {value}")?;
         }

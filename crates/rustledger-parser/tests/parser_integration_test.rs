@@ -91,6 +91,20 @@ fn test_parse_simple_transaction() {
 }
 
 #[test]
+fn string_escapes_are_decoded() {
+    // The semantic value strips quotes AND decodes escapes (Beancount):
+    // \" -> ", \\ -> \, \t -> tab, unknown \x -> x.
+    let source = "2024-01-15 * \"q=\\\"hi\\\" bs=\\\\ tab=\\t x=\\x\"\n  \
+                  Assets:Cash  -5.00 USD\n  Expenses:X  5.00 USD\n";
+    let result = parse_ok(source);
+    if let Directive::Transaction(txn) = &result.directives[0].value {
+        assert_eq!(txn.narration.as_str(), "q=\"hi\" bs=\\ tab=\t x=x");
+    } else {
+        panic!("expected transaction");
+    }
+}
+
+#[test]
 fn test_parse_transaction_with_tags_and_links() {
     let source = r#"
 2024-01-15 * "Dinner" #food #restaurant ^receipt-123

@@ -314,7 +314,10 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     `resolve_effective_booking_method` re-book FIFO/LIFO ledgers as
 ///     STRICT. The new trailing field changes the archived layout, so
 ///     old bytes must be regenerated.
-const CACHE_VERSION: u32 = 9;
+/// v10: String literals are now escape-decoded at parse (`\"`->`"`, etc.);
+///     the stored narration/payee/meta/etc. bytes differ from the old raw
+///     form, so a cache hit would serve stale, still-escaped strings.
+const CACHE_VERSION: u32 = 10;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]

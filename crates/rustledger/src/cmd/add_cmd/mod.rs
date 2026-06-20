@@ -76,11 +76,11 @@ pub struct Args {
     /// Quick mode: payee narration account amount \[account \[amount\]\]...
     ///
     /// Each amount needs an explicit currency and must be a SINGLE argument, so
-    /// quote it: `'5.00 USD'` (otherwise the shell splits it into `5.00` and
+    /// quote it: `"5.00 USD"` (otherwise the shell splits it into `5.00` and
     /// `USD`). Because `--quick` is variadic it consumes every following
     /// argument, so pass the FILE before `--quick`, or end the quick args with
     /// `--`. Example:
-    ///   `rledger add ledger.beancount -y --quick 'Store' 'Lunch' Expenses:Food '5.00 USD' Assets:Cash`
+    ///   `rledger add ledger.beancount -y --quick "Store" "Lunch" Expenses:Food "5.00 USD" Assets:Cash`
     #[arg(short, long, num_args = 4.., value_name = "ARGS")]
     pub quick: Option<Vec<String>>,
 
@@ -202,14 +202,16 @@ fn canonical_format_directive(directive: &Directive, config: &FormatConfig) -> R
         .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-/// Heuristic: does `token` look like a mistyped amount rather than an
-/// account name? Account names start with an uppercase letter; an amount-like
-/// token starts with a digit, or a sign / decimal point followed by a digit.
+/// Heuristic: does `token` look like a mistyped amount rather than an account
+/// name? It's amount-like if, after an optional leading sign, it starts with a
+/// digit or a decimal point followed by a digit (`5`, `-45.00`, `.5`, `-.5`).
+/// Account names never start that way, so this distinguishes the two.
 fn looks_like_amount(token: &str) -> bool {
-    let mut chars = token.chars();
+    let rest = token.strip_prefix(['-', '+']).unwrap_or(token);
+    let mut chars = rest.chars();
     match chars.next() {
         Some(c) if c.is_ascii_digit() => true,
-        Some('-' | '+' | '.') => chars.next().is_some_and(|c| c.is_ascii_digit()),
+        Some('.') => chars.next().is_some_and(|c| c.is_ascii_digit()),
         _ => false,
     }
 }
@@ -286,10 +288,9 @@ fn run_quick_mode_with_writer<W: std::io::Write>(
         if looks_like_amount(account) {
             bail!(
                 "'{account}' looks like an amount but appears where an account \
-                 name is expected.\n  Amounts need an explicit currency \
-                 (e.g. '{account} USD') and must be a single argument — quote \
-                 amounts that contain a space (e.g. '5.00 USD') so the shell \
-                 does not split them."
+                 name is expected.\n  Amounts need an explicit currency and must \
+                 be a single argument — quote amounts that contain a space \
+                 (e.g. \"5.00 USD\") so the shell does not split them."
             );
         }
 
@@ -747,7 +748,7 @@ mod tests {
     fn looks_like_amount_distinguishes_amounts_from_accounts() {
         // Amount-like tokens that, in the account position, used to become
         // phantom accounts and trigger a confusing "N postings lack amounts".
-        for t in ["5.00", "-45.00", "+10", ".5", "0", "1234.56"] {
+        for t in ["5.00", "-45.00", "+10", ".5", "-.5", "+.5", "0", "1234.56"] {
             assert!(looks_like_amount(t), "{t:?} should look like an amount");
         }
         // Real account names and bare currencies are not amount-like.

@@ -152,7 +152,6 @@ tempfile = "3"
 
 # Data formats
 csv = "1"
-ofxy = "0.2"
 
 # HTTP
 ureq = { version = "3", features = ["json"] }

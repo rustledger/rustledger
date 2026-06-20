@@ -3,14 +3,16 @@
 //! This module implements importing transactions from OFX (Open Financial Exchange)
 //! and QFX (Quicken Financial Exchange) files commonly exported by banks.
 //!
-//! # Chrono boundary
+//! # Native parser
 //!
-//! `ofxy::body::Transaction::date_posted` returns `chrono::DateTime<Utc>`, but
-//! the rest of the workspace uses `jiff::civil::Date`. The chrono → jiff
-//! conversion happens inside `extract_transaction` via a `format("%Y-%m-%d")
-//! .parse()` round-trip. No `chrono` type appears in any `pub` signature in
-//! this crate — `chrono` is an internal, ofxy-only seal. If we ever drop or
-//! replace ofxy, the chrono dependency can go away with it.
+//! Parsing is done by a small dependency-free reader (see the "Native OFX
+//! parser" section below) rather than an external crate. OFX 1.x (SGML) and OFX
+//! 2.x (XML) differ only in whether leaf elements are closed, so reading each
+//! leaf's value as "the text up to the next `<`" handles both dialects, with no
+//! dependency on header conformance or OFX version — sparse 1.x headers and 2.x
+//! files both parse (see #1457). Dates are produced directly as
+//! [`rustledger_core::NaiveDate`] (jiff), so this crate needs neither `ofxy`
+//! nor `chrono`.
 
 use crate::config::ImporterConfig;
 use crate::{EnrichedImportResult, ImportResult, Importer};
@@ -56,41 +58,24 @@ impl OfxImporter {
             )
         })?;
 
-        let ofx: ofxy::Ofx = content
-            .parse()
-            .with_context(|| "Failed to parse OFX content")?;
+        let statements = parse_ofx(content).with_context(|| "Failed to parse OFX content")?;
 
         let mut directives = Vec::new();
         let mut warnings = Vec::new();
 
-        // Process bank accounts
-        if let Some(bank_msg) = &ofx.body.bank {
-            let stmt = &bank_msg.transaction_response.statement;
-            let currency = &stmt.currency;
-
-            if let Some(txn_list) = &stmt.bank_transactions {
-                for txn in &txn_list.transactions {
-                    match Self::parse_transaction(txn, currency, &config.account, default_currency)
-                    {
-                        Ok(t) => directives.push(Directive::Transaction(t)),
-                        Err(e) => warnings.push(format!("Skipped transaction: {e}")),
-                    }
-                }
-            }
-        }
-
-        // Process credit card accounts
-        if let Some(cc_msg) = &ofx.body.credit_card {
-            let stmt = &cc_msg.transaction_response.statement;
-            let currency = &stmt.currency;
-
-            if let Some(txn_list) = &stmt.bank_transactions {
-                for txn in &txn_list.transactions {
-                    match Self::parse_transaction(txn, currency, &config.account, default_currency)
-                    {
-                        Ok(t) => directives.push(Directive::Transaction(t)),
-                        Err(e) => warnings.push(format!("Skipped transaction: {e}")),
-                    }
+        // Bank and credit-card statements are imported identically: every
+        // transaction posts to `config.account`.
+        for statement in &statements {
+            let statement_currency = statement.currency.as_deref().unwrap_or("");
+            for txn in &statement.transactions {
+                match Self::build_transaction(
+                    txn,
+                    statement_currency,
+                    &config.account,
+                    default_currency,
+                ) {
+                    Ok(t) => directives.push(Directive::Transaction(t)),
+                    Err(e) => warnings.push(format!("Skipped transaction: {e}")),
                 }
             }
         }
@@ -138,23 +123,17 @@ impl OfxImporter {
         Ok(enriched)
     }
 
-    fn parse_transaction(
-        txn: &ofxy::body::Transaction,
+    fn build_transaction(
+        txn: &OfxTransaction,
         statement_currency: &str,
         account: &str,
         default_currency: &str,
     ) -> Result<Transaction> {
-        // Get date from ofxy's DateTime<Utc> via formatted string roundtrip.
-        // See module docstring re: the chrono boundary.
-        let date: NaiveDate = txn
-            .date_posted
-            .format("%Y-%m-%d")
-            .to_string()
+        let date = ofx_date_to_naive(&txn.date_posted)?;
+        let amount: rust_decimal::Decimal = txn
+            .amount
             .parse()
-            .with_context(|| "Invalid date")?;
-
-        // Get amount
-        let amount = txn.amount;
+            .with_context(|| format!("invalid amount: {:?}", txn.amount))?;
 
         // Build narration from name and memo
         let name = txn.name.as_deref().unwrap_or("");
@@ -168,16 +147,11 @@ impl OfxImporter {
         };
 
         // Currency precedence: transaction → statement → config default.
-        let curr = txn.currency.as_ref().map_or_else(
-            || {
-                if statement_currency.is_empty() {
-                    default_currency.to_string()
-                } else {
-                    statement_currency.to_string()
-                }
-            },
-            |c| c.symbol.clone(),
-        );
+        let curr = match txn.currency.as_deref().filter(|c| !c.is_empty()) {
+            Some(c) => c.to_string(),
+            None if statement_currency.is_empty() => default_currency.to_string(),
+            None => statement_currency.to_string(),
+        };
 
         // Create posting
         let units = Amount::new(amount, &curr);
@@ -204,6 +178,139 @@ impl OfxImporter {
 
         Ok(txn_builder)
     }
+}
+
+// ============================================================================
+// Native OFX parser
+//
+// OFX 1.x SGML and OFX 2.x XML differ only in whether leaf elements are closed:
+// SGML writes `<TAG>value` (the value runs to the next `<`), XML writes
+// `<TAG>value</TAG>`. Reading each leaf as "text up to the next `<`" parses both
+// dialects uniformly, with no dependency on header conformance or OFX version.
+// This replaces the `ofxy` crate (and its `chrono` dependency).
+// ============================================================================
+
+/// One bank or credit-card statement: its declared currency (`CURDEF`) and the
+/// transactions in its `BANKTRANLIST`.
+struct OfxStatement {
+    currency: Option<String>,
+    transactions: Vec<OfxTransaction>,
+}
+
+/// A single `STMTTRN` aggregate, reduced to the fields we import. `date_posted`
+/// and `amount` are kept raw and validated in [`OfxImporter::build_transaction`]
+/// so a malformed value becomes a per-transaction warning, not a hard failure.
+struct OfxTransaction {
+    date_posted: String,
+    amount: String,
+    name: Option<String>,
+    memo: Option<String>,
+    currency: Option<String>,
+}
+
+/// Parse OFX content (1.x SGML or 2.x XML) into statements. Errors only if the
+/// input isn't an OFX document at all; a well-formed file with no transactions
+/// yields an empty list.
+fn parse_ofx(content: &str) -> Result<Vec<OfxStatement>> {
+    if !content.contains("<OFX>") && !content.contains("<OFX ") {
+        anyhow::bail!("not an OFX document (no <OFX> element)");
+    }
+
+    let mut statements = Vec::new();
+    for (open, close) in [("<STMTRS>", "</STMTRS>"), ("<CCSTMTRS>", "</CCSTMTRS>")] {
+        for region in find_blocks(content, open, close) {
+            statements.push(OfxStatement {
+                currency: leaf(region, "CURDEF"),
+                transactions: parse_transactions(region),
+            });
+        }
+    }
+
+    // Fallback for files carrying STMTTRN aggregates without a recognized
+    // statement wrapper.
+    if statements.is_empty() {
+        let transactions = parse_transactions(content);
+        if !transactions.is_empty() {
+            statements.push(OfxStatement {
+                currency: leaf(content, "CURDEF"),
+                transactions,
+            });
+        }
+    }
+
+    Ok(statements)
+}
+
+/// Parse every `STMTTRN` block in `region`. A block missing the required
+/// `DTPOSTED`/`TRNAMT` leaves isn't importable and is skipped.
+fn parse_transactions(region: &str) -> Vec<OfxTransaction> {
+    find_blocks(region, "<STMTTRN>", "</STMTTRN>")
+        .into_iter()
+        .filter_map(|block| {
+            Some(OfxTransaction {
+                date_posted: leaf(block, "DTPOSTED")?,
+                amount: leaf(block, "TRNAMT")?,
+                name: leaf(block, "NAME"),
+                memo: leaf(block, "MEMO"),
+                currency: leaf(block, "CURSYM"),
+            })
+        })
+        .collect()
+}
+
+/// Return the slices between each `open`..`close` pair in `s` (non-overlapping;
+/// OFX's STMTTRN/STMTRS aggregates don't self-nest, so this is sufficient).
+fn find_blocks<'a>(s: &'a str, open: &str, close: &str) -> Vec<&'a str> {
+    let mut blocks = Vec::new();
+    let mut rest = s;
+    while let Some(i) = rest.find(open) {
+        let after = &rest[i + open.len()..];
+        let Some(j) = after.find(close) else { break };
+        blocks.push(&after[..j]);
+        rest = &after[j + close.len()..];
+    }
+    blocks
+}
+
+/// Extract leaf element `tag`'s value from `block`: the text after `<tag>` up to
+/// the next `<` (handles SGML `<TAG>v` and XML `<TAG>v</TAG>` alike),
+/// entity-decoded and trimmed. `<tag/>` yields `Some("")`; absence yields `None`.
+fn leaf(block: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    if let Some(i) = block.find(&open) {
+        let after = &block[i + open.len()..];
+        let end = after.find('<').unwrap_or(after.len());
+        return Some(decode_entities(after[..end].trim()));
+    }
+    if block.contains(&format!("<{tag}/>")) {
+        return Some(String::new());
+    }
+    None
+}
+
+/// Decode the five predefined XML entities (OFX rarely uses numeric refs).
+/// `&amp;` is decoded last so `&amp;lt;` becomes `&lt;`, not `<`.
+fn decode_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Convert an OFX datetime (`YYYYMMDD`, optionally followed by `HHMMSS[.fff][tz]`)
+/// to a civil date by taking the `YYYYMMDD` prefix.
+fn ofx_date_to_naive(s: &str) -> Result<NaiveDate> {
+    let digits: String = s.trim().chars().take_while(char::is_ascii_digit).collect();
+    if digits.len() < 8 {
+        anyhow::bail!("invalid OFX date: {s:?}");
+    }
+    format!("{}-{}-{}", &digits[0..4], &digits[4..6], &digits[6..8])
+        .parse()
+        .with_context(|| format!("invalid OFX date: {s:?}"))
 }
 
 impl Importer for OfxImporter {
@@ -748,5 +855,85 @@ NEWFILEUID:NONE
             msg.contains("requires a default currency"),
             "expected currency error, got: {msg}"
         );
+    }
+
+    // ===== Native parser: #1457 cases + robustness =====
+
+    /// OFX 1.x SGML that omits CHARSET/COMPRESSION/OLDFILEUID/NEWFILEUID — the
+    /// header-strictness case from #1457. Must parse, and read fields correctly.
+    #[test]
+    fn test_native_1x_sparse_headers() {
+        let ofx = "OFXHEADER:100\nDATA:OFXSGML\nVERSION:102\nSECURITY:NONE\nENCODING:USASCII\n\n\
+<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD<BANKACCTFROM><ACCTID>1</BANKACCTFROM>\n\
+<BANKTRANLIST>\n\
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-50.00<FITID>t1<NAME>COFFEE SHOP</STMTTRN>\n\
+</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+        let r = OfxImporter
+            .extract_from_string(ofx, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("sparse 1.x headers must parse");
+        assert_eq!(r.directives.len(), 1);
+        let Directive::Transaction(txn) = &r.directives[0] else {
+            panic!("expected transaction");
+        };
+        assert_eq!(txn.narration.as_str(), "COFFEE SHOP");
+        assert_eq!(txn.postings[0].account.as_str(), "Assets:Bank");
+    }
+
+    /// OFX 2.x (XML): version 200, `<?xml?>`/`<?OFX?>` prolog, closed tags, an
+    /// XML entity in `<NAME>`, and a self-closing `<MEMO/>`. The #1457 hard case.
+    #[test]
+    fn test_native_2x_xml_with_entities_and_self_closing() {
+        let ofx = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<?OFX OFXHEADER=\"200\" VERSION=\"200\" SECURITY=\"NONE\" OLDFILEUID=\"NONE\" NEWFILEUID=\"NONE\"?>\n\
+<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD</CURDEF>\n\
+<BANKTRANLIST>\n\
+<STMTTRN><TRNTYPE>DEBIT</TRNTYPE><DTPOSTED>20240115120000.000[-5:EST]</DTPOSTED><TRNAMT>-50.00</TRNAMT><FITID>t1</FITID><NAME>Johnson &amp; Co</NAME><MEMO/></STMTTRN>\n\
+</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+        let r = OfxImporter
+            .extract_from_string(ofx, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("2.x XML must parse");
+        assert_eq!(r.directives.len(), 1);
+        let Directive::Transaction(txn) = &r.directives[0] else {
+            panic!("expected transaction");
+        };
+        // Entity decoded; timezone date reduced to the civil date; MEMO empty.
+        assert_eq!(txn.narration.as_str(), "Johnson & Co");
+        assert_eq!(txn.date, rustledger_core::naive_date(2024, 1, 15).unwrap());
+    }
+
+    /// Bank + credit-card statements with different `CURDEF` values: each
+    /// statement's transactions must use its own currency.
+    #[test]
+    fn test_native_multi_statement_currency() {
+        let ofx = "<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD\n\
+<BANKTRANLIST><STMTTRN><DTPOSTED>20240101<TRNAMT>-1.00<NAME>A</STMTTRN></BANKTRANLIST>\n\
+</STMTRS></STMTTRNRS></BANKMSGSRSV1>\n\
+<CREDITCARDMSGSRSV1><CCSTMTTRNRS><CCSTMTRS><CURDEF>CAD\n\
+<BANKTRANLIST><STMTTRN><DTPOSTED>20240102<TRNAMT>-2.00<NAME>B</STMTTRN></BANKTRANLIST>\n\
+</CCSTMTRS></CCSTMTTRNRS></CREDITCARDMSGSRSV1></OFX>";
+        let r = OfxImporter
+            .extract_from_string(ofx, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("multi-statement must parse");
+        assert_eq!(r.directives.len(), 2);
+        let curr = |d: &Directive| match d {
+            Directive::Transaction(t) => t.postings[0].amount().unwrap().currency.to_string(),
+            _ => panic!("expected transaction"),
+        };
+        assert_eq!(curr(&r.directives[0]), "USD");
+        assert_eq!(curr(&r.directives[1]), "CAD");
+    }
+
+    #[test]
+    fn test_native_leaf_and_helpers() {
+        assert_eq!(leaf("<NAME>Foo<MEMO>Bar", "NAME").as_deref(), Some("Foo"));
+        assert_eq!(leaf("<NAME>Foo</NAME>", "NAME").as_deref(), Some("Foo"));
+        assert_eq!(leaf("<MEMO/>", "MEMO").as_deref(), Some(""));
+        assert_eq!(leaf("<NAME>x", "MEMO"), None);
+        assert_eq!(decode_entities("a &amp; b &lt;c&gt;"), "a & b <c>");
+        assert_eq!(
+            ofx_date_to_naive("20240115120000[-5:EST]").unwrap(),
+            rustledger_core::naive_date(2024, 1, 15).unwrap()
+        );
+        assert!(ofx_date_to_naive("2024").is_err());
     }
 }

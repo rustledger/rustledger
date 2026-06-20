@@ -47,7 +47,7 @@
 mod error;
 mod validators;
 
-pub use error::{ErrorCode, Severity, ValidationError};
+pub use error::{ErrorCode, Severity, ValidationError, is_advisory_only_code};
 pub use validators::balance::balance_tolerance;
 
 /// Which phase of two-phase validation to run.

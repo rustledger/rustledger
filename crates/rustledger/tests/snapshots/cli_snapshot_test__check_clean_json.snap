@@ -3,21 +3,9 @@ source: crates/rustledger/tests/cli_snapshot_test.rs
 expression: pretty
 ---
 {
-  "diagnostics": [
-    {
-      "code": "E1004",
-      "column": 1,
-      "end_column": 1,
-      "end_line": 79,
-      "file": "<fixtures>/valid-ledger.beancount",
-      "line": 78,
-      "message": "Cannot close account Assets:Bank:Savings with non-zero balance",
-      "phase": "validate",
-      "severity": "warning"
-    }
-  ],
+  "diagnostics": [],
   "error_count": 0,
   "parse_error_count": 0,
   "validate_error_count": 0,
-  "warning_count": 1
+  "warning_count": 0
 }

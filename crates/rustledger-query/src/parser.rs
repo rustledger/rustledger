@@ -1082,13 +1082,16 @@ mod tests {
         ] {
             let err = parse(q).expect_err("should be a parse error");
             assert_eq!(err.position, pos, "span should point at the token in {q:?}");
-            match err.kind {
-                ParseErrorKind::SyntaxError(ref m) => assert!(
-                    m.contains(token),
-                    "error should name {token:?}, got {m:?} for {q:?}"
-                ),
-                other => panic!("expected SyntaxError naming {token:?}, got {other:?} for {q:?}"),
-            }
+            let ParseErrorKind::SyntaxError(ref m) = err.kind else {
+                panic!(
+                    "expected SyntaxError naming {token:?}, got {:?} for {q:?}",
+                    err.kind
+                );
+            };
+            assert!(
+                m.contains(token),
+                "error should name {token:?}, got {m:?} for {q:?}"
+            );
         }
     }
 

@@ -99,12 +99,23 @@ pub fn parse(source: &str) -> Result<Query, ParseError> {
         Ok(query)
     } else {
         let err = errs.first().map(|e| {
-            let kind = if e.found().is_none() {
+            let start = e.span().start;
+            // chumsky reports `found() == None` both for a genuine premature
+            // EOF *and* for the `end()` combinator rejecting leftover tokens
+            // after a valid prefix — so `found()` can't tell them apart. The
+            // error span, however, points at the real offending position.
+            // Treat only a position at/past the end of input as EOF; otherwise
+            // name the unexpected (often trailing) token instead of
+            // mislabeling it "unexpected end of input".
+            let kind = if start >= source.len() {
                 ParseErrorKind::UnexpectedEof
+            } else if let Some(rest) = source.get(start..) {
+                let token = rest.split_whitespace().next().unwrap_or(rest);
+                ParseErrorKind::SyntaxError(format!("unexpected token '{token}'"))
             } else {
                 ParseErrorKind::SyntaxError(e.to_string())
             };
-            ParseError::new(kind, e.span().start)
+            ParseError::new(kind, start)
         });
         Err(err.unwrap_or_else(|| ParseError::new(ParseErrorKind::UnexpectedEof, 0)))
     }
@@ -1054,6 +1065,32 @@ fn integer<'a>() -> impl Parser<'a, ParserInput<'a>, i64, ParserExtra<'a>> + Clo
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn trailing_tokens_are_named_not_mislabeled_eof() {
+        // Regression for OUTSTANDING #16: leftover tokens after a valid prefix
+        // were reported as "unexpected end of input" (because `end()` rejects
+        // them with `found() == None`), even though the span points at the real
+        // token. They must now be named.
+        for (q, token, pos) in [
+            ("SELECT account FOOBAR", "FOOBAR", 15usize),
+            (
+                "SELECT account, sum(position) GROUP BY account WHERE number > 0",
+                "WHERE",
+                47,
+            ),
+        ] {
+            let err = parse(q).expect_err("should be a parse error");
+            assert_eq!(err.position, pos, "span should point at the token in {q:?}");
+            match err.kind {
+                ParseErrorKind::SyntaxError(ref m) => assert!(
+                    m.contains(token),
+                    "error should name {token:?}, got {m:?} for {q:?}"
+                ),
+                other => panic!("expected SyntaxError naming {token:?}, got {other:?} for {q:?}"),
+            }
+        }
+    }
 
     #[test]
     fn test_simple_select() {

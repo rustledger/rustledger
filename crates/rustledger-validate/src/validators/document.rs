@@ -49,7 +49,7 @@ pub fn validate_document(
     state: &LedgerState,
     doc: &Document,
     file_id: Option<u16>,
-    exists_cache: &FxHashMap<(String, Option<u16>), bool>,
+    exists_cache: &FxHashMap<(&str, Option<u16>), bool>,
     errors: &mut Vec<ValidationError>,
 ) {
     // Check account exists
@@ -69,7 +69,7 @@ pub fn validate_document(
         // function. In release builds, a miss falls back to a fresh
         // syscall — correct behavior either way, just slower.
         let file_was_found = exists_cache
-            .get(&(doc.path.clone(), file_id))
+            .get(&(doc.path.as_str(), file_id))
             .copied()
             .unwrap_or_else(|| {
                 debug_assert!(

@@ -947,7 +947,7 @@ fn test_relative_document_resolves_against_directive_file() {
     let missing: Vec<_> = ledger
         .errors
         .iter()
-        .filter(|e| e.message.contains("Document file not found"))
+        .filter(|e| e.code == "E8001") // DocumentNotFound (stable code, not message text)
         .collect();
     assert!(
         missing.is_empty(),
@@ -979,7 +979,7 @@ fn test_relative_document_in_included_file_resolves_against_that_file() {
     let missing: Vec<_> = ledger
         .errors
         .iter()
-        .filter(|e| e.message.contains("Document file not found"))
+        .filter(|e| e.code == "E8001") // DocumentNotFound (stable code, not message text)
         .collect();
     assert!(
         missing.is_empty(),

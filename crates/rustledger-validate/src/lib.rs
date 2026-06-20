@@ -634,10 +634,10 @@ fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
 ///
 /// When `check_documents` is disabled the function short-circuits to
 /// an empty map.
-fn build_document_exists_cache<D: ValidatableDirective>(
-    directives: &[D],
+fn build_document_exists_cache<'a, D: ValidatableDirective>(
+    directives: &'a [D],
     options: &ValidationOptions,
-) -> FxHashMap<(String, Option<u16>), bool> {
+) -> FxHashMap<(&'a str, Option<u16>), bool> {
     if !options.check_documents {
         return FxHashMap::default();
     }
@@ -660,11 +660,10 @@ fn build_document_exists_cache<D: ValidatableDirective>(
     // validator uses (see `document_file_exists`). Stops on the first hit so a
     // Document found in `document_dirs[0]` still costs exactly one syscall —
     // matching pre-fix sequential I/O cost, but in parallel across Documents.
-    let resolve = |(s, file_id): (&str, Option<u16>)| -> ((String, Option<u16>), bool) {
-        (
-            (s.to_string(), file_id),
-            document_file_exists(s, file_id, options),
-        )
+    // Keys borrow `&'a str` from the `directives` slice, so neither the cache
+    // build nor the validator lookup allocates a `String`.
+    let resolve = |(s, file_id): (&'a str, Option<u16>)| {
+        ((s, file_id), document_file_exists(s, file_id, options))
     };
 
     if keys.len() >= PARALLEL_DOC_EXISTS_THRESHOLD {

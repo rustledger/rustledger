@@ -792,9 +792,10 @@ impl Inventory {
         // reduced quantity at the average cost, not every underlying lot.
         // Returning the full lot set made the consumer (book.rs) expand the
         // reduction into one posting per lot and remove the entire position
-        // (and book a garbage gain). The taken units carry the inventory sign,
-        // matching the FIFO/ordered convention.
-        let matched: MatchedLots = smallvec![at_avg_cost(reduction)];
+        // (and book a garbage gain). The taken units carry the *inventory* sign
+        // (`total_units.signum()`), matching the FIFO/ordered convention — so
+        // covering a short (negative pool) yields a negative matched lot.
+        let matched: MatchedLots = smallvec![at_avg_cost(reduction * total_units.signum())];
 
         let new_units = total_units + units.number;
 
@@ -1464,9 +1465,11 @@ mod reduction_tests {
             .unwrap();
 
         // One synthetic matched lot at the average cost {160}; basis 5*160=800.
+        // Long pool: the matched lot carries the inventory (positive) sign.
         assert_eq!(r.matched.len(), 1);
         assert_eq!(r.cost_basis.as_ref().unwrap().number, dec!(800));
         assert_eq!(r.matched[0].cost.as_ref().unwrap().number, dec!(160));
+        assert_eq!(r.matched[0].units.number, dec!(5));
 
         // 15 STK remain as a single lot carrying the average cost {160}.
         assert_eq!(i.units("STK"), dec!(15));
@@ -1476,6 +1479,28 @@ mod reduction_tests {
             .collect();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].cost.as_ref().unwrap().number, dec!(160));
+    }
+
+    #[test]
+    fn reduce_average_short_cover_matched_lot_carries_inventory_sign() {
+        // Covering a short (positive units reducing a negative pool) must return
+        // a matched lot with the inventory (negative) sign, like FIFO/ordered.
+        let mut i = Inventory::new();
+        i.add(Position::with_cost(
+            Amount::new(dec!(-10), "STK"),
+            Cost::new(dec!(150), "USD"),
+        ));
+        let r = i
+            .reduce(
+                &Amount::new(dec!(5), "STK"),
+                Some(&CostSpec::default()),
+                BookingMethod::Average,
+            )
+            .unwrap();
+        assert_eq!(r.matched.len(), 1);
+        assert_eq!(r.matched[0].units.number, dec!(-5));
+        // Short pool shrinks from -10 to -5.
+        assert_eq!(i.units("STK"), dec!(-5));
     }
 
     #[test]

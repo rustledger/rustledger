@@ -771,22 +771,41 @@ impl Inventory {
             });
         }
 
-        let cost_basis = average_cost_from_positions(&matching, total_units)?
-            .map(|(avg_cost, currency)| Amount::new(reduction * avg_cost, currency));
+        let avg = average_cost_from_positions(&matching, total_units)?;
+        let cost_basis = avg
+            .as_ref()
+            .map(|(avg_cost, currency)| Amount::new(reduction * *avg_cost, currency.clone()));
 
-        let matched: MatchedLots = matching.into_iter().cloned().collect();
+        // Build a position of `number` units of the reduced currency at the
+        // average cost (or costless if the lots had no cost).
+        let at_avg_cost = |number: Decimal| -> Position {
+            let amount = Amount::new(number, units.currency.clone());
+            match &avg {
+                Some((avg_cost, currency)) => {
+                    Position::with_cost(amount, Cost::new(*avg_cost, currency.clone()))
+                }
+                None => Position::simple(amount),
+            }
+        };
+
+        // A reduction under AVERAGE matches a SINGLE synthetic lot of the
+        // reduced quantity at the average cost, not every underlying lot.
+        // Returning the full lot set made the consumer (book.rs) expand the
+        // reduction into one posting per lot and remove the entire position
+        // (and book a garbage gain). The taken units carry the inventory sign,
+        // matching the FIFO/ordered convention.
+        let matched: MatchedLots = smallvec![at_avg_cost(reduction)];
+
         let new_units = total_units + units.number;
 
         // Remove all positions of this currency
         self.positions
             .retain(|p| p.units.currency != units.currency);
 
-        // Add back the remainder if non-zero
+        // Add back the remainder (if non-zero) at the average cost, so a later
+        // reduction sees the correct basis instead of a costless position.
         if !new_units.is_zero() {
-            self.positions.push_back(Position::simple(Amount::new(
-                new_units,
-                units.currency.clone(),
-            )));
+            self.positions.push_back(at_avg_cost(new_units));
         }
 
         self.rebuild_index();
@@ -795,6 +814,58 @@ impl Inventory {
             matched,
             cost_basis,
         })
+    }
+
+    /// Collapse every cost-bearing lot of each currency into a single
+    /// weighted-average-cost lot. Cost-less (cash) positions are left untouched.
+    ///
+    /// This realizes the balance of an AVERAGE-booked account, where all lots of
+    /// a commodity share one running cost. The journal keeps the real per-lot
+    /// costs; only this realized view merges them (matching hledger's pool
+    /// model). A currency whose lots net to zero is removed; a currency whose
+    /// lots have mismatched cost currencies is left untouched.
+    pub fn merge_average(&mut self) {
+        let currencies: std::collections::BTreeSet<Currency> = self
+            .positions
+            .iter()
+            .filter(|p| p.cost.is_some())
+            .map(|p| p.units.currency.clone())
+            .collect();
+
+        for currency in currencies {
+            let (total_units, avg) = {
+                let matching: Vec<&Position> = self
+                    .positions
+                    .iter()
+                    .filter(|p| p.units.currency == currency && p.cost.is_some())
+                    .collect();
+                let total_units: Decimal = matching.iter().map(|p| p.units.number).sum();
+                let avg = if total_units.is_zero() {
+                    None
+                } else {
+                    average_cost_from_positions(&matching, total_units)
+                        .ok()
+                        .flatten()
+                };
+                (total_units, avg)
+            };
+
+            // Couldn't average a non-zero position (cost-currency mismatch):
+            // leave its lots untouched rather than corrupt them.
+            if !total_units.is_zero() && avg.is_none() {
+                continue;
+            }
+
+            self.positions
+                .retain(|p| !(p.units.currency == currency && p.cost.is_some()));
+            if let Some((avg_cost, cost_currency)) = avg {
+                self.positions.push_back(Position::with_cost(
+                    Amount::new(total_units, currency.clone()),
+                    Cost::new(avg_cost, cost_currency),
+                ));
+            }
+        }
+        self.rebuild_index();
     }
 
     /// Cost merge `{*}`: merge all lots of the currency into a single
@@ -1372,6 +1443,89 @@ mod reduction_tests {
             )
             .unwrap();
         assert_eq!(r.cost_basis.unwrap().number, dec!(500)); // only the STK lot
+    }
+
+    #[test]
+    fn reduce_average_partial_multi_lot_matches_single_synthetic_lot() {
+        // Regression: a partial AVERAGE sale across multiple lots matches a
+        // SINGLE synthetic lot of the reduced quantity at the average cost, not
+        // every underlying lot. Returning the full lot set made the consumer
+        // (book.rs) expand the reduction into one posting per lot, emptying the
+        // position and booking a garbage gain.
+        let mut i = Inventory::new();
+        i.add(lot(10, 150, 1));
+        i.add(lot(10, 170, 2));
+        let r = i
+            .reduce(
+                &sell_stk(5),
+                Some(&CostSpec::default()),
+                BookingMethod::Average,
+            )
+            .unwrap();
+
+        // One synthetic matched lot at the average cost {160}; basis 5*160=800.
+        assert_eq!(r.matched.len(), 1);
+        assert_eq!(r.cost_basis.as_ref().unwrap().number, dec!(800));
+        assert_eq!(r.matched[0].cost.as_ref().unwrap().number, dec!(160));
+
+        // 15 STK remain as a single lot carrying the average cost {160}.
+        assert_eq!(i.units("STK"), dec!(15));
+        let remaining: Vec<&Position> = i
+            .positions()
+            .filter(|p| p.units.currency == "STK")
+            .collect();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].cost.as_ref().unwrap().number, dec!(160));
+    }
+
+    #[test]
+    fn merge_average_collapses_lots_to_single_weighted_lot() {
+        // The realized balance of an AVERAGE account is one pool at the
+        // weighted-average cost: (10*150 + 10*170 - 5*160) / 15 = 160.
+        let mut i = Inventory::new();
+        i.add(lot(10, 150, 1));
+        i.add(lot(10, 170, 2));
+        i.add(Position::with_cost(
+            Amount::new(dec!(-5), "STK"),
+            Cost::new(dec!(160), "USD"),
+        ));
+        i.merge_average();
+        let stk: Vec<&Position> = i
+            .positions()
+            .filter(|p| p.units.currency == "STK")
+            .collect();
+        assert_eq!(stk.len(), 1);
+        assert_eq!(stk[0].units.number, dec!(15));
+        assert_eq!(stk[0].cost.as_ref().unwrap().number, dec!(160));
+    }
+
+    #[test]
+    fn merge_average_net_zero_removes_lots() {
+        let mut i = Inventory::new();
+        i.add(lot(10, 150, 1));
+        i.add(Position::with_cost(
+            Amount::new(dec!(-10), "STK"),
+            Cost::new(dec!(160), "USD"),
+        ));
+        i.merge_average();
+        assert_eq!(
+            i.positions().filter(|p| p.units.currency == "STK").count(),
+            0
+        );
+    }
+
+    #[test]
+    fn merge_average_leaves_costless_positions_untouched() {
+        let mut i = Inventory::new();
+        i.add(Position::simple(Amount::new(dec!(100), "USD")));
+        i.add(lot(10, 150, 1));
+        i.merge_average();
+        // Cash stays; the single STK lot stays a single lot.
+        assert_eq!(i.units("USD"), dec!(100));
+        assert_eq!(
+            i.positions().filter(|p| p.units.currency == "STK").count(),
+            1
+        );
     }
 
     #[test]

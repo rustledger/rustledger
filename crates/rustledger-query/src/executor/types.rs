@@ -399,7 +399,7 @@ pub struct WindowContext {
 }
 
 /// Account information cached from Open/Close directives.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AccountInfo {
     /// Date the account was opened.
     pub open_date: Option<NaiveDate>,
@@ -407,6 +407,10 @@ pub struct AccountInfo {
     pub close_date: Option<NaiveDate>,
     /// Metadata from the Open directive.
     pub open_meta: Metadata,
+    /// Booking method string from the Open directive (e.g. `"AVERAGE"`), if any.
+    /// Stored raw to avoid coupling the query crate to the booking-method enum;
+    /// used to realize AVERAGE accounts as a single weighted-average pool.
+    pub booking: Option<String>,
 }
 
 /// An in-memory table created by CREATE TABLE.

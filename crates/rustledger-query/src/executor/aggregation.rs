@@ -232,6 +232,30 @@ impl<'a> Executor<'a> {
         }
         Ok(row)
     }
+
+    /// True when every posting in `group` belongs to a single account that is
+    /// AVERAGE-booked. Such a group's summed inventory should be realized as one
+    /// weighted-average pool (`Inventory::merge_average`). Returns false for
+    /// empty/mixed-account groups, so non-aggregated-by-account sums are
+    /// unaffected.
+    fn group_is_single_average_account(&self, group: &[&PostingContext]) -> bool {
+        let mut account: Option<&str> = None;
+        for ctx in group {
+            let a = ctx.transaction.postings[ctx.posting_index].account.as_str();
+            match account {
+                None => account = Some(a),
+                Some(prev) if prev != a => return false,
+                _ => {}
+            }
+        }
+        account.is_some_and(|a| {
+            self.account_info
+                .get(a)
+                .and_then(|info| info.booking.as_deref())
+                .is_some_and(|b| b.eq_ignore_ascii_case("AVERAGE"))
+        })
+    }
+
     pub(super) fn evaluate_aggregate_expr(
         &self,
         expr: &Expr,
@@ -301,6 +325,13 @@ impl<'a> Executor<'a> {
                                     total_number,
                                     "__NUMBER__".to_string(),
                                 )));
+                            }
+                            // Realize an AVERAGE-booked account as a single
+                            // weighted-average pool: the journal keeps the real
+                            // per-lot costs, but the account's balance merges
+                            // them (matching its booking method).
+                            if self.group_is_single_average_account(group) {
+                                total_inventory.merge_average();
                             }
                             Ok(Value::Inventory(Box::new(total_inventory)))
                         } else if has_numbers {

@@ -699,6 +699,72 @@ fn test_journal_position_column_preserves_cost() {
     assert_eq!(cost.currency.as_str(), "USD");
 }
 
+#[test]
+fn test_average_account_sum_position_merges_to_single_pool() {
+    // An AVERAGE-booked account realizes its balance as one weighted-average
+    // pool: 10 AAPL {150} + 10 AAPL {170} -> 20 AAPL {160}. A FIFO account keeps
+    // the separate lots. The journal keeps the real per-lot costs either way.
+    fn buy(account: &str, qty: i64, price: i64) -> Posting {
+        Posting::new(
+            account,
+            Amount::new(rust_decimal::Decimal::from(qty), "AAPL"),
+        )
+        .with_cost(
+            CostSpec::empty()
+                .with_number(rustledger_core::CostNumber::PerUnit {
+                    value: rust_decimal::Decimal::from(price),
+                })
+                .with_currency("USD"),
+        )
+    }
+    fn ledger(booking: &str) -> Vec<Directive> {
+        let mut open = Open::new(date(2024, 1, 1), "Assets:B");
+        open.booking = Some(booking.to_string());
+        vec![
+            Directive::Open(open),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 2, 1), "b1")
+                    .with_synthesized_posting(buy("Assets:B", 10, 150))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(-1500), "USD"),
+                    )),
+            ),
+            Directive::Transaction(
+                Transaction::new(date(2024, 3, 1), "b2")
+                    .with_synthesized_posting(buy("Assets:B", 10, 170))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(-1700), "USD"),
+                    )),
+            ),
+        ]
+    }
+    let q = "SELECT account, sum(position) WHERE account = 'Assets:B' GROUP BY account";
+
+    let avg = execute_query(q, &ledger("AVERAGE"));
+    let inv = match &avg.rows[0][1] {
+        Value::Inventory(i) => i,
+        other => panic!("expected inventory, got {other:?}"),
+    };
+    let lots: Vec<_> = inv.positions().collect();
+    assert_eq!(
+        lots.len(),
+        1,
+        "AVERAGE must merge to one pool, got {lots:?}"
+    );
+    assert_eq!(lots[0].units.number, dec!(20));
+    assert_eq!(lots[0].cost.as_ref().unwrap().number, dec!(160));
+
+    let fifo = execute_query(q, &ledger("FIFO"));
+    let inv = match &fifo.rows[0][1] {
+        Value::Inventory(i) => i,
+        other => panic!("expected inventory, got {other:?}"),
+    };
+    assert_eq!(inv.positions().count(), 2, "FIFO must keep separate lots");
+}
+
 /// Regression test for #955 deep review: `JOURNAL ... FROM <filter>` should
 /// only count postings from transactions that pass the FROM filter into the
 /// cumulative balance. A wildcard `JOURNAL "Assets"` over a ledger with two

@@ -17,7 +17,7 @@ use rustc_hash::FxHashMap;
 
 use regex::{Regex, RegexBuilder};
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, Directive, Inventory, Metadata, NaiveDate, Position};
+use rustledger_core::{Amount, Directive, Inventory, NaiveDate, Position};
 #[cfg(test)]
 use rustledger_core::{MetaValue, Transaction};
 use rustledger_loader::SourceMap;
@@ -127,21 +127,14 @@ impl<'a> Executor<'a> {
             match directive {
                 Directive::Open(open) => {
                     let account = open.account.to_string();
-                    let info = account_info.entry(account).or_insert_with(|| AccountInfo {
-                        open_date: None,
-                        close_date: None,
-                        open_meta: Metadata::default(),
-                    });
+                    let info = account_info.entry(account).or_default();
                     info.open_date = Some(open.date);
                     info.open_meta.clone_from(&open.meta);
+                    info.booking.clone_from(&open.booking);
                 }
                 Directive::Close(close) => {
                     let account = close.account.to_string();
-                    let info = account_info.entry(account).or_insert_with(|| AccountInfo {
-                        open_date: None,
-                        close_date: None,
-                        open_meta: Metadata::default(),
-                    });
+                    let info = account_info.entry(account).or_default();
                     info.close_date = Some(close.date);
                 }
                 _ => {}
@@ -210,21 +203,14 @@ impl<'a> Executor<'a> {
             match &spanned.value {
                 Directive::Open(open) => {
                     let account = open.account.to_string();
-                    let info = account_info.entry(account).or_insert_with(|| AccountInfo {
-                        open_date: None,
-                        close_date: None,
-                        open_meta: Metadata::default(),
-                    });
+                    let info = account_info.entry(account).or_default();
                     info.open_date = Some(open.date);
                     info.open_meta.clone_from(&open.meta);
+                    info.booking.clone_from(&open.booking);
                 }
                 Directive::Close(close) => {
                     let account = close.account.to_string();
-                    let info = account_info.entry(account).or_insert_with(|| AccountInfo {
-                        open_date: None,
-                        close_date: None,
-                        open_meta: Metadata::default(),
-                    });
+                    let info = account_info.entry(account).or_default();
                     info.close_date = Some(close.date);
                 }
                 _ => {}
@@ -2811,6 +2797,7 @@ mod tests {
     use super::*;
     use crate::parse;
     use rust_decimal_macros::dec;
+    use rustledger_core::Metadata;
     use rustledger_core::Posting;
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {

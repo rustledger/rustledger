@@ -320,16 +320,18 @@ pub struct LedgerState {
     /// reopen-after-close is ever supported, a legitimate later close on
     /// the same account still runs the inventory check.
     pub(crate) late_close_processed: FxHashSet<(rustledger_core::Account, NaiveDate)>,
-    /// `(account, date)` pairs for which the early phase already emitted
-    /// `AccountNotOpen` (E1001) on an *elided* posting to an unopened account.
-    /// Elided postings must be checked early — booking interpolates them, so the
-    /// account has to exist before booking (the Python #877-equivalent case).
-    /// Explicit postings are deferred to the late phase so account-rewriting
-    /// regular plugins (e.g. `rename_accounts`, `split_expenses`), which run
-    /// after early, aren't falsely flagged on their pre-rewrite account name.
-    /// The late phase consults this set to avoid double-reporting an elided
-    /// posting that is still unopened after the plugin pass.
-    pub(crate) account_not_open_early: FxHashSet<(rustledger_core::Account, NaiveDate)>,
+    /// Per-posting identities `(file_id, span)` for which the early phase already
+    /// emitted `AccountNotOpen` (E1001) on an *elided* posting to an unopened
+    /// account. Elided postings must be checked early — booking interpolates
+    /// them, so the account has to exist before booking (the Python
+    /// #877-equivalent case). Explicit postings are deferred to the late phase
+    /// so account-rewriting regular plugins (e.g. `rename_accounts`,
+    /// `split_expenses`), which run after early, aren't falsely flagged on their
+    /// pre-rewrite account name. The late phase consults this set to skip the
+    /// *same* posting (a booked-from-elided one still unopened after plugins),
+    /// keyed by source identity so a different posting that merely shares an
+    /// account/date is still reported.
+    pub(crate) account_not_open_early: FxHashSet<(u16, rustledger_core::Span)>,
 }
 
 impl LedgerState {

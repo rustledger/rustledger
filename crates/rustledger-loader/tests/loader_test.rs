@@ -2133,3 +2133,33 @@ fn test_open_check_deferred_past_account_rewriting_plugins() {
         ledger2.errors
     );
 }
+
+/// The deferred E1001 dedup is keyed per-posting (file_id, span), not per
+/// (account, date): two transactions on the SAME date posting to the SAME
+/// unopened account — one elided (reported early), one explicit (reported
+/// late) — must BOTH be flagged, not silently deduped to one.
+#[test]
+fn test_e1001_dedup_is_per_posting_not_account_date() {
+    use rustledger_loader::{LoadOptions, load};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("samedate.beancount");
+    std::fs::write(
+        &path,
+        "2020-01-01 open Assets:Cash\n\
+         2020-01-01 * \"elided\"\n  Assets:Cash  -5.00 USD\n  Expenses:Same\n\
+         2020-01-01 * \"explicit\"\n  Assets:Cash  -7.00 USD\n  Expenses:Same  7.00 USD\n",
+    )
+    .expect("write ledger");
+    let ledger = load(&path, &LoadOptions::default()).expect("load ledger");
+    let same_acct_e1001 = ledger
+        .errors
+        .iter()
+        .filter(|e| e.code == "E1001" && e.message.contains("Expenses:Same"))
+        .count();
+    assert_eq!(
+        same_acct_e1001, 2,
+        "both same-date postings to the unopened account must be reported; got: {:?}",
+        ledger.errors
+    );
+}

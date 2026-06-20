@@ -47,9 +47,12 @@ pub fn validate_transaction_early(
                 format!("Account {} was never opened", posting.account),
                 txn.date,
             ));
+            // Key by the posting's source identity (not account/date) so the
+            // late phase skips *this* posting only — a different posting that
+            // merely shares the account on the same date is still reported.
             state
                 .account_not_open_early
-                .insert((posting.account.clone(), txn.date));
+                .insert((posting.file_id, posting.span));
         }
     }
 }
@@ -77,7 +80,7 @@ pub fn validate_transaction_late(
             validate_posting_currency(state, txn, posting, account_state, errors);
         } else if !state
             .account_not_open_early
-            .contains(&(posting.account.clone(), txn.date))
+            .contains(&(posting.file_id, posting.span))
         {
             errors.push(ValidationError::new(
                 ErrorCode::AccountNotOpen,

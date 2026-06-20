@@ -8,6 +8,17 @@ expression: pretty
       "code": "E1001",
       "column": 1,
       "end_column": 1,
+      "end_line": 11,
+      "file": "<fixtures>/validation-errors.beancount",
+      "line": 10,
+      "message": "Account Assets:Cash was never opened",
+      "phase": "validate",
+      "severity": "error"
+    },
+    {
+      "code": "E1001",
+      "column": 1,
+      "end_column": 1,
       "end_line": 10,
       "file": "<fixtures>/validation-errors.beancount",
       "line": 5,
@@ -22,17 +33,6 @@ expression: pretty
       "end_line": 10,
       "file": "<fixtures>/validation-errors.beancount",
       "line": 5,
-      "message": "Account Assets:Cash was never opened",
-      "phase": "validate",
-      "severity": "error"
-    },
-    {
-      "code": "E1001",
-      "column": 1,
-      "end_column": 1,
-      "end_line": 11,
-      "file": "<fixtures>/validation-errors.beancount",
-      "line": 10,
       "message": "Account Assets:Cash was never opened",
       "phase": "validate",
       "severity": "error"

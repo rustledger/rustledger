@@ -576,14 +576,7 @@ fn validate_phase_inner<D: ValidatableDirective>(
                     error.file_id = Some(file_id);
                 }
                 if error.note.is_none() && file_id == SYNTHESIZED_FILE_ID {
-                    error.note = Some(
-                        "directive was synthesized by a plugin (no source location \
-                         in your files); the responsible plugin is either an \
-                         enabled auto-plugin (e.g. `auto_accounts`, or document \
-                         discovery via `option \"documents\"`) or one of your \
-                         `plugin \"…\"` declarations"
-                            .to_string(),
-                    );
+                    error.note = Some(SYNTHESIZED_DIRECTIVE_NOTE.to_string());
                 }
             }
         }
@@ -595,6 +588,16 @@ fn validate_phase_inner<D: ValidatableDirective>(
 /// Collect unused-pad errors (E2003). Called once after both phases
 /// have run — pads can be marked `used` by either phase's balance
 /// applications.
+/// Advisory note attached to errors anchored to a plugin-synthesized directive
+/// (`file_id == SYNTHESIZED_FILE_ID`), so the user can trace an error that maps
+/// to nothing in their source files back to a plugin. Shared by the
+/// per-directive patching loop and the deferred [`check_unused_pads`].
+const SYNTHESIZED_DIRECTIVE_NOTE: &str = "directive was synthesized by a plugin (no source location \
+     in your files); the responsible plugin is either an \
+     enabled auto-plugin (e.g. `auto_accounts`, or document \
+     discovery via `option \"documents\"`) or one of your \
+     `plugin \"…\"` declarations";
+
 fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     for (target_account, pads) in &state.pending_pads {
@@ -610,10 +613,16 @@ fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
                     pad.date, target_account, pad.source_account
                 ));
                 // Anchor the deferred error to the pad's own line (when known)
-                // so it renders with a location instead of `<unknown>:`.
+                // so it renders with a location instead of `<unknown>:`. A pad
+                // synthesized by a plugin gets the same advisory note the
+                // per-directive patching loop attaches to in-phase errors, so
+                // deferred and in-phase errors stay consistent.
                 if let Some((span, file_id)) = pad.location {
                     error.span = Some(span);
                     error.file_id = Some(file_id);
+                    if file_id == SYNTHESIZED_FILE_ID {
+                        error.note = Some(SYNTHESIZED_DIRECTIVE_NOTE.to_string());
+                    }
                 }
                 errors.push(error);
             }

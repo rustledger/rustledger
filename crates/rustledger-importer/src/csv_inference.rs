@@ -211,31 +211,32 @@ pub fn infer_csv_config(content: &str) -> Option<InferredCsvConfig> {
     })
 }
 
+/// Count the leading run of ASCII digits in `s` — i.e. the digits immediately
+/// after a separator, ignoring any trailing currency symbol/suffix
+/// (`looks_like_number` admits `$ € £ ¥` etc.), so `23€` counts as 2.
+fn leading_digit_run(s: &str) -> usize {
+    s.chars().take_while(char::is_ascii_digit).count()
+}
+
 /// Infer an amount [`Locale`] from the sampled values in the amount-bearing
 /// columns. Returns `Some(de_DE)` when the values look comma-decimal, else
 /// `None` (callers default to POSIX).
 ///
 /// When a value has both `.` and `,`, the rightmost is taken as the decimal
 /// separator (`2.500,00` -> comma-decimal, `1,234.56` -> period-decimal). A
-/// lone comma counts as a decimal separator only when it is immediately
-/// followed by 1-2 digits, so a thousands group like `1,234` stays
-/// period-style while a decorated amount like `-54,23€` is still comma-decimal.
+/// lone comma or period counts as a decimal separator only when immediately
+/// followed by 1-2 digits, so a thousands group like `1,234` / `1.234` stays
+/// ambiguous while a decorated amount like `-54,23€` is still comma-decimal.
 /// Each sampled cell across the amount-bearing columns votes; the majority wins.
 ///
 /// # Limitation
 ///
-/// Inference needs a comma somewhere in the sample. A comma-decimal export
-/// whose sampled amounts are all period-grouped integers (`1.234` meaning 1234)
-/// carries no distinguishing signal from period-decimal `1.234` (= 1.234), so
-/// it returns `None` and the amounts are read as POSIX. There is no local way to
-/// disambiguate the two; pass `--amount-locale de_DE` for such files.
-/// Count the leading run of ASCII digits in `s` — i.e. the digits immediately
-/// after a separator, ignoring any trailing currency symbol/suffix
-/// (`looks_like_number` admits `$ € £ ¥` etc.), so `23€` counts as 2.
-fn trailing_digit_run(s: &str) -> usize {
-    s.chars().take_while(char::is_ascii_digit).count()
-}
-
+/// A period-grouped integer (`1.234` meaning 1234) carries no local signal
+/// distinguishing it from period-decimal `1.234` (= 1.234). When such ambiguous
+/// grouping is the *only* signal, the decision falls back to `delimiter`: a
+/// `;`-delimited export is read as comma-decimal (`de_DE`) — `;` is used
+/// precisely because `,` is the decimal separator — while any other delimiter
+/// returns `None` (POSIX). Pass `--amount-locale de_DE` to force the locale.
 fn infer_amount_locale(
     sample: &[&Vec<String>],
     cols: impl Iterator<Item = usize>,
@@ -266,7 +267,7 @@ fn infer_amount_locale(
                 (Some(comma), None) => {
                     // 1-2 digits after a lone comma is a decimal (`-54,23`);
                     // otherwise it's thousands-grouping (`1,234`).
-                    if (1..=2).contains(&trailing_digit_run(&v[comma + 1..])) {
+                    if (1..=2).contains(&leading_digit_run(&v[comma + 1..])) {
                         comma_decimal += 1;
                     } else {
                         period_decimal += 1;
@@ -276,7 +277,7 @@ fn infer_amount_locale(
                     // Symmetric to the comma case: a lone period with 1-2
                     // trailing digits is a decimal point (`50.00`); a 3-digit
                     // group (`1.250`) is ambiguous.
-                    if (1..=2).contains(&trailing_digit_run(&v[dot + 1..])) {
+                    if (1..=2).contains(&leading_digit_run(&v[dot + 1..])) {
                         period_decimal += 1;
                     } else {
                         ambiguous_grouped += 1;

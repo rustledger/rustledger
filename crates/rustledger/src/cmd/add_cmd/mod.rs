@@ -74,6 +74,13 @@ pub struct Args {
     pub yes: bool,
 
     /// Quick mode: payee narration account amount \[account \[amount\]\]...
+    ///
+    /// Each amount needs an explicit currency and must be a SINGLE argument, so
+    /// quote it: `"5.00 USD"` (otherwise the shell splits it into `5.00` and
+    /// `USD`). Because `--quick` is variadic it consumes every following
+    /// argument, so pass the FILE before `--quick`, or end the quick args with
+    /// `--`. Example:
+    ///   `rledger add ledger.beancount -y --quick "Store" "Lunch" Expenses:Food "5.00 USD" Assets:Cash`
     #[arg(short, long, num_args = 4.., value_name = "ARGS")]
     pub quick: Option<Vec<String>>,
 
@@ -195,6 +202,20 @@ fn canonical_format_directive(directive: &Directive, config: &FormatConfig) -> R
         .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
+/// Heuristic: does `token` look like a mistyped amount rather than an account
+/// name? It's amount-like if, after an optional leading sign, it starts with a
+/// digit or a decimal point followed by a digit (`5`, `-45.00`, `.5`, `-.5`).
+/// Account names never start that way, so this distinguishes the two.
+fn looks_like_amount(token: &str) -> bool {
+    let rest = token.strip_prefix(['-', '+']).unwrap_or(token);
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_digit() => true,
+        Some('.') => chars.next().is_some_and(|c| c.is_ascii_digit()),
+        _ => false,
+    }
+}
+
 /// Run the add command in quick mode (writes to stdout).
 fn run_quick_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
@@ -258,6 +279,20 @@ fn run_quick_mode_with_writer<W: std::io::Write>(
     while i < quick_args.len() {
         let account = &quick_args[i];
         i += 1;
+
+        // A token in the account position that looks like a number is almost
+        // always a misparsed amount: either it lacks a currency (`5.00` instead
+        // of `5.00 USD`) or a `5.00 USD` amount got split by the shell into two
+        // arguments. Without this, such a token is silently taken as a phantom
+        // account and the user sees a confusing "N postings lack amounts".
+        if looks_like_amount(account) {
+            bail!(
+                "'{account}' looks like an amount but appears where an account \
+                 name is expected.\n  Amounts need an explicit currency and must \
+                 be a single argument — quote amounts that contain a space \
+                 (e.g. \"5.00 USD\") so the shell does not split them."
+            );
+        }
 
         if i < quick_args.len() {
             // Try to parse as amount
@@ -708,6 +743,22 @@ pub fn run(args: &Args, file: &PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn looks_like_amount_distinguishes_amounts_from_accounts() {
+        // Amount-like tokens that, in the account position, used to become
+        // phantom accounts and trigger a confusing "N postings lack amounts".
+        for t in ["5.00", "-45.00", "+10", ".5", "-.5", "+.5", "0", "1234.56"] {
+            assert!(looks_like_amount(t), "{t:?} should look like an amount");
+        }
+        // Real account names and bare currencies are not amount-like.
+        for t in ["Assets:Cash", "Expenses:Food", "USD", "Equity:Opening", "-"] {
+            assert!(
+                !looks_like_amount(t),
+                "{t:?} should NOT look like an amount"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_date_today() {

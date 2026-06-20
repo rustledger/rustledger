@@ -38,15 +38,35 @@ fn resolve_target_dir(prefix: Option<&Path>) -> Result<PathBuf> {
     Ok(dir.to_path_buf())
 }
 
-/// Generate the content of a wrapper script for the current platform.
+/// Marker line written into every generated wrapper so [`is_rledger_wrapper`]
+/// can recognize one precisely, instead of treating any file that merely
+/// mentions "rledger" as a wrapper.
+const WRAPPER_MARKER: &str = "rledger compat wrapper";
+
+/// POSIX single-quote a string so it survives in the generated `sh` wrapper
+/// even when it contains spaces or shell metacharacters.
 #[cfg(unix)]
-fn wrapper_content(subcommand: &str) -> String {
-    format!("#!/bin/sh\nexec rledger {subcommand} \"$@\"\n")
+fn sh_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Generate the content of a wrapper script for the current platform.
+///
+/// The shim execs `rledger` by **absolute path** (`current_exe`) rather than by
+/// bare name, so it works even when the install directory is not on `PATH` —
+/// the common `--prefix` case, where a bare `exec rledger` dies with
+/// `exec: rledger: not found`. `rledger` is the validated-UTF-8 absolute path.
+#[cfg(unix)]
+fn wrapper_content(subcommand: &str, rledger: &str) -> String {
+    format!(
+        "#!/bin/sh\n# {WRAPPER_MARKER}\nexec {} {subcommand} \"$@\"\n",
+        sh_single_quote(rledger)
+    )
 }
 
 #[cfg(windows)]
-fn wrapper_content(subcommand: &str) -> String {
-    format!("@rledger {subcommand} %*\r\n")
+fn wrapper_content(subcommand: &str, rledger: &str) -> String {
+    format!("@rem {WRAPPER_MARKER}\r\n@\"{rledger}\" {subcommand} %*\r\n")
 }
 
 /// Get the wrapper file name for a bean-* command on the current platform.
@@ -62,10 +82,15 @@ fn wrapper_filename(name: &str) -> String {
 
 /// Check if an existing file is an rledger-generated wrapper.
 ///
-/// Returns `true` if the file can be read as UTF-8 and contains "rledger".
-/// Returns `false` if the file doesn't exist, can't be read, or isn't a wrapper.
+/// Matches the current [`WRAPPER_MARKER`] line, plus the legacy `exec rledger`
+/// / `@rledger` forms emitted before the absolute-path change, so upgrades
+/// still overwrite/uninstall old wrappers. This is deliberately tighter than
+/// "contains rledger" so unrelated scripts that merely mention rledger are not
+/// clobbered. Returns `false` if the file doesn't exist or can't be read.
 fn is_rledger_wrapper(path: &Path) -> bool {
-    fs::read_to_string(path).is_ok_and(|contents| contents.contains("rledger"))
+    fs::read_to_string(path).is_ok_and(|c| {
+        c.contains(WRAPPER_MARKER) || c.contains("exec rledger ") || c.contains("@rledger ")
+    })
 }
 
 /// Install bean-* compatibility wrapper scripts, logging progress to stdout.
@@ -80,7 +105,25 @@ pub fn install(prefix: Option<&Path>) -> Result<()> {
 /// Install bean-* compatibility wrapper scripts, writing progress lines to
 /// `out`. Skip notices for non-rledger files still go to stderr.
 pub fn install_with_writer<W: Write>(prefix: Option<&Path>, out: &mut W) -> Result<()> {
-    let dir = resolve_target_dir(prefix)?;
+    // Resolve the binary once: the shims exec this absolute path (so they work
+    // even when the install dir is off PATH), and — absent `--prefix` — it also
+    // determines the install directory. Computing `current_exe()` a single time
+    // avoids an extra syscall and a potential dir/exe mismatch.
+    let rledger_exe = std::env::current_exe()
+        .context("could not determine the rledger binary path for the wrapper scripts")?;
+    let rledger_str = rledger_exe.to_str().with_context(|| {
+        format!(
+            "rledger binary path is not valid UTF-8, cannot write wrapper scripts: {}",
+            rledger_exe.display()
+        )
+    })?;
+    let dir = match prefix {
+        Some(p) => p.to_path_buf(),
+        None => rledger_exe
+            .parent()
+            .context("rledger binary has no parent directory")?
+            .to_path_buf(),
+    };
 
     if !dir.exists() {
         bail!(
@@ -102,7 +145,7 @@ pub fn install_with_writer<W: Write>(prefix: Option<&Path>, out: &mut W) -> Resu
             continue;
         }
 
-        let content = wrapper_content(subcommand);
+        let content = wrapper_content(subcommand, rledger_str);
         fs::write(&path, &content)
             .with_context(|| format!("failed to write {}", path.display()))?;
 
@@ -196,10 +239,44 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_wrapper_content_unix() {
-        let content = wrapper_content("check");
+        let content = wrapper_content("check", "/opt/tools/rledger");
         assert!(content.starts_with("#!/bin/sh\n"));
-        assert!(content.contains("rledger check"));
+        assert!(content.contains(WRAPPER_MARKER));
+        // Execs the absolute path, not a bare `rledger` (which would break when
+        // the install dir is off PATH).
+        assert!(
+            content.contains("exec '/opt/tools/rledger' check"),
+            "should exec the absolute path: {content:?}"
+        );
+        assert!(
+            !content.contains("exec rledger "),
+            "must not exec bare rledger"
+        );
         assert!(content.contains("\"$@\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_wrapper_content_unix_quotes_spaces() {
+        // A path with spaces must stay a single argument in the shim.
+        let content = wrapper_content("query", "/opt/my tools/rledger");
+        assert!(
+            content.contains("exec '/opt/my tools/rledger' query"),
+            "spaces in the path must be single-quoted: {content:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_wrapper_content_windows() {
+        let content = wrapper_content("check", "C:\\tools\\rledger.exe");
+        assert!(content.contains(WRAPPER_MARKER));
+        // Execs the absolute path (double-quoted) with %*, not a bare @rledger.
+        assert!(
+            content.contains("@\"C:\\tools\\rledger.exe\" check %*"),
+            "should exec the absolute path: {content:?}"
+        );
+        assert!(!content.contains("@rledger "), "must not exec bare rledger");
     }
 
     #[test]
@@ -281,15 +358,28 @@ mod tests {
 
         // Write an old rledger wrapper
         let path = dir.path().join(wrapper_filename("bean-check"));
-        fs::write(&path, "#!/bin/sh\nrledger check-old \"$@\"\n").unwrap();
+        // A legacy-format rledger wrapper (bare `exec rledger`, pre absolute
+        // path) that `is_rledger_wrapper` still recognizes for upgrades.
+        fs::write(&path, "#!/bin/sh\nexec rledger check-old \"$@\"\n").unwrap();
 
         install(Some(dir.path())).unwrap();
 
-        // Should have been overwritten
+        // Should have been overwritten with the new exec line for `check` and no
+        // longer reference the old `check-old` subcommand.
         let contents = fs::read_to_string(&path).unwrap();
         assert!(
-            contents.contains("rledger check"),
-            "should overwrite old rledger wrapper"
+            !contents.contains("check-old"),
+            "should overwrite: {contents:?}"
+        );
+        #[cfg(unix)]
+        assert!(
+            contents.contains("check \"$@\""),
+            "unix exec line: {contents:?}"
+        );
+        #[cfg(windows)]
+        assert!(
+            contents.contains("check %*"),
+            "windows exec line: {contents:?}"
         );
     }
 

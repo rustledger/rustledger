@@ -2134,7 +2134,7 @@ fn test_open_check_deferred_past_account_rewriting_plugins() {
     );
 }
 
-/// The deferred E1001 dedup is keyed per-posting (file_id, span), not per
+/// The deferred E1001 dedup is keyed per-posting (`file_id`, span), not per
 /// (account, date): two transactions on the SAME date posting to the SAME
 /// unopened account — one elided (reported early), one explicit (reported
 /// late) — must BOTH be flagged, not silently deduped to one.

@@ -477,6 +477,44 @@ fn test_query_select_accounts() {
 }
 
 #[test]
+fn test_query_flag_after_query_is_rejected_with_hint() {
+    let path = test_fixtures_dir().join("valid-ledger.beancount");
+    if !path.exists() {
+        eprintln!("Skipping: valid-ledger.beancount not found");
+        return;
+    }
+
+    // A flag after the (trailing_var_arg) query is captured as a query token;
+    // we should fail with an actionable hint, not a cryptic BQL error.
+    let output = Command::new(require_rledger!())
+        .arg("query")
+        .arg(&path)
+        .arg("SELECT account")
+        .arg("--numberify")
+        .output()
+        .expect("Failed to run rledger query");
+    assert!(!output.status.success(), "misplaced flag should error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("looks like a command-line flag"),
+        "expected a misplaced-flag hint, got: {stderr}"
+    );
+
+    // A negative number in the query must NOT be mistaken for a flag.
+    let ok = Command::new(require_rledger!())
+        .arg("query")
+        .arg(&path)
+        .arg("SELECT account WHERE number > -5")
+        .output()
+        .expect("Failed to run rledger query");
+    assert!(
+        ok.status.success(),
+        "negative number should not be flagged: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+}
+
+#[test]
 fn test_query_sum_positions() {
     let path = test_fixtures_dir().join("valid-ledger.beancount");
     if !path.exists() {
@@ -1598,9 +1636,21 @@ fn test_query_and_format_handle_broken_pipe() {
         (status, errbuf)
     };
 
+    // `completions` streams a large script regardless of any ledger; `check`
+    // only emits many lines when there are many errors, so give it one.
+    let mut errs = String::from("2020-01-01 open Assets:Cash\n");
+    for i in 0..2000 {
+        errs.push_str(&format!("2020-01-01 balance Assets:Cash {i}.00 USD\n"));
+    }
+    let errtmp = tempfile::NamedTempFile::new().expect("tempfile");
+    std::fs::write(errtmp.path(), &errs).expect("write errors ledger");
+    let errpath = errtmp.path().to_str().expect("path");
+
     for args in [
         vec!["query", path, "SELECT date, account, position, narration"],
         vec!["format", path],
+        vec!["check", errpath],
+        vec!["completions", "bash"],
     ] {
         let (status, stderr) = run_and_close(&args);
         assert!(
@@ -1609,8 +1659,8 @@ fn test_query_and_format_handle_broken_pipe() {
             args.join(" ")
         );
         assert!(
-            !stderr.contains("Broken pipe"),
-            "`rledger {}` should not print a broken-pipe error; stderr: {stderr}",
+            !stderr.contains("Broken pipe") && !stderr.contains("panic"),
+            "`rledger {}` should not print a broken-pipe error or panic; stderr: {stderr}",
             args.join(" ")
         );
     }

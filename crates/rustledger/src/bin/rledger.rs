@@ -324,6 +324,9 @@ fn main() -> ExitCode {
             }
             match rustledger::cmd::check::run(&args) {
                 Ok(code) => code,
+                // A downstream reader (e.g. `| head`) closing the pipe is not an
+                // error — exit cleanly, matching the Query/Format arms.
+                Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("error: {e:#}");
                     ExitCode::from(2)
@@ -497,8 +500,21 @@ fn main() -> ExitCode {
             }
         },
         Commands::Completions { shell } => {
-            clap_complete::generate(shell, &mut Cli::command(), "rledger", &mut io::stdout());
-            ExitCode::SUCCESS
+            // Generate into a buffer first: `clap_complete::generate` writes
+            // straight to the sink and panics on a write error, so writing to a
+            // pipe that a reader closed early (e.g. `| head`) would abort. We
+            // write the buffer ourselves and treat a broken pipe as success.
+            use std::io::Write as _;
+            let mut buf = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "rledger", &mut buf);
+            match io::stdout().write_all(&buf) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::from(1)
+                }
+            }
         }
     }
 }

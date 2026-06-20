@@ -213,7 +213,15 @@ struct OfxTransaction {
 /// input isn't an OFX document at all; a well-formed file with no transactions
 /// yields an empty list.
 fn parse_ofx(content: &str) -> Result<Vec<OfxTransaction>> {
-    if !content.contains("<OFX>") && !content.contains("<OFX ") {
+    // The `<OFX>` root may carry attributes or wrap onto the next line, so match
+    // `<OFX` followed by `>` or any whitespace rather than the two literal forms.
+    let has_ofx_root = content.match_indices("<OFX").any(|(i, _)| {
+        content[i + 4..]
+            .chars()
+            .next()
+            .is_some_and(|c| c == '>' || c.is_whitespace())
+    });
+    if !has_ofx_root {
         anyhow::bail!("not an OFX document (no <OFX> element)");
     }
 
@@ -275,20 +283,40 @@ fn transaction_currency(block: &str) -> Option<String> {
     leaf(&block[i..], "CURSYM")
 }
 
-/// Extract leaf element `tag`'s value from `block`: the text after `<tag>` up to
-/// the next `<` (handles SGML `<TAG>v` and XML `<TAG>v</TAG>` alike),
-/// entity-decoded and trimmed. `<tag/>` yields `Some("")`; absence yields `None`.
+/// Extract leaf element `tag`'s value from `block`: the text after the start tag
+/// up to the next `<` (handles SGML `<TAG>v` and XML `<TAG>v</TAG>` alike),
+/// entity-decoded and trimmed. All start-tag forms are recognized — `<TAG>`,
+/// `<TAG/>`, `<TAG />`, and `<TAG attr="…">` / `<TAG attr="…"/>` — with the
+/// self-closing forms yielding `Some("")`. Absence yields `None`. The next
+/// character after `<tag` must be `>`, `/`, or whitespace, so `<TAG>` never
+/// matches a longer sibling like `<TAGEXTRA>`.
 fn leaf(block: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    if let Some(i) = block.find(&open) {
-        let after = &block[i + open.len()..];
-        let end = after.find('<').unwrap_or(after.len());
-        return Some(decode_entities(after[..end].trim()));
+    let prefix = format!("<{tag}");
+    let mut from = 0;
+    loop {
+        let i = from + block[from..].find(&prefix)?;
+        let rest = &block[i + prefix.len()..];
+        match rest.chars().next() {
+            // `<TAG>value…`
+            Some('>') => {
+                let after = &rest['>'.len_utf8()..];
+                let end = after.find('<').unwrap_or(after.len());
+                return Some(decode_entities(after[..end].trim()));
+            }
+            // `<TAG/>`, `<TAG />`, `<TAG attr=…>`, `<TAG attr=…/>`
+            Some('/' | ' ' | '\t' | '\r' | '\n') => {
+                let gt = rest.find('>')?;
+                if rest[..gt].ends_with('/') {
+                    return Some(String::new()); // self-closing
+                }
+                let after = &rest[gt + 1..];
+                let end = after.find('<').unwrap_or(after.len());
+                return Some(decode_entities(after[..end].trim()));
+            }
+            // Not this tag (e.g. `<TAGEXTRA>`); keep searching.
+            _ => from = i + prefix.len(),
+        }
     }
-    if block.contains(&format!("<{tag}/>")) {
-        return Some(String::new());
-    }
-    None
 }
 
 /// Decode the five predefined XML entities (OFX rarely uses numeric refs).
@@ -307,11 +335,13 @@ fn decode_entities(s: &str) -> String {
 /// Convert an OFX datetime (`YYYYMMDD`, optionally followed by `HHMMSS[.fff][tz]`)
 /// to a civil date by taking the `YYYYMMDD` prefix.
 fn ofx_date_to_naive(s: &str) -> Result<NaiveDate> {
-    let digits: String = s.trim().chars().take_while(char::is_ascii_digit).collect();
-    if digits.len() < 8 {
+    let s = s.trim();
+    // The civil date is the leading `YYYYMMDD`; slice it directly (the bytes are
+    // ASCII, so byte and char indices coincide) rather than allocating.
+    if s.len() < 8 || !s.as_bytes()[..8].iter().all(u8::is_ascii_digit) {
         anyhow::bail!("invalid OFX date: {s:?}");
     }
-    format!("{}-{}-{}", &digits[0..4], &digits[4..6], &digits[6..8])
+    format!("{}-{}-{}", &s[0..4], &s[4..6], &s[6..8])
         .parse()
         .with_context(|| format!("invalid OFX date: {s:?}"))
 }
@@ -894,6 +924,15 @@ NEWFILEUID:NONE
         assert_eq!(leaf("<NAME>Foo</NAME>", "NAME").as_deref(), Some("Foo"));
         assert_eq!(leaf("<MEMO/>", "MEMO").as_deref(), Some(""));
         assert_eq!(leaf("<NAME>x", "MEMO"), None);
+        // All XML start-tag forms (whitespace self-close, attributes).
+        assert_eq!(leaf("<MEMO />", "MEMO").as_deref(), Some(""));
+        assert_eq!(leaf("<MEMO x=\"1\"/>", "MEMO").as_deref(), Some(""));
+        assert_eq!(leaf("<NAME id=\"1\">Foo<", "NAME").as_deref(), Some("Foo"));
+        // A longer sibling must not be matched by a shorter tag.
+        assert_eq!(
+            leaf("<NAMEEXTRA>Z<NAME>Foo", "NAME").as_deref(),
+            Some("Foo")
+        );
         assert_eq!(decode_entities("a &amp; b &lt;c&gt;"), "a & b <c>");
         assert_eq!(
             ofx_date_to_naive("20240115120000[-5:EST]").unwrap(),

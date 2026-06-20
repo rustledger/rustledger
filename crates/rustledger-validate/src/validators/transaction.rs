@@ -19,7 +19,7 @@ use crate::{AccountState, LedgerState, ValidationOptions};
 /// deliberately deferred to the late phase, since elided postings have
 /// `units: None` here.
 pub fn validate_transaction_early(
-    state: &LedgerState,
+    state: &mut LedgerState,
     txn: &Transaction,
     errors: &mut Vec<ValidationError>,
 ) {
@@ -30,17 +30,26 @@ pub fn validate_transaction_early(
     // here — we don't want to run the currency check yet (deferred to late
     // phase so it sees filled units).
     for posting in &txn.postings {
-        match state.accounts.get(&posting.account) {
-            Some(account_state) => {
-                validate_account_lifecycle(txn, posting, account_state, errors);
-            }
-            None => {
-                errors.push(ValidationError::new(
-                    ErrorCode::AccountNotOpen,
-                    format!("Account {} was never opened", posting.account),
-                    txn.date,
-                ));
-            }
+        if let Some(account_state) = state.accounts.get(&posting.account) {
+            validate_account_lifecycle(txn, posting, account_state, errors);
+            continue;
+        }
+        // Account not opened. Only flag *elided* postings here: booking
+        // interpolates them, so the account must exist before booking (the
+        // Python #877-equivalent case). Explicit postings are deferred to the
+        // late phase so account-rewriting regular plugins (`rename_accounts`,
+        // `split_expenses`, …) — which run after early — aren't falsely flagged
+        // on their pre-rewrite account name. The recorded key lets the late
+        // phase skip re-reporting an elided posting that is still unopened.
+        if posting.units.is_none() {
+            errors.push(ValidationError::new(
+                ErrorCode::AccountNotOpen,
+                format!("Account {} was never opened", posting.account),
+                txn.date,
+            ));
+            state
+                .account_not_open_early
+                .insert((posting.account.clone(), txn.date));
         }
     }
 }
@@ -55,17 +64,26 @@ pub fn validate_transaction_late(
     txn: &Transaction,
     errors: &mut Vec<ValidationError>,
 ) {
-    // Currency-constraint checks on filled postings. These need to run
-    // late because they call `posting.amount()`, which is `None` for
-    // elided postings until booking fills them in.
+    // Currency-constraint checks on filled postings (they call
+    // `posting.amount()`, `None` for elided postings until booking fills them).
     //
-    // Account-presence (E1001) already ran in the early phase; we
-    // deliberately don't re-emit here, but we still need the account
-    // state to enforce currency constraints — so skip the check rather
-    // than re-flagging unopened accounts.
+    // Account-presence (E1001) for *explicit* postings is also emitted here —
+    // deferred from the early phase so account-rewriting regular plugins have
+    // already run and we see the final account names. Elided postings were
+    // checked early (booking needs the account); `account_not_open_early`
+    // guards against double-reporting one that is still unopened.
     for posting in &txn.postings {
         if let Some(account_state) = state.accounts.get(&posting.account) {
             validate_posting_currency(state, txn, posting, account_state, errors);
+        } else if !state
+            .account_not_open_early
+            .contains(&(posting.account.clone(), txn.date))
+        {
+            errors.push(ValidationError::new(
+                ErrorCode::AccountNotOpen,
+                format!("Account {} was never opened", posting.account),
+                txn.date,
+            ));
         }
     }
 

@@ -27,8 +27,34 @@ pub fn escape_string(s: &str) -> String {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
+            // The parser decodes `\t`/`\r` into literal tab/CR, so re-escape
+            // them here rather than emitting raw control bytes inside quotes
+            // (hostile to terminals/logs, and not round-trippable).
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
             _ => out.push(c),
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_string;
+
+    #[test]
+    fn escapes_quote_backslash_and_controls() {
+        assert_eq!(escape_string("a\"b"), "a\\\"b");
+        assert_eq!(escape_string("a\\b"), "a\\\\b");
+        assert_eq!(escape_string("a\nb"), "a\\nb");
+        // The parser decodes `\t`/`\r` to literal tab/CR; Display must re-escape
+        // them rather than emit raw control bytes inside the quotes.
+        assert_eq!(escape_string("a\tb"), "a\\tb");
+        assert_eq!(escape_string("a\rb"), "a\\rb");
+    }
+
+    #[test]
+    fn leaves_plain_text_untouched() {
+        assert_eq!(escape_string("plain text 123"), "plain text 123");
+    }
 }

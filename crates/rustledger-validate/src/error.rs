@@ -139,6 +139,15 @@ impl ErrorCode {
         matches!(self, Self::DateOutOfOrder)
     }
 
+    /// Whether this diagnostic is advisory-only and must NOT be surfaced by
+    /// `check` (which mirrors `bean-check`). Python beancount does not flag
+    /// closing an account with a residual balance, so `check` stays silent; the
+    /// advisory is surfaced instead by `rledger lint closed-nonempty`.
+    #[must_use]
+    pub const fn is_advisory_only(&self) -> bool {
+        matches!(self, Self::AccountCloseNotEmpty)
+    }
+
     /// Get the severity level.
     #[must_use]
     pub const fn severity(&self) -> Severity {
@@ -164,6 +173,16 @@ impl ErrorCode {
     pub const fn is_parse_phase(&self) -> bool {
         matches!(self, Self::InvalidAccountName)
     }
+}
+
+/// Whether a rendered diagnostic code string (e.g. `"E1004"`) is advisory-only.
+///
+/// The string-keyed counterpart to [`ErrorCode::is_advisory_only`], for
+/// consumers (the CLI `check`/`lint` split) that only carry the code string.
+/// Keeping it here means the set of advisory-only codes lives in one place.
+#[must_use]
+pub fn is_advisory_only_code(code: &str) -> bool {
+    code == ErrorCode::AccountCloseNotEmpty.code()
 }
 
 /// Severity level for validation messages.

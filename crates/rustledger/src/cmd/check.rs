@@ -10,6 +10,10 @@ use rustledger_loader::LoadError;
 use rustledger_plugin::PluginManager;
 #[cfg(feature = "python-plugin-wasm")]
 use rustledger_plugin::{PluginInput, PluginOptions};
+// The canonical advisory-only predicate lives in `rustledger-validate` so that
+// `check` (which hides these, mirroring bean-check) and `lint` share one source
+// of truth for which codes are advisory.
+use rustledger_validate::is_advisory_only_code;
 use serde::Serialize;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -508,6 +512,13 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     // Convert process errors to diagnostics, using the phase field to
     // split into parse/validate/plugin categories.
     for err in &ledger.errors {
+        // Advisory-only diagnostics are not surfaced by `check`, which mirrors
+        // `bean-check`: Python beancount does not flag closing an account with a
+        // residual balance (E1004). They are reported by `rledger lint
+        // closed-nonempty` instead.
+        if is_advisory_only_code(&err.code) {
+            continue;
+        }
         let severity_str = match err.severity {
             rustledger_loader::ErrorSeverity::Error => "error",
             rustledger_loader::ErrorSeverity::Warning => "warning",
@@ -567,7 +578,10 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     let warning_count = ledger
         .errors
         .iter()
-        .filter(|e| matches!(e.severity, rustledger_loader::ErrorSeverity::Warning))
+        .filter(|e| {
+            matches!(e.severity, rustledger_loader::ErrorSeverity::Warning)
+                && !is_advisory_only_code(&e.code)
+        })
         .count();
     #[cfg(feature = "python-plugin-wasm")]
     let mut warning_count = warning_count;

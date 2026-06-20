@@ -181,9 +181,9 @@ pub struct Args {
     pub no_header: bool,
 
     /// Categorize transactions using the built-in merchant dictionary
-    /// (NETFLIX → Expenses:Subscriptions, SHELL → Expenses:Transportation:Gas,
-    /// …) instead of leaving unmatched rows at Expenses:Unknown. Can also be
-    /// set per-importer in importers.toml via `use_merchant_dict = true`.
+    /// (e.g. NETFLIX → Expenses:Subscriptions:Streaming) instead of leaving
+    /// unmatched rows at Expenses:Unknown. Can also be set per-importer in
+    /// importers.toml via `use_merchant_dict = true`.
     #[arg(long)]
     pub use_merchant_dict: bool,
 

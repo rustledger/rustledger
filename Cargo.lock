@@ -3351,6 +3351,7 @@ dependencies = [
  "jiff",
  "ofxy",
  "proptest",
+ "regex",
  "rmp-serde",
  "rust_decimal",
  "rustledger-core",

@@ -36,6 +36,7 @@ rustledger-plugin = { workspace = true, features = ["wasm-runtime"], optional = 
 rustledger-plugin-types.workspace = true
 jiff.workspace = true
 rust_decimal.workspace = true
+regex.workspace = true
 anyhow.workspace = true
 format_num_pattern.workspace = true
 csv.workspace = true

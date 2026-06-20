@@ -62,6 +62,35 @@ pub fn validate_open(state: &mut LedgerState, open: &Open, errors: &mut Vec<Vali
         .insert(open.account.clone(), Inventory::new());
 }
 
+/// Late-phase: reflect an `Open` in account/inventory state without re-running
+/// the early-phase name/duplicate checks. Regular plugins (e.g.
+/// `currency_accounts`) run *after* the early phase and may generate both an
+/// Open and a posting for the same account; this lets the late-phase
+/// account-presence check on plugin-added postings see those generated Opens
+/// (originals are already in state from early, so this is a no-op for them).
+pub fn register_open_late(state: &mut LedgerState, open: &Open) {
+    if state.accounts.contains_key(&open.account) {
+        return;
+    }
+    let booking = open
+        .booking
+        .as_ref()
+        .and_then(|b| b.parse::<BookingMethod>().ok())
+        .unwrap_or(state.options.default_booking_method);
+    state.accounts.insert(
+        open.account.clone(),
+        AccountState {
+            opened: open.date,
+            closed: None,
+            currencies: open.currencies.iter().cloned().collect(),
+            booking,
+        },
+    );
+    state
+        .inventories
+        .insert(open.account.clone(), Inventory::new());
+}
+
 /// Early-phase Close validation — runs on pre-booking directives.
 ///
 /// Checks that the account being closed exists and isn't already

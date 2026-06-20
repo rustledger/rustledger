@@ -88,9 +88,9 @@ pub enum Phase {
 }
 
 use validators::{
-    validate_balance_early, validate_balance_late, validate_close, validate_close_late,
-    validate_document, validate_note, validate_open, validate_pad, validate_transaction_early,
-    validate_transaction_late,
+    register_open_late, validate_balance_early, validate_balance_late, validate_close,
+    validate_close_late, validate_document, validate_note, validate_open, validate_pad,
+    validate_transaction_early, validate_transaction_late,
 };
 
 use rayon::prelude::*;
@@ -537,6 +537,12 @@ fn validate_phase_inner<D: ValidatableDirective>(
             // ── Early-only kinds (state setup, structural / presence checks) ──
             (Phase::Early, Directive::Open(open)) => {
                 validate_open(state, open, &mut errors);
+            }
+            // Late sees plugin-generated Opens (regular plugins run after early),
+            // so the deferred account-presence check on plugin-added postings
+            // recognizes them. No-op for originals already in state from early.
+            (Phase::Late, Directive::Open(open)) => {
+                register_open_late(state, open);
             }
             (Phase::Early, Directive::Close(close)) => {
                 validate_close(state, close, &mut errors);

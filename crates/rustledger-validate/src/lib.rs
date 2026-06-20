@@ -288,6 +288,10 @@ struct PendingPad {
     /// `used` flag. Empty set = no balance has consumed this pad yet
     /// (drives E2003 in `check_unused_pads`).
     padded_currencies: FxHashSet<rustledger_core::Currency>,
+    /// Source span + file id of the `pad` directive, when validating
+    /// `Spanned` directives. Carried so `check_unused_pads` can anchor the
+    /// deferred E2003 to the pad's own line instead of `<unknown>`.
+    location: Option<(rustledger_parser::Span, u16)>,
 }
 
 /// Ledger state for validation.
@@ -533,7 +537,7 @@ fn validate_phase_inner<D: ValidatableDirective>(
                 validate_commodity_precision_meta(comm, &mut errors);
             }
             (Phase::Early, Directive::Pad(pad)) => {
-                validate_pad(state, pad, &mut errors);
+                validate_pad(state, pad, d.span_info(), &mut errors);
             }
             (Phase::Early, Directive::Document(doc)) => {
                 let file_id = d.span_info().map(|(_, fid)| fid);
@@ -596,17 +600,22 @@ fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
     for (target_account, pads) in &state.pending_pads {
         for pad in pads {
             if pad.padded_currencies.is_empty() {
-                errors.push(
-                    ValidationError::new(
-                        ErrorCode::PadWithoutBalance,
-                        "Unused Pad entry".to_string(),
-                        pad.date,
-                    )
-                    .with_context(format!(
-                        "   {} pad {} {}",
-                        pad.date, target_account, pad.source_account
-                    )),
-                );
+                let mut error = ValidationError::new(
+                    ErrorCode::PadWithoutBalance,
+                    "Unused Pad entry".to_string(),
+                    pad.date,
+                )
+                .with_context(format!(
+                    "   {} pad {} {}",
+                    pad.date, target_account, pad.source_account
+                ));
+                // Anchor the deferred error to the pad's own line (when known)
+                // so it renders with a location instead of `<unknown>:`.
+                if let Some((span, file_id)) = pad.location {
+                    error.span = Some(span);
+                    error.file_id = Some(file_id);
+                }
+                errors.push(error);
             }
         }
     }

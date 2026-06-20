@@ -16,6 +16,7 @@ ADRs document significant architectural decisions made during rustledger develop
 | [ADR-0004](0004-ts-types-from-rust-dtos.md) | Generate wire-format bindings from Rust DTOs | Accepted (Phase 1 + 2 + 3) |
 | [ADR-0005](0005-cst-conversion-performance.md) | CST Conversion Performance (parse cache; green-tree declined) | Accepted |
 | [ADR-0006](0006-wit-component-model-embedding.md) | WIT / Component-Model embedding contract | Proposed |
+| [ADR-0007](0007-average-booking-realization.md) | AVERAGE booking realizes a single weighted-average pool | Accepted |
 
 ## About ADRs
 

@@ -220,10 +220,9 @@ impl CsvImporter {
         amount_format: &AmountFormat,
         header_map: &HashMap<String, usize>,
     ) -> Result<Option<Transaction>> {
-        // Get date. No `Row N:` prefix on these errors: the sole caller
-        // (`extract`) already wraps every `parse_row` error with
-        // `Row {row_num}: {e}`, so prefixing here too produced a doubled
-        // `Row 1: Row 1: ...`.
+        // Get date. No `Row N:` prefix on these errors: `parse_row`'s caller
+        // already wraps every error it returns with `Row {row_num}: {e}`, so
+        // prefixing here too produced a doubled `Row 1: Row 1: ...`.
         let date_str = self
             .get_column(record, &csv_config.date_column, header_map)
             .with_context(|| "missing date column".to_string())?;

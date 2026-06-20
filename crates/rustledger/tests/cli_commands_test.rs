@@ -1511,3 +1511,74 @@ fn test_native_plugin_preferred_over_python_fallback() {
         "native plugins should not produce plugin-not-found errors: {combined}"
     );
 }
+
+/// Regression for OUTSTANDING #11: piping streaming output (`query`/`format`)
+/// to a reader that closes the pipe early — e.g. `| head` — must exit cleanly
+/// instead of printing `Broken pipe` and exiting non-zero. The `report` arm
+/// already handled this; `query` and `format` now match it.
+#[test]
+fn test_query_and_format_handle_broken_pipe() {
+    use std::io::Read as _;
+    use std::process::Stdio;
+
+    let bin = require_rledger!();
+
+    // Build a ledger whose output comfortably exceeds the OS pipe buffer
+    // (~64 KiB) so the writer is still producing output when we close the read
+    // end; otherwise it would finish before the pipe breaks and never exercise
+    // the EPIPE path. Same-date entries keep the ledger valid without date math.
+    let mut ledger = String::from(
+        "option \"operating_currency\" \"USD\"\n\
+         2020-01-01 open Assets:Cash\n\
+         2020-01-01 open Expenses:Food\n",
+    );
+    for i in 0..6000 {
+        ledger.push_str(&format!(
+            "2020-01-01 * \"payee {i}\" \"a deliberately long narration number {i} to inflate output\"\n  \
+             Expenses:Food  {}.50 USD\n  Assets:Cash\n",
+            i % 100
+        ));
+    }
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    std::fs::write(tmp.path(), &ledger).expect("write ledger");
+    let path = tmp.path().to_str().expect("path");
+
+    // Run the command, read one chunk, then drop the read end to break the pipe.
+    let run_and_close = |args: &[&str]| -> (std::process::ExitStatus, String) {
+        let mut child = Command::new(&bin)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rledger");
+        let mut out = child.stdout.take().expect("stdout");
+        let mut buf = [0u8; 256];
+        let _ = out.read(&mut buf);
+        drop(out); // close read end → writer hits EPIPE on its next write
+        let mut errbuf = String::new();
+        let _ = child
+            .stderr
+            .take()
+            .expect("stderr")
+            .read_to_string(&mut errbuf);
+        let status = child.wait().expect("wait");
+        (status, errbuf)
+    };
+
+    for args in [
+        vec!["query", path, "SELECT date, account, position, narration"],
+        vec!["format", path],
+    ] {
+        let (status, stderr) = run_and_close(&args);
+        assert!(
+            status.success(),
+            "`rledger {}` piped to an early-closing reader should exit 0, got {status:?}; stderr: {stderr}",
+            args.join(" ")
+        );
+        assert!(
+            !stderr.contains("Broken pipe"),
+            "`rledger {}` should not print a broken-pipe error; stderr: {stderr}",
+            args.join(" ")
+        );
+    }
+}

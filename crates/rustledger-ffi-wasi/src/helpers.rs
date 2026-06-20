@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rustledger_booking::BookingEngine;
 use rustledger_core::Directive;
 use rustledger_parser::{Spanned, parse as parse_beancount};
 
@@ -84,133 +83,81 @@ pub struct LoadResult {
 
 /// Parse and interpolate source, returning directives with line numbers.
 pub fn load_source(source: &str) -> LoadResult {
-    let parse_result = parse_beancount(source);
     let lookup = LineLookup::new(source);
 
-    let mut errors: Vec<Error> = parse_result
-        .errors
+    // Parse once to recover the declared `include` paths for the DTO. The
+    // string surface has no real filesystem, so we cannot resolve includes; we
+    // stub each as an empty file in the VFS below to preserve the historical
+    // "list includes, don't resolve, don't error" contract.
+    let parse_result = parse_beancount(source);
+    let includes: Vec<Include> = parse_result
+        .includes
         .iter()
-        .map(|e| Error::new(e.to_string()).with_line(lookup.byte_to_line(e.span().0)))
-        .collect();
-
-    // Extract options
-    let mut options = LedgerOptions::default();
-    for (key, value, _span) in &parse_result.options {
-        match key.as_str() {
-            "title" => options.title = Some(value.clone()),
-            "operating_currency" => options.operating_currency.push(value.clone()),
-            "name_assets" => options.name_assets.clone_from(value),
-            "name_liabilities" => options.name_liabilities.clone_from(value),
-            "name_equity" => options.name_equity.clone_from(value),
-            "name_income" => options.name_income.clone_from(value),
-            "name_expenses" => options.name_expenses.clone_from(value),
-            "documents" => options.documents.push(value.clone()),
-            "booking_method" => options.booking_method.clone_from(value),
-            "render_commas" => {
-                options.render_commas = value.eq_ignore_ascii_case("true") || value == "1";
-            }
-            "inferred_tolerance_default" => {
-                // Parse "CURRENCY:TOLERANCE" or "*:TOLERANCE"
-                if let Some((curr, tol)) = value.split_once(':') {
-                    options
-                        .inferred_tolerance_default
-                        .insert(curr.trim().to_string(), tol.trim().to_string());
-                }
-            }
-            "inferred_tolerance_multiplier" | "tolerance_multiplier" => {
-                options.inferred_tolerance_multiplier.clone_from(value);
-            }
-            "infer_tolerance_from_cost" => {
-                options.infer_tolerance_from_cost =
-                    value.eq_ignore_ascii_case("true") || value == "1";
-            }
-            "account_rounding" => options.account_rounding = Some(value.clone()),
-            "account_previous_balances" => options.account_previous_balances.clone_from(value),
-            "account_previous_earnings" => options.account_previous_earnings.clone_from(value),
-            "account_previous_conversions" => {
-                options.account_previous_conversions.clone_from(value);
-            }
-            "account_current_earnings" => options.account_current_earnings.clone_from(value),
-            "account_current_conversions" => {
-                options.account_current_conversions = Some(value.clone());
-            }
-            "account_unrealized_gains" => options.account_unrealized_gains = Some(value.clone()),
-            "conversion_currency" => options.conversion_currency = Some(value.clone()),
-            _ => {}
-        }
-    }
-
-    // Run the pre-booking SYNTH pass (`auto_accounts`, `document_discovery`)
-    // over the parsed directives, reusing the *canonical* loader entry point
-    // (`run_plugins` — the same function `process::load` calls) instead of a
-    // fork. The string surface cannot use the file-based pipeline wholesale
-    // (it has no filesystem to resolve `include`s against and must preserve
-    // unresolved-include reporting), so it invokes the shared synth stage
-    // directly. Without this, a file-declared `plugin "auto_accounts"` never
-    // generated Open directives through `ledger.load`/`validate`/`query`.
-    // Booking is gated only on *parse* success (it must run on the same input
-    // the canonical pipeline books, regardless of synth/plugin diagnostics).
-    // Capture that state now, before the synth pass appends its own errors.
-    let no_parse_errors = errors.is_empty();
-
-    let mut synth_dirs: Vec<Spanned<Directive>> = parse_result.directives.clone();
-    let mut source_map = rustledger_loader::SourceMap::new();
-    source_map.add_file(
-        std::path::PathBuf::from("<source>"),
-        std::sync::Arc::from(source),
-    );
-    let synth_plugins: Vec<rustledger_loader::Plugin> = parse_result
-        .plugins
-        .iter()
-        .map(|(name, config, span)| {
-            // Mirror the loader: a `python:` prefix forces Python execution and
-            // is stripped from the resolved module name.
-            let force_python = name.starts_with("python:");
-            let name = name.strip_prefix("python:").unwrap_or(name).to_string();
-            rustledger_loader::Plugin {
-                name,
-                config: config.clone(),
-                span: *span,
-                file_id: 0,
-                force_python,
-            }
+        .map(|(path, span)| Include {
+            path: path.clone(),
+            lineno: lookup.byte_to_line(span.start),
         })
         .collect();
-    let mut synth_errors: Vec<rustledger_loader::LedgerError> = Vec::new();
-    let synth_result = rustledger_loader::run_plugins(
-        &mut synth_dirs,
-        &synth_plugins,
-        &rustledger_loader::Options::default(),
-        &rustledger_loader::LoadOptions::default(),
-        &source_map,
-        &mut synth_errors,
-        rustledger_loader::PluginPass::PreBookingSynth,
-    );
-    errors.extend(synth_errors.iter().map(ledger_error_to_ffi));
-    if let Err(e) = synth_result {
-        // A fatal synth-pass error must not be silently dropped (it is tagged
-        // non-parse so it does not suppress booking or `ledger.validate`).
-        errors.push(Error::new(format!("synth plugin pass failed: {e}")).validate_phase());
-    }
 
-    // Collect directive line numbers, commodities, and precision
+    // Route the string through the SAME canonical pipeline as `load_file`
+    // (`sort → synth → book → regular → finalize`) via an in-memory VFS, rather
+    // than re-implementing a partial loader here. This keeps source loads in
+    // lock-step with the native loader: file-declared regular plugins
+    // (`rename_accounts`, `split_expenses`, `currency_accounts`, …) and the
+    // date sort now run, and any future pipeline phase reaches the FFI for free.
+    // `validate: false` preserves this surface's load-only error contract
+    // (booking errors surface; semantic validation is `ledger.validate`'s job).
+    let mut vfs = rustledger_loader::VirtualFileSystem::new();
+    vfs.add_file("<source>", source);
+    for inc in &includes {
+        // Empty stub: include resolution becomes a no-op, so a bare source with
+        // `include` directives lists them (above) without emitting a parse-phase
+        // "file not found" error that would suppress `ledger.validate`.
+        vfs.add_file(inc.path.as_str(), "");
+    }
+    let load_opts = rustledger_loader::LoadOptions {
+        validate: false,
+        ..Default::default()
+    };
+    let ledger = match rustledger_loader::Loader::new()
+        .with_filesystem(Box::new(vfs))
+        .load(std::path::Path::new("<source>"))
+        .map_err(|e| e.to_string())
+        .and_then(|raw| rustledger_loader::process(raw, &load_opts).map_err(|e| e.to_string()))
+    {
+        Ok(ledger) => ledger,
+        Err(e) => {
+            // Fatal load/process failure is unexpected for an in-memory source,
+            // but surface it rather than panicking.
+            return LoadResult {
+                directives: Vec::new(),
+                spanned_directives: Vec::new(),
+                directive_lines: Vec::new(),
+                line_lookup: lookup,
+                errors: vec![Error::new(e)],
+                options: LedgerOptions::default(),
+                plugins: Vec::new(),
+                includes,
+            };
+        }
+    };
+
+    // Rebuild the wire DTO from the canonical `Ledger`.
+    let mut directives: Vec<Directive> = Vec::new();
     let mut directive_lines: Vec<u32> = Vec::new();
     let mut commodities: HashSet<String> = HashSet::new();
     let mut precision_tracker = PrecisionTracker::new();
-
-    let mut directives: Vec<Directive> = Vec::new();
-    for spanned in &synth_dirs {
-        // Synth-generated directives carry `SYNTHESIZED_FILE_ID`, absent from
-        // the single-file source map, so they surface as line 0 — the
-        // "generated entry" fingerprint embedders key on.
-        let line = if source_map.get(spanned.file_id as usize).is_some() {
+    for spanned in &ledger.directives {
+        // Synth/plugin-generated directives carry a `file_id` absent from the
+        // source map, so they fall through to line 0 — the "generated entry"
+        // fingerprint embedders key on to forbid editing synthesized entries.
+        let line = if ledger.source_map.get(spanned.file_id as usize).is_some() {
             lookup.byte_to_line(spanned.span.start)
         } else {
             0
         };
         directive_lines.push(line);
 
-        // Collect commodities and track precision
         match &spanned.value {
             Directive::Open(o) => {
                 for c in &o.currencies {
@@ -251,74 +198,26 @@ pub fn load_source(source: &str) -> LoadResult {
         directives.push(spanned.value.clone());
     }
 
-    // Run booking and interpolation on transactions (sequential)
-    // This fills in empty cost specs via lot matching, normalizes total prices,
-    // and interpolates missing amounts. Must be sequential because lot matching
-    // depends on prior inventory state. Gated on parse success only — synth
-    // diagnostics appended above must not suppress booking.
-    if no_parse_errors {
-        let booking_method = options
-            .booking_method
-            .parse()
-            .unwrap_or(rustledger_core::BookingMethod::Strict);
-        let mut booking_engine = BookingEngine::with_method(booking_method);
-        booking_engine.register_account_methods(directives.iter());
+    let errors: Vec<Error> = ledger.errors.iter().map(ledger_error_to_ffi).collect();
 
-        for (i, directive) in directives.iter_mut().enumerate() {
-            if let Directive::Transaction(txn) = directive {
-                match booking_engine.book_and_interpolate(txn) {
-                    Ok(result) => {
-                        // Apply the booked transaction to update inventory for subsequent lot matching
-                        booking_engine.apply(&result.transaction);
-                        *txn = result.transaction;
-                        // Normalize total prices (@@→@) for downstream consumers
-                        rustledger_booking::normalize_prices(txn);
-                    }
-                    Err(e) => {
-                        errors.push(
-                            Error::new(e.to_string())
-                                .with_line(directive_lines[i])
-                                .validate_phase(),
-                        );
-                    }
-                }
-            }
-        }
-    }
-
+    let mut options = build_ledger_options(&ledger.options);
     let mut commodity_list: Vec<_> = commodities.into_iter().collect();
     commodity_list.sort();
     options.commodities = commodity_list;
     options.display_precision = precision_tracker.most_common_precision();
 
-    // Extract plugins
-    let plugins: Vec<Plugin> = parse_result
+    let plugins: Vec<Plugin> = ledger
         .plugins
         .iter()
-        .map(|(name, config, _span)| Plugin {
-            name: name.clone(),
-            config: config.clone(),
+        .map(|p| Plugin {
+            name: p.name.clone(),
+            config: p.config.clone(),
         })
         .collect();
-
-    // Extract includes
-    let includes: Vec<Include> = parse_result
-        .includes
-        .iter()
-        .map(|(path, span)| Include {
-            path: path.clone(),
-            lineno: lookup.byte_to_line(span.start),
-        })
-        .collect();
-
-    // Spanned directives for validation — the synth-expanded set, so the
-    // `ledger.validate` session sees auto-generated Opens (no spurious
-    // "account not opened" diagnostics).
-    let spanned_directives: Vec<Spanned<Directive>> = synth_dirs;
 
     LoadResult {
         directives,
-        spanned_directives,
+        spanned_directives: ledger.directives,
         directive_lines,
         line_lookup: lookup,
         errors,

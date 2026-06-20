@@ -17,13 +17,14 @@
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use rustledger_loader::{LoadOptions, Loader};
+use rustledger_validate::ErrorCode;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// Validate code for "account closed with a non-zero balance"
-/// (`rustledger_validate::ErrorCode::AccountCloseNotEmpty`).
-const CLOSE_NONEMPTY_CODE: &str = "E1004";
+/// Validate code for "account closed with a non-zero balance", sourced from the
+/// canonical [`ErrorCode`] so it can't drift from the enum.
+const CLOSE_NONEMPTY_CODE: &str = ErrorCode::AccountCloseNotEmpty.code();
 
 /// Output format for the report.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -91,11 +92,25 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
         ..Default::default()
     };
     for path in &args.files {
-        let mut load_result = Loader::new()
+        let load_result = Loader::new()
             .load(path)
             .with_context(|| format!("failed to load {}", path.display()))?;
-        // `process` re-reports load errors; we only want the validate advisory.
-        load_result.errors.clear();
+        // The Loader surfaces parse/include errors in `errors` rather than
+        // returning `Err`. We can't reliably analyze account closes in a file
+        // that didn't parse, so fail loudly instead of reporting a misleading
+        // "no accounts closed with a non-zero balance" for invalid input.
+        if !load_result.errors.is_empty() {
+            let joined = load_result
+                .errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::bail!(
+                "{}: cannot lint a file with load errors: {joined}",
+                path.display()
+            );
+        }
         let ledger = rustledger_loader::process(load_result, &options)
             .with_context(|| format!("failed to process {}", path.display()))?;
         for err in &ledger.errors {
@@ -193,6 +208,27 @@ mod tests {
         assert!(
             out.contains("No accounts closed with a non-zero balance"),
             "expected no findings for a zero-balance close, got: {out}"
+        );
+    }
+
+    #[test]
+    fn errors_on_file_with_load_errors() {
+        // A missing include surfaces as a load error; the lint must fail loudly
+        // rather than silently report "no accounts" on a file it couldn't load.
+        let mut file = tempfile::Builder::new()
+            .suffix(".beancount")
+            .tempfile()
+            .unwrap();
+        file.write_all(b"include \"definitely-missing-xyz.beancount\"\n")
+            .unwrap();
+        let args = Args {
+            files: vec![file.path().to_path_buf()],
+            format: OutputFormat::Text,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        assert!(
+            run_with_writer(&args, &mut buf).is_err(),
+            "expected a hard error when the file has load errors"
         );
     }
 }

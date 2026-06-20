@@ -6,19 +6,14 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use rustledger_core::Directive;
 use rustledger_loader::LoadError;
-
-/// True for validate codes that are advisory-only: produced by validation and
-/// reported by `rledger lint`, but NOT surfaced by `check` (which mirrors
-/// `bean-check`). Keep in sync with `rustledger_validate::ErrorCode::is_advisory_only`.
-fn is_advisory_only_code(code: &str) -> bool {
-    // E1004 = AccountCloseNotEmpty (close with a residual balance). Python
-    // beancount does not flag this.
-    code == "E1004"
-}
 #[cfg(feature = "python-plugin-wasm")]
 use rustledger_plugin::PluginManager;
 #[cfg(feature = "python-plugin-wasm")]
 use rustledger_plugin::{PluginInput, PluginOptions};
+// The canonical advisory-only predicate lives in `rustledger-validate` so that
+// `check` (which hides these, mirroring bean-check) and `lint` share one source
+// of truth for which codes are advisory.
+use rustledger_validate::is_advisory_only_code;
 use serde::Serialize;
 use std::io::{self, Write};
 use std::path::PathBuf;

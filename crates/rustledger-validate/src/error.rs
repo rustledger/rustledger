@@ -175,6 +175,16 @@ impl ErrorCode {
     }
 }
 
+/// Whether a rendered diagnostic code string (e.g. `"E1004"`) is advisory-only.
+///
+/// The string-keyed counterpart to [`ErrorCode::is_advisory_only`], for
+/// consumers (the CLI `check`/`lint` split) that only carry the code string.
+/// Keeping it here means the set of advisory-only codes lives in one place.
+#[must_use]
+pub fn is_advisory_only_code(code: &str) -> bool {
+    code == ErrorCode::AccountCloseNotEmpty.code()
+}
+
 /// Severity level for validation messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Severity {

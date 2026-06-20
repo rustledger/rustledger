@@ -1,9 +1,9 @@
 //! Differential tests for OFX amount parsing.
 //!
-//! The OFX importer delegates number parsing to the third-party `ofxy` crate. These tests
+//! The OFX importer parses `<TRNAMT>` values into `rust_decimal::Decimal`. These tests
 //! construct OFX content with known amounts (sub-cent, negative, large) and assert that
 //! every posting carries the exact `Decimal` value from the source — so that any silent
-//! corruption by `ofxy` would surface here, the same way #972 surfaced for CSV.
+//! corruption in amount parsing would surface here, the same way #972 surfaced for CSV.
 
 use rust_decimal::Decimal;
 use rustledger_importer::{
@@ -93,7 +93,7 @@ fn ofx_preserves_normal_amounts() {
 
 #[test]
 fn ofx_preserves_sub_cent_amounts() {
-    // The bug class from #972: any silent precision loss in `ofxy`'s amount parser
+    // The bug class from #972: any silent precision loss in OFX amount parsing
     // would corrupt these.
     assert_ofx_amounts(&["0.01", "-0.01", "0.05", "-0.05", "0.001", "-0.001"]);
 }

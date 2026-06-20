@@ -58,25 +58,23 @@ impl OfxImporter {
             )
         })?;
 
-        let statements = parse_ofx(content).with_context(|| "Failed to parse OFX content")?;
+        let transactions = parse_ofx(content).with_context(|| "Failed to parse OFX content")?;
 
         let mut directives = Vec::new();
         let mut warnings = Vec::new();
 
-        // Bank and credit-card statements are imported identically: every
+        // Bank and credit-card transactions are imported identically: every
         // transaction posts to `config.account`.
-        for statement in &statements {
-            let statement_currency = statement.currency.as_deref().unwrap_or("");
-            for txn in &statement.transactions {
-                match Self::build_transaction(
-                    txn,
-                    statement_currency,
-                    &config.account,
-                    default_currency,
-                ) {
-                    Ok(t) => directives.push(Directive::Transaction(t)),
-                    Err(e) => warnings.push(format!("Skipped transaction: {e}")),
-                }
+        for txn in &transactions {
+            let statement_currency = txn.statement_currency.as_deref().unwrap_or("");
+            match Self::build_transaction(
+                txn,
+                statement_currency,
+                &config.account,
+                default_currency,
+            ) {
+                Ok(t) => directives.push(Directive::Transaction(t)),
+                Err(e) => warnings.push(format!("Skipped transaction: {e}")),
             }
         }
 
@@ -183,93 +181,98 @@ impl OfxImporter {
 // ============================================================================
 // Native OFX parser
 //
-// OFX 1.x SGML and OFX 2.x XML differ only in whether leaf elements are closed:
-// SGML writes `<TAG>value` (the value runs to the next `<`), XML writes
-// `<TAG>value</TAG>`. Reading each leaf as "text up to the next `<`" parses both
-// dialects uniformly, with no dependency on header conformance or OFX version.
-// This replaces the `ofxy` crate (and its `chrono` dependency).
+// OFX 1.x SGML and OFX 2.x XML differ only in whether elements are closed: SGML
+// writes `<TAG>value` (the value runs to the next `<`) and may omit end tags on
+// aggregates too, while XML writes `<TAG>value</TAG>`. Reading each leaf as
+// "text up to the next `<`", and bounding each `STMTTRN` by the next sibling /
+// list-close / end-of-input rather than requiring `</STMTTRN>`, parses both
+// dialects (and end-tag-less SGML) with no dependency on header conformance or
+// OFX version. This replaces the `ofxy` crate (and its `chrono` dependency).
+//
+// Dates use the bank-stated civil date (the `YYYYMMDD` prefix of `DTPOSTED`),
+// not a UTC-shifted date — a transaction stamped late evening with a timezone
+// offset stays on the date the statement shows it, which is what an accounting
+// import wants. (`ofxy` converted to UTC, which could move it a day.)
 // ============================================================================
 
-/// One bank or credit-card statement: its declared currency (`CURDEF`) and the
-/// transactions in its `BANKTRANLIST`.
-struct OfxStatement {
-    currency: Option<String>,
-    transactions: Vec<OfxTransaction>,
-}
-
-/// A single `STMTTRN` aggregate, reduced to the fields we import. `date_posted`
-/// and `amount` are kept raw and validated in [`OfxImporter::build_transaction`]
-/// so a malformed value becomes a per-transaction warning, not a hard failure.
+/// A single `STMTTRN`, reduced to the fields we import, plus the statement
+/// currency (nearest preceding `CURDEF`) it belongs to. `date_posted` and
+/// `amount` are kept raw and validated in [`OfxImporter::build_transaction`] so
+/// a malformed or absent value becomes a per-transaction warning, not a silent
+/// drop or a hard failure of the whole import.
 struct OfxTransaction {
     date_posted: String,
     amount: String,
     name: Option<String>,
     memo: Option<String>,
     currency: Option<String>,
+    statement_currency: Option<String>,
 }
 
-/// Parse OFX content (1.x SGML or 2.x XML) into statements. Errors only if the
+/// Parse OFX content (1.x SGML or 2.x XML) into transactions. Errors only if the
 /// input isn't an OFX document at all; a well-formed file with no transactions
 /// yields an empty list.
-fn parse_ofx(content: &str) -> Result<Vec<OfxStatement>> {
+fn parse_ofx(content: &str) -> Result<Vec<OfxTransaction>> {
     if !content.contains("<OFX>") && !content.contains("<OFX ") {
         anyhow::bail!("not an OFX document (no <OFX> element)");
     }
 
-    let mut statements = Vec::new();
-    for (open, close) in [("<STMTRS>", "</STMTRS>"), ("<CCSTMTRS>", "</CCSTMTRS>")] {
-        for region in find_blocks(content, open, close) {
-            statements.push(OfxStatement {
-                currency: leaf(region, "CURDEF"),
-                transactions: parse_transactions(region),
-            });
+    // `CURDEF` positions in document order, so each transaction can take the
+    // currency of the statement it sits in (single forward pass — no per-txn
+    // rescan, keeping the parser linear).
+    let mut curdefs: Vec<(usize, String)> = Vec::new();
+    let mut scan = 0;
+    while let Some(rel) = content[scan..].find("<CURDEF>") {
+        let i = scan + rel;
+        if let Some(v) = leaf(&content[i..], "CURDEF") {
+            curdefs.push((i, v));
         }
+        scan = i + "<CURDEF>".len();
     }
 
-    // Fallback for files carrying STMTTRN aggregates without a recognized
-    // statement wrapper.
-    if statements.is_empty() {
-        let transactions = parse_transactions(content);
-        if !transactions.is_empty() {
-            statements.push(OfxStatement {
-                currency: leaf(content, "CURDEF"),
-                transactions,
-            });
+    let mut transactions = Vec::new();
+    let mut cd = 0;
+    let mut statement_currency: Option<String> = None;
+    let mut scan = 0;
+    while let Some(rel) = content[scan..].find("<STMTTRN>") {
+        let start = scan + rel;
+        let after = start + "<STMTTRN>".len();
+        // Advance the statement currency to the last CURDEF before this txn.
+        while cd < curdefs.len() && curdefs[cd].0 < start {
+            statement_currency = Some(curdefs[cd].1.clone());
+            cd += 1;
         }
+        // The block runs to the next STMTTRN open, the txn-list close, or end —
+        // whichever comes first — so a missing/whitespaced `</STMTTRN>` is fine.
+        let rest = &content[after..];
+        let end = ["<STMTTRN>", "</STMTTRN>", "</BANKTRANLIST>"]
+            .iter()
+            .filter_map(|m| rest.find(m))
+            .min()
+            .unwrap_or(rest.len());
+        let block = &rest[..end];
+        transactions.push(OfxTransaction {
+            date_posted: leaf(block, "DTPOSTED").unwrap_or_default(),
+            amount: leaf(block, "TRNAMT").unwrap_or_default(),
+            name: leaf(block, "NAME"),
+            memo: leaf(block, "MEMO"),
+            currency: transaction_currency(block),
+            statement_currency: statement_currency.clone(),
+        });
+        scan = after;
     }
 
-    Ok(statements)
+    Ok(transactions)
 }
 
-/// Parse every `STMTTRN` block in `region`. A block missing the required
-/// `DTPOSTED`/`TRNAMT` leaves isn't importable and is skipped.
-fn parse_transactions(region: &str) -> Vec<OfxTransaction> {
-    find_blocks(region, "<STMTTRN>", "</STMTTRN>")
-        .into_iter()
-        .filter_map(|block| {
-            Some(OfxTransaction {
-                date_posted: leaf(block, "DTPOSTED")?,
-                amount: leaf(block, "TRNAMT")?,
-                name: leaf(block, "NAME"),
-                memo: leaf(block, "MEMO"),
-                currency: leaf(block, "CURSYM"),
-            })
-        })
-        .collect()
-}
-
-/// Return the slices between each `open`..`close` pair in `s` (non-overlapping;
-/// OFX's STMTTRN/STMTRS aggregates don't self-nest, so this is sufficient).
-fn find_blocks<'a>(s: &'a str, open: &str, close: &str) -> Vec<&'a str> {
-    let mut blocks = Vec::new();
-    let mut rest = s;
-    while let Some(i) = rest.find(open) {
-        let after = &rest[i + open.len()..];
-        let Some(j) = after.find(close) else { break };
-        blocks.push(&after[..j]);
-        rest = &after[j + close.len()..];
-    }
-    blocks
+/// A transaction's own currency: the `<CURSYM>` inside its `<CURRENCY>`
+/// aggregate. Deliberately ignores `<ORIGCURRENCY>` (the pre-conversion
+/// currency), whose `CURSYM` must not be mistaken for the posted amount's.
+fn transaction_currency(block: &str) -> Option<String> {
+    // `<ORIGCURRENCY>` does not contain the literal `<CURRENCY>`, so this only
+    // matches the real `<CURRENCY>` aggregate.
+    let i = block.find("<CURRENCY>")?;
+    leaf(&block[i..], "CURSYM")
 }
 
 /// Extract leaf element `tag`'s value from `block`: the text after `<tag>` up to
@@ -463,17 +466,9 @@ NEWFILEUID:NONE
         let result =
             OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
-        match &result {
-            Ok(import_result) => {
-                assert_eq!(import_result.directives.len(), 2);
-                assert!(import_result.warnings.is_empty());
-            }
-            Err(e) => {
-                // Some OFX parsers may be strict about format
-                // Just verify we handled the error gracefully
-                println!("OFX parse error (expected with minimal test data): {e}");
-            }
-        }
+        let import_result = result.expect("OFX content should parse");
+        assert_eq!(import_result.directives.len(), 2);
+        assert!(import_result.warnings.is_empty());
     }
 
     #[test]
@@ -535,14 +530,8 @@ NEWFILEUID:NONE
         let result =
             OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Liabilities:CreditCard", "USD"));
 
-        match &result {
-            Ok(import_result) => {
-                assert_eq!(import_result.directives.len(), 1);
-            }
-            Err(e) => {
-                println!("OFX parse error (expected with minimal test data): {e}");
-            }
-        }
+        let import_result = result.expect("OFX content should parse");
+        assert_eq!(import_result.directives.len(), 1);
     }
 
     #[test]
@@ -595,14 +584,8 @@ NEWFILEUID:NONE
         let result =
             OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
-        match &result {
-            Ok(import_result) => {
-                assert!(import_result.directives.is_empty());
-            }
-            Err(e) => {
-                println!("OFX parse error: {e}");
-            }
-        }
+        let import_result = result.expect("OFX content should parse");
+        assert!(import_result.directives.is_empty());
     }
 
     #[test]
@@ -686,14 +669,8 @@ NEWFILEUID:NONE
         let result =
             OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
-        match &result {
-            Ok(import_result) => {
-                assert_eq!(import_result.directives.len(), 1);
-            }
-            Err(e) => {
-                println!("OFX parse error: {e}");
-            }
-        }
+        let import_result = result.expect("OFX content should parse");
+        assert_eq!(import_result.directives.len(), 1);
     }
 
     #[test]
@@ -757,14 +734,8 @@ NEWFILEUID:NONE
         let result =
             OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
-        match &result {
-            Ok(import_result) => {
-                assert_eq!(import_result.directives.len(), 1);
-            }
-            Err(e) => {
-                println!("OFX parse error: {e}");
-            }
-        }
+        let import_result = result.expect("OFX content should parse");
+        assert_eq!(import_result.directives.len(), 1);
     }
 
     #[test]
@@ -828,14 +799,8 @@ NEWFILEUID:NONE
         let result =
             OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
-        match &result {
-            Ok(import_result) => {
-                assert_eq!(import_result.directives.len(), 1);
-            }
-            Err(e) => {
-                println!("OFX parse error: {e}");
-            }
-        }
+        let import_result = result.expect("OFX content should parse");
+        assert_eq!(import_result.directives.len(), 1);
     }
 
     #[test]
@@ -935,5 +900,117 @@ NEWFILEUID:NONE
             rustledger_core::naive_date(2024, 1, 15).unwrap()
         );
         assert!(ofx_date_to_naive("2024").is_err());
+    }
+
+    /// Helper: the currency of the first extracted transaction's primary posting.
+    fn first_posting_currency(r: &ImportResult) -> String {
+        match &r.directives[0] {
+            Directive::Transaction(t) => t.postings[0].amount().unwrap().currency.to_string(),
+            _ => panic!("expected transaction"),
+        }
+    }
+
+    /// A transaction-level `<CURRENCY><CURSYM>` overrides the statement `CURDEF`.
+    #[test]
+    fn test_native_transaction_cursym_overrides_statement() {
+        let ofx = "<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD\n\
+<BANKTRANLIST><STMTTRN><DTPOSTED>20240115<TRNAMT>-50.00<NAME>X\n\
+<CURRENCY><CURRATE>1.1<CURSYM>EUR</CURRENCY></STMTTRN></BANKTRANLIST>\n\
+</STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+        let r = OfxImporter
+            .extract_from_string(ofx, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("must parse");
+        assert_eq!(first_posting_currency(&r), "EUR");
+    }
+
+    /// `<ORIGCURRENCY>` (pre-conversion currency) must NOT be used for the posted
+    /// amount — it stays the statement currency. Regression for the review bug
+    /// where `CURSYM` was captured from anywhere in the block.
+    #[test]
+    fn test_native_origcurrency_does_not_override() {
+        let ofx = "<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD\n\
+<BANKTRANLIST><STMTTRN><DTPOSTED>20240115<TRNAMT>-50.00<NAME>FOREIGN\n\
+<ORIGCURRENCY><CURRATE>0.8<CURSYM>GBP</ORIGCURRENCY></STMTTRN></BANKTRANLIST>\n\
+</STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+        let r = OfxImporter
+            .extract_from_string(ofx, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("must parse");
+        assert_eq!(first_posting_currency(&r), "USD");
+    }
+
+    /// OFX 1.x SGML that omits the `</STMTTRN>` aggregate close tags must still
+    /// yield every transaction (bounded by the next `<STMTTRN>` / list close).
+    #[test]
+    fn test_native_sgml_without_aggregate_close_tags() {
+        let ofx = "<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD\n\
+<BANKTRANLIST>\n\
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-50.00<NAME>A\n\
+<STMTTRN><TRNTYPE>CREDIT<DTPOSTED>20240116<TRNAMT>60.00<NAME>B\n\
+</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+        let r = OfxImporter
+            .extract_from_string(ofx, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("end-tag-less SGML must parse");
+        assert_eq!(r.directives.len(), 2);
+    }
+
+    /// OFX 2.x (XML) credit-card statement (`<CCSTMTRS>`, closed tags).
+    #[test]
+    fn test_native_2x_credit_card() {
+        let ofx = "<?xml version=\"1.0\"?><?OFX OFXHEADER=\"200\" VERSION=\"200\"?>\n\
+<OFX><CREDITCARDMSGSRSV1><CCSTMTTRNRS><CCSTMTRS><CURDEF>USD</CURDEF>\n\
+<BANKTRANLIST><STMTTRN><TRNTYPE>DEBIT</TRNTYPE><DTPOSTED>20240110</DTPOSTED><TRNAMT>-25.50</TRNAMT><NAME>SHOP</NAME></STMTTRN></BANKTRANLIST>\n\
+</CCSTMTRS></CCSTMTTRNRS></CREDITCARDMSGSRSV1></OFX>";
+        let r = OfxImporter
+            .extract_from_string(ofx, &ofx_cfg("Liabilities:Card", "USD"))
+            .expect("2.x credit card must parse");
+        assert_eq!(r.directives.len(), 1);
+    }
+
+    /// A transaction with neither NAME nor MEMO gets an empty narration.
+    #[test]
+    fn test_native_no_name_no_memo() {
+        let ofx = "<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD\n\
+<BANKTRANLIST><STMTTRN><DTPOSTED>20240115<TRNAMT>-50.00</STMTTRN></BANKTRANLIST>\n\
+</STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+        let r = OfxImporter
+            .extract_from_string(ofx, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("must parse");
+        assert_eq!(r.directives.len(), 1);
+        let Directive::Transaction(t) = &r.directives[0] else {
+            panic!("expected transaction");
+        };
+        assert_eq!(t.narration.as_str(), "");
+    }
+
+    /// A malformed/absent amount is skipped with a warning, not a hard failure
+    /// or a silent drop.
+    #[test]
+    fn test_native_malformed_amount_warns() {
+        let ofx = "<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD\n\
+<BANKTRANLIST><STMTTRN><DTPOSTED>20240115<TRNAMT>not-a-number<NAME>X</STMTTRN></BANKTRANLIST>\n\
+</STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+        let r = OfxImporter
+            .extract_from_string(ofx, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("parse succeeds; the bad txn is skipped");
+        assert!(r.directives.is_empty());
+        assert_eq!(r.warnings.len(), 1);
+        assert!(r.warnings[0].contains("invalid amount"));
+    }
+
+    /// The civil date is the bank-stated date, not a UTC-shifted one: a late
+    /// timestamp with an offset that would cross midnight in UTC stays put.
+    #[test]
+    fn test_native_date_is_local_not_utc() {
+        let ofx = "<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD\n\
+<BANKTRANLIST><STMTTRN><DTPOSTED>20240115230000[-5:EST]<TRNAMT>-50.00<NAME>LATE</STMTTRN></BANKTRANLIST>\n\
+</STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+        let r = OfxImporter
+            .extract_from_string(ofx, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("must parse");
+        let Directive::Transaction(t) = &r.directives[0] else {
+            panic!("expected transaction");
+        };
+        // 23:00 EST is 04:00 UTC next day; we keep the stated 2024-01-15.
+        assert_eq!(t.date, rustledger_core::naive_date(2024, 1, 15).unwrap());
     }
 }

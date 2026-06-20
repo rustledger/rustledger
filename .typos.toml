@@ -1,4 +1,6 @@
 [default.extend-words]
+# OFX tag name: currency exchange rate (<CURRATE>)
+CURRATE = "CURRATE"
 # Financial term: Profit and Loss
 Pn = "Pn"
 pnl = "pnl"

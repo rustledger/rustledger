@@ -343,6 +343,9 @@ fn main() -> ExitCode {
             }
             match rustledger::cmd::query::run(&args) {
                 Ok(()) => ExitCode::SUCCESS,
+                // A downstream reader (e.g. `| head`) closing the pipe is not an
+                // error — exit cleanly, matching the Report arm and git.
+                Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("error: {e:#}");
                     ExitCode::from(1)
@@ -359,6 +362,9 @@ fn main() -> ExitCode {
             }
             match rustledger::cmd::format::run(&args) {
                 Ok(code) => code,
+                // A downstream reader (e.g. `| head`) closing the pipe is not an
+                // error — exit cleanly, matching the Report arm and git.
+                Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("error: {e:#}");
                     ExitCode::from(2)

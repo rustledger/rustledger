@@ -988,6 +988,37 @@ fn test_relative_document_in_included_file_resolves_against_that_file() {
 }
 
 #[test]
+fn test_unused_pad_error_has_source_location() {
+    // Regression: E2003 (Unused Pad) must be anchored to the pad's own line,
+    // not rendered as `<unknown>:`. The pad below is never consumed by a
+    // following balance assertion.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.beancount");
+    std::fs::write(
+        &path,
+        "2024-01-01 open Assets:Checking USD\n\
+         2024-01-01 open Equity:Opening USD\n\
+         2024-03-15 pad Assets:Checking Equity:Opening\n",
+    )
+    .unwrap();
+
+    let ledger = load(&path, &LoadOptions::default()).expect("should load");
+    let e2003 = ledger
+        .errors
+        .iter()
+        .find(|e| e.code == "E2003")
+        .expect("expected an E2003 unused-pad error");
+    let loc = e2003
+        .location
+        .as_ref()
+        .expect("E2003 must carry a source location, not <unknown>");
+    assert_eq!(
+        loc.line, 3,
+        "E2003 should point at the pad's line; got {loc:?}"
+    );
+}
+
+#[test]
 fn test_document_discovery_no_option() {
     // Test that document discovery doesn't happen when option "documents" is not set
     let path = fixtures_path("simple.beancount");

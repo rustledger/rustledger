@@ -121,6 +121,8 @@ pub(super) struct ImporterEntry {
     /// Account mappings: pattern → account.
     #[serde(default)]
     pub(super) mappings: HashMap<String, String>,
+    /// Categorize via the built-in merchant dictionary (off by default).
+    pub(super) use_merchant_dict: Option<bool>,
 }
 
 /// Apply a CSV column flag that may be a header name or a bare 0-based index.
@@ -284,6 +286,10 @@ pub(super) fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterC
             .collect();
         mappings.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
         builder = builder.mappings(mappings);
+    }
+
+    if let Some(enable) = entry.use_merchant_dict {
+        builder = builder.use_merchant_dict(enable);
     }
 
     builder.build()

@@ -325,13 +325,10 @@ impl CsvImporter {
         payee: Option<&str>,
         narration: &str,
     ) -> Option<&'a str> {
-        if csv_config.mappings.is_empty() {
-            return None;
-        }
-
         let payee_lower = payee.map(str::to_lowercase);
         let narration_lower = narration.to_lowercase();
 
+        // User-supplied mappings take priority over the built-in dictionary.
         for (pattern, account) in &csv_config.mappings {
             // Match against payee first, then narration
             if let Some(ref p) = payee_lower
@@ -341,6 +338,20 @@ impl CsvImporter {
             }
             if narration_lower.contains(pattern.as_str()) {
                 return Some(account);
+            }
+        }
+
+        // Then the built-in merchant dictionary, when enabled — so
+        // `extract --use-merchant-dict` actually categorizes NETFLIX, AMAZON,
+        // SHELL, … instead of leaving them at the default expense account.
+        if csv_config.use_merchant_dict {
+            for entry in rustledger_ops::merchants::MERCHANT_PATTERNS {
+                let pat = entry.pattern.to_lowercase();
+                if payee_lower.as_deref().is_some_and(|p| p.contains(&pat))
+                    || narration_lower.contains(&pat)
+                {
+                    return Some(entry.account);
+                }
             }
         }
 
@@ -1234,6 +1245,40 @@ not-a-date,Coffee,-5.00
         } else {
             panic!("Expected transaction");
         }
+    }
+
+    #[test]
+    fn test_merchant_dict_categorizes_account_when_enabled() {
+        // Regression for OUTSTANDING #20: with use_merchant_dict, the regular
+        // extract path (used by the CLI) must apply the dictionary's account,
+        // not leave a known merchant at the default expense account.
+        let account_for = |enable: bool| -> String {
+            let config = ImporterConfig::csv()
+                .account("Assets:Bank")
+                .currency("USD")
+                .date_column("Date")
+                .narration_column("Description")
+                .amount_column("Amount")
+                .use_merchant_dict(enable)
+                .build()
+                .unwrap();
+            let csv = "Date,Description,Amount\n2024-03-08,NETFLIX.COM,-15.99\n";
+            let result = CsvImporter.extract_string(csv, &config).unwrap();
+            match &result.directives[0] {
+                Directive::Transaction(txn) => txn.postings[1].account.as_str().to_string(),
+                _ => panic!("expected transaction"),
+            }
+        };
+        assert_eq!(
+            account_for(false),
+            "Expenses:Unknown",
+            "disabled stays default"
+        );
+        assert_eq!(
+            account_for(true),
+            "Expenses:Subscriptions:Streaming",
+            "enabled: NETFLIX maps to the merchant-dict account"
+        );
     }
 
     #[test]

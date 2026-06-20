@@ -307,7 +307,7 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     positionally) — verified against rkyv 0.8.16 — so this change
 ///     does NOT require a separate version bump. If a future rkyv
 ///     version changes that encoding, OR if `CostNumber` gains
-///     additional fields, bump to v10.
+///     additional fields, bump to the next version (v11).
 /// v9: `CachedOptions` gained a `set_options: Vec<String>` field
 ///     (#1340). It was previously dropped, so a cache hit lost the
 ///     record of which options the file explicitly set — making
@@ -1012,11 +1012,11 @@ mod tests {
         // the developer to also update the fixtures (or remove this
         // tripwire if v9's contract is identical to v8 for CostNumber
         // — which is unusual but possible).
-        // v9 (#1340) bumped CACHE_VERSION only to add a `set_options`
-        // field to `CachedOptions` — the `CostNumber` archived layout
-        // these fixtures pin is unchanged, so the byte arrays below are
-        // still valid and only FIXTURE_VERSION moves.
-        const FIXTURE_VERSION: u32 = 9;
+        // v9 (#1340) and v10 (string escape-decoding) both bumped
+        // CACHE_VERSION without touching the `CostNumber` archived layout
+        // these fixtures pin, so the byte arrays below are still valid and
+        // only FIXTURE_VERSION moves.
+        const FIXTURE_VERSION: u32 = 10;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \

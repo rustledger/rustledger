@@ -79,3 +79,48 @@ fn load_source_lists_includes_without_resolution_error() {
         r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
+
+/// Plugin *warnings* (e.g. `unrealized`'s gain/loss notices), which now flow
+/// through the full pipeline, must surface to FFI consumers as warnings — not
+/// errors.
+#[test]
+fn load_source_preserves_warning_severity() {
+    let src = "plugin \"unrealized\" \"Equity:Unrealized\"\n\
+               2020-01-01 open Assets:Stock\n2020-01-01 open Assets:Cash\n\
+               2020-01-01 open Equity:Unrealized\n\
+               2020-01-02 * \"buy\"\n  Assets:Stock  10 AAPL {100.00 USD}\n  Assets:Cash  -1000.00 USD\n\
+               2020-06-01 price AAPL 150.00 USD\n";
+    let r = load_source(src);
+    assert!(
+        r.errors.iter().any(|e| e.severity == "warning"),
+        "unrealized gain must surface as a warning; got {:?}",
+        r.errors
+            .iter()
+            .map(|e| (&e.severity, &e.message))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !r.errors.iter().any(|e| e.severity == "error"),
+        "the unrealized notice must not be reported as an error; got {:?}",
+        r.errors
+            .iter()
+            .map(|e| (&e.severity, &e.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A glob `include` path that cannot be resolved on the string surface must not
+/// error either (the literal-stub approach could not match a glob pattern).
+#[test]
+fn load_source_glob_include_does_not_error() {
+    let src = "include \"[ab].beancount\"\n\
+               2020-01-02 * \"x\"\n  Assets:Cash  -10.00 USD\n  Expenses:Food  10.00 USD\n";
+    let r = load_source(src);
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.message.contains("does not match") || e.message.contains("not found")),
+        "unresolved glob include must not produce an error; got {:?}",
+        r.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}

@@ -1480,9 +1480,25 @@ fn build_validation_options(
         .map(|s| (*s).to_string())
         .collect();
 
+    // Per-`file_id` source-file directories, so the validator can resolve a
+    // relative `document` path against its own directive's file (matching
+    // Beancount and `include`) instead of the process CWD. `file_id` indexes
+    // `source_map.files()`, so this vec is parallel to it.
+    let document_source_dirs: Vec<std::path::PathBuf> = source_map
+        .files()
+        .iter()
+        .map(|f| {
+            f.path.parent().map_or_else(
+                || std::path::PathBuf::from("."),
+                std::path::Path::to_path_buf,
+            )
+        })
+        .collect();
+
     ValidationOptions::default()
         .with_account_types(account_types)
         .with_document_dirs(resolved_document_dirs)
+        .with_document_source_dirs(document_source_dirs)
         .with_infer_tolerance_from_cost(file_options.infer_tolerance_from_cost)
         .with_tolerance_multiplier(file_options.inferred_tolerance_multiplier)
         .with_inferred_tolerance_default(file_options.inferred_tolerance_default.clone())

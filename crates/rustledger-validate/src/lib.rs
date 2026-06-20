@@ -139,6 +139,15 @@ pub struct ValidationOptions {
     /// Relative document paths are resolved against these directories.
     /// Paths are resolved against the ledger file's directory at load time.
     pub document_dirs: Vec<std::path::PathBuf>,
+    /// Directory of each source file, indexed by `file_id` (the `u16` carried
+    /// by `Spanned<Directive>`). A relative `document` path with no
+    /// `document_base`/`documents` option is resolved against its own
+    /// directive's source-file directory — matching Beancount, which
+    /// normalizes the path at parse time, and `include`, which resolves
+    /// relative to the including file. Empty for callers that don't supply
+    /// source locations (the resolution then falls back to the process CWD,
+    /// the pre-fix behavior).
+    pub document_source_dirs: Vec<std::path::PathBuf>,
     /// Valid account type prefixes (from options like `name_assets`, `name_liabilities`, etc.).
     /// Defaults to `["Assets", "Liabilities", "Equity", "Income", "Expenses"]`.
     pub account_types: Vec<String>,
@@ -171,6 +180,7 @@ impl Default for ValidationOptions {
             warn_future_dates: false,
             document_base: None,
             document_dirs: Vec::new(),
+            document_source_dirs: Vec::new(),
             account_types: vec![
                 "Assets".to_string(),
                 "Liabilities".to_string(),
@@ -220,6 +230,15 @@ impl ValidationOptions {
     #[must_use]
     pub fn with_document_dirs(mut self, dirs: Vec<std::path::PathBuf>) -> Self {
         self.document_dirs = dirs;
+        self
+    }
+
+    /// Set per-`file_id` source-file directories, used to resolve relative
+    /// `document` paths against their own directive's file (see the field doc
+    /// on [`ValidationOptions::document_source_dirs`]).
+    #[must_use]
+    pub fn with_document_source_dirs(mut self, dirs: Vec<std::path::PathBuf>) -> Self {
+        self.document_source_dirs = dirs;
         self
     }
 
@@ -517,7 +536,8 @@ fn validate_phase_inner<D: ValidatableDirective>(
                 validate_pad(state, pad, &mut errors);
             }
             (Phase::Early, Directive::Document(doc)) => {
-                validate_document(state, doc, &document_exists_cache, &mut errors);
+                let file_id = d.span_info().map(|(_, fid)| fid);
+                validate_document(state, doc, file_id, &document_exists_cache, &mut errors);
             }
             (Phase::Early, Directive::Note(note)) => {
                 validate_note(state, note, &mut errors);
@@ -617,49 +637,67 @@ fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
 fn build_document_exists_cache<D: ValidatableDirective>(
     directives: &[D],
     options: &ValidationOptions,
-) -> FxHashMap<String, bool> {
+) -> FxHashMap<(String, Option<u16>), bool> {
     if !options.check_documents {
         return FxHashMap::default();
     }
 
-    // Collect unique doc.path strings. Each (doc_path, options) pair
-    // resolves to exactly one (found?) bool, so deduping here saves
-    // syscalls when the same path is referenced by multiple Document
-    // directives.
-    let mut paths: FxHashSet<&str> = FxHashSet::default();
+    // Collect unique (doc.path, file_id) pairs. Resolution depends on the
+    // directive's source file (see `document_file_exists`), so the key
+    // includes `file_id` — the same relative path in two differently-located
+    // files can resolve to different files. Deduping still saves syscalls
+    // when one (path, file) pair is referenced by multiple directives.
+    let mut keys: FxHashSet<(&str, Option<u16>)> = FxHashSet::default();
     for d in directives {
         if let Directive::Document(doc) = d.directive() {
-            paths.insert(doc.path.as_str());
+            let file_id = d.span_info().map(|(_, fid)| fid);
+            keys.insert((doc.path.as_str(), file_id));
         }
     }
-    let paths: Vec<&str> = paths.into_iter().collect();
+    let keys: Vec<(&str, Option<u16>)> = keys.into_iter().collect();
 
-    // One closure-per-path resolves it through the same priority
-    // chain the validator uses. Stops on the first hit so a Document
-    // found in `document_dirs[0]` still costs exactly one syscall —
-    // matching pre-fix sequential I/O cost, but in parallel across
-    // Documents.
-    let resolve = |s: &str| -> (String, bool) {
-        let doc_path = std::path::Path::new(s);
-        let found = if doc_path.is_absolute() {
-            doc_path.exists()
-        } else if let Some(base) = &options.document_base {
-            base.join(doc_path).exists()
-        } else if !options.document_dirs.is_empty() {
-            options
-                .document_dirs
-                .iter()
-                .any(|dir| dir.join(doc_path).exists())
-        } else {
-            doc_path.exists()
-        };
-        (s.to_string(), found)
+    // One closure-per-key resolves it through the same priority chain the
+    // validator uses (see `document_file_exists`). Stops on the first hit so a
+    // Document found in `document_dirs[0]` still costs exactly one syscall —
+    // matching pre-fix sequential I/O cost, but in parallel across Documents.
+    let resolve = |(s, file_id): (&str, Option<u16>)| -> ((String, Option<u16>), bool) {
+        (
+            (s.to_string(), file_id),
+            document_file_exists(s, file_id, options),
+        )
     };
 
-    if paths.len() >= PARALLEL_DOC_EXISTS_THRESHOLD {
-        paths.into_par_iter().map(resolve).collect()
+    if keys.len() >= PARALLEL_DOC_EXISTS_THRESHOLD {
+        keys.into_par_iter().map(resolve).collect()
     } else {
-        paths.into_iter().map(resolve).collect()
+        keys.into_iter().map(resolve).collect()
+    }
+}
+
+/// Resolve whether a `document` directive's file exists, using one priority
+/// chain shared by the pre-pass cache and the validator:
+///   1. absolute path → check as-is;
+///   2. `document_base` set → resolve against it;
+///   3. `documents` option dirs non-empty → found if any contains it;
+///   4. otherwise → resolve against the directive's own source-file directory
+///      (matching Beancount, which normalizes at parse time, and `include`),
+///      falling back to the process CWD only when the source directory is
+///      unknown (unspanned directives, or no source map supplied).
+fn document_file_exists(path: &str, file_id: Option<u16>, options: &ValidationOptions) -> bool {
+    let doc_path = std::path::Path::new(path);
+    if doc_path.is_absolute() {
+        doc_path.exists()
+    } else if let Some(base) = &options.document_base {
+        base.join(doc_path).exists()
+    } else if !options.document_dirs.is_empty() {
+        options
+            .document_dirs
+            .iter()
+            .any(|dir| dir.join(doc_path).exists())
+    } else if let Some(dir) = file_id.and_then(|id| options.document_source_dirs.get(id as usize)) {
+        dir.join(doc_path).exists()
+    } else {
+        doc_path.exists()
     }
 }
 

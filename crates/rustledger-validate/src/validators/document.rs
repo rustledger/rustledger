@@ -29,7 +29,10 @@ pub fn validate_note(state: &LedgerState, note: &Note, errors: &mut Vec<Validati
 /// 1. Absolute path: used as-is.
 /// 2. `options.document_base`: joined with the document path.
 /// 3. `options.document_dirs`: tried in order; first existing match wins.
-/// 4. Fallback: the path is checked as-is (relative to the process CWD).
+/// 4. Fallback: resolved against the directive's own source-file directory
+///    (`file_id` → `options.document_source_dirs`), matching Beancount and
+///    `include`. When the source directory is unknown (unspanned directive or
+///    no source map) it falls back to the process CWD.
 ///
 /// `document_base` takes precedence over `document_dirs` because it
 /// represents an explicit base set by the caller (e.g. the main ledger
@@ -38,14 +41,15 @@ pub fn validate_note(state: &LedgerState, note: &Note, errors: &mut Vec<Validati
 ///
 /// The `exists_cache` is consulted instead of calling `Path::exists()`
 /// directly. The caller (see `build_document_exists_cache` in `lib.rs`)
-/// resolves each unique `doc.path` once via the same priority chain
+/// resolves each unique `(doc.path, file_id)` once via the same priority chain
 /// above, with rayon parallelism across Documents. The cache is empty
 /// when `check_documents` is disabled — fine, because the lookups in
 /// this function are gated by the same flag.
 pub fn validate_document(
     state: &LedgerState,
     doc: &Document,
-    exists_cache: &FxHashMap<String, bool>,
+    file_id: Option<u16>,
+    exists_cache: &FxHashMap<(String, Option<u16>), bool>,
     errors: &mut Vec<ValidationError>,
 ) {
     // Check account exists
@@ -64,31 +68,20 @@ pub fn validate_document(
         // indicate a divergence bug between the pre-pass and this
         // function. In release builds, a miss falls back to a fresh
         // syscall — correct behavior either way, just slower.
-        let file_was_found = exists_cache.get(&doc.path).copied().unwrap_or_else(|| {
-            debug_assert!(
-                false,
-                "Document path `{}` missing from pre-resolved exists_cache — \
-                 build_document_exists_cache enumeration must match this validator's resolution",
-                doc.path
-            );
-            // Defensive fallback: redo the resolution inline. Matches
-            // the priority chain in build_document_exists_cache so the
-            // result is equivalent.
-            let doc_path = Path::new(&doc.path);
-            if doc_path.is_absolute() {
-                doc_path.exists()
-            } else if let Some(base) = &state.options.document_base {
-                base.join(doc_path).exists()
-            } else if !state.options.document_dirs.is_empty() {
-                state
-                    .options
-                    .document_dirs
-                    .iter()
-                    .any(|dir| dir.join(doc_path).exists())
-            } else {
-                doc_path.exists()
-            }
-        });
+        let file_was_found = exists_cache
+            .get(&(doc.path.clone(), file_id))
+            .copied()
+            .unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "Document (path `{}`, file_id {file_id:?}) missing from pre-resolved \
+                     exists_cache — build_document_exists_cache enumeration must match this \
+                     validator's resolution",
+                    doc.path
+                );
+                // Defensive fallback: redo the resolution via the shared chain.
+                crate::document_file_exists(&doc.path, file_id, &state.options)
+            });
 
         if !file_was_found {
             let doc_path = Path::new(&doc.path);
@@ -98,9 +91,8 @@ pub fn validate_document(
                 doc.date,
             );
 
-            // The error-context message is independent of the cache —
-            // it walks options.document_dirs to build the "searched: …"
-            // list. Same logic as before the cache was introduced.
+            // The error-context message mirrors the resolution chain so the
+            // user sees where we actually looked.
             if doc_path.is_relative()
                 && state.options.document_base.is_none()
                 && !state.options.document_dirs.is_empty()
@@ -113,13 +105,17 @@ pub fn validate_document(
                     .collect();
                 error = error.with_context(format!("searched: {}", searched.join(", ")));
             } else {
-                // Reconstruct the resolved path the same way the original
-                // validator did: absolute as-is, document_base join, or
-                // fallback to the raw path.
+                // Reconstruct the single resolved path: absolute as-is,
+                // document_base join, else the directive's source-file dir
+                // (the same fallback `document_file_exists` uses).
+                let source_dir =
+                    file_id.and_then(|id| state.options.document_source_dirs.get(id as usize));
                 let resolved = if doc_path.is_absolute() {
                     doc_path.to_path_buf()
                 } else if let Some(base) = &state.options.document_base {
                     base.join(doc_path)
+                } else if let Some(dir) = source_dir {
+                    dir.join(doc_path)
                 } else {
                     doc_path.to_path_buf()
                 };

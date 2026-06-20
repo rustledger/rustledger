@@ -926,6 +926,68 @@ fn test_document_discovery_from_option() {
 }
 
 #[test]
+fn test_relative_document_resolves_against_directive_file() {
+    // Regression: a relative `document` path must resolve against the
+    // directive's own source file (like Beancount + `include`), NOT the
+    // process CWD. The test CWD is the crate dir, so CWD-relative resolution
+    // would report the document as missing.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("ledger.beancount"),
+        "2024-01-01 open Assets:Cash\n2024-01-02 document Assets:Cash \"receipt.pdf\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("receipt.pdf"), b"pdf").unwrap();
+
+    let ledger = load(
+        &dir.path().join("ledger.beancount"),
+        &LoadOptions::default(),
+    )
+    .expect("should load");
+    let missing: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("Document file not found"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "relative document should resolve against the ledger's dir, got: {missing:?}"
+    );
+}
+
+#[test]
+fn test_relative_document_in_included_file_resolves_against_that_file() {
+    // The path must resolve against the INCLUDED file's directory, not the
+    // main file's — exercising the per-`file_id` resolution.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(
+        dir.path().join("main.beancount"),
+        "2024-01-01 open Assets:Cash\ninclude \"sub/sub.beancount\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("sub/sub.beancount"),
+        "2024-01-05 document Assets:Cash \"receipt.pdf\"\n",
+    )
+    .unwrap();
+    // receipt.pdf lives next to sub.beancount, NOT next to main.beancount.
+    std::fs::write(dir.path().join("sub/receipt.pdf"), b"pdf").unwrap();
+
+    let ledger =
+        load(&dir.path().join("main.beancount"), &LoadOptions::default()).expect("should load");
+    let missing: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("Document file not found"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "document in an included file should resolve against that file's dir, got: {missing:?}"
+    );
+}
+
+#[test]
 fn test_document_discovery_no_option() {
     // Test that document discovery doesn't happen when option "documents" is not set
     let path = fixtures_path("simple.beancount");

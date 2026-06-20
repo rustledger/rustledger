@@ -75,7 +75,12 @@ fn sum_account_and_subaccounts(
 const DECIMAL_TEN: Decimal = Decimal::TEN;
 
 /// Validate a Pad directive.
-pub fn validate_pad(state: &mut LedgerState, pad: &Pad, errors: &mut Vec<ValidationError>) {
+pub fn validate_pad(
+    state: &mut LedgerState,
+    pad: &Pad,
+    location: Option<(rustledger_parser::Span, u16)>,
+    errors: &mut Vec<ValidationError>,
+) {
     // Check that the target account exists
     if !state.accounts.contains_key(&pad.account) {
         errors.push(ValidationError::new(
@@ -101,6 +106,7 @@ pub fn validate_pad(state: &mut LedgerState, pad: &Pad, errors: &mut Vec<Validat
         source_account: pad.source_account.clone(),
         date: pad.date,
         padded_currencies: rustc_hash::FxHashSet::default(),
+        location,
     };
     state
         .pending_pads

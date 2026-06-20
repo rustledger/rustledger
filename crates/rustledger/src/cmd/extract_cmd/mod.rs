@@ -752,6 +752,28 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
         eprintln!("warning: {warning}");
     }
 
+    // Fail loudly when the importer produced no transactions — before
+    // duplicate filtering (`--existing`) or `--balance` augmentation, either of
+    // which would otherwise mask the real cause (all-duplicates, or a lone
+    // balance directive with zero transactions). A garbage / wrong-type /
+    // empty file otherwise makes a scripted `extract … >> ledger.beancount`
+    // silently append nothing and still exit 0.
+    let extracted_txns = result
+        .directives
+        .iter()
+        .filter(|d| matches!(d, Directive::Transaction(_)))
+        .count();
+    if extracted_txns == 0 {
+        anyhow::bail!(
+            "no transactions were extracted from {}\n  \
+             the file may not match a recognized importer format, be empty, or \
+             use unexpected columns\n  \
+             try: --auto, an explicit importer (--importer), or column flags \
+             (--date-column, --amount-column, …)",
+            file.display()
+        );
+    }
+
     // Filter duplicates if --existing is specified, and optionally apply
     // ML-based account suggestions for transactions the rules engine left
     // pointing at a fallback account.
@@ -836,9 +858,12 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
         out.write_all(formatted.as_bytes())?;
     }
 
+    let written_txns = directives
+        .iter()
+        .filter(|d| matches!(d, Directive::Transaction(_)))
+        .count();
     eprintln!(
-        "Extracted {} transactions from {}",
-        directives.len(),
+        "Extracted {written_txns} transactions from {}",
         file.display()
     );
 

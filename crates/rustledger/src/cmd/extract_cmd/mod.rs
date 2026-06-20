@@ -827,6 +827,21 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     let formatted = canonicalize_directives(directives.iter(), &fmt_config)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
+    // Fail loudly on an empty result instead of printing "Extracted 0
+    // transactions" and exiting 0. A garbage / wrong-type / empty file
+    // otherwise makes a scripted `extract … >> ledger.beancount` silently
+    // append nothing.
+    if directives.is_empty() {
+        anyhow::bail!(
+            "no transactions were extracted from {}\n  \
+             the file may not match a recognized importer format, be empty, or \
+             use unexpected columns\n  \
+             try: --auto, an explicit importer (--importer), or column flags \
+             (--date-column, --amount-column, …)",
+            file.display()
+        );
+    }
+
     if let Some(ref output_path) = args.output {
         let mut out_file = fs::File::create(output_path)
             .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;

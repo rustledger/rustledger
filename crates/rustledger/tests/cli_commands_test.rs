@@ -1511,3 +1511,39 @@ fn test_native_plugin_preferred_over_python_fallback() {
         "native plugins should not produce plugin-not-found errors: {combined}"
     );
 }
+
+/// Regression for OUTSTANDING #18: `extract` on a file that yields no
+/// transactions (garbage / wrong type / empty) must fail loudly instead of
+/// printing "Extracted 0 transactions" and exiting 0 — otherwise a scripted
+/// `extract … >> ledger.beancount` silently appends nothing.
+#[test]
+fn test_extract_empty_result_exits_nonzero() {
+    let bin = require_rledger!();
+
+    let file = tempfile::Builder::new()
+        .suffix(".txt")
+        .tempfile()
+        .expect("tempfile");
+    std::fs::write(file.path(), "garbage not a csv\nsecond line\n").expect("write");
+
+    let output = Command::new(&bin)
+        .args([
+            "extract",
+            file.path().to_str().unwrap(),
+            "-a",
+            "Assets:Bank",
+        ])
+        .output()
+        .expect("run extract");
+
+    assert!(
+        !output.status.success(),
+        "extract on a non-importable file should exit non-zero, got {:?}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no transactions were extracted"),
+        "should explain why nothing was extracted; stderr: {stderr}"
+    );
+}

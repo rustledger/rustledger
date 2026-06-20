@@ -512,6 +512,20 @@ fn test_query_flag_after_query_is_rejected_with_hint() {
         "negative number should not be flagged: {}",
         String::from_utf8_lossy(&ok.stderr)
     );
+
+    // Unary negation of a column (`-number`) is valid BQL, not a flag — it must
+    // never trip the misplaced-flag hint even when written unquoted.
+    let neg = Command::new(require_rledger!())
+        .arg("query")
+        .arg(&path)
+        .arg("SELECT")
+        .arg("-number")
+        .output()
+        .expect("Failed to run rledger query");
+    assert!(
+        !String::from_utf8_lossy(&neg.stderr).contains("looks like a command-line flag"),
+        "unary negation '-number' must not be flagged as a CLI flag"
+    );
 }
 
 #[test]

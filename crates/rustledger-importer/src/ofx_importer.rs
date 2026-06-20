@@ -18,8 +18,84 @@ use anyhow::{Context, Result};
 use rustledger_core::NaiveDate;
 use rustledger_core::{Amount, Directive, Posting, Transaction};
 use rustledger_ops::enrichment::{CategorizationMethod, Enrichment};
+use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
+
+/// The OFX 1.x SGML header keys `ofxy` requires, with safe canonical defaults.
+/// `ofxy` reads the header only structurally — we extract transactions from the
+/// body — so supplying placeholders for absent keys is lossless here.
+const OFX_HEADER_DEFAULTS: &[(&str, &str)] = &[
+    ("OFXHEADER", "100"),
+    ("DATA", "OFXSGML"),
+    ("VERSION", "102"),
+    ("SECURITY", "NONE"),
+    ("ENCODING", "USASCII"),
+    ("CHARSET", "1252"),
+    ("COMPRESSION", "NONE"),
+    ("OLDFILEUID", "NONE"),
+    ("NEWFILEUID", "NONE"),
+];
+
+/// Normalize the OFX header so `ofxy` — which accepts only a complete OFX 1.x
+/// SGML header (versions 102/103/151/160) and requires `CHARSET`/`OLDFILEUID`/
+/// `NEWFILEUID` — can parse two real-world cases it otherwise rejects:
+///
+/// 1. **OFX 1.x missing required headers.** Banks routinely omit `CHARSET` or the
+///    FILEUIDs. We fill only the absent keys, preserving the real `VERSION` etc.
+/// 2. **OFX 2.x (XML).** The `<?xml?>`/`<?OFX?>` prolog carries no `KEY:VALUE`
+///    headers and declares version 200+. We replace it with a synthetic 1.x
+///    header; `ofxy`'s body deserializer already tolerates the XML closed tags,
+///    so the transactions parse unchanged.
+///
+/// `ofxy` splits the file at `<OFX>`, so rewriting everything before it leaves
+/// the body untouched. Conformant 1.x input is returned borrowed (no change);
+/// input without `<OFX>` is left for `ofxy` to reject as before.
+fn normalize_ofx_header(content: &str) -> Cow<'_, str> {
+    let Some(body_start) = content.find("<OFX>") else {
+        return Cow::Borrowed(content);
+    };
+    let (header_region, body) = content.split_at(body_start);
+
+    // Collect recognized `KEY:VALUE` header lines (uppercase bareword keys). XML
+    // prolog lines use `KEY="VALUE"` attributes, not `:`, so contribute nothing.
+    let found: Vec<(&str, &str)> = header_region
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .map(|(k, v)| (k.trim(), v.trim()))
+        .filter(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_uppercase()))
+        .collect();
+    let value = |key: &str| found.iter().find(|(k, _)| *k == key).map(|&(_, v)| v);
+    // Whether a present value is one `ofxy` will accept.
+    let valid = |key: &str| match key {
+        "VERSION" => value("VERSION").is_some_and(|v| matches!(v, "102" | "103" | "151" | "160")),
+        "DATA" => value("DATA") == Some("OFXSGML"),
+        "ENCODING" => value("ENCODING").is_some_and(|v| matches!(v, "USASCII" | "UNICODE")),
+        "SECURITY" => value("SECURITY").is_some_and(|v| matches!(v, "NONE" | "TYPE1")),
+        "COMPRESSION" => true, // `ofxy` defaults this; never required
+        _ => value(key).is_some(),
+    };
+
+    // Conformant 1.x header: leave the input untouched.
+    if OFX_HEADER_DEFAULTS.iter().all(|(k, _)| valid(k)) {
+        return Cow::Borrowed(content);
+    }
+
+    let mut out = String::with_capacity(content.len() + 128);
+    for (key, default) in OFX_HEADER_DEFAULTS {
+        out.push_str(key);
+        out.push(':');
+        out.push_str(if valid(key) {
+            value(key).unwrap_or(default)
+        } else {
+            default
+        });
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(body);
+    Cow::Owned(out)
+}
 
 /// OFX/QFX file importer.
 ///
@@ -56,7 +132,11 @@ impl OfxImporter {
             )
         })?;
 
-        let ofx: ofxy::Ofx = content
+        // Normalize the header so real-world 1.x files with missing headers and
+        // 2.x (XML) files parse, rather than being rejected by `ofxy`'s strict
+        // header/version requirements (see #1457).
+        let normalized = normalize_ofx_header(content);
+        let ofx: ofxy::Ofx = normalized
             .parse()
             .with_context(|| "Failed to parse OFX content")?;
 
@@ -748,5 +828,56 @@ NEWFILEUID:NONE
             msg.contains("requires a default currency"),
             "expected currency error, got: {msg}"
         );
+    }
+
+    // ===== #1457: header-normalization shim =====
+
+    /// A 1.x SGML statement that omits CHARSET/COMPRESSION/OLDFILEUID/NEWFILEUID
+    /// (only the common OFXHEADER/DATA/VERSION/SECURITY/ENCODING present) — the
+    /// kind of header many banks emit. Must parse rather than fail on a missing
+    /// required header.
+    #[test]
+    fn test_ofx_1x_missing_headers_parses() {
+        let ofx = "OFXHEADER:100\nDATA:OFXSGML\nVERSION:102\nSECURITY:NONE\nENCODING:USASCII\n\n\
+<OFX><BANKMSGSRSV1><STMTTRNRS><TRNUID>1<STATUS><CODE>0<SEVERITY>INFO</STATUS>\n\
+<STMTRS><CURDEF>USD<BANKACCTFROM><BANKID>123<ACCTID>456<ACCTTYPE>CHECKING</BANKACCTFROM>\n\
+<BANKTRANLIST><DTSTART>20240101<DTEND>20240131\n\
+<STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-50.00<FITID>t1<NAME>COFFEE SHOP</STMTTRN>\n\
+</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+        let result = OfxImporter
+            .extract_from_string(ofx, &ofx_cfg("Assets:Bank:Checking", "USD"))
+            .expect("1.x with sparse headers should parse");
+        assert_eq!(result.directives.len(), 1);
+    }
+
+    /// An OFX 2.x (XML) statement — `<?xml?>`/`<?OFX?>` prolog, version 200,
+    /// closed tags. The synthetic-header transcode must let it parse.
+    #[test]
+    fn test_ofx_2x_xml_parses() {
+        let ofx = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<?OFX OFXHEADER=\"200\" VERSION=\"200\" SECURITY=\"NONE\" OLDFILEUID=\"NONE\" NEWFILEUID=\"NONE\"?>\n\
+<OFX><BANKMSGSRSV1><STMTTRNRS><TRNUID>1</TRNUID><STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS>\n\
+<STMTRS><CURDEF>USD</CURDEF><BANKACCTFROM><BANKID>123</BANKID><ACCTID>456</ACCTID><ACCTTYPE>CHECKING</ACCTTYPE></BANKACCTFROM>\n\
+<BANKTRANLIST><DTSTART>20240101</DTSTART><DTEND>20240131</DTEND>\n\
+<STMTTRN><TRNTYPE>DEBIT</TRNTYPE><DTPOSTED>20240115</DTPOSTED><TRNAMT>-50.00</TRNAMT><FITID>t1</FITID><NAME>COFFEE</NAME></STMTTRN>\n\
+</BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+        let result = OfxImporter
+            .extract_from_string(ofx, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("2.x XML should parse via the transcode");
+        assert_eq!(result.directives.len(), 1);
+    }
+
+    /// A fully conformant 1.x header is returned untouched (borrowed).
+    #[test]
+    fn test_normalize_leaves_conformant_unchanged() {
+        let ofx = "OFXHEADER:100\nDATA:OFXSGML\nVERSION:102\nSECURITY:NONE\nENCODING:USASCII\n\
+CHARSET:1252\nCOMPRESSION:NONE\nOLDFILEUID:NONE\nNEWFILEUID:NONE\n\n<OFX></OFX>";
+        assert!(matches!(normalize_ofx_header(ofx), Cow::Borrowed(_)));
+    }
+
+    /// Input without an `<OFX>` tag is left for `ofxy` to reject (borrowed).
+    #[test]
+    fn test_normalize_passthrough_without_ofx_tag() {
+        assert!(matches!(normalize_ofx_header("garbage"), Cow::Borrowed(_)));
     }
 }

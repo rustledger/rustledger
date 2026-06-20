@@ -111,14 +111,7 @@ impl CsvImporter {
                 }
             };
 
-            match self.parse_row(
-                &record,
-                config,
-                csv_config,
-                &amount_format,
-                &header_map,
-                row_num,
-            ) {
+            match self.parse_row(&record, config, csv_config, &amount_format, &header_map) {
                 Ok(Some(txn)) => directives.push(Directive::Transaction(txn)),
                 Ok(None) => {} // Skip empty rows
                 Err(e) => {
@@ -226,12 +219,13 @@ impl CsvImporter {
         csv_config: &CsvConfig,
         amount_format: &AmountFormat,
         header_map: &HashMap<String, usize>,
-        row_num: usize,
     ) -> Result<Option<Transaction>> {
-        // Get date
+        // Get date. No `Row N:` prefix on these errors: `parse_row`'s caller
+        // already wraps every error it returns with `Row {row_num}: {e}`, so
+        // prefixing here too produced a doubled `Row 1: Row 1: ...`.
         let date_str = self
             .get_column(record, &csv_config.date_column, header_map)
-            .with_context(|| format!("Row {row_num}: missing date column"))?;
+            .with_context(|| "missing date column".to_string())?;
 
         if date_str.trim().is_empty() {
             return Ok(None); // Skip empty rows
@@ -241,8 +235,8 @@ impl CsvImporter {
             .and_then(|tm| tm.to_date())
             .with_context(|| {
                 format!(
-                    "Row {}: failed to parse date '{}' with format '{}'",
-                    row_num, date_str, csv_config.date_format
+                    "failed to parse date '{}' with format '{}'",
+                    date_str, csv_config.date_format
                 )
             })?;
 
@@ -1030,6 +1024,14 @@ not-a-date,Coffee,-5.00
         assert_eq!(result.warnings.len(), 1);
         // The error propagates the "missing date column" context
         assert!(result.warnings[0].contains("missing date column"));
+        // ...with exactly one `Row N:` prefix, not the doubled
+        // `Row 1: Row 1: ...` the inner+outer prefixes used to produce.
+        assert_eq!(
+            result.warnings[0].matches("Row ").count(),
+            1,
+            "row prefix must not be doubled: {:?}",
+            result.warnings[0]
+        );
     }
 
     #[test]

@@ -99,12 +99,25 @@ pub fn parse(source: &str) -> Result<Query, ParseError> {
         Ok(query)
     } else {
         let err = errs.first().map(|e| {
-            let kind = if e.found().is_none() {
+            let start = e.span().start;
+            let kind = if e.found().is_some() {
+                // chumsky found a concrete unexpected token: keep its rich
+                // message ("expected keyword …", "invalid number", …).
+                ParseErrorKind::SyntaxError(e.to_string())
+            } else if start >= source.len() {
+                // `found() == None` at/past the end is a genuine premature EOF.
                 ParseErrorKind::UnexpectedEof
+            } else if let Some(rest) = source.get(start..) {
+                // `found() == None` mid-input is the `end()` combinator
+                // rejecting leftover tokens after a valid prefix. The span
+                // points at the real token; name it instead of mislabeling it
+                // "unexpected end of input".
+                let token = rest.split_whitespace().next().unwrap_or(rest);
+                ParseErrorKind::SyntaxError(format!("unexpected token '{token}'"))
             } else {
                 ParseErrorKind::SyntaxError(e.to_string())
             };
-            ParseError::new(kind, e.span().start)
+            ParseError::new(kind, start)
         });
         Err(err.unwrap_or_else(|| ParseError::new(ParseErrorKind::UnexpectedEof, 0)))
     }
@@ -1054,6 +1067,35 @@ fn integer<'a>() -> impl Parser<'a, ParserInput<'a>, i64, ParserExtra<'a>> + Clo
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn test_trailing_tokens_are_named_not_mislabeled_eof() {
+        // Regression for OUTSTANDING #16: leftover tokens after a valid prefix
+        // were reported as "unexpected end of input" (because `end()` rejects
+        // them with `found() == None`), even though the span points at the real
+        // token. They must now be named.
+        for (q, token, pos) in [
+            ("SELECT account FOOBAR", "FOOBAR", 15usize),
+            (
+                "SELECT account, sum(position) GROUP BY account WHERE number > 0",
+                "WHERE",
+                47,
+            ),
+        ] {
+            let err = parse(q).expect_err("should be a parse error");
+            assert_eq!(err.position, pos, "span should point at the token in {q:?}");
+            let ParseErrorKind::SyntaxError(ref m) = err.kind else {
+                panic!(
+                    "expected SyntaxError naming {token:?}, got {:?} for {q:?}",
+                    err.kind
+                );
+            };
+            assert!(
+                m.contains(token),
+                "error should name {token:?}, got {m:?} for {q:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_simple_select() {

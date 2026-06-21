@@ -814,11 +814,16 @@ fn primary_expr<'a>(
             .then_ignore(ws())
             .then_ignore(just(')'))
             .map(|e| Expr::Paren(Box::new(e))),
+        // Literals MUST come before the column/function branch: a bare
+        // identifier otherwise greedily parses `TRUE`/`FALSE`/`NULL` as a column
+        // name, so those literals were unreachable in expression position. The
+        // literal parser only matches the reserved keywords plus number/string/
+        // date literals, so ordinary column and function names still fall
+        // through to `function_call_or_column`.
+        literal().map(Expr::Literal),
         // Function call or column reference (must come before wildcard check)
         // Pass expr to allow nested function calls like units(sum(position))
         function_call_or_column(expr),
-        // Literals
-        literal().map(Expr::Literal),
         // Wildcard (fallback if nothing else matched)
         just('*').to(Expr::Wildcard),
     ))

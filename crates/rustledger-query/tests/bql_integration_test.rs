@@ -10103,3 +10103,28 @@ fn test_quarter_returns_year_quarter_string() {
     let result = execute_query("SELECT quarter(max(date))", &directives);
     assert_eq!(result.rows[0][0], Value::String("2020-Q4".to_string()));
 }
+
+#[test]
+fn test_boolean_and_null_literals_in_expressions() {
+    let directives = make_test_directives();
+    // TRUE/FALSE/NULL must parse as literals in expression position; the bare
+    // column parser used to shadow them, yielding "column not found".
+    let total = match execute_query("SELECT count(*)", &directives).rows[0][0] {
+        Value::Integer(n) => n,
+        ref v => panic!("expected integer count, got {v:?}"),
+    };
+    assert_eq!(
+        execute_query("SELECT count(*) WHERE TRUE", &directives).rows[0][0],
+        Value::Integer(total),
+        "WHERE TRUE should match all rows"
+    );
+    assert_eq!(
+        execute_query("SELECT count(*) WHERE FALSE", &directives).rows[0][0],
+        Value::Integer(0),
+        "WHERE FALSE should match no rows"
+    );
+    assert!(matches!(
+        execute_query("SELECT NULL", &directives).rows[0][0],
+        Value::Null
+    ));
+}

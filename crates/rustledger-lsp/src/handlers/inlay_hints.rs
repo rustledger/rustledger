@@ -167,7 +167,13 @@ pub fn handle_inlay_hints(
             // A well-formed fully-missing posting line is
             // `[indent][flag ]account[trailing ws]`, so the end of the
             // trimmed content lands right after the account.
-            let trimmed = line.trim();
+            // Strip a trailing inline comment first: a fully-elided posting line
+            // is `[indent][flag ]account[ws][; comment]` with no string or
+            // amount before the comment, so the first `;` unambiguously starts
+            // it. Without this the hint anchors *past* the comment instead of at
+            // the account end.
+            let content = line.split(';').next().unwrap_or(line);
+            let trimmed = content.trim();
             let indent_bytes = line.len() - line.trim_start().len();
             let end_col_bytes = indent_bytes + trimmed.len();
             let indent_chars = line[..indent_bytes].chars().count();
@@ -823,6 +829,43 @@ mod tests {
             "hint number should be right-justified at the formatter column; label={label:?}"
         );
         assert_eq!(label.trim_start(), "50.00 USD");
+    }
+
+    #[test]
+    fn test_inlay_hint_anchors_before_inline_comment() {
+        // The elided posting carries a trailing inline comment. The hint must
+        // anchor at the account end (col 13, after `Assets:Cash`), NOT past the
+        // `; note here` comment (which the old `line.trim()` swallowed).
+        let source = "\
+2024-01-15 * \"Test\"
+  Expenses:Food  -5.00 USD
+  Assets:Cash  ; note here
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        let params = InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///t.beancount".parse().unwrap(),
+            },
+            range: lsp_types::Range {
+                start: Position::new(0, 0),
+                end: Position::new(10, 0),
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let hints = handle_inlay_hints(&params, source, &result, PositionEncoding::Utf16)
+            .unwrap_or_default();
+        assert_eq!(hints.len(), 1, "one inferred-amount hint expected");
+        let h = &hints[0];
+        assert_eq!(h.position.line, 2);
+        assert_eq!(
+            h.position.character, 13,
+            "hint must anchor at the account end (col 13), not past the inline comment"
+        );
     }
 
     /// #1346 regression for the byte-vs-encoding bugs the deep review

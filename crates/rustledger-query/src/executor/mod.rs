@@ -3676,10 +3676,11 @@ mod tests {
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.rows[0][0], Value::String("hello".to_string()));
 
-        // Test MAXWIDTH - truncation with ellipsis
+        // Test MAXWIDTH - textwrap.shorten: neither word fits with the " [...]"
+        // placeholder in width 8, so it collapses to the placeholder alone.
         let query = parse("SELECT maxwidth('hello world', 8)").unwrap();
         let result = executor.execute(&query).unwrap();
-        assert_eq!(result.rows[0][0], Value::String("hello...".to_string()));
+        assert_eq!(result.rows[0][0], Value::String("[...]".to_string()));
     }
 
     #[test]

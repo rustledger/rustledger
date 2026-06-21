@@ -952,24 +952,67 @@ impl MainLoopState {
         let uri = &params.text_document_position.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        // Ledger state so the rename spans every `include`d file, not just the
-        // open buffer (otherwise references in other files are left dangling).
-        let ledger_guard = self.ledger_state.read();
-        let ledger_state = if ledger_guard.ledger().is_some() {
-            Some(&*ledger_guard)
-        } else {
-            None
-        };
+        // Gather the other ledger files (everything except the current buffer)
+        // so the rename spans every `include`d file — otherwise references in
+        // other files are left dangling. Collected under the locks here (with
+        // each file's live buffer content when open) so the handler parses with
+        // no locks held.
+        let current_canonical = uri_to_path(uri).and_then(|p| p.canonicalize().ok());
+        let other_files = self.other_ledger_files(current_canonical.as_deref());
 
         let response = handle_rename(
             &params,
             &text,
             &parse_result,
-            ledger_state,
+            &other_files,
             self.position_encoding,
         );
 
         serde_json::to_value(response).map_err(|e| e.to_string())
+    }
+
+    /// Collect the ledger's files reachable via `include`, EXCLUDING the file at
+    /// `current_canonical`, as `(uri, source)`. The source is the open buffer's
+    /// live content when the file is open (so edit ranges match the client),
+    /// else the loader's on-disk source. Locks are released before returning, so
+    /// callers can parse without holding them.
+    fn other_ledger_files(
+        &self,
+        current_canonical: Option<&std::path::Path>,
+    ) -> Vec<(Uri, String)> {
+        // Live content of every open buffer, keyed by canonical path.
+        let open: std::collections::HashMap<PathBuf, String> = {
+            let vfs = self.vfs.read();
+            vfs.paths()
+                .filter_map(|p| Some((p.canonicalize().ok()?, vfs.get_content(p)?)))
+                .collect()
+        };
+
+        let ledger_guard = self.ledger_state.read();
+        let mut out = Vec::new();
+        if let Some(ledger) = ledger_guard.ledger() {
+            for f in ledger.source_map.files() {
+                let canon = f.path.canonicalize().ok();
+                if canon.as_deref() == current_canonical {
+                    continue;
+                }
+                let Ok(uri) = format!("file://{}", f.path.display()).parse::<Uri>() else {
+                    tracing::warn!(
+                        "rename: skipping ledger file with a non-file:// URI: {}",
+                        f.path.display()
+                    );
+                    continue;
+                };
+                // Prefer the open buffer's live content over the on-disk source
+                // so cross-file edit ranges line up with the client's buffer.
+                let source = canon
+                    .as_ref()
+                    .and_then(|c| open.get(c).cloned())
+                    .unwrap_or_else(|| f.source.to_string());
+                out.push((uri, source));
+            }
+        }
+        out
     }
 
     /// Handle the textDocument/formatting request.

@@ -43,9 +43,6 @@ use lsp_types::{
 use rustledger_parser::{ParseResult, parse};
 use std::collections::HashMap;
 
-use crate::ledger_state::LedgerState;
-use crate::uri_to_path;
-
 use super::utils::{
     LineIndex, PositionEncoding, get_word_at_position, is_account_like, is_currency_like,
 };
@@ -117,7 +114,11 @@ pub fn handle_rename(
     params: &RenameParams,
     source: &str,
     parse_result: &ParseResult,
-    ledger_state: Option<&LedgerState>,
+    // Other ledger files reachable via `include` (everything except the current
+    // buffer), as `(uri, source)` — the source is the open buffer's live
+    // content when the file is open, else the loader's on-disk source. Gathered
+    // by the caller under the state lock so parsing here holds no locks.
+    other_files: &[(lsp_types::Uri, String)],
     encoding: PositionEncoding,
 ) -> Option<WorkspaceEdit> {
     let position = params.text_document_position.position;
@@ -175,34 +176,28 @@ pub fn handle_rename(
 
     let mut changes: HashMap<lsp_types::Uri, Vec<TextEdit>> = HashMap::new();
 
-    // Current buffer (live source — reflects unsaved edits).
+    // Current buffer (live source — reflects unsaved edits). If the cursor is
+    // NOT on a real occurrence in the current file (e.g. account-shaped text in
+    // a comment or string), there are no edits here — bail out rather than
+    // triggering a surprising cross-file rename from a non-symbol position.
     let current_edits = collect(parse_result, source);
-    if !current_edits.is_empty() {
-        changes.insert(uri.clone(), current_edits);
+    if current_edits.is_empty() {
+        return None;
     }
+    changes.insert(uri.clone(), current_edits);
 
     // Every OTHER file in the loaded ledger (reachable via `include`): rename
     // the symbol there too, so a multi-file ledger isn't left with dangling
     // references to the old name. Without this, renaming an account used across
     // includes corrupted the ledger.
-    if let Some(ls) = ledger_state
-        && let Some(ledger) = ls.ledger()
-    {
-        let current_canonical = uri_to_path(&uri).and_then(|p| p.canonicalize().ok());
-        for f in ledger.source_map.files() {
-            if let Ok(c) = f.path.canonicalize()
-                && current_canonical.as_deref() == Some(c.as_path())
-            {
-                continue; // current file already handled with its live source
-            }
-            let Ok(f_uri) = format!("file://{}", f.path.display()).parse::<lsp_types::Uri>() else {
-                continue;
-            };
-            let f_parse = parse(&f.source);
-            let f_edits = collect(&f_parse, &f.source);
-            if !f_edits.is_empty() {
-                changes.insert(f_uri, f_edits);
-            }
+    for (f_uri, f_source) in other_files {
+        if *f_uri == uri {
+            continue; // never overwrite the current buffer's live edits
+        }
+        let f_parse = parse(f_source);
+        let f_edits = collect(&f_parse, f_source);
+        if !f_edits.is_empty() {
+            changes.insert(f_uri.clone(), f_edits);
         }
     }
 
@@ -369,7 +364,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let edit = handle_rename(&params, source, &result, None, PositionEncoding::Utf16);
+        let edit = handle_rename(&params, source, &result, &[], PositionEncoding::Utf16);
         assert!(edit.is_some());
 
         let edit = edit.unwrap();
@@ -426,7 +421,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let edit = handle_rename(&params, source, &result, None, PositionEncoding::Utf16)
+        let edit = handle_rename(&params, source, &result, &[], PositionEncoding::Utf16)
             .expect("rename returns edit");
         let changes = edit.changes.expect("edit has changes");
         let edits = changes.values().next().expect("at least one file");
@@ -494,7 +489,7 @@ mod tests {
             new_name: "Assets:Checking".to_string(),
             work_done_progress_params: Default::default(),
         };
-        let edit = handle_rename(&params, source, &result, None, PositionEncoding::Utf16)
+        let edit = handle_rename(&params, source, &result, &[], PositionEncoding::Utf16)
             .expect("rename returns edit");
         let changes = edit.changes.expect("edit has changes");
         let edits = changes.values().next().expect("at least one file");

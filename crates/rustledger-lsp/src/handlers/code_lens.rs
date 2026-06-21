@@ -45,7 +45,7 @@ use rustledger_validate::ErrorCode;
 use std::collections::HashMap;
 
 use super::diagnostics::validation_would_run;
-use super::utils::{LineIndex, PositionEncoding};
+use super::utils::{LineIndex, PositionEncoding, count_noun};
 
 /// Handle a code lens request.
 ///
@@ -102,10 +102,11 @@ pub fn handle_code_lens(
                     open.currencies.iter().map(|c| c.to_string()).collect();
 
                 let title = if txn_count > 0 {
+                    let counted = count_noun(txn_count, "transaction");
                     if currencies.is_empty() {
-                        format!("{} transactions", txn_count)
+                        counted
                     } else {
-                        format!("{} transactions | {}", txn_count, currencies.join(", "))
+                        format!("{} | {}", counted, currencies.join(", "))
                     }
                 } else if !currencies.is_empty() {
                     currencies.join(", ")
@@ -140,10 +141,11 @@ pub fn handle_code_lens(
                     .into_iter()
                     .collect();
 
+                let counted = count_noun(posting_count, "posting");
                 let title = if currencies.is_empty() {
-                    format!("{} postings", posting_count)
+                    counted
                 } else {
-                    format!("{} postings | {}", posting_count, currencies.join(", "))
+                    format!("{} | {}", counted, currencies.join(", "))
                 };
 
                 lenses.push(CodeLens {

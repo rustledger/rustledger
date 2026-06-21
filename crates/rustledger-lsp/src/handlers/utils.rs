@@ -20,6 +20,18 @@ pub(crate) fn trim_span_end(source: &str, end: usize) -> usize {
         .map_or(clamped, |s| s.trim_end().len())
 }
 
+/// Format a count with a noun, pluralizing with a trailing `s` unless the count
+/// is exactly 1 (so hover/code-lens show "1 posting", not "1 postings"). Only
+/// handles regular `+s` plurals, which is all the LSP surface needs
+/// (transaction, posting, amount).
+pub(crate) fn count_noun(count: usize, singular: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {singular}s")
+    }
+}
+
 /// Whether two LSP `Range`s overlap, using LSP half-open semantics
 /// (`Range.end` is EXCLUSIVE per the spec).
 ///
@@ -635,6 +647,15 @@ pub fn is_currency_like(s: &str, parse_result: &ParseResult) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_count_noun_pluralization() {
+        assert_eq!(count_noun(0, "posting"), "0 postings");
+        assert_eq!(count_noun(1, "posting"), "1 posting");
+        assert_eq!(count_noun(2, "posting"), "2 postings");
+        assert_eq!(count_noun(1, "transaction"), "1 transaction");
+        assert_eq!(count_noun(3, "amount"), "3 amounts");
+    }
 
     #[test]
     fn test_line_index_basic() {

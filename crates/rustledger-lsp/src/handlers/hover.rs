@@ -12,8 +12,8 @@ use rustledger_parser::{ParseResult, Spanned};
 use crate::ledger_state::LedgerState;
 
 use super::utils::{
-    PositionEncoding, commodity_declaration_spans, get_word_at_source_position, is_account_type,
-    is_currency_like_simple,
+    PositionEncoding, commodity_declaration_spans, count_noun, get_word_at_source_position,
+    is_account_type, is_currency_like_simple,
 };
 
 /// Handle a hover request.
@@ -111,14 +111,18 @@ fn get_account_info(
             let currencies: Vec<String> = open.currencies.iter().map(|c| c.to_string()).collect();
             info.push_str(&format!("**Currencies:** {}\n\n", currencies.join(", ")));
         }
-        info.push_str(&format!("**Used in:** {usage_count} postings"));
+        info.push_str(&format!(
+            "**Used in:** {}",
+            count_noun(usage_count, "posting")
+        ));
         return Some(info);
     }
 
     // No open found anywhere, but still provide usage info if it's referenced.
     if usage_count > 0 {
         return Some(format!(
-            "## Account: `{account}`\n\n**Note:** No `open` directive found\n\n**Used in:** {usage_count} postings"
+            "## Account: `{account}`\n\n**Note:** No `open` directive found\n\n**Used in:** {}",
+            count_noun(usage_count, "posting")
         ));
     }
 
@@ -152,7 +156,10 @@ fn get_currency_info(currency: &str, parse_result: &ParseResult) -> Option<Strin
 
             // Count usages
             let usage_count = count_currency_usages(currency, parse_result);
-            info.push_str(&format!("\n**Used in:** {} amounts", usage_count));
+            info.push_str(&format!(
+                "\n**Used in:** {}",
+                count_noun(usage_count, "amount")
+            ));
 
             return Some(info);
         }
@@ -162,8 +169,9 @@ fn get_currency_info(currency: &str, parse_result: &ParseResult) -> Option<Strin
     let usage_count = count_currency_usages(currency, parse_result);
     if usage_count > 0 {
         return Some(format!(
-            "## Currency: `{}`\n\n**Note:** No `commodity` directive found\n\n**Used in:** {} amounts",
-            currency, usage_count
+            "## Currency: `{}`\n\n**Note:** No `commodity` directive found\n\n**Used in:** {}",
+            currency,
+            count_noun(usage_count, "amount")
         ));
     }
 

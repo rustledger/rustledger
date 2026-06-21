@@ -63,8 +63,9 @@ cd /path/to/main/rustledger
 ### Long-lived reference branches — do NOT delete
 
 A few remote branches are kept intentionally and are **not** cleanup targets,
-even when they have no open PR. Run `git log <branch>` for full context before
-touching any of them.
+even when they have no open PR. Run `git log origin/<branch>` for full context
+before touching any of them (they are remote-only — a bare `<branch>` ref won't
+resolve unless you've fetched it locally).
 
 | Branch | Why it's kept |
 |--------|---------------|

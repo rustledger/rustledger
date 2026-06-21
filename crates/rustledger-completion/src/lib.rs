@@ -246,6 +246,15 @@ pub fn classify_context(before_cursor: &str) -> CompletionContext {
         return CompletionContext::LineStart;
     }
 
+    // Inside an open quoted string → payee/narration completion. Checked
+    // before the date-prefix logic below: a transaction header
+    // (`2024-01-01 * "Pay…`) starts with a date, which otherwise
+    // short-circuits to `AfterDate` and leaves this context (and
+    // `complete_payee`) unreachable.
+    if before_cursor.chars().filter(|&c| c == '"').count() % 2 == 1 {
+        return CompletionContext::InsideString;
+    }
+
     // Check for date at line start (YYYY-MM-DD pattern). Guard the
     // 10-byte split on a char boundary: a `YYYY-MM-DD` prefix is all
     // ASCII, so if byte 10 lands mid-character the line can't be a
@@ -279,12 +288,6 @@ pub fn classify_context(before_cursor: &str) -> CompletionContext {
 
         // After date but no recognized directive yet
         return CompletionContext::AfterDate;
-    }
-
-    // Check if inside a quoted string
-    let quote_count = before_cursor.chars().filter(|&c| c == '"').count();
-    if quote_count % 2 == 1 {
-        return CompletionContext::InsideString;
     }
 
     CompletionContext::Unknown
@@ -598,6 +601,27 @@ mod tests {
     #[test]
     fn classify_inside_string() {
         assert_eq!(ctx("text \"inside"), CompletionContext::InsideString);
+    }
+
+    #[test]
+    fn classify_inside_string_in_transaction_header() {
+        // Regression: a transaction header starts with a date, which used to
+        // short-circuit to `AfterDate` before the open-quote check, leaving
+        // payee/narration completion unreachable.
+        assert_eq!(
+            ctx("2024-01-01 * \"Whole F"),
+            CompletionContext::InsideString
+        );
+        // Second string (narration) after a complete payee.
+        assert_eq!(
+            ctx("2024-01-01 * \"Payee\" \"Groc"),
+            CompletionContext::InsideString
+        );
+        // A complete (balanced) payee string is not "inside" a string.
+        assert_ne!(
+            ctx("2024-01-01 * \"Payee\" "),
+            CompletionContext::InsideString
+        );
     }
 
     #[test]

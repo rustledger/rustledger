@@ -8,6 +8,13 @@ use crate::error::QueryError;
 use super::super::Executor;
 use super::super::types::{Interval, IntervalUnit, PostingContext, Value};
 
+/// strftime formats the one-arg `PARSE_DATE` tries (after ISO `FromStr`),
+/// covering numeric and month-name shapes — `%m-%d-%Y` first so ambiguous
+/// `MM-DD-YYYY` matches dateutil's month-first default.
+const PARSE_DATE_FORMATS: &[&str] = &[
+    "%Y/%m/%d", "%m-%d-%Y", "%m/%d/%Y", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y",
+];
+
 impl Executor<'_> {
     /// Evaluate date functions: `YEAR`, `MONTH`, `DAY`, `WEEKDAY`, `QUARTER`, `YMONTH`, `TODAY`.
     pub(crate) fn eval_date_function(
@@ -459,10 +466,7 @@ impl Executor<'_> {
         if let Ok(d) = string.parse::<NaiveDate>() {
             return Ok(Value::Date(d));
         }
-        const FORMATS: &[&str] = &[
-            "%Y/%m/%d", "%m-%d-%Y", "%m/%d/%Y", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y",
-        ];
-        for fmt in FORMATS {
+        for fmt in PARSE_DATE_FORMATS {
             if let Ok(d) = jiff::fmt::strtime::parse(fmt, &string).and_then(|tm| tm.to_date()) {
                 return Ok(Value::Date(d));
             }

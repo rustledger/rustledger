@@ -8,6 +8,10 @@ use crate::error::QueryError;
 use super::super::Executor;
 use super::super::types::{PostingContext, Value};
 
+/// Ellipsis marker `MAXWIDTH` appends when it shortens text (Python
+/// `textwrap.shorten`'s default `placeholder`, sans the leading space).
+const MAXWIDTH_PLACEHOLDER: &str = "[...]";
+
 impl Executor<'_> {
     /// Evaluate string functions: `LENGTH`, `UPPER`, `LOWER`, `SUBSTR`, `TRIM`, `STARTSWITH`, `ENDSWITH`.
     pub(crate) fn eval_string_function(
@@ -334,13 +338,12 @@ impl Executor<'_> {
         // drop whole trailing words and append the placeholder ` [...]`. A
         // single over-long word collapses to `[...]`. A width too small for the
         // placeholder itself is an error (textwrap raises ValueError).
-        const PLACEHOLDER: &str = "[...]";
         let words: Vec<&str> = string.split_whitespace().collect();
         let collapsed = words.join(" ");
         if collapsed.chars().count() <= n {
             return Ok(Value::String(collapsed));
         }
-        let placeholder_len = PLACEHOLDER.chars().count();
+        let placeholder_len = MAXWIDTH_PLACEHOLDER.chars().count();
         if placeholder_len > n {
             return Err(QueryError::Evaluation(
                 "MAXWIDTH: placeholder too large for max width".to_string(),
@@ -368,9 +371,9 @@ impl Executor<'_> {
             }
         }
         if kept.is_empty() {
-            Ok(Value::String(PLACEHOLDER.to_string()))
+            Ok(Value::String(MAXWIDTH_PLACEHOLDER.to_string()))
         } else {
-            Ok(Value::String(format!("{kept} {PLACEHOLDER}")))
+            Ok(Value::String(format!("{kept} {MAXWIDTH_PLACEHOLDER}")))
         }
     }
 

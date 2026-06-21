@@ -44,7 +44,7 @@ pub fn handle_document_links(
     for (line_num, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.starts_with("include")
-            && let Some(link) = parse_include_line(line, line_num as u32, &base_dir)
+            && let Some(link) = parse_include_line(line, line_num as u32, &line_index, &base_dir)
         {
             links.push(link);
         }
@@ -144,8 +144,14 @@ fn create_document_link(
         return None;
     }
 
-    let start_col = (quote_start + 1) as u32;
-    let end_col = start_col + path.len() as u32;
+    // Convert the path's byte offsets to columns in the negotiated encoding.
+    // `quote_start`/`path.len()` are byte offsets; emitting them directly
+    // misplaces the link under UTF-16 whenever the line contains multibyte
+    // characters (e.g. a Unicode account name or an accented path).
+    let line_start = line_index.position_to_offset(start_line, 0)?;
+    let path_start = line_start + quote_start + 1;
+    let (_, start_col) = line_index.offset_to_position(path_start);
+    let (_, end_col) = line_index.offset_to_position(path_start + path.len());
 
     // Store data for resolve - defer target resolution
     let data = serde_json::json!({
@@ -170,6 +176,7 @@ fn create_document_link(
 fn parse_include_line(
     line: &str,
     line_num: u32,
+    line_index: &LineIndex<'_>,
     base_dir: &Option<String>,
 ) -> Option<DocumentLink> {
     // Match patterns like: include "path/to/file.beancount"
@@ -184,8 +191,12 @@ fn parse_include_line(
     let quote_end = after_quote.find('"')?;
 
     let path = &after_quote[..quote_end];
-    let start_col = (quote_start + 1) as u32;
-    let end_col = start_col + path.len() as u32;
+    // Convert byte offsets to columns in the negotiated encoding (see
+    // `create_document_link`): raw byte columns misplace the link under UTF-16.
+    let line_start = line_index.position_to_offset(line_num, 0)?;
+    let path_start = line_start + quote_start + 1;
+    let (_, start_col) = line_index.offset_to_position(path_start);
+    let (_, end_col) = line_index.offset_to_position(path_start + path.len());
 
     // Store data for resolve - defer target resolution
     let data = serde_json::json!({
@@ -220,8 +231,9 @@ mod tests {
     fn test_parse_include_line() {
         let line = r#"include "accounts.beancount""#;
         let base_dir = Some("/home/user/ledger".to_string());
+        let line_index = LineIndex::new(line, PositionEncoding::Utf16);
 
-        let link = parse_include_line(line, 0, &base_dir);
+        let link = parse_include_line(line, 0, &line_index, &base_dir);
         assert!(link.is_some());
 
         let link = link.unwrap();
@@ -232,6 +244,37 @@ mod tests {
         assert!(link.target.is_none());
         // Data should contain the path info
         assert!(link.data.is_some());
+    }
+
+    #[test]
+    fn test_document_link_columns_are_utf16() {
+        // A multibyte account name precedes the path, and the path itself
+        // contains multibyte chars. Under UTF-16, columns must count code
+        // units, not bytes — otherwise the clickable span is misplaced.
+        let source = "2024-01-02 document Assets:Café \"réçu.pdf\"\n";
+        let result = rustledger_parser::parse(source);
+        let params = DocumentLinkParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///x/main.beancount".parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let links =
+            handle_document_links(&params, source, &result, PositionEncoding::Utf16).unwrap();
+        let link = &links[0];
+        // The opening quote sits at UTF-16 col 32 (`Café` is 4 units, not 5
+        // bytes), so the path starts at col 33; `réçu.pdf` is 8 UTF-16 units →
+        // end (exclusive) at col 41. Raw byte offsets would give 34/44 — the
+        // pre-fix bug.
+        assert_eq!(
+            link.range.start.character, 33,
+            "path start must be a UTF-16 column"
+        );
+        assert_eq!(
+            link.range.end.character, 41,
+            "path end must be a UTF-16 column"
+        );
     }
 
     #[test]

@@ -203,14 +203,22 @@ pub fn load_source(source: &str) -> LoadResult {
     // listed in the DTO; only their resolution errors are suppressed. The
     // filter is targeted — a parse-phase error that both names a declared
     // include path and reports a resolution failure — so it never masks a real
-    // syntax error in the source itself.
+    // syntax error in the source itself. Path separators are normalized to `/`
+    // on both sides: the loader renders paths via `Path::display()`, which uses
+    // `\` on Windows, while declared include paths use `/`.
+    let normalized_includes: Vec<String> =
+        includes.iter().map(|i| i.path.replace('\\', "/")).collect();
     let errors: Vec<Error> = ledger
         .errors
         .iter()
         .filter(|e| {
-            !(e.phase == "parse"
-                && includes.iter().any(|inc| e.message.contains(&inc.path))
-                && (e.message.contains("not found") || e.message.contains("does not match")))
+            if e.phase != "parse"
+                || !(e.message.contains("not found") || e.message.contains("does not match"))
+            {
+                return true;
+            }
+            let msg = e.message.replace('\\', "/");
+            !normalized_includes.iter().any(|p| msg.contains(p))
         })
         .map(ledger_error_to_ffi)
         .collect();

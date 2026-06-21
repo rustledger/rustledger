@@ -21,7 +21,9 @@ impl Executor<'_> {
                 Self::require_args(name, func, 1)?;
                 let val = self.evaluate_expr(&func.args[0], ctx)?;
                 match val {
-                    Value::String(s) => Ok(Value::Integer(s.len() as i64)),
+                    // Count Unicode characters, not UTF-8 bytes (matches
+                    // beanquery / Python `len(str)`).
+                    Value::String(s) => Ok(Value::Integer(s.chars().count() as i64)),
                     Value::StringSet(s) => Ok(Value::Integer(s.len() as i64)),
                     _ => Err(QueryError::Type(
                         "LENGTH expects a string or set".to_string(),
@@ -359,20 +361,38 @@ impl Executor<'_> {
         };
 
         match (val, start, len) {
-            (Value::String(s), Value::Integer(start), None) => {
-                let start = start.max(0) as usize;
-                let result: String = s.chars().skip(start).collect();
-                Ok(Value::String(result))
-            }
-            (Value::String(s), Value::Integer(start), Some(Value::Integer(len))) => {
-                let start = start.max(0) as usize;
-                let len = len.max(0) as usize;
-                let result: String = s.chars().skip(start).take(len).collect();
-                Ok(Value::String(result))
-            }
+            // SUBSTR(s, start, end) follows Python slicing `s[start:end]`
+            // (beanquery semantics): the third argument is the END index, NOT a
+            // length, and negative indices count from the end. The 2-arg form
+            // `s[start:]` is a rledger extension (beanquery requires 3 args).
+            (Value::String(s), Value::Integer(start), None) => Ok(Value::String(py_slice(
+                &s.chars().collect::<Vec<_>>(),
+                start,
+                None,
+            ))),
+            (Value::String(s), Value::Integer(start), Some(Value::Integer(end))) => Ok(
+                Value::String(py_slice(&s.chars().collect::<Vec<_>>(), start, Some(end))),
+            ),
             _ => Err(QueryError::Type(
                 "SUBSTR expects (string, int, [int])".to_string(),
             )),
         }
+    }
+}
+
+/// Python-style slice `chars[start:end]` over a character vector.
+///
+/// Matches `CPython` (and thus beanquery) semantics: negative indices count from
+/// the end, both bounds are clamped into `0..=len`, and `start >= end` yields an
+/// empty string. `end == None` slices to the end (`chars[start:]`).
+fn py_slice(chars: &[char], start: i64, end: Option<i64>) -> String {
+    let n = chars.len() as i64;
+    let normalize = |i: i64| -> i64 { if i < 0 { (n + i).max(0) } else { i.min(n) } };
+    let s = normalize(start);
+    let e = end.map_or(n, normalize);
+    if s >= e {
+        String::new()
+    } else {
+        chars[s as usize..e as usize].iter().collect()
     }
 }

@@ -254,7 +254,7 @@ mod tests {
     use rustledger_parser::parse;
 
     #[test]
-    fn account_info_resolves_open_from_included_directives() {
+    fn test_get_account_info_resolves_included_open() {
         // Current file uses the account but does not open it.
         let pr = parse("2024-02-01 * \"x\"\n  Assets:Shared 1 USD\n  Assets:Shared -1 USD\n");
         // The `open` lives in an included file, supplied via ledger_directives.

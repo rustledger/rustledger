@@ -329,13 +329,48 @@ impl Executor<'_> {
             }
         };
 
-        if string.chars().count() <= n {
-            Ok(Value::String(string))
-        } else if n <= 3 {
-            Ok(Value::String(string.chars().take(n).collect()))
+        // Match Python `textwrap.shorten` (beanquery's MAXWIDTH): collapse
+        // runs of whitespace to single spaces, and if the result exceeds `n`,
+        // drop whole trailing words and append the placeholder ` [...]`. A
+        // single over-long word collapses to `[...]`. A width too small for the
+        // placeholder itself is an error (textwrap raises ValueError).
+        const PLACEHOLDER: &str = "[...]";
+        let words: Vec<&str> = string.split_whitespace().collect();
+        let collapsed = words.join(" ");
+        if collapsed.chars().count() <= n {
+            return Ok(Value::String(collapsed));
+        }
+        let placeholder_len = PLACEHOLDER.chars().count();
+        if placeholder_len > n {
+            return Err(QueryError::Evaluation(
+                "MAXWIDTH: placeholder too large for max width".to_string(),
+            ));
+        }
+        // Greedily keep words while "<kept> [...]" still fits in `n`.
+        let mut kept = String::new();
+        let mut kept_len = 0usize;
+        for word in &words {
+            let wlen = word.chars().count();
+            let candidate_len = if kept.is_empty() {
+                wlen
+            } else {
+                kept_len + 1 + wlen
+            };
+            // candidate + a leading-space placeholder (" [...]").
+            if candidate_len + 1 + placeholder_len <= n {
+                if !kept.is_empty() {
+                    kept.push(' ');
+                }
+                kept.push_str(word);
+                kept_len = candidate_len;
+            } else {
+                break;
+            }
+        }
+        if kept.is_empty() {
+            Ok(Value::String(PLACEHOLDER.to_string()))
         } else {
-            let truncated: String = string.chars().take(n - 3).collect();
-            Ok(Value::String(format!("{truncated}...")))
+            Ok(Value::String(format!("{kept} {PLACEHOLDER}")))
         }
     }
 

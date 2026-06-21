@@ -10128,3 +10128,42 @@ fn test_boolean_and_null_literals_in_expressions() {
         Value::Null
     ));
 }
+
+#[test]
+fn test_maxwidth_textwrap_shorten() {
+    let directives = make_test_directives();
+    // MAXWIDTH matches Python textwrap.shorten: collapse whitespace, drop whole
+    // trailing words, append " [...]"; a lone over-long word becomes "[...]".
+    let cases = [
+        (r#"maxwidth("hello world foo", 12)"#, "hello [...]"),
+        (r#"maxwidth("hello world foo", 20)"#, "hello world foo"),
+        (r#"maxwidth("abcdefghij", 5)"#, "[...]"),
+    ];
+    for (q, expected) in cases {
+        let result = execute_query(&format!("SELECT {q}"), &directives);
+        assert_eq!(
+            result.rows[0][0],
+            Value::String(expected.to_string()),
+            "for {q}"
+        );
+    }
+    // Width too small for the placeholder is an error (textwrap ValueError).
+    let _ = execute_query_err(r#"SELECT maxwidth("hello", 3)"#, &directives);
+}
+
+#[test]
+fn test_parse_date_one_arg() {
+    let directives = make_test_directives();
+    // One-arg parse_date covers ISO / numeric / month-name formats, including
+    // dateutil's month-first reading of ambiguous MM-DD-YYYY.
+    let cases = [
+        (r#"parse_date("2021-07-01")"#, (2021, 7, 1)),
+        (r#"parse_date("2021/07/01")"#, (2021, 7, 1)),
+        (r#"parse_date("01-07-2021")"#, (2021, 1, 7)),
+        (r#"parse_date("July 1 2021")"#, (2021, 7, 1)),
+    ];
+    for (q, (y, m, d)) in cases {
+        let result = execute_query(&format!("SELECT {q}"), &directives);
+        assert_eq!(result.rows[0][0], Value::Date(date(y, m, d)), "for {q}");
+    }
+}

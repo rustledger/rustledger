@@ -414,7 +414,14 @@ impl Executor<'_> {
         func: &FunctionCall,
         ctx: &PostingContext,
     ) -> Result<Value, QueryError> {
-        Self::require_args("PARSE_DATE", func, 2)?;
+        // beanquery accepts `parse_date(str)` (dateutil) and
+        // `parse_date(str, format)`.
+        if func.args.is_empty() || func.args.len() > 2 {
+            return Err(QueryError::InvalidArguments(
+                "PARSE_DATE".to_string(),
+                "expected 1 or 2 arguments".to_string(),
+            ));
+        }
 
         let string = match self.evaluate_expr(&func.args[0], ctx)? {
             Value::String(s) => s,
@@ -424,23 +431,45 @@ impl Executor<'_> {
                 ));
             }
         };
-        let format = match self.evaluate_expr(&func.args[1], ctx)? {
-            Value::String(s) => s,
-            _ => {
-                return Err(QueryError::Type(
-                    "PARSE_DATE: second argument must be a format string".to_string(),
-                ));
-            }
-        };
 
-        jiff::fmt::strtime::parse(&format, &string)
-            .and_then(|tm| tm.to_date())
-            .map(Value::Date)
-            .map_err(|e| {
-                QueryError::Type(format!(
-                    "PARSE_DATE: cannot parse '{string}' with format '{format}': {e}"
-                ))
-            })
+        // Two-arg form: explicit strftime format.
+        if func.args.len() == 2 {
+            let format = match self.evaluate_expr(&func.args[1], ctx)? {
+                Value::String(s) => s,
+                _ => {
+                    return Err(QueryError::Type(
+                        "PARSE_DATE: second argument must be a format string".to_string(),
+                    ));
+                }
+            };
+            return jiff::fmt::strtime::parse(&format, &string)
+                .and_then(|tm| tm.to_date())
+                .map(Value::Date)
+                .map_err(|e| {
+                    QueryError::Type(format!(
+                        "PARSE_DATE: cannot parse '{string}' with format '{format}': {e}"
+                    ))
+                });
+        }
+
+        // One-arg form: beanquery uses dateutil's flexible parser. We cover the
+        // common ISO / numeric / month-name shapes (including dateutil's
+        // month-first default for ambiguous `MM-DD-YYYY`); full natural-language
+        // parsing is not replicated.
+        if let Ok(d) = string.parse::<NaiveDate>() {
+            return Ok(Value::Date(d));
+        }
+        const FORMATS: &[&str] = &[
+            "%Y/%m/%d", "%m-%d-%Y", "%m/%d/%Y", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y",
+        ];
+        for fmt in FORMATS {
+            if let Ok(d) = jiff::fmt::strtime::parse(fmt, &string).and_then(|tm| tm.to_date()) {
+                return Ok(Value::Date(d));
+            }
+        }
+        Err(QueryError::Type(format!(
+            "PARSE_DATE: cannot parse '{string}' (one-arg parse_date covers ISO/numeric/month-name formats)"
+        )))
     }
 
     /// Evaluate `DATE_BIN` function (bin dates into buckets).

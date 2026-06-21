@@ -108,11 +108,12 @@ impl Executor<'_> {
     /// Apply the PIVOT BY transformation, matching bean-query semantics
     /// (issue #1034).
     ///
-    /// **Syntax**: `PIVOT BY <pivot_value_col>, <group_by_col>` — exactly
-    /// two columns. The first column's values become the new column
-    /// headers; the second is the GROUP BY column to keep as the row key.
-    /// All other columns become "value" cells, populated at the
-    /// intersection of (`group_by_col` value, `pivot_value_col` value).
+    /// **Syntax**: `PIVOT BY <row_key_col>, <spread_col>` — exactly two
+    /// columns. The FIRST column is kept as the row key; the SECOND column's
+    /// distinct values become the new column headers (matching bean-query's
+    /// `test_pivot_one_column`). All other columns become "value" cells,
+    /// populated at the intersection of (`row_key_col` value, `spread_col`
+    /// value).
     ///
     /// **Validation** (rules 1–3 match `_compile_pivot_by` in
     /// `beanquery/compiler.py`; rule 4 is rledger-specific):
@@ -172,22 +173,26 @@ impl Executor<'_> {
             return Err(QueryError::PivotWithoutGroupBy);
         };
 
-        let pivot_value_col_idx = self.find_pivot_column(result, &pivot_exprs[0])?;
-        let key_col_idx = self.find_pivot_column(result, &pivot_exprs[1])?;
+        // `PIVOT BY <row_key>, <spread>`: the FIRST column stays as the row key;
+        // the SECOND column's distinct values become the new columns (matching
+        // beanquery — previously these two roles were reversed, which inverted
+        // the output axes).
+        let key_col_idx = self.find_pivot_column(result, &pivot_exprs[0])?;
+        let pivot_value_col_idx = self.find_pivot_column(result, &pivot_exprs[1])?;
 
         // Validation #3: the two columns must differ.
         if pivot_value_col_idx == key_col_idx {
             return Err(QueryError::PivotSameColumn);
         }
 
-        // Validation #4: the second column must be a GROUP BY target.
-        // Resolve each GROUP BY expression to its result column index
-        // and check membership.
-        let key_in_group_by = gb
+        // Validation #4: the second column (the one spread into new columns)
+        // must be a GROUP BY target. Resolve each GROUP BY expression to its
+        // result column index and check membership.
+        let pivot_in_group_by = gb
             .iter()
             .filter_map(|expr| self.find_pivot_column(result, expr).ok())
-            .any(|idx| idx == key_col_idx);
-        if !key_in_group_by {
+            .any(|idx| idx == pivot_value_col_idx);
+        if !pivot_in_group_by {
             return Err(QueryError::PivotSecondNotInGroupBy);
         }
 

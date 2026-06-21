@@ -1927,7 +1927,7 @@ fn test_pivot_by_with_order_by_works() {
     let directives = make_test_directives();
     let result = execute_query(
         "SELECT account, currency, SUM(number) GROUP BY 1, 2 \
-         ORDER BY account PIVOT BY currency, account",
+         ORDER BY account PIVOT BY account, currency",
         &directives,
     );
     // Strong assertions (Copilot review on PR #1037 — pre-strengthening
@@ -2031,7 +2031,7 @@ fn test_pivot_by_empty_result_yields_key_column_no_rows() {
     let directives = make_test_directives();
     let result = execute_query(
         "SELECT account, currency, SUM(number) WHERE account = 'NoSuchAccount' \
-         GROUP BY 1, 2 PIVOT BY currency, account",
+         GROUP BY 1, 2 PIVOT BY account, currency",
         &directives,
     );
     assert!(result.rows.is_empty(), "expected no data rows");
@@ -2065,7 +2065,7 @@ fn test_pivot_by_duplicate_key_pivot_pairs_first_wins() {
     let directives = make_test_directives();
     let result = execute_query(
         "SELECT account, currency, SUM(number) GROUP BY 1, 2 \
-         PIVOT BY currency, account",
+         PIVOT BY account, currency",
         &directives,
     );
     // Smoke check: result has rows and at least the USD column.
@@ -2091,7 +2091,7 @@ fn test_pivot_by_with_order_by_on_hidden_column_works() {
     let directives = make_test_directives();
     let result = execute_query(
         "SELECT account, currency, SUM(number) GROUP BY 1, 2 \
-         ORDER BY MIN(date) PIVOT BY currency, account",
+         ORDER BY MIN(date) PIVOT BY account, currency",
         &directives,
     );
     assert!(!result.columns.is_empty());
@@ -10165,5 +10165,33 @@ fn test_parse_date_one_arg() {
     for (q, (y, m, d)) in cases {
         let result = execute_query(&format!("SELECT {q}"), &directives);
         assert_eq!(result.rows[0][0], Value::Date(date(y, m, d)), "for {q}");
+    }
+}
+
+#[test]
+fn test_pivot_by_first_column_is_the_row_key() {
+    // Regression: `PIVOT BY a, b` keeps `a` as the row key and spreads `b`'s
+    // values into columns (matches bean-query). Previously the two roles were
+    // inverted (rows and columns swapped).
+    let directives = make_test_directives();
+    let result = execute_query(
+        "SELECT account, currency, SUM(number) GROUP BY 1, 2 PIVOT BY account, currency",
+        &directives,
+    );
+    // First column is the `account` row key; currency values became columns.
+    assert_eq!(result.columns[0], "account");
+    assert!(
+        result.columns.iter().any(|c| c == "USD"),
+        "currency value should be a column header; got {:?}",
+        result.columns
+    );
+    // Every row's key cell is an account (contains a `:` separator), never a
+    // currency code — proves the axes aren't inverted.
+    for row in &result.rows {
+        assert!(
+            matches!(&row[0], Value::String(s) if s.contains(':')),
+            "row key should be an account name, got {:?}",
+            row[0]
+        );
     }
 }

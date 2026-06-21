@@ -1686,6 +1686,10 @@ fn test_query_and_format_handle_broken_pipe() {
 /// currency) as a base candidate; resolving its quote yields itself. A
 /// commodity is never priced in itself — bean-price never fetches a currency
 /// against itself. Exercises the `--source-cmd` fetch path (offline).
+///
+/// Unix-only: the stub source uses `echo`, which is a shell builtin without a
+/// standalone executable on Windows.
+#[cfg(unix)]
 #[test]
 fn test_price_no_self_quote_directive() {
     let rledger = require_rledger!();
@@ -1711,17 +1715,36 @@ fn test_price_no_self_quote_directive() {
         .output()
         .expect("Failed to run rledger price");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success() && stdout.is_empty() {
-        eprintln!("Skipping: price/--source-cmd not supported in this build");
+    // Skip only when the build genuinely lacks the flag (don't mask real
+    // failures behind an empty-stdout heuristic).
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success()
+        && (stderr.contains("--source-cmd") || stderr.contains("unexpected argument"))
+    {
+        eprintln!("Skipping: --source-cmd not supported in this build");
         return;
     }
+
+    // Parse the emitted `<date> price <SYMBOL> <num> <CURRENCY>` directives and
+    // assert on the (symbol, currency) tokens — precise, not substring matching
+    // (which would treat `price USDX …` as a hit).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut saw_aapl = false;
+    for line in stdout.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        if toks.len() >= 5 && toks[1] == "price" {
+            let (symbol, currency) = (toks[2], toks[toks.len() - 1]);
+            assert_ne!(
+                symbol, currency,
+                "self-referential price directive emitted: {line}"
+            );
+            if symbol == "AAPL" {
+                saw_aapl = true;
+            }
+        }
+    }
     assert!(
-        stdout.contains("price AAPL"),
-        "should fetch the held AAPL; got: {stdout}"
-    );
-    assert!(
-        !stdout.contains("price USD"),
-        "must not emit a self-referential `price USD … USD`; got: {stdout}"
+        saw_aapl,
+        "expected a `price AAPL … USD` directive; got: {stdout}"
     );
 }

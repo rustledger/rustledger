@@ -62,13 +62,24 @@ fn collect_symbols_from_document(
 ) {
     let line_index = LineIndex::new(source, encoding);
     for spanned in &parse_result.directives {
-        let (line, col) = line_index.offset_to_position(spanned.span.start);
-        let location = Location {
-            uri: uri.clone(),
-            range: Range {
-                start: Position::new(line, col),
-                end: Position::new(line, col + 10),
-            },
+        let dir_span = spanned.span;
+        // Locate a symbol by its name within the directive's source span, so the
+        // result jumps to the symbol token (e.g. the account name) rather than a
+        // hardcoded 10-column window anchored at the directive's date.
+        let locate = |name: &str| -> Location {
+            let dir_text = source.get(dir_span.start..dir_span.end).unwrap_or("");
+            let off = dir_text
+                .find(name)
+                .map_or(dir_span.start, |rel| dir_span.start + rel);
+            let (sl, sc) = line_index.offset_to_position(off);
+            let (el, ec) = line_index.offset_to_position(off + name.len());
+            Location {
+                uri: uri.clone(),
+                range: Range {
+                    start: Position::new(sl, sc),
+                    end: Position::new(el, ec),
+                },
+            }
         };
 
         match &spanned.value {
@@ -82,7 +93,7 @@ fn collect_symbols_from_document(
                         kind: SymbolKind::CLASS,
                         tags: None,
                         deprecated: None,
-                        location: location.clone(),
+                        location: locate(&account),
                         container_name: Some("Accounts".to_string()),
                     });
                     seen_accounts.insert(account);
@@ -99,7 +110,7 @@ fn collect_symbols_from_document(
                             kind: SymbolKind::CONSTANT,
                             tags: None,
                             deprecated: None,
-                            location: location.clone(),
+                            location: locate(&curr_str),
                             container_name: Some("Currencies".to_string()),
                         });
                         seen_currencies.insert(curr_str);
@@ -117,7 +128,7 @@ fn collect_symbols_from_document(
                         kind: SymbolKind::CONSTANT,
                         tags: None,
                         deprecated: None,
-                        location,
+                        location: locate(&curr),
                         container_name: Some("Currencies".to_string()),
                     });
                     seen_currencies.insert(curr);
@@ -130,11 +141,11 @@ fn collect_symbols_from_document(
                     let payee_str = payee.to_string();
                     if query.is_empty() || payee_str.to_lowercase().contains(query) {
                         symbols.push(SymbolInformation {
-                            name: payee_str,
+                            name: payee_str.clone(),
                             kind: SymbolKind::STRING,
                             tags: None,
                             deprecated: None,
-                            location: location.clone(),
+                            location: locate(&payee_str),
                             container_name: Some("Payees".to_string()),
                         });
                     }
@@ -187,6 +198,20 @@ mod tests {
         assert!(symbols.iter().any(|s| s.name == "Assets:Bank"));
         assert!(symbols.iter().any(|s| s.name == "USD"));
         assert!(symbols.iter().any(|s| s.name == "EUR"));
+
+        // The location must point at the account *name*, not the directive's
+        // date (the old `col + 10` window). On line 1, `Assets:Bank` starts at
+        // column 16 (after `2024-01-01 open `).
+        let bank = symbols.iter().find(|s| s.name == "Assets:Bank").unwrap();
+        assert_eq!(bank.location.range.start.line, 1);
+        assert_eq!(
+            bank.location.range.start.character, 16,
+            "symbol range must anchor at the account name, not the date"
+        );
+        assert_eq!(
+            bank.location.range.end.character,
+            16 + "Assets:Bank".len() as u32
+        );
     }
 
     #[test]

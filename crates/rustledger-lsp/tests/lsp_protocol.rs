@@ -1150,3 +1150,53 @@ fn async_request_invalidated_by_edit_still_gets_a_response() {
         );
     }
 }
+
+/// Regression: `workspace/symbol` must search the whole loaded ledger, not just
+/// open buffers — an account declared in an unopened `include`d file must be
+/// findable. Pre-fix the search only consulted open documents.
+#[cfg(unix)]
+#[test]
+fn workspace_symbol_finds_symbols_in_unopened_included_files() {
+    use lsp_types::request::WorkspaceSymbolRequest;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let journal_path = tmp.path().join("journal.beancount");
+    let main_path = tmp.path().join("main.beancount");
+    let inc_path = tmp.path().join("inc.beancount");
+    std::fs::write(&main_path, "2024-01-01 open Assets:Bank USD\n").expect("write main");
+    std::fs::write(&inc_path, "2024-01-01 open Expenses:CrossFileOnly USD\n").expect("write inc");
+    std::fs::write(
+        &journal_path,
+        format!(
+            "include \"{}\"\ninclude \"{}\"\n",
+            main_path.display(),
+            inc_path.display()
+        ),
+    )
+    .expect("write journal");
+
+    let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
+    client.initialize();
+    // Open only main.beancount; inc.beancount stays unopened.
+    let main_uri = format!("file://{}", main_path.display());
+    client.open_document(
+        &main_uri,
+        &std::fs::read_to_string(&main_path).expect("read main"),
+    );
+
+    let resp: Option<lsp_types::WorkspaceSymbolResponse> = client
+        .request::<WorkspaceSymbolRequest>(lsp_types::WorkspaceSymbolParams {
+            query: "CrossFileOnly".to_string(),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        });
+    let symbols = match resp {
+        Some(lsp_types::WorkspaceSymbolResponse::Flat(v)) => v,
+        other => panic!("expected a flat workspace-symbol response, got {other:?}"),
+    };
+    assert!(
+        symbols.iter().any(|s| s.name == "Expenses:CrossFileOnly"),
+        "workspace/symbol must find an account from an unopened included file; got: {:?}",
+        symbols.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+}

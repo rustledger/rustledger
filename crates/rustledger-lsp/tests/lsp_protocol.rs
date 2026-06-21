@@ -893,3 +893,92 @@ fn completion_resolve_returns_single_item_and_uses_journal() {
         "resolve should show the journal balance 5000-1500=3500; got:\n{doc}"
     );
 }
+
+/// Regression for #2: a validation error living in an `include`d file that the
+/// user has NOT opened must still be surfaced — the server publishes
+/// diagnostics for the included file's own URI. Pre-fix the error was filtered
+/// out (only the open file's errors were kept) and the included file, having no
+/// open buffer, never received a `publishDiagnostics`, so the problem was
+/// completely invisible.
+///
+/// `cfg(unix)`: the `file://{path}` URI assembly assumes a POSIX absolute path
+/// (see `multi_file_balance_lens_reflects_cross_file_aggregation`).
+#[cfg(unix)]
+#[test]
+fn included_file_validation_errors_are_published() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let journal_path = tmp.path().join("journal.beancount");
+    let good_path = tmp.path().join("good.beancount");
+    let bad_path = tmp.path().join("bad.beancount");
+
+    // good.beancount opens the accounts so the only error in bad.beancount is
+    // the unbalanced transaction (no unopened-account noise).
+    std::fs::write(
+        &good_path,
+        "2024-01-01 open Assets:Cash USD\n2024-01-01 open Expenses:Food USD\n",
+    )
+    .expect("write good");
+    // bad.beancount: an unbalanced transaction (-5 vs +3).
+    std::fs::write(
+        &bad_path,
+        "2024-02-01 * \"unbalanced in include\"\n  \
+           Assets:Cash   -5 USD\n  \
+           Expenses:Food   3 USD\n",
+    )
+    .expect("write bad");
+    std::fs::write(
+        &journal_path,
+        format!(
+            "include \"{}\"\ninclude \"{}\"\n",
+            good_path.display(),
+            bad_path.display()
+        ),
+    )
+    .expect("write journal");
+
+    let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
+    client.initialize();
+
+    // Open ONLY good.beancount; bad.beancount stays unopened.
+    let good_uri = format!("file://{}", good_path.display());
+    let good_src = std::fs::read_to_string(&good_path).expect("read good");
+    client.open_document(&good_uri, &good_src);
+
+    let bad_uri = format!("file://{}", bad_path.display());
+
+    // Drain publishDiagnostics until bad.beancount's (non-empty) arrive.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut seen: Vec<String> = Vec::new();
+    let bad_diags = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break None;
+        }
+        let Some(msg) = client.recv_with_timeout(remaining) else {
+            break None;
+        };
+        if let lsp_server::Message::Notification(n) = msg
+            && n.method == "textDocument/publishDiagnostics"
+        {
+            let p: lsp_types::PublishDiagnosticsParams =
+                serde_json::from_value(n.params).expect("valid publishDiagnostics");
+            seen.push(p.uri.as_str().to_string());
+            if p.uri.as_str() == bad_uri && !p.diagnostics.is_empty() {
+                break Some(p);
+            }
+        }
+    };
+
+    let bad_diags = bad_diags.unwrap_or_else(|| {
+        panic!("no non-empty publishDiagnostics for the unopened included file {bad_uri}; saw URIs: {seen:?}")
+    });
+    let has_unbalanced = bad_diags.diagnostics.iter().any(|d| {
+        d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)
+            && matches!(&d.code, Some(lsp_types::NumberOrString::String(s)) if s == "E3001")
+    });
+    assert!(
+        has_unbalanced,
+        "expected an E3001 (unbalanced) diagnostic for the unopened included file {bad_uri}; got {:?}",
+        bad_diags.diagnostics
+    );
+}

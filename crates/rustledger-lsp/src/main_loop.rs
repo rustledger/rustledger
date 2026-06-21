@@ -172,6 +172,12 @@ pub struct MainLoopState {
     pub sender: Sender<lsp_server::Message>,
     /// Cached diagnostics per file.
     pub diagnostics: HashMap<Uri, Vec<lsp_types::Diagnostic>>,
+    /// URIs of *unopened* ledger files (reachable via `include`) that we last
+    /// published non-empty diagnostics for. Tracked so that, when their errors
+    /// are fixed, we send an explicit empty diagnostic set to clear them — the
+    /// LSP spec has no implicit "clear", and these files have no open buffer of
+    /// their own to drive a clear via `on_did_close`.
+    pub cross_file_diag_uris: std::collections::HashSet<Uri>,
     /// Whether shutdown was requested.
     pub shutdown_requested: bool,
     /// Set by the `exit` notification handler. The main loop checks
@@ -262,6 +268,7 @@ impl MainLoopState {
 
         Self {
             vfs: Arc::new(RwLock::new(Vfs::new())),
+            cross_file_diag_uris: std::collections::HashSet::new(),
             sender,
             diagnostics: HashMap::new(),
             shutdown_requested: false,
@@ -1711,6 +1718,19 @@ impl MainLoopState {
             &other_buffer_overlays,
             self.position_encoding,
         );
+
+        // Compute diagnostics for ledger files reachable via `include` that are
+        // NOT open in any buffer — otherwise validation errors that live in an
+        // unopened included file (e.g. an unbalanced transaction) never surface
+        // anywhere. Open files publish their own diagnostics via didOpen/
+        // didChange, so they're skipped here.
+        let cross_file = self.compute_unopened_ledger_diagnostics(
+            ledger_state,
+            current_canonical_path.as_deref(),
+            current_file_id,
+            &result,
+            &other_buffer_overlays,
+        );
         drop(ledger_guard); // Release lock before sending
 
         tracing::debug!(
@@ -1723,6 +1743,107 @@ impl MainLoopState {
         // Cache and send
         self.diagnostics.insert(uri.clone(), diagnostics.clone());
         self.send_diagnostics(uri, diagnostics);
+
+        // Publish (or clear) diagnostics for unopened included files.
+        self.publish_cross_file_diagnostics(cross_file);
+    }
+
+    /// Compute diagnostics for every ledger file reachable via `include` that
+    /// is NOT currently open in a buffer. Each unopened file is validated
+    /// against the full ledger (reusing [`all_diagnostics`], filtered to that
+    /// file's id and mapped against that file's own source), with the open
+    /// buffers' fresh parses overlaid so unsaved edits are reflected.
+    ///
+    /// Returns one `(uri, diagnostics)` per unopened ledger file (diagnostics
+    /// may be empty — the caller clears those it had previously reported).
+    /// Cost is O(unopened ledger files) validations; real-world ledgers have
+    /// few files, and this only runs when the ledger spans more than one file.
+    fn compute_unopened_ledger_diagnostics(
+        &self,
+        ledger_state: Option<&crate::ledger_state::LedgerState>,
+        current_canonical: Option<&std::path::Path>,
+        current_file_id: Option<u16>,
+        current_parse: &ParseResult,
+        other_buffer_overlays: &[(u16, &[Spanned<Directive>])],
+    ) -> Vec<(Uri, Vec<lsp_types::Diagnostic>)> {
+        let Some(ls) = ledger_state else {
+            return Vec::new();
+        };
+        let Some(ledger) = ls.ledger() else {
+            return Vec::new();
+        };
+        if ledger.source_map.files().len() <= 1 {
+            return Vec::new();
+        }
+
+        // Canonical paths of all open buffers (so we skip files that
+        // self-publish).
+        let open_canonical: std::collections::HashSet<PathBuf> = {
+            let vfs = self.vfs.read();
+            vfs.paths().filter_map(|p| p.canonicalize().ok()).collect()
+        };
+
+        // Overlay applied when validating an unopened file: every open buffer's
+        // fresh parse (current file first, then the others).
+        let mut overlay_all: Vec<(u16, &[Spanned<Directive>])> =
+            Vec::with_capacity(1 + other_buffer_overlays.len());
+        if let Some(fid) = current_file_id {
+            overlay_all.push((fid, current_parse.directives.as_slice()));
+        }
+        overlay_all.extend_from_slice(other_buffer_overlays);
+
+        let mut out = Vec::new();
+        for f in ledger.source_map.files() {
+            let canonical = f.path.canonicalize().ok();
+            // Skip the current file and any open buffer — those self-publish.
+            if canonical.as_deref() == current_canonical {
+                continue;
+            }
+            if let Some(c) = &canonical
+                && open_canonical.contains(c)
+            {
+                continue;
+            }
+            let Ok(uri) = format!("file://{}", f.path.display()).parse::<Uri>() else {
+                continue;
+            };
+            let parsed = parse(&f.source);
+            let diags = all_diagnostics(
+                &parsed,
+                &f.source,
+                ledger_state,
+                Some(f.id as u16),
+                Some(f.path.as_path()),
+                &overlay_all,
+                self.position_encoding,
+            );
+            out.push((uri, diags));
+        }
+        out
+    }
+
+    /// Publish or clear diagnostics for unopened included files. A non-empty
+    /// set is published and the URI tracked; an empty set clears (and untracks)
+    /// a URI we had previously reported errors for. URIs are tracked in
+    /// [`MainLoopState::cross_file_diag_uris`] because, unlike open buffers,
+    /// these files have no `on_did_close` to drive the LSP-required explicit
+    /// clear.
+    fn publish_cross_file_diagnostics(
+        &mut self,
+        cross_file: Vec<(Uri, Vec<lsp_types::Diagnostic>)>,
+    ) {
+        for (uri, diags) in cross_file {
+            if diags.is_empty() {
+                if self.cross_file_diag_uris.remove(&uri) {
+                    self.diagnostics.remove(&uri);
+                    self.send_diagnostics(&uri, vec![]);
+                }
+            } else {
+                self.cross_file_diag_uris.insert(uri.clone());
+                self.diagnostics.insert(uri.clone(), diags.clone());
+                self.send_diagnostics(&uri, diags);
+            }
+        }
     }
 
     /// Send diagnostics to the client.

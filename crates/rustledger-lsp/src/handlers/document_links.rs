@@ -6,7 +6,7 @@
 //!
 //! Supports resolve for lazy-loading targets and verifying file existence.
 
-use lsp_types::{DocumentLink, DocumentLinkParams, Position, Range, Uri};
+use lsp_types::{DocumentLink, DocumentLinkParams, Range, Uri};
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 use std::path::Path;
@@ -144,14 +144,13 @@ fn create_document_link(
         return None;
     }
 
-    // Convert the path's byte offsets to columns in the negotiated encoding.
-    // `quote_start`/`path.len()` are byte offsets; emitting them directly
-    // misplaces the link under UTF-16 whenever the line contains multibyte
-    // characters (e.g. a Unicode account name or an accented path).
-    let line_start = line_index.position_to_offset(start_line, 0)?;
-    let path_start = line_start + quote_start + 1;
-    let (_, start_col) = line_index.offset_to_position(path_start);
-    let (_, end_col) = line_index.offset_to_position(path_start + path.len());
+    // Convert the path's byte offsets to encoding-aware `Position`s. Emitting
+    // `quote_start`/`path.len()` directly (raw byte offsets) misplaces the link
+    // under UTF-16 whenever the line contains multibyte characters (a Unicode
+    // account name or an accented path).
+    let quote_byte = quote_start + 1;
+    let start = line_index.byte_in_line_to_position(start_line, quote_byte)?;
+    let end = line_index.byte_in_line_to_position(start_line, quote_byte + path.len())?;
 
     // Store data for resolve - defer target resolution
     let data = serde_json::json!({
@@ -161,10 +160,7 @@ fn create_document_link(
     });
 
     Some(DocumentLink {
-        range: Range {
-            start: Position::new(start_line, start_col),
-            end: Position::new(start_line, end_col),
-        },
+        range: Range { start, end },
         target: None,  // Resolved lazily
         tooltip: None, // Resolved lazily
         data: Some(data),
@@ -191,12 +187,11 @@ fn parse_include_line(
     let quote_end = after_quote.find('"')?;
 
     let path = &after_quote[..quote_end];
-    // Convert byte offsets to columns in the negotiated encoding (see
+    // Convert byte offsets to encoding-aware `Position`s (see
     // `create_document_link`): raw byte columns misplace the link under UTF-16.
-    let line_start = line_index.position_to_offset(line_num, 0)?;
-    let path_start = line_start + quote_start + 1;
-    let (_, start_col) = line_index.offset_to_position(path_start);
-    let (_, end_col) = line_index.offset_to_position(path_start + path.len());
+    let quote_byte = quote_start + 1;
+    let start = line_index.byte_in_line_to_position(line_num, quote_byte)?;
+    let end = line_index.byte_in_line_to_position(line_num, quote_byte + path.len())?;
 
     // Store data for resolve - defer target resolution
     let data = serde_json::json!({
@@ -206,10 +201,7 @@ fn parse_include_line(
     });
 
     Some(DocumentLink {
-        range: Range {
-            start: Position::new(line_num, start_col),
-            end: Position::new(line_num, end_col),
-        },
+        range: Range { start, end },
         target: None,  // Resolved lazily
         tooltip: None, // Resolved lazily
         data: Some(data),
@@ -226,6 +218,7 @@ fn resolve_path_to_uri(path: &str, base_dir: &Option<String>) -> Option<Uri> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lsp_types::Position;
 
     #[test]
     fn test_parse_include_line() {

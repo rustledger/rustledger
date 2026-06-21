@@ -7,7 +7,9 @@
 
 use lsp_types::{Hover, HoverContents, HoverParams, MarkupContent, MarkupKind};
 use rustledger_core::Directive;
-use rustledger_parser::ParseResult;
+use rustledger_parser::{ParseResult, Spanned};
+
+use crate::ledger_state::LedgerState;
 
 use super::utils::{
     PositionEncoding, commodity_declaration_spans, get_word_at_source_position, is_account_type,
@@ -19,6 +21,7 @@ pub fn handle_hover(
     params: &HoverParams,
     source: &str,
     parse_result: &ParseResult,
+    ledger_state: Option<&LedgerState>,
     encoding: PositionEncoding,
 ) -> Option<Hover> {
     let position = params.text_document_position_params.position;
@@ -28,9 +31,13 @@ pub fn handle_hover(
 
     tracing::debug!("Hover for word: {:?}", word);
 
+    // Cross-file directives (from the loaded ledger) so an account opened in an
+    // `include`d file still resolves on hover.
+    let ledger_directives = ledger_state.and_then(LedgerState::directives);
+
     // Check if it's an account name
     if (word.contains(':') || is_account_type(&word))
-        && let Some(info) = get_account_info(&word, parse_result)
+        && let Some(info) = get_account_info(&word, parse_result, ledger_directives)
     {
         return Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -69,39 +76,49 @@ pub fn handle_hover(
 }
 
 /// Get information about an account.
-fn get_account_info(account: &str, parse_result: &ParseResult) -> Option<String> {
-    // Find the open directive for this account
-    for spanned_directive in &parse_result.directives {
-        if let Directive::Open(open) = &spanned_directive.value {
-            let open_account = open.account.to_string();
-            if open_account == account || account.starts_with(&format!("{}:", open_account)) {
-                let mut info = format!("## Account: `{}`\n\n", open_account);
+///
+/// The `open` directive is looked up in the current file first, then in the
+/// cross-file `ledger_directives` (the loaded ledger) so an account opened in
+/// an `include`d file still shows its open date/currencies instead of a
+/// spurious "No `open` directive found".
+fn get_account_info(
+    account: &str,
+    parse_result: &ParseResult,
+    ledger_directives: Option<&[Spanned<Directive>]>,
+) -> Option<String> {
+    let matches_open = |open: &rustledger_core::Open| {
+        let oa = open.account.as_ref();
+        account == oa
+            || account
+                .strip_prefix(oa)
+                .is_some_and(|rest| rest.starts_with(':'))
+    };
+    let find_open = |dirs: &[Spanned<Directive>]| {
+        dirs.iter().find_map(|sd| match &sd.value {
+            Directive::Open(open) if matches_open(open) => Some(open.clone()),
+            _ => None,
+        })
+    };
 
-                // Add open date
-                info.push_str(&format!("**Opened:** {}\n\n", open.date));
+    let open =
+        find_open(&parse_result.directives).or_else(|| ledger_directives.and_then(find_open));
+    let usage_count = count_account_usages(account, parse_result);
 
-                // Add currencies if any
-                if !open.currencies.is_empty() {
-                    let currencies: Vec<String> =
-                        open.currencies.iter().map(|c| c.to_string()).collect();
-                    info.push_str(&format!("**Currencies:** {}\n\n", currencies.join(", ")));
-                }
-
-                // Count usages
-                let usage_count = count_account_usages(account, parse_result);
-                info.push_str(&format!("**Used in:** {} postings", usage_count));
-
-                return Some(info);
-            }
+    if let Some(open) = open {
+        let mut info = format!("## Account: `{}`\n\n", open.account);
+        info.push_str(&format!("**Opened:** {}\n\n", open.date));
+        if !open.currencies.is_empty() {
+            let currencies: Vec<String> = open.currencies.iter().map(|c| c.to_string()).collect();
+            info.push_str(&format!("**Currencies:** {}\n\n", currencies.join(", ")));
         }
+        info.push_str(&format!("**Used in:** {usage_count} postings"));
+        return Some(info);
     }
 
-    // Account not found in open directives, but still provide usage info
-    let usage_count = count_account_usages(account, parse_result);
+    // No open found anywhere, but still provide usage info if it's referenced.
     if usage_count > 0 {
         return Some(format!(
-            "## Account: `{}`\n\n**Note:** No `open` directive found\n\n**Used in:** {} postings",
-            account, usage_count
+            "## Account: `{account}`\n\n**Note:** No `open` directive found\n\n**Used in:** {usage_count} postings"
         ));
     }
 
@@ -234,6 +251,28 @@ fn get_directive_info(keyword: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustledger_parser::parse;
+
+    #[test]
+    fn account_info_resolves_open_from_included_directives() {
+        // Current file uses the account but does not open it.
+        let pr = parse("2024-02-01 * \"x\"\n  Assets:Shared 1 USD\n  Assets:Shared -1 USD\n");
+        // The `open` lives in an included file, supplied via ledger_directives.
+        let inc = parse("2024-01-01 open Assets:Shared USD\n");
+
+        // Single-file only: spurious "No open directive found".
+        let single = get_account_info("Assets:Shared", &pr, None).expect("usage info");
+        assert!(single.contains("No `open` directive found"));
+
+        // With cross-file directives: resolves the open from the include.
+        let cross =
+            get_account_info("Assets:Shared", &pr, Some(&inc.directives)).expect("account info");
+        assert!(cross.contains("**Opened:** 2024-01-01"), "got: {cross}");
+        assert!(
+            !cross.contains("No `open`"),
+            "should not claim missing open: {cross}"
+        );
+    }
 
     #[test]
     fn test_get_directive_info() {

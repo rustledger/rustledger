@@ -682,7 +682,21 @@ impl MainLoopState {
         let uri = &params.text_document_position_params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_hover(&params, &text, &parse_result, self.position_encoding);
+        // Ledger state for cross-file (`include`d) account resolution.
+        let ledger_guard = self.ledger_state.read();
+        let ledger_state = if ledger_guard.ledger().is_some() {
+            Some(&*ledger_guard)
+        } else {
+            None
+        };
+
+        let response = handle_hover(
+            &params,
+            &text,
+            &parse_result,
+            ledger_state,
+            self.position_encoding,
+        );
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }

@@ -172,7 +172,7 @@ pub fn handle_inlay_hints(
             // amount before the comment, so the first `;` unambiguously starts
             // it. Without this the hint anchors *past* the comment instead of at
             // the account end.
-            let content = line.split(';').next().unwrap_or(line);
+            let content = line.split_once(';').map_or(line, |(before, _)| before);
             let trimmed = content.trim();
             let indent_bytes = line.len() - line.trim_start().len();
             let end_col_bytes = indent_bytes + trimmed.len();

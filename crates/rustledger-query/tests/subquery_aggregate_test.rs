@@ -55,4 +55,11 @@ fn aggregate_over_subquery_collapses_to_one_row() {
         Value::Integer(2),
         "COUNT(payee) over a subquery excludes NULLs"
     );
+    // SUM was affected by the same per-row dispatch bug — exercise it too.
+    // The 4 postings net to zero (-1/+1 per transaction).
+    assert_eq!(
+        one("SELECT sum(number) FROM (SELECT number)"),
+        Value::Number(dec!(0)),
+        "SUM(number) over a subquery aggregates to one row"
+    );
 }

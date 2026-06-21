@@ -982,3 +982,95 @@ fn included_file_validation_errors_are_published() {
         bad_diags.diagnostics
     );
 }
+
+/// Companion to the above: once the error in the unopened included file is
+/// fixed, its diagnostics must be explicitly CLEARED (an empty publish), not
+/// left lingering in the client. Exercises `publish_cross_file_diagnostics`'s
+/// stale-clearing path via a watched-file change that reloads the journal.
+#[cfg(unix)]
+#[test]
+fn included_file_diagnostics_are_cleared_when_fixed() {
+    use lsp_types::{DidChangeWatchedFilesParams, FileChangeType, FileEvent};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let journal_path = tmp.path().join("journal.beancount");
+    let good_path = tmp.path().join("good.beancount");
+    let bad_path = tmp.path().join("bad.beancount");
+    std::fs::write(
+        &good_path,
+        "2024-01-01 open Assets:Cash USD\n2024-01-01 open Expenses:Food USD\n",
+    )
+    .expect("write good");
+    // Start unbalanced (-5 vs +3).
+    std::fs::write(
+        &bad_path,
+        "2024-02-01 * \"x\"\n  Assets:Cash   -5 USD\n  Expenses:Food   3 USD\n",
+    )
+    .expect("write bad");
+    std::fs::write(
+        &journal_path,
+        format!(
+            "include \"{}\"\ninclude \"{}\"\n",
+            good_path.display(),
+            bad_path.display()
+        ),
+    )
+    .expect("write journal");
+
+    let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
+    client.initialize();
+    let good_uri = format!("file://{}", good_path.display());
+    client.open_document(
+        &good_uri,
+        &std::fs::read_to_string(&good_path).expect("read good"),
+    );
+    let bad_uri = format!("file://{}", bad_path.display());
+
+    // Drain publishDiagnostics until bad.beancount reaches the desired emptiness.
+    let drain = |client: &mut LspTestClient, want_empty: bool| -> bool {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let Some(msg) = client.recv_with_timeout(remaining) else {
+                return false;
+            };
+            if let lsp_server::Message::Notification(n) = msg
+                && n.method == "textDocument/publishDiagnostics"
+            {
+                let p: lsp_types::PublishDiagnosticsParams =
+                    serde_json::from_value(n.params).expect("valid publishDiagnostics");
+                if p.uri.as_str() == bad_uri && p.diagnostics.is_empty() == want_empty {
+                    return true;
+                }
+            }
+        }
+    };
+
+    assert!(
+        drain(&mut client, false),
+        "expected a non-empty diagnostic for the unopened included file first"
+    );
+
+    // Fix bad.beancount on disk and notify a watched-file change → the server
+    // reloads the journal and revalidates the open document, which recomputes
+    // (now-clean) cross-file diagnostics for bad.beancount.
+    std::fs::write(
+        &bad_path,
+        "2024-02-01 * \"x\"\n  Assets:Cash   -5 USD\n  Expenses:Food   5 USD\n",
+    )
+    .expect("rewrite bad balanced");
+    client.notify::<lsp_types::notification::DidChangeWatchedFiles>(DidChangeWatchedFilesParams {
+        changes: vec![FileEvent {
+            uri: bad_uri.parse().unwrap(),
+            typ: FileChangeType::CHANGED,
+        }],
+    });
+
+    assert!(
+        drain(&mut client, true),
+        "expected bad.beancount diagnostics to be cleared (empty publish) after the fix"
+    );
+}

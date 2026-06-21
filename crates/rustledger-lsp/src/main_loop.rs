@@ -1784,10 +1784,16 @@ impl MainLoopState {
         };
 
         // Overlay applied when validating an unopened file: every open buffer's
-        // fresh parse (current file first, then the others).
+        // fresh parse (current file first, then the others). The current
+        // buffer is overlaid only when its fresh parse is clean — overlaying a
+        // partial/invalid parse would corrupt the validation input for the
+        // other files (matching the parse-error skip applied to the `other`
+        // buffers in `publish_diagnostics`).
         let mut overlay_all: Vec<(u16, &[Spanned<Directive>])> =
             Vec::with_capacity(1 + other_buffer_overlays.len());
-        if let Some(fid) = current_file_id {
+        if let Some(fid) = current_file_id
+            && current_parse.errors.is_empty()
+        {
             overlay_all.push((fid, current_parse.directives.as_slice()));
         }
         overlay_all.extend_from_slice(other_buffer_overlays);
@@ -1804,7 +1810,18 @@ impl MainLoopState {
             {
                 continue;
             }
+            // NOTE: this `file://{path}` assembly matches the crate-wide
+            // convention (see `revalidate_open_documents`, `document_links`,
+            // and `uri_to_path`, which strips a plain `file://` prefix without
+            // percent-decoding). A path with characters that aren't URI-safe
+            // (spaces, `#`, `%`) would fail to parse; warn rather than drop it
+            // silently. A proper percent-encoding `path_to_uri` helper applied
+            // consistently across the crate is the broader fix.
             let Ok(uri) = format!("file://{}", f.path.display()).parse::<Uri>() else {
+                tracing::warn!(
+                    "skipping cross-file diagnostics for {}: path is not a valid file:// URI",
+                    f.path.display()
+                );
                 continue;
             };
             let parsed = parse(&f.source);
@@ -1822,27 +1839,51 @@ impl MainLoopState {
         out
     }
 
-    /// Publish or clear diagnostics for unopened included files. A non-empty
-    /// set is published and the URI tracked; an empty set clears (and untracks)
-    /// a URI we had previously reported errors for. URIs are tracked in
-    /// [`MainLoopState::cross_file_diag_uris`] because, unlike open buffers,
-    /// these files have no `on_did_close` to drive the LSP-required explicit
-    /// clear.
+    /// Publish or clear diagnostics for unopened included files.
+    ///
+    /// Non-empty sets are published and their URIs tracked in
+    /// [`MainLoopState::cross_file_diag_uris`]. Any previously-tracked URI that
+    /// is NOT erroring this round is then explicitly cleared (empty publish) and
+    /// untracked — this covers a fixed error, an include-graph change, the
+    /// ledger becoming single-file/unavailable (so `cross_file` is empty), all
+    /// of which would otherwise leave stale errors in the client. URIs of files
+    /// currently open in a buffer are left alone: those buffers publish (and
+    /// clear) their own diagnostics via didOpen/didChange/didClose.
+    #[allow(clippy::mutable_key_type)] // Uri has interior mutability but is safe as a set key here
     fn publish_cross_file_diagnostics(
         &mut self,
         cross_file: Vec<(Uri, Vec<lsp_types::Diagnostic>)>,
     ) {
+        // Publish the files that have errors this round.
+        let mut erroring: std::collections::HashSet<Uri> = std::collections::HashSet::new();
         for (uri, diags) in cross_file {
             if diags.is_empty() {
-                if self.cross_file_diag_uris.remove(&uri) {
-                    self.diagnostics.remove(&uri);
-                    self.send_diagnostics(&uri, vec![]);
-                }
-            } else {
-                self.cross_file_diag_uris.insert(uri.clone());
-                self.diagnostics.insert(uri.clone(), diags.clone());
-                self.send_diagnostics(&uri, diags);
+                continue;
             }
+            erroring.insert(uri.clone());
+            self.cross_file_diag_uris.insert(uri.clone());
+            self.diagnostics.insert(uri.clone(), diags.clone());
+            self.send_diagnostics(&uri, diags);
+        }
+
+        // Clear any previously-tracked URI that is no longer erroring and is not
+        // currently open (open buffers manage their own diagnostics).
+        let open_uris: std::collections::HashSet<Uri> = self
+            .vfs
+            .read()
+            .paths()
+            .filter_map(|p| format!("file://{}", p.display()).parse::<Uri>().ok())
+            .collect();
+        let stale: Vec<Uri> = self
+            .cross_file_diag_uris
+            .iter()
+            .filter(|u| !erroring.contains(*u) && !open_uris.contains(*u))
+            .cloned()
+            .collect();
+        for uri in stale {
+            self.cross_file_diag_uris.remove(&uri);
+            self.diagnostics.remove(&uri);
+            self.send_diagnostics(&uri, vec![]);
         }
     }
 

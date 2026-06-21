@@ -322,6 +322,7 @@ pub fn handle_code_action_resolve(
         let line_index = LineIndex::new(source, encoding);
         resolved.edit = Some(compute_open_directive_edit(
             uri,
+            source,
             &line_index,
             account,
             parse_result,
@@ -335,6 +336,7 @@ pub fn handle_code_action_resolve(
 #[allow(clippy::mutable_key_type)] // Uri is required as key by LSP WorkspaceEdit API
 fn compute_open_directive_edit(
     uri: &Uri,
+    source: &str,
     line_index: &LineIndex,
     account: &str,
     parse_result: &ParseResult,
@@ -344,7 +346,7 @@ fn compute_open_directive_edit(
         find_earliest_date(parse_result).unwrap_or_else(|| "2000-01-01".to_string());
 
     // Find where to insert the open directive
-    let insert_position = find_open_directive_position(line_index, parse_result);
+    let insert_position = find_open_directive_position(source, line_index, parse_result);
 
     let new_text = format!("{} open {}\n", earliest_date, account);
 
@@ -396,7 +398,11 @@ fn find_earliest_date(parse_result: &ParseResult) -> Option<String> {
 }
 
 /// Find the position to insert new open directives.
-fn find_open_directive_position(line_index: &LineIndex, parse_result: &ParseResult) -> Position {
+fn find_open_directive_position(
+    source: &str,
+    line_index: &LineIndex,
+    parse_result: &ParseResult,
+) -> Position {
     // Find the last open directive and insert after it
     let mut last_open_end: Option<usize> = None;
 
@@ -407,8 +413,15 @@ fn find_open_directive_position(line_index: &LineIndex, parse_result: &ParseResu
     }
 
     if let Some(offset) = last_open_end {
-        let (line, _) = line_index.offset_to_position(offset);
-        // Insert on the next line
+        // A directive's span end points at the *start of the next directive*,
+        // so it includes trailing blank lines. Trim back to the open's last
+        // content byte before taking the line; otherwise `line + 1` overshoots
+        // and the inserted `open` lands inside a following transaction (between
+        // its header and postings). Trimming also keeps it correct for opens
+        // that carry an indented metadata block.
+        let content_end = source[..offset.min(source.len())].trim_end().len();
+        let (line, _) = line_index.offset_to_position(content_end);
+        // Insert on the line after the open's last content line.
         Position::new(line + 1, 0)
     } else {
         // No open directives, insert at the beginning
@@ -755,5 +768,17 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert!(edits[0].new_text.contains("open Expenses:Food"));
         assert!(edits[0].new_text.contains("2024-01-01")); // Earliest date
+
+        // Regression: the insert must land on line 2 (right after the existing
+        // `open` on line 1, before the transaction header) — NOT line 3, which
+        // would split the transaction header from its postings and corrupt the
+        // file. (Source has a leading newline: line0 blank, line1 open,
+        // line2 txn header, line3 postings.)
+        assert_eq!(
+            edits[0].range.start,
+            Position::new(2, 0),
+            "open must be inserted before the transaction, not inside it"
+        );
+        assert_eq!(edits[0].range.end, Position::new(2, 0));
     }
 }

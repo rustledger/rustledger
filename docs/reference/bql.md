@@ -248,7 +248,7 @@ SELECT min(date), max(date)
 | `month(date)` | Extract month | `3` |
 | `day(date)` | Extract day | `15` |
 | `quarter(date)` | Extract quarter | `1` |
-| `weekday(date)` | Day of week (0=Mon) | `4` |
+| `weekday(date)` | Day-of-week name (`Mon`..`Sun`) | `Fri` |
 | `today()` | Current date | `2024-03-15` |
 
 ### Amount Functions

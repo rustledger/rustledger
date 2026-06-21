@@ -10,8 +10,8 @@ mod string;
 mod util;
 
 /// Three-letter English weekday abbreviation (`Mon`..`Sun`) for a Monday-zero
-/// offset (0=Mon … 6=Sun). `WEEKDAY()` returns this string, matching beanquery
-/// (whose `weekday()` yields a day name, not an integer).
+/// offset (0=Mon … 6=Sun). `WEEKDAY(date)` returns this string, matching
+/// beanquery (whose `weekday(date)` yields a day name, not an integer).
 pub(super) const fn weekday_abbrev(monday_zero_offset: u32) -> &'static str {
     match monday_zero_offset {
         0 => "Mon",

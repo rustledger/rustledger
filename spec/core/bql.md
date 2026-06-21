@@ -106,7 +106,7 @@ Functions transform positions into derived quantities:
 - `MONTH(date)` → Integer
 - `YEAR(date)` → Integer
 - `QUARTER(date)` → Integer
-- `WEEKDAY(date)` → Integer
+- `WEEKDAY(date)` → String (day name, `Mon`..`Sun`)
 
 ### String Functions
 

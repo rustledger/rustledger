@@ -19,7 +19,7 @@
 | `month(date)` | Extract month (1-12) |
 | `day(date)` | Extract day of month |
 | `quarter(date)` | Extract quarter (1-4) |
-| `weekday(date)` | Day of week (0=Monday) |
+| `weekday(date)` | Day-of-week name (`Mon`..`Sun`) |
 
 ## String Functions
 

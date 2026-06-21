@@ -10075,6 +10075,12 @@ fn test_round_negative_precision() {
         let result = execute_query(&format!("SELECT {q}"), &directives);
         assert_eq!(result.rows[0][0], Value::Number(expected), "for {q}");
     }
+    // Integer arguments round too (beanquery round(1234,-2)=1200), staying
+    // integers; non-negative precision is a no-op.
+    let result = execute_query("SELECT round(1234, -2)", &directives);
+    assert_eq!(result.rows[0][0], Value::Integer(1200));
+    let result = execute_query("SELECT round(1234, 2)", &directives);
+    assert_eq!(result.rows[0][0], Value::Integer(1234));
 }
 
 #[test]

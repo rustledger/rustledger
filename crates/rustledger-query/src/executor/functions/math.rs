@@ -70,7 +70,19 @@ impl Executor<'_> {
 
         match val {
             Value::Number(n) => Ok(Value::Number(round_decimal(n, decimals))),
-            Value::Integer(i) => Ok(Value::Integer(i)),
+            Value::Integer(i) => {
+                // Rounding an integer to >= 0 places is a no-op; a negative
+                // precision rounds it to tens/hundreds (beanquery `round(1234,
+                // -2)` = 1200). The result is integral — keep it an integer when
+                // it still fits in i64, else fall back to a decimal.
+                if decimals >= 0 {
+                    Ok(Value::Integer(i))
+                } else {
+                    use rust_decimal::prelude::ToPrimitive;
+                    let r = round_decimal(Decimal::from(i), decimals);
+                    Ok(r.to_i64().map_or(Value::Number(r), Value::Integer))
+                }
+            }
             _ => Err(QueryError::Type("ROUND expects a number".to_string())),
         }
     }
@@ -138,9 +150,12 @@ fn round_decimal(n: Decimal, places: i64) -> Decimal {
         // needless huge argument.
         return n.round_dp(u32::try_from(places).unwrap_or(u32::MAX).min(28));
     }
-    let k = -places;
-    // 10^k stops fitting in Decimal beyond 28 digits; any representable number
-    // rounds to 0 at that magnitude.
+    // `checked_neg` guards `places == i64::MIN` (where `-places` would overflow).
+    // 10^k also stops fitting in Decimal beyond 28 digits; in either case any
+    // representable number rounds to 0 at that magnitude.
+    let Some(k) = places.checked_neg() else {
+        return Decimal::ZERO;
+    };
     if k > 28 {
         return Decimal::ZERO;
     }

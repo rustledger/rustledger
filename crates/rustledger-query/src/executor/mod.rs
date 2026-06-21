@@ -643,7 +643,8 @@ impl<'a> Executor<'a> {
             "LENGTH" => {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
-                    Value::String(s) => Ok(Value::Integer(s.len() as i64)),
+                    // Count Unicode characters, not UTF-8 bytes (matches beanquery).
+                    Value::String(s) => Ok(Value::Integer(s.chars().count() as i64)),
                     _ => Err(QueryError::Type("LENGTH expects a string".to_string())),
                 }
             }
@@ -1295,17 +1296,18 @@ impl<'a> Executor<'a> {
                         "expected 2 or 3 arguments".to_string(),
                     ));
                 }
+                // Python slice semantics s[start:end] — see `py_slice` /
+                // `eval_substr`. arg3 is the END index, not a length.
                 match (&args[0], &args[1], args.get(2)) {
-                    (Value::String(s), Value::Integer(start), None) => {
-                        let start = (*start).max(0) as usize;
-                        let result: String = s.chars().skip(start).collect();
-                        Ok(Value::String(result))
-                    }
-                    (Value::String(s), Value::Integer(start), Some(Value::Integer(len))) => {
-                        let start = (*start).max(0) as usize;
-                        let len = (*len).max(0) as usize;
-                        let result: String = s.chars().skip(start).take(len).collect();
-                        Ok(Value::String(result))
+                    (Value::String(s), Value::Integer(start), None) => Ok(Value::String(
+                        functions::string::py_slice(&s.chars().collect::<Vec<_>>(), *start, None),
+                    )),
+                    (Value::String(s), Value::Integer(start), Some(Value::Integer(end))) => {
+                        Ok(Value::String(functions::string::py_slice(
+                            &s.chars().collect::<Vec<_>>(),
+                            *start,
+                            Some(*end),
+                        )))
                     }
                     _ => Err(QueryError::Type(
                         "SUBSTR expects (string, int, [int])".to_string(),

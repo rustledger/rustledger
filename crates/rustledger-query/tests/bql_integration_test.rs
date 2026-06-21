@@ -280,6 +280,29 @@ fn test_length_counts_chars_not_bytes() {
 }
 
 #[test]
+fn test_string_funcs_in_aggregate_context_use_char_semantics() {
+    // length()/substr() wrapping an aggregate route through the separate
+    // `evaluate_function_on_values` path — it must use the same char-based /
+    // Python-slice semantics as the normal path (Copilot review on #1498).
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:O")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Café ☕")
+                .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(5), "USD")))
+                .with_synthesized_posting(Posting::new("Equity:O", Amount::new(dec!(-5), "USD"))),
+        ),
+    ];
+    // "Café ☕" is 6 chars (more bytes); length must count chars.
+    let result = execute_query("SELECT length(max(narration))", &directives);
+    assert_eq!(result.rows[0][0], Value::Integer(6));
+    // substr arg3 is the END index: [1:4] of "Café ☕" = "afé" (length-semantics
+    // would have returned "afé " with the trailing space).
+    let result = execute_query("SELECT substr(max(narration), 1, 4)", &directives);
+    assert_eq!(result.rows[0][0], Value::String("afé".to_string()));
+}
+
+#[test]
 fn test_substr_python_slice_semantics() {
     let directives = make_test_directives();
     // SUBSTR(s, start, end) == Python s[start:end] (beanquery): arg3 is the END

@@ -6,7 +6,7 @@ mod account;
 mod date;
 mod math;
 mod position;
-mod string;
+pub(in crate::executor) mod string;
 mod util;
 
 /// Three-letter English weekday abbreviation (`Mon`..`Sun`) for a Monday-zero

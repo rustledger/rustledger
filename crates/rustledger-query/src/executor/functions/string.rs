@@ -385,9 +385,17 @@ impl Executor<'_> {
 /// Matches `CPython` (and thus beanquery) semantics: negative indices count from
 /// the end, both bounds are clamped into `0..=len`, and `start >= end` yields an
 /// empty string. `end == None` slices to the end (`chars[start:]`).
-fn py_slice(chars: &[char], start: i64, end: Option<i64>) -> String {
+pub(in crate::executor) fn py_slice(chars: &[char], start: i64, end: Option<i64>) -> String {
     let n = chars.len() as i64;
-    let normalize = |i: i64| -> i64 { if i < 0 { (n + i).max(0) } else { i.min(n) } };
+    // `saturating_add` so a very negative index (e.g. `i64::MIN`) clamps to 0
+    // instead of overflowing and panicking in debug builds.
+    let normalize = |i: i64| -> i64 {
+        if i < 0 {
+            n.saturating_add(i).max(0)
+        } else {
+            i.min(n)
+        }
+    };
     let s = normalize(start);
     let e = end.map_or(n, normalize);
     if s >= e {

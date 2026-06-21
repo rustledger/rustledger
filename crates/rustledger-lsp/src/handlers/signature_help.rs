@@ -256,8 +256,17 @@ fn signature_after_date(after_date: &str) -> Option<SignatureHelp> {
     // "price" directive
     if let Some(rest) = after_date.strip_prefix("price") {
         let rest = rest.trim_start();
-        let spaces = rest.split_whitespace().count();
-        let param = (spaces.saturating_sub(1)).min(2);
+        // The active parameter is the number of COMPLETE tokens: a trailing
+        // space means the previous token is finished and the cursor has advanced
+        // to the next parameter. Counting tokens alone left `price AAPL ` on
+        // param 0 (commodity) instead of advancing to 1 (amount).
+        let tokens = rest.split_whitespace().count();
+        let complete = if rest.is_empty() || rest.ends_with(char::is_whitespace) {
+            tokens
+        } else {
+            tokens.saturating_sub(1)
+        };
+        let param = complete.min(2);
         return Some(SignatureHelp {
             signatures: vec![price_signature()],
             active_signature: Some(0),
@@ -649,6 +658,37 @@ mod tests {
         assert_eq!(help.signatures.len(), 1);
         assert!(help.signatures[0].label.contains("open"));
         assert_eq!(help.active_parameter, Some(0)); // Account parameter
+    }
+
+    #[test]
+    fn test_price_directive_active_parameter_advances() {
+        // After `price AAPL ` (commodity + trailing space) the active parameter
+        // must advance to the amount (1), not stay on the commodity (0).
+        let cases = [
+            ("2024-01-15 price ", 17, 0u32),       // typing the commodity
+            ("2024-01-15 price AAPL ", 22, 1),     // commodity done → amount
+            ("2024-01-15 price AAPL 150 ", 26, 2), // amount done → currency
+        ];
+        for (source, col, expected) in cases {
+            let params = SignatureHelpParams {
+                context: None,
+                text_document_position_params: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier {
+                        uri: "file:///test.beancount".parse().unwrap(),
+                    },
+                    position: lsp_types::Position::new(0, col),
+                },
+                work_done_progress_params: Default::default(),
+            };
+            let help = handle_signature_help(&params, source, PositionEncoding::Utf16)
+                .unwrap_or_else(|| panic!("signature help for {source:?}"));
+            assert!(help.signatures[0].label.contains("price"));
+            assert_eq!(
+                help.active_parameter,
+                Some(expected),
+                "wrong active parameter for {source:?}"
+            );
+        }
     }
 
     #[test]

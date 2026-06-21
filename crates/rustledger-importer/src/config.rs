@@ -195,6 +195,18 @@ impl AmountFormat {
             amount
         };
 
+        // Reject a value carrying BOTH a leading and a trailing minus
+        // (e.g. "-50.00-"): the sign is ambiguous, and silently negating the
+        // already-negative magnitude to a positive would be surprising.
+        if trailing_neg {
+            let body = to_parse.trim_start();
+            if body.starts_with('-') || body.starts_with('\u{2212}') {
+                anyhow::bail!(
+                    "ambiguous amount sign (both leading and trailing minus): {amount:?}"
+                );
+            }
+        }
+
         let value: Decimal = match self {
             Self::Symbols(number_symbols) => parse_with_symbols(to_parse, number_symbols)
                 .with_context(|| format!("unable to parse using symbols: {number_symbols:?}"))?,
@@ -846,6 +858,10 @@ mod tests {
             f.parse("50.00").unwrap(),
             Decimal::from_str("50.00").unwrap()
         );
+        // Both leading and trailing minus is ambiguous → rejected, not flipped
+        // to positive.
+        assert!(f.parse("-50.00-").is_err());
+        assert!(f.parse("\u{2212}50.00-").is_err());
     }
 
     #[test]

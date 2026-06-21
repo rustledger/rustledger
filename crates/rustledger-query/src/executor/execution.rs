@@ -331,6 +331,24 @@ impl Executor<'_> {
             .map(|(i, name)| (name.to_lowercase(), i))
             .collect();
 
+        // Aggregate queries over a subquery must group/aggregate, exactly like
+        // the table-source path (`execute_select_from_table`). Without this,
+        // `SELECT count(*) FROM (SELECT ...)` was evaluated per inner row,
+        // yielding one (empty) row per row instead of a single aggregated value.
+        let is_aggregate = outer_query
+            .targets
+            .iter()
+            .any(|t| Self::is_aggregate_expr(&t.expr))
+            || outer_query.group_by.is_some()
+            || outer_query.having.is_some();
+        if is_aggregate {
+            let table = Table {
+                columns: inner_result.columns,
+                rows: inner_result.rows,
+            };
+            return self.execute_aggregate_from_table(outer_query, &table, &inner_column_map);
+        }
+
         // Determine outer column names
         let outer_column_names =
             self.resolve_subquery_column_names(&outer_query.targets, &inner_result.columns)?;

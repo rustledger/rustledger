@@ -1808,3 +1808,36 @@ fn test_check_single_option_ok() {
         "a single non-repeatable option must pass check"
     );
 }
+
+/// Regression: `rledger format` must read files tolerantly (lossy UTF-8), the
+/// same way the loader (`rledger check`) does. A ledger with stray invalid
+/// UTF-8 bytes — which `check` and beancount both accept — previously failed
+/// to `format` with a hard "stream did not contain valid UTF-8" read error.
+#[test]
+fn test_format_accepts_invalid_utf8() {
+    let rledger = require_rledger!();
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // Valid ledger plus a comment containing invalid UTF-8 (lone 0xC2 bytes).
+    let mut bytes = b"2024-01-01 open Assets:Cash\n;".to_vec();
+    bytes.push(0xC2);
+    bytes.push(0xC2);
+    bytes.extend_from_slice(b"\n");
+    std::fs::write(tmp.path(), &bytes).expect("write");
+
+    let output = Command::new(&rledger)
+        .arg("format")
+        .arg(tmp.path())
+        .output()
+        .expect("Failed to run rledger format");
+
+    assert!(
+        output.status.success(),
+        "format should succeed on invalid-UTF-8 input: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Assets:Cash"),
+        "formatted output should contain the directive: {stdout}"
+    );
+}

@@ -100,8 +100,12 @@ fn format_file<W: Write>(file: &PathBuf, args: &Args, out: &mut W) -> Result<Exi
         anyhow::bail!("file not found: {}", file.display());
     }
 
-    let original_content =
-        fs::read_to_string(file).with_context(|| format!("failed to read {}", file.display()))?;
+    // Read tolerantly to match the loader/cache (rustledger-loader `vfs.rs`,
+    // `cache.rs`), which decode with `from_utf8_lossy`. Otherwise a ledger that
+    // `rledger check` accepts — e.g. one with stray invalid-UTF-8 bytes, which
+    // beancount also accepts — would fail to `format` with a hard read error.
+    let bytes = fs::read(file).with_context(|| format!("failed to read {}", file.display()))?;
+    let original_content = String::from_utf8_lossy(&bytes).into_owned();
 
     let formatted = match try_format_source(&original_content) {
         Ok(out) => out,

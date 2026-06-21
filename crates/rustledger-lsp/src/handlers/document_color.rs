@@ -171,23 +171,27 @@ fn find_amount_range(
         .position_to_offset(line_num, 0)
         .unwrap_or_default();
 
+    let bytes = line.as_bytes();
     for pattern in &search_patterns {
-        if let Some(pos) = line.find(pattern) {
-            // Verify it's a standalone number (not part of a larger
-            // string). `pos` is a BYTE offset returned by
-            // `line.find`, so the boundary check must index by byte
-            // too. Pre-round-19 used `line.chars().nth(pos - 1)`
-            // which is a CHAR index — for any line containing non-
-            // ASCII content (account names with Cyrillic, narrations
-            // with emoji), the char index landed past the intended
-            // location and the check produced wrong results. The
-            // ASCII-only classification we want here (alnum / digit)
-            // is well-defined on the raw byte at `pos - 1` /
-            // `after_pos`, so byte indexing is both correct and
-            // simpler.
-            let bytes = line.as_bytes();
-            let before_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
+        // Scan EVERY occurrence, not just the first. The number string can
+        // appear inside the account name (`100` in `Assets:US-100:Bank`, `5`
+        // in `Assets:Account5`) before the real amount; the old code looked at
+        // only `line.find`'s first hit, so it either colored the in-account
+        // digits or — when that hit failed the boundary check — gave up
+        // without trying the real amount.
+        let mut search_from = 0;
+        while let Some(rel) = line[search_from..].find(pattern) {
+            let pos = search_from + rel;
             let after_pos = pos + pattern.len();
+
+            // An amount is a whitespace-separated token, so the char before it
+            // must be whitespace (or line start). Requiring whitespace — rather
+            // than merely "not alphanumeric" — rejects digits embedded in an
+            // account name, where the preceding char is `-` or `:` (not alnum
+            // but not whitespace either). Byte indexing is correct here: the
+            // classification is ASCII-only, and `pos`/`after_pos` are byte
+            // offsets from `find`.
+            let before_ok = pos == 0 || bytes[pos - 1].is_ascii_whitespace();
             let after_ok = after_pos >= bytes.len() || !bytes[after_pos].is_ascii_digit();
 
             if before_ok && after_ok {
@@ -198,6 +202,8 @@ fn find_amount_range(
                     end: Position::new(el, ec),
                 });
             }
+            // Advance past this (rejected) match and keep looking.
+            search_from = pos + 1;
         }
     }
 
@@ -237,6 +243,59 @@ mod tests {
         // Second posting is positive (green)
         assert!(colors[1].color.green > 0.5);
         assert!(colors[1].color.red < 0.5);
+    }
+
+    #[test]
+    fn test_document_color_ignores_digits_in_account_name() {
+        // `100` also appears inside the account `Assets:US-100:Bank`. The color
+        // must land on the real amount (col 22), not the in-account digits.
+        let source =
+            "2024-01-15 * \"Test\"\n  Assets:US-100:Bank  100 USD\n  Equity:Opening  -100 USD\n";
+        let result = parse(source);
+        let params = DocumentColorParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let colors =
+            handle_document_color(&params, source, &result, PositionEncoding::Utf16).unwrap();
+        let first = colors
+            .iter()
+            .find(|c| c.range.start.line == 1)
+            .expect("line 1 colored");
+        assert_eq!(
+            first.range.start.character, 22,
+            "must color the amount, not the `100` inside the account name"
+        );
+    }
+
+    #[test]
+    fn test_document_color_amount_value_also_in_account() {
+        // The amount `5` also occurs inside `Assets:Account5`. The real amount
+        // must still be colored (the old code found the in-account `5` first,
+        // failed the boundary check, and dropped the color entirely).
+        let source = "2024-01-15 * \"Test\"\n  Assets:Account5  5 USD\n  Expenses:Food  -5 USD\n";
+        let result = parse(source);
+        let params = DocumentColorParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let colors =
+            handle_document_color(&params, source, &result, PositionEncoding::Utf16).unwrap();
+        assert_eq!(colors.len(), 2, "both amounts must be colored");
+        let first = colors
+            .iter()
+            .find(|c| c.range.start.line == 1)
+            .expect("line 1 colored");
+        assert_eq!(
+            first.range.start.character, 19,
+            "color the real amount `5`, not the one in `Account5`"
+        );
     }
 
     #[test]

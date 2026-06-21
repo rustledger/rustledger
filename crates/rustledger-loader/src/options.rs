@@ -244,7 +244,12 @@ impl Options {
             return; // Don't apply the value
         }
 
-        // Check for duplicate non-repeatable options (E7003)
+        // Check for duplicate non-repeatable options (E7003).
+        //
+        // Stricter than beancount: `bean-check` silently lets the last value
+        // win (exit 0). We flag the duplicate so the CLI can surface it as an
+        // error (a repeated non-repeatable option is almost always a mistake) —
+        // a DELIBERATE deviation. See `cmd::check` E7003 handling.
         let is_repeatable = REPEATABLE_OPTIONS.contains(&key);
         if is_known && !is_repeatable && self.set_options.contains(key) {
             self.warnings.push(OptionWarning {

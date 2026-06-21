@@ -1748,3 +1748,63 @@ fn test_price_no_self_quote_directive() {
         "expected a `price AAPL … USD` directive; got: {stdout}"
     );
 }
+
+/// `rledger check` rejects a repeated non-repeatable option (E7003) as an
+/// error. This is a DELIBERATE deviation, stricter than beancount: `bean-check`
+/// silently accepts the duplicate (last value wins, exit 0). A duplicated
+/// non-repeatable `option` is almost always a copy-paste mistake, so we surface
+/// it. See the E7003 handling in `cmd::check`.
+#[test]
+fn test_check_duplicate_option_is_error() {
+    let rledger = require_rledger!();
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    std::fs::write(
+        tmp.path(),
+        "option \"title\" \"First\"\noption \"title\" \"Second\"\n2024-01-01 open Assets:Cash\n",
+    )
+    .expect("write");
+
+    let output = Command::new(&rledger)
+        .args(["check", "--no-cache"])
+        .arg(tmp.path())
+        .output()
+        .expect("Failed to run rledger check");
+
+    assert!(
+        !output.status.success(),
+        "duplicate non-repeatable option should fail check (stricter than beancount)"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("E7003"),
+        "output should cite E7003; got: {combined}"
+    );
+}
+
+/// Conversely, a single non-repeatable option must NOT be flagged (no false
+/// positive on the deliberate E7003 strictness).
+#[test]
+fn test_check_single_option_ok() {
+    let rledger = require_rledger!();
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    std::fs::write(
+        tmp.path(),
+        "option \"title\" \"Only Once\"\n2024-01-01 open Assets:Cash\n",
+    )
+    .expect("write");
+
+    let output = Command::new(&rledger)
+        .args(["check", "--no-cache"])
+        .arg(tmp.path())
+        .output()
+        .expect("Failed to run rledger check");
+
+    assert!(
+        output.status.success(),
+        "a single non-repeatable option must pass check"
+    );
+}

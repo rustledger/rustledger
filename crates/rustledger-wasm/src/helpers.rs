@@ -105,11 +105,25 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
     }
 }
 
+/// Whether any entry is an actual error (`Severity::Error`), as opposed to a
+/// warning. Warnings (e.g. the `unrealized` plugin's gain/loss notices) must
+/// not abort processing or mark a ledger invalid — matching `rledger check`,
+/// which exits 0 on warning-only ledgers.
+#[must_use]
+pub fn has_fatal(errors: &[Error]) -> bool {
+    errors.iter().any(|e| e.severity == Severity::Error)
+}
+
 /// Run validation on a loaded ledger and return validation errors.
 pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     use rustledger_validate::{ValidationOptions, ValidationSession};
 
-    if !load.errors.is_empty() {
+    // Skip validation only when loading produced a genuine *error* (parse or
+    // booking failure) — those make the directive stream unsound to validate.
+    // A warning must NOT skip validation, or real diagnostics (E1001, balance
+    // residuals, …) would be silently dropped for any ledger that also emits a
+    // plugin warning.
+    if has_fatal(&load.errors) {
         return Vec::new();
     }
 
@@ -181,5 +195,43 @@ fn extract_loader_options(options: &rustledger_loader::Options) -> LedgerOptions
     LedgerOptions {
         title: options.title.clone(),
         operating_currencies: options.operating_currency.clone(),
+    }
+}
+
+#[cfg(test)]
+mod warning_severity_tests {
+    use super::*;
+
+    #[test]
+    fn has_fatal_ignores_warnings() {
+        assert!(!has_fatal(&[Error::warning("w".to_string())]));
+        assert!(has_fatal(&[Error::new("e")]));
+        assert!(has_fatal(&[
+            Error::warning("w".to_string()),
+            Error::new("e")
+        ]));
+    }
+
+    /// A plugin warning must NOT cause validation to be skipped — otherwise a
+    /// genuine error on a ledger that also warns is silently dropped.
+    #[test]
+    fn run_validation_not_skipped_by_warning() {
+        let src = "plugin \"unrealized\" \"Equity:Unrealized\"\n\
+                   2020-01-01 open Assets:Stock\n2020-01-01 open Assets:Cash\n\
+                   2020-01-01 open Equity:Unrealized\n\
+                   2020-01-02 * \"buy\"\n  Assets:Stock  10 AAPL {100.00 USD}\n  Assets:Cash  -1000.00 USD\n\
+                   2020-06-01 price AAPL 150.00 USD\n\
+                   2020-07-01 * \"x\"\n  Assets:Cash  -5.00 USD\n  Expenses:NeverOpened  5.00 USD\n";
+        let load = load_and_book(src);
+        assert!(
+            load.errors.iter().any(|e| e.severity == Severity::Warning),
+            "expected an unrealized warning in load.errors"
+        );
+        assert!(!has_fatal(&load.errors), "a warning must not be fatal");
+        let validation = run_validation(&load);
+        assert!(
+            validation.iter().any(|e| e.message.contains("NeverOpened")),
+            "validation must run despite the warning and report E1001"
+        );
     }
 }

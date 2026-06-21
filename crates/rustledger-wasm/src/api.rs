@@ -11,7 +11,7 @@ use rustledger_loader::{FileSystem, LoadError, LoadResult};
 use rustledger_parser::parse as parse_beancount;
 
 use crate::convert::{directive_to_json, value_to_cell};
-use crate::helpers::{extract_options, load_and_book, run_validation, to_js};
+use crate::helpers::{extract_options, has_fatal, load_and_book, run_validation, to_js};
 #[cfg(feature = "completions")]
 use crate::types::{CompletionJson, CompletionResultJson};
 use crate::types::{
@@ -102,7 +102,9 @@ pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
     errors.extend(validation_errors);
 
     let result = ValidationResult {
-        valid: errors.is_empty(),
+        // Warnings do not invalidate a ledger (matching `rledger check`, which
+        // exits 0 on warning-only input); only actual errors do.
+        valid: !has_fatal(&errors),
         errors,
     };
     to_js(&result)
@@ -119,8 +121,9 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
 
     let load = load_and_book(source);
 
-    // Return early if there were parse/interpolation errors
-    if !load.errors.is_empty() {
+    // Return early only on actual errors (parse/booking); warnings must not
+    // abort processing.
+    if has_fatal(&load.errors) {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -227,8 +230,9 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
 
     let load = load_and_book(source);
 
-    // Return early if there were parse/interpolation errors
-    if !load.errors.is_empty() {
+    // Return early only on actual errors (parse/booking); warnings must not
+    // abort processing.
+    if has_fatal(&load.errors) {
         let result = PadResult {
             directives: Vec::new(),
             padding_transactions: Vec::new(),
@@ -297,8 +301,9 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> Result<JsValue, JsError> {
 
     let load = load_and_book(source);
 
-    // Return early if there were parse/interpolation errors
-    if !load.errors.is_empty() {
+    // Return early only on actual errors (parse/booking); warnings must not
+    // abort processing.
+    if has_fatal(&load.errors) {
         let result = PluginResult {
             directives: Vec::new(),
             errors: load.errors,
@@ -596,7 +601,8 @@ pub fn validate_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue,
     let errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
 
     let result = ValidationResult {
-        valid: errors.is_empty(),
+        // Warnings do not invalidate a ledger; only actual errors do.
+        valid: !has_fatal(&errors),
         errors,
     };
     to_js(&result)

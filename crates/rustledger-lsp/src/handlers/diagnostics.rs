@@ -378,7 +378,11 @@ pub fn validation_errors_to_diagnostics(
 }
 
 /// Convert a single validation error to an LSP diagnostic.
-pub fn validation_error_to_diagnostic(
+///
+/// `pub(crate)`: an LSP-internal helper, not part of the crate's public API,
+/// so its signature (which takes `source` to trim over-long directive spans)
+/// can evolve without a breaking change.
+pub(crate) fn validation_error_to_diagnostic(
     error: &ValidationError,
     source: &str,
     line_index: &LineIndex,

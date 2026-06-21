@@ -9833,3 +9833,49 @@ fn test_convert_string_input_rejects_garbage() {
         );
     }
 }
+
+/// SQL three-valued logic: a comparison with a NULL column value (e.g. a
+/// transaction with no payee) is UNKNOWN, so WHERE excludes the row. Regression
+/// for two bugs: `!=` used to *include* null rows, and ordered comparisons
+/// (`<`/`>`) used to error out and empty the whole query when any value was null.
+#[test]
+fn test_null_comparison_excludes_rows() {
+    let dirs = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+        // Has a payee.
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 2), "with payee")
+                .with_payee("Alpha")
+                .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-5), "USD")))
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(5), "USD"),
+                )),
+        ),
+        // No payee → payee is NULL.
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 3), "no payee")
+                .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-7), "USD")))
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(7), "USD"),
+                )),
+        ),
+    ];
+    let count = |q: &str| -> i64 {
+        let r = execute_query(q, &dirs);
+        match r.rows.first().and_then(|row| row.first()) {
+            Some(Value::Integer(n)) => *n,
+            other => panic!("expected an integer count, got {other:?}"),
+        }
+    };
+    // != excludes null rows (was: included them → would be 2).
+    assert_eq!(count(r#"SELECT count(*) WHERE payee != "Alpha""#), 0);
+    // = matches only the two Alpha postings.
+    assert_eq!(count(r#"SELECT count(*) WHERE payee = "Alpha""#), 2);
+    // Ordered comparisons match the non-null rows and DON'T empty the query
+    // (was: returned nothing because compare on NULL errored).
+    assert_eq!(count(r#"SELECT count(*) WHERE payee > "A""#), 2);
+    assert_eq!(count(r#"SELECT count(*) WHERE payee < "z""#), 2);
+}

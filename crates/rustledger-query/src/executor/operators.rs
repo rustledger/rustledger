@@ -8,6 +8,20 @@ use crate::error::QueryError;
 use super::Executor;
 use super::types::{Interval, PostingContext, Value};
 
+/// Whether `op` is an equality or ordering comparison — the operators for which
+/// a NULL operand yields SQL "UNKNOWN" (treated as not-matched).
+const fn is_comparison(op: BinaryOperator) -> bool {
+    matches!(
+        op,
+        BinaryOperator::Eq
+            | BinaryOperator::Ne
+            | BinaryOperator::Lt
+            | BinaryOperator::Le
+            | BinaryOperator::Gt
+            | BinaryOperator::Ge
+    )
+}
+
 impl Executor<'_> {
     /// Evaluate a binary operation.
     pub(super) fn evaluate_binary_op(
@@ -17,6 +31,17 @@ impl Executor<'_> {
     ) -> Result<Value, QueryError> {
         let left = self.evaluate_expr(&op.left, ctx)?;
         let right = self.evaluate_expr(&op.right, ctx)?;
+
+        // SQL three-valued logic: a comparison with NULL is UNKNOWN, which a
+        // WHERE clause treats as not-matched. Return false for EVERY comparison
+        // operator so `!=` doesn't wrongly include rows with a missing optional
+        // field (e.g. no payee), and ordered comparisons (`<`/`>`) don't error
+        // out and empty the whole query when any value in the column is NULL.
+        // Matches beanquery. `values_equal` is left untouched so GROUP BY still
+        // groups NULL keys together.
+        if is_comparison(op.op) && (matches!(left, Value::Null) || matches!(right, Value::Null)) {
+            return Ok(Value::Boolean(false));
+        }
 
         match op.op {
             BinaryOperator::Eq => Ok(Value::Boolean(self.values_equal(&left, &right))),
@@ -311,6 +336,10 @@ impl Executor<'_> {
         left: &Value,
         right: &Value,
     ) -> Result<Value, QueryError> {
+        // Same NULL-comparison rule as `evaluate_binary_op` (see there).
+        if is_comparison(op) && (matches!(left, Value::Null) || matches!(right, Value::Null)) {
+            return Ok(Value::Boolean(false));
+        }
         match op {
             BinaryOperator::Eq => Ok(Value::Boolean(self.values_equal(left, right))),
             BinaryOperator::Ne => Ok(Value::Boolean(!self.values_equal(left, right))),

@@ -7283,10 +7283,16 @@ fn test_aggregate_context_non_aggregate_function_short_circuit() {
     );
 
     assert_eq!(result.len(), 2, "should have 2 quarters");
-    // Verify quarter values are 1 and 2
+    // quarter() returns a `YYYY-Qn` string (matching beanquery), not an integer.
     let quarters: Vec<_> = result.rows.iter().map(|r| &r[0]).collect();
-    assert!(quarters.contains(&&Value::Integer(1)), "should contain Q1");
-    assert!(quarters.contains(&&Value::Integer(2)), "should contain Q2");
+    assert!(
+        quarters.contains(&&Value::String("2024-Q1".to_string())),
+        "should contain 2024-Q1, got {quarters:?}"
+    );
+    assert!(
+        quarters.contains(&&Value::String("2024-Q2".to_string())),
+        "should contain 2024-Q2, got {quarters:?}"
+    );
 }
 
 #[test]
@@ -10051,4 +10057,43 @@ fn test_date_add_large_offset_errors_gracefully() {
     // Ordinary offsets still compute a date.
     let result = execute_query("SELECT date_add(date, 5)", &directives);
     assert!(matches!(result.rows[0][0], Value::Date(_)));
+}
+
+#[test]
+fn test_round_negative_precision() {
+    let directives = make_test_directives();
+    // Negative precision rounds to the left of the decimal point (matching
+    // Python/beanquery); it used to be a silent no-op (cast to u32 wrapped).
+    let cases = [
+        ("round(1234.56, -2)", dec!(1200)),
+        ("round(123.45, -1)", dec!(120)),
+        ("round(1234.56, 0)", dec!(1235)),
+        ("round(2.5, 0)", dec!(2)), // banker's rounding (half-to-even)
+        ("round(1234.5, -100)", dec!(0)), // far beyond the magnitude → 0
+    ];
+    for (q, expected) in cases {
+        let result = execute_query(&format!("SELECT {q}"), &directives);
+        assert_eq!(result.rows[0][0], Value::Number(expected), "for {q}");
+    }
+}
+
+#[test]
+fn test_quarter_returns_year_quarter_string() {
+    use rustledger_core::{Open, Transaction};
+    // quarter() returns a `YYYY-Qn` string (beanquery), not an integer — in both
+    // the per-row and aggregate (wrapping max()) eval paths.
+    let directives = vec![
+        Directive::Open(Open::new(date(2020, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2020, 1, 1), "Equity:O")),
+        Directive::Transaction(
+            Transaction::new(date(2020, 11, 5), "x")
+                .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1), "USD")))
+                .with_synthesized_posting(Posting::new("Equity:O", Amount::new(dec!(-1), "USD"))),
+        ),
+    ];
+    let result = execute_query("SELECT quarter(date)", &directives);
+    assert_eq!(result.rows[0][0], Value::String("2020-Q4".to_string()));
+    // Aggregate path (quarter wrapping an aggregate).
+    let result = execute_query("SELECT quarter(max(date))", &directives);
+    assert_eq!(result.rows[0][0], Value::String("2020-Q4".to_string()));
 }

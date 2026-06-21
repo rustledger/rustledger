@@ -48,8 +48,9 @@ impl Executor<'_> {
                 super::weekday_abbrev(date.weekday().to_monday_zero_offset() as u32).to_string(),
             )),
             "QUARTER" => {
+                // beanquery returns a `YYYY-Qn` string, not an integer.
                 let quarter = (date.month() - 1) / 3 + 1;
-                Ok(Value::Integer(quarter.into()))
+                Ok(Value::String(format!("{:04}-Q{}", date.year(), quarter)))
             }
             "YMONTH" => Ok(Value::String(format!(
                 "{:04}-{:02}",

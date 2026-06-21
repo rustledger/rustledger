@@ -1256,7 +1256,12 @@ impl<'a> Executor<'a> {
             "QUARTER" => {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
-                    Value::Date(d) => Ok(Value::Integer(((d.month() - 1) / 3 + 1).into())),
+                    // beanquery returns a `YYYY-Qn` string, not an integer.
+                    Value::Date(d) => Ok(Value::String(format!(
+                        "{:04}-Q{}",
+                        d.year(),
+                        (d.month() - 1) / 3 + 1
+                    ))),
                     _ => Err(QueryError::Type("QUARTER expects a date".to_string())),
                 }
             }

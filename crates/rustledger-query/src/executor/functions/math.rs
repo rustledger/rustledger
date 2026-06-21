@@ -55,9 +55,9 @@ impl Executor<'_> {
         }
 
         let val = self.evaluate_expr(&func.args[0], ctx)?;
-        let decimals = if func.args.len() == 2 {
+        let decimals: i64 = if func.args.len() == 2 {
             match self.evaluate_expr(&func.args[1], ctx)? {
-                Value::Integer(i) => i as u32,
+                Value::Integer(i) => i,
                 _ => {
                     return Err(QueryError::Type(
                         "ROUND second arg must be integer".to_string(),
@@ -69,7 +69,7 @@ impl Executor<'_> {
         };
 
         match val {
-            Value::Number(n) => Ok(Value::Number(n.round_dp(decimals))),
+            Value::Number(n) => Ok(Value::Number(round_decimal(n, decimals))),
             Value::Integer(i) => Ok(Value::Integer(i)),
             _ => Err(QueryError::Type("ROUND expects a number".to_string())),
         }
@@ -123,4 +123,27 @@ impl Executor<'_> {
             _ => Err(QueryError::Type("SAFEDIV expects two numbers".to_string())),
         }
     }
+}
+
+/// Round `n` to `places` decimal places, matching Python's `round` (and thus
+/// beanquery): a NEGATIVE `places` rounds to the left of the decimal point
+/// (tens, hundreds, …). Uses banker's rounding (half-to-even), consistent with
+/// `Decimal::round_dp`.
+///
+/// The old code cast `places` to `u32`, so a negative value wrapped to a huge
+/// precision and `round_dp` became a silent no-op.
+fn round_decimal(n: Decimal, places: i64) -> Decimal {
+    if places >= 0 {
+        // `round_dp` caps at Decimal's 28-digit precision; clamp to avoid a
+        // needless huge argument.
+        return n.round_dp(u32::try_from(places).unwrap_or(u32::MAX).min(28));
+    }
+    let k = -places;
+    // 10^k stops fitting in Decimal beyond 28 digits; any representable number
+    // rounds to 0 at that magnitude.
+    if k > 28 {
+        return Decimal::ZERO;
+    }
+    let scale = Decimal::from_i128_with_scale(10i128.pow(k as u32), 0);
+    (n / scale).round() * scale
 }

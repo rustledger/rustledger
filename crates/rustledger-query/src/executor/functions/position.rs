@@ -378,22 +378,25 @@ impl Executor<'_> {
             }
         };
 
-        // Get date (optional, defaults to context date)
-        let date = if func.args.len() == 3 {
-            match self.evaluate_expr(&func.args[2], ctx)? {
+        // With an explicit date, look up the price as of that date. Without one,
+        // return the LATEST price — beanquery's `getprice(base, quote)` passes
+        // `date=None`, which resolves to the most recent price, NOT the price as
+        // of the current transaction's date.
+        let price = if func.args.len() == 3 {
+            let date = match self.evaluate_expr(&func.args[2], ctx)? {
                 Value::Date(d) => d,
                 _ => {
                     return Err(QueryError::Type(
                         "GETPRICE: third argument must be a date".to_string(),
                     ));
                 }
-            }
+            };
+            self.price_db.get_price(&base, &quote, date)
         } else {
-            ctx.transaction.date
+            self.price_db.get_latest_price(&base, &quote)
         };
 
-        // Look up the price
-        match self.price_db.get_price(&base, &quote, date) {
+        match price {
             Some(price) => Ok(Value::Number(price)),
             None => Ok(Value::Null),
         }

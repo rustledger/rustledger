@@ -9985,3 +9985,49 @@ fn test_safediv_accepts_mixed_int_and_decimal() {
     let result = execute_query("SELECT safediv(max(number), 0)", &directives);
     assert_eq!(result.rows[0][0], Value::Number(dec!(0)));
 }
+
+#[test]
+fn test_getprice_two_arg_returns_latest_price() {
+    use rustledger_core::Price;
+    // Two-arg getprice(base, quote) must return the LATEST price (beanquery
+    // date=None semantics), NOT the price as of the transaction date.
+    let directives = vec![
+        Directive::Open(Open::new(date(2020, 1, 1), "Assets:Stock")),
+        Directive::Open(Open::new(date(2020, 1, 1), "Equity:O")),
+        Directive::Price(Price {
+            date: date(2020, 1, 15),
+            currency: "AAPL".into(),
+            amount: Amount::new(dec!(150.00), "USD"),
+            meta: Default::default(),
+        }),
+        Directive::Price(Price {
+            date: date(2020, 4, 1),
+            currency: "AAPL".into(),
+            amount: Amount::new(dec!(160.00), "USD"),
+            meta: Default::default(),
+        }),
+        Directive::Transaction(
+            Transaction::new(date(2020, 2, 1), "buy")
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Stock",
+                    Amount::new(dec!(10), "AAPL"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Equity:O",
+                    Amount::new(dec!(-1500), "USD"),
+                )),
+        ),
+    ];
+    let result = execute_query(r#"SELECT getprice("AAPL", "USD")"#, &directives);
+    assert!(!result.rows.is_empty(), "query returned no rows");
+    for row in &result.rows {
+        // The mid-range transaction is 2020-02-01, but the latest price (160.00,
+        // 2020-04-01) is what beanquery returns for the dateless form.
+        assert_eq!(
+            row[0],
+            Value::Number(dec!(160.00)),
+            "expected the latest price 160.00, got {:?}",
+            row[0]
+        );
+    }
+}

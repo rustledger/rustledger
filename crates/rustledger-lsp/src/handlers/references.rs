@@ -11,13 +11,26 @@ use super::utils::{
 };
 use lsp_types::{Location, Position, Range, ReferenceParams, Uri};
 use rustledger_core::Directive;
-use rustledger_parser::ParseResult;
+use rustledger_parser::{ParseResult, parse};
+
+/// Which kind of symbol references are being collected.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RefKind {
+    Account,
+    Currency,
+    Payee,
+}
 
 /// Handle a find references request.
 pub fn handle_references(
     params: &ReferenceParams,
     source: &str,
     parse_result: &ParseResult,
+    // Other ledger files reachable via `include` (everything except the current
+    // buffer), as `(uri, source)` with live content for open buffers. Gathered
+    // by the caller under the state lock so parsing here holds no locks. So
+    // "find references" spans the whole ledger, not just the open file.
+    other_files: &[(Uri, String)],
     uri: &Uri,
     encoding: PositionEncoding,
 ) -> Option<Vec<Location>> {
@@ -31,44 +44,71 @@ pub fn handle_references(
     // Get the word at the cursor position
     let (word, _, _) = get_word_at_position(line, position.character as usize, encoding)?;
 
-    let mut locations = Vec::new();
-    // Build the line index once and share it across collectors —
-    // otherwise each posting/directive lookup is an O(n) scan.
-    let line_index = LineIndex::new(source, encoding);
+    // Classify the symbol kind from the cursor's file (account / currency /
+    // payee), then collect that kind's occurrences across every ledger file.
+    let kind = if is_account_like(&word) {
+        RefKind::Account
+    } else if is_currency_like(&word, parse_result) {
+        RefKind::Currency
+    } else if is_in_quotes(line, position.character as usize) {
+        RefKind::Payee
+    } else {
+        return None;
+    };
 
-    // Check if it's an account
-    if is_account_like(&word) {
-        collect_account_references(
-            parse_result,
-            &line_index,
-            &word,
-            uri,
-            include_declaration,
-            &mut locations,
-        );
+    // Collect references from a single file into its own vec (each collector
+    // sorts/dedups within the file). Returns the file's locations.
+    let collect_file = |src: &str, pr: &ParseResult, file_uri: &Uri| -> Vec<Location> {
+        let line_index = LineIndex::new(src, encoding);
+        let mut out = Vec::new();
+        match kind {
+            RefKind::Account => {
+                collect_account_references(
+                    pr,
+                    &line_index,
+                    &word,
+                    file_uri,
+                    include_declaration,
+                    &mut out,
+                );
+            }
+            RefKind::Currency => {
+                collect_currency_references(
+                    pr,
+                    &line_index,
+                    &word,
+                    file_uri,
+                    include_declaration,
+                    &mut out,
+                );
+            }
+            RefKind::Payee => {
+                collect_payee_references(src, pr, &line_index, &word, file_uri, &mut out);
+            }
+        }
+        out
+    };
+
+    let mut locations = collect_file(source, parse_result, uri);
+    for (f_uri, f_source) in other_files {
+        if f_uri == uri {
+            continue; // current file already collected from its live source
+        }
+        let f_parse = parse(f_source);
+        locations.extend(collect_file(f_source, &f_parse, f_uri));
     }
-    // Check if it's a currency
-    else if is_currency_like(&word, parse_result) {
-        collect_currency_references(
-            parse_result,
-            &line_index,
-            &word,
-            uri,
-            include_declaration,
-            &mut locations,
-        );
-    }
-    // Check if it's a payee (inside quotes on a transaction line)
-    else if is_in_quotes(line, position.character as usize) {
-        collect_payee_references(
-            source,
-            parse_result,
-            &line_index,
-            &word,
-            uri,
-            &mut locations,
-        );
-    }
+
+    // Final cross-file dedup keyed by (uri, range) — the per-file collectors
+    // only dedup by range, so two files with a same-positioned occurrence must
+    // not collapse into one.
+    locations.sort_by(|a, b| {
+        a.uri
+            .as_str()
+            .cmp(b.uri.as_str())
+            .then(a.range.start.line.cmp(&b.range.start.line))
+            .then(a.range.start.character.cmp(&b.range.start.character))
+    });
+    locations.dedup_by(|a, b| a.uri == b.uri && a.range == b.range);
 
     if locations.is_empty() {
         None
@@ -271,7 +311,7 @@ mod tests {
             },
         };
 
-        let refs = handle_references(&params, source, &result, &uri, PositionEncoding::Utf16);
+        let refs = handle_references(&params, source, &result, &[], &uri, PositionEncoding::Utf16);
         assert!(refs.is_some());
 
         let refs = refs.unwrap();
@@ -301,7 +341,7 @@ mod tests {
             },
         };
 
-        let refs = handle_references(&params, source, &result, &uri, PositionEncoding::Utf16);
+        let refs = handle_references(&params, source, &result, &[], &uri, PositionEncoding::Utf16);
         assert!(refs.is_some());
 
         let refs = refs.unwrap();
@@ -343,7 +383,7 @@ mod tests {
             },
         };
 
-        let refs = handle_references(&params, source, &result, &uri, PositionEncoding::Utf16)
+        let refs = handle_references(&params, source, &result, &[], &uri, PositionEncoding::Utf16)
             .expect("references returns Some");
 
         // Expected: 3 references — `commodity USD`, `-100 USD`,
@@ -368,6 +408,7 @@ mod tests {
             &params_no_decl,
             source,
             &result,
+            &[],
             &uri,
             PositionEncoding::Utf16,
         )
@@ -417,7 +458,7 @@ mod tests {
                 include_declaration: true,
             },
         };
-        let refs = handle_references(&params, source, &result, &uri, PositionEncoding::Utf16)
+        let refs = handle_references(&params, source, &result, &[], &uri, PositionEncoding::Utf16)
             .expect("references returns Some");
         // Expected: 2 references - the open's ACCOUNT token and
         // the posting's ACCOUNT token. The substring-search shape
@@ -460,6 +501,7 @@ mod tests {
             &params_no_decl,
             source,
             &result,
+            &[],
             &uri,
             PositionEncoding::Utf16,
         )
@@ -522,7 +564,7 @@ mod tests {
             },
         };
 
-        let refs = handle_references(&params, source, &result, &uri, PositionEncoding::Utf16)
+        let refs = handle_references(&params, source, &result, &[], &uri, PositionEncoding::Utf16)
             .expect("references returns Some");
 
         // Expected: 2 non-declaration references — the metadata
@@ -574,7 +616,7 @@ mod tests {
             },
         };
 
-        let refs = handle_references(&params, source, &result, &uri, PositionEncoding::Utf16)
+        let refs = handle_references(&params, source, &result, &[], &uri, PositionEncoding::Utf16)
             .expect("at least the Open definition + 1 posting reference");
 
         let metadata_lines = [3u32, 5u32];

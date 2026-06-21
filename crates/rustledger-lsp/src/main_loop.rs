@@ -723,8 +723,20 @@ impl MainLoopState {
         let uri = &params.text_document_position.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response =
-            handle_references(&params, &text, &parse_result, uri, self.position_encoding);
+        // Other ledger files so "find references" spans every `include`d file,
+        // not just the open buffer. Collected under the locks (live content for
+        // open buffers); the handler then parses lock-free.
+        let current_canonical = uri_to_path(uri).and_then(|p| p.canonicalize().ok());
+        let other_files = self.other_ledger_files(current_canonical.as_deref());
+
+        let response = handle_references(
+            &params,
+            &text,
+            &parse_result,
+            &other_files,
+            uri,
+            self.position_encoding,
+        );
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }

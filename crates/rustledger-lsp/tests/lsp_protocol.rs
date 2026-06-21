@@ -1268,3 +1268,67 @@ fn rename_account_spans_included_files() {
         "rename must also edit the included file (cross-file usage); edited: {edited_uris:?}"
     );
 }
+
+/// Regression: find-references on an account used across `include`d files must
+/// return locations in ALL files, not just the open one.
+#[cfg(unix)]
+#[test]
+fn references_span_included_files() {
+    use lsp_types::request::References;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let journal_path = tmp.path().join("journal.beancount");
+    let main_path = tmp.path().join("main.beancount");
+    let inc_path = tmp.path().join("inc.beancount");
+    std::fs::write(&main_path, "2024-01-01 open Assets:Bank USD\n").expect("write main");
+    std::fs::write(
+        &inc_path,
+        "2024-01-01 open Expenses:Food USD\n\
+         2024-02-01 * \"x\"\n  Assets:Bank  -5 USD\n  Expenses:Food  5 USD\n",
+    )
+    .expect("write inc");
+    std::fs::write(
+        &journal_path,
+        format!(
+            "include \"{}\"\ninclude \"{}\"\n",
+            main_path.display(),
+            inc_path.display()
+        ),
+    )
+    .expect("write journal");
+
+    let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
+    client.initialize();
+    let main_uri = format!("file://{}", main_path.display());
+    client.open_document(
+        &main_uri,
+        &std::fs::read_to_string(&main_path).expect("read main"),
+    );
+
+    // References on `Assets:Bank` (col 16, line 0 of main), include declaration.
+    let locations: Option<Vec<lsp_types::Location>> =
+        client.request::<References>(lsp_types::ReferenceParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: main_uri.parse().unwrap(),
+                },
+                position: lsp_types::Position::new(0, 16),
+            },
+            context: lsp_types::ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        });
+    let locations = locations.unwrap_or_default();
+    let inc_uri = format!("file://{}", inc_path.display());
+    let uris: Vec<&str> = locations.iter().map(|l| l.uri.as_str()).collect();
+    assert!(
+        locations.iter().any(|l| l.uri.as_str() == main_uri),
+        "references must include the open file's open directive; got: {uris:?}"
+    );
+    assert!(
+        locations.iter().any(|l| l.uri.as_str() == inc_uri),
+        "references must include the usage in the included file; got: {uris:?}"
+    );
+}

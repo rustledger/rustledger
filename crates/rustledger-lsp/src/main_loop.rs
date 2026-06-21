@@ -105,7 +105,16 @@ pub struct TaskResult {
     pub request_id: lsp_server::RequestId,
     /// The result of the task, or an error message.
     pub result: Result<serde_json::Value, String>,
+    /// Set when the world changed (revision bumped) between dispatch and
+    /// completion: the result is stale and is reported to the client as
+    /// `ContentModified` instead of being silently dropped (which would leave a
+    /// strict client waiting forever for a response that never comes).
+    pub content_modified: bool,
 }
+
+/// LSP `ContentModified` error code (the document changed while the request was
+/// in flight). Defined in LSP but not exposed by `lsp_server::ErrorCode`.
+const CONTENT_MODIFIED: i32 = -32801;
 
 /// A job to be executed on the background worker thread.
 type BackgroundJob = Box<dyn FnOnce() + Send>;
@@ -345,13 +354,21 @@ impl MainLoopState {
         match event {
             Event::Message(msg) => self.handle_message(msg),
             Event::Task(task_result) => {
-                let response = match task_result.result {
-                    Ok(value) => lsp_server::Response::new_ok(task_result.request_id, value),
-                    Err(msg) => lsp_server::Response::new_err(
+                let response = if task_result.content_modified {
+                    lsp_server::Response::new_err(
                         task_result.request_id,
-                        lsp_server::ErrorCode::InternalError as i32,
-                        msg,
-                    ),
+                        CONTENT_MODIFIED,
+                        "content modified".to_string(),
+                    )
+                } else {
+                    match task_result.result {
+                        Ok(value) => lsp_server::Response::new_ok(task_result.request_id, value),
+                        Err(msg) => lsp_server::Response::new_err(
+                            task_result.request_id,
+                            lsp_server::ErrorCode::InternalError as i32,
+                            msg,
+                        ),
+                    }
                 };
                 self.send(lsp_server::Message::Response(response));
             }
@@ -420,21 +437,32 @@ impl MainLoopState {
         let _ = self.job_sender.send(Box::new(move || {
             let result = handler();
 
-            // Drop stale results - if the world changed since dispatch,
-            // the client will have sent a new request for fresh data.
+            // If the world changed since dispatch, the result is stale.
+            // Report ContentModified rather than dropping it: a strict client
+            // tracking pending requests would otherwise wait forever for a
+            // response that never arrives. It re-requests on the next edit.
             // Skipped for unconditional dispatch (stateless handlers).
             if let Some(rev) = dispatch_revision
                 && revision_arc.load(std::sync::atomic::Ordering::SeqCst) != rev
             {
                 tracing::debug!(
-                    "Dropping stale result for request {:?} (revision changed)",
+                    "Result for request {:?} is stale (revision changed); replying ContentModified",
                     request_id
                 );
+                let _ = task_sender.send(TaskResult {
+                    request_id,
+                    result: Ok(serde_json::Value::Null),
+                    content_modified: true,
+                });
                 return;
             }
 
             // Ignore send errors - the main loop may have shut down
-            let _ = task_sender.send(TaskResult { request_id, result });
+            let _ = task_sender.send(TaskResult {
+                request_id,
+                result,
+                content_modified: false,
+            });
         }));
     }
 

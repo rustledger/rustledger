@@ -1074,3 +1074,75 @@ fn included_file_diagnostics_are_cleared_when_fixed() {
         "expected bad.beancount diagnostics to be cleared (empty publish) after the fix"
     );
 }
+
+/// An async-dispatched request (`semanticTokens/full`) invalidated by a
+/// concurrent edit must still receive a response — previously the stale result
+/// was silently dropped, leaving a strict client waiting forever. The response
+/// is either the (raced-in) tokens or a `ContentModified` (-32801) error.
+#[test]
+fn async_request_invalidated_by_edit_still_gets_a_response() {
+    let mut client = LspTestClient::spawn();
+    client.initialize();
+
+    let uri = test_uri("async_stale.beancount");
+    // A large document so `semanticTokens/full` takes long enough to be
+    // invalidated by the edit we send immediately after.
+    let mut big = String::new();
+    for i in 0..4000 {
+        big.push_str(&format!("2024-01-01 open Assets:A{i} USD\n"));
+    }
+    client.open_document(&uri, &big);
+
+    let id = client.next_request_id();
+    let req = lsp_server::Request {
+        id: id.clone(),
+        method: <SemanticTokensFullRequest as lsp_types::request::Request>::METHOD.to_string(),
+        params: serde_json::to_value(SemanticTokensParams {
+            text_document: TextDocumentIdentifier {
+                uri: uri.parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .unwrap(),
+    };
+    client
+        .raw_send_request(req)
+        .expect("send semanticTokens/full");
+
+    // Immediately invalidate the world with an edit (bumps the revision).
+    client.notify::<lsp_types::notification::DidChangeTextDocument>(
+        lsp_types::DidChangeTextDocumentParams {
+            text_document: lsp_types::VersionedTextDocumentIdentifier {
+                uri: uri.parse().unwrap(),
+                version: 2,
+            },
+            content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "2024-01-01 open Assets:Edited USD\n".to_string(),
+            }],
+        },
+    );
+
+    // The request MUST get a response (pre-fix it was dropped → client hang).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let resp = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let msg = client
+            .recv_with_timeout(remaining)
+            .expect("no response for the async request — it was dropped (the bug)");
+        if let lsp_server::Message::Response(r) = msg
+            && r.id == id
+        {
+            break r;
+        }
+    };
+    // If the result raced in as stale, it must be reported as ContentModified.
+    if let Some(err) = resp.error {
+        assert_eq!(
+            err.code, -32801,
+            "a stale async result must be reported as ContentModified, got {err:?}"
+        );
+    }
+}

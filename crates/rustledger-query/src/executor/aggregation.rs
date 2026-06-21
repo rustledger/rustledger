@@ -265,14 +265,29 @@ impl<'a> Executor<'a> {
             Expr::Function(func) => {
                 match func.name.to_uppercase().as_str() {
                     "COUNT" => {
-                        // COUNT(*) or COUNT(expr) — validate argument count
                         if func.args.len() > 1 {
                             return Err(QueryError::InvalidArguments(
                                 "COUNT".to_string(),
                                 "expected 0 or 1 argument".to_string(),
                             ));
                         }
-                        Ok(Value::Integer(group.len() as i64))
+                        // SQL semantics (matching beanquery): COUNT(*) counts
+                        // every row in the group, but COUNT(expr) counts only
+                        // rows where expr is non-NULL — so e.g. COUNT(payee)
+                        // skips payee-less transactions rather than counting all.
+                        let count = match func.args.first() {
+                            None | Some(Expr::Wildcard) => group.len(),
+                            Some(arg) => {
+                                let mut c = 0usize;
+                                for ctx in group {
+                                    if !matches!(self.evaluate_expr(arg, ctx)?, Value::Null) {
+                                        c += 1;
+                                    }
+                                }
+                                c
+                            }
+                        };
+                        Ok(Value::Integer(count as i64))
                     }
                     "SUM" => {
                         if func.args.len() != 1 {

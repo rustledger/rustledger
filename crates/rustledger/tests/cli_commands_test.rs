@@ -1679,3 +1679,49 @@ fn test_query_and_format_handle_broken_pipe() {
         );
     }
 }
+
+/// Regression: `rledger price --undeclared` must not emit a self-referential
+/// `price USD … USD` directive. The `--undeclared` ticker-shape heuristic picks
+/// up the operating/quote currency (USD, held as cash / seen as a cost
+/// currency) as a base candidate; resolving its quote yields itself. A
+/// commodity is never priced in itself — bean-price never fetches a currency
+/// against itself. Exercises the `--source-cmd` fetch path (offline).
+#[test]
+fn test_price_no_self_quote_directive() {
+    let rledger = require_rledger!();
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    std::fs::write(
+        tmp.path(),
+        "option \"operating_currency\" \"USD\"\n\
+         2024-01-01 open Assets:Stock\n2024-01-01 open Assets:Cash\n\
+         2024-01-02 * \"buy\"\n  Assets:Stock  10 AAPL {100.00 USD}\n  Assets:Cash  -1000.00 USD\n",
+    )
+    .expect("write");
+
+    let output = Command::new(&rledger)
+        .args(["price", "-f"])
+        .arg(tmp.path())
+        .args([
+            "--undeclared",
+            "-b",
+            "--no-cache",
+            "--source-cmd",
+            "echo 150.00 USD",
+        ])
+        .output()
+        .expect("Failed to run rledger price");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() && stdout.is_empty() {
+        eprintln!("Skipping: price/--source-cmd not supported in this build");
+        return;
+    }
+    assert!(
+        stdout.contains("price AAPL"),
+        "should fetch the held AAPL; got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("price USD"),
+        "must not emit a self-referential `price USD … USD`; got: {stdout}"
+    );
+}

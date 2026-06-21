@@ -357,6 +357,15 @@ pub fn run_with_writer<W: Write>(
             );
 
         for (effective_currency, per_spec_mapping) in per_quote_jobs {
+            // A commodity is never priced in itself. Skip self-referential
+            // (base == quote) jobs — these arise when `--undeclared` picks up
+            // the operating/quote currency (e.g. USD held as cash, or seen as a
+            // cost currency) as a base candidate, whose resolved quote is then
+            // itself. bean-price never fetches a currency against itself; left
+            // unfiltered this emits a nonsensical `price USD … USD` directive.
+            if &effective_currency == symbol {
+                continue;
+            }
             // --clobber: pre-fetch skip when an explicit `price` directive for
             // (symbol, effective_currency, requested_date) already exists. Avoids
             // round-tripping through the source for the common case where the
@@ -630,6 +639,12 @@ fn dump_fetch_plan(
             );
 
         for (currency, per_spec_mapping) in per_quote_jobs {
+            // Skip self-referential (base == quote) jobs so `--dry-run` matches
+            // the fetch path: a commodity is never priced in itself. See the
+            // identical guard in the fetch loop above.
+            if &currency == symbol {
+                continue;
+            }
             // Apply the per-spec mapping override so describe_attempts shows
             // the source/ticker that *this* quote will actually use, not
             // whatever happened to win first-spec precedence in
@@ -803,6 +818,14 @@ fn run_with_external_command<W: Write>(
             );
 
         for effective_currency in per_quote_currencies {
+            // Skip self-referential (base == quote) jobs, same as the network
+            // fetch and --dry-run paths: a commodity is never priced in itself
+            // (guards against `--undeclared` picking up the operating/quote
+            // currency as a base, which would emit a nonsensical `price USD …
+            // USD` directive).
+            if &effective_currency == symbol {
+                continue;
+            }
             // --clobber: skip when an existing price for this (symbol, currency, date)
             // is already in the file. Same rule as the network fetch path.
             if !args.clobber {

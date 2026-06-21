@@ -177,7 +177,7 @@ pub struct Args {
     #[arg(long, conflicts_with_all = [
         "date_column", "date_format", "narration_column", "amount_column",
         "delimiter", "skip_rows", "no_header", "debit_column", "credit_column",
-        "payee_column",
+        "payee_column", "currency_column",
     ])]
     pub auto: bool,
 

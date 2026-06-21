@@ -243,9 +243,10 @@ fn find_currency_column(headers: &[&str]) -> Option<usize> {
         "currency code",
         "ccy code",
     ];
-    headers
-        .iter()
-        .position(|h| NAMES.contains(&h.trim().to_lowercase().as_str()))
+    headers.iter().position(|h| {
+        let h = h.trim();
+        NAMES.iter().any(|n| h.eq_ignore_ascii_case(n))
+    })
 }
 
 /// Count the leading run of ASCII digits in `s` — i.e. the digits immediately

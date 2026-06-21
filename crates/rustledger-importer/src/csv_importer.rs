@@ -293,15 +293,25 @@ impl CsvImporter {
         };
 
         // Per-row currency from a currency column (e.g. multi-currency
-        // exports), falling back to the configured default, then USD.
-        let currency = csv_config
-            .currency_column
-            .as_ref()
-            .and_then(|col| self.get_column(record, col, header_map).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| config.currency.clone())
-            .unwrap_or_else(|| "USD".to_string());
+        // exports). A configured column that can't be read is a config error
+        // (wrong name/index) — surface it rather than silently falling back,
+        // which would reintroduce the "multi-currency becomes mono-currency"
+        // bug. A blank cell is legitimate and falls back to the default.
+        let default_currency = || config.currency.clone().unwrap_or_else(|| "USD".to_string());
+        let currency = match &csv_config.currency_column {
+            Some(col) => {
+                let cell = self
+                    .get_column(record, col, header_map)
+                    .context("failed to read configured currency column")?;
+                let cell = cell.trim();
+                if cell.is_empty() {
+                    default_currency()
+                } else {
+                    cell.to_string()
+                }
+            }
+            None => default_currency(),
+        };
 
         // Create the transaction posting
         let amount = Amount::new(final_amount, &currency);
@@ -781,6 +791,34 @@ More info
         assert_eq!(ccy(0), "EUR");
         assert_eq!(ccy(1), "USD");
         assert_eq!(ccy(2), "USD", "blank currency cell falls back to default");
+    }
+
+    #[test]
+    fn test_csv_import_missing_currency_column_warns_not_silent() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .currency_column("Nonexistent")
+            .build()
+            .unwrap();
+
+        let csv_content = "Date,Description,Amount,Currency\n2024-01-02,Coffee,-5.00,EUR\n";
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
+
+        // A misconfigured currency column must NOT silently fall back to the
+        // default currency; the row is rejected with a warning instead.
+        assert!(result.directives.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.to_lowercase().contains("currency")),
+            "expected a currency-column warning, got {:?}",
+            result.warnings
+        );
     }
 
     #[test]

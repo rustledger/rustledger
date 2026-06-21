@@ -771,6 +771,7 @@ fn build_extract_args(
         payee_column: string_flag(req, "payee-column", None),
         amount_column: string_flag(req, "amount-column", None)
             .unwrap_or_else(|| "Amount".to_string()),
+        currency_column: string_flag(req, "currency-column", None),
         amount_locale: string_flag(req, "amount-locale", None),
         amount_format: string_flag(req, "amount-format", None),
         debit_column: string_flag(req, "debit-column", None),

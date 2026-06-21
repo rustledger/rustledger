@@ -134,6 +134,11 @@ pub struct Args {
     #[arg(long, default_value = "Amount")]
     pub amount_column: String,
 
+    /// Per-row currency column name or index (optional). When set, each row's
+    /// currency is read from this column instead of the single `--currency`.
+    #[arg(long)]
+    pub currency_column: Option<String>,
+
     /// Locale used to parse amounts, e.g. `en_US`
     #[arg(long)]
     pub amount_locale: Option<String>,
@@ -710,6 +715,15 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 );
             }
 
+            if let Some(currency_col) = &args.currency_column {
+                builder = apply_column(
+                    builder,
+                    currency_col,
+                    CsvConfigBuilder::currency_column_index,
+                    |b, n| b.currency_column(n),
+                );
+            }
+
             if let Some(debit) = &args.debit_column {
                 builder = builder.debit_column(debit);
             }
@@ -1045,6 +1059,7 @@ narration_column = 1
             narration_column: Some(toml::Value::String("Description".to_string())),
             payee_column: None,
             amount_column: Some(toml::Value::String("Amount".to_string())),
+            currency_column: None,
             debit_column: None,
             credit_column: None,
             amount_locale: None,
@@ -1080,6 +1095,7 @@ narration_column = 1
             narration_column: None,
             payee_column: None,
             amount_column: None,
+            currency_column: None,
             debit_column: None,
             credit_column: None,
             amount_locale: None,
@@ -1114,6 +1130,7 @@ narration_column = 1
             narration_column: None,
             payee_column: None,
             amount_column: None,
+            currency_column: None,
             debit_column: None,
             credit_column: None,
             amount_locale: None,
@@ -1149,6 +1166,7 @@ narration_column = 1
             narration_column: Some(toml::Value::Integer(2)),
             payee_column: Some(toml::Value::String("Payee".to_string())),
             amount_column: None,
+            currency_column: None,
             debit_column: Some(toml::Value::String("Debit".to_string())),
             credit_column: Some(toml::Value::String("Credit".to_string())),
             amount_locale: None,

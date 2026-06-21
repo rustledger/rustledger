@@ -94,6 +94,8 @@ pub(super) struct ImporterEntry {
     pub(super) payee_column: Option<toml::Value>,
     /// Amount column name or index.
     pub(super) amount_column: Option<toml::Value>,
+    /// Per-row currency column name or index.
+    pub(super) currency_column: Option<toml::Value>,
     /// Debit column name or index.
     pub(super) debit_column: Option<toml::Value>,
     /// Credit column name or index.
@@ -240,6 +242,16 @@ pub(super) fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterC
             &col,
             CsvConfigBuilder::amount_column_index,
             |b, n| b.amount_column(n),
+        );
+    }
+    if let Some(ref val) = entry.currency_column
+        && let Some(col) = parse_column_value(val)
+    {
+        builder = apply_column(
+            builder,
+            &col,
+            CsvConfigBuilder::currency_column_index,
+            |b, n| b.currency_column(n),
         );
     }
     if let Some(ref val) = entry.debit_column

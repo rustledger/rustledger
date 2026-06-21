@@ -43,6 +43,8 @@ pub struct InferredCsvConfig {
     pub narration_column: Option<ColumnSpec>,
     /// Payee column (if separate from narration).
     pub payee_column: Option<ColumnSpec>,
+    /// Per-row currency column (detected from a header like "Currency"/"Ccy").
+    pub currency_column: Option<ColumnSpec>,
     /// Inferred amount locale (decimal/grouping separators). `Some(de_DE)` when
     /// the amounts look comma-decimal (e.g. `-54,23`, `2.500,00`); `None` when
     /// they look period-decimal or carry no signal (the parser defaults to
@@ -61,6 +63,7 @@ impl InferredCsvConfig {
             date_format: self.date_format.clone(),
             narration_column: self.narration_column.clone(),
             payee_column: self.payee_column.clone(),
+            currency_column: self.currency_column.clone(),
             amount_column: self.amount_column.clone(),
             debit_column: self.debit_column.clone(),
             credit_column: self.credit_column.clone(),
@@ -115,6 +118,14 @@ pub fn infer_csv_config(content: &str) -> Option<InferredCsvConfig> {
     let date_col_idx = date_col.as_ref().map(|(i, _)| *i);
     let (amount_col, debit_col, credit_col) =
         find_amount_columns(&headers, &sample, num_cols, date_col_idx);
+    // Detect the currency column first so text-column detection can exclude it
+    // (otherwise a "Currency" column could be claimed as narration/payee when no
+    // dedicated description column exists).
+    let currency_col = if has_header {
+        find_currency_column(&headers)
+    } else {
+        None
+    };
     let (narration_col, payee_col) = find_text_columns(
         &headers,
         num_cols,
@@ -122,6 +133,7 @@ pub fn infer_csv_config(content: &str) -> Option<InferredCsvConfig> {
         amount_col,
         debit_col,
         credit_col,
+        currency_col,
     );
 
     // Build result
@@ -187,6 +199,13 @@ pub fn infer_csv_config(content: &str) -> Option<InferredCsvConfig> {
         }
     });
 
+    // Build the currency ColumnSpec from the index detected above (by header
+    // name only; cell values are free-form 3-letter codes).
+    let currency_column = currency_col.map(|i| {
+        confidence += 0.05;
+        ColumnSpec::Name(headers[i].to_string())
+    });
+
     // Infer the decimal separator from the amount-bearing columns so that
     // comma-decimal exports (e.g. "-54,23", "2.500,00") parse correctly under
     // --auto instead of being read with a POSIX (period-decimal) locale.
@@ -206,9 +225,27 @@ pub fn infer_csv_config(content: &str) -> Option<InferredCsvConfig> {
         credit_column,
         narration_column,
         payee_column,
+        currency_column,
         amount_locale,
         confidence: f64::min(confidence, 1.0),
     })
+}
+
+/// Find a per-row currency column by header name (case-insensitive). Matches
+/// common spellings used by multi-currency exports; the column's values are
+/// 3-letter currency codes, so we only key off the header, never the content.
+fn find_currency_column(headers: &[&str]) -> Option<usize> {
+    const NAMES: [&str; 6] = [
+        "currency",
+        "ccy",
+        "curr",
+        "cur",
+        "currency code",
+        "ccy code",
+    ];
+    headers
+        .iter()
+        .position(|h| NAMES.contains(&h.trim().to_lowercase().as_str()))
 }
 
 /// Count the leading run of ASCII digits in `s` — i.e. the digits immediately
@@ -597,6 +634,7 @@ fn find_text_columns(
     amount_col: Option<usize>,
     debit_col: Option<usize>,
     credit_col: Option<usize>,
+    currency_col: Option<usize>,
 ) -> (Option<usize>, Option<usize>) {
     let narration_keywords = [
         "description",
@@ -617,7 +655,7 @@ fn find_text_columns(
         "recipient",
     ];
 
-    let used_cols: Vec<usize> = [date_col, amount_col, debit_col, credit_col]
+    let used_cols: Vec<usize> = [date_col, amount_col, debit_col, credit_col, currency_col]
         .iter()
         .filter_map(|c| *c)
         .collect();
@@ -814,6 +852,46 @@ Date,Description,Debit,Credit
         assert!(config.debit_column.is_some());
         assert!(config.credit_column.is_some());
         assert!(config.amount_column.is_none());
+    }
+
+    #[test]
+    fn infer_detects_currency_column() {
+        let csv = "\
+Date,Description,Amount,Currency
+2024-01-02,Coffee,-5.00,EUR
+2024-01-05,Salary,2000.00,USD
+";
+        let config = infer_csv_config(csv).expect("should infer config");
+        assert!(
+            matches!(config.currency_column, Some(ColumnSpec::Name(ref n)) if n == "Currency"),
+            "expected Currency column to be detected, got {:?}",
+            config.currency_column
+        );
+        // And it must not be misclassified as the amount column.
+        assert!(matches!(config.amount_column, Some(ColumnSpec::Name(ref n)) if n == "Amount"));
+    }
+
+    #[test]
+    fn infer_currency_column_not_stolen_as_narration() {
+        // No "Description" column: the narration fallback must NOT grab the
+        // currency column.
+        let csv = "\
+Date,Payee,Amount,Currency
+2024-01-02,Cafe,-5.00,EUR
+2024-01-05,Work,2000.00,USD
+";
+        let config = infer_csv_config(csv).expect("should infer config");
+        assert!(matches!(config.currency_column, Some(ColumnSpec::Name(ref n)) if n == "Currency"));
+        let not_currency =
+            |c: &Option<ColumnSpec>| !matches!(c, Some(ColumnSpec::Name(n)) if n == "Currency");
+        assert!(
+            not_currency(&config.narration_column),
+            "currency stolen as narration"
+        );
+        assert!(
+            not_currency(&config.payee_column),
+            "currency stolen as payee"
+        );
     }
 
     #[test]

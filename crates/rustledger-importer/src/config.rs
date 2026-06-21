@@ -49,6 +49,10 @@ pub struct CsvConfig {
     pub payee_column: Option<ColumnSpec>,
     /// The column name or index for the amount.
     pub amount_column: Option<ColumnSpec>,
+    /// The column name or index for a per-row currency code. When set, each
+    /// row's currency is read from this column (falling back to the config
+    /// default currency / USD when the cell is blank).
+    pub currency_column: Option<ColumnSpec>,
     /// Amount locale, see <https://docs.rs/format_num_pattern/latest/format_num_pattern/index.html>
     pub amount_locale: Option<Locale>,
     /// Amount format, see <https://docs.rs/format_num_pattern/latest/format_num_pattern/index.html>
@@ -97,6 +101,7 @@ impl Default for CsvConfig {
             narration_column: Some(ColumnSpec::Name("Description".to_string())),
             payee_column: None,
             amount_column: Some(ColumnSpec::Name("Amount".to_string())),
+            currency_column: None,
             amount_locale: Some(Locale::POSIX),
             amount_format: None,
             debit_column: None,
@@ -363,6 +368,18 @@ impl CsvConfigBuilder {
     /// Set the amount column by index.
     pub fn amount_column_index(mut self, index: usize) -> Self {
         self.config.amount_column = Some(ColumnSpec::Index(index));
+        self
+    }
+
+    /// Set the per-row currency column by name.
+    pub fn currency_column(mut self, name: impl Into<String>) -> Self {
+        self.config.currency_column = Some(ColumnSpec::Name(name.into()));
+        self
+    }
+
+    /// Set the per-row currency column by index.
+    pub fn currency_column_index(mut self, index: usize) -> Self {
+        self.config.currency_column = Some(ColumnSpec::Index(index));
         self
     }
 

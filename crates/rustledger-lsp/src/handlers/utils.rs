@@ -6,6 +6,20 @@
 use lsp_types::{Position, Range};
 use rustledger_parser::ParseResult;
 
+/// Trim a directive span's end offset back over trailing whitespace.
+///
+/// A directive's parser span runs up to the *start of the next directive*, so
+/// it swallows any trailing blank lines. Mapping that raw end to a `Position`
+/// makes ranges (folding, document symbols, …) overshoot into the following
+/// directive. This returns the offset just past the directive's last
+/// non-whitespace byte, so the range ends at the directive's real content.
+pub(crate) fn trim_span_end(source: &str, end: usize) -> usize {
+    let clamped = end.min(source.len());
+    source
+        .get(..clamped)
+        .map_or(clamped, |s| s.trim_end().len())
+}
+
 /// Whether two LSP `Range`s overlap, using LSP half-open semantics
 /// (`Range.end` is EXCLUSIVE per the spec).
 ///

@@ -9,7 +9,7 @@ use lsp_types::{FoldingRange, FoldingRangeKind, FoldingRangeParams};
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 
-use super::utils::{LineIndex, PositionEncoding};
+use super::utils::{LineIndex, PositionEncoding, trim_span_end};
 
 /// Handle a folding range request.
 pub fn handle_folding_ranges(
@@ -29,7 +29,10 @@ pub fn handle_folding_ranges(
             && !txn.postings.is_empty()
         {
             let (start_line, _) = line_index.offset_to_position(spanned.span.start);
-            let (end_line, _) = line_index.offset_to_position(spanned.span.end);
+            // Trim the span end so the fold doesn't swallow trailing blank
+            // lines and the next directive's header (which made folds overlap).
+            let (end_line, _) =
+                line_index.offset_to_position(trim_span_end(source, spanned.span.end));
 
             // Only fold if spans multiple lines
             if end_line > start_line {
@@ -230,6 +233,30 @@ mod tests {
         // Transaction should fold from line 0 to line 2
         let txn_fold = ranges.iter().find(|r| r.start_line == 0);
         assert!(txn_fold.is_some());
+    }
+
+    #[test]
+    fn test_folding_does_not_overshoot_into_next_directive() {
+        // Two transactions separated by blank lines. The first fold must end at
+        // its last posting (line 2), NOT extend across the blanks into T2's
+        // header (line 5) — which would make folds overlap and hide T2.
+        let source = "2024-01-15 * \"T1\"\n  Assets:Bank  -5 USD\n  Expenses:Food  5 USD\n\n\n2024-01-20 * \"T2\"\n  Assets:Bank  -3 USD\n  Expenses:Food  3 USD\n";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "no parse errors");
+        let params = FoldingRangeParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let ranges =
+            handle_folding_ranges(&params, source, &result, PositionEncoding::Utf16).unwrap();
+        let t1 = ranges.iter().find(|r| r.start_line == 0).expect("T1 fold");
+        assert_eq!(
+            t1.end_line, 2,
+            "T1 fold must end at its last posting, not overshoot"
+        );
     }
 
     #[test]

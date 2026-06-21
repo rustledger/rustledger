@@ -12,7 +12,7 @@ use lsp_types::{
 use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 
-use super::utils::{LineIndex, PositionEncoding};
+use super::utils::{LineIndex, PositionEncoding, trim_span_end};
 
 /// Handle a document symbols request.
 pub fn handle_document_symbols(
@@ -31,7 +31,10 @@ pub fn handle_document_symbols(
             directive_to_symbol(
                 &spanned.value,
                 spanned.span.start,
-                spanned.span.end,
+                // Trim trailing whitespace so a symbol's range ends at its own
+                // content, not at the next directive (which made sibling symbol
+                // ranges overlap and broke editor breadcrumb/enclosing logic).
+                trim_span_end(source, spanned.span.end),
                 &line_index,
             )
         })
@@ -297,5 +300,36 @@ mod tests {
         if let Some(DocumentSymbolResponse::Nested(symbols)) = response {
             assert_eq!(symbols.len(), 2); // open + transaction
         }
+    }
+
+    #[test]
+    fn test_document_symbol_ranges_do_not_overlap() {
+        // Two transactions separated by blank lines. Each symbol's range must
+        // end at its own content, not extend into the next directive — else
+        // sibling ranges overlap and break editor breadcrumb/enclosing logic.
+        let source = "2024-01-15 * \"T1\"\n  Assets:Bank  -5 USD\n  Expenses:Food  5 USD\n\n\n2024-01-20 * \"T2\"\n  Assets:Bank  -3 USD\n  Expenses:Food  3 USD\n";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "no parse errors");
+        let params = DocumentSymbolParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let Some(DocumentSymbolResponse::Nested(symbols)) =
+            handle_document_symbols(&params, source, &result, PositionEncoding::Utf16)
+        else {
+            panic!("expected nested symbols");
+        };
+        assert_eq!(symbols.len(), 2);
+        // T1's range must end before T2's range starts (line 5 is T2's header).
+        assert!(
+            symbols[0].range.end.line < symbols[1].range.start.line,
+            "T1 symbol range {:?} overlaps T2 {:?}",
+            symbols[0].range,
+            symbols[1].range
+        );
+        assert_eq!(symbols[0].range.end.line, 2, "T1 ends at its last posting");
     }
 }

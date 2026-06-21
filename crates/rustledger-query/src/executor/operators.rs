@@ -163,7 +163,7 @@ impl Executor<'_> {
                             .map(Value::Date)
                             .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
                     }
-                    _ => self.arithmetic_op(&left, &right, |a, b| a + b),
+                    _ => self.arithmetic_op(&left, &right, |a, b| Some(a + b)),
                 }
             }
             BinaryOperator::Sub => {
@@ -179,12 +179,12 @@ impl Executor<'_> {
                             .map(Value::Date)
                             .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
                     }
-                    _ => self.arithmetic_op(&left, &right, |a, b| a - b),
+                    _ => self.arithmetic_op(&left, &right, |a, b| Some(a - b)),
                 }
             }
-            BinaryOperator::Mul => self.arithmetic_op(&left, &right, |a, b| a * b),
-            BinaryOperator::Div => self.arithmetic_op(&left, &right, |a, b| a / b),
-            BinaryOperator::Mod => self.arithmetic_op(&left, &right, |a, b| a % b),
+            BinaryOperator::Mul => self.arithmetic_op(&left, &right, |a, b| Some(a * b)),
+            BinaryOperator::Div => self.arithmetic_op(&left, &right, Decimal::checked_div),
+            BinaryOperator::Mod => self.arithmetic_op(&left, &right, Decimal::checked_rem),
         }
     }
 
@@ -281,7 +281,7 @@ impl Executor<'_> {
         op: F,
     ) -> Result<Value, QueryError>
     where
-        F: FnOnce(Decimal, Decimal) -> Decimal,
+        F: FnOnce(Decimal, Decimal) -> Option<Decimal>,
     {
         let (a, b) = match (left, right) {
             (Value::Number(a), Value::Number(b)) => (*a, *b),
@@ -294,7 +294,11 @@ impl Executor<'_> {
                 ));
             }
         };
-        Ok(Value::Number(op(a, b)))
+        // `op` returns `None` for undefined results (e.g. division/modulo by
+        // zero, where `checked_div`/`checked_rem` yield `None`). Match
+        // beanquery, which produces NULL rather than raising — and crucially
+        // avoid the underlying `rust_decimal` panic on `a / 0`.
+        Ok(op(a, b).map_or(Value::Null, Value::Number))
     }
 
     /// Convert a value to boolean using SQL/beanquery truthiness rules.
@@ -460,7 +464,7 @@ impl Executor<'_> {
                             .map(Value::Date)
                             .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
                     }
-                    _ => self.arithmetic_op(left, right, |a, b| a + b),
+                    _ => self.arithmetic_op(left, right, |a, b| Some(a + b)),
                 }
             }
             BinaryOperator::Sub => {
@@ -476,12 +480,12 @@ impl Executor<'_> {
                             .map(Value::Date)
                             .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
                     }
-                    _ => self.arithmetic_op(left, right, |a, b| a - b),
+                    _ => self.arithmetic_op(left, right, |a, b| Some(a - b)),
                 }
             }
-            BinaryOperator::Mul => self.arithmetic_op(left, right, |a, b| a * b),
-            BinaryOperator::Div => self.arithmetic_op(left, right, |a, b| a / b),
-            BinaryOperator::Mod => self.arithmetic_op(left, right, |a, b| a % b),
+            BinaryOperator::Mul => self.arithmetic_op(left, right, |a, b| Some(a * b)),
+            BinaryOperator::Div => self.arithmetic_op(left, right, Decimal::checked_div),
+            BinaryOperator::Mod => self.arithmetic_op(left, right, Decimal::checked_rem),
         }
     }
 

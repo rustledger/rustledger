@@ -244,6 +244,32 @@ fn test_execute_select_with_filter() {
 }
 
 #[test]
+fn test_division_by_zero_returns_null_not_panic() {
+    let directives = make_test_directives();
+    // Division / modulo by zero must yield NULL (matching beanquery), not panic
+    // the process via rust_decimal's `a / 0`.
+    for q in [
+        "SELECT 1 / 0",
+        "SELECT 5 % 0",
+        "SELECT 1.0 / 0",
+        "SELECT 7 % 0",
+    ] {
+        let result = execute_query(q, &directives);
+        assert!(!result.rows.is_empty(), "query {q} returned no rows");
+        for row in &result.rows {
+            assert!(
+                matches!(row[0], Value::Null),
+                "{q}: expected NULL, got {:?}",
+                row[0]
+            );
+        }
+    }
+    // Non-zero division still computes a value.
+    let result = execute_query("SELECT 10 / 4", &directives);
+    assert!(matches!(result.rows[0][0], Value::Number(_)));
+}
+
+#[test]
 fn test_execute_select_with_date_filter() {
     let directives = make_test_directives();
     let result = execute_query(

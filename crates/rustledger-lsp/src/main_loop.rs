@@ -358,7 +358,9 @@ impl MainLoopState {
                     lsp_server::Response::new_err(
                         task_result.request_id,
                         CONTENT_MODIFIED,
-                        "content modified".to_string(),
+                        "document changed while the request was in flight; \
+                         re-request for up-to-date results"
+                            .to_string(),
                     )
                 } else {
                     match task_result.result {
@@ -449,9 +451,12 @@ impl MainLoopState {
                     "Result for request {:?} is stale (revision changed); replying ContentModified",
                     request_id
                 );
+                // `result` is unused on the `content_modified` path (the
+                // consumer emits a ContentModified error), but use `Err` so the
+                // value never reads as a success if future code forgets the flag.
                 let _ = task_sender.send(TaskResult {
                     request_id,
-                    result: Ok(serde_json::Value::Null),
+                    result: Err("stale result (content modified)".to_string()),
                     content_modified: true,
                 });
                 return;

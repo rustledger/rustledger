@@ -1129,6 +1129,10 @@ fn async_request_invalidated_by_edit_still_gets_a_response() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let resp = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for a response to the async request — it was likely dropped (the bug)"
+        );
         let msg = client
             .recv_with_timeout(remaining)
             .expect("no response for the async request — it was dropped (the bug)");

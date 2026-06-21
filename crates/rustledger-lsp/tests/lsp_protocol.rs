@@ -1200,3 +1200,71 @@ fn workspace_symbol_finds_symbols_in_unopened_included_files() {
         symbols.iter().map(|s| &s.name).collect::<Vec<_>>()
     );
 }
+
+/// Regression: renaming an account used across `include`d files must produce
+/// edits for ALL files, not just the open one — otherwise the rename leaves
+/// dangling references in the other files and corrupts the ledger.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::mutable_key_type)] // Uri keys in the WorkspaceEdit changes map are safe to read
+fn rename_account_spans_included_files() {
+    use lsp_types::request::Rename;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let journal_path = tmp.path().join("journal.beancount");
+    let main_path = tmp.path().join("main.beancount");
+    let inc_path = tmp.path().join("inc.beancount");
+    // main opens Assets:Bank; inc uses it in a posting.
+    std::fs::write(&main_path, "2024-01-01 open Assets:Bank USD\n").expect("write main");
+    std::fs::write(
+        &inc_path,
+        "2024-01-01 open Expenses:Food USD\n\
+         2024-02-01 * \"x\"\n  Assets:Bank  -5 USD\n  Expenses:Food  5 USD\n",
+    )
+    .expect("write inc");
+    std::fs::write(
+        &journal_path,
+        format!(
+            "include \"{}\"\ninclude \"{}\"\n",
+            main_path.display(),
+            inc_path.display()
+        ),
+    )
+    .expect("write journal");
+
+    let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
+    client.initialize();
+    let main_uri = format!("file://{}", main_path.display());
+    client.open_document(
+        &main_uri,
+        &std::fs::read_to_string(&main_path).expect("read main"),
+    );
+
+    // Rename `Assets:Bank` (col 16 on line 0 of main) -> `Assets:Checking`.
+    let edit: Option<lsp_types::WorkspaceEdit> =
+        client.request::<Rename>(lsp_types::RenameParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: main_uri.parse().unwrap(),
+                },
+                position: lsp_types::Position::new(0, 16),
+            },
+            new_name: "Assets:Checking".to_string(),
+            work_done_progress_params: Default::default(),
+        });
+
+    let changes = edit
+        .expect("rename returned an edit")
+        .changes
+        .expect("workspace edit has per-file changes");
+    let inc_uri = format!("file://{}", inc_path.display());
+    let edited_uris: Vec<&str> = changes.keys().map(|u| u.as_str()).collect();
+    assert!(
+        changes.keys().any(|u| u.as_str() == main_uri),
+        "rename must edit the open file; edited: {edited_uris:?}"
+    );
+    assert!(
+        changes.keys().any(|u| u.as_str() == inc_uri),
+        "rename must also edit the included file (cross-file usage); edited: {edited_uris:?}"
+    );
+}

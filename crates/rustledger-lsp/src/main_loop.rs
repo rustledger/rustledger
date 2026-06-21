@@ -952,7 +952,22 @@ impl MainLoopState {
         let uri = &params.text_document_position.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_rename(&params, &text, &parse_result, self.position_encoding);
+        // Ledger state so the rename spans every `include`d file, not just the
+        // open buffer (otherwise references in other files are left dangling).
+        let ledger_guard = self.ledger_state.read();
+        let ledger_state = if ledger_guard.ledger().is_some() {
+            Some(&*ledger_guard)
+        } else {
+            None
+        };
+
+        let response = handle_rename(
+            &params,
+            &text,
+            &parse_result,
+            ledger_state,
+            self.position_encoding,
+        );
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }

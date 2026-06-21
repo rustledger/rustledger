@@ -40,12 +40,22 @@ use lsp_types::{
     Position, PrepareRenameResponse, Range, RenameParams, TextDocumentPositionParams, TextEdit,
     WorkspaceEdit,
 };
-use rustledger_parser::ParseResult;
+use rustledger_parser::{ParseResult, parse};
 use std::collections::HashMap;
+
+use crate::ledger_state::LedgerState;
+use crate::uri_to_path;
 
 use super::utils::{
     LineIndex, PositionEncoding, get_word_at_position, is_account_like, is_currency_like,
 };
+
+/// Which kind of symbol is being renamed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenameKind {
+    Account,
+    Currency,
+}
 
 /// Handle a prepare rename request (check if rename is valid at position).
 ///
@@ -107,6 +117,7 @@ pub fn handle_rename(
     params: &RenameParams,
     source: &str,
     parse_result: &ParseResult,
+    ledger_state: Option<&LedgerState>,
     encoding: PositionEncoding,
 ) -> Option<WorkspaceEdit> {
     let position = params.text_document_position.position;
@@ -120,25 +131,12 @@ pub fn handle_rename(
     // Get the word at the cursor position
     let (old_name, _, _) = get_word_at_position(line, position.character as usize, encoding)?;
 
-    // Collect all edits
-    let mut edits = Vec::new();
-    // Build the line index once and share across collectors. The
-    // previous code went through `byte_offset_to_position`, which is
-    // O(n) per call (linear scan from byte 0); for a large ledger
-    // with many account / currency occurrences, that scaled
-    // quadratically with file size.
-    let line_index = LineIndex::new(source, encoding);
-
-    // Account vs currency dispatch via the parser's occurrence
-    // indices, not the legacy is_account_like hardcoded English
-    // root-name check. The index gate works for any account the
-    // lexer produced (including Unicode-prefix names like
-    // `Vermögen:Bank` when the user has
-    // `option "name_assets" "Vermögen"`), AND it's free - we walk
-    // the same index a second time inside collect_*_rename_edits
-    // anyway. The legacy is_account_like / is_currency_like
-    // helpers stay in place for prepare_rename which has no
-    // ParseResult at hand.
+    // Determine the symbol kind ONCE from the current file's occurrence
+    // indices (account vs currency), preserving the original precedence:
+    // known-account > known-currency > account-shaped > currency-shaped.
+    // The cursor sits on `old_name` in the current file, so its occurrence
+    // index classifies it. The legacy is_account_like / is_currency_like
+    // helpers stay in place for prepare_rename which has no ParseResult.
     let is_known_account = parse_result
         .account_occurrences
         .iter()
@@ -147,27 +145,70 @@ pub fn handle_rename(
         .currency_occurrences
         .iter()
         .any(|o| o.value == old_name);
-    if is_known_account {
-        collect_account_rename_edits(parse_result, &line_index, &old_name, new_name, &mut edits);
+    let kind = if is_known_account {
+        RenameKind::Account
     } else if is_known_currency {
-        collect_currency_rename_edits(parse_result, &line_index, &old_name, new_name, &mut edits);
+        RenameKind::Currency
     } else if is_account_like(&old_name) {
-        // Word looks account-shaped but the parser never produced
-        // an ACCOUNT token for it - probably a typo mid-edit, or
-        // a fragment from a broken directive. Walk the (empty)
-        // index anyway so a future contributor can drop this
-        // branch when prepare_rename's gate also uses the index.
-        collect_account_rename_edits(parse_result, &line_index, &old_name, new_name, &mut edits);
+        RenameKind::Account
     } else if is_currency_like(&old_name, parse_result) {
-        collect_currency_rename_edits(parse_result, &line_index, &old_name, new_name, &mut edits);
+        RenameKind::Currency
+    } else {
+        return None;
+    };
+
+    // Build the edits for ONE file (its own source + parse) — reused for the
+    // current buffer (live source) and for every other ledger file.
+    let collect = |pr: &ParseResult, src: &str| -> Vec<TextEdit> {
+        let idx = LineIndex::new(src, encoding);
+        let mut edits = Vec::new();
+        match kind {
+            RenameKind::Account => {
+                collect_account_rename_edits(pr, &idx, &old_name, new_name, &mut edits);
+            }
+            RenameKind::Currency => {
+                collect_currency_rename_edits(pr, &idx, &old_name, new_name, &mut edits);
+            }
+        }
+        edits
+    };
+
+    let mut changes: HashMap<lsp_types::Uri, Vec<TextEdit>> = HashMap::new();
+
+    // Current buffer (live source — reflects unsaved edits).
+    let current_edits = collect(parse_result, source);
+    if !current_edits.is_empty() {
+        changes.insert(uri.clone(), current_edits);
     }
 
-    if edits.is_empty() {
+    // Every OTHER file in the loaded ledger (reachable via `include`): rename
+    // the symbol there too, so a multi-file ledger isn't left with dangling
+    // references to the old name. Without this, renaming an account used across
+    // includes corrupted the ledger.
+    if let Some(ls) = ledger_state
+        && let Some(ledger) = ls.ledger()
+    {
+        let current_canonical = uri_to_path(&uri).and_then(|p| p.canonicalize().ok());
+        for f in ledger.source_map.files() {
+            if let Ok(c) = f.path.canonicalize()
+                && current_canonical.as_deref() == Some(c.as_path())
+            {
+                continue; // current file already handled with its live source
+            }
+            let Ok(f_uri) = format!("file://{}", f.path.display()).parse::<lsp_types::Uri>() else {
+                continue;
+            };
+            let f_parse = parse(&f.source);
+            let f_edits = collect(&f_parse, &f.source);
+            if !f_edits.is_empty() {
+                changes.insert(f_uri, f_edits);
+            }
+        }
+    }
+
+    if changes.is_empty() {
         return None;
     }
-
-    let mut changes = HashMap::new();
-    changes.insert(uri, edits);
 
     Some(WorkspaceEdit {
         changes: Some(changes),
@@ -328,7 +369,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let edit = handle_rename(&params, source, &result, PositionEncoding::Utf16);
+        let edit = handle_rename(&params, source, &result, None, PositionEncoding::Utf16);
         assert!(edit.is_some());
 
         let edit = edit.unwrap();
@@ -385,7 +426,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let edit = handle_rename(&params, source, &result, PositionEncoding::Utf16)
+        let edit = handle_rename(&params, source, &result, None, PositionEncoding::Utf16)
             .expect("rename returns edit");
         let changes = edit.changes.expect("edit has changes");
         let edits = changes.values().next().expect("at least one file");
@@ -453,7 +494,7 @@ mod tests {
             new_name: "Assets:Checking".to_string(),
             work_done_progress_params: Default::default(),
         };
-        let edit = handle_rename(&params, source, &result, PositionEncoding::Utf16)
+        let edit = handle_rename(&params, source, &result, None, PositionEncoding::Utf16)
             .expect("rename returns edit");
         let changes = edit.changes.expect("edit has changes");
         let edits = changes.values().next().expect("at least one file");

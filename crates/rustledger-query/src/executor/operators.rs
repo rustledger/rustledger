@@ -492,9 +492,13 @@ impl Executor<'_> {
         right: &Value,
     ) -> std::cmp::Ordering {
         match (left, right) {
+            // NULL sorts as the smallest value, matching beanquery: ORDER BY ...
+            // ASC places NULLs first, DESC (via the caller's `.reverse()`) places
+            // them last. (`SELECT payee ORDER BY payee` on a payee-less txn now
+            // matches bean-query.)
             (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
-            (Value::Null, _) => std::cmp::Ordering::Greater, // Nulls sort last
-            (_, Value::Null) => std::cmp::Ordering::Less,
+            (Value::Null, _) => std::cmp::Ordering::Less,
+            (_, Value::Null) => std::cmp::Ordering::Greater,
             (Value::Number(a), Value::Number(b)) => a.cmp(b),
             (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
             (Value::Number(a), Value::Integer(b)) => a.cmp(&Decimal::from(*b)),

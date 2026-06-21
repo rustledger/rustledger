@@ -10109,9 +10109,9 @@ fn test_boolean_and_null_literals_in_expressions() {
     let directives = make_test_directives();
     // TRUE/FALSE/NULL must parse as literals in expression position; the bare
     // column parser used to shadow them, yielding "column not found".
-    let total = match execute_query("SELECT count(*)", &directives).rows[0][0] {
-        Value::Integer(n) => n,
-        ref v => panic!("expected integer count, got {v:?}"),
+    let total = match &execute_query("SELECT count(*)", &directives).rows[0][0] {
+        Value::Integer(n) => *n,
+        v => panic!("expected integer count, got {v:?}"),
     };
     assert_eq!(
         execute_query("SELECT count(*) WHERE TRUE", &directives).rows[0][0],

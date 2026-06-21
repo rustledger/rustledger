@@ -532,7 +532,7 @@ fn function_completions() -> Vec<Completion> {
         function("MONTH(", "Extract month"),
         function("DAY(", "Extract day"),
         function("QUARTER(", "Extract quarter"),
-        function("WEEKDAY(", "Day of week (0=Mon)"),
+        function("WEEKDAY(", "Day-of-week name (Mon..Sun)"),
         function("YMONTH(", "Year-month format"),
         function("TODAY()", "Current date"),
         // String functions

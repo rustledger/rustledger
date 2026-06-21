@@ -44,8 +44,8 @@ impl Executor<'_> {
             "YEAR" => Ok(Value::Integer(date.year().into())),
             "MONTH" => Ok(Value::Integer(date.month().into())),
             "DAY" => Ok(Value::Integer(date.day().into())),
-            "WEEKDAY" => Ok(Value::Integer(
-                (date.weekday().to_monday_zero_offset() as u32).into(),
+            "WEEKDAY" => Ok(Value::String(
+                super::weekday_abbrev(date.weekday().to_monday_zero_offset() as u32).to_string(),
             )),
             "QUARTER" => {
                 let quarter = (date.month() - 1) / 3 + 1;

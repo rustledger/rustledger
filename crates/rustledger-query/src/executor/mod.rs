@@ -1271,8 +1271,9 @@ impl<'a> Executor<'a> {
             "WEEKDAY" => {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
-                    Value::Date(d) => Ok(Value::Integer(
-                        (d.weekday().to_monday_zero_offset() as u32).into(),
+                    Value::Date(d) => Ok(Value::String(
+                        functions::weekday_abbrev(d.weekday().to_monday_zero_offset() as u32)
+                            .to_string(),
                     )),
                     _ => Err(QueryError::Type("WEEKDAY expects a date".to_string())),
                 }

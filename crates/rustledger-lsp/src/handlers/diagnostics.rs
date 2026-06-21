@@ -372,7 +372,7 @@ pub fn validation_errors_to_diagnostics(
     result.extend(
         filtered_errors
             .iter()
-            .map(|e| validation_error_to_diagnostic(e, &line_index)),
+            .map(|e| validation_error_to_diagnostic(e, source, &line_index)),
     );
     result
 }
@@ -380,12 +380,22 @@ pub fn validation_errors_to_diagnostics(
 /// Convert a single validation error to an LSP diagnostic.
 pub fn validation_error_to_diagnostic(
     error: &ValidationError,
+    source: &str,
     line_index: &LineIndex,
 ) -> Diagnostic {
     // Get position from span if available, otherwise use start of file
     let (start_line, start_col, end_line, end_col, has_location) = if let Some(span) = &error.span {
         let (sl, sc) = line_index.offset_to_position(span.start);
-        let (el, ec) = line_index.offset_to_position(span.end);
+        // A directive's span runs up to the start of the *next* directive, so
+        // it swallows any trailing blank lines and would draw the squiggle
+        // across unrelated lines (e.g. an unbalanced-transaction diagnostic
+        // bleeding into the following directive). Trim trailing whitespace so
+        // the range ends at the directive's last non-blank character.
+        let clamped_end = span.end.min(source.len());
+        let end = source
+            .get(span.start..clamped_end)
+            .map_or(clamped_end, |s| span.start + s.trim_end().len());
+        let (el, ec) = line_index.offset_to_position(end);
         (sl, sc, el, ec, true)
     } else {
         // No span available - put at start of file and note in message
@@ -961,6 +971,48 @@ mod tests {
             error_diagnostics.is_empty(),
             "Valid file should have no ERROR diagnostics, but got: {:?}",
             error_codes
+        );
+    }
+
+    #[test]
+    fn test_unbalanced_diagnostic_range_does_not_overshoot() {
+        // The unbalanced transaction (lines 3-5) is followed by a blank line
+        // and an unrelated `open`. Its diagnostic range must end at the last
+        // posting, not bleed across the blank line into the next directive.
+        // Note: real newlines (no `\`-continuation, which would strip the
+        // postings' leading indentation and break parsing).
+        let source = "\
+2024-01-01 open Assets:Bank USD
+2024-01-01 open Expenses:Food USD
+
+2024-02-01 * \"x\"
+  Assets:Bank 10 USD
+  Expenses:Food -9 USD
+
+2024-03-01 open Equity:X USD
+";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "no parse errors");
+        let diagnostics = all_diagnostics(
+            &result,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let bal = diagnostics
+            .iter()
+            .find(|d| get_code(d) == "E3001")
+            .expect("expected an E3001 unbalanced-transaction diagnostic");
+        assert_eq!(bal.range.start.line, 3, "starts at the transaction header");
+        // Last posting is line 5 (0-based); the blank line 6 and the next
+        // directive on line 7 must NOT be covered.
+        assert!(
+            bal.range.end.line <= 5,
+            "range overshot past the last posting: end line {}",
+            bal.range.end.line
         );
     }
 

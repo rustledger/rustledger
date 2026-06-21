@@ -888,23 +888,41 @@ impl MainLoopState {
             .paths()
             .filter_map(|p| p.canonicalize().ok())
             .collect();
-        let ledger_guard = self.ledger_state.read();
-        if let Some(ledger) = ledger_guard.ledger() {
-            for f in ledger.source_map.files() {
-                if let Ok(c) = f.path.canonicalize()
-                    && open_canonical.contains(&c)
-                {
-                    continue;
-                }
-                let Ok(uri) = format!("file://{}", f.path.display()).parse::<Uri>() else {
-                    continue;
-                };
-                let source = f.source.to_string();
-                let parsed = Arc::new(parse(&source));
-                documents.push((uri, source, parsed));
-            }
+        // Collect the unopened ledger files' (uri, source) UNDER the lock, then
+        // drop the guard before parsing — re-parsing a large ledger while
+        // holding the state read-lock would block journal reloads.
+        let unopened: Vec<(Uri, String)> = {
+            let ledger_guard = self.ledger_state.read();
+            ledger_guard.ledger().map_or_else(Vec::new, |ledger| {
+                ledger
+                    .source_map
+                    .files()
+                    .iter()
+                    .filter(|f| {
+                        f.path
+                            .canonicalize()
+                            .ok()
+                            .is_none_or(|c| !open_canonical.contains(&c))
+                    })
+                    .filter_map(|f| {
+                        match format!("file://{}", f.path.display()).parse::<Uri>() {
+                            Ok(uri) => Some((uri, f.source.to_string())),
+                            Err(_) => {
+                                tracing::warn!(
+                                    "workspace/symbol: skipping ledger file with a non-file:// URI: {}",
+                                    f.path.display()
+                                );
+                                None
+                            }
+                        }
+                    })
+                    .collect()
+            })
+        };
+        for (uri, source) in unopened {
+            let parsed = Arc::new(parse(&source));
+            documents.push((uri, source, parsed));
         }
-        drop(ledger_guard);
 
         let response = handle_workspace_symbols(&params, &documents, self.position_encoding);
 

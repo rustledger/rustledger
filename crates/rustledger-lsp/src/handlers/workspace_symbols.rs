@@ -47,6 +47,34 @@ pub fn handle_workspace_symbols(
     }
 }
 
+/// Find the exact source range of a symbol via the parser's token-occurrence
+/// index (`account_occurrences` / `currency_occurrences`), restricted to the
+/// directive's span. This is token-precise: unlike a substring search, it won't
+/// anchor a currency `USD` to the `USD` inside an account like `Assets:USD:Bank`.
+/// Returns `None` when no matching token occurrence falls inside the directive
+/// (e.g. payees, which have no occurrence index), so the caller can fall back.
+fn token_location<T: AsRef<str>>(
+    occurrences: &[rustledger_parser::Spanned<T>],
+    name: &str,
+    dir_start: usize,
+    dir_end: usize,
+    line_index: &LineIndex,
+    uri: &Uri,
+) -> Option<Location> {
+    let occ = occurrences
+        .iter()
+        .find(|o| o.value.as_ref() == name && o.span.start >= dir_start && o.span.end <= dir_end)?;
+    let (sl, sc) = line_index.offset_to_position(occ.span.start);
+    let (el, ec) = line_index.offset_to_position(occ.span.end);
+    Some(Location {
+        uri: uri.clone(),
+        range: Range {
+            start: Position::new(sl, sc),
+            end: Position::new(el, ec),
+        },
+    })
+}
+
 /// Collect symbols from a single document.
 #[allow(deprecated)] // SymbolInformation::deprecated field is deprecated but required
 #[allow(clippy::too_many_arguments)]
@@ -93,7 +121,15 @@ fn collect_symbols_from_document(
                         kind: SymbolKind::CLASS,
                         tags: None,
                         deprecated: None,
-                        location: locate(&account),
+                        location: token_location(
+                            &parse_result.account_occurrences,
+                            &account,
+                            dir_span.start,
+                            dir_span.end,
+                            &line_index,
+                            uri,
+                        )
+                        .unwrap_or_else(|| locate(&account)),
                         container_name: Some("Accounts".to_string()),
                     });
                     seen_accounts.insert(account);
@@ -110,7 +146,15 @@ fn collect_symbols_from_document(
                             kind: SymbolKind::CONSTANT,
                             tags: None,
                             deprecated: None,
-                            location: locate(&curr_str),
+                            location: token_location(
+                                &parse_result.currency_occurrences,
+                                &curr_str,
+                                dir_span.start,
+                                dir_span.end,
+                                &line_index,
+                                uri,
+                            )
+                            .unwrap_or_else(|| locate(&curr_str)),
                             container_name: Some("Currencies".to_string()),
                         });
                         seen_currencies.insert(curr_str);
@@ -128,7 +172,15 @@ fn collect_symbols_from_document(
                         kind: SymbolKind::CONSTANT,
                         tags: None,
                         deprecated: None,
-                        location: locate(&curr),
+                        location: token_location(
+                            &parse_result.currency_occurrences,
+                            &curr,
+                            dir_span.start,
+                            dir_span.end,
+                            &line_index,
+                            uri,
+                        )
+                        .unwrap_or_else(|| locate(&curr)),
                         container_name: Some("Currencies".to_string()),
                     });
                     seen_currencies.insert(curr);

@@ -280,13 +280,13 @@ impl Executor<'_> {
 
         let second_arg = self.evaluate_expr(&func.args[1], ctx)?;
         let result = match second_arg {
-            Value::Integer(days) => date.checked_add(jiff::ToSpan::days(days)).unwrap(),
+            Value::Integer(days) => add_days(date, days)?,
             Value::Number(n) => {
                 use rust_decimal::prelude::ToPrimitive;
                 let days = n.to_i64().ok_or_else(|| {
                     QueryError::Type("DATE_ADD: days must be an integer".to_string())
                 })?;
-                date.checked_add(jiff::ToSpan::days(days)).unwrap()
+                add_days(date, days)?
             }
             Value::Interval(interval) => interval
                 .add_to_date(date)
@@ -558,4 +558,20 @@ impl Executor<'_> {
 
         Ok(Value::Date(binned))
     }
+}
+
+/// Add `days` to `date`, returning a graceful error instead of panicking when
+/// `days` is out of range.
+///
+/// `jiff::ToSpan::days` panics while *constructing* the span if the count is
+/// outside jiff's representable range (≈ ±7.3M days), so the previous
+/// `date.checked_add(days.days()).unwrap()` aborted the process on a large
+/// offset. Build the span fallibly and propagate overflow as a `QueryError`
+/// (beanquery raises a catchable `OverflowError` here).
+fn add_days(date: NaiveDate, days: i64) -> Result<NaiveDate, QueryError> {
+    let span = jiff::Span::new()
+        .try_days(days)
+        .map_err(|_| QueryError::Evaluation("DATE_ADD: day offset out of range".to_string()))?;
+    date.checked_add(span)
+        .map_err(|_| QueryError::Evaluation("DATE_ADD: resulting date out of range".to_string()))
 }

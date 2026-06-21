@@ -10031,3 +10031,15 @@ fn test_getprice_two_arg_returns_latest_price() {
         );
     }
 }
+
+#[test]
+fn test_date_add_large_offset_errors_gracefully() {
+    let directives = make_test_directives();
+    // A day offset beyond jiff's representable range must produce a graceful
+    // QueryError, not panic the process (was: ToSpan::days().unwrap() aborted).
+    let _err = execute_query_err("SELECT date_add(date, 99999999999)", &directives);
+    let _err = execute_query_err("SELECT date_add(date, -99999999999)", &directives);
+    // Ordinary offsets still compute a date.
+    let result = execute_query("SELECT date_add(date, 5)", &directives);
+    assert!(matches!(result.rows[0][0], Value::Date(_)));
+}

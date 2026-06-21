@@ -196,8 +196,15 @@ impl AmountFormat {
         // parsing (locale, parens, trailing-minus) for the remainder.
         let upper = trimmed.to_ascii_uppercase();
         for (suffix, negative) in [("DR", true), ("CR", false)] {
+            // Only treat DR/CR as the accounting marker when it stands alone —
+            // i.e. the char before it is a digit or whitespace. This avoids
+            // misreading a currency code that happens to end in those letters
+            // (e.g. "100 XDR", "100 SCR") as a debit/credit and flipping its sign.
             if let Some(stripped) = upper.strip_suffix(suffix)
-                && !stripped.trim_end().is_empty()
+                && stripped
+                    .chars()
+                    .last()
+                    .is_some_and(|c| c.is_ascii_digit() || c.is_whitespace())
             {
                 let body = &trimmed[..trimmed.len() - suffix.len()];
                 let magnitude = self.parse(body)?.abs();
@@ -892,8 +899,12 @@ mod tests {
             f.parse("-5.00 DR").unwrap(),
             Decimal::from_str("-5.00").unwrap()
         );
-        // A trailing currency-like token that merely ends in "CR"/"DR" letters
-        // but isn't the marker still parses its numeric part; bare markers fail.
+        // A currency code that merely ends in DR/CR letters (preceded by a
+        // letter, not a digit/space) is NOT the marker — it parses positive,
+        // not sign-flipped. e.g. XDR (IMF SDR), SCR (Seychelles rupee).
+        assert_eq!(f.parse("100 XDR").unwrap(), Decimal::from(100));
+        assert_eq!(f.parse("100 SCR").unwrap(), Decimal::from(100));
+        // Bare markers (no number) fail.
         assert!(f.parse("DR").is_err());
         assert!(f.parse("CR").is_err());
     }

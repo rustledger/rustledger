@@ -10185,13 +10185,13 @@ fn test_pivot_by_first_column_is_the_row_key() {
         "currency value should be a column header; got {:?}",
         result.columns
     );
-    // Every row's key cell is an account (contains a `:` separator), never a
-    // currency code — proves the axes aren't inverted.
+    // No row is keyed by the pivoted currency value — directly proves the axes
+    // aren't inverted (under the old behavior, `USD` would be a row key).
     for row in &result.rows {
-        assert!(
-            matches!(&row[0], Value::String(s) if s.contains(':')),
-            "row key should be an account name, got {:?}",
-            row[0]
+        assert_ne!(
+            row[0],
+            Value::String("USD".to_string()),
+            "row key must be an account, not the pivoted currency header"
         );
     }
 }

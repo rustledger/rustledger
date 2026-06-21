@@ -1673,12 +1673,13 @@ mod tests {
         ctx.update(dec!(-5.00), "USD");
 
         let mut executor = Executor::new(&directives);
-        // Two-column PIVOT BY (post-#1034): first arg is the pivot value
-        // column, second is the GROUP BY column to keep as the row key.
+        // Two-column PIVOT BY: the first arg is the row key, the second is
+        // spread into columns. Here `account` keys the rows and `currency`
+        // values (USD) become the pivoted columns.
         let query = parse(
             "SELECT account, currency, SUM(number) \
              GROUP BY account, currency \
-             PIVOT BY currency, account",
+             PIVOT BY account, currency",
         )
         .expect("parse should succeed");
         let result = executor.execute(&query).expect("execute should succeed");

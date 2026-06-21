@@ -652,8 +652,22 @@ impl MainLoopState {
         let uri = &params.text_document_position_params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response =
-            handle_goto_definition(&params, &text, &parse_result, uri, self.position_encoding);
+        // Ledger state for cross-file (`include`d) account definitions.
+        let ledger_guard = self.ledger_state.read();
+        let ledger_state = if ledger_guard.ledger().is_some() {
+            Some(&*ledger_guard)
+        } else {
+            None
+        };
+
+        let response = handle_goto_definition(
+            &params,
+            &text,
+            &parse_result,
+            ledger_state,
+            uri,
+            self.position_encoding,
+        );
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -1176,9 +1190,23 @@ impl MainLoopState {
         let uri = &params.text_document_position_params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
+        // Ledger state for cross-file (`include`d) account declarations.
+        let ledger_guard = self.ledger_state.read();
+        let ledger_state = if ledger_guard.ledger().is_some() {
+            Some(&*ledger_guard)
+        } else {
+            None
+        };
+
         // Handle go-to-declaration (same as definition for Beancount)
-        let response =
-            handle_goto_declaration(&params, &text, &parse_result, uri, self.position_encoding);
+        let response = handle_goto_declaration(
+            &params,
+            &text,
+            &parse_result,
+            ledger_state,
+            uri,
+            self.position_encoding,
+        );
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }

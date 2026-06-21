@@ -8,6 +8,8 @@ use lsp_types::{GotoDefinitionParams, GotoDefinitionResponse, Location, Position
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
 
+use crate::ledger_state::LedgerState;
+
 use super::utils::{
     LineIndex, PositionEncoding, get_word_at_source_position, is_account_type, is_currency_like,
 };
@@ -17,6 +19,7 @@ pub fn handle_goto_definition(
     params: &GotoDefinitionParams,
     source: &str,
     parse_result: &ParseResult,
+    ledger_state: Option<&LedgerState>,
     uri: &Uri,
     encoding: PositionEncoding,
 ) -> Option<GotoDefinitionResponse> {
@@ -33,9 +36,21 @@ pub fn handle_goto_definition(
     // after a one-shot O(n) build.
     let line_index = LineIndex::new(source, encoding);
 
-    // Check if it's an account name
-    if (word.contains(':') || is_account_type(&word))
+    let is_account = word.contains(':') || is_account_type(&word);
+
+    // Check if it's an account name (current file first).
+    if is_account
         && let Some(location) = find_account_definition(&word, parse_result, &line_index, uri)
+    {
+        return Some(GotoDefinitionResponse::Scalar(location));
+    }
+
+    // Cross-file fallback: the account may be opened in an `include`d file,
+    // which the single-file `parse_result` above doesn't see.
+    if is_account
+        && let Some(state) = ledger_state
+        && let Some((path, line)) = state.find_account_definition(&word)
+        && let Some(location) = cross_file_location(&path, line)
     {
         return Some(GotoDefinitionResponse::Scalar(location));
     }
@@ -52,6 +67,25 @@ pub fn handle_goto_definition(
     }
 
     None
+}
+
+/// Build a `Location` for a cross-file definition from the ledger's
+/// `find_account_definition` result.
+///
+/// The stored line is **1-based** (`rustledger_loader`'s
+/// `SourceFile::line_col` returns `line + 1`), while LSP positions are
+/// **0-based**, hence `line - 1`. A zero-width range at column 0 makes the
+/// editor jump to the start of the `open` line.
+fn cross_file_location(path: &std::path::Path, line_1based: u32) -> Option<Location> {
+    let uri: Uri = format!("file://{}", path.display()).parse().ok()?;
+    let line = line_1based.saturating_sub(1);
+    Some(Location {
+        uri,
+        range: Range {
+            start: Position::new(line, 0),
+            end: Position::new(line, 0),
+        },
+    })
 }
 
 /// Find the definition of an account (the Open directive).
@@ -187,6 +221,7 @@ mod tests {
             &params,
             source,
             &parse_result,
+            None,
             &uri,
             PositionEncoding::Utf16,
         )
@@ -230,10 +265,25 @@ mod tests {
                 &params,
                 source,
                 &parse_result,
+                None,
                 &uri,
                 PositionEncoding::Utf16
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn cross_file_location_builds_uri_and_converts_line() {
+        // `find_account_definition` returns a 1-based line (SourceFile::line_col);
+        // the LSP Location must be 0-based, and the path becomes a file:// URI.
+        let loc = cross_file_location(std::path::Path::new("/ledger/accounts.beancount"), 5)
+            .expect("location");
+        assert_eq!(loc.uri.as_str(), "file:///ledger/accounts.beancount");
+        assert_eq!(loc.range.start, Position::new(4, 0)); // 5 (1-based) -> 4 (0-based)
+        assert_eq!(loc.range.end, Position::new(4, 0));
+        // Line 1 (1-based) clamps to 0, not underflow.
+        let first = cross_file_location(std::path::Path::new("/a.beancount"), 1).unwrap();
+        assert_eq!(first.range.start, Position::new(0, 0));
     }
 }

@@ -36,8 +36,14 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let result =
-            handle_goto_declaration(&params, source, &result, &uri, PositionEncoding::Utf16);
+        let result = handle_goto_declaration(
+            &params,
+            source,
+            &result,
+            None,
+            &uri,
+            PositionEncoding::Utf16,
+        );
         assert!(result.is_some());
     }
 }

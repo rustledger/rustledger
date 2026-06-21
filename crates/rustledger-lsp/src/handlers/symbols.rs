@@ -30,6 +30,7 @@ pub fn handle_document_symbols(
         .filter_map(|spanned| {
             directive_to_symbol(
                 &spanned.value,
+                source,
                 spanned.span.start,
                 // Trim trailing whitespace so a symbol's range ends at its own
                 // content, not at the next directive (which made sibling symbol
@@ -51,6 +52,7 @@ pub fn handle_document_symbols(
 #[allow(deprecated)] // DocumentSymbol::deprecated field is deprecated but required
 fn directive_to_symbol(
     directive: &Directive,
+    source: &str,
     start_offset: usize,
     end_offset: usize,
     line_index: &LineIndex,
@@ -103,11 +105,17 @@ fn directive_to_symbol(
                         }
                     });
 
-                    let (posting_line, _) =
-                        line_index.offset_to_position(spanned_posting.span.start);
+                    // Derive the range from the posting's own span (trimmed of
+                    // trailing whitespace) instead of a hardcoded `col 2..50`,
+                    // which overshot past end-of-line on short postings,
+                    // truncated long ones, and started mid-account on
+                    // non-2-space indentation.
+                    let (psl, psc) = line_index.offset_to_position(spanned_posting.span.start);
+                    let (pel, pec) = line_index
+                        .offset_to_position(trim_span_end(source, spanned_posting.span.end));
                     let posting_range = Range {
-                        start: Position::new(posting_line, 2),
-                        end: Position::new(posting_line, 50),
+                        start: Position::new(psl, psc),
+                        end: Position::new(pel, pec),
                     };
 
                     DocumentSymbol {
@@ -331,5 +339,36 @@ mod tests {
             symbols[1].range
         );
         assert_eq!(symbols[0].range.end.line, 2, "T1 ends at its last posting");
+    }
+
+    #[test]
+    fn test_posting_child_ranges_match_their_spans() {
+        // Posting child symbols must use their own source span, not a hardcoded
+        // `col 2..50` window that overshoots end-of-line / starts mid-account.
+        let source = "2024-01-15 * \"T\"\n  Assets:Bank  -5 USD\n";
+        let result = parse(source);
+        let params = DocumentSymbolParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let Some(DocumentSymbolResponse::Nested(symbols)) =
+            handle_document_symbols(&params, source, &result, PositionEncoding::Utf16)
+        else {
+            panic!("expected nested symbols");
+        };
+        let txn = &symbols[0];
+        let posting = &txn.children.as_ref().expect("postings as children")[0];
+        // `  Assets:Bank  -5 USD` on line 1: the posting span runs from the
+        // line start (col 0, covering the account) to col 21 (after `USD`) —
+        // never the hardcoded col 50 that overshot end-of-line.
+        assert_eq!(posting.range.start, Position::new(1, 0));
+        assert_eq!(
+            posting.range.end,
+            Position::new(1, 21),
+            "posting range must end at its content, not the hardcoded col 50"
+        );
     }
 }

@@ -95,7 +95,7 @@ impl Server {
         // when there is no workspace folder. Otherwise a stray journal in the
         // editor's launch directory silently contaminates an unrelated
         // workspace's state.
-        let discovered = Self::discovery_dir(workspace_root, std::env::current_dir().ok())
+        let discovered = Self::discovery_dir(workspace_root, || std::env::current_dir().ok())
             .and_then(|dir| discover_journal_file(&dir));
         if discovered.is_none() {
             tracing::debug!("No journal file configured or discovered");
@@ -107,12 +107,14 @@ impl Server {
     /// folder when set, otherwise the process cwd. The cwd is deliberately
     /// *not* consulted when a workspace folder exists, so a journal that
     /// happens to sit in the editor's launch directory cannot leak into an
-    /// unrelated workspace.
+    /// unrelated workspace. `cwd` is computed lazily so the `current_dir`
+    /// syscall is skipped entirely (and its failure ignored) when a workspace
+    /// folder is set.
     fn discovery_dir(
         workspace_root: Option<std::path::PathBuf>,
-        cwd: Option<std::path::PathBuf>,
+        cwd: impl FnOnce() -> Option<std::path::PathBuf>,
     ) -> Option<std::path::PathBuf> {
-        workspace_root.or(cwd)
+        workspace_root.or_else(cwd)
     }
 
     /// Get the workspace root path from init params.
@@ -351,13 +353,20 @@ mod tests {
         let ws = PathBuf::from("/work/space");
         let cwd = PathBuf::from("/tmp/launch");
         // Workspace set → search the workspace, never the cwd (no contamination).
-        assert_eq!(
-            Server::discovery_dir(Some(ws.clone()), Some(cwd.clone())),
-            Some(ws)
+        // The cwd closure must not even be invoked in this case.
+        let mut cwd_called = false;
+        let got = Server::discovery_dir(Some(ws.clone()), || {
+            cwd_called = true;
+            Some(cwd.clone())
+        });
+        assert_eq!(got, Some(ws));
+        assert!(
+            !cwd_called,
+            "cwd must not be consulted when a workspace is set"
         );
         // No workspace → fall back to the cwd.
-        assert_eq!(Server::discovery_dir(None, Some(cwd.clone())), Some(cwd));
+        assert_eq!(Server::discovery_dir(None, || Some(cwd.clone())), Some(cwd));
         // Neither → nothing to discover.
-        assert_eq!(Server::discovery_dir(None, None), None);
+        assert_eq!(Server::discovery_dir(None, || None), None);
     }
 }

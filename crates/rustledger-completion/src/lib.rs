@@ -285,7 +285,12 @@ pub fn classify_context(before_cursor: &str) -> CompletionContext {
                 continue;
             };
             let after_directive = rest.trim_start();
-            let past_first_token = after_directive.contains(' ');
+            // "Past the first argument" = either a second token has started, or
+            // the first token is finished (trailing whitespace). Use
+            // whitespace-aware checks so tab-separated arguments work too.
+            let token_count = after_directive.split_whitespace().count();
+            let past_first_token = token_count > 1
+                || (token_count == 1 && after_directive.ends_with(char::is_whitespace));
             // The token currently being typed ("" right after trailing
             // whitespace, i.e. at the start of a fresh token).
             let typing = if after_directive.ends_with(char::is_whitespace) {
@@ -334,13 +339,19 @@ pub fn classify_context(before_cursor: &str) -> CompletionContext {
                         CompletionContext::Unknown
                     })
                 }
-                _ => None,
+                // Transaction bodies (`*`/`!`/`txn`) past the flag are payee/
+                // narration/tag territory — keep the prior `AfterDate` behavior.
+                "*" | "!" | "txn" => None,
+                // Every other directive past its first argument: no completion
+                // rather than the (always-wrong) directive-keyword list. Their
+                // follow-on arguments (e.g. note/document strings, commodity
+                // metadata) aren't modeled, so `Unknown` is the safe answer.
+                _ => Some(CompletionContext::Unknown),
             };
             if let Some(ctx) = ctx {
                 return ctx;
             }
-            // Unhandled directive past its first token: preserve the prior
-            // fall-through to `AfterDate` below.
+            // Transaction-flag fall-through to `AfterDate` below.
             break;
         }
 
@@ -705,6 +716,21 @@ mod tests {
             CompletionContext::AccountSegment {
                 prefix: "Assets:".to_string()
             }
+        );
+        // close past its account → no completion (not directive keywords).
+        assert_eq!(
+            ctx("2024-01-15 close Assets:Cash "),
+            CompletionContext::Unknown
+        );
+        // Tab-separated arguments are recognized too (not just spaces).
+        assert_eq!(
+            ctx("2024-01-15 open\tAssets:Cash\t"),
+            CompletionContext::ExpectingCurrency
+        );
+        // A transaction body still falls through to AfterDate (unchanged).
+        assert_eq!(
+            ctx("2024-01-15 * \"Payee\" #tag "),
+            CompletionContext::AfterDate
         );
     }
 

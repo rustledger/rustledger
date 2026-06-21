@@ -181,14 +181,31 @@ fn parse_with_symbols(s: &str, sym: &NumberSymbols) -> Result<Decimal, rust_deci
 impl AmountFormat {
     /// Attempt to parse a string using the given format.
     pub fn parse(&self, amount: &str) -> Result<Decimal> {
+        let trimmed = amount.trim();
+
+        // Trailing-minus negative convention ("50.00-"), emitted by some bank
+        // and mainframe CSV exports. Strip the trailing sign and negate after
+        // parsing, since the underlying numeric parsers reject a trailing '-'.
+        // Parens negation (handled below) is mutually exclusive and takes
+        // precedence, so don't treat a ")-"-style string as trailing-minus.
+        let trailing_neg = trimmed.len() > 1 && trimmed.ends_with('-') && !trimmed.starts_with('(');
+        let to_parse = if trailing_neg {
+            &trimmed[..trimmed.len() - 1]
+        } else {
+            amount
+        };
+
         let value: Decimal = match self {
-            Self::Symbols(number_symbols) => parse_with_symbols(amount, number_symbols)
+            Self::Symbols(number_symbols) => parse_with_symbols(to_parse, number_symbols)
                 .with_context(|| format!("unable to parse using symbols: {number_symbols:?}"))?,
-            Self::Format(number_format) => parse_fmt(amount, number_format)
+            Self::Format(number_format) => parse_fmt(to_parse, number_format)
                 .with_context(|| format!("unable to parse using given format: {number_format}"))?,
         };
 
-        if amount.trim().starts_with('(') && amount.trim().ends_with(')') {
+        // Parens negation and trailing-minus are mutually exclusive (the latter
+        // excludes a leading '('), so either one negates the parsed magnitude.
+        let parens_neg = trimmed.starts_with('(') && trimmed.ends_with(')');
+        if parens_neg || trailing_neg {
             Ok(value.neg())
         } else {
             Ok(value)
@@ -803,6 +820,32 @@ mod tests {
         // Accountancy convention: (123.45) means -123.45.
         let v = AmountFormat::default().parse("(0.01)").unwrap();
         assert_eq!(v, Decimal::from_str("-0.01").unwrap());
+    }
+
+    #[test]
+    fn parse_default_trailing_minus_as_negative() {
+        // Trailing-minus convention ("50.00-") from some bank/mainframe exports.
+        let f = AmountFormat::default();
+        assert_eq!(
+            f.parse("50.00-").unwrap(),
+            Decimal::from_str("-50.00").unwrap()
+        );
+        assert_eq!(
+            f.parse("1,234.56-").unwrap(),
+            Decimal::from_str("-1234.56").unwrap()
+        );
+        // A lone "-" is not a number.
+        assert!(f.parse("-").is_err());
+        // Leading minus still works and isn't double-negated.
+        assert_eq!(
+            f.parse("-50.00").unwrap(),
+            Decimal::from_str("-50.00").unwrap()
+        );
+        // Plain positive unaffected.
+        assert_eq!(
+            f.parse("50.00").unwrap(),
+            Decimal::from_str("50.00").unwrap()
+        );
     }
 
     #[test]

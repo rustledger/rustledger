@@ -60,6 +60,20 @@ cd /path/to/main/rustledger
 - **Clean state**: Each worktree is isolated, no cross-contamination
 - **Faster CI feedback**: Work on fixes while waiting for CI on another branch
 
+### Long-lived reference branches — do NOT delete
+
+A few remote branches are kept intentionally and are **not** cleanup targets,
+even when they have no open PR. Run `git log <branch>` for full context before
+touching any of them.
+
+| Branch | Why it's kept |
+|--------|---------------|
+| `spike/ffi-wit-component` | WIT / Component-Model FFI design spike for #1384. Reference if the `rustledger:ledger` component contract (the typed WIT API) changes. |
+| `spike/ledger-resource` | Stateful `resource session` "A+B boundary" redesign spike for #173. Reference for a future stateful embedding API. |
+| `benchmarks`, `compatibility` | CI-managed data branches (nightly benchmark / compatibility results). Written by automation — never hand-delete. |
+
+When pruning merged/closed PR branches, skip the rows above.
+
 ______________________________________________________________________
 
 ## Project Overview

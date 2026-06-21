@@ -100,6 +100,26 @@ impl Executor<'_> {
                     Ok(Value::Integer(n / d))
                 }
             }
+            // Mixed numeric operands: coerce the integer to Decimal and divide
+            // (matches beanquery, which accepts int↔decimal). A zero divisor
+            // yields 0 — the "safe" in SAFEDIV — consistent with the
+            // Number/Number arm above.
+            (Value::Number(n), Value::Integer(d)) => {
+                let d = Decimal::from(d);
+                Ok(Value::Number(if d.is_zero() {
+                    Decimal::ZERO
+                } else {
+                    n / d
+                }))
+            }
+            (Value::Integer(n), Value::Number(d)) => {
+                let n = Decimal::from(n);
+                Ok(Value::Number(if d.is_zero() {
+                    Decimal::ZERO
+                } else {
+                    n / d
+                }))
+            }
             _ => Err(QueryError::Type("SAFEDIV expects two numbers".to_string())),
         }
     }

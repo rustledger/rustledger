@@ -9962,3 +9962,20 @@ fn test_null_comparison_excludes_rows() {
     assert_eq!(count(r#"SELECT count(*) WHERE payee > "A""#), 2);
     assert_eq!(count(r#"SELECT count(*) WHERE payee < "z""#), 2);
 }
+
+#[test]
+fn test_safediv_accepts_mixed_int_and_decimal() {
+    let directives = make_test_directives();
+    // beanquery accepts safediv with int↔decimal operands and returns a decimal;
+    // mixed operands used to be rejected with a type error.
+    for (q, expected) in [("safediv(10.0, 4)", "2.5"), ("safediv(10, 4.0)", "2.5")] {
+        let result = execute_query(&format!("SELECT {q}"), &directives);
+        match &result.rows[0][0] {
+            Value::Number(n) => assert_eq!(n.to_string(), expected, "for {q}"),
+            v => panic!("{q}: expected Number, got {v:?}"),
+        }
+    }
+    // Zero divisor → 0 (the "safe" in safediv), for mixed operands too.
+    let result = execute_query("SELECT safediv(10.0, 0)", &directives);
+    assert_eq!(result.rows[0][0], Value::Number(dec!(0)));
+}

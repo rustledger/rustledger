@@ -1841,3 +1841,31 @@ fn test_format_accepts_invalid_utf8() {
         "formatted output should contain the directive: {stdout}"
     );
 }
+
+/// Companion to `test_format_accepts_invalid_utf8`: `format --check` must report
+/// a file with invalid UTF-8 as needing formatting (exit 1), because
+/// `--in-place` would rewrite the invalid bytes to U+FFFD.
+#[test]
+fn test_format_check_flags_invalid_utf8() {
+    let rledger = require_rledger!();
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let mut bytes = b"2024-01-01 open Assets:Cash\n;".to_vec();
+    bytes.push(0xC2);
+    bytes.push(0xC2);
+    bytes.extend_from_slice(b"\n");
+    std::fs::write(tmp.path(), &bytes).expect("write");
+
+    let output = Command::new(&rledger)
+        .args(["format", "--check"])
+        .arg(tmp.path())
+        .output()
+        .expect("Failed to run rledger format --check");
+
+    // exit 1 == "needs formatting"; must NOT be reported as already-formatted.
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "format --check should flag invalid-UTF-8 input as needing formatting: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

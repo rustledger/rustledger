@@ -105,6 +105,11 @@ fn format_file<W: Write>(file: &PathBuf, args: &Args, out: &mut W) -> Result<Exi
     // `rledger check` accepts — e.g. one with stray invalid-UTF-8 bytes, which
     // beancount also accepts — would fail to `format` with a hard read error.
     let bytes = fs::read(file).with_context(|| format!("failed to read {}", file.display()))?;
+    // Track whether the input was valid UTF-8. If not, `from_utf8_lossy`
+    // replaced bytes with U+FFFD, so writing the formatted output would rewrite
+    // the file even if the formatted text equals the lossy-decoded original —
+    // `--check` must report that as "needs formatting" (see below).
+    let had_invalid_utf8 = std::str::from_utf8(&bytes).is_err();
     let original_content = String::from_utf8_lossy(&bytes).into_owned();
 
     let formatted = match try_format_source(&original_content) {
@@ -124,7 +129,10 @@ fn format_file<W: Write>(file: &PathBuf, args: &Args, out: &mut W) -> Result<Exi
         // that the canonical form rewrites — exactly the kind of
         // change the new formatter introduces (one trailing newline,
         // exactly one blank between directives).
-        if formatted == original_content {
+        // Invalid UTF-8 always counts as "needs formatting": `--in-place`
+        // would rewrite the offending bytes to U+FFFD, so reporting "already
+        // formatted" here would let CI miss a real rewrite.
+        if formatted == original_content && !had_invalid_utf8 {
             if args.verbose {
                 eprintln!("File is already formatted: {}", file.display());
             }

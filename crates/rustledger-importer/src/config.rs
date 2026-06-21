@@ -188,6 +188,23 @@ impl AmountFormat {
     pub fn parse(&self, amount: &str) -> Result<Decimal> {
         let trimmed = amount.trim();
 
+        // DR/CR accounting suffix (e.g. "5.00 DR" debit → negative, "5.00 CR"
+        // credit → positive), used by some bank exports. Without this the
+        // numeric parser silently drops the letters, so a debit would import
+        // with the wrong (positive) sign. Case-insensitive; strip the marker
+        // and force the sign on the magnitude, reusing the normal number
+        // parsing (locale, parens, trailing-minus) for the remainder.
+        let upper = trimmed.to_ascii_uppercase();
+        for (suffix, negative) in [("DR", true), ("CR", false)] {
+            if let Some(stripped) = upper.strip_suffix(suffix)
+                && !stripped.trim_end().is_empty()
+            {
+                let body = &trimmed[..trimmed.len() - suffix.len()];
+                let magnitude = self.parse(body)?.abs();
+                return Ok(if negative { -magnitude } else { magnitude });
+            }
+        }
+
         // Trailing-minus negative convention ("50.00-"), emitted by some bank
         // and mainframe CSV exports. Strip the trailing sign and negate after
         // parsing, since the underlying numeric parsers reject a trailing '-'.
@@ -849,6 +866,36 @@ mod tests {
         // Accountancy convention: (123.45) means -123.45.
         let v = AmountFormat::default().parse("(0.01)").unwrap();
         assert_eq!(v, Decimal::from_str("-0.01").unwrap());
+    }
+
+    #[test]
+    fn parse_default_dr_cr_suffix() {
+        // DR (debit) → negative, CR (credit) → positive; case-insensitive,
+        // with or without a space. Used by some bank/mainframe exports.
+        let f = AmountFormat::default();
+        assert_eq!(
+            f.parse("5.00 DR").unwrap(),
+            Decimal::from_str("-5.00").unwrap()
+        );
+        assert_eq!(
+            f.parse("5.00 CR").unwrap(),
+            Decimal::from_str("5.00").unwrap()
+        );
+        assert_eq!(f.parse("100CR").unwrap(), Decimal::from(100));
+        assert_eq!(f.parse("100dr").unwrap(), Decimal::from(-100));
+        assert_eq!(
+            f.parse("1,234.56 DR").unwrap(),
+            Decimal::from_str("-1234.56").unwrap()
+        );
+        // DR forces negative even if the magnitude is written negative.
+        assert_eq!(
+            f.parse("-5.00 DR").unwrap(),
+            Decimal::from_str("-5.00").unwrap()
+        );
+        // A trailing currency-like token that merely ends in "CR"/"DR" letters
+        // but isn't the marker still parses its numeric part; bare markers fail.
+        assert!(f.parse("DR").is_err());
+        assert!(f.parse("CR").is_err());
     }
 
     #[test]

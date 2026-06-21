@@ -132,14 +132,20 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
         return to_js(&result);
     }
 
+    // Carry any non-fatal load warnings through every result path so callers
+    // still see them alongside (or instead of) query output.
+    let warnings = load.errors;
+
     // Parse the query
     let query = match parse_query(query_str) {
         Ok(q) => q,
         Err(e) => {
+            let mut errors = warnings;
+            errors.push(Error::new(e.to_string()));
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: vec![Error::new(e.to_string())],
+                errors,
             };
             return to_js(&result);
         }
@@ -163,15 +169,17 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
             let query_result = QueryResult {
                 columns: result.columns,
                 rows,
-                errors: Vec::new(),
+                errors: warnings,
             };
             to_js(&query_result)
         }
         Err(e) => {
+            let mut errors = warnings;
+            errors.push(Error::new(format!("Query execution error: {e}")));
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: vec![Error::new(format!("Query execution error: {e}"))],
+                errors,
             };
             to_js(&result)
         }
@@ -241,8 +249,17 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
         return to_js(&result);
     }
 
+    // Carry non-fatal load warnings through to the result.
+    let mut errors = load.errors;
+
     // Process pads
     let pad_result = process_pads(&load.directives);
+    errors.extend(
+        pad_result
+            .errors
+            .iter()
+            .map(|e| Error::new(e.message.clone())),
+    );
 
     let result = PadResult {
         // The source stream, verbatim — `process_pads` no longer
@@ -254,11 +271,7 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
             .iter()
             .map(|txn| directive_to_json(&Directive::Transaction(txn.clone())))
             .collect(),
-        errors: pad_result
-            .errors
-            .iter()
-            .map(|e| Error::new(e.message.clone()))
-            .collect(),
+        errors,
     };
     to_js(&result)
 }
@@ -311,15 +324,20 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> Result<JsValue, JsError> {
         return to_js(&result);
     }
 
+    // Carry non-fatal load warnings through every result path.
+    let warnings = load.errors;
+
     // Find and run the plugin
     let registry = NativePluginRegistry::global();
     // External API runs plugins on already-booked input — synth
     // plugins are a loader-internal concern and would re-emit Opens
     // for accounts the booking pass already opened.
     let Some(plugin) = registry.find_regular(plugin_name) else {
+        let mut errors = warnings;
+        errors.push(Error::new(format!("Unknown plugin: {plugin_name}")));
         let result = PluginResult {
             directives: Vec::new(),
-            errors: vec![Error::new(format!("Unknown plugin: {plugin_name}"))],
+            errors,
         };
         return to_js(&result);
     };
@@ -340,26 +358,24 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> Result<JsValue, JsError> {
     let output_directives = match wrappers_to_directives(&materialized_wrappers) {
         Ok(dirs) => dirs,
         Err(e) => {
+            let mut errors = warnings;
+            errors.push(Error::new(format!("Conversion error: {e}")));
             let result = PluginResult {
                 directives: Vec::new(),
-                errors: vec![Error::new(format!("Conversion error: {e}"))],
+                errors,
             };
             return to_js(&result);
         }
     };
 
+    let mut errors = warnings;
+    errors.extend(output.errors.iter().map(|e| match e.severity {
+        rustledger_plugin::PluginErrorSeverity::Warning => Error::warning(e.message.clone()),
+        rustledger_plugin::PluginErrorSeverity::Error => Error::new(e.message.clone()),
+    }));
     let result = PluginResult {
         directives: output_directives.iter().map(directive_to_json).collect(),
-        errors: output
-            .errors
-            .iter()
-            .map(|e| match e.severity {
-                rustledger_plugin::PluginErrorSeverity::Warning => {
-                    Error::warning(e.message.clone())
-                }
-                rustledger_plugin::PluginErrorSeverity::Error => Error::new(e.message.clone()),
-            })
-            .collect(),
+        errors,
     };
     to_js(&result)
 }

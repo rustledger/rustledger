@@ -110,12 +110,13 @@ fn directive_to_symbol(
                     // which overshot past end-of-line on short postings,
                     // truncated long ones, and started mid-account on
                     // non-2-space indentation.
-                    let (psl, psc) = line_index.offset_to_position(spanned_posting.span.start);
-                    let (pel, pec) = line_index
+                    let (posting_start_line, posting_start_col) =
+                        line_index.offset_to_position(spanned_posting.span.start);
+                    let (posting_end_line, posting_end_col) = line_index
                         .offset_to_position(trim_span_end(source, spanned_posting.span.end));
                     let posting_range = Range {
-                        start: Position::new(psl, psc),
-                        end: Position::new(pel, pec),
+                        start: Position::new(posting_start_line, posting_start_col),
+                        end: Position::new(posting_end_line, posting_end_col),
                     };
 
                     DocumentSymbol {
@@ -347,6 +348,7 @@ mod tests {
         // `col 2..50` window that overshoots end-of-line / starts mid-account.
         let source = "2024-01-15 * \"T\"\n  Assets:Bank  -5 USD\n";
         let result = parse(source);
+        assert!(result.errors.is_empty(), "no parse errors");
         let params = DocumentSymbolParams {
             text_document: lsp_types::TextDocumentIdentifier {
                 uri: "file:///test.beancount".parse().unwrap(),
@@ -362,8 +364,9 @@ mod tests {
         let txn = &symbols[0];
         let posting = &txn.children.as_ref().expect("postings as children")[0];
         // `  Assets:Bank  -5 USD` on line 1: the posting span runs from the
-        // line start (col 0, covering the account) to col 21 (after `USD`) —
-        // never the hardcoded col 50 that overshot end-of-line.
+        // start of the line (col 0 — the indent, so the range still fully
+        // covers the account) to col 21 (just after `USD`) — never the
+        // hardcoded col 50 that overshot end-of-line.
         assert_eq!(posting.range.start, Position::new(1, 0));
         assert_eq!(
             posting.range.end,

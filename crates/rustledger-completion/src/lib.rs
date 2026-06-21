@@ -198,11 +198,16 @@ pub fn classify_context(before_cursor: &str) -> CompletionContext {
         if posting_content.contains(':') && posting_content.contains(' ') {
             // After account, might be expecting amount or currency
             let parts: Vec<&str> = posting_content.split_whitespace().collect();
-            if parts.len() >= 2 {
-                // Check if last part looks like a number
-                if let Some(last) = parts.last()
-                    && (last.parse::<f64>().is_ok() || last.ends_with('.'))
-                {
+            if parts.len() >= 2
+                && let Some(last) = parts.last()
+            {
+                // A currency is expected after: the units amount (`100`), a
+                // cost-spec amount (`{100.00`/`{{100.00`), or a price-annotation
+                // amount (`@ 1.20`/`@@1.20` — including the bare `@`/`@@`/`{`
+                // marker before the amount is typed). Strip any leading `@`/`{`
+                // so the amount underneath is recognized.
+                let amount = last.trim_start_matches('@').trim_start_matches('{');
+                if amount.is_empty() || amount.parse::<f64>().is_ok() || amount.ends_with('.') {
                     return CompletionContext::ExpectingCurrency;
                 }
             }
@@ -623,6 +628,33 @@ mod tests {
     fn classify_expecting_currency() {
         assert_eq!(
             ctx("  Assets:Bank  100.00 "),
+            CompletionContext::ExpectingCurrency
+        );
+    }
+
+    #[test]
+    fn classify_expecting_currency_in_cost_and_price() {
+        // After a price annotation `@`/`@@` (with or without the amount typed).
+        assert_eq!(
+            ctx("  Assets:Stock  10 HOOL @ "),
+            CompletionContext::ExpectingCurrency
+        );
+        assert_eq!(
+            ctx("  Assets:Stock  10 HOOL @ 1.20 "),
+            CompletionContext::ExpectingCurrency
+        );
+        assert_eq!(
+            ctx("  Assets:Stock  10 HOOL @@1500 "),
+            CompletionContext::ExpectingCurrency
+        );
+        // Inside a cost spec `{...}` (amount typed, currency expected next).
+        assert_eq!(
+            ctx("  Assets:Stock  10 HOOL {100.00 "),
+            CompletionContext::ExpectingCurrency
+        );
+        // A fully-typed currency should NOT keep offering currency completion.
+        assert_ne!(
+            ctx("  Assets:Bank  100 USD "),
             CompletionContext::ExpectingCurrency
         );
     }

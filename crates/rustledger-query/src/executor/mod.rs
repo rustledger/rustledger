@@ -864,38 +864,29 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 2)?;
                 let (dividend, divisor) = (&args[0], &args[1]);
                 match (dividend, divisor) {
-                    (Value::Number(a), Value::Number(b)) => {
-                        if b.is_zero() {
-                            Ok(Value::Null)
-                        } else {
-                            Ok(Value::Number(a / b))
-                        }
-                    }
-                    (Value::Integer(a), Value::Integer(b)) => {
-                        if *b == 0 {
-                            Ok(Value::Null)
-                        } else {
-                            Ok(Value::Number(Decimal::from(*a) / Decimal::from(*b)))
-                        }
-                    }
-                    (Value::Number(a), Value::Integer(b)) => {
-                        if *b == 0 {
-                            Ok(Value::Null)
-                        } else {
-                            Ok(Value::Number(a / Decimal::from(*b)))
-                        }
-                    }
-                    (Value::Integer(a), Value::Number(b)) => {
-                        if b.is_zero() {
-                            Ok(Value::Null)
-                        } else {
-                            Ok(Value::Number(Decimal::from(*a) / b))
-                        }
-                    }
+                    // NULL propagates.
                     (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
-                    _ => Err(QueryError::Type(
-                        "SAFEDIV expects numeric arguments".to_string(),
-                    )),
+                    // Any numeric pair: coerce to Decimal and divide. A zero
+                    // divisor yields 0 (the "safe" in SAFEDIV) — matching
+                    // beanquery and the per-row `eval_safediv` path, which used to
+                    // disagree (this path returned NULL on a zero divisor).
+                    _ => {
+                        let to_dec = |v: &Value| match v {
+                            Value::Number(n) => Some(*n),
+                            Value::Integer(i) => Some(Decimal::from(*i)),
+                            _ => None,
+                        };
+                        match (to_dec(dividend), to_dec(divisor)) {
+                            (Some(a), Some(b)) => Ok(Value::Number(if b.is_zero() {
+                                Decimal::ZERO
+                            } else {
+                                a / b
+                            })),
+                            _ => Err(QueryError::Type(
+                                "SAFEDIV expects numeric arguments".to_string(),
+                            )),
+                        }
+                    }
                 }
             }
             "NEG" => {

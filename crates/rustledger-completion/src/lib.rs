@@ -250,8 +250,9 @@ pub fn classify_context(before_cursor: &str) -> CompletionContext {
     // before the date-prefix logic below: a transaction header
     // (`2024-01-01 * "Pay…`) starts with a date, which otherwise
     // short-circuits to `AfterDate` and leaves this context (and
-    // `complete_payee`) unreachable.
-    if before_cursor.chars().filter(|&c| c == '"').count() % 2 == 1 {
+    // `complete_payee`) unreachable. Uses lexer-aligned scanning so escaped
+    // quotes and quotes inside comments don't misclassify.
+    if ends_in_open_string(before_cursor) {
         return CompletionContext::InsideString;
     }
 
@@ -319,6 +320,34 @@ fn in_code_position(before: &str) -> bool {
         }
     }
     !in_string
+}
+
+/// Whether the cursor (end of `before`) sits inside an *open* string literal
+/// (a payee/narration being typed). Uses the same lexer-aligned scan as
+/// [`in_code_position`]: a backslash-escaped `\"` does not close the string,
+/// and an unescaped, unquoted `;` starts a comment (after which the cursor is
+/// in a comment, not a string). This is stricter than a raw `"`-parity count,
+/// which would miscount escaped quotes and quotes inside comments.
+fn ends_in_open_string(before: &str) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in before.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+        } else if ch == ';' {
+            // Comment outside any string: cursor is in a comment, not a string.
+            return false;
+        }
+    }
+    in_string
 }
 
 /// Check if a string looks like a date (YYYY-MM-DD).
@@ -620,6 +649,26 @@ mod tests {
         // A complete (balanced) payee string is not "inside" a string.
         assert_ne!(
             ctx("2024-01-01 * \"Payee\" "),
+            CompletionContext::InsideString
+        );
+    }
+
+    #[test]
+    fn classify_inside_string_handles_escapes_and_comments() {
+        // An escaped quote does not close the string → still inside.
+        assert_eq!(
+            ctx("2024-01-01 * \"She said \\\"hi"),
+            CompletionContext::InsideString
+        );
+        // A balanced string that *contains* an escaped quote is not "inside".
+        assert_ne!(
+            ctx("2024-01-01 * \"a \\\" b\" "),
+            CompletionContext::InsideString
+        );
+        // A quote that appears inside a comment must not trigger payee
+        // completion (the `;` ends code/string scanning).
+        assert_ne!(
+            ctx("2024-01-01 open Assets:Bank ; \"note"),
             CompletionContext::InsideString
         );
     }

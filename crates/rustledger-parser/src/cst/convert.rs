@@ -1619,11 +1619,15 @@ fn apply_inherited_state(
 /// direct-child tokens (the directive isn't a `META_ENTRY` so the
 /// typed-AST accessors aren't reusable).
 fn pushmeta_value(node: &crate::SyntaxNode) -> MetaValue {
+    // A leading `MINUS` token negates the numeric value (e.g. `precision: -1`),
+    // mirroring `meta_value_from_entry`.
+    let mut negate = false;
     for el in node.children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
             continue;
         };
         match t.kind() {
+            crate::SyntaxKind::MINUS => negate = true,
             crate::SyntaxKind::STRING => {
                 if let Some(s) = strip_string_quotes(t.text()) {
                     return MetaValue::String(s.to_string());
@@ -1631,7 +1635,8 @@ fn pushmeta_value(node: &crate::SyntaxNode) -> MetaValue {
             }
             crate::SyntaxKind::NUMBER => {
                 if let Some(n) = parse_decimal_token(t.text()) {
-                    return number_meta_value(t.text(), n);
+                    let value = if negate { -n } else { n };
+                    return number_meta_value(t.text(), value);
                 }
             }
             crate::SyntaxKind::DATE => {
@@ -2783,11 +2788,14 @@ mod tests {
         assert_eq!(number_meta_value("42", dec!(42)), MetaValue::Int(42));
         assert_eq!(number_meta_value("0", dec!(0)), MetaValue::Int(0));
         assert_eq!(number_meta_value("1", dec!(-1)), MetaValue::Int(-1));
-        // Decimal point / exponent -> Number.
+        // Decimal point -> Number.
         assert_eq!(
             number_meta_value("42.0", dec!(42.0)),
             MetaValue::Number(dec!(42.0))
         );
+        // Exponent -> Number. The lexer doesn't currently emit exponent NUMBER
+        // tokens, so this isn't reachable from real input today; it pins the
+        // helper's `e`/`E` guard against a future lexer that does.
         assert_eq!(
             number_meta_value("1e3", dec!(1000)),
             MetaValue::Number(dec!(1000))

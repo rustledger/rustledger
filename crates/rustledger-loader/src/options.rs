@@ -53,7 +53,7 @@ const REPEATABLE_OPTIONS: &[&str] = &[
 const READONLY_OPTIONS: &[&str] = &["filename"];
 
 /// Option validation warning.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionWarning {
     /// Warning code (E7001 through E7006).
     pub code: &'static str,
@@ -68,7 +68,7 @@ pub struct OptionWarning {
 /// Beancount file options.
 ///
 /// These correspond to the `option` directives in beancount files.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// Title for the ledger.
     pub title: Option<String>,

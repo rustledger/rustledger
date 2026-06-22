@@ -84,11 +84,17 @@ pub struct CachedOptions {
     pub infer_tolerance_from_cost: bool,
     pub use_legacy_fixed_tolerances: bool,
     pub experiment_explicit_tolerances: bool,
+    pub use_precise_interpolation: bool,
     pub booking_method: String,
     pub render_commas: bool,
+    /// `option "display_precision" "USD:4"` overrides, stored as
+    /// (currency, digits) pairs. Dropping this on a cache hit silently reverted
+    /// number formatting to inferred precision (the bug this field fixes).
+    pub display_precision: Vec<(String, u32)>,
     pub allow_pipe_separator: bool,
     pub long_string_maxlines: u32,
     pub documents: Vec<String>,
+    pub plugin_processing_mode: String,
     pub custom: Vec<(String, String)>,
     /// Names of options the source explicitly set (e.g.
     /// `"booking_method"`). Restored so downstream resolution that
@@ -125,11 +131,18 @@ impl From<&Options> for CachedOptions {
             infer_tolerance_from_cost: opts.infer_tolerance_from_cost,
             use_legacy_fixed_tolerances: opts.use_legacy_fixed_tolerances,
             experiment_explicit_tolerances: opts.experiment_explicit_tolerances,
+            use_precise_interpolation: opts.use_precise_interpolation,
             booking_method: opts.booking_method.clone(),
             render_commas: opts.render_commas,
+            display_precision: opts
+                .display_precision
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
             allow_pipe_separator: opts.allow_pipe_separator,
             long_string_maxlines: opts.long_string_maxlines,
             documents: opts.documents.clone(),
+            plugin_processing_mode: opts.plugin_processing_mode.clone(),
             custom: opts
                 .custom
                 .iter()
@@ -170,11 +183,14 @@ impl From<CachedOptions> for Options {
         opts.infer_tolerance_from_cost = cached.infer_tolerance_from_cost;
         opts.use_legacy_fixed_tolerances = cached.use_legacy_fixed_tolerances;
         opts.experiment_explicit_tolerances = cached.experiment_explicit_tolerances;
+        opts.use_precise_interpolation = cached.use_precise_interpolation;
         opts.booking_method = cached.booking_method;
         opts.render_commas = cached.render_commas;
+        opts.display_precision = cached.display_precision.into_iter().collect();
         opts.allow_pipe_separator = cached.allow_pipe_separator;
         opts.long_string_maxlines = cached.long_string_maxlines;
         opts.documents = cached.documents;
+        opts.plugin_processing_mode = cached.plugin_processing_mode;
         opts.custom = cached.custom.into_iter().collect();
         opts.set_options = cached.set_options.into_iter().collect();
         opts
@@ -321,7 +337,12 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     metadata literals (`key: 42`) now archive as `Int` rather than
 ///     `Number`, and the new discriminant changes the enum's archived
 ///     layout, so old bytes must be regenerated.
-const CACHE_VERSION: u32 = 11;
+/// v12: `CachedOptions` gained `display_precision`, `use_precise_interpolation`,
+///     and `plugin_processing_mode` — previously dropped, so a cache hit
+///     silently ignored `option "display_precision" "USD:4"` (formatting fell
+///     back to inferred precision) and the other two settings. New fields change
+///     the archived layout, so old bytes must be regenerated.
+const CACHE_VERSION: u32 = 12;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1016,11 +1037,11 @@ mod tests {
         // the developer to also update the fixtures (or remove this
         // tripwire if v9's contract is identical to v8 for CostNumber
         // — which is unusual but possible).
-        // v9 (#1340), v10 (string escape-decoding), and v11 (`MetaValue::Int`)
-        // all bumped CACHE_VERSION without touching the `CostNumber` archived
-        // layout these fixtures pin, so the byte arrays below are still valid
-        // and only FIXTURE_VERSION moves.
-        const FIXTURE_VERSION: u32 = 11;
+        // v9 (#1340), v10 (string escape-decoding), v11 (`MetaValue::Int`), and
+        // v12 (`CachedOptions` field-parity) all bumped CACHE_VERSION without
+        // touching the `CostNumber` archived layout these fixtures pin, so the
+        // byte arrays below are still valid and only FIXTURE_VERSION moves.
+        const FIXTURE_VERSION: u32 = 12;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1110,6 +1131,64 @@ mod tests {
         assert_eq!(restored.title, Some("Test Ledger".to_string()));
         assert_eq!(restored.operating_currency, vec!["USD", "EUR"]);
         assert!(restored.render_commas);
+    }
+
+    /// Structural guard (fitness function): populate EVERY non-transient
+    /// `Options` field with a non-default value, round-trip through
+    /// `CachedOptions`, and assert nothing was dropped. A new `Options` field
+    /// that `CachedOptions` forgets to carry fails here — the bug class that
+    /// silently dropped `display_precision` / `use_precise_interpolation` /
+    /// `plugin_processing_mode` (and `set_options` before #1340).
+    ///
+    /// `warnings` is intentionally transient (re-derived, not cached), so it is
+    /// left default on both sides. **When you add a field to `Options`, set it
+    /// here too.**
+    #[test]
+    fn cached_options_field_parity() {
+        use rust_decimal_macros::dec;
+
+        let mut opts = Options::new();
+        opts.title = Some("T".into());
+        opts.filename = Some("f.beancount".into());
+        opts.operating_currency = vec!["USD".into(), "EUR".into()];
+        opts.name_assets = "A".into();
+        opts.name_liabilities = "L".into();
+        opts.name_equity = "Q".into();
+        opts.name_income = "I".into();
+        opts.name_expenses = "X".into();
+        opts.account_rounding = Some("Equity:Round".into());
+        opts.account_previous_balances = "Opening".into();
+        opts.account_previous_earnings = "Earn".into();
+        opts.account_previous_conversions = "Conv".into();
+        opts.account_current_earnings = "CurEarn".into();
+        opts.account_current_conversions = Some("CurConv".into());
+        opts.account_unrealized_gains = Some("Unreal".into());
+        opts.conversion_currency = Some("NOTHING".into());
+        opts.inferred_tolerance_default =
+            std::iter::once(("USD".to_string(), dec!(0.005))).collect();
+        opts.inferred_tolerance_multiplier = dec!(1.5);
+        opts.infer_tolerance_from_cost = true;
+        opts.use_legacy_fixed_tolerances = true;
+        opts.experiment_explicit_tolerances = true;
+        opts.use_precise_interpolation = true;
+        opts.booking_method = "FIFO".into();
+        opts.render_commas = true;
+        opts.display_precision = [("USD".to_string(), 4u32), ("JPY".to_string(), 0)]
+            .into_iter()
+            .collect();
+        opts.allow_pipe_separator = true;
+        opts.long_string_maxlines = 99;
+        opts.documents = vec!["docs".into()];
+        opts.plugin_processing_mode = "raw".into();
+        opts.custom = std::iter::once(("k".to_string(), "v".to_string())).collect();
+        opts.set_options = std::iter::once("booking_method".to_string()).collect();
+        // `warnings` left default (transient — not cached).
+
+        let restored: Options = CachedOptions::from(&opts).into();
+        assert_eq!(
+            restored, opts,
+            "a CachedOptions field was dropped on the cache round-trip"
+        );
     }
 
     /// Regression for #1340: `set_options` must survive the cache

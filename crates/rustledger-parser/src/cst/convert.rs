@@ -640,53 +640,24 @@ fn extract_custom_values(node: &crate::SyntaxNode) -> Vec<MetaValue> {
 
     let mut i = 0;
     while i < raw.len() {
-        let t = &raw[i];
         // Skip the directive's header tokens (DATE, CUSTOM_KW, and
         // the first STRING which is the custom-type name).
         if !seen_type_string {
-            if t.kind() == crate::SyntaxKind::STRING {
+            if raw[i].kind() == crate::SyntaxKind::STRING {
                 seen_type_string = true;
             }
             i += 1;
             continue;
         }
-        match t.kind() {
-            crate::SyntaxKind::STRING => {
-                if let Some(s) = strip_string_quotes(t.text()) {
-                    values.push(MetaValue::String(s.to_string()));
-                }
-            }
-            crate::SyntaxKind::ACCOUNT => {
-                values.push(MetaValue::Account(Account::new(t.text())));
-            }
-            crate::SyntaxKind::BOOL_TRUE => values.push(MetaValue::Bool(true)),
-            crate::SyntaxKind::BOOL_FALSE => values.push(MetaValue::Bool(false)),
-            crate::SyntaxKind::NUMBER => {
-                // Look ahead for an adjacent CURRENCY -> Amount.
-                if let Some(next) = raw.get(i + 1)
-                    && next.kind() == crate::SyntaxKind::CURRENCY
-                    && let Some(num) = parse_decimal_token(t.text())
-                {
-                    let curr = Currency::new(next.text());
-                    values.push(MetaValue::Amount(Amount::new(num, curr)));
-                    i += 2;
-                    continue;
-                }
-                if let Some(num) = parse_decimal_token(t.text()) {
-                    values.push(number_meta_value(t.text(), num));
-                }
-            }
-            crate::SyntaxKind::DATE => {
-                if let Some(date) = parse_date_token(t.text()) {
-                    values.push(MetaValue::Date(date));
-                }
-            }
-            crate::SyntaxKind::CURRENCY => {
-                values.push(MetaValue::Currency(Currency::new(t.text())));
-            }
-            _ => {}
+        // One value at a time through the shared discriminator — this is what
+        // gives custom directives the same MINUS-sign, Tag/Link and
+        // `NUMBER CURRENCY` → Amount handling as metadata entries.
+        if let Some((value, next)) = value_tokens_to_meta(&raw, i) {
+            values.push(value);
+            i = next;
+        } else {
+            i += 1;
         }
-        i += 1;
     }
     values
 }
@@ -1503,10 +1474,73 @@ fn meta_entry_has_minus_sign(entry: &MetaEntry) -> bool {
     false
 }
 
+/// Discriminate one *value group* of raw metadata/custom value tokens
+/// (`tokens[start..]`, trivia already filtered) into a [`MetaValue`], returning
+/// the value and the index just past it. This is the single source of truth for
+/// the raw token-walk extractors ([`pushmeta_value`] and
+/// [`extract_custom_values`]) so they can't drift — they previously did:
+/// `extract_custom_values` dropped the leading `MINUS` (so `custom "x" -50.00`
+/// emitted `+50.00`) and dropped `Tag`/`Link` entirely, while `pushmeta_value`
+/// skipped the `NUMBER CURRENCY` → `Amount` lookahead.
+///
+/// Discrimination mirrors the typed [`meta_value_from_entry`] (the `META_ENTRY`
+/// sibling, which additionally escape-decodes strings via the typed AST). A
+/// leading `MINUS` negates the following `NUMBER`; an adjacent `CURRENCY` makes
+/// it an `Amount`. Returns `None` for a non-value token (the caller advances).
+fn value_tokens_to_meta(
+    tokens: &[rowan::SyntaxToken<crate::BeancountLanguage>],
+    start: usize,
+) -> Option<(MetaValue, usize)> {
+    let mut i = start;
+    let mut negate = false;
+    if tokens.get(i).map(rowan::SyntaxToken::kind) == Some(crate::SyntaxKind::MINUS) {
+        negate = true;
+        i += 1;
+    }
+    let t = tokens.get(i)?;
+    match t.kind() {
+        crate::SyntaxKind::STRING => {
+            let s = strip_string_quotes(t.text())?;
+            Some((MetaValue::String(s.to_string()), i + 1))
+        }
+        crate::SyntaxKind::NUMBER => {
+            let mut decimal = parse_decimal_token(t.text())?;
+            if negate {
+                decimal = -decimal;
+            }
+            // Adjacent `CURRENCY` → `Amount` (negate applies to the amount too).
+            if let Some(next) = tokens.get(i + 1)
+                && next.kind() == crate::SyntaxKind::CURRENCY
+            {
+                return Some((
+                    MetaValue::Amount(Amount::new(decimal, Currency::new(next.text()))),
+                    i + 2,
+                ));
+            }
+            Some((number_meta_value(t.text(), decimal), i + 1))
+        }
+        crate::SyntaxKind::DATE => Some((MetaValue::Date(parse_date_token(t.text())?), i + 1)),
+        crate::SyntaxKind::ACCOUNT => Some((MetaValue::Account(Account::new(t.text())), i + 1)),
+        crate::SyntaxKind::CURRENCY => Some((MetaValue::Currency(Currency::new(t.text())), i + 1)),
+        crate::SyntaxKind::BOOL_TRUE => Some((MetaValue::Bool(true), i + 1)),
+        crate::SyntaxKind::BOOL_FALSE => Some((MetaValue::Bool(false), i + 1)),
+        crate::SyntaxKind::TAG => Some((
+            MetaValue::Tag(Tag::new(t.text().trim_start_matches('#'))),
+            i + 1,
+        )),
+        crate::SyntaxKind::LINK => Some((
+            MetaValue::Link(Link::new(t.text().trim_start_matches('^'))),
+            i + 1,
+        )),
+        _ => None,
+    }
+}
+
 /// Discriminate the value tokens under a `META_ENTRY` into a
 /// typed [`MetaValue`]. Matches the legacy parser's preference
 /// order: string > number > date > account > currency > tag >
-/// link > bool > none.
+/// link > bool > none. The raw-token sibling is [`value_tokens_to_meta`];
+/// keep the two in sync (this one additionally escape-decodes strings).
 fn meta_value_from_entry(entry: &MetaEntry) -> MetaValue {
     if let Some(s) = entry.value_string()
         && let Some(text) = s.text_decoded()
@@ -1619,43 +1653,29 @@ fn apply_inherited_state(
 /// direct-child tokens (the directive isn't a `META_ENTRY` so the
 /// typed-AST accessors aren't reusable).
 fn pushmeta_value(node: &crate::SyntaxNode) -> MetaValue {
-    // A leading `MINUS` token negates the numeric value (e.g. `precision: -1`),
-    // mirroring `meta_value_from_entry`.
-    let mut negate = false;
-    for el in node.children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
-            continue;
-        };
-        match t.kind() {
-            crate::SyntaxKind::MINUS => negate = true,
-            crate::SyntaxKind::STRING => {
-                if let Some(s) = strip_string_quotes(t.text()) {
-                    return MetaValue::String(s.to_string());
-                }
-            }
-            crate::SyntaxKind::NUMBER => {
-                if let Some(n) = parse_decimal_token(t.text()) {
-                    let value = if negate { -n } else { n };
-                    return number_meta_value(t.text(), value);
-                }
-            }
-            crate::SyntaxKind::DATE => {
-                if let Some(d) = parse_date_token(t.text()) {
-                    return MetaValue::Date(d);
-                }
-            }
-            crate::SyntaxKind::ACCOUNT => return MetaValue::Account(Account::new(t.text())),
-            crate::SyntaxKind::CURRENCY => return MetaValue::Currency(Currency::new(t.text())),
-            crate::SyntaxKind::BOOL_TRUE => return MetaValue::Bool(true),
-            crate::SyntaxKind::BOOL_FALSE => return MetaValue::Bool(false),
-            crate::SyntaxKind::TAG => {
-                return MetaValue::Tag(Tag::new(t.text().trim_start_matches('#')));
-            }
-            crate::SyntaxKind::LINK => {
-                return MetaValue::Link(Link::new(t.text().trim_start_matches('^')));
-            }
-            _ => {}
+    // The first value token after the key wins. `value_tokens_to_meta` returns
+    // `None` for the key/colon (and any non-value token), so the loop walks to
+    // the first real value — sharing MINUS-sign, Tag/Link and
+    // `NUMBER CURRENCY` → Amount handling with metadata/custom values.
+    let raw: Vec<rowan::SyntaxToken<crate::BeancountLanguage>> = node
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .filter(|t| {
+            !matches!(
+                t.kind(),
+                crate::SyntaxKind::WHITESPACE
+                    | crate::SyntaxKind::NEWLINE
+                    | crate::SyntaxKind::COMMENT
+            )
+        })
+        .collect();
+
+    let mut i = 0;
+    while i < raw.len() {
+        if let Some((value, _)) = value_tokens_to_meta(&raw, i) {
+            return value;
         }
+        i += 1;
     }
     MetaValue::None
 }

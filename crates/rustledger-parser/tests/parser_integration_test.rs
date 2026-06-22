@@ -275,6 +275,41 @@ fn test_parse_custom_directive() {
     assert_eq!(count_directive_type(&result, "custom"), 1);
 }
 
+/// Regression: custom directive values must preserve a leading `MINUS` sign and
+/// carry `Tag`/`Link` values. `extract_custom_values` previously had no `MINUS`
+/// arm (so `-50.00` emitted `+50.00`) and dropped tags/links entirely. All three
+/// value-token extractors now share `value_tokens_to_meta`.
+#[test]
+fn test_custom_directive_preserves_sign_and_tag_link() {
+    use rust_decimal_macros::dec;
+    use rustledger_core::{Amount, Currency, MetaValue};
+
+    let source = r#"2024-01-01 custom "budget" -50.00 USD #quarterly ^plan-2024 TRUE"#;
+    let result = parse_ok(source);
+    let spanned = result
+        .directives
+        .iter()
+        .find(|d| matches!(d.value, Directive::Custom(_)))
+        .expect("expected a custom directive");
+    let Directive::Custom(custom) = &spanned.value else {
+        unreachable!()
+    };
+
+    assert_eq!(
+        custom.values,
+        vec![
+            // Signed amount keeps its sign (was emitted as +50.00).
+            MetaValue::Amount(Amount::new(dec!(-50.00), Currency::new("USD"))),
+            // Tag and Link are no longer dropped.
+            MetaValue::Tag("quarterly".into()),
+            MetaValue::Link("plan-2024".into()),
+            MetaValue::Bool(true),
+        ],
+        "custom values: {:?}",
+        custom.values
+    );
+}
+
 // ============================================================================
 // Options, Includes, and Plugins
 // ============================================================================

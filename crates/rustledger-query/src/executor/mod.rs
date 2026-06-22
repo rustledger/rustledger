@@ -293,12 +293,17 @@ impl<'a> Executor<'a> {
     /// (issue: BQL compat 93%→77%), after `SELECT`, `PRINT`, and `BALANCES` each
     /// had to be fixed the same way. Routing every generic walk through one
     /// accessor keeps the next command from re-introducing the bug.
-    pub(super) fn resolved_directives(&self) -> Vec<&Directive> {
-        if let Some(spanned) = self.spanned_directives {
-            spanned.iter().map(|s| &s.value).collect()
-        } else {
-            self.directives.iter().collect()
-        }
+    pub(super) fn resolved_directives(&self) -> impl Iterator<Item = &Directive> + '_ {
+        // The two sources are mutually exclusive (see the constructors):
+        // `new_with_sources` leaves `directives` empty and fills
+        // `spanned_directives`; `new` leaves `spanned_directives` None. Chaining
+        // them therefore yields exactly the populated source — with no
+        // allocation, unlike collecting into a `Vec`.
+        self.spanned_directives
+            .unwrap_or(&[])
+            .iter()
+            .map(|s| &s.value)
+            .chain(self.directives.iter())
     }
 
     /// Get or compile a regex pattern from the cache.

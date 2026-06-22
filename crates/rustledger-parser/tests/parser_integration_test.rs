@@ -310,6 +310,40 @@ fn test_custom_directive_preserves_sign_and_tag_link() {
     );
 }
 
+/// Regression: a `pushmeta` value of `NUMBER CURRENCY` must parse as an
+/// `Amount`. Before the three value-token walks were unified through
+/// `value_tokens_to_meta`, `pushmeta_value` returned on the `NUMBER` token and
+/// dropped the currency (`5 USD` became `Number(5)`).
+#[test]
+fn test_pushmeta_value_with_currency_is_amount() {
+    use rust_decimal_macros::dec;
+    use rustledger_core::{Amount, Currency, MetaValue};
+
+    let source = r"
+pushmeta budget: 5 USD
+2024-01-01 open Assets:Cash USD
+popmeta budget:
+";
+    let result = parse_ok(source);
+    let open = result
+        .directives
+        .iter()
+        .find_map(|d| match &d.value {
+            Directive::Open(o) => Some(o),
+            _ => None,
+        })
+        .expect("expected an open directive");
+    assert_eq!(
+        open.meta.get("budget"),
+        Some(&MetaValue::Amount(Amount::new(
+            dec!(5),
+            Currency::new("USD")
+        ))),
+        "pushmeta budget should be Amount(5 USD); meta: {:?}",
+        open.meta
+    );
+}
+
 // ============================================================================
 // Options, Includes, and Plugins
 // ============================================================================

@@ -3,7 +3,7 @@
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use rustledger_core::{Amount, Directive, NaiveDate, Position};
+use rustledger_core::{Amount, Directive, Inventory, NaiveDate, Position};
 
 /// Threshold for parallel row evaluation. Below this, sequential is faster.
 const PARALLEL_THRESHOLD: usize = 1000;
@@ -469,6 +469,23 @@ impl Executor<'_> {
             FxHashSet::default()
         };
 
+        // `balance` is a running total over the post-WHERE output stream, in
+        // table (entry) order — a streaming window column, not a property of a
+        // posting. The materialized table carries an UNFILTERED snapshot, which
+        // is wrong the moment WHERE drops rows that carry other commodities
+        // (e.g. `... WHERE account = "Assets:Bank"` must not see the AAPL leg of
+        // a stock purchase). Recompute it here over the surviving rows, in entry
+        // order, before ORDER BY — mirroring the default path's `collect_postings`.
+        // Gated so non-balance queries pay nothing (the per-row Inventory clone
+        // was the #1080 hot path). `account_balance` is intentionally NOT
+        // recomputed: it is the account's true ledger balance across all postings.
+        let balance_idx = column_map.get("balance").copied();
+        let position_idx = column_map.get("position").copied();
+        let track_balance = balance_idx.is_some()
+            && position_idx.is_some()
+            && super::query_references_column(query, "balance");
+        let mut running_balance = Inventory::default();
+
         // Process each row from the table
         for row in &table.rows {
             // Apply WHERE clause if present
@@ -477,6 +494,22 @@ impl Executor<'_> {
             {
                 continue;
             }
+
+            // Recompute the running `balance` cell over WHERE-surviving rows.
+            let overridden_row;
+            let row = if track_balance {
+                if let Some(Value::Position(pos)) = position_idx.map(|i| &row[i]) {
+                    running_balance.add((**pos).clone());
+                }
+                let mut r = row.clone();
+                if let Some(i) = balance_idx {
+                    r[i] = Value::Inventory(Box::new(running_balance.clone()));
+                }
+                overridden_row = r;
+                &overridden_row
+            } else {
+                row
+            };
 
             // Evaluate targets (including hidden columns)
             let result_row = self.evaluate_subquery_row(&extended_targets, row, &column_map)?;

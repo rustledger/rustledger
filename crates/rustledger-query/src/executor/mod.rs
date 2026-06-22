@@ -4211,6 +4211,73 @@ mod tests {
     }
 
     #[test]
+    fn test_postings_balance_excludes_filtered_commodities() {
+        // Regression: `balance` in the #postings path accumulated over ALL
+        // postings (pre-WHERE), so a stock leg leaked into a cash-account
+        // balance. It must be a running total over WHERE-surviving rows only,
+        // in entry order.
+        let p = |account: &str, n, currency: &str| {
+            rustledger_core::Spanned::synthesized(Posting::new(account, Amount::new(n, currency)))
+        };
+        let txn = |d, postings| {
+            Directive::Transaction(Transaction {
+                date: d,
+                flag: '*',
+                payee: None,
+                narration: "t".into(),
+                tags: vec![],
+                links: vec![],
+                meta: Metadata::default(),
+                postings,
+                trailing_comments: Vec::new(),
+            })
+        };
+        let directives = vec![
+            txn(
+                date(2020, 1, 2),
+                vec![
+                    p("Assets:Bank", dec!(5000), "USD"),
+                    p("Income:Salary", dec!(-5000), "USD"),
+                ],
+            ),
+            txn(
+                date(2020, 1, 3),
+                vec![
+                    p("Assets:Stock", dec!(10), "AAPL"),
+                    p("Assets:Bank", dec!(-1000), "USD"),
+                ],
+            ),
+            txn(
+                date(2020, 1, 4),
+                vec![
+                    p("Assets:Bank", dec!(2000), "USD"),
+                    p("Income:Salary", dec!(-2000), "USD"),
+                ],
+            ),
+        ];
+        let mut executor = Executor::new(&directives);
+        let result = executor
+            .execute(
+                &parse(
+                    "SELECT getitem(balance, 'USD'), getitem(balance, 'AAPL') \
+                     FROM #postings WHERE account = 'Assets:Bank' ORDER BY date",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 3);
+        let usd = |n| Value::Amount(Amount::new(n, "USD"));
+        assert_eq!(result.rows[0][0], usd(dec!(5000)));
+        assert_eq!(result.rows[1][0], usd(dec!(4000)));
+        assert_eq!(result.rows[2][0], usd(dec!(6000)));
+        // The AAPL leg (Assets:Stock, filtered out by WHERE) must NOT leak into
+        // the cash balance — getitem returns NULL for a zero/absent commodity.
+        assert_eq!(result.rows[0][1], Value::Null);
+        assert_eq!(result.rows[1][1], Value::Null);
+        assert_eq!(result.rows[2][1], Value::Null);
+    }
+
+    #[test]
     fn test_interval_function() {
         let directives = sample_directives();
         let mut executor = Executor::new(&directives);

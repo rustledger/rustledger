@@ -298,19 +298,26 @@ fn target<'a>() -> impl Parser<'a, ParserInput<'a>, Target, ParserExtra<'a>> + C
 
 /// Parse FROM modifiers (OPEN ON, CLOSE ON, CLEAR, filter).
 fn from_modifiers<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserExtra<'a>> + Clone {
+    // Each modifier consumes its LEADING separator whitespace and never its
+    // trailing whitespace, so the boundary space before a following clause
+    // (`ORDER BY`/`GROUP BY`/`WHERE`/…) is left intact for that clause's
+    // required `ws1()`. (Previously each modifier ate its trailing whitespace,
+    // which starved the following clause and turned
+    // `FROM CLOSE ON <date> ORDER BY …` into a syntax error.) `open_on` is
+    // always first, so its leading whitespace is already consumed by `FROM ` in
+    // `from_clause`.
     let open_on = kw("OPEN")
         .ignore_then(ws1())
         .ignore_then(kw("ON"))
         .ignore_then(ws1())
-        .ignore_then(date_literal())
-        .then_ignore(ws());
+        .ignore_then(date_literal());
 
-    let close_on = kw("CLOSE")
+    let close_on = ws()
+        .ignore_then(kw("CLOSE"))
         .ignore_then(ws().then(kw("ON")).then(ws()).or_not())
-        .ignore_then(date_literal())
-        .then_ignore(ws());
+        .ignore_then(date_literal());
 
-    let clear = kw("CLEAR").then_ignore(ws());
+    let clear = ws().ignore_then(kw("CLEAR"));
 
     // Parse modifiers in order: OPEN ON, CLOSE ON, CLEAR, filter
     // Or just a table name for user-created tables
@@ -330,8 +337,25 @@ fn from_modifiers<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserEx
 }
 
 /// Parse FROM filter expression (predicates).
+///
+/// A FROM filter is a bare expression preceded by separator whitespace, but it
+/// must not start with a following-clause keyword (`WHERE`/`GROUP`/`ORDER`/
+/// `HAVING`/`LIMIT`/`PIVOT`) — otherwise the optional filter greedily parses
+/// e.g. the `ORDER` in `FROM CLOSE ON <date> ORDER BY …` as a column reference,
+/// consuming the keyword and producing a syntax error. Peek past the leading
+/// whitespace; if a clause keyword follows, decline (leaving the boundary for
+/// that clause).
 fn from_filter<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone {
-    expr()
+    let clause_keyword = choice((
+        kw("WHERE").ignored(),
+        kw("GROUP").ignored(),
+        kw("ORDER").ignored(),
+        kw("HAVING").ignored(),
+        kw("LIMIT").ignored(),
+        kw("PIVOT").ignored(),
+    ));
+    ws().ignore_then(clause_keyword.not().rewind())
+        .ignore_then(expr())
 }
 
 /// Parse WHERE clause.
@@ -1256,6 +1280,45 @@ mod tests {
                 );
                 assert!(from.clear);
             }
+            _ => panic!("Expected SELECT query"),
+        }
+    }
+
+    #[test]
+    fn test_from_modifier_followed_by_clause_parses() {
+        // Regression: a FROM modifier (OPEN ON / CLOSE ON / CLEAR) followed by
+        // another clause used to be a syntax error because the modifier consumed
+        // the boundary whitespace the clause's `ws1()` needs.
+        match parse("SELECT account FROM CLOSE ON 2021-01-01 ORDER BY account")
+            .expect("FROM CLOSE ON <date> ORDER BY should parse")
+        {
+            Query::Select(sel) => {
+                assert_eq!(
+                    sel.from.unwrap().close_on,
+                    Some(rustledger_core::naive_date(2021, 1, 1).unwrap())
+                );
+                assert!(
+                    sel.order_by.is_some(),
+                    "ORDER BY should be a clause, not consumed by the FROM filter"
+                );
+            }
+            _ => panic!("Expected SELECT query"),
+        }
+        // WHERE / GROUP BY after a FROM modifier also parse.
+        assert!(matches!(
+            parse("SELECT account FROM OPEN ON 2020-06-01 WHERE account ~ \"Exp\""),
+            Ok(Query::Select(_))
+        ));
+        assert!(matches!(
+            parse("SELECT account FROM CLOSE ON 2021-01-01 GROUP BY account"),
+            Ok(Query::Select(_))
+        ));
+        // A genuine FROM filter (no clause keyword) still parses as the filter.
+        match parse("SELECT account FROM account ~ \"Exp\"").expect("FROM filter parses") {
+            Query::Select(sel) => assert!(
+                sel.from.unwrap().filter.is_some(),
+                "a bare FROM expression should be the filter"
+            ),
             _ => panic!("Expected SELECT query"),
         }
     }

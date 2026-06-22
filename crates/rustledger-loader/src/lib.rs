@@ -155,6 +155,26 @@ pub enum LoadError {
         /// The error message.
         message: String,
     },
+
+    /// More files were referenced than the 16-bit file-id space allows.
+    ///
+    /// File ids are `u16` on every `Spanned` value, so a ledger may reference at
+    /// most `u16::MAX` files via includes/globs. Reported as an error rather
+    /// than panicking, since `load` is a never-panic-on-input surface.
+    #[error("too many files: a ledger may reference at most {limit} files (16-bit file ids)")]
+    TooManyFiles {
+        /// The maximum number of files supported.
+        limit: usize,
+    },
+}
+
+/// Convert a 0-based file index to the `u16` file id stored on `Spanned`
+/// values, returning [`LoadError::TooManyFiles`] instead of panicking when a
+/// ledger references more files than the 16-bit id space allows.
+fn file_id_to_u16(file_id: usize) -> Result<u16, LoadError> {
+    u16::try_from(file_id).map_err(|_| LoadError::TooManyFiles {
+        limit: u16::MAX as usize,
+    })
 }
 
 /// Result of loading a beancount file.
@@ -635,12 +655,12 @@ impl Loader {
         // ID; this keeps inner spans consistent with their containing
         // directive so consumers don't need to traverse parent pointers.
         //
-        // file_id is `u16` everywhere (see `Spanned::file_id` rustdoc).
-        // `with_file_id` debug-asserts on overflow; we use the same
-        // expect here so release builds also fail loudly instead of
-        // silently mapping the 65,537th file onto `SYNTHESIZED_FILE_ID`.
-        let fid_u16 = u16::try_from(file_id)
-            .expect("file_id exceeds u16::MAX; SourceMap supports at most 65,535 files");
+        // file_id is `u16` everywhere (see `Spanned::file_id` rustdoc). Fail
+        // loudly rather than silently aliasing the overflowing file onto
+        // `SYNTHESIZED_FILE_ID`, but via a returned `LoadError` (collected by the
+        // caller) rather than a panic — `load` must never panic on input. The
+        // `?` short-circuits this file; `with_file_id` below stays within range.
+        let fid_u16 = file_id_to_u16(file_id)?;
         directives.extend(result.directives.into_iter().map(|d| {
             let mut d = d.with_file_id(file_id);
             if let rustledger_core::Directive::Transaction(ref mut txn) = d.value {
@@ -778,6 +798,20 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn file_id_to_u16_returns_error_past_the_16bit_limit_not_panic() {
+        // Within the 16-bit file-id space: Ok.
+        assert_eq!(file_id_to_u16(0).unwrap(), 0);
+        assert_eq!(file_id_to_u16(u16::MAX as usize).unwrap(), u16::MAX);
+        // Past it: a LoadError (collected into LoadResult::errors), NOT a panic.
+        // `load` is a never-panic-on-input surface — at the 65,536th file the
+        // old `expect` would have aborted the whole embedder / wasm module.
+        assert!(matches!(
+            file_id_to_u16(u16::MAX as usize + 1),
+            Err(LoadError::TooManyFiles { limit }) if limit == u16::MAX as usize
+        ));
+    }
 
     #[test]
     fn test_is_encrypted_file_gpg_extension() {

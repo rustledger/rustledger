@@ -435,6 +435,29 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 }
                 error_count += 1;
             }
+            LoadError::TooManyFiles { .. } => {
+                // Message lives once, on the variant's `#[error(...)]`.
+                let message = load_error.to_string();
+                if json_mode {
+                    diagnostics.push(JsonDiagnostic {
+                        file: file.display().to_string(),
+                        line: 1,
+                        column: 1,
+                        end_line: 1,
+                        end_column: 1,
+                        severity: "error".to_string(),
+                        phase: "parse".to_string(),
+                        code: "E0007".to_string(),
+                        message,
+                        hint: None,
+                        context: None,
+                    });
+                    parse_error_count += 1;
+                } else if !args.quiet {
+                    writeln!(stdout, "error: {message}")?;
+                }
+                error_count += 1;
+            }
         }
     }
 

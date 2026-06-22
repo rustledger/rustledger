@@ -87,7 +87,8 @@ pub struct CachedOptions {
     pub use_precise_interpolation: bool,
     pub booking_method: String,
     pub render_commas: bool,
-    /// `option "display_precision" "USD:4"` overrides, stored as
+    /// `option "display_precision" "USD:0.0001"` overrides (the digit count is
+    /// the example number's decimal scale, so `0.0001` → 4), stored as
     /// (currency, digits) pairs. Dropping this on a cache hit silently reverted
     /// number formatting to inferred precision (the bug this field fixes).
     pub display_precision: Vec<(String, u32)>,
@@ -323,7 +324,7 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     positionally) — verified against rkyv 0.8.16 — so this change
 ///     does NOT require a separate version bump. If a future rkyv
 ///     version changes that encoding, OR if `CostNumber` gains
-///     additional fields, bump to the next version (v12).
+///     additional fields, bump `CACHE_VERSION` to the next value.
 /// v9: `CachedOptions` gained a `set_options: Vec<String>` field
 ///     (#1340). It was previously dropped, so a cache hit lost the
 ///     record of which options the file explicitly set — making
@@ -339,9 +340,9 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     layout, so old bytes must be regenerated.
 /// v12: `CachedOptions` gained `display_precision`, `use_precise_interpolation`,
 ///     and `plugin_processing_mode` — previously dropped, so a cache hit
-///     silently ignored `option "display_precision" "USD:4"` (formatting fell
-///     back to inferred precision) and the other two settings. New fields change
-///     the archived layout, so old bytes must be regenerated.
+///     silently ignored `option "display_precision" "USD:0.0001"` (formatting
+///     fell back to inferred precision) and the other two settings. New fields
+///     change the archived layout, so old bytes must be regenerated.
 const CACHE_VERSION: u32 = 12;
 
 /// Cache header stored at the start of cache files.

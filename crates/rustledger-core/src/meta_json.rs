@@ -82,10 +82,11 @@ pub fn json_to_meta_value(value: &serde_json::Value) -> MetaValue {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 MetaValue::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                Decimal::from_str_exact(&f.to_string()).map_or(MetaValue::None, MetaValue::Number)
             } else {
-                MetaValue::None
+                // Parse the number's exact textual form rather than round-tripping
+                // through f64 — that preserves `u64` values above `i64::MAX` and
+                // high-precision decimals (within `Decimal`'s range).
+                Decimal::from_str_exact(&n.to_string()).map_or(MetaValue::None, MetaValue::Number)
             }
         }
         serde_json::Value::Object(obj) => {
@@ -177,5 +178,10 @@ mod tests {
         );
         // A real JSON integer (e.g. from a plugin) parses as Int.
         assert_eq!(json_to_meta_value(&serde_json::json!(7)), MetaValue::Int(7));
+        // A u64 above i64::MAX is preserved exactly (not lost via an f64 hop).
+        assert_eq!(
+            json_to_meta_value(&serde_json::json!(18_446_744_073_709_551_615_u64)),
+            MetaValue::Number(dec!(18446744073709551615))
+        );
     }
 }

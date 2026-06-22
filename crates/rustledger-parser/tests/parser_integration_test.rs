@@ -227,7 +227,6 @@ fn test_parse_commodity_directive() {
 fn test_commodity_precision_metadata_round_trips() {
     // Issue #991: per-commodity `precision: N` metadata must round-trip
     // through parse → format → parse without changing value or type.
-    use rust_decimal_macros::dec;
     use rustledger_core::{FormatConfig, MetaValue, format_directives};
 
     let source = "2024-01-01 commodity USD\n  precision: 2\n";
@@ -235,11 +234,11 @@ fn test_commodity_precision_metadata_round_trips() {
     let Directive::Commodity(comm) = &parsed.directives[0].value else {
         panic!("expected commodity");
     };
-    // First parse: stays a Number(2), not a string or anything else.
+    // First parse: an unquoted integer literal is `Int(2)`, not a Number/string.
     assert_eq!(
         comm.meta.get("precision"),
-        Some(&MetaValue::Number(dec!(2))),
-        "parser must produce Number(2) for unquoted integer metadata"
+        Some(&MetaValue::Int(2)),
+        "parser must produce Int(2) for unquoted integer metadata"
     );
 
     // Format the directive and re-parse — the value must survive unchanged.
@@ -250,8 +249,8 @@ fn test_commodity_precision_metadata_round_trips() {
     };
     assert_eq!(
         comm2.meta.get("precision"),
-        Some(&MetaValue::Number(dec!(2))),
-        "round-tripped precision must remain Number(2); got formatted: {formatted:?}"
+        Some(&MetaValue::Int(2)),
+        "round-tripped precision must remain Int(2); got formatted: {formatted:?}"
     );
 }
 

@@ -673,7 +673,7 @@ fn extract_custom_values(node: &crate::SyntaxNode) -> Vec<MetaValue> {
                     continue;
                 }
                 if let Some(num) = parse_decimal_token(t.text()) {
-                    values.push(MetaValue::Number(num));
+                    values.push(number_meta_value(t.text(), num));
                 }
             }
             crate::SyntaxKind::DATE => {
@@ -1529,7 +1529,7 @@ fn meta_value_from_entry(entry: &MetaEntry) -> MetaValue {
         if let Some(c) = entry.value_currency() {
             return MetaValue::Amount(Amount::new(decimal, Currency::new(c.text())));
         }
-        return MetaValue::Number(decimal);
+        return number_meta_value(n.text(), decimal);
     }
     if let Some(d) = entry.value_date()
         && let Some(date) = parse_date_token(d.text())
@@ -1631,7 +1631,7 @@ fn pushmeta_value(node: &crate::SyntaxNode) -> MetaValue {
             }
             crate::SyntaxKind::NUMBER => {
                 if let Some(n) = parse_decimal_token(t.text()) {
-                    return MetaValue::Number(n);
+                    return number_meta_value(t.text(), n);
                 }
             }
             crate::SyntaxKind::DATE => {
@@ -2352,6 +2352,26 @@ fn parse_decimal_token(text: &str) -> Option<Decimal> {
     Decimal::from_str(s).ok()
 }
 
+/// Choose `Int` vs `Number` for a numeric metadata literal.
+///
+/// Beancount represents integer metadata (`key: 42`) as an int and decimal
+/// metadata (`key: 42.0`) as a `Decimal`. `text` is the original (unsigned)
+/// NUMBER token: a literal with no `.` or exponent that fits in `i64` becomes
+/// `Int`; decimals, exponents, and out-of-range integers stay `Number`. `value`
+/// is the parsed (and sign-applied) magnitude. (Thousands-separator commas are
+/// irrelevant to integer-ness, so they aren't stripped before the check.)
+fn number_meta_value(text: &str, value: Decimal) -> MetaValue {
+    use rust_decimal::prelude::ToPrimitive;
+    if !text.contains('.')
+        && !text.contains('e')
+        && !text.contains('E')
+        && let Some(i) = value.to_i64()
+    {
+        return MetaValue::Int(i);
+    }
+    MetaValue::Number(value)
+}
+
 // ---- Span helpers ----------------------------------------------
 
 /// Convert a CST node's [`rowan::TextRange`] (relative to the
@@ -2582,7 +2602,8 @@ mod tests {
         );
         assert_eq!(
             open.meta.get("number"),
-            Some(&MetaValue::Number(Decimal::from(42)))
+            // Unquoted integer metadata is now `Int`, not `Number`.
+            Some(&MetaValue::Int(42))
         );
     }
 
@@ -2750,8 +2771,34 @@ mod tests {
         assert_eq!(c.values.len(), 4);
         assert!(matches!(c.values[0], MetaValue::Account(_)));
         assert_eq!(c.values[1], MetaValue::Bool(true));
-        assert_eq!(c.values[2], MetaValue::Number(Decimal::from(42)));
+        assert_eq!(c.values[2], MetaValue::Int(42));
         assert!(matches!(c.values[3], MetaValue::Date(_)));
+    }
+
+    #[test]
+    fn number_meta_value_int_vs_decimal_discriminator() {
+        use rust_decimal_macros::dec;
+        // Integer literals -> Int (the token text is unsigned; `value` carries
+        // the sign, e.g. `precision: -1` parses the token "1" with value -1).
+        assert_eq!(number_meta_value("42", dec!(42)), MetaValue::Int(42));
+        assert_eq!(number_meta_value("0", dec!(0)), MetaValue::Int(0));
+        assert_eq!(number_meta_value("1", dec!(-1)), MetaValue::Int(-1));
+        // Decimal point / exponent -> Number.
+        assert_eq!(
+            number_meta_value("42.0", dec!(42.0)),
+            MetaValue::Number(dec!(42.0))
+        );
+        assert_eq!(
+            number_meta_value("1e3", dec!(1000)),
+            MetaValue::Number(dec!(1000))
+        );
+        // i64 overflow stays Number (within Decimal's range).
+        let huge = "99999999999999999999999999";
+        let huge_dec = Decimal::from_str_exact(huge).unwrap();
+        assert_eq!(
+            number_meta_value(huge, huge_dec),
+            MetaValue::Number(huge_dec)
+        );
     }
 
     #[test]

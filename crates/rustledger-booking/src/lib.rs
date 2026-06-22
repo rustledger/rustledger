@@ -78,32 +78,6 @@ pub(crate) fn price_currency_of(posting: &rustledger_core::Posting) -> Option<Cu
         .map(|a| a.currency.clone())
 }
 
-/// Compute the (currency, signed contribution) a price annotation
-/// adds to a transaction's residual for the given units.
-///
-/// `kind = Unit` ⇒ contribution is `|units| * price * sign(units)`;
-/// `kind = Total` ⇒ contribution is `price * sign(units)`.
-///
-/// Returns `None` for incomplete/empty price annotations where the
-/// currency or number is missing — the caller falls back to weighing
-/// the posting in its units currency. Used by both `calculate_residual`
-/// and `calculate_residual_precise` so the Unit-vs-Total semantics
-/// live in one place.
-fn price_residual_contribution(
-    price: &rustledger_core::PriceAnnotation,
-    units: &rustledger_core::Amount,
-) -> Option<(Currency, Decimal)> {
-    let amt = price
-        .amount
-        .as_ref()
-        .and_then(IncompleteAmount::as_amount)?;
-    let signed = match price.kind {
-        rustledger_core::PriceKind::Unit => units.number.abs() * amt.number * units.number.signum(),
-        rustledger_core::PriceKind::Total => amt.number * units.number.signum(),
-    };
-    Some((amt.currency.clone(), signed))
-}
-
 /// Infer the cost currency from other postings in the transaction.
 ///
 /// Python beancount infers cost currency from simple postings (those without
@@ -156,6 +130,138 @@ pub(crate) fn infer_cost_currency_from_postings(transaction: &Transaction) -> Op
     None
 }
 
+/// Numeric backend for the posting-weight engine. `Decimal` is the fast path;
+/// `BigDecimal` the arbitrary-precision path used near the `rust_decimal`
+/// 28-digit ceiling. Both implement this trait so the balance-weight ladder
+/// (cost-spec resolution + price formula) lives in exactly ONE place
+/// ([`residual_weight`]): a new `CostNumber` variant or a sign fix then forces a
+/// compile error / change at a single site instead of silently drifting between
+/// the fast and precise residual functions.
+///
+/// `abs`/`signum` are taken on the source `Decimal` (exact — they add no
+/// digits); only the *multiplications* run in `D`, so `D = BigDecimal`
+/// reproduces the precise path's arithmetic byte-for-byte.
+trait WeightNum: Clone + Default + std::ops::AddAssign + std::ops::Mul<Output = Self> {
+    fn from_decimal(d: Decimal) -> Self;
+}
+
+impl WeightNum for Decimal {
+    fn from_decimal(d: Decimal) -> Self {
+        d
+    }
+}
+
+impl WeightNum for BigDecimal {
+    fn from_decimal(d: Decimal) -> Self {
+        to_big(d)
+    }
+}
+
+/// The canonical per-posting balance weight, summed per currency, generic over
+/// the numeric backend. Single source of truth for [`calculate_residual`] and
+/// [`calculate_residual_precise`].
+///
+/// Weight rule (Beancount): a cost spec puts the weight in the cost currency
+/// (`cost` beats `price`); else a price annotation puts it in the price
+/// currency; else the weight is the units themselves.
+fn residual_weight<D: WeightNum>(transaction: &Transaction) -> HashMap<Currency, D> {
+    // Pre-allocate for typical case (1-2 currencies per transaction)
+    let mut residuals: HashMap<Currency, D> =
+        HashMap::with_capacity(transaction.postings.len().min(4));
+
+    // Lazily compute inferred currency only when needed (most transactions don't need it)
+    let mut inferred_cost_currency: Option<Option<Currency>> = None;
+    let get_inferred_currency = |cache: &mut Option<Option<Currency>>| -> Option<Currency> {
+        cache
+            .get_or_insert_with(|| infer_cost_currency_from_postings(transaction))
+            .clone()
+    };
+
+    for posting in &transaction.postings {
+        // Only process complete amounts
+        let Some(IncompleteAmount::Complete(units)) = &posting.units else {
+            continue;
+        };
+        let signum = units.number.signum();
+
+        // Determine the "weight" of this posting for balance purposes.
+        // If cost has a number but no currency, infer the currency from the
+        // price annotation, then from the other postings.
+        let cost_contribution = posting.cost.as_ref().and_then(|cost_spec| {
+            let inferred_currency = cost_spec
+                .currency
+                .clone()
+                .or_else(|| price_currency_of(posting))
+                .or_else(|| get_inferred_currency(&mut inferred_cost_currency));
+
+            // `PerUnitFromTotal` and `Total` both carry a preserved total —
+            // using it avoids the division-then-multiplication precision loss of
+            // recomputing from `per_unit`. `PerUnit` goes through multiplication.
+            let cost_curr = inferred_currency.as_ref()?;
+            match cost_spec.number {
+                Some(rustledger_core::CostNumber::Total { value: total }) => Some((
+                    cost_curr.clone(),
+                    D::from_decimal(total) * D::from_decimal(signum),
+                )),
+                Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => Some((
+                    cost_curr.clone(),
+                    D::from_decimal(b.total) * D::from_decimal(signum),
+                )),
+                Some(rustledger_core::CostNumber::PerUnit { value: per_unit }) => Some((
+                    cost_curr.clone(),
+                    D::from_decimal(units.number) * D::from_decimal(per_unit),
+                )),
+                None => None, // empty `{}`
+            }
+        });
+
+        if let Some((currency, amount)) = cost_contribution {
+            // Cost-based posting: weight is in the cost currency
+            *residuals.entry(currency).or_default() += amount;
+        } else if posting.cost.is_some() {
+            // Cost spec exists but has no determinable cost number
+            // (e.g., empty `{}`). The CANONICAL weight of a cost-tracked
+            // posting is `units × cost`, NOT `units × price` — even if a
+            // price annotation is present. Falling through to the price
+            // branch would silently produce a balanced residual using
+            // the wrong weight (issue #1026). Skip contribution; the
+            // booking pass will resolve via lot matching, and the
+            // interpolation rule (in `interpolate.rs`) accounts for
+            // this posting as one cost-unknown for its currency group.
+        } else if let Some(price) = &posting.price {
+            // Price annotation: converts units to the price currency.
+            if let Some(amt) = price.amount.as_ref().and_then(IncompleteAmount::as_amount) {
+                // `kind = Unit` ⇒ `|units| * price * sign(units)`;
+                // `kind = Total` ⇒ `price * sign(units)`. The expanded
+                // `abs * price * signum` form (rather than `units * price`) is
+                // kept so `D = Decimal` and `D = BigDecimal` reproduce the
+                // pre-refactor arithmetic exactly.
+                let signed = match price.kind {
+                    rustledger_core::PriceKind::Unit => {
+                        D::from_decimal(units.number.abs())
+                            * D::from_decimal(amt.number)
+                            * D::from_decimal(signum)
+                    }
+                    rustledger_core::PriceKind::Total => {
+                        D::from_decimal(amt.number) * D::from_decimal(signum)
+                    }
+                };
+                *residuals.entry(amt.currency.clone()).or_default() += signed;
+            } else {
+                // Incomplete or bare-sigil price annotation — can't
+                // calculate a price-currency conversion, fall back to units.
+                *residuals.entry(units.currency.clone()).or_default() +=
+                    D::from_decimal(units.number);
+            }
+        } else {
+            // Simple posting: weight is just the units
+            *residuals.entry(units.currency.clone()).or_default() += D::from_decimal(units.number);
+        }
+    }
+
+    residuals
+}
+
 /// Calculate the residual (imbalance) of a transaction.
 ///
 /// Returns a map of currency -> residual amount.
@@ -170,93 +276,9 @@ pub(crate) fn infer_cost_currency_from_postings(transaction: &Transaction) -> Op
 ///
 /// See: `spec/tla/DoubleEntry.tla`
 #[must_use]
+#[allow(clippy::implicit_hasher)]
 pub fn calculate_residual(transaction: &Transaction) -> HashMap<Currency, Decimal> {
-    // Pre-allocate for typical case (1-2 currencies per transaction)
-    let mut residuals: HashMap<Currency, Decimal> =
-        HashMap::with_capacity(transaction.postings.len().min(4));
-
-    // Lazily compute inferred currency only when needed (most transactions don't need it)
-    let mut inferred_cost_currency: Option<Option<Currency>> = None;
-    let get_inferred_currency = |cache: &mut Option<Option<Currency>>| -> Option<Currency> {
-        cache
-            .get_or_insert_with(|| infer_cost_currency_from_postings(transaction))
-            .clone()
-    };
-
-    for posting in &transaction.postings {
-        // Only process complete amounts
-        if let Some(IncompleteAmount::Complete(units)) = &posting.units {
-            // Determine the "weight" of this posting for balance purposes.
-            // - If there's a cost, the weight is in the cost currency (not units currency)
-            // - If there's a price annotation, the weight is in the price currency (not units currency)
-            // - Otherwise, the weight is just the units
-
-            // Check if cost spec has determinable values.
-            // If cost has number but no currency, try to infer currency from:
-            // 1. Price annotation
-            // 2. Other postings in the transaction
-            let cost_contribution = posting.cost.as_ref().and_then(|cost_spec| {
-                // Try to get cost currency, falling back to price currency, then other postings
-                let inferred_currency = cost_spec
-                    .currency
-                    .clone()
-                    .or_else(|| price_currency_of(posting))
-                    .or_else(|| get_inferred_currency(&mut inferred_cost_currency));
-
-                // `PerUnitFromTotal` and `Total` both carry a total
-                // that booking preserves for exact residual math —
-                // using the total avoids the
-                // division-then-multiplication precision loss that
-                // would happen if we recomputed from `per_unit`.
-                // `PerUnit` (user-written per-unit) goes through the
-                // multiplication path.
-                let cost_curr = inferred_currency.as_ref()?;
-                match cost_spec.number {
-                    Some(rustledger_core::CostNumber::Total { value: total }) => {
-                        Some((cost_curr.clone(), total * units.number.signum()))
-                    }
-                    Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => {
-                        Some((cost_curr.clone(), b.total * units.number.signum()))
-                    }
-                    Some(rustledger_core::CostNumber::PerUnit { value: per_unit }) => {
-                        let cost_amount = units.number * per_unit;
-                        Some((cost_curr.clone(), cost_amount))
-                    }
-                    None => None, // empty `{}`
-                }
-            });
-
-            if let Some((currency, amount)) = cost_contribution {
-                // Cost-based posting: weight is in the cost currency
-                *residuals.entry(currency).or_default() += amount;
-            } else if posting.cost.is_some() {
-                // Cost spec exists but has no determinable cost number
-                // (e.g., empty `{}`). The CANONICAL weight of a cost-tracked
-                // posting is `units × cost`, NOT `units × price` — even if a
-                // price annotation is present. Falling through to the price
-                // branch would silently produce a balanced residual using
-                // the wrong weight (issue #1026). Skip contribution; the
-                // booking pass will resolve via lot matching, and the
-                // interpolation rule (in `interpolate.rs`) accounts for
-                // this posting as one cost-unknown for its currency group.
-            } else if let Some(price) = &posting.price {
-                // Price annotation: converts units to price currency for balance purposes.
-                // The weight is in the price currency, not the units currency.
-                if let Some((curr, contribution)) = price_residual_contribution(price, units) {
-                    *residuals.entry(curr).or_default() += contribution;
-                } else {
-                    // Incomplete or bare-sigil price annotation — can't
-                    // calculate a price-currency conversion, fall back to units.
-                    *residuals.entry(units.currency.clone()).or_default() += units.number;
-                }
-            } else {
-                // Simple posting: weight is just the units
-                *residuals.entry(units.currency.clone()).or_default() += units.number;
-            }
-        }
-    }
-
-    residuals
+    residual_weight::<Decimal>(transaction)
 }
 
 /// Convert a `rust_decimal::Decimal` to `BigDecimal` for arbitrary-precision arithmetic.
@@ -276,83 +298,9 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// when amounts have near-28-digit precision. `rust_decimal` is limited to 28-29
 /// significant digits; this function handles arbitrary precision correctly.
 #[must_use]
+#[allow(clippy::implicit_hasher)]
 pub fn calculate_residual_precise(transaction: &Transaction) -> HashMap<Currency, BigDecimal> {
-    let mut residuals: HashMap<Currency, BigDecimal> =
-        HashMap::with_capacity(transaction.postings.len().min(4));
-
-    let mut inferred_cost_currency: Option<Option<Currency>> = None;
-    let get_inferred_currency = |cache: &mut Option<Option<Currency>>| -> Option<Currency> {
-        cache
-            .get_or_insert_with(|| infer_cost_currency_from_postings(transaction))
-            .clone()
-    };
-
-    for posting in &transaction.postings {
-        if let Some(IncompleteAmount::Complete(units)) = &posting.units {
-            let units_number = to_big(units.number);
-
-            let cost_contribution = posting.cost.as_ref().and_then(|cost_spec| {
-                let inferred_currency = cost_spec
-                    .currency
-                    .clone()
-                    .or_else(|| price_currency_of(posting))
-                    .or_else(|| get_inferred_currency(&mut inferred_cost_currency));
-
-                // BigDecimal version of the same matcher as above.
-                // `PerUnitFromTotal` joins `Total` in the precision-
-                // preserving branch.
-                let cost_curr = inferred_currency.as_ref()?;
-                match cost_spec.number {
-                    Some(rustledger_core::CostNumber::Total { value: total }) => Some((
-                        cost_curr.clone(),
-                        to_big(total) * to_big(units.number.signum()),
-                    )),
-                    Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => Some((
-                        cost_curr.clone(),
-                        to_big(b.total) * to_big(units.number.signum()),
-                    )),
-                    Some(rustledger_core::CostNumber::PerUnit { value: per_unit }) => {
-                        let cost_amount = &units_number * to_big(per_unit);
-                        Some((cost_curr.clone(), cost_amount))
-                    }
-                    None => None,
-                }
-            });
-
-            if let Some((currency, amount)) = cost_contribution {
-                *residuals.entry(currency).or_default() += amount;
-            } else if posting.cost.is_some() {
-                // Cost spec exists but has no determinable cost number
-                // (e.g., empty `{}`). Same as `calculate_residual` —
-                // cost beats price for posting weight; falling through
-                // to the price branch produces a wrong-weight balanced
-                // residual (issue #1026).
-            } else if let Some(price) = &posting.price {
-                // Same Unit/Total semantics as `calculate_residual`, but
-                // running through BigDecimal to avoid 28-digit precision
-                // loss. Inline because the `BigDecimal` math doesn't fit
-                // the shared `price_residual_contribution` (which returns
-                // `Decimal`).
-                if let Some(amt) = price.amount.as_ref().and_then(IncompleteAmount::as_amount) {
-                    let signed = match price.kind {
-                        rustledger_core::PriceKind::Unit => {
-                            units_number.abs() * to_big(amt.number) * to_big(units.number.signum())
-                        }
-                        rustledger_core::PriceKind::Total => {
-                            to_big(amt.number) * to_big(units.number.signum())
-                        }
-                    };
-                    *residuals.entry(amt.currency.clone()).or_default() += signed;
-                } else {
-                    *residuals.entry(units.currency.clone()).or_default() += units_number.clone();
-                }
-            } else {
-                *residuals.entry(units.currency.clone()).or_default() += units_number;
-            }
-        }
-    }
-
-    residuals
+    residual_weight::<BigDecimal>(transaction)
 }
 
 /// Check if a transaction is balanced within tolerance.
@@ -596,6 +544,65 @@ mod tests {
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
         // AAPL should not appear in residuals (cost converts to USD)
         assert_eq!(residual.get("AAPL"), None);
+    }
+
+    /// Fitness function: the fast (`Decimal`) and precise (`BigDecimal`) residual
+    /// paths now share one generic engine ([`residual_weight`]), so they must
+    /// produce equal residuals per currency. Guards against a future
+    /// re-specialization of one path drifting from the other. Exercises every
+    /// weight arm in a single transaction.
+    #[test]
+    fn fast_and_precise_residual_agree_across_weight_arms() {
+        use std::str::FromStr;
+
+        let txn = Transaction::new(date(2024, 1, 15), "Every weight arm")
+            // per-unit cost
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
+                    CostSpec::empty()
+                        .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(150.00) })
+                        .with_currency("USD"),
+                ),
+            )
+            // total cost, negative units
+            .with_synthesized_posting(
+                Posting::new("Assets:Bond", Amount::new(dec!(-3), "BOND")).with_cost(
+                    CostSpec::empty()
+                        .with_number(rustledger_core::CostNumber::Total { value: dec!(450.00) })
+                        .with_currency("USD"),
+                ),
+            )
+            // unit price
+            .with_synthesized_posting(
+                Posting::new("Assets:USD", Amount::new(dec!(-100.00), "USD"))
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(0.85), "EUR"))),
+            )
+            // total price
+            .with_synthesized_posting(
+                Posting::new("Assets:GBP", Amount::new(dec!(20.00), "GBP"))
+                    .with_price(PriceAnnotation::total(Amount::new(dec!(26.00), "EUR"))),
+            )
+            // simple
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-12.34), "USD")));
+
+        let fast = calculate_residual(&txn);
+        let precise = calculate_residual_precise(&txn);
+
+        assert_eq!(
+            fast.len(),
+            precise.len(),
+            "fast {fast:?} and precise {precise:?} cover different currency sets"
+        );
+        for (currency, fval) in &fast {
+            let pval = precise.get(currency).expect("currency present in precise");
+            // Compare via the precise value's string form parsed back to Decimal
+            // (exact for these values) — avoids BigDecimal scale-sensitive `==`.
+            let pval_as_dec = Decimal::from_str(&pval.to_string()).unwrap();
+            assert_eq!(
+                *fval, pval_as_dec,
+                "fast and precise residual disagree for {currency}: {fval} vs {pval}"
+            );
+        }
     }
 
     /// Test residual calculation with total cost.

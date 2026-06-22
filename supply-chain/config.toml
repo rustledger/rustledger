@@ -271,6 +271,18 @@ criteria = "safe-to-deploy"
 version = "0.1.12"
 criteria = "safe-to-deploy"
 
+[[exemptions.defmt]]
+version = "1.1.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.defmt-macros]]
+version = "1.1.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.defmt-parser]]
+version = "1.0.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.digest]]
 version = "0.10.7"
 criteria = "safe-to-deploy"

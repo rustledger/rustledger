@@ -310,11 +310,26 @@ impl Executor<'_> {
     /// `Decimal::checked_rem` to integers too, giving the truncated (wrong) sign.
     pub(super) fn modulo_op(&self, left: &Value, right: &Value) -> Result<Value, QueryError> {
         if let (Value::Integer(a), Value::Integer(b)) = (left, right) {
-            return Ok(if *b == 0 {
-                Value::Null
+            let (a, b) = (*a, *b);
+            if b == 0 {
+                return Ok(Value::Null);
+            }
+            // `i64::MIN % -1` overflows the truncated remainder but is
+            // mathematically 0 (every integer is divisible by -1), so map the
+            // overflow case to 0.
+            let Some(rem) = a.checked_rem(b) else {
+                return Ok(Value::Integer(0));
+            };
+            // Floored modulo: when the truncated remainder's sign differs from
+            // the divisor's, shift by the divisor. This `rem + b` cannot
+            // overflow — in the differing-sign branch `|rem| < |b|`, so the sum
+            // stays within range and takes the divisor's sign.
+            let result = if rem != 0 && (rem < 0) != (b < 0) {
+                rem + b
             } else {
-                Value::Integer(((a % b) + b) % b)
-            });
+                rem
+            };
+            return Ok(Value::Integer(result));
         }
         self.arithmetic_op(left, right, Decimal::checked_rem)
     }

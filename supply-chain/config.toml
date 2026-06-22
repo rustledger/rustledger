@@ -743,14 +743,6 @@ criteria = "safe-to-deploy"
 version = "0.8.16"
 criteria = "safe-to-deploy"
 
-[[exemptions.rmp]]
-version = "0.8.15"
-criteria = "safe-to-deploy"
-
-[[exemptions.rmp-serde]]
-version = "1.3.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.ropey]]
 version = "1.6.1"
 criteria = "safe-to-deploy"

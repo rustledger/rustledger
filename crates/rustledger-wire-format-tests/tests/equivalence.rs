@@ -253,6 +253,7 @@ fn fixture_metadata_all_variants() -> Metadata {
         MetaValue::Date(naive_date(2024, 6, 15).unwrap()),
     );
     m.insert("number-key".to_string(), MetaValue::Number(dec!(123.456)));
+    m.insert("int-key".to_string(), MetaValue::Int(42));
     m.insert("bool-key".to_string(), MetaValue::Bool(true));
     m.insert(
         "amount-key".to_string(),

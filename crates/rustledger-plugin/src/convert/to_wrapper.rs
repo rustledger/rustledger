@@ -146,6 +146,9 @@ pub(super) fn meta_value_to_data(value: &MetaValue) -> MetaValueData {
         MetaValue::Amount(a) => MetaValueData::Amount(amount_to_data(a)),
         MetaValue::Bool(b) => MetaValueData::Bool(*b),
         MetaValue::None => MetaValueData::String(String::new()),
+        // The plugin wire has no integer case; carry it as a numeric string
+        // (plugins already see `Number` the same way).
+        MetaValue::Int(i) => MetaValueData::Number(i.to_string()),
     }
 }
 

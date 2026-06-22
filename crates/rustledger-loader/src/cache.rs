@@ -317,7 +317,11 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 /// v10: String literals are now escape-decoded at parse (`\"`->`"`, etc.);
 ///     the stored narration/payee/meta/etc. bytes differ from the old raw
 ///     form, so a cache hit would serve stale, still-escaped strings.
-const CACHE_VERSION: u32 = 10;
+/// v11: `MetaValue` gained an `Int(i64)` variant (appended last). Integer
+///     metadata literals (`key: 42`) now archive as `Int` rather than
+///     `Number`, and the new discriminant changes the enum's archived
+///     layout, so old bytes must be regenerated.
+const CACHE_VERSION: u32 = 11;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1012,11 +1016,11 @@ mod tests {
         // the developer to also update the fixtures (or remove this
         // tripwire if v9's contract is identical to v8 for CostNumber
         // — which is unusual but possible).
-        // v9 (#1340) and v10 (string escape-decoding) both bumped
-        // CACHE_VERSION without touching the `CostNumber` archived layout
-        // these fixtures pin, so the byte arrays below are still valid and
-        // only FIXTURE_VERSION moves.
-        const FIXTURE_VERSION: u32 = 10;
+        // v9 (#1340), v10 (string escape-decoding), and v11 (`MetaValue::Int`)
+        // all bumped CACHE_VERSION without touching the `CostNumber` archived
+        // layout these fixtures pin, so the byte arrays below are still valid
+        // and only FIXTURE_VERSION moves.
+        const FIXTURE_VERSION: u32 = 11;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \

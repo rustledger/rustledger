@@ -306,6 +306,7 @@ fn visit_meta_value_currency<'a>(v: &'a MetaValue, visit: &mut impl FnMut(&'a st
         | MetaValue::Date(_)
         | MetaValue::Number(_)
         | MetaValue::Bool(_)
+        | MetaValue::Int(_)
         | MetaValue::None => {}
     }
 }
@@ -324,6 +325,7 @@ fn visit_meta_value_account<'a>(v: &'a MetaValue, visit: &mut impl FnMut(&'a str
         | MetaValue::Number(_)
         | MetaValue::Bool(_)
         | MetaValue::Amount(_)
+        | MetaValue::Int(_)
         | MetaValue::None => {}
     }
 }
@@ -342,6 +344,7 @@ fn visit_meta_value_tag<'a>(v: &'a MetaValue, visit: &mut impl FnMut(&'a str)) {
         | MetaValue::Number(_)
         | MetaValue::Bool(_)
         | MetaValue::Amount(_)
+        | MetaValue::Int(_)
         | MetaValue::None => {}
     }
 }
@@ -360,6 +363,7 @@ fn visit_meta_value_link<'a>(v: &'a MetaValue, visit: &mut impl FnMut(&'a str)) 
         | MetaValue::Number(_)
         | MetaValue::Bool(_)
         | MetaValue::Amount(_)
+        | MetaValue::Int(_)
         | MetaValue::None => {}
     }
 }

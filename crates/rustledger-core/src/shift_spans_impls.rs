@@ -204,6 +204,7 @@ impl ShiftSpans for MetaValue {
             Self::Bool(b) => b.shift_spans(shift),
             Self::Amount(a) => a.shift_spans(shift),
             Self::None => {}
+            Self::Int(i) => i.shift_spans(shift),
         }
     }
 }

@@ -36,6 +36,9 @@ fn meta_value_to_json(value: &MetaValue) -> MetaValueJson {
             currency: a.currency.to_string(),
         },
         MetaValue::None => MetaValueJson::Null,
+        // Stringified like `Number` (MetaValueJson has no numeric case); the
+        // typed variant below carries the "int" type tag.
+        MetaValue::Int(i) => MetaValueJson::String(i.to_string()),
     }
 }
 
@@ -101,6 +104,10 @@ fn meta_value_to_typed_json(value: &MetaValue) -> TypedValueJson {
         MetaValue::None => TypedValueJson {
             value_type: "null".into(),
             value: MetaValueJson::Null,
+        },
+        MetaValue::Int(i) => TypedValueJson {
+            value_type: "int".into(),
+            value: MetaValueJson::String(i.to_string()),
         },
     }
 }

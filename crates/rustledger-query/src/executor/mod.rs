@@ -4180,20 +4180,20 @@ mod tests {
         let mut executor = Executor::new_with_sources(&spanned, &source_map);
 
         // meta() exposes synthetic filename/lineno per posting. (lineno is a
-        // Number — there is no integer MetaValue; the dedicated `lineno` column
-        // is Integer.)
+        // true Integer — matching the dedicated `lineno` column and beanquery's
+        // integer lineno.)
         let r = executor
             .execute(&parse("SELECT meta('filename'), meta('lineno')").unwrap())
             .unwrap();
         assert_eq!(r.rows[0][0], Value::String("test.beancount".to_string()));
-        assert_eq!(r.rows[0][1], Value::Number(dec!(2)));
-        assert_eq!(r.rows[1][1], Value::Number(dec!(3)));
+        assert_eq!(r.rows[0][1], Value::Integer(2));
+        assert_eq!(r.rows[1][1], Value::Integer(3));
 
         // entry_meta uses the ENTRY (directive) line, not the posting's.
         let r = executor
             .execute(&parse("SELECT entry_meta('lineno')").unwrap())
             .unwrap();
-        assert_eq!(r.rows[0][0], Value::Number(dec!(1)));
+        assert_eq!(r.rows[0][0], Value::Integer(1));
 
         // A user meta key still resolves and takes precedence.
         let r = executor
@@ -4202,12 +4202,12 @@ mod tests {
         assert_eq!(r.rows[0][0], Value::String("food".to_string()));
 
         // The full meta column is augmented; getitem over it (and via #postings)
-        // sees the synthetic keys.
+        // sees the synthetic keys as integers.
         let r = executor
             .execute(&parse("SELECT getitem(meta, 'lineno') FROM #postings").unwrap())
             .unwrap();
-        assert_eq!(r.rows[0][0], Value::Number(dec!(2)));
-        assert_eq!(r.rows[1][0], Value::Number(dec!(3)));
+        assert_eq!(r.rows[0][0], Value::Integer(2));
+        assert_eq!(r.rows[1][0], Value::Integer(3));
     }
 
     #[test]

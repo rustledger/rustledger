@@ -622,6 +622,9 @@ fn meta_value_to_json(v: &rustledger_core::MetaValue) -> serde_json::Value {
         MetaValue::Tag(t) => serde_json::Value::String(t.to_string()),
         MetaValue::Link(l) => serde_json::Value::String(l.to_string()),
         MetaValue::None => serde_json::Value::Null,
+        // Stringified like `Number`, keeping all numeric metadata uniform on the
+        // JSON wire (and identical across the FFI bindings).
+        MetaValue::Int(i) => serde_json::json!(i.to_string()),
     }
 }
 

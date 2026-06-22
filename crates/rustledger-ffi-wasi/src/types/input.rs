@@ -237,7 +237,8 @@ pub fn json_to_meta_value(value: &serde_json::Value) -> MetaValue {
         serde_json::Value::Bool(b) => MetaValue::Bool(*b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                MetaValue::Number(rustledger_core::Decimal::from(i))
+                // A JSON integer round-trips as an integer metadata value.
+                MetaValue::Int(i)
             } else if let Some(f) = n.as_f64() {
                 match rustledger_core::Decimal::from_str_exact(&f.to_string()) {
                     Ok(d) => MetaValue::Number(d),

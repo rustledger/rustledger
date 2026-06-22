@@ -53,6 +53,12 @@ pub enum MetaValue {
     Amount(Amount),
     /// Null/None value
     None,
+    /// Integer value (e.g. beancount `key: 42`, distinct from `42.0`).
+    ///
+    /// MUST remain the LAST variant: rkyv encodes enum discriminants by
+    /// declaration order, so appending keeps the existing variants' discriminants
+    /// stable. `CACHE_VERSION` (rustledger-loader) was bumped when this was added.
+    Int(i64),
 }
 
 impl fmt::Display for MetaValue {
@@ -68,6 +74,7 @@ impl fmt::Display for MetaValue {
             Self::Bool(b) => write!(f, "{b}"),
             Self::Amount(a) => write!(f, "{a}"),
             Self::None => write!(f, "None"),
+            Self::Int(i) => write!(f, "{i}"),
         }
     }
 }
@@ -90,24 +97,38 @@ pub type Metadata = FxHashMap<String, MetaValue>;
 #[must_use = "ignoring the result silently drops invalid `precision:` metadata; the loader expects to skip invalid values, the validator expects to surface them"]
 pub fn parse_precision_meta(value: &MetaValue) -> Result<u32, String> {
     use rust_decimal::prelude::ToPrimitive;
-    let MetaValue::Number(n) = value else {
-        return Err(format!(
+    match value {
+        // `precision: 2` now parses as an integer metadata value.
+        MetaValue::Int(i) => u32::try_from(*i).map_err(|_| {
+            if *i < 0 {
+                format!("expected a non-negative integer, got {i}")
+            } else {
+                format!(
+                    "value {i} exceeds the maximum supported precision ({})",
+                    u32::MAX
+                )
+            }
+        }),
+        // `precision: 2.0` (an explicit decimal) is still accepted if integral.
+        MetaValue::Number(n) => {
+            if n.is_sign_negative() {
+                return Err(format!("expected a non-negative integer, got {n}"));
+            }
+            if !n.fract().is_zero() {
+                return Err(format!("expected an integer, got {n}"));
+            }
+            n.to_u32().ok_or_else(|| {
+                format!(
+                    "value {n} exceeds the maximum supported precision ({})",
+                    u32::MAX
+                )
+            })
+        }
+        _ => Err(format!(
             "expected a non-negative integer, got {} value",
             meta_value_kind(value)
-        ));
-    };
-    if n.is_sign_negative() {
-        return Err(format!("expected a non-negative integer, got {n}"));
+        )),
     }
-    if !n.fract().is_zero() {
-        return Err(format!("expected an integer, got {n}"));
-    }
-    n.to_u32().ok_or_else(|| {
-        format!(
-            "value {n} exceeds the maximum supported precision ({})",
-            u32::MAX
-        )
-    })
 }
 
 const fn meta_value_kind(v: &MetaValue) -> &'static str {
@@ -122,6 +143,7 @@ const fn meta_value_kind(v: &MetaValue) -> &'static str {
         MetaValue::Bool(_) => "bool",
         MetaValue::Amount(_) => "amount",
         MetaValue::None => "none",
+        MetaValue::Int(_) => "int",
     }
 }
 
@@ -1842,6 +1864,11 @@ mod tests {
 
     #[test]
     fn parse_precision_meta_accepts_non_negative_integers() {
+        // `precision: 2` parses as `Int`; `precision: 2.0` as `Number`. Both
+        // must validate identically.
+        assert_eq!(parse_precision_meta(&MetaValue::Int(0)), Ok(0));
+        assert_eq!(parse_precision_meta(&MetaValue::Int(2)), Ok(2));
+        assert_eq!(parse_precision_meta(&MetaValue::Int(28)), Ok(28));
         assert_eq!(parse_precision_meta(&MetaValue::Number(dec!(0))), Ok(0));
         assert_eq!(parse_precision_meta(&MetaValue::Number(dec!(2))), Ok(2));
         assert_eq!(parse_precision_meta(&MetaValue::Number(dec!(28))), Ok(28));
@@ -1856,6 +1883,8 @@ mod tests {
     fn parse_precision_meta_rejects_negatives() {
         let err = parse_precision_meta(&MetaValue::Number(dec!(-1))).unwrap_err();
         assert!(err.contains("non-negative"), "got: {err}");
+        let err = parse_precision_meta(&MetaValue::Int(-1)).unwrap_err();
+        assert!(err.contains("non-negative"), "got: {err}");
     }
 
     #[test]
@@ -1869,6 +1898,16 @@ mod tests {
         // 2^33 — out of u32 range.
         let err = parse_precision_meta(&MetaValue::Number(dec!(8589934592))).unwrap_err();
         assert!(err.contains("exceeds"), "got: {err}");
+        let err = parse_precision_meta(&MetaValue::Int(8_589_934_592)).unwrap_err();
+        assert!(err.contains("exceeds"), "got: {err}");
+    }
+
+    #[test]
+    fn meta_value_int_display_and_kind() {
+        assert_eq!(MetaValue::Int(42).to_string(), "42");
+        assert_eq!(MetaValue::Int(-7).to_string(), "-7");
+        assert_eq!(crate::format::format_meta_value(&MetaValue::Int(42)), "42");
+        assert_eq!(meta_value_kind(&MetaValue::Int(0)), "int");
     }
 
     #[test]

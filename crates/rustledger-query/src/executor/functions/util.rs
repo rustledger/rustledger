@@ -64,9 +64,13 @@ impl Executor<'_> {
         let loc = loc?;
         match key {
             "filename" => Some(MetaValue::String(loc.filename.clone())),
-            // There is no integer `MetaValue`; `Number(Decimal)` renders as `4`
-            // and compares numerically, matching beanquery's integer lineno.
-            "lineno" => Some(MetaValue::Number(Decimal::from(loc.lineno as u64))),
+            // beanquery's lineno is an integer; emit a true `Int` (the `lineno`
+            // column is also `Integer`). Falls back to `Number` only on the
+            // practically-impossible case of a line number exceeding i64.
+            "lineno" => Some(i64::try_from(loc.lineno).map_or_else(
+                |_| MetaValue::Number(Decimal::from(loc.lineno as u64)),
+                MetaValue::Int,
+            )),
             _ => None,
         }
     }
@@ -103,6 +107,7 @@ impl Executor<'_> {
             None => Value::Null,
             Some(MetaValue::String(s)) => Value::String(s.clone()),
             Some(MetaValue::Number(n)) => Value::Number(*n),
+            Some(MetaValue::Int(i)) => Value::Integer(*i),
             Some(MetaValue::Date(d)) => Value::Date(*d),
             Some(MetaValue::Bool(b)) => Value::Boolean(*b),
             Some(MetaValue::Amount(a)) => Value::Amount(a.clone()),

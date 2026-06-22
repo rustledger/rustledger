@@ -47,6 +47,10 @@ pub fn meta_value_to_json(value: &MetaValue) -> serde_json::Value {
             "currency": a.currency.to_string()
         }),
         MetaValue::None => serde_json::Value::Null,
+        // Stringified like `Number`, keeping numeric metadata uniform on the
+        // wire and identical to the WASM binding (the equivalence harness pins
+        // ffi-wasi == wasm).
+        MetaValue::Int(i) => serde_json::json!(i.to_string()),
     }
 }
 
@@ -198,6 +202,10 @@ impl TypedValue {
             MetaValue::None => Self {
                 value_type: "null",
                 value: serde_json::Value::Null,
+            },
+            MetaValue::Int(i) => Self {
+                value_type: "int",
+                value: serde_json::Value::String(i.to_string()),
             },
         }
     }

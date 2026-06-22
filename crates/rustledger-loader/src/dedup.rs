@@ -128,6 +128,7 @@ fn intern_meta(meta: &mut Metadata, interner: &mut StringInterner, dedup_count: 
             }
             MetaValue::String(_)
             | MetaValue::Number(_)
+            | MetaValue::Int(_)
             | MetaValue::Date(_)
             | MetaValue::Bool(_)
             | MetaValue::None => {}

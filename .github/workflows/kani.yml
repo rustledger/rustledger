@@ -40,7 +40,7 @@ jobs:
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'formal-verification'))
 
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Install Kani inline rather than via `model-checking/kani-github-action`.
       # That action's repo HEAD hasn't moved since 2024-01-10 (~16 months at
       # time of writing); its internal `action.yml` pulls in

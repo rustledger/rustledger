@@ -61,54 +61,13 @@ fn metadata_to_json(meta: &Metadata) -> HashMap<String, MetaValueJson> {
 /// Stringified-decimal handling matches [`meta_value_to_json`] — JSON
 /// numbers can't represent `rust_decimal::Decimal` losslessly.
 fn meta_value_to_typed_json(value: &MetaValue) -> TypedValueJson {
-    match value {
-        MetaValue::String(s) => TypedValueJson {
-            value_type: "string".into(),
-            value: MetaValueJson::String(s.clone()),
-        },
-        MetaValue::Account(a) => TypedValueJson {
-            value_type: "account".into(),
-            value: MetaValueJson::String(a.to_string()),
-        },
-        MetaValue::Currency(c) => TypedValueJson {
-            value_type: "currency".into(),
-            value: MetaValueJson::String(c.to_string()),
-        },
-        MetaValue::Tag(t) => TypedValueJson {
-            value_type: "tag".into(),
-            value: MetaValueJson::String(t.to_string()),
-        },
-        MetaValue::Link(l) => TypedValueJson {
-            value_type: "link".into(),
-            value: MetaValueJson::String(l.to_string()),
-        },
-        MetaValue::Date(d) => TypedValueJson {
-            value_type: "date".into(),
-            value: MetaValueJson::String(d.to_string()),
-        },
-        MetaValue::Number(n) => TypedValueJson {
-            value_type: "number".into(),
-            value: MetaValueJson::String(n.to_string()),
-        },
-        MetaValue::Bool(b) => TypedValueJson {
-            value_type: "bool".into(),
-            value: MetaValueJson::Bool(*b),
-        },
-        MetaValue::Amount(a) => TypedValueJson {
-            value_type: "amount".into(),
-            value: MetaValueJson::Amount {
-                number: a.number.to_string(),
-                currency: a.currency.to_string(),
-            },
-        },
-        MetaValue::None => TypedValueJson {
-            value_type: "null".into(),
-            value: MetaValueJson::Null,
-        },
-        MetaValue::Int(i) => TypedValueJson {
-            value_type: "int".into(),
-            value: MetaValueJson::String(i.to_string()),
-        },
+    // The type tag is single-sourced in core (`serde_json`-free, so this crate
+    // can share it); the typed `value` reuses this crate's own `meta_value_to_json`
+    // (the WASM binding keeps `serde_json` a dev-only dep, so it emits the typed
+    // `MetaValueJson` enum rather than `serde_json::Value`).
+    TypedValueJson {
+        value_type: rustledger_core::meta_value_type_tag(value).into(),
+        value: meta_value_to_json(value),
     }
 }
 

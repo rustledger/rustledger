@@ -223,49 +223,13 @@ fn default_flag() -> String {
     "*".to_string()
 }
 
-/// Convert JSON metadata value to core `MetaValue`.
+/// Convert a JSON metadata value to a core `MetaValue`.
 ///
-/// Unparsable numeric values become `MetaValue::None` (review B-4.1)
-/// rather than silently coercing to zero. Metadata is informational
-/// so a typed `MetaValue::None` is the right "I saw something but
-/// couldn't interpret it as a number" signal — preferable to either
-/// silently substituting zero (loses the original value) or panicking
-/// (heavyweight for a metadata field).
+/// Thin wrapper over the single source [`rustledger_core::json_to_meta_value`];
+/// kept so call sites read in ffi-wasi terms. Unparsable numbers / unrecognized
+/// shapes become `MetaValue::None` (informational metadata, no coercion/panic).
 pub fn json_to_meta_value(value: &serde_json::Value) -> MetaValue {
-    match value {
-        serde_json::Value::String(s) => MetaValue::String(s.clone()),
-        serde_json::Value::Bool(b) => MetaValue::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                // A JSON integer round-trips as an integer metadata value.
-                MetaValue::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                match rustledger_core::Decimal::from_str_exact(&f.to_string()) {
-                    Ok(d) => MetaValue::Number(d),
-                    Err(_) => MetaValue::None,
-                }
-            } else {
-                MetaValue::None
-            }
-        }
-        serde_json::Value::Null => MetaValue::None,
-        serde_json::Value::Object(obj) => {
-            // Handle Amount objects
-            if let (Some(number), Some(currency)) = (obj.get("number"), obj.get("currency"))
-                && let (Some(n), Some(c)) = (number.as_str(), currency.as_str())
-            {
-                return match rustledger_core::Decimal::from_str_exact(n) {
-                    Ok(number) => MetaValue::Amount(rustledger_core::Amount {
-                        number,
-                        currency: c.into(),
-                    }),
-                    Err(_) => MetaValue::None,
-                };
-            }
-            MetaValue::None
-        }
-        serde_json::Value::Array(_) => MetaValue::None,
-    }
+    rustledger_core::json_to_meta_value(value)
 }
 
 /// Convert `HashMap<String, Value>` to core Metadata.

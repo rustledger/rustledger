@@ -31,27 +31,12 @@ impl Meta {
     }
 }
 
-/// Convert `MetaValue` to JSON, extracting raw values without extra formatting.
+/// Convert `MetaValue` to its canonical JSON form.
+///
+/// Thin wrapper over the single source [`rustledger_core::meta_value_to_json`];
+/// kept so call sites and the `types` module API read in ffi-wasi terms.
 pub fn meta_value_to_json(value: &MetaValue) -> serde_json::Value {
-    match value {
-        MetaValue::String(s) => serde_json::Value::String(s.clone()),
-        MetaValue::Account(a) => serde_json::Value::String(a.to_string()),
-        MetaValue::Currency(c) => serde_json::Value::String(c.to_string()),
-        MetaValue::Tag(t) => serde_json::Value::String(t.to_string()),
-        MetaValue::Link(l) => serde_json::Value::String(l.to_string()),
-        MetaValue::Date(d) => serde_json::Value::String(d.to_string()),
-        MetaValue::Number(n) => serde_json::json!(n.to_string()),
-        MetaValue::Bool(b) => serde_json::Value::Bool(*b),
-        MetaValue::Amount(a) => serde_json::json!({
-            "number": a.number.to_string(),
-            "currency": a.currency.to_string()
-        }),
-        MetaValue::None => serde_json::Value::Null,
-        // Stringified like `Number`, keeping numeric metadata uniform on the
-        // wire and identical to the WASM binding (the equivalence harness pins
-        // ffi-wasi == wasm).
-        MetaValue::Int(i) => serde_json::json!(i.to_string()),
-    }
+    rustledger_core::meta_value_to_json(value)
 }
 
 #[derive(Serialize, Clone)]
@@ -159,54 +144,11 @@ pub struct TypedValue {
 
 impl TypedValue {
     pub fn from_meta_value(mv: &MetaValue) -> Self {
-        match mv {
-            MetaValue::String(s) => Self {
-                value_type: "string",
-                value: serde_json::Value::String(s.clone()),
-            },
-            MetaValue::Account(a) => Self {
-                value_type: "account",
-                value: serde_json::Value::String(a.to_string()),
-            },
-            MetaValue::Currency(c) => Self {
-                value_type: "currency",
-                value: serde_json::Value::String(c.to_string()),
-            },
-            MetaValue::Tag(t) => Self {
-                value_type: "tag",
-                value: serde_json::Value::String(t.to_string()),
-            },
-            MetaValue::Link(l) => Self {
-                value_type: "link",
-                value: serde_json::Value::String(l.to_string()),
-            },
-            MetaValue::Date(d) => Self {
-                value_type: "date",
-                value: serde_json::Value::String(d.to_string()),
-            },
-            MetaValue::Number(n) => Self {
-                value_type: "number",
-                value: serde_json::Value::String(n.to_string()),
-            },
-            MetaValue::Bool(b) => Self {
-                value_type: "bool",
-                value: serde_json::Value::Bool(*b),
-            },
-            MetaValue::Amount(a) => Self {
-                value_type: "amount",
-                value: serde_json::json!({
-                    "number": a.number.to_string(),
-                    "currency": a.currency.to_string()
-                }),
-            },
-            MetaValue::None => Self {
-                value_type: "null",
-                value: serde_json::Value::Null,
-            },
-            MetaValue::Int(i) => Self {
-                value_type: "int",
-                value: serde_json::Value::String(i.to_string()),
-            },
+        // The `type` tag and the JSON `value` are both single-sourced in core,
+        // so the tagged form can never drift from the plain `meta` map form.
+        Self {
+            value_type: rustledger_core::meta_value_type_tag(mv),
+            value: rustledger_core::meta_value_to_json(mv),
         }
     }
 }

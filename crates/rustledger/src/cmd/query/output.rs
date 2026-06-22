@@ -603,29 +603,12 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
     }
 }
 
-/// Convert a metadata value to a typed JSON value, mirroring `value_to_json`'s
-/// conventions (decimals as strings to preserve precision). Without this the
-/// JSON output leaked the Rust Debug form (e.g. `"String(\"good\")"`).
+/// Convert a metadata value to its canonical JSON form (decimals as strings to
+/// preserve precision). Thin wrapper over the single source
+/// [`rustledger_core::meta_value_to_json`]; without it the JSON output leaked
+/// the Rust Debug form (e.g. `"String(\"good\")"`).
 fn meta_value_to_json(v: &rustledger_core::MetaValue) -> serde_json::Value {
-    use rustledger_core::MetaValue;
-    match v {
-        MetaValue::String(s) => serde_json::Value::String(s.clone()),
-        MetaValue::Number(n) => serde_json::json!(n.to_string()),
-        MetaValue::Bool(b) => serde_json::Value::Bool(*b),
-        MetaValue::Date(d) => serde_json::Value::String(d.to_string()),
-        MetaValue::Amount(a) => serde_json::json!({
-            "number": a.number.to_string(),
-            "currency": a.currency,
-        }),
-        MetaValue::Account(a) => serde_json::Value::String(a.to_string()),
-        MetaValue::Currency(c) => serde_json::Value::String(c.to_string()),
-        MetaValue::Tag(t) => serde_json::Value::String(t.to_string()),
-        MetaValue::Link(l) => serde_json::Value::String(l.to_string()),
-        MetaValue::None => serde_json::Value::Null,
-        // Stringified like `Number`, keeping all numeric metadata uniform on the
-        // JSON wire (and identical across the FFI bindings).
-        MetaValue::Int(i) => serde_json::json!(i.to_string()),
-    }
+    rustledger_core::meta_value_to_json(v)
 }
 
 fn value_to_json(value: &Value) -> serde_json::Value {

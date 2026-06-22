@@ -877,8 +877,12 @@ impl Executor<'_> {
         // position_value, once for balance_for_row). Issue #957 self-review.
         let at_mode = AtMode::from_query(query.at_function.as_deref());
 
-        // Filter transactions that touch the account
-        for directive in self.directives {
+        // Filter transactions that touch the account. Resolve the directive
+        // source via `resolved_directives()` — under `new_with_sources` (CLI /
+        // LSP) `self.directives` is empty and the data is in
+        // `spanned_directives`. Iterating `self.directives` directly here is
+        // what made `JOURNAL` return zero rows in the CLI.
+        for directive in self.resolved_directives() {
             if let Directive::Transaction(txn) = directive {
                 // Apply FROM clause filter if present
                 if let Some(from) = &query.from
@@ -1060,16 +1064,11 @@ impl Executor<'_> {
         let columns = vec!["directive".to_string()];
         let mut result = QueryResult::new(columns);
 
-        // Iterate whichever directive source is populated: when the Executor is
-        // built via `new_with_sources` (e.g. the CLI, source-mapped queries),
-        // `self.directives` is empty and the data lives in `spanned_directives`
-        // — same fallback as the system-table builders. Without this, PRINT
-        // returned zero rows in the CLI.
-        let all_directives: Vec<&Directive> = if let Some(spanned) = self.spanned_directives {
-            spanned.iter().map(|s| &s.value).collect()
-        } else {
-            self.directives.iter().collect()
-        };
+        // Iterate whichever directive source is populated (see
+        // `resolved_directives`): under `new_with_sources` (CLI / source-mapped
+        // queries) `self.directives` is empty and the data is in
+        // `spanned_directives`.
+        let all_directives = self.resolved_directives();
 
         for directive in all_directives {
             // Apply FROM clause filter if present

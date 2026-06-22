@@ -282,6 +282,25 @@ impl<'a> Executor<'a> {
         })
     }
 
+    /// The directives to iterate over, regardless of which constructor built
+    /// the `Executor`.
+    ///
+    /// The source-location-aware constructor ([`Self::new_with_sources`], used
+    /// by the CLI and LSP) stores directives in `spanned_directives` and leaves
+    /// `directives` **empty**. Any command that walks directives MUST go through
+    /// here — iterating `self.directives` directly silently yields an empty
+    /// result under that constructor. That exact omission regressed `JOURNAL`
+    /// (issue: BQL compat 93%→77%), after `SELECT`, `PRINT`, and `BALANCES` each
+    /// had to be fixed the same way. Routing every generic walk through one
+    /// accessor keeps the next command from re-introducing the bug.
+    pub(super) fn resolved_directives(&self) -> Vec<&Directive> {
+        if let Some(spanned) = self.spanned_directives {
+            spanned.iter().map(|s| &s.value).collect()
+        } else {
+            self.directives.iter().collect()
+        }
+    }
+
     /// Get or compile a regex pattern from the cache.
     ///
     /// Returns `Some(Regex)` if the pattern is valid, `None` if it's invalid.
@@ -361,19 +380,9 @@ impl<'a> Executor<'a> {
     ) -> Result<FxHashMap<rustledger_core::Account, Inventory>, QueryError> {
         let mut balances: FxHashMap<rustledger_core::Account, Inventory> = FxHashMap::default();
 
-        // Iterate over whichever directive source is populated. When the
-        // Executor is built via `new_with_sources`, `self.directives` is empty
-        // and the data lives in `spanned_directives` — same pattern as
-        // `collect_postings` and the system-table builders. Without this,
-        // BALANCES silently returned an empty result set for source-location-
-        // aware Executors (e.g. LSP / source-mapped queries).
-        let all_directives: Vec<&Directive> = if let Some(spanned) = self.spanned_directives {
-            spanned.iter().map(|s| &s.value).collect()
-        } else {
-            self.directives.iter().collect()
-        };
-
-        for directive in all_directives {
+        // Iterate over whichever directive source is populated (see
+        // `resolved_directives`).
+        for directive in self.resolved_directives() {
             if let Directive::Transaction(txn) = directive {
                 // Apply FROM filter if present
                 if let Some(from_clause) = from
@@ -4058,6 +4067,71 @@ mod tests {
         assert_eq!(
             result.rows[0][0],
             Value::String("test.beancount:1".to_string())
+        );
+    }
+
+    /// Regression: `JOURNAL` must iterate the directive source that is actually
+    /// populated. Under `new_with_sources` (the CLI / LSP path) `self.directives`
+    /// is empty and the data lives in `spanned_directives`; `execute_journal`
+    /// read the empty `self.directives` directly and returned **zero rows**,
+    /// regressing BQL `JOURNAL` compatibility 93%→77%. Now routed through
+    /// `resolved_directives()` (like `SELECT`/`PRINT`/`BALANCES`).
+    #[test]
+    fn test_journal_via_source_mapped_executor_returns_rows() {
+        use rustledger_loader::SourceMap;
+        use rustledger_parser::{Span, Spanned};
+        use std::sync::Arc;
+
+        let mut source_map = SourceMap::new();
+        let source: Arc<str> =
+            "2024-01-15 * \"Lunch\"\n  Assets:Cash  -12.00 USD\n  Expenses:Food  12.00 USD".into();
+        let file_id = source_map.add_file("test.beancount".into(), source);
+
+        let txn = Transaction {
+            date: rustledger_core::naive_date(2024, 1, 15).unwrap(),
+            flag: '*',
+            payee: None,
+            narration: "Lunch".into(),
+            tags: vec![],
+            links: vec![],
+            meta: Metadata::default(),
+            postings: vec![
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-12.00), "USD"),
+                )),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(12.00), "USD"),
+                )),
+            ],
+            trailing_comments: Vec::new(),
+        };
+        let spanned_directives = vec![Spanned {
+            value: Directive::Transaction(txn),
+            span: Span { start: 0, end: 60 },
+            file_id: file_id as u16,
+        }];
+
+        let mut executor = Executor::new_with_sources(&spanned_directives, &source_map);
+        let query = parse("JOURNAL 'Assets'").unwrap();
+        let result = executor.execute(&query).unwrap();
+
+        // Exactly the Assets:Cash posting — was 0 rows before the fix.
+        assert_eq!(
+            result.rows.len(),
+            1,
+            "JOURNAL over a source-mapped executor returned {} rows (expected 1)",
+            result.rows.len()
+        );
+        let account_col = result
+            .columns
+            .iter()
+            .position(|c| c == "account")
+            .expect("account column");
+        assert_eq!(
+            result.rows[0][account_col],
+            Value::String("Assets:Cash".to_string())
         );
     }
 

@@ -381,40 +381,19 @@ impl Executor<'_> {
             }
             // Posting metadata as dictionary
             "meta" => Ok(Value::Metadata(Box::new(posting.meta.clone()))),
-            // Source location columns
-            "filename" => {
-                if let Some(idx) = ctx.directive_index {
-                    if let Some(loc) = self.get_source_location(idx) {
-                        Ok(Value::String(loc.filename.clone()))
-                    } else {
-                        Ok(Value::Null)
-                    }
-                } else {
-                    Ok(Value::Null)
-                }
-            }
-            "lineno" => {
-                if let Some(idx) = ctx.directive_index {
-                    if let Some(loc) = self.get_source_location(idx) {
-                        Ok(Value::Integer(loc.lineno as i64))
-                    } else {
-                        Ok(Value::Null)
-                    }
-                } else {
-                    Ok(Value::Null)
-                }
-            }
-            "location" => {
-                if let Some(idx) = ctx.directive_index {
-                    if let Some(loc) = self.get_source_location(idx) {
-                        Ok(Value::String(format!("{}:{}", loc.filename, loc.lineno)))
-                    } else {
-                        Ok(Value::Null)
-                    }
-                } else {
-                    Ok(Value::Null)
-                }
-            }
+            // Source location columns — resolved from the posting's own span
+            // (falling back to the enclosing directive's location).
+            "filename" => Ok(self
+                .resolved_source_location(ctx)
+                .map_or(Value::Null, |loc| Value::String(loc.filename))),
+            "lineno" => Ok(self
+                .resolved_source_location(ctx)
+                .map_or(Value::Null, |loc| Value::Integer(loc.lineno as i64))),
+            "location" => Ok(self
+                .resolved_source_location(ctx)
+                .map_or(Value::Null, |loc| {
+                    Value::String(format!("{}:{}", loc.filename, loc.lineno))
+                })),
             // has_cost - check if posting has cost specification
             "has_cost" => Ok(Value::Boolean(posting.cost.is_some())),
             // entry - parent transaction as structured object

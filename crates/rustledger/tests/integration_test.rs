@@ -749,18 +749,23 @@ fn test_query_filename_lineno_columns_resolve() {
         eprintln!("Skipping: rledger binary not found");
         return;
     };
-    // Transaction is on line 3 (two opens precede it).
+    // Transaction header is on line 3 (two opens precede it); its postings are
+    // on lines 4 (Assets:Cash) and 5 (Equity:O).
     let content = "2020-01-01 open Assets:Cash USD\n\
                    2020-01-01 open Equity:O USD\n\
                    2020-02-01 * \"p\"\n  \
                      Assets:Cash  10.00 USD\n  \
                      Equity:O\n";
-    let temp_file = std::env::temp_dir().join("query-filename-lineno-test.beancount");
-    std::fs::write(&temp_file, content).expect("write temp file");
+    // Unique temp file (auto-removed on drop) to avoid cross-run collisions.
+    let mut tmp = tempfile::Builder::new()
+        .suffix(".beancount")
+        .tempfile()
+        .expect("create temp file");
+    std::io::Write::write_all(&mut tmp, content.as_bytes()).expect("write temp file");
 
     let output = Command::new(binary)
         .arg("query")
-        .arg(&temp_file)
+        .arg(tmp.path())
         .arg("SELECT filename, lineno WHERE flag = \"*\"")
         .output()
         .expect("run rledger query");
@@ -773,18 +778,17 @@ fn test_query_filename_lineno_columns_resolve() {
     );
     // filename resolves to the real path (was empty/NULL before the fix).
     assert!(
-        stdout.contains("query-filename-lineno-test.beancount"),
+        stdout.contains(".beancount"),
         "expected the source filename in output, got:\n{stdout}"
     );
-    // lineno resolves to 3 (the transaction's line).
+    // lineno resolves per-posting: the Assets:Cash posting is on line 4 (was the
+    // transaction's line 3 before per-posting resolution).
     assert!(
         stdout
             .lines()
-            .any(|l| l.contains(".beancount") && l.trim_end().ends_with('3')),
-        "expected lineno 3 on the directive's row, got:\n{stdout}"
+            .any(|l| l.contains(".beancount") && l.trim_end().ends_with('4')),
+        "expected lineno 4 on the first posting's row, got:\n{stdout}"
     );
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]

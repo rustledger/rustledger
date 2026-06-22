@@ -99,6 +99,10 @@ pub struct Executor<'a> {
     account_info: FxHashMap<String, AccountInfo>,
     /// Source locations for directives (indexed by directive index).
     source_locations: Option<Vec<SourceLocation>>,
+    /// The source map, kept so per-posting source locations (the `lineno` /
+    /// `filename` / `location` columns on posting rows) can be resolved from
+    /// each posting's own span, not just the enclosing directive's.
+    source_map: Option<&'a SourceMap>,
     /// In-memory tables created by CREATE TABLE.
     tables: FxHashMap<String, Table>,
 }
@@ -150,6 +154,7 @@ impl<'a> Executor<'a> {
             regex_cache: RwLock::new(FxHashMap::default()),
             account_info,
             source_locations: None,
+            source_map: None,
             tables: FxHashMap::default(),
         }
     }
@@ -160,7 +165,7 @@ impl<'a> Executor<'a> {
     /// the `filename`, `lineno`, and `location` columns in queries.
     pub fn new_with_sources(
         spanned_directives: &'a [Spanned<Directive>],
-        source_map: &SourceMap,
+        source_map: &'a SourceMap,
     ) -> Self {
         // Build price database from spanned directives — two passes
         // (mirrors `PriceDatabase::from_directives`).
@@ -226,6 +231,7 @@ impl<'a> Executor<'a> {
             regex_cache: RwLock::new(FxHashMap::default()),
             account_info,
             source_locations: Some(source_locations),
+            source_map: Some(source_map),
             tables: FxHashMap::default(),
         }
     }
@@ -235,6 +241,45 @@ impl<'a> Executor<'a> {
         self.source_locations
             .as_ref()
             .and_then(|locs| locs.get(directive_index))
+    }
+
+    /// Resolve a (file + line) source location from a span's start offset.
+    /// Returns `None` for synthesized spans (pad/booking-generated, which carry
+    /// no real source) or when no source map is available.
+    pub(super) fn span_source_location(
+        &self,
+        file_id: u16,
+        span_start: usize,
+    ) -> Option<SourceLocation> {
+        if file_id == rustledger_core::SYNTHESIZED_FILE_ID {
+            return None;
+        }
+        let file = self.source_map?.get(file_id as usize)?;
+        let (line, _) = file.line_col(span_start);
+        Some(SourceLocation {
+            filename: file.path.display().to_string(),
+            lineno: line,
+        })
+    }
+
+    /// Resolve a posting's OWN source location from its span, rather than the
+    /// enclosing transaction's. Matches beanquery, which reports each posting's
+    /// own line; callers fall back to the directive location when this is
+    /// `None` (synthesized posting / no source map).
+    fn posting_source_location(&self, ctx: &PostingContext) -> Option<SourceLocation> {
+        let posting = ctx.transaction.postings.get(ctx.posting_index)?;
+        self.span_source_location(posting.file_id, posting.span.start)
+    }
+
+    /// Resolve the source location for a posting row's `filename`/`lineno`/
+    /// `location` columns: prefer the posting's own location, falling back to
+    /// the enclosing directive's (for synthesized postings or when no source
+    /// map is present).
+    pub(super) fn resolved_source_location(&self, ctx: &PostingContext) -> Option<SourceLocation> {
+        self.posting_source_location(ctx).or_else(|| {
+            ctx.directive_index
+                .and_then(|idx| self.get_source_location(idx).cloned())
+        })
     }
 
     /// Get or compile a regex pattern from the cache.
@@ -2573,6 +2618,19 @@ impl<'a> Executor<'a> {
             let day = Value::Integer(i64::from(txn.date.day()));
 
             for posting in &txn.postings {
+                // Per-posting source location, falling back to the txn-level
+                // values when the posting has no real span (synthesized) or no
+                // source map is available. Shadows the txn-level bindings.
+                let (filename, lineno, location) =
+                    match self.span_source_location(posting.file_id, posting.span.start) {
+                        Some(loc) => (
+                            Value::String(loc.filename.clone()),
+                            Value::Integer(loc.lineno as i64),
+                            Value::String(format!("{}:{}", loc.filename, loc.lineno)),
+                        ),
+                        None => (filename.clone(), lineno.clone(), location.clone()),
+                    };
+
                 // Update running balances (per-account and cumulative).
                 if let Some(units) = posting.amount() {
                     let pos = if let Some(cost_spec) = &posting.cost {
@@ -3998,6 +4056,65 @@ mod tests {
             result.rows[0][0],
             Value::String("test.beancount:1".to_string())
         );
+    }
+
+    #[test]
+    fn test_per_posting_source_location() {
+        use rustledger_loader::SourceMap;
+        use rustledger_parser::{Span, Spanned};
+        use std::sync::Arc;
+
+        // Line 1: header, line 2: Assets:Bank, line 3: Expenses:Food.
+        let source: Arc<str> =
+            "2024-01-15 * \"Test\"\n  Assets:Bank  100 USD\n  Expenses:Food  -100 USD".into();
+        let mut source_map = SourceMap::new();
+        let file_id = source_map.add_file("test.beancount".into(), source) as u16;
+
+        // Postings carry their OWN (non-synthesized) spans: offset 20 = line 2,
+        // offset 43 = line 3.
+        let txn = Transaction {
+            date: rustledger_core::naive_date(2024, 1, 15).unwrap(),
+            flag: '*',
+            payee: Some("Test".into()),
+            narration: "Test".into(),
+            tags: vec![],
+            links: vec![],
+            meta: Metadata::default(),
+            postings: vec![
+                Spanned {
+                    value: Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")),
+                    span: Span { start: 20, end: 42 },
+                    file_id,
+                },
+                Spanned {
+                    value: Posting::new("Expenses:Food", Amount::new(dec!(-100), "USD")),
+                    span: Span { start: 43, end: 67 },
+                    file_id,
+                },
+            ],
+            trailing_comments: Vec::new(),
+        };
+        let spanned = vec![Spanned {
+            value: Directive::Transaction(txn),
+            span: Span { start: 0, end: 67 },
+            file_id,
+        }];
+        let mut executor = Executor::new_with_sources(&spanned, &source_map);
+
+        // Default path: each posting reports its OWN line (2, 3), not the
+        // transaction's line (1).
+        let result = executor
+            .execute(&parse("SELECT lineno, account").unwrap())
+            .unwrap();
+        assert_eq!(result.rows[0][0], Value::Integer(2));
+        assert_eq!(result.rows[1][0], Value::Integer(3));
+
+        // `#postings` table path resolves per-posting too.
+        let result = executor
+            .execute(&parse("SELECT lineno FROM #postings").unwrap())
+            .unwrap();
+        assert_eq!(result.rows[0][0], Value::Integer(2));
+        assert_eq!(result.rows[1][0], Value::Integer(3));
     }
 
     #[test]

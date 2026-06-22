@@ -481,9 +481,17 @@ impl Executor<'_> {
         // recomputed: it is the account's true ledger balance across all postings.
         let balance_idx = column_map.get("balance").copied();
         let position_idx = column_map.get("position").copied();
+        // `SELECT *` expands to every table column (including `balance`), but
+        // `query_references_column` doesn't see through the wildcard — so treat a
+        // wildcard target as referencing `balance`, else `SELECT * FROM #postings
+        // WHERE ...` would still emit the pre-WHERE snapshot.
+        let selects_all = query
+            .targets
+            .iter()
+            .any(|t| matches!(t.expr, Expr::Wildcard));
         let track_balance = balance_idx.is_some()
             && position_idx.is_some()
-            && super::query_references_column(query, "balance");
+            && (selects_all || super::query_references_column(query, "balance"));
         let mut running_balance = Inventory::default();
 
         // Process each row from the table

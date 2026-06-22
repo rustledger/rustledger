@@ -4275,6 +4275,30 @@ mod tests {
         assert_eq!(result.rows[0][1], Value::Null);
         assert_eq!(result.rows[1][1], Value::Null);
         assert_eq!(result.rows[2][1], Value::Null);
+
+        // `SELECT *` expands to the `balance` column too — it must be recomputed
+        // the same way (wildcard doesn't name `balance` explicitly).
+        let result = executor
+            .execute(
+                &parse("SELECT * FROM #postings WHERE account = 'Assets:Bank' ORDER BY date")
+                    .unwrap(),
+            )
+            .unwrap();
+        let bal_col = result
+            .columns
+            .iter()
+            .position(|c| c == "balance")
+            .expect("balance column present");
+        for row in &result.rows {
+            if let Value::Inventory(inv) = &row[bal_col] {
+                assert!(
+                    inv.units("AAPL").is_zero(),
+                    "SELECT * balance must not leak the filtered AAPL leg"
+                );
+            } else {
+                panic!("expected an Inventory in the balance column");
+            }
+        }
     }
 
     #[test]

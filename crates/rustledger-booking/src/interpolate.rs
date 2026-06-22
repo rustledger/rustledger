@@ -194,45 +194,12 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                 }
 
                 // Determine the "weight" of this posting for balance purposes.
-                // This must match the logic in calculate_residual().
-                //
-                // Rules:
-                // - If there's a cost spec, weight is in cost currency (not units)
-                // - If there's a price annotation (no cost), weight is in price currency
-                // - Otherwise, weight is the units themselves
-
-                // Check if cost spec has determinable values.
-                // If cost has number but no currency, try to infer currency from:
-                // 1. Price annotation
-                // 2. Other postings in the transaction
-                let cost_contribution = posting.cost.as_ref().and_then(|cost_spec| {
-                    // Try to get cost currency, falling back to price currency, then other postings
-                    let inferred_currency = cost_spec
-                        .currency
-                        .clone()
-                        .or_else(|| crate::price_currency_of(posting))
-                        .or_else(|| get_inferred_currency(&mut inferred_cost_currency));
-
-                    let cost_curr = inferred_currency.as_ref()?;
-                    match cost_spec.number {
-                        Some(rustledger_core::CostNumber::PerUnit { value: per_unit }) => {
-                            let cost_amount = amount.number * per_unit;
-                            Some((cost_curr.clone(), cost_amount))
-                        }
-                        Some(rustledger_core::CostNumber::Total { value: total }) => {
-                            // Sign depends on units sign — the spec
-                            // names the total magnitude, not the
-                            // direction.
-                            Some((cost_curr.clone(), total * amount.number.signum()))
-                        }
-                        Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => {
-                            // Use the preserved total for precision
-                            // (same rationale as the residual block
-                            // above).
-                            Some((cost_curr.clone(), b.total * amount.number.signum()))
-                        }
-                        None => None, // empty `{}`
-                    }
+                // The cost weight goes through the shared `cost_weight` engine —
+                // the SAME `CostNumber` ladder `calculate_residual` uses — so
+                // interpolation and the balance residual can no longer disagree
+                // (the rule: cost beats price; else price; else units).
+                let cost_contribution = crate::cost_weight::<Decimal>(posting, amount, || {
+                    get_inferred_currency(&mut inferred_cost_currency)
                 });
 
                 if let Some((currency, cost_amount)) = cost_contribution {
@@ -254,12 +221,9 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                     // Track this as one unknown for the cost currency. The
                     // post-loop check then enforces the "at most one unknown
                     // per currency group" rule that bean-check enforces.
-                    let cost_currency = posting
-                        .cost
-                        .as_ref()
-                        .and_then(|c| c.currency.clone())
-                        .or_else(|| crate::price_currency_of(posting))
-                        .or_else(|| get_inferred_currency(&mut inferred_cost_currency));
+                    let cost_currency = crate::cost_currency_of(posting, || {
+                        get_inferred_currency(&mut inferred_cost_currency)
+                    });
                     if let Some(curr) = cost_currency {
                         *cost_unknowns_by_currency.entry(curr).or_default() += 1;
                     }
@@ -763,6 +727,44 @@ mod tests {
             !result.residuals.contains_key("HOOL"),
             "should not have HOOL residual"
         );
+    }
+
+    /// Agreement fitness function: interpolation and balance-checking now share
+    /// the `cost_weight` engine, so after interpolation the *independent* public
+    /// [`crate::calculate_residual`] must see the result as balanced — across
+    /// cost AND price weights. If interpolation computed a posting using a
+    /// different weight than the residual does, this would surface a non-zero
+    /// residual.
+    #[test]
+    fn test_interpolated_weights_agree_with_calculate_residual() {
+        // Total-cost stock + unit-priced FX leg, both weighing in USD; the auto
+        // cash posting must absorb the USD residual exactly.
+        let txn = Transaction::new(date(2015, 10, 2), "Mixed cost and price")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(10), "HOOL")).with_cost(
+                    rustledger_core::CostSpec::empty()
+                        .with_number(rustledger_core::CostNumber::Total {
+                            value: dec!(1500.00),
+                        })
+                        .with_currency("USD"),
+                ),
+            )
+            .with_synthesized_posting(
+                Posting::new("Assets:EUR", Amount::new(dec!(-200.00), "EUR")).with_price(
+                    rustledger_core::PriceAnnotation::unit(Amount::new(dec!(1.10), "USD")),
+                ),
+            )
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
+
+        let result = interpolate(&txn).expect("interpolation should succeed");
+
+        // The independent residual engine (sharing cost_weight) sees balance.
+        for (currency, value) in crate::calculate_residual(&result.transaction) {
+            assert!(
+                value.abs() < dec!(0.0001),
+                "interpolated result not balanced per calculate_residual: {value} {currency}"
+            );
+        }
     }
 
     #[test]

@@ -73,48 +73,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
-/// Try to canonicalize a path, falling back to making it absolute if canonicalize
-/// is not supported (e.g., on WASI).
-///
-/// This function:
-/// 1. First tries `fs::canonicalize()` which resolves symlinks and returns absolute path
-/// 2. If that fails (e.g., WASI doesn't support it), tries to make an absolute path manually
-/// 3. As a last resort, returns the original path
-fn normalize_path(path: &Path) -> PathBuf {
-    // Try canonicalize first (works on most platforms, resolves symlinks)
-    if let Ok(canonical) = path.canonicalize() {
-        return canonical;
-    }
-
-    // Fallback: make absolute without resolving symlinks (WASI-compatible)
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else if let Ok(cwd) = std::env::current_dir() {
-        // Join with current directory and clean up the path
-        let mut result = cwd;
-        for component in path.components() {
-            match component {
-                std::path::Component::ParentDir => {
-                    result.pop();
-                }
-                std::path::Component::Normal(s) => {
-                    result.push(s);
-                }
-                std::path::Component::CurDir => {}
-                std::path::Component::RootDir => {
-                    result = PathBuf::from("/");
-                }
-                std::path::Component::Prefix(p) => {
-                    result = PathBuf::from(p.as_os_str());
-                }
-            }
-        }
-        result
-    } else {
-        // Last resort: just return the path as-is
-        path.to_path_buf()
-    }
-}
+// Path normalization lives in a single place: `FileSystem::normalize`
+// (`DiskFileSystem::normalize` is the disk implementation, `VirtualFileSystem`
+// the in-memory one). The free `normalize_path` that used to duplicate the disk
+// body was removed — all callers go through the injected filesystem so the
+// include path-traversal guard normalizes consistently in one namespace.
 
 /// Errors that can occur during loading.
 #[derive(Debug, Error)]
@@ -531,9 +494,15 @@ impl Loader {
                     } else {
                         base_dir.to_path_buf()
                     };
-                    normalize_path(&prefix_path)
+                    // Normalize via the injected filesystem (not a hardcoded
+                    // disk path fn), so this pre-glob traversal guard and the
+                    // per-matched-file guard below resolve in the SAME namespace
+                    // — under a `VirtualFileSystem` the disk `normalize_path`
+                    // would have compared a disk-canonicalized prefix against a
+                    // pure-string root.
+                    self.fs.normalize(&prefix_path)
                 } else {
-                    normalize_path(&full_path)
+                    self.fs.normalize(&full_path)
                 };
 
                 if !path_to_check.starts_with(root) {
@@ -1126,6 +1095,43 @@ include "./transactions/*.beancount"
         assert!(
             has_glob_error,
             "expected GlobNoMatch error, got: {:?}",
+            result.errors
+        );
+    }
+
+    /// Regression: with path security under a `VirtualFileSystem`, the pre-glob
+    /// traversal guard used the disk `normalize_path` while the per-file guard
+    /// used `self.fs.normalize` — different namespaces. So a LEGITIMATE glob
+    /// include within the root got its prefix disk-normalized to a real-CWD path
+    /// that didn't `starts_with` the VFS root, and was falsely rejected as a
+    /// path traversal. Both guards now normalize through the injected filesystem.
+    #[test]
+    fn test_vfs_glob_include_within_root_not_flagged_as_traversal() {
+        let mut vfs = VirtualFileSystem::new();
+        vfs.add_file("ledger/main.beancount", r#"include "sub/*.beancount""#);
+        vfs.add_file(
+            "ledger/sub/a.beancount",
+            "2024-01-01 open Assets:Cash USD\n",
+        );
+
+        let result = Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .with_root_dir(PathBuf::from("ledger")) // enables path security
+            .load(Path::new("ledger/main.beancount"))
+            .unwrap();
+
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, LoadError::PathTraversal { .. })),
+            "legit in-root VFS glob include wrongly flagged as traversal: {:?}",
+            result.errors
+        );
+        // The included file actually loaded (its `open` is present).
+        assert!(
+            !result.directives.is_empty(),
+            "the in-root include should have loaded; errors: {:?}",
             result.errors
         );
     }

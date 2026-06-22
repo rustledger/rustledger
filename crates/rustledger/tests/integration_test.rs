@@ -800,12 +800,16 @@ fn test_query_print_outputs_directives() {
                    2020-02-01 * \"p\"\n  \
                      Assets:Cash  10.00 USD\n  \
                      Equity:O\n";
-    let temp_file = std::env::temp_dir().join("query-print-test.beancount");
-    std::fs::write(&temp_file, content).expect("write temp file");
+    // Unique temp file (auto-removed on drop) to avoid cross-run collisions.
+    let mut tmp = tempfile::Builder::new()
+        .suffix(".beancount")
+        .tempfile()
+        .expect("create temp file");
+    std::io::Write::write_all(&mut tmp, content.as_bytes()).expect("write temp file");
 
     let output = Command::new(binary)
         .arg("query")
-        .arg(&temp_file)
+        .arg(tmp.path())
         .arg("PRINT")
         .output()
         .expect("run rledger query PRINT");
@@ -821,6 +825,4 @@ fn test_query_print_outputs_directives() {
         stdout.contains("open Assets:Cash"),
         "PRINT should emit directives, got:\n{stdout}"
     );
-
-    std::fs::remove_file(&temp_file).ok();
 }

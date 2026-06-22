@@ -3,13 +3,13 @@
 //! This module includes metadata, conversion, casting, and helper functions.
 
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, Inventory, MetaValue, Position};
+use rustledger_core::{Amount, Inventory, MetaValue, Metadata, Position};
 
 use crate::ast::FunctionCall;
 use crate::error::QueryError;
 
 use super::super::Executor;
-use super::super::types::{PostingContext, Value};
+use super::super::types::{PostingContext, SourceLocation, Value};
 
 impl Executor<'_> {
     /// Evaluate metadata functions: `META`, `ENTRY_META`, `ANY_META`.
@@ -36,17 +36,65 @@ impl Executor<'_> {
 
         let posting = &ctx.transaction.postings[ctx.posting_index];
 
+        // beanquery exposes `filename`/`lineno` as members of a posting's /
+        // entry's metadata. Resolve them per scope: posting metadata carries
+        // the POSTING's location, entry metadata the enclosing directive's.
+        let posting_loc = self.resolved_source_location(ctx);
+        let entry_loc = ctx
+            .directive_index
+            .and_then(|i| self.get_source_location(i).cloned());
+
         let meta_value = match name {
-            "META" | "POSTING_META" => posting.meta.get(&key),
-            "ENTRY_META" => ctx.transaction.meta.get(&key),
-            "ANY_META" => posting
-                .meta
-                .get(&key)
-                .or_else(|| ctx.transaction.meta.get(&key)),
+            "META" | "POSTING_META" => Self::meta_lookup(&posting.meta, posting_loc.as_ref(), &key),
+            "ENTRY_META" => Self::meta_lookup(&ctx.transaction.meta, entry_loc.as_ref(), &key),
+            "ANY_META" => Self::meta_lookup(&posting.meta, posting_loc.as_ref(), &key)
+                .or_else(|| Self::meta_lookup(&ctx.transaction.meta, entry_loc.as_ref(), &key)),
             _ => unreachable!(),
         };
 
-        Ok(Self::meta_value_to_value(meta_value))
+        Ok(Self::meta_value_to_value(meta_value.as_ref()))
+    }
+
+    /// beanquery's parser injects `filename` and `lineno` into every posting's
+    /// and entry's metadata dict. rledger keeps source location in spans, not in
+    /// the meta map, so synthesize those two keys at the BQL boundary from the
+    /// resolved location. A user-defined key of the same name wins (callers
+    /// consult the raw map first).
+    fn source_location_meta_key(loc: Option<&SourceLocation>, key: &str) -> Option<MetaValue> {
+        let loc = loc?;
+        match key {
+            "filename" => Some(MetaValue::String(loc.filename.clone())),
+            // There is no integer `MetaValue`; `Number(Decimal)` renders as `4`
+            // and compares numerically, matching beanquery's integer lineno.
+            "lineno" => Some(MetaValue::Number(Decimal::from(loc.lineno as u64))),
+            _ => None,
+        }
+    }
+
+    /// Look up a single metadata key, falling back to the synthetic
+    /// source-location keys (`filename`/`lineno`) when absent from `raw`.
+    fn meta_lookup(raw: &Metadata, loc: Option<&SourceLocation>, key: &str) -> Option<MetaValue> {
+        raw.get(key)
+            .cloned()
+            .or_else(|| Self::source_location_meta_key(loc, key))
+    }
+
+    /// Return `raw` extended with beanquery's synthetic `filename`/`lineno`
+    /// metadata keys resolved from `loc` (existing user keys win). Used to
+    /// materialize the full `meta` column value.
+    pub(crate) fn augmented_meta(raw: &Metadata, loc: Option<&SourceLocation>) -> Metadata {
+        if loc.is_none() {
+            return raw.clone();
+        }
+        let mut meta = raw.clone();
+        for key in ["filename", "lineno"] {
+            if !meta.contains_key(key)
+                && let Some(value) = Self::source_location_meta_key(loc, key)
+            {
+                meta.insert(key.to_string(), value);
+            }
+        }
+        meta
     }
 
     /// Convert a `MetaValue` to a `Value`.

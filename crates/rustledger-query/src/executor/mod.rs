@@ -2588,13 +2588,9 @@ impl<'a> Executor<'a> {
 
         for (dir_idx, txn) in &transactions {
             // Pre-compute transaction-level values shared across all postings
+            // Transaction-level location — used as the per-posting fallback
+            // below (for synthesized postings / no source map).
             let source_loc = self.get_source_location(*dir_idx);
-            let filename =
-                source_loc.map_or(Value::Null, |loc| Value::String(loc.filename.clone()));
-            let lineno = source_loc.map_or(Value::Null, |loc| Value::Integer(loc.lineno as i64));
-            let location = source_loc.map_or(Value::Null, |loc| {
-                Value::String(format!("{}:{}", loc.filename, loc.lineno))
-            });
 
             let tags: Vec<String> = txn.tags.iter().map(ToString::to_string).collect();
             let links: Vec<String> = txn.links.iter().map(ToString::to_string).collect();
@@ -2618,18 +2614,22 @@ impl<'a> Executor<'a> {
             let day = Value::Integer(i64::from(txn.date.day()));
 
             for posting in &txn.postings {
-                // Per-posting source location, falling back to the txn-level
-                // values when the posting has no real span (synthesized) or no
-                // source map is available. Shadows the txn-level bindings.
-                let (filename, lineno, location) =
-                    match self.span_source_location(posting.file_id, posting.span.start) {
-                        Some(loc) => (
-                            Value::String(loc.filename.clone()),
-                            Value::Integer(loc.lineno as i64),
-                            Value::String(format!("{}:{}", loc.filename, loc.lineno)),
-                        ),
-                        None => (filename.clone(), lineno.clone(), location.clone()),
-                    };
+                // Per-posting source location (the posting's own span), falling
+                // back to the transaction's when the posting has no real span
+                // (synthesized) or no source map is available. The single
+                // resolved location feeds both the location columns and the
+                // synthetic `filename`/`lineno` metadata keys below.
+                let posting_loc = self
+                    .span_source_location(posting.file_id, posting.span.start)
+                    .or_else(|| source_loc.cloned());
+                let (filename, lineno, location) = match posting_loc.as_ref() {
+                    Some(loc) => (
+                        Value::String(loc.filename.clone()),
+                        Value::Integer(loc.lineno as i64),
+                        Value::String(format!("{}:{}", loc.filename, loc.lineno)),
+                    ),
+                    None => (Value::Null, Value::Null, Value::Null),
+                };
 
                 // Update running balances (per-account and cumulative).
                 if let Some(units) = posting.amount() {
@@ -2753,7 +2753,10 @@ impl<'a> Executor<'a> {
                     balance_val,
                     account_balance_val,
                     // Metadata and collection
-                    Value::Metadata(Box::new(posting.meta.clone())),
+                    Value::Metadata(Box::new(Self::augmented_meta(
+                        &posting.meta,
+                        posting_loc.as_ref(),
+                    ))),
                     Value::StringSet(all_accounts.clone()),
                     // Hidden metadata columns
                     Self::metadata_to_value(&txn.meta),
@@ -4115,6 +4118,96 @@ mod tests {
             .unwrap();
         assert_eq!(result.rows[0][0], Value::Integer(2));
         assert_eq!(result.rows[1][0], Value::Integer(3));
+    }
+
+    #[test]
+    fn test_meta_includes_source_location() {
+        use rustledger_loader::SourceMap;
+        use rustledger_parser::{Span, Spanned};
+        use std::sync::Arc;
+
+        let source: Arc<str> =
+            "2024-01-15 * \"Test\"\n  Assets:Bank  100 USD\n  Expenses:Food  -100 USD".into();
+        let mut source_map = SourceMap::new();
+        let file_id = source_map.add_file("test.beancount".into(), source) as u16;
+
+        // Posting 1 (line 2) carries a user `category` key; posting 2 (line 3)
+        // has none.
+        let mut p1_meta = Metadata::default();
+        p1_meta.insert(
+            "category".to_string(),
+            MetaValue::String("food".to_string()),
+        );
+        let txn = Transaction {
+            date: rustledger_core::naive_date(2024, 1, 15).unwrap(),
+            flag: '*',
+            payee: Some("Test".into()),
+            narration: "Test".into(),
+            tags: vec![],
+            links: vec![],
+            meta: Metadata::default(),
+            postings: vec![
+                Spanned {
+                    value: Posting {
+                        account: "Assets:Bank".into(),
+                        units: Some(rustledger_core::IncompleteAmount::Complete(Amount::new(
+                            dec!(100),
+                            "USD",
+                        ))),
+                        cost: None,
+                        price: None,
+                        flag: None,
+                        meta: p1_meta,
+                        comments: Vec::new(),
+                        trailing_comments: Vec::new(),
+                    },
+                    span: Span { start: 20, end: 42 },
+                    file_id,
+                },
+                Spanned {
+                    value: Posting::new("Expenses:Food", Amount::new(dec!(-100), "USD")),
+                    span: Span { start: 43, end: 67 },
+                    file_id,
+                },
+            ],
+            trailing_comments: Vec::new(),
+        };
+        let spanned = vec![Spanned {
+            value: Directive::Transaction(txn),
+            span: Span { start: 0, end: 67 },
+            file_id,
+        }];
+        let mut executor = Executor::new_with_sources(&spanned, &source_map);
+
+        // meta() exposes synthetic filename/lineno per posting. (lineno is a
+        // Number — there is no integer MetaValue; the dedicated `lineno` column
+        // is Integer.)
+        let r = executor
+            .execute(&parse("SELECT meta('filename'), meta('lineno')").unwrap())
+            .unwrap();
+        assert_eq!(r.rows[0][0], Value::String("test.beancount".to_string()));
+        assert_eq!(r.rows[0][1], Value::Number(dec!(2)));
+        assert_eq!(r.rows[1][1], Value::Number(dec!(3)));
+
+        // entry_meta uses the ENTRY (directive) line, not the posting's.
+        let r = executor
+            .execute(&parse("SELECT entry_meta('lineno')").unwrap())
+            .unwrap();
+        assert_eq!(r.rows[0][0], Value::Number(dec!(1)));
+
+        // A user meta key still resolves and takes precedence.
+        let r = executor
+            .execute(&parse("SELECT meta('category') WHERE account ~ 'Bank'").unwrap())
+            .unwrap();
+        assert_eq!(r.rows[0][0], Value::String("food".to_string()));
+
+        // The full meta column is augmented; getitem over it (and via #postings)
+        // sees the synthetic keys.
+        let r = executor
+            .execute(&parse("SELECT getitem(meta, 'lineno') FROM #postings").unwrap())
+            .unwrap();
+        assert_eq!(r.rows[0][0], Value::Number(dec!(2)));
+        assert_eq!(r.rows[1][0], Value::Number(dec!(3)));
     }
 
     #[test]

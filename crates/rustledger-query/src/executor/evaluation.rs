@@ -380,7 +380,10 @@ impl Executor<'_> {
                 ))
             }
             // Posting metadata as dictionary
-            "meta" => Ok(Value::Metadata(Box::new(posting.meta.clone()))),
+            "meta" => Ok(Value::Metadata(Box::new(Self::augmented_meta(
+                &posting.meta,
+                self.resolved_source_location(ctx).as_ref(),
+            )))),
             // Source location columns — resolved from the posting's own span
             // (falling back to the enclosing directive's location).
             "filename" => Ok(self

@@ -2,7 +2,8 @@
 
 use super::ShellSettings;
 use anyhow::{Context, Result};
-use rustledger_core::{Directive, DisplayContext};
+use rustledger_core::{Directive, DisplayContext, Spanned};
+use rustledger_loader::SourceMap;
 use rustledger_query::{Executor, Value, parse as parse_query};
 use std::io::Write;
 
@@ -18,15 +19,18 @@ const MAX_COLUMN_WIDTH: usize = u16::MAX as usize;
 
 pub(super) fn execute_query<W: Write>(
     query_str: &str,
-    directives: &[Directive],
+    directives: &[Spanned<Directive>],
+    source_map: &SourceMap,
     settings: &ShellSettings,
     writer: &mut W,
 ) -> Result<()> {
     // Parse the query
     let query = parse_query(query_str).with_context(|| "failed to parse query")?;
 
-    // Execute
-    let mut executor = Executor::new(directives);
+    // Execute. Use the source-map-aware constructor so the `filename`/`lineno`
+    // columns (and `meta`-derived location lookups) resolve to real source
+    // positions instead of NULL.
+    let mut executor = Executor::new_with_sources(directives, source_map);
     let result = executor
         .execute(&query)
         .with_context(|| "failed to execute query")?;

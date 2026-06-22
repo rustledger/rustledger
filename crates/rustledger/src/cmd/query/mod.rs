@@ -17,7 +17,7 @@ mod output;
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::Parser;
-use rustledger_booking::merge_with_padding;
+use rustledger_booking::merge_with_padding_spanned;
 use rustledger_core::DisplayContext;
 use rustledger_loader::LoadOptions;
 use std::fs;
@@ -165,18 +165,19 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
         eprintln!();
     }
 
-    // Get directives (already booked and plugins applied)
-    let booked_directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
-
     // Merge pad-synthesized transactions into the directive stream
-    // (BQL is a balance-computing consumer). `merge_with_padding`
-    // preserves the original Pad directives in the output so
-    // `FROM #entries WHERE type = 'pad'` audits still enumerate them,
-    // AND handles multi-pad shadowing (#1300) correctly by
-    // construction via `process_pads`.
-    let directives = merge_with_padding(&booked_directives);
+    // (BQL is a balance-computing consumer). The span-preserving variant keeps
+    // each directive's source `Spanned` wrapper so the query engine can resolve
+    // the `filename`/`lineno` columns (pad-synth transactions are marked
+    // synthesized → no source location). `merge_with_padding_spanned` preserves
+    // the original Pad directives in the output so `FROM #entries WHERE type =
+    // 'pad'` audits still enumerate them, AND handles multi-pad shadowing
+    // (#1300) correctly by construction via `process_pads`.
+    let directives = merge_with_padding_spanned(&ledger.directives);
 
-    // Use display context from the loaded ledger
+    // Source map + display context from the loaded ledger (used for source-
+    // location columns and number formatting respectively).
+    let source_map = ledger.source_map;
     let display_context = ledger.display_context;
 
     if args.verbose {
@@ -208,7 +209,13 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
             .with_context(|| format!("failed to read query file {}", query_file.display()))?
     } else {
         // Interactive mode
-        return interactive::run_interactive(file, &directives, &display_context, args);
+        return interactive::run_interactive(
+            file,
+            &directives,
+            &source_map,
+            &display_context,
+            args,
+        );
     };
 
     // Batch query: no pager (matching Python bean-query behavior).
@@ -217,9 +224,9 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     if let Some(ref output_path) = settings.output_file {
         let mut file = fs::File::create(output_path)
             .with_context(|| format!("failed to create output file {}", output_path.display()))?;
-        output::execute_query(&query_str, &directives, &settings, &mut file)
+        output::execute_query(&query_str, &directives, &source_map, &settings, &mut file)
     } else {
-        output::execute_query(&query_str, &directives, &settings, out)
+        output::execute_query(&query_str, &directives, &source_map, &settings, out)
     }
 }
 

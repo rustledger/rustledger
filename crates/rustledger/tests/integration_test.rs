@@ -740,3 +740,49 @@ fn test_beancount_canonical_example_matches_python() {
         "Rust should match Python on example.beancount: {rs_output}"
     );
 }
+
+#[test]
+fn test_query_filename_lineno_columns_resolve() {
+    // Regression: `SELECT filename, lineno` used to return NULL from the CLI
+    // because the query command built the executor without a source map.
+    let Some(binary) = rledger_binary() else {
+        eprintln!("Skipping: rledger binary not found");
+        return;
+    };
+    // Transaction is on line 3 (two opens precede it).
+    let content = "2020-01-01 open Assets:Cash USD\n\
+                   2020-01-01 open Equity:O USD\n\
+                   2020-02-01 * \"p\"\n  \
+                     Assets:Cash  10.00 USD\n  \
+                     Equity:O\n";
+    let temp_file = std::env::temp_dir().join("query-filename-lineno-test.beancount");
+    std::fs::write(&temp_file, content).expect("write temp file");
+
+    let output = Command::new(binary)
+        .arg("query")
+        .arg(&temp_file)
+        .arg("SELECT filename, lineno WHERE flag = \"*\"")
+        .output()
+        .expect("run rledger query");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "query should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // filename resolves to the real path (was empty/NULL before the fix).
+    assert!(
+        stdout.contains("query-filename-lineno-test.beancount"),
+        "expected the source filename in output, got:\n{stdout}"
+    );
+    // lineno resolves to 3 (the transaction's line).
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.contains(".beancount") && l.trim_end().ends_with('3')),
+        "expected lineno 3 on the directive's row, got:\n{stdout}"
+    );
+
+    std::fs::remove_file(&temp_file).ok();
+}

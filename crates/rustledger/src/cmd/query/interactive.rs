@@ -3,7 +3,8 @@
 use super::output::execute_query;
 use super::{Args, OutputFormat, SYSTEM_TABLES, ShellSettings};
 use anyhow::Result;
-use rustledger_core::{Directive, DisplayContext};
+use rustledger_core::{Directive, DisplayContext, Spanned};
+use rustledger_loader::SourceMap;
 use rustledger_query::parse as parse_query;
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
@@ -23,12 +24,12 @@ fn get_init_path() -> Option<PathBuf> {
 }
 
 /// Count statistics about directives.
-fn count_statistics(directives: &[Directive]) -> (usize, usize, usize) {
+fn count_statistics(directives: &[Spanned<Directive>]) -> (usize, usize, usize) {
     let mut num_transactions = 0;
     let mut num_postings = 0;
 
     for directive in directives {
-        if let Directive::Transaction(txn) = directive {
+        if let Directive::Transaction(txn) = &directive.value {
             num_transactions += 1;
             num_postings += txn.postings.len();
         }
@@ -39,7 +40,8 @@ fn count_statistics(directives: &[Directive]) -> (usize, usize, usize) {
 
 pub(super) fn run_interactive(
     file: &PathBuf,
-    directives: &[Directive],
+    directives: &[Spanned<Directive>],
+    source_map: &SourceMap,
     display_context: &DisplayContext,
     args: &Args,
 ) -> Result<()> {
@@ -90,7 +92,7 @@ pub(super) fn run_interactive(
 
                 // Handle dot-commands
                 if let Some(cmd) = line.strip_prefix('.') {
-                    if handle_dot_command(cmd, &mut settings, directives) {
+                    if handle_dot_command(cmd, &mut settings, directives, source_map) {
                         break;
                     }
                     continue;
@@ -106,7 +108,7 @@ pub(super) fn run_interactive(
                         "warning: commands without \".\" prefix are deprecated. use \".{lower}\" instead"
                     );
 
-                    if handle_dot_command(&lower, &mut settings, directives) {
+                    if handle_dot_command(&lower, &mut settings, directives, source_map) {
                         break;
                     }
                     continue;
@@ -115,7 +117,9 @@ pub(super) fn run_interactive(
                 // Execute as BQL query
                 let result = if let Some(ref output_path) = settings.output_file {
                     match fs::File::create(output_path) {
-                        Ok(mut file) => execute_query(line, directives, &settings, &mut file),
+                        Ok(mut file) => {
+                            execute_query(line, directives, source_map, &settings, &mut file)
+                        }
                         Err(e) => {
                             eprintln!("error: failed to open {}: {}", output_path.display(), e);
                             continue;
@@ -123,7 +127,7 @@ pub(super) fn run_interactive(
                     }
                 } else {
                     let mut stdout = io::stdout();
-                    execute_query(line, directives, &settings, &mut stdout)
+                    execute_query(line, directives, source_map, &settings, &mut stdout)
                 };
                 match result {
                     Ok(()) => {}
@@ -154,7 +158,12 @@ pub(super) fn run_interactive(
 }
 
 /// Returns `true` if the REPL should exit.
-fn handle_dot_command(cmd: &str, settings: &mut ShellSettings, directives: &[Directive]) -> bool {
+fn handle_dot_command(
+    cmd: &str,
+    settings: &mut ShellSettings,
+    directives: &[Spanned<Directive>],
+    source_map: &SourceMap,
+) -> bool {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     let command = parts.first().map(|s| s.to_lowercase()).unwrap_or_default();
     let args: Vec<&str> = parts.into_iter().skip(1).collect();
@@ -366,9 +375,9 @@ fn handle_dot_command(cmd: &str, settings: &mut ShellSettings, directives: &[Dir
                         println!("Running: {query}");
                         let result = if let Some(ref output_path) = settings.output_file {
                             match fs::File::create(output_path) {
-                                Ok(mut file) => {
-                                    execute_query(query, directives, settings, &mut file)
-                                }
+                                Ok(mut file) => execute_query(
+                                    query, directives, source_map, settings, &mut file,
+                                ),
                                 Err(e) => {
                                     eprintln!(
                                         "error: failed to open {}: {}",
@@ -380,7 +389,7 @@ fn handle_dot_command(cmd: &str, settings: &mut ShellSettings, directives: &[Dir
                             }
                         } else {
                             let mut stdout = io::stdout();
-                            execute_query(query, directives, settings, &mut stdout)
+                            execute_query(query, directives, source_map, settings, &mut stdout)
                         };
                         if let Err(e) = result {
                             eprintln!("error: {e:#}");

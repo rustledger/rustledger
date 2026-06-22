@@ -33,7 +33,7 @@ pub use book::{
 pub use interpolate::{InterpolationError, InterpolationResult, interpolate};
 pub use pad::{
     PadError, PadResult, SYNTH_PAD_NARRATION_PREFIX, is_synthesized_pad, merge_with_padding,
-    process_pads,
+    merge_with_padding_spanned, process_pads,
 };
 
 use bigdecimal::BigDecimal;

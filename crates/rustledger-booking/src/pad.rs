@@ -24,7 +24,7 @@
 
 use rust_decimal::Decimal;
 use rustledger_core::{
-    Amount, Currency, Directive, Inventory, NaiveDate, Pad, Position, Posting, Transaction,
+    Amount, Currency, Directive, Inventory, NaiveDate, Pad, Position, Posting, Spanned, Transaction,
 };
 use std::collections::HashMap;
 use std::ops::Neg;
@@ -342,6 +342,47 @@ pub fn merge_with_padding(directives: &[Directive]) -> Vec<Directive> {
     merged.extend(directives.iter().cloned());
 
     merged.sort_by_key(rustledger_core::Directive::date);
+
+    merged
+}
+
+/// Span-preserving variant of [`merge_with_padding`].
+///
+/// Identical merge behavior, but the input/output keep each directive's
+/// [`Spanned`] wrapper so downstream consumers (e.g. BQL's `filename`/`lineno`
+/// columns) can resolve real source locations. Pad-synthesized transactions
+/// have no source representation, so they are wrapped with
+/// [`Spanned::synthesized`] ([`Span::ZERO`](rustledger_core::Span) +
+/// [`SYNTHESIZED_FILE_ID`](rustledger_core::SYNTHESIZED_FILE_ID)) — exactly how
+/// other synthesized directives (plugin output, etc.) are marked.
+///
+/// # Not idempotent
+///
+/// Same caveat as [`merge_with_padding`]: re-running on its own output
+/// double-counts pad effects.
+#[must_use]
+pub fn merge_with_padding_spanned(directives: &[Spanned<Directive>]) -> Vec<Spanned<Directive>> {
+    let plain: Vec<Directive> = directives.iter().map(|s| s.value.clone()).collect();
+    debug_assert!(
+        !plain
+            .iter()
+            .any(|d| matches!(d, Directive::Transaction(t) if is_synthesized_pad(t))),
+        "merge_with_padding_spanned called on input that already contains synth pad transactions; \
+         re-running would double-count pad effects",
+    );
+
+    let result = process_pads(&plain);
+
+    // Prepend synth transactions (same ordering rationale as the plain variant)
+    // and mark them as synthesized so they resolve to no source location.
+    let mut merged: Vec<Spanned<Directive>> =
+        Vec::with_capacity(directives.len() + result.padding_transactions.len());
+    for txn in result.padding_transactions {
+        merged.push(Spanned::synthesized(Directive::Transaction(txn)));
+    }
+    merged.extend(directives.iter().cloned());
+
+    merged.sort_by_key(|s| s.value.date());
 
     merged
 }

@@ -1371,9 +1371,20 @@ impl<'a> Executor<'a> {
                             Ok(Value::Amount(Amount::new(amount, currency.as_str())))
                         }
                     }
+                    // Metadata / object lookup — mirror the per-row path
+                    // (`eval_getitem`). Previously only the lazy path handled
+                    // these, so `getitem(meta, key)` errored in the eager /
+                    // `#postings` evaluation path.
+                    (Value::Metadata(meta), Value::String(key)) => {
+                        Ok(Self::meta_value_to_value(meta.get(key)))
+                    }
+                    (Value::Object(obj), Value::String(key)) => {
+                        Ok(obj.get(key).cloned().unwrap_or(Value::Null))
+                    }
                     (Value::Null, _) => Ok(Value::Null),
                     _ => Err(QueryError::Type(
-                        "GETITEM expects (inventory, string)".to_string(),
+                        "GETITEM expects (inventory, string), (metadata, string), or (object, string)"
+                            .to_string(),
                     )),
                 }
             }
@@ -3533,6 +3544,81 @@ mod tests {
         let query = parse("SELECT meta('nonexistent') WHERE account ~ 'Expenses'").unwrap();
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.rows[0][0], Value::Null);
+    }
+
+    #[test]
+    fn test_getitem_meta_eager_path_postings() {
+        // Regression: getitem(meta, key) errored in the eager / `#postings`
+        // path (only the per-row/lazy path handled metadata). `FROM #postings`
+        // routes the function through `evaluate_function_on_values`.
+        let mut posting_meta: Metadata = Metadata::default();
+        posting_meta.insert(
+            "category".to_string(),
+            MetaValue::String("food".to_string()),
+        );
+        let txn = Transaction {
+            date: date(2024, 1, 15),
+            flag: '*',
+            payee: None,
+            narration: "Coffee".into(),
+            tags: vec![],
+            links: vec![],
+            meta: Metadata::default(),
+            postings: vec![
+                rustledger_core::Spanned::synthesized(Posting {
+                    account: "Expenses:Food".into(),
+                    units: Some(rustledger_core::IncompleteAmount::Complete(Amount::new(
+                        dec!(5),
+                        "USD",
+                    ))),
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    meta: posting_meta,
+                    comments: Vec::new(),
+                    trailing_comments: Vec::new(),
+                }),
+                rustledger_core::Spanned::synthesized(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-5), "USD"),
+                )),
+            ],
+            trailing_comments: Vec::new(),
+        };
+        let directives = vec![Directive::Transaction(txn)];
+        let mut executor = Executor::new(&directives);
+        let query =
+            parse("SELECT getitem(meta, 'category') FROM #postings WHERE account ~ 'Expenses'")
+                .unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.rows[0][0], Value::String("food".to_string()));
+    }
+
+    #[test]
+    fn test_integer_modulo_floored_sign() {
+        // Integer `%` uses Python floored modulo (sign follows the divisor);
+        // decimal `%` stays truncated (matching Python `Decimal`).
+        let directives = vec![Directive::Transaction(
+            Transaction::new(date(2024, 1, 1), "x")
+                .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1), "USD"))),
+        )];
+        let mut executor = Executor::new(&directives);
+        for (q, expected) in [
+            ("-5 % 3", 1i64),
+            ("5 % -3", -1),
+            ("-7 % 4", 1),
+            ("7 % -4", -1),
+        ] {
+            let r = executor
+                .execute(&parse(&format!("SELECT {q}")).unwrap())
+                .unwrap();
+            assert_eq!(r.rows[0][0], Value::Integer(expected), "for {q}");
+        }
+        // Decimal modulo is unchanged (truncated).
+        let r = executor
+            .execute(&parse("SELECT -5.0 % 3").unwrap())
+            .unwrap();
+        assert_eq!(r.rows[0][0], Value::Number(dec!(-2)));
     }
 
     #[test]

@@ -343,14 +343,6 @@ criteria = "safe-to-deploy"
 version = "2.0.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.futures-executor]]
-version = "0.3.32"
-criteria = "safe-to-deploy"
-
-[[exemptions.futures-macro]]
-version = "0.3.32"
-criteria = "safe-to-deploy"
-
 [[exemptions.generic-array]]
 version = "0.14.7"
 criteria = "safe-to-deploy"
@@ -521,6 +513,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.mach2]]
 version = "0.4.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.macro-string]]
+version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.maybe-owned]]

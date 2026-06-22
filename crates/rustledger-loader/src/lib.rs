@@ -170,11 +170,20 @@ pub enum LoadError {
 
 /// Convert a 0-based file index to the `u16` file id stored on `Spanned`
 /// values, returning [`LoadError::TooManyFiles`] instead of panicking when a
-/// ledger references more files than the 16-bit id space allows.
-fn file_id_to_u16(file_id: usize) -> Result<u16, LoadError> {
-    u16::try_from(file_id).map_err(|_| LoadError::TooManyFiles {
-        limit: u16::MAX as usize,
-    })
+/// ledger references more files than the id space allows.
+///
+/// `SYNTHESIZED_FILE_ID` (`u16::MAX`) is reserved as the plugin-synthesized
+/// sentinel, so a real file id must be strictly below it — we reject `>=` it,
+/// not merely `> u16::MAX`, otherwise the 65,535th file would alias onto the
+/// sentinel. (This is also the boundary `SourceMap::add_file` asserts, so the
+/// loader must check it *before* calling `add_file`.)
+const fn file_id_to_u16(file_id: usize) -> Result<u16, LoadError> {
+    if file_id >= rustledger_parser::SYNTHESIZED_FILE_ID as usize {
+        return Err(LoadError::TooManyFiles {
+            limit: rustledger_parser::SYNTHESIZED_FILE_ID as usize,
+        });
+    }
+    Ok(file_id as u16)
 }
 
 /// Result of loading a beancount file.
@@ -457,8 +466,15 @@ impl Loader {
             (src, parsed)
         };
 
+        // Validate the prospective file id BEFORE `add_file` — `add_file`
+        // asserts `id < SYNTHESIZED_FILE_ID` and would panic, but `load` must
+        // never panic on input. The next id `add_file` assigns is the current
+        // file count; reject it here (collected into `LoadResult::errors` by the
+        // caller) so an over-large include/glob set fails loudly without a panic.
+        let fid_u16 = file_id_to_u16(source_map.files().len())?;
         // Add to source map (Arc::clone is cheap - just increments refcount)
         let file_id = source_map.add_file(path_buf.clone(), std::sync::Arc::clone(&source));
+        debug_assert_eq!(file_id, fid_u16 as usize);
 
         // Mark as loading (update both stack and set)
         self.include_stack_set.insert(path_buf.clone());
@@ -655,12 +671,9 @@ impl Loader {
         // ID; this keeps inner spans consistent with their containing
         // directive so consumers don't need to traverse parent pointers.
         //
-        // file_id is `u16` everywhere (see `Spanned::file_id` rustdoc). Fail
-        // loudly rather than silently aliasing the overflowing file onto
-        // `SYNTHESIZED_FILE_ID`, but via a returned `LoadError` (collected by the
-        // caller) rather than a panic — `load` must never panic on input. The
-        // `?` short-circuits this file; `with_file_id` below stays within range.
-        let fid_u16 = file_id_to_u16(file_id)?;
+        // file_id is `u16` everywhere (see `Spanned::file_id` rustdoc). `fid_u16`
+        // was validated above (before this file was added to the source map), so
+        // no overflow/panic is possible here.
         directives.extend(result.directives.into_iter().map(|d| {
             let mut d = d.with_file_id(file_id);
             if let rustledger_core::Directive::Transaction(ref mut txn) = d.value {
@@ -800,16 +813,25 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn file_id_to_u16_returns_error_past_the_16bit_limit_not_panic() {
-        // Within the 16-bit file-id space: Ok.
+    fn file_id_to_u16_rejects_the_reserved_sentinel_not_panic() {
+        let sentinel = rustledger_parser::SYNTHESIZED_FILE_ID as usize;
+        // The last valid real id is one BELOW the reserved sentinel.
         assert_eq!(file_id_to_u16(0).unwrap(), 0);
-        assert_eq!(file_id_to_u16(u16::MAX as usize).unwrap(), u16::MAX);
-        // Past it: a LoadError (collected into LoadResult::errors), NOT a panic.
-        // `load` is a never-panic-on-input surface — at the 65,536th file the
-        // old `expect` would have aborted the whole embedder / wasm module.
+        assert_eq!(
+            file_id_to_u16(sentinel - 1).unwrap(),
+            rustledger_parser::SYNTHESIZED_FILE_ID - 1
+        );
+        // The sentinel itself (and beyond) is rejected with a LoadError — NOT a
+        // panic, and NOT aliased onto SYNTHESIZED_FILE_ID. `load` is a
+        // never-panic-on-input surface; the old `expect`/`assert` would have
+        // aborted the whole embedder / wasm module at this boundary.
         assert!(matches!(
-            file_id_to_u16(u16::MAX as usize + 1),
-            Err(LoadError::TooManyFiles { limit }) if limit == u16::MAX as usize
+            file_id_to_u16(sentinel),
+            Err(LoadError::TooManyFiles { limit }) if limit == sentinel
+        ));
+        assert!(matches!(
+            file_id_to_u16(sentinel + 1),
+            Err(LoadError::TooManyFiles { .. })
         ));
     }
 

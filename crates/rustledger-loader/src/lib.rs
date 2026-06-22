@@ -336,6 +336,16 @@ impl Loader {
         if self.enforce_path_security && self.root_dir.is_none() {
             self.root_dir = canonical.parent().map(Path::to_path_buf);
         }
+        // Normalize the root through the SAME filesystem namespace as the paths
+        // it is compared against. An explicit `with_root_dir(...)` may be
+        // relative/un-normalized, and on disk `normalize` makes paths absolute —
+        // so without this, a relative root never `starts_with` a normalized path
+        // and every include would be falsely rejected as a traversal. (The
+        // default-derived root is already normalized, so re-normalizing is a
+        // no-op there.)
+        if let Some(root) = self.root_dir.take() {
+            self.root_dir = Some(self.fs.normalize(&root));
+        }
 
         // Phase 1: Parse the root file to discover includes.
         // The root file is typically small (just includes + options).

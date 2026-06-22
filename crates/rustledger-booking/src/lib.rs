@@ -161,6 +161,7 @@ impl WeightNum for BigDecimal {
 /// cost currency, else the price currency, else `infer_currency()` (called
 /// lazily — only when the first two are absent). Returns `None` if the posting
 /// has no cost spec or no currency can be determined.
+#[must_use]
 pub(crate) fn cost_currency_of(
     posting: &rustledger_core::Posting,
     infer_currency: impl FnOnce() -> Option<Currency>,
@@ -187,25 +188,26 @@ fn cost_weight<D: WeightNum>(
     infer_currency: impl FnOnce() -> Option<Currency>,
 ) -> Option<(Currency, D)> {
     let cost_spec = posting.cost.as_ref()?;
-    let cost_curr = cost_currency_of(posting, infer_currency)?;
     let signum = units.number.signum();
     // `PerUnitFromTotal` and `Total` both carry a preserved total — using it
     // avoids the division-then-multiplication precision loss of recomputing from
-    // `per_unit`. `PerUnit` goes through multiplication.
-    match cost_spec.number {
+    // `per_unit`. `PerUnit` goes through multiplication. Match the number FIRST
+    // so an empty `{}` spec short-circuits without resolving (and possibly
+    // inferring) the cost currency.
+    let weight = match cost_spec.number {
         Some(rustledger_core::CostNumber::Total { value: total }) => {
-            Some((cost_curr, D::from_decimal(total) * D::from_decimal(signum)))
+            D::from_decimal(total) * D::from_decimal(signum)
         }
-        Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => Some((
-            cost_curr,
-            D::from_decimal(b.total) * D::from_decimal(signum),
-        )),
-        Some(rustledger_core::CostNumber::PerUnit { value: per_unit }) => Some((
-            cost_curr,
-            D::from_decimal(units.number) * D::from_decimal(per_unit),
-        )),
-        None => None, // empty `{}`
-    }
+        Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => {
+            D::from_decimal(b.total) * D::from_decimal(signum)
+        }
+        Some(rustledger_core::CostNumber::PerUnit { value: per_unit }) => {
+            D::from_decimal(units.number) * D::from_decimal(per_unit)
+        }
+        None => return None, // empty `{}`
+    };
+    let cost_curr = cost_currency_of(posting, infer_currency)?;
+    Some((cost_curr, weight))
 }
 
 /// The canonical per-posting balance weight, summed per currency, generic over

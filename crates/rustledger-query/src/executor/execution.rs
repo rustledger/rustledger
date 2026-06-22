@@ -1019,7 +1019,18 @@ impl Executor<'_> {
         let columns = vec!["directive".to_string()];
         let mut result = QueryResult::new(columns);
 
-        for directive in self.directives {
+        // Iterate whichever directive source is populated: when the Executor is
+        // built via `new_with_sources` (e.g. the CLI, source-mapped queries),
+        // `self.directives` is empty and the data lives in `spanned_directives`
+        // — same fallback as the system-table builders. Without this, PRINT
+        // returned zero rows in the CLI.
+        let all_directives: Vec<&Directive> = if let Some(spanned) = self.spanned_directives {
+            spanned.iter().map(|s| &s.value).collect()
+        } else {
+            self.directives.iter().collect()
+        };
+
+        for directive in all_directives {
             // Apply FROM clause filter if present
             if let Some(from) = &query.from
                 && let Some(filter) = &from.filter

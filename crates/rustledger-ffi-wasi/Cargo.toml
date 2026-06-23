@@ -24,6 +24,7 @@ rustledger-booking.workspace = true
 rustledger-validate.workspace = true
 rustledger-query.workspace = true
 rustledger-plugin.workspace = true
+rustledger-ops.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

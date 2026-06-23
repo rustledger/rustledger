@@ -3299,6 +3299,7 @@ dependencies = [
  "rustledger-booking",
  "rustledger-core",
  "rustledger-loader",
+ "rustledger-ops",
  "rustledger-parser",
  "rustledger-plugin",
  "rustledger-query",

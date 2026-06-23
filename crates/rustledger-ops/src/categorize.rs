@@ -10,6 +10,24 @@
 
 use crate::enrichment::CategorizationMethod;
 use regex::Regex;
+use std::sync::LazyLock;
+
+/// Built-in merchant-dictionary regexes, compiled once on first use. Patterns
+/// that fail to compile are skipped. Each entry pairs a case-insensitive,
+/// unanchored regex with its `&'static` category and account; the `Regex` is
+/// cheaply `Arc`-cloned into per-engine rules by [`RulesEngine::load_merchant_dict`].
+static MERCHANT_REGEXES: LazyLock<Vec<(Regex, &'static str, &'static str)>> = LazyLock::new(|| {
+    crate::merchants::MERCHANT_PATTERNS
+        .iter()
+        .filter_map(|entry| {
+            regex::RegexBuilder::new(entry.pattern)
+                .case_insensitive(true)
+                .build()
+                .ok()
+                .map(|re| (re, entry.category, entry.account))
+        })
+        .collect()
+});
 
 /// A categorization rule.
 #[derive(Debug)]
@@ -125,18 +143,18 @@ impl RulesEngine {
 
     /// Load the built-in merchant dictionary as low-priority rules.
     pub fn load_merchant_dict(&mut self) {
-        for entry in crate::merchants::MERCHANT_PATTERNS {
-            if let Ok(regex) = regex::RegexBuilder::new(entry.pattern)
-                .case_insensitive(true)
-                .build()
-            {
-                self.rules.push(Rule {
-                    name: Some(entry.category.to_string()),
-                    pattern: RulePattern::Regex(regex),
-                    account: entry.account.to_string(),
-                    priority: -1000, // Below all user rules
-                });
-            }
+        // Merchant regexes are compiled once process-wide (see `MERCHANT_REGEXES`)
+        // and cheaply `Arc`-cloned per engine. Recompiling them on every
+        // `build_rules_engine` call — one per imported file — was a real cost;
+        // this restores the cache the plain CSV path had before unification,
+        // now shared by both the plain and enriched paths.
+        for (regex, category, account) in MERCHANT_REGEXES.iter() {
+            self.rules.push(Rule {
+                name: Some((*category).to_string()),
+                pattern: RulePattern::Regex(regex.clone()),
+                account: (*account).to_string(),
+                priority: -1000, // Below all user rules
+            });
         }
         self.rules.sort_by_key(|r| std::cmp::Reverse(r.priority));
     }

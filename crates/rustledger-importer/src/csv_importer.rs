@@ -69,6 +69,24 @@ impl CsvImporter {
 
     /// Extract transactions from string content using the given importer config.
     pub fn extract_string(&self, content: &str, config: &ImporterConfig) -> Result<ImportResult> {
+        let ImporterType::Csv(csv_config) = &config.importer_type;
+        // Build the categorization engine once and share it with the row loop —
+        // the single source also used by the enriched path. `extract_string_enriched`
+        // builds it once and reuses it for enrichment too, so the engine (which
+        // compiles the merchant regexes) is never constructed twice per call.
+        let engine = Self::build_rules_engine(csv_config);
+        self.extract_string_with_engine(content, config, &engine)
+    }
+
+    /// Row-extraction core shared by [`Self::extract_string`] and
+    /// [`Self::extract_string_enriched`], parameterized on a pre-built rules
+    /// engine so it is constructed exactly once per extract call.
+    fn extract_string_with_engine(
+        &self,
+        content: &str,
+        config: &ImporterConfig,
+        engine: &rustledger_ops::categorize::RulesEngine,
+    ) -> Result<ImportResult> {
         // Irrefutable today because `ImporterType` has a single variant.
         // If a new variant is added the compiler will catch this as
         // refutable — that's intentional load-bearing safety; do NOT
@@ -79,12 +97,6 @@ impl CsvImporter {
         // is non-trivial and parse_row runs per row, so we'd repeat the
         // compile thousands of times if we did it inside the loop.
         let amount_format = csv_config.compile_amount_format()?;
-
-        // Build the categorization engine once for the whole file — the single
-        // source shared with the enriched path (config mappings, regex mappings,
-        // and the merchant dictionary). The plain path previously consulted a
-        // bespoke matcher that ignored `regex_mappings` entirely.
-        let engine = Self::build_rules_engine(csv_config);
 
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(csv_config.has_header)
@@ -123,7 +135,7 @@ impl CsvImporter {
                 csv_config,
                 &amount_format,
                 &header_map,
-                &engine,
+                engine,
             ) {
                 Ok(Some(txn)) => directives.push(Directive::Transaction(txn)),
                 Ok(None) => {} // Skip empty rows
@@ -168,11 +180,12 @@ impl CsvImporter {
         config: &ImporterConfig,
     ) -> Result<EnrichedImportResult> {
         let ImporterType::Csv(csv_config) = &config.importer_type;
-        let result = self.extract_string(content, config)?;
 
-        // Build the rules engine once for all directives — shared with the
-        // plain path via `build_rules_engine`.
+        // Build the rules engine ONCE and use it for both row extraction and
+        // enrichment, instead of building it inside `extract_string` and again
+        // here (the engine compiles the merchant regexes).
         let engine = Self::build_rules_engine(csv_config);
+        let result = self.extract_string_with_engine(content, config, &engine)?;
 
         let entries = result
             .directives
@@ -318,10 +331,13 @@ impl CsvImporter {
                 .as_deref()
                 .unwrap_or("Income:Unknown")
         };
-        let contra_account = engine
-            .categorize(payee.as_deref(), &narration)
-            .map_or_else(|| default_contra.to_string(), |m| m.account);
-        let contra_posting = Posting::auto(&contra_account);
+        // Borrow the matched account (or the default) as `&str` — no per-row
+        // `String` allocation when a rule doesn't match.
+        let rule_match = engine.categorize(payee.as_deref(), &narration);
+        let contra_account = rule_match
+            .as_ref()
+            .map_or(default_contra, |m| m.account.as_str());
+        let contra_posting = Posting::auto(contra_account);
 
         // Build the transaction
         let mut txn = Transaction::new(date, &narration)

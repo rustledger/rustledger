@@ -1644,20 +1644,15 @@ fn is_python_module_name(resolved: &std::path::Path, raw_name: &str) -> bool {
 }
 
 /// Classify a Python plugin reference as a FILE path (vs a dotted module name):
-/// a file when it resolves to an existing path, ends in `.py` (case-insensitive),
-/// or contains a path separator. Forward `/` counts even on Windows (where
-/// `MAIN_SEPARATOR` is `\`), so `plugins/foo.py` is never mistaken for a module.
-///
-/// Single source for the up-front #1432 rejection (via `is_python_module_name`)
-/// and the runtime file-vs-module dispatch, which previously used non-equivalent
-/// criteria (the dispatch omitted the forward slash) and could disagree.
+/// a file when it resolves to an existing path, or its name is file-like by the
+/// shared [`rustledger_plugin::python::is_python_plugin_file_ref`] criterion
+/// (`.py` extension or a path separator). That shared classifier is the single
+/// source for the up-front #1432 rejection, the runtime dispatch here, and the
+/// `discover_module_source` routing inside `rustledger-plugin` — they previously
+/// used non-equivalent criteria and could disagree about the same reference.
 #[cfg(feature = "python-plugins")]
 fn is_python_plugin_file(resolved: &std::path::Path, raw_name: &str) -> bool {
-    resolved.exists()
-        || std::path::Path::new(raw_name)
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("py"))
-        || raw_name.contains(['/', std::path::MAIN_SEPARATOR])
+    resolved.exists() || rustledger_plugin::python::is_python_plugin_file_ref(raw_name)
 }
 
 /// Actionable error for a Python plugin referenced by module name. `file` is the

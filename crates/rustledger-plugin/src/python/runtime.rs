@@ -456,6 +456,23 @@ fn engine_config() -> Config {
 
 /// Discover and read a Python plugin's source code.
 ///
+/// Classify a Python plugin reference as a FILE path (vs a dotted module name):
+/// a file when it ends in `.py` (case-insensitive) or contains a path separator.
+/// Forward `/` counts even on Windows (where `MAIN_SEPARATOR` is `\`), so
+/// `plugins/foo.py` is never mistaken for a module.
+///
+/// Single source for the file-vs-module decision across the loader's up-front
+/// `#1432` rejection, the loader's runtime dispatch, and `discover_module_source`
+/// below — these previously used three non-equivalent criteria (some omitted
+/// the forward slash) and could disagree about the same reference.
+#[must_use]
+pub fn is_python_plugin_file_ref(name: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
+        || name.contains(['/', std::path::MAIN_SEPARATOR])
+}
+
 /// For file-based plugins (`.py` files or paths), reads the file directly.
 /// For module-based plugins, returns `ModuleNotFound` error - the caller should
 /// use `suggest_module_path()` to provide a helpful hint to the user.
@@ -470,10 +487,7 @@ fn discover_module_source(
     use std::path::PathBuf;
 
     // Handle file-based plugins first
-    let is_py_file = std::path::Path::new(module_name)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("py"));
-    if is_py_file || module_name.contains(std::path::MAIN_SEPARATOR) {
+    if is_python_plugin_file_ref(module_name) {
         let path = if let Some(dir) = beancount_dir {
             dir.join(module_name)
         } else {

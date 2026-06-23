@@ -458,6 +458,29 @@ impl Inventory {
         })
     }
 
+    /// Whether a posting of `units` carrying `cost` would REDUCE this inventory
+    /// under `method` — the single source for the reduction-vs-augmentation
+    /// decision shared by the booking engine (`BookingEngine::apply`) and the
+    /// Late validator's inventory pass.
+    ///
+    /// A posting reduces only when it carries a cost, the booking method isn't
+    /// `NONE` (issue #1182 — `NONE` accumulates every posting as an augmentation,
+    /// with no lot matching), and the inventory holds a cost-bearing position of
+    /// the opposite sign in the same currency ([`Self::is_reduced_by`] with
+    /// [`ReductionScope::CostBearingOnly`]). This gate was previously written
+    /// byte-for-byte in both crates and the #1182 fix had to be applied twice.
+    #[must_use]
+    pub fn is_booking_reduction(
+        &self,
+        units: &Amount,
+        cost: Option<&CostSpec>,
+        method: BookingMethod,
+    ) -> bool {
+        method != BookingMethod::None
+            && cost.is_some()
+            && self.is_reduced_by(units, ReductionScope::CostBearingOnly)
+    }
+
     /// Get the total book value (cost basis) for a currency.
     ///
     /// Returns the sum of all cost bases for positions of the given currency.

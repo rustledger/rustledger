@@ -2,7 +2,7 @@
 
 use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
-use rustledger_core::{Amount, BookingMethod, Inventory, Posting, ReductionScope, Transaction};
+use rustledger_core::{Amount, BookingMethod, Inventory, Posting, Transaction};
 use std::collections::HashMap;
 
 use super::helpers::push_account_not_open;
@@ -490,22 +490,13 @@ pub fn update_inventories(
             .map(|a| a.booking)
             .unwrap_or_default();
 
-        // Use the same reduction detection as the booking engine: a posting
-        // reduces inventory when the inventory has cost-bearing positions with
-        // the opposite sign for the same currency. Simple (no-cost) positions
-        // are ignored. This correctly handles sell-to-open (selling into empty
-        // inventory) as an augmentation, not a reduction.
-        //
-        // Under `option "booking_method" "NONE"` (issue #1182), every
-        // posting is an augmentation — NONE accumulates positions
-        // without lot matching. Mirrors the parallel guards in
-        // `rustledger-booking::book::book` and `BookingEngine::apply`.
-        // Without this gate, the validator's independent lot-matching
-        // pass would re-raise the ambiguous/no-matching-lot errors
-        // the booker just decided to skip.
-        let is_reduction = booking_method != BookingMethod::None
-            && posting.cost.is_some()
-            && inv.is_reduced_by(units, ReductionScope::CostBearingOnly);
+        // Reduction vs augmentation — the SAME decision the booking engine makes,
+        // now via the single `Inventory::is_booking_reduction` source: a cost-bearing
+        // opposite-sign position reduces, and under `option "booking_method" "NONE"`
+        // (issue #1182) every posting is an augmentation. Sharing it means this
+        // validator pass and `BookingEngine::apply` can't drift, and the #1182 gate
+        // lives in one place instead of being maintained in both crates.
+        let is_reduction = inv.is_booking_reduction(units, posting.cost.as_ref(), booking_method);
 
         if is_reduction {
             process_inventory_reduction(inv, posting, units, booking_method, txn, errors);

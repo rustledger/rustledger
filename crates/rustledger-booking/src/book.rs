@@ -467,18 +467,11 @@ impl BookingEngine {
                 let method = self.method_for(&posting.account);
                 let inv = self.inventories.entry(posting.account.clone()).or_default();
 
-                // Determine if this is a reduction: units reduce inventory when
-                // signs differ for the same currency. Only cost-bearing positions
-                // are considered, so simple (no-cost) positions don't trigger
-                // false reduction detection.
-                //
-                // NONE booking (issue #1182) treats every posting as an
-                // augmentation. Mixed-sign positions accumulate in the
-                // inventory — Python beancount's semantic for the NONE
-                // method, which the parallel guard in `book()` mirrors.
-                let is_reduction = method != BookingMethod::None
-                    && posting.cost.is_some()
-                    && inv.is_reduced_by(units, ReductionScope::CostBearingOnly);
+                // Reduction vs augmentation — the single source for this decision
+                // (`Inventory::is_booking_reduction`), shared with the Late
+                // validator so the two can't drift (including the #1182 NONE gate
+                // that previously had to be maintained in both crates).
+                let is_reduction = inv.is_booking_reduction(units, posting.cost.as_ref(), method);
 
                 if is_reduction {
                     // Reduce from inventory. `reduce` only errors when the lot

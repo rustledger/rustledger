@@ -38,8 +38,20 @@ const LEDGER: &str = "\
 
 /// Parse the fixed ledger once; every fuzz iteration borrows these directives.
 static DIRECTIVES: LazyLock<Vec<Directive>> = LazyLock::new(|| {
-    let (spanned, _errors) = rustledger_parser::parse_directives(LEDGER);
-    spanned.into_iter().map(|s| s.value).collect()
+    let (spanned, errors) = rustledger_parser::parse_directives(LEDGER);
+    // Fail fast if the baseline fixture ever stops parsing cleanly — otherwise
+    // the fuzzer would silently run against a partial/empty ledger and quietly
+    // lose most of its coverage.
+    assert!(
+        errors.is_empty(),
+        "fuzz_query_execute baseline LEDGER failed to parse: {errors:?}"
+    );
+    let directives: Vec<Directive> = spanned.into_iter().map(|s| s.value).collect();
+    assert!(
+        !directives.is_empty(),
+        "fuzz_query_execute baseline LEDGER parsed to zero directives"
+    );
+    directives
 });
 
 fuzz_target!(|data: &[u8]| {

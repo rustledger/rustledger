@@ -80,21 +80,25 @@ impl Executor<'_> {
         loc.map_or(Value::Null, |l| Value::String(l.filename.clone()))
     }
 
-    /// The synthetic `lineno` source-location column value, as an `Integer`.
-    ///
-    /// Saturates to `i64::MAX` only on the practically-impossible case of a line
-    /// number exceeding `i64` — the single, overflow-checked replacement for the
-    /// unchecked `loc.lineno as i64` casts the column paths used (bug #4).
-    pub(crate) fn source_lineno_value(loc: Option<&SourceLocation>) -> Value {
-        loc.map_or(Value::Null, |l| {
-            Value::Integer(i64::try_from(l.lineno).unwrap_or(i64::MAX))
-        })
+    /// The line number as an `i64`, saturating to `i64::MAX` only on the
+    /// practically-impossible case of a line number exceeding `i64` — the single,
+    /// overflow-checked replacement for the unchecked `loc.lineno as i64` casts
+    /// (bug #4). Shared by the `lineno` and `location` columns so they can never
+    /// disagree on the same posting.
+    fn lineno_i64(loc: &SourceLocation) -> i64 {
+        i64::try_from(loc.lineno).unwrap_or(i64::MAX)
     }
 
-    /// The synthetic `location` source-location column value (`filename:lineno`).
+    /// The synthetic `lineno` source-location column value, as an `Integer`.
+    pub(crate) fn source_lineno_value(loc: Option<&SourceLocation>) -> Value {
+        loc.map_or(Value::Null, |l| Value::Integer(Self::lineno_i64(l)))
+    }
+
+    /// The synthetic `location` source-location column value (`filename:lineno`),
+    /// using the same saturated line number as [`Self::source_lineno_value`].
     pub(crate) fn source_location_value(loc: Option<&SourceLocation>) -> Value {
         loc.map_or(Value::Null, |l| {
-            Value::String(format!("{}:{}", l.filename, l.lineno))
+            Value::String(format!("{}:{}", l.filename, Self::lineno_i64(l)))
         })
     }
 
@@ -274,6 +278,11 @@ mod tests {
         assert_eq!(
             Executor::source_lineno_value(Some(&loc(usize::MAX))),
             Value::Integer(i64::MAX)
+        );
+        // `location` must use the same saturated value so the two columns agree.
+        assert_eq!(
+            Executor::source_location_value(Some(&loc(usize::MAX))),
+            Value::String(format!("f.bean:{}", i64::MAX))
         );
     }
 

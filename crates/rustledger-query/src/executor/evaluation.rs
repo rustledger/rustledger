@@ -329,11 +329,19 @@ impl Executor<'_> {
                 .as_ref()
                 .and_then(|c| c.currency.as_ref())
                 .map_or(Value::Null, |c| Value::String(c.to_string()))),
-            // Cost date
+            // Cost date — the *resolved* cost date, not the raw spec date: an
+            // undated cost (`{150 USD}`) inherits the transaction date when
+            // booked, which is what bean-query and the `#postings` table report.
+            // Reading the raw `CostSpec.date` (often `None`) was the divergence.
             "cost_date" => Ok(posting
-                .cost
-                .as_ref()
-                .and_then(|c| c.date)
+                .amount()
+                .and_then(|units| {
+                    posting
+                        .cost
+                        .as_ref()
+                        .and_then(|cs| cs.resolve(units.number, ctx.transaction.date))
+                })
+                .and_then(|cost| cost.date)
                 .map_or(Value::Null, Value::Date)),
             // Cost label
             "cost_label" => Ok(posting
@@ -421,9 +429,11 @@ impl Executor<'_> {
                 obj.insert("meta".to_string(), Value::Object(Box::new(meta_obj)));
                 Ok(Value::Object(Box::new(obj)))
             }
-            // type - directive type (matches Python beancount's type column)
-            // For SELECT FROM (default), this is always "Transaction"
-            "type" => Ok(Value::String("Transaction".to_string())),
+            // type - directive type. bean-query lowercases it (`transaction`),
+            // and the `#postings` table already emits lowercase; the default
+            // posting source is always a transaction. (Confirmed against the
+            // bean-query oracle.)
+            "type" => Ok(Value::String("transaction".to_string())),
             // id - directive index (matches Python beancount's id column)
             "id" => Ok(ctx
                 .directive_index

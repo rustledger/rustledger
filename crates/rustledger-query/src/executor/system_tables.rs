@@ -523,8 +523,8 @@ impl Executor<'_> {
                 )
             };
 
-        let filename = source_loc.map_or(Value::Null, |loc| Value::String(loc.filename.clone()));
-        let lineno = source_loc.map_or(Value::Null, |loc| Value::Integer(loc.lineno as i64));
+        let filename = Self::source_filename_value(source_loc);
+        let lineno = Self::source_lineno_value(source_loc);
 
         vec![
             Value::Integer(idx as i64), // id
@@ -648,14 +648,12 @@ impl Executor<'_> {
                 let posting_loc = self
                     .span_source_location(posting.file_id, posting.span.start)
                     .or_else(|| source_loc.cloned());
-                let (filename, lineno, location) = match posting_loc.as_ref() {
-                    Some(loc) => (
-                        Value::String(loc.filename.clone()),
-                        Value::Integer(loc.lineno as i64),
-                        Value::String(format!("{}:{}", loc.filename, loc.lineno)),
-                    ),
-                    None => (Value::Null, Value::Null, Value::Null),
-                };
+                let loc = posting_loc.as_ref();
+                let (filename, lineno, location) = (
+                    Self::source_filename_value(loc),
+                    Self::source_lineno_value(loc),
+                    Self::source_location_value(loc),
+                );
 
                 // Update running balances (per-account and cumulative).
                 if let Some(units) = posting.amount() {

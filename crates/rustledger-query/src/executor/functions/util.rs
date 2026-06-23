@@ -75,6 +75,29 @@ impl Executor<'_> {
         }
     }
 
+    /// The synthetic `filename` source-location column value.
+    pub(crate) fn source_filename_value(loc: Option<&SourceLocation>) -> Value {
+        loc.map_or(Value::Null, |l| Value::String(l.filename.clone()))
+    }
+
+    /// The synthetic `lineno` source-location column value, as an `Integer`.
+    ///
+    /// Saturates to `i64::MAX` only on the practically-impossible case of a line
+    /// number exceeding `i64` — the single, overflow-checked replacement for the
+    /// unchecked `loc.lineno as i64` casts the column paths used (bug #4).
+    pub(crate) fn source_lineno_value(loc: Option<&SourceLocation>) -> Value {
+        loc.map_or(Value::Null, |l| {
+            Value::Integer(i64::try_from(l.lineno).unwrap_or(i64::MAX))
+        })
+    }
+
+    /// The synthetic `location` source-location column value (`filename:lineno`).
+    pub(crate) fn source_location_value(loc: Option<&SourceLocation>) -> Value {
+        loc.map_or(Value::Null, |l| {
+            Value::String(format!("{}:{}", l.filename, l.lineno))
+        })
+    }
+
     /// Look up a single metadata key, falling back to the synthetic
     /// source-location keys (`filename`/`lineno`) when absent from `raw`.
     fn meta_lookup(raw: &Metadata, loc: Option<&SourceLocation>, key: &str) -> Option<MetaValue> {
@@ -218,5 +241,53 @@ impl Executor<'_> {
             }
         }
         Ok(Value::Null)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::Executor;
+    use super::super::super::types::{SourceLocation, Value};
+
+    fn loc(lineno: usize) -> SourceLocation {
+        SourceLocation {
+            filename: "f.bean".to_string(),
+            lineno,
+        }
+    }
+
+    #[test]
+    fn source_lineno_value_basics() {
+        assert_eq!(
+            Executor::source_lineno_value(Some(&loc(42))),
+            Value::Integer(42)
+        );
+        assert_eq!(Executor::source_lineno_value(None), Value::Null);
+    }
+
+    // bug #4: a line number exceeding `i64` must saturate to `i64::MAX`, not wrap
+    // negative as the old unchecked `loc.lineno as i64` cast did. Only reachable
+    // where `usize` is wider than `i64`.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn source_lineno_value_saturates_on_overflow() {
+        assert_eq!(
+            Executor::source_lineno_value(Some(&loc(usize::MAX))),
+            Value::Integer(i64::MAX)
+        );
+    }
+
+    #[test]
+    fn source_filename_and_location_values() {
+        assert_eq!(
+            Executor::source_filename_value(Some(&loc(7))),
+            Value::String("f.bean".to_string())
+        );
+        assert_eq!(
+            Executor::source_location_value(Some(&loc(7))),
+            Value::String("f.bean:7".to_string())
+        );
+        assert_eq!(Executor::source_filename_value(None), Value::Null);
+        assert_eq!(Executor::source_location_value(None), Value::Null);
     }
 }

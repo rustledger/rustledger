@@ -381,17 +381,15 @@ impl Executor<'_> {
             )))),
             // Source location columns — resolved from the posting's own span
             // (falling back to the enclosing directive's location).
-            "filename" => Ok(self
-                .resolved_source_location(ctx)
-                .map_or(Value::Null, |loc| Value::String(loc.filename))),
-            "lineno" => Ok(self
-                .resolved_source_location(ctx)
-                .map_or(Value::Null, |loc| Value::Integer(loc.lineno as i64))),
-            "location" => Ok(self
-                .resolved_source_location(ctx)
-                .map_or(Value::Null, |loc| {
-                    Value::String(format!("{}:{}", loc.filename, loc.lineno))
-                })),
+            "filename" => Ok(Self::source_filename_value(
+                self.resolved_source_location(ctx).as_ref(),
+            )),
+            "lineno" => Ok(Self::source_lineno_value(
+                self.resolved_source_location(ctx).as_ref(),
+            )),
+            "location" => Ok(Self::source_location_value(
+                self.resolved_source_location(ctx).as_ref(),
+            )),
             // has_cost - check if posting has cost specification
             "has_cost" => Ok(Value::Boolean(posting.cost.is_some())),
             // entry - parent transaction as structured object

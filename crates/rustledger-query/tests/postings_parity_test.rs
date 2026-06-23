@@ -130,3 +130,78 @@ fn default_select_matches_postings_table() {
          posting-source implementations have drifted"
     );
 }
+
+/// Every `#postings` column the default path also computes, EXCEPT the two that
+/// are known to diverge today (see [`KNOWN_DIVERGENT_COLUMNS`]). The two paths
+/// must agree on all of these — the bulk of the projection.
+const AGREEING_COLUMNS: &str = "id, date, year, month, day, flag, payee, narration, \
+     description, tags, links, posting_flag, account, other_accounts, number, currency, \
+     cost_number, cost_currency, cost_label, position, price, weight, balance, account_balance";
+
+/// The columns where the default `SELECT` path and `#postings` currently produce
+/// different values for the same posting — the BR8 step-3 reconciliation work-list:
+///
+/// - `type`: default emits `"Transaction"` (capitalized), `#postings` emits
+///   `"transaction"` (lowercase) — a casing mismatch.
+/// - `cost_date`: default reads the raw `CostSpec.date` (`None` for `{150 USD}`),
+///   `#postings` reads the *resolved* cost date (filled to the txn date).
+///
+/// Pinned here so the eventual single-posting-source unification has an explicit
+/// list to reconcile (each to the bean-query-correct value), and so a NEW
+/// divergence appearing on any other column fails this test loudly.
+const KNOWN_DIVERGENT_COLUMNS: &[&str] = &["type", "cost_date"];
+
+fn columns_that_diverge(dirs: &[Directive]) -> Vec<String> {
+    let mut executor = Executor::new(dirs);
+    let all = format!("{AGREEING_COLUMNS}, type, cost_date");
+    all.split(',')
+        .map(str::trim)
+        .filter(|col| {
+            let direct = executor
+                .execute(&parse(&format!("SELECT {col}")).unwrap())
+                .unwrap();
+            let table = executor
+                .execute(&parse(&format!("SELECT {col} FROM #postings")).unwrap())
+                .unwrap();
+            direct.rows != table.rows
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// The default `SELECT` path and `#postings` agree on every column except the
+/// two documented ones — proven per-column so the failure message names any new
+/// drift. This is the regression net for the upcoming iterator unification.
+#[test]
+fn divergence_is_exactly_the_known_two_columns() {
+    let mut diverge = columns_that_diverge(&fixture());
+    diverge.sort();
+    let mut known: Vec<String> = KNOWN_DIVERGENT_COLUMNS
+        .iter()
+        .copied()
+        .map(str::to_string)
+        .collect();
+    known.sort();
+    assert_eq!(
+        diverge, known,
+        "the set of diverging #postings columns changed — reconcile or update KNOWN_DIVERGENT_COLUMNS"
+    );
+}
+
+/// Full row-for-row parity on the agreeing columns (the bulk of the table).
+#[test]
+fn agreeing_columns_match_row_for_row() {
+    let dirs = fixture();
+    let mut executor = Executor::new(&dirs);
+    let direct = executor
+        .execute(&parse(&format!("SELECT {AGREEING_COLUMNS}")).unwrap())
+        .unwrap();
+    let table = executor
+        .execute(&parse(&format!("SELECT {AGREEING_COLUMNS} FROM #postings")).unwrap())
+        .unwrap();
+    assert_eq!(direct.columns, table.columns, "headers diverge");
+    assert_eq!(
+        direct.rows, table.rows,
+        "default SELECT and #postings diverge on an agreeing column"
+    );
+}

@@ -818,6 +818,35 @@ fn test_getitem_meta_eager_path_postings() {
     assert_eq!(result.rows[0][0], Value::String("food".to_string()));
 }
 
+/// After the dual-eval-path collapse, the `#postings` / subquery front-end
+/// (`evaluate_subquery_expr`) routes function calls through the same registry
+/// as top-level queries, so it inherits the extended-date functions (previously
+/// `UnknownFunction` there) and the reconciled function bodies. The META
+/// interception must still run first (covered by the getitem-meta test above).
+#[test]
+fn test_unified_registry_reaches_postings_subquery_path() {
+    let directives = sample_directives();
+    let mut executor = Executor::new(&directives);
+
+    // Extended-date function (DATE + DATE_ADD) in the #postings path — errored
+    // `UnknownFunction` here before the registry was unified.
+    let result = executor
+        .execute(&parse("SELECT date_add(DATE('2024-01-15'), 1) FROM #postings").unwrap())
+        .unwrap();
+    assert!(!result.rows.is_empty(), "#postings produced no rows");
+    assert_eq!(
+        result.rows[0][0],
+        Value::Date(rustledger_core::naive_date(2024, 1, 16).unwrap())
+    );
+
+    // Reconciled MAXWIDTH (Python textwrap.shorten) in the #postings path —
+    // the eager registry previously did naive truncation here.
+    let result = executor
+        .execute(&parse("SELECT maxwidth('hello world', 8) FROM #postings").unwrap())
+        .unwrap();
+    assert_eq!(result.rows[0][0], Value::String("[...]".to_string()));
+}
+
 #[test]
 fn test_integer_modulo_floored_sign() {
     // Integer `%` uses Python floored modulo (sign follows the divisor);

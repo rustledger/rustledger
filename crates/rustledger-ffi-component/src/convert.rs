@@ -1113,11 +1113,13 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
 
     // Convert inputs to core directives, remembering each one's position in
     // `entries` so a `clamp_indexed` source index can map an output back to the
-    // exact original WIT directive. Inputs that fail to convert are skipped (they
-    // can't participate in summarization); `orig_index` keeps the surviving cores
-    // aligned to their WIT source.
-    let mut core: Vec<rustledger_core::Directive> = Vec::new();
-    let mut orig_index: Vec<usize> = Vec::new();
+    // exact original WIT directive. These are already-loaded WIT directives, so
+    // conversion is not expected to fail; if one ever does it is skipped — this
+    // surface returns `Vec<wit::Directive>` with no error channel (matching the
+    // unparsable-bounds early return above) — and `orig_index` keeps the
+    // surviving cores aligned to their WIT source.
+    let mut core: Vec<rustledger_core::Directive> = Vec::with_capacity(entries.len());
+    let mut orig_index: Vec<usize> = Vec::with_capacity(entries.len());
     for (i, d) in entries.iter().enumerate() {
         if let Ok(c) = ffi::input_entry_to_directive(&loaded_directive_to_input(d)) {
             core.push(c);

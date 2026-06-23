@@ -31,6 +31,9 @@ impl Executor<'_> {
     ) -> Result<Value, QueryError> {
         let left = self.evaluate_expr(&op.left, ctx)?;
         let right = self.evaluate_expr(&op.right, ctx)?;
+        // `binary_op_on_values` owns the operator semantics — including the SQL
+        // three-valued-logic NULL short-circuit (a comparison involving NULL is
+        // UNKNOWN → false, so WHERE drops rows with a missing optional field).
         self.binary_op_on_values(op.op, &left, &right)
     }
 

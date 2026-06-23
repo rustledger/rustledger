@@ -8,9 +8,9 @@ use super::super::Executor;
 use super::super::types::Value;
 
 impl Executor<'_> {
-    /// Value-core for ROUND shared by the lazy `eval_round` and the eager
-    /// registry. Supports negative precision (rounds tens/hundreds), matching
-    /// Python/beanquery `round`.
+    /// Value-core for ROUND, called by the eager registry; the lazy path reaches
+    /// it through delegation. Supports negative precision (rounds tens/hundreds),
+    /// matching Python/beanquery `round`.
     pub(crate) fn round_on_values(args: &[Value]) -> Result<Value, QueryError> {
         if args.is_empty() || args.len() > 2 {
             return Err(QueryError::InvalidArguments(

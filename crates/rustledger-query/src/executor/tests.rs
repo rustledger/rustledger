@@ -988,6 +988,12 @@ fn test_string_functions_extended() {
     let query = parse("SELECT maxwidth('hello world', 8)").unwrap();
     let result = executor.execute(&query).unwrap();
     assert_eq!(result.rows[0][0], Value::String("[...]".to_string()));
+
+    // JOINSTR skips NULL args (does not stringify them as "NULL") — a path that
+    // the dual-eval collapse must preserve from the former lazy `eval_joinstr`.
+    let query = parse("SELECT joinstr('a', NULL, 'b')").unwrap();
+    let result = executor.execute(&query).unwrap();
+    assert_eq!(result.rows[0][0], Value::String("a, b".to_string()));
 }
 
 #[test]

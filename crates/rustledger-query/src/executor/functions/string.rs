@@ -10,9 +10,10 @@ use super::super::types::Value;
 const MAXWIDTH_PLACEHOLDER: &str = "[...]";
 
 impl Executor<'_> {
-    /// Value-core for MAXWIDTH shared by the lazy `eval_maxwidth` and the eager
-    /// registry (`evaluate_function_on_values`). Canonical behavior matches
-    /// Python `textwrap.shorten` (beanquery's MAXWIDTH).
+    /// Value-core for MAXWIDTH, called by the eager registry
+    /// (`evaluate_function_on_values`); the lazy path reaches it through
+    /// delegation. Canonical behavior matches Python `textwrap.shorten`
+    /// (beanquery's MAXWIDTH).
     pub(crate) fn maxwidth_on_values(args: &[Value]) -> Result<Value, QueryError> {
         Self::require_args_count("MAXWIDTH", args, 2)?;
 
@@ -25,7 +26,9 @@ impl Executor<'_> {
             }
         };
         let n = match &args[1] {
-            Value::Integer(i) => *i as usize,
+            Value::Integer(i) => usize::try_from(*i).map_err(|_| {
+                QueryError::Type("MAXWIDTH: second argument must be a positive integer".to_string())
+            })?,
             Value::Number(n) => {
                 use rust_decimal::prelude::ToPrimitive;
                 n.to_usize().ok_or_else(|| {

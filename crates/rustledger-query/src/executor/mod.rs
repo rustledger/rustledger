@@ -1570,13 +1570,21 @@ impl<'a> Executor<'a> {
                 }
             }
             "JOINSTR" => {
-                // Mirror the lazy `eval_joinstr`: stringify every non-String/Set
-                // arg via `value_to_string` and join with ", " (a comma+space).
+                // Mirror the former lazy `eval_joinstr`: require >=1 argument,
+                // SKIP nulls, and stringify every other non-String/Set arg via
+                // `value_to_string`, joining with ", " (a comma+space).
+                if args.is_empty() {
+                    return Err(QueryError::InvalidArguments(
+                        "JOINSTR".to_string(),
+                        "expected at least 1 argument".to_string(),
+                    ));
+                }
                 let mut parts = Vec::new();
                 for v in args {
                     match v {
                         Value::String(s) => parts.push(s.clone()),
                         Value::StringSet(ss) => parts.extend(ss.iter().cloned()),
+                        Value::Null => {}
                         other => parts.push(Self::value_to_string(other)),
                     }
                 }

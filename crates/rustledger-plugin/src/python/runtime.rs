@@ -454,8 +454,9 @@ fn engine_config() -> Config {
     config
 }
 
-/// Classify a Python plugin reference as a FILE path (vs a dotted module name):
-/// a file when it ends in `.py` (case-insensitive) or contains a path separator.
+/// Classify a Python plugin reference as a FILE path vs a dotted module name.
+///
+/// A file when it ends in `.py` (case-insensitive) or contains a path separator.
 /// Forward `/` counts even on Windows (where `MAIN_SEPARATOR` is `\`), so
 /// `plugins/foo.py` is never mistaken for a module.
 ///

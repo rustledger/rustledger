@@ -1,8 +1,10 @@
 //! Built-in system-table builders — `#prices`, `#balances`, `#commodities`,
 //! `#events`, `#notes`, `#documents`, `#accounts`, `#transactions`, `#entries`,
 //! `#postings`. Extracted from the executor god-module; the `get_builtin_table`
-//! dispatcher in `mod.rs` calls these. Each walks directives via
-//! `Executor::resolved_directives` (so they honor the source-mapped constructor).
+//! dispatcher in `mod.rs` calls these. Most walk directives via
+//! `Executor::resolved_directives` (so they honor the source-mapped
+//! constructor); `#prices` is backed by `self.price_db` instead (itself built
+//! from the directives at construction).
 
 use super::types::{SourceLocation, Table, Value};
 use super::{Executor, compute_posting_weight};

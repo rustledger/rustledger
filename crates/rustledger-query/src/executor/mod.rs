@@ -474,9 +474,10 @@ impl<'a> Executor<'a> {
         where_reads_balance: bool,
     ) -> Result<Vec<PostingContext<'a>>, QueryError> {
         let mut postings = Vec::new();
-        // Per-account running balance — accumulates every posting regardless of
-        // FROM/WHERE filters, so `account_balance` always reflects the account's
-        // true ledger balance at the point of the posting.
+        // Per-account running balance — accumulates every posting the FROM clause
+        // keeps (plus the pre-`open_on` carry-in below), independent of the WHERE
+        // filter, so `account_balance` always reflects the account's true ledger
+        // balance at the point of the posting.
         let mut account_balances: FxHashMap<rustledger_core::Account, Inventory> =
             FxHashMap::default();
         // Single cumulative running balance across WHERE-filtered postings in

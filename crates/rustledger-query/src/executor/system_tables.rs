@@ -592,16 +592,19 @@ impl Executor<'_> {
         // Single posting-source scan, shared with the default `SELECT` path
         // ([`Self::collect_postings`]): every posting in directive order, with no
         // FROM/WHERE filter and both running balances tracked. With no filter
-        // there are no predicates to evaluate, so the scan can't fail here —
-        // degrade to an empty table rather than panic if that ever changes.
-        let Ok(contexts) = self.scan_postings(None, None, true, true, false) else {
-            return table;
-        };
+        // there are no predicates to evaluate, so the scan is infallible here —
+        // assert that invariant rather than silently emitting an empty table.
+        let contexts = self
+            .scan_postings(None, None, true, true, false)
+            .expect("scan_postings(None, None, ..) evaluates no predicates, so it cannot fail");
 
         for ctx in contexts {
             let txn = ctx.transaction;
             let posting = &txn.postings[ctx.posting_index];
-            let dir_idx = ctx.directive_index.unwrap_or(0);
+            // `scan_postings` always sets a real directive index on every context.
+            let dir_idx = ctx
+                .directive_index
+                .expect("scan_postings always records the source directive index");
 
             // Transaction-level location — the per-posting fallback below.
             let source_loc = self.get_source_location(dir_idx);

@@ -29,27 +29,6 @@ use std::path::Path;
 #[derive(Debug, Default, Clone)]
 pub struct CsvImporter;
 
-/// Precompiled merchant-dictionary regexes, built once on first use. Patterns
-/// that fail to compile are skipped, mirroring
-/// [`rustledger_ops::categorize::RulesEngine::load_merchant_dict`]. Each entry
-/// pairs a case-insensitive, unanchored regex with its `&'static` account.
-fn merchant_regexes() -> &'static [(regex::Regex, &'static str)] {
-    use std::sync::LazyLock;
-    static REGEXES: LazyLock<Vec<(regex::Regex, &'static str)>> = LazyLock::new(|| {
-        rustledger_ops::merchants::MERCHANT_PATTERNS
-            .iter()
-            .filter_map(|entry| {
-                regex::RegexBuilder::new(entry.pattern)
-                    .case_insensitive(true)
-                    .build()
-                    .ok()
-                    .map(|re| (re, entry.account))
-            })
-            .collect()
-    });
-    &REGEXES
-}
-
 impl Importer for CsvImporter {
     fn name(&self) -> &'static str {
         "CSV"
@@ -101,6 +80,12 @@ impl CsvImporter {
         // compile thousands of times if we did it inside the loop.
         let amount_format = csv_config.compile_amount_format()?;
 
+        // Build the categorization engine once for the whole file — the single
+        // source shared with the enriched path (config mappings, regex mappings,
+        // and the merchant dictionary). The plain path previously consulted a
+        // bespoke matcher that ignored `regex_mappings` entirely.
+        let engine = Self::build_rules_engine(csv_config);
+
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(csv_config.has_header)
             .delimiter(csv_config.delimiter as u8)
@@ -132,7 +117,14 @@ impl CsvImporter {
                 }
             };
 
-            match self.parse_row(&record, config, csv_config, &amount_format, &header_map) {
+            match self.parse_row(
+                &record,
+                config,
+                csv_config,
+                &amount_format,
+                &header_map,
+                &engine,
+            ) {
                 Ok(Some(txn)) => directives.push(Directive::Transaction(txn)),
                 Ok(None) => {} // Skip empty rows
                 Err(e) => {
@@ -178,15 +170,9 @@ impl CsvImporter {
         let ImporterType::Csv(csv_config) = &config.importer_type;
         let result = self.extract_string(content, config)?;
 
-        // Build the rules engine once for all directives
-        let mut engine = rustledger_ops::categorize::RulesEngine::new();
-        engine.load_from_mappings(&csv_config.mappings);
-        if !csv_config.regex_mappings.is_empty() {
-            engine.load_from_regex_mappings(&csv_config.regex_mappings);
-        }
-        if csv_config.use_merchant_dict {
-            engine.load_merchant_dict();
-        }
+        // Build the rules engine once for all directives — shared with the
+        // plain path via `build_rules_engine`.
+        let engine = Self::build_rules_engine(csv_config);
 
         let entries = result
             .directives
@@ -240,6 +226,7 @@ impl CsvImporter {
         csv_config: &CsvConfig,
         amount_format: &AmountFormat,
         header_map: &HashMap<String, usize>,
+        engine: &rustledger_ops::categorize::RulesEngine,
     ) -> Result<Option<Transaction>> {
         // Get date. No `Row N:` prefix on these errors: `parse_row`'s caller
         // already wraps every error it returns with `Row {row_num}: {e}`, so
@@ -331,10 +318,10 @@ impl CsvImporter {
                 .as_deref()
                 .unwrap_or("Income:Unknown")
         };
-        let contra_account = self
-            .match_mapping(csv_config, payee.as_deref(), &narration)
-            .unwrap_or(default_contra);
-        let contra_posting = Posting::auto(contra_account);
+        let contra_account = engine
+            .categorize(payee.as_deref(), &narration)
+            .map_or_else(|| default_contra.to_string(), |m| m.account);
+        let contra_posting = Posting::auto(&contra_account);
 
         // Build the transaction
         let mut txn = Transaction::new(date, &narration)
@@ -349,50 +336,23 @@ impl CsvImporter {
         Ok(Some(txn))
     }
 
-    /// Match payee/narration against configured mappings.
-    /// Returns the mapped account name if a pattern matches, or None.
-    /// Patterns are pre-lowercased at build time, so only the input fields
-    /// need to be lowercased here.
-    fn match_mapping<'a>(
-        &self,
-        csv_config: &'a CsvConfig,
-        payee: Option<&str>,
-        narration: &str,
-    ) -> Option<&'a str> {
-        // User-supplied mappings take priority over the built-in dictionary.
-        // Only pay for the lowercasing when there are mappings to check.
-        if !csv_config.mappings.is_empty() {
-            let payee_lower = payee.map(str::to_lowercase);
-            let narration_lower = narration.to_lowercase();
-            for (pattern, account) in &csv_config.mappings {
-                // Match against payee first, then narration
-                if let Some(ref p) = payee_lower
-                    && p.contains(pattern.as_str())
-                {
-                    return Some(account);
-                }
-                if narration_lower.contains(pattern.as_str()) {
-                    return Some(account);
-                }
-            }
+    /// Build the categorization [`rustledger_ops::categorize::RulesEngine`] from
+    /// a CSV config — the single source consulted by BOTH the plain
+    /// (`extract`/`extract_string`) and enriched (`extract_string_enriched`)
+    /// paths. Loads, in priority order: the config's exact mappings (substring,
+    /// lowercased), its regex mappings, and the built-in merchant dictionary
+    /// (when `use_merchant_dict`). Previously the plain path used a bespoke
+    /// matcher that silently skipped `regex_mappings`.
+    fn build_rules_engine(csv_config: &CsvConfig) -> rustledger_ops::categorize::RulesEngine {
+        let mut engine = rustledger_ops::categorize::RulesEngine::new();
+        engine.load_from_mappings(&csv_config.mappings);
+        if !csv_config.regex_mappings.is_empty() {
+            engine.load_from_regex_mappings(&csv_config.regex_mappings);
         }
-
-        // Then the built-in merchant dictionary, when enabled — so
-        // `extract --use-merchant-dict` actually categorizes NETFLIX, AMAZON,
-        // SHELL, … instead of leaving them at the default expense account.
-        // The dictionary patterns are regexes (e.g. `AMAZON|AMZN`), matched
-        // case-insensitively and unanchored, exactly as the enriched path's
-        // `RulesEngine::load_merchant_dict` does — a plain substring match
-        // would silently miss every alternation/character-class pattern.
         if csv_config.use_merchant_dict {
-            for (regex, account) in merchant_regexes() {
-                if payee.is_some_and(|p| regex.is_match(p)) || regex.is_match(narration) {
-                    return Some(account);
-                }
-            }
+            engine.load_merchant_dict();
         }
-
-        None
+        engine
     }
 
     fn get_column<'a>(
@@ -1388,6 +1348,50 @@ not-a-date,Coffee,-5.00
             account_for("AMZN MKTP US", true),
             "Expenses:Shopping:Amazon",
             "enabled: AMZN matches the AMAZON|AMZN alternation pattern"
+        );
+    }
+
+    #[test]
+    fn test_regex_mappings_categorize_on_plain_path_and_match_enriched() {
+        // Regression: the plain `extract`/`extract_string` path (used by the
+        // CLI) previously ignored `regex_mappings` entirely — a regex-matched
+        // row landed at the default account instead of its mapped one — while
+        // the enriched path honored them. Both now share one RulesEngine and
+        // must agree.
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .regex_mappings(vec![(
+                "STARBUCKS|SBUX".to_string(),
+                "Expenses:Coffee".to_string(),
+            )])
+            .build()
+            .unwrap();
+        // "SBUX" matches only the regex alternation, not a plain substring of
+        // "STARBUCKS" — the exact case the plain path used to drop.
+        let csv = "Date,Description,Amount\n2024-03-08,SBUX STORE #123,-4.50\n";
+
+        let plain = CsvImporter.extract_string(csv, &config).unwrap();
+        let plain_account = match &plain.directives[0] {
+            Directive::Transaction(txn) => txn.postings[1].account.as_str().to_string(),
+            _ => panic!("expected transaction"),
+        };
+        assert_eq!(
+            plain_account, "Expenses:Coffee",
+            "plain path must honor regex_mappings (SBUX -> Expenses:Coffee)"
+        );
+
+        let enriched = CsvImporter.extract_string_enriched(csv, &config).unwrap();
+        let enriched_account = match &enriched.entries[0].0 {
+            Directive::Transaction(txn) => txn.postings[1].account.as_str().to_string(),
+            _ => panic!("expected transaction"),
+        };
+        assert_eq!(
+            plain_account, enriched_account,
+            "plain and enriched contra-accounts must agree"
         );
     }
 

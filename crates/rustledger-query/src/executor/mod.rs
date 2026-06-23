@@ -4031,7 +4031,9 @@ mod tests {
     /// directive walks all route through `resolved_directives`, so they must see
     /// the directives under `new_with_sources` (where they live in
     /// `spanned_directives`, not `directives`) — the JOURNAL bug class. Run
-    /// `BALANCES` over a source-mapped executor and confirm it isn't empty.
+    /// a refactored system table (`#entries` — one row per directive, built by
+    /// `build_entries_table`) over a source-mapped executor and confirm it sees
+    /// the directives.
     #[test]
     fn test_system_table_via_source_mapped_executor() {
         use rustledger_parser::{Span, Spanned};
@@ -4048,13 +4050,19 @@ mod tests {
         let source_map = rustledger_loader::SourceMap::new();
         let mut executor = Executor::new_with_sources(&spanned, &source_map);
 
+        // `#entries` lists every directive; one of the builders collapsed onto
+        // `resolved_directives` in this PR. Under `new_with_sources` the
+        // directives live in `spanned_directives`, so a builder that read
+        // `self.directives` directly would return zero rows here.
         let result = executor
-            .execute(&parse("BALANCES").unwrap())
-            .expect("BALANCES");
-        assert!(
-            result.len() >= 3,
-            "BALANCES via source-mapped executor returned {} rows (expected >= 3)",
-            result.len()
+            .execute(&parse("SELECT type FROM #entries").unwrap())
+            .expect("#entries query");
+        assert_eq!(
+            result.len(),
+            directives.len(),
+            "#entries via a source-mapped executor returned {} rows (expected {}, one per directive)",
+            result.len(),
+            directives.len()
         );
     }
 

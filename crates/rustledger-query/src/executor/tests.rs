@@ -834,16 +834,14 @@ fn test_unified_registry_reaches_postings_subquery_path() {
         .execute(&parse("SELECT date_add(DATE('2024-01-15'), 1) FROM #postings").unwrap())
         .unwrap();
     assert!(!result.rows.is_empty(), "#postings produced no rows");
-    assert_eq!(
-        result.rows[0][0],
-        Value::Date(rustledger_core::naive_date(2024, 1, 16).unwrap())
-    );
+    assert_eq!(result.rows[0][0], Value::Date(date(2024, 1, 16)));
 
     // Reconciled MAXWIDTH (Python textwrap.shorten) in the #postings path —
     // the eager registry previously did naive truncation here.
     let result = executor
         .execute(&parse("SELECT maxwidth('hello world', 8) FROM #postings").unwrap())
         .unwrap();
+    assert!(!result.rows.is_empty(), "#postings produced no rows");
     assert_eq!(result.rows[0][0], Value::String("[...]".to_string()));
 }
 

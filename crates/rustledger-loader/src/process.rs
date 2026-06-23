@@ -783,10 +783,7 @@ fn run_booking(
     // file_id, span.start)` — is already encoded in the existing
     // positional order, and stable_sort preserves that as the tiebreak).
     let mut order: Vec<usize> = (0..directives.len()).collect();
-    order.sort_by_key(|&i| {
-        let d = &directives[i].value;
-        (d.date(), d.priority(), d.has_cost_reduction())
-    });
+    order.sort_by_key(|&i| rustledger_core::booking_sort_key(&directives[i].value));
 
     let mut failed_indices: Vec<usize> = Vec::new();
     for &i in &order {

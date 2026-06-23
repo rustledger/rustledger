@@ -622,7 +622,23 @@ impl Directive {
 /// those that do reduce cost-basis lots. This ensures lots exist
 /// when they're matched, regardless of file ordering.
 pub fn sort_directives(directives: &mut [Directive]) {
-    directives.sort_by_cached_key(|d| (d.date(), d.priority(), d.has_cost_reduction()));
+    directives.sort_by_cached_key(booking_sort_key);
+}
+
+/// The canonical booking-order sort key: `(date, priority, has_cost_reduction)`.
+///
+/// Within a `(date, priority)` group, cost augmentations
+/// (`has_cost_reduction == false`) sort before the reductions that match
+/// against them, so lots exist when matched regardless of file ordering.
+///
+/// This is the SINGLE source of the booking order. [`sort_directives`] sorts a
+/// slice in place by it, and both `book()` (rustledger-booking) and
+/// `run_booking()` (rustledger-loader) key an index permutation through it
+/// (they preserve the input order for reassembly, so they cannot sort the slice
+/// directly). Change a booking-order tiebreak here only.
+#[must_use]
+pub fn booking_sort_key(d: &Directive) -> (NaiveDate, DirectivePriority, bool) {
+    (d.date(), d.priority(), d.has_cost_reduction())
 }
 
 /// A transaction directive.

@@ -613,10 +613,7 @@ pub fn book(directives: &[Directive], method: BookingMethod) -> LedgerBookResult
     // file position)` — is already encoded in the input's positional order,
     // and a stable sort keeps that as the tiebreak.
     let mut order: Vec<usize> = (0..directives.len()).collect();
-    order.sort_by_key(|&i| {
-        let d = &directives[i];
-        (d.date(), d.priority(), d.has_cost_reduction())
-    });
+    order.sort_by_key(|&i| rustledger_core::booking_sort_key(&directives[i]));
 
     // Book in booking order, recording each transaction's outcome against
     // its original index so the result can be reassembled in input order.

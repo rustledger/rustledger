@@ -67,7 +67,7 @@ pub use cost::{BookedCost, BookedCostInvariantError, Cost, CostNumber, CostSpec}
 pub use directive::{
     Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document, Event, MetaValue,
     Metadata, Note, Open, Pad, Posting, Price, PriceAnnotation, PriceKind, Query, Transaction,
-    parse_precision_meta, sort_directives,
+    booking_sort_key, parse_precision_meta, sort_directives,
 };
 pub use display_context::{DEFAULT_CURRENCY, DisplayContext, Precision};
 pub use extract::{

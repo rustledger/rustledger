@@ -1983,3 +1983,6 @@ fn query_references_column(query: &SelectQuery, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod dual_eval_parity;

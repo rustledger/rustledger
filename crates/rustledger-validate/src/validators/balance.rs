@@ -4,6 +4,7 @@
 use rust_decimal::{Decimal, MathematicalOps};
 use rustledger_core::{Amount, Balance, Pad, Position, is_subaccount_or_equal};
 
+use super::helpers::require_account_open;
 use crate::error::{ErrorCode, ValidationError};
 use crate::{LedgerState, PendingPad};
 
@@ -82,22 +83,18 @@ pub fn validate_pad(
     errors: &mut Vec<ValidationError>,
 ) {
     // Check that the target account exists
-    if !state.accounts.contains_key(&pad.account) {
-        errors.push(ValidationError::new(
-            ErrorCode::AccountNotOpen,
-            format!("Pad target account {} was never opened", pad.account),
-            pad.date,
-        ));
+    if !require_account_open(state, &pad.account, pad.date, "Pad target account", errors) {
         return;
     }
 
     // Check that the source account exists
-    if !state.accounts.contains_key(&pad.source_account) {
-        errors.push(ValidationError::new(
-            ErrorCode::AccountNotOpen,
-            format!("Pad source account {} was never opened", pad.source_account),
-            pad.date,
-        ));
+    if !require_account_open(
+        state,
+        &pad.source_account,
+        pad.date,
+        "Pad source account",
+        errors,
+    ) {
         return;
     }
 
@@ -126,13 +123,7 @@ pub fn validate_balance_early(
     bal: &Balance,
     errors: &mut Vec<ValidationError>,
 ) {
-    if !state.accounts.contains_key(&bal.account) {
-        errors.push(ValidationError::new(
-            ErrorCode::AccountNotOpen,
-            format!("Account {} was never opened", bal.account),
-            bal.date,
-        ));
-    }
+    require_account_open(state, &bal.account, bal.date, "Account", errors);
 }
 
 /// Late-phase balance validation — runs after booking + plugins.

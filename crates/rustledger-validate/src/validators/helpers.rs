@@ -1,5 +1,48 @@
 //! Helper functions for validation.
 
+use rustledger_core::{Account, NaiveDate};
+
+use crate::LedgerState;
+use crate::error::{ErrorCode, ValidationError};
+
+/// Push an `E1001` (`AccountNotOpen`) error for `account` at `date`. `subject`
+/// names the account's role in the message — `"Account"`, `"Pad target
+/// account"`, `"Pad source account"` — producing
+/// `"<subject> <account> was never opened"`. This is the single definition of
+/// the E1001 message and code, shared by every directive validator that reports
+/// an unopened account.
+pub fn push_account_not_open(
+    account: &Account,
+    date: NaiveDate,
+    subject: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    errors.push(ValidationError::new(
+        ErrorCode::AccountNotOpen,
+        format!("{subject} {account} was never opened"),
+        date,
+    ));
+}
+
+/// Account-presence check for E1001. `state.accounts` is populated in date
+/// order, so an account absent from it has not been opened on or before `date`.
+/// Returns `true` when the account is open; otherwise pushes the E1001 error
+/// (via [`push_account_not_open`]) and returns `false`. Callers that need to
+/// bail out on an unopened account branch on the returned `bool`.
+pub fn require_account_open(
+    state: &LedgerState,
+    account: &Account,
+    date: NaiveDate,
+    subject: &str,
+    errors: &mut Vec<ValidationError>,
+) -> bool {
+    if state.accounts.contains_key(account) {
+        return true;
+    }
+    push_account_not_open(account, date, subject, errors);
+    false
+}
+
 /// Validate an account name according to beancount rules.
 /// Returns None if valid, or Some(reason) if invalid.
 ///

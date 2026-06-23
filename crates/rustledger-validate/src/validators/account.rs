@@ -5,7 +5,7 @@ use rustledger_core::{BookingMethod, Close, Inventory, Open};
 use crate::error::{ErrorCode, ValidationError};
 use crate::{AccountState, LedgerState};
 
-use super::helpers::validate_account_name;
+use super::helpers::{push_account_not_open, validate_account_name};
 
 /// Validate an Open directive.
 pub fn validate_open(state: &mut LedgerState, open: &Open, errors: &mut Vec<ValidationError>) {
@@ -113,13 +113,7 @@ pub fn validate_close(state: &mut LedgerState, close: &Close, errors: &mut Vec<V
                 account_state.closed = Some(close.date);
             }
         }
-        None => {
-            errors.push(ValidationError::new(
-                ErrorCode::AccountNotOpen,
-                format!("Account {} was never opened", close.account),
-                close.date,
-            ));
-        }
+        None => push_account_not_open(&close.account, close.date, "Account", errors),
     }
 }
 

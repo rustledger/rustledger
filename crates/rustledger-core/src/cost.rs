@@ -815,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_total_cost_with_zero_units_returns_none_not_panic() {
+    fn test_resolve_total_cost_zero_units_returns_none() {
         // `0 X {{100 USD}}`: a Total cost over zero units. Before the guard,
         // `total / units.abs()` was `100 / 0`, which PANICKED in `validate`/`pad`
         // (which call `resolve`). It must now resolve to `None` (uncosted).

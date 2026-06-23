@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn from_posting_resolves_cost_else_simple_and_survives_zero_units() {
+    fn test_from_posting_resolves_cost_or_simple() {
         use crate::{CostNumber, CostSpec};
         use rust_decimal::Decimal;
 

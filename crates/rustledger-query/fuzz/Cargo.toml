@@ -15,6 +15,12 @@ arbitrary = { version = "1", features = ["derive"] }
 [dependencies.rustledger-query]
 path = ".."
 
+[dependencies.rustledger-core]
+path = "../../rustledger-core"
+
+[dependencies.rustledger-parser]
+path = "../../rustledger-parser"
+
 # Prevent this from interfering with workspaces
 [workspace]
 members = ["."]
@@ -22,6 +28,13 @@ members = ["."]
 [[bin]]
 name = "fuzz_query_parse"
 path = "fuzz_targets/fuzz_query_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_query_execute"
+path = "fuzz_targets/fuzz_query_execute.rs"
 test = false
 doc = false
 bench = false

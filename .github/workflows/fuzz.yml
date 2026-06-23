@@ -32,6 +32,7 @@ on:
           - fuzz_parse
           - fuzz_parse_line
           - fuzz_query_parse
+          - fuzz_query_execute
           - fuzz_booking
 permissions:
   contents: read
@@ -157,16 +158,20 @@ jobs:
           tail -20 crates/rustledger-parser/fuzz-output.txt >> $GITHUB_STEP_SUMMARY || true
           echo '```' >> $GITHUB_STEP_SUMMARY
   fuzz-query:
-    name: Fuzz Query (fuzz_query_parse)
+    name: Fuzz Query (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_query_parse, fuzz_query_execute]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Check if target should run
         id: check
         run: |
           INPUT_TARGET="${{ github.event.inputs.target || 'all' }}"
-          if [ "$INPUT_TARGET" = "all" ] || [ "$INPUT_TARGET" = "fuzz_query_parse" ]; then
+          if [ "$INPUT_TARGET" = "all" ] || [ "$INPUT_TARGET" = "${{ matrix.target }}" ]; then
             echo "should_run=true" >> $GITHUB_OUTPUT
           else
             echo "should_run=false" >> $GITHUB_OUTPUT
@@ -182,10 +187,10 @@ jobs:
         if: steps.check.outputs.should_run == 'true'
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          path: crates/rustledger-query/fuzz/corpus/fuzz_query_parse
-          key: fuzz-corpus-query-${{ github.sha }}
+          path: crates/rustledger-query/fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
           restore-keys: |
-            fuzz-corpus-query-
+            fuzz-corpus-${{ matrix.target }}-
       - name: Determine fuzz duration
         if: steps.check.outputs.should_run == 'true'
         id: duration
@@ -204,8 +209,8 @@ jobs:
         if: steps.check.outputs.should_run == 'true'
         run: |
           cd crates/rustledger-query
-          echo "Running fuzz_query_parse for ${{ steps.duration.outputs.seconds }} seconds..."
-          cargo +nightly fuzz run fuzz_query_parse -- \
+          echo "Running ${{ matrix.target }} for ${{ steps.duration.outputs.seconds }} seconds..."
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
             -max_total_time=${{ steps.duration.outputs.seconds }} \
             -max_len=2048 \
             -print_final_stats=1 \
@@ -214,7 +219,7 @@ jobs:
         if: steps.check.outputs.should_run == 'true'
         run: |
           cd crates/rustledger-query
-          dir="fuzz/artifacts/fuzz_query_parse"
+          dir="fuzz/artifacts/${{ matrix.target }}"
           # Fail on ANY artifact that is not a benign `slow-unit-*`. This is
           # the safe superset of libFuzzer's real-failure prefixes
           # (crash-/oom-/timeout-/leak-/mismatch-), so an unknown or future
@@ -242,19 +247,19 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: crashes-fuzz_query_parse
-          path: crates/rustledger-query/fuzz/artifacts/fuzz_query_parse/
+          name: crashes-${{ matrix.target }}
+          path: crates/rustledger-query/fuzz/artifacts/${{ matrix.target }}/
       - name: Upload corpus
         if: steps.check.outputs.should_run == 'true' && github.event_name == 'schedule'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: corpus-fuzz_query_parse
-          path: crates/rustledger-query/fuzz/corpus/fuzz_query_parse/
+          name: corpus-${{ matrix.target }}
+          path: crates/rustledger-query/fuzz/corpus/${{ matrix.target }}/
           retention-days: 7
       - name: Summary
         if: steps.check.outputs.should_run == 'true'
         run: |
-          echo "## Fuzz Results: fuzz_query_parse" >> $GITHUB_STEP_SUMMARY
+          echo "## Fuzz Results: ${{ matrix.target }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Duration: ${{ steps.duration.outputs.seconds }} seconds" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

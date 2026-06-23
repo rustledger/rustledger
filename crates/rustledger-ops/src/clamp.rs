@@ -167,11 +167,33 @@ fn earnings_transaction(pnl: &HashMap<String, Decimal>, date: NaiveDate) -> Opti
 /// pre-`begin` activity and carrying forward the latest prices.
 #[must_use]
 pub fn clamp(directives: &[Directive], begin: NaiveDate, end: NaiveDate) -> Vec<Directive> {
-    let mut balances: HashMap<String, Inventory> = HashMap::new();
-    let mut latest_prices: HashMap<(String, String), (NaiveDate, Directive)> = HashMap::new();
-    let mut filtered: Vec<Directive> = Vec::new();
+    clamp_indexed(directives, begin, end)
+        .into_iter()
+        .map(|(d, _)| d)
+        .collect()
+}
 
-    for d in directives {
+/// Like [`clamp`], but tags each output with its source-input index.
+///
+/// Each output directive is paired with the index of the input directive it was
+/// passed through from (`Some(i)`), or `None` when synthesized (an
+/// opening-balance / earnings summary). This lets callers restore the original
+/// source provenance (filename/lineno) on pass-through entries — an in-window
+/// transaction or a carried-forward price keeps its real location, rather than
+/// every output being attributed to a synthetic `<clamped>` source (the loss
+/// that forced the JSON-path workaround in rustledger/rustledger#1425).
+#[must_use]
+pub fn clamp_indexed(
+    directives: &[Directive],
+    begin: NaiveDate,
+    end: NaiveDate,
+) -> Vec<(Directive, Option<usize>)> {
+    let mut balances: HashMap<String, Inventory> = HashMap::new();
+    let mut latest_prices: HashMap<(String, String), (NaiveDate, Directive, usize)> =
+        HashMap::new();
+    let mut filtered: Vec<(Directive, usize)> = Vec::new();
+
+    for (i, d) in directives.iter().enumerate() {
         let date = d.date();
         if date < begin {
             match d {
@@ -187,16 +209,16 @@ pub fn clamp(directives: &[Directive], begin: NaiveDate, end: NaiveDate) -> Vec<
                 }
                 Directive::Price(pr) => {
                     let key = (pr.currency.to_string(), pr.amount.currency.to_string());
-                    let keep = latest_prices.get(&key).is_none_or(|(d0, _)| date >= *d0);
+                    let keep = latest_prices.get(&key).is_none_or(|(d0, _, _)| date >= *d0);
                     if keep {
-                        latest_prices.insert(key, (date, d.clone()));
+                        latest_prices.insert(key, (date, d.clone(), i));
                     }
                 }
-                Directive::Open(_) => filtered.push(d.clone()),
+                Directive::Open(_) => filtered.push((d.clone(), i)),
                 _ => {}
             }
         } else if date < end && !matches!(d, Directive::Commodity(_)) {
-            filtered.push(d.clone());
+            filtered.push((d.clone(), i));
         }
     }
 
@@ -206,9 +228,10 @@ pub fn clamp(directives: &[Directive], begin: NaiveDate, end: NaiveDate) -> Vec<
         .filter(|(account, inv)| is_balance_sheet(account) && !inv.is_empty())
         .collect();
     bs_accounts.sort_by_key(|(account, _)| (*account).clone());
-    let mut summaries: Vec<Directive> = bs_accounts
+    // Synthesized summaries carry no source directive (`None`).
+    let mut summaries: Vec<(Directive, Option<usize>)> = bs_accounts
         .into_iter()
-        .map(|(account, inv)| summary_transaction(account, inv, begin))
+        .map(|(account, inv)| (summary_transaction(account, inv, begin), None))
         .collect();
 
     // Earnings: roll up Income/Expenses P&L.
@@ -222,22 +245,23 @@ pub fn clamp(directives: &[Directive], begin: NaiveDate, end: NaiveDate) -> Vec<
         }
     }
     if let Some(earnings) = earnings_transaction(&pnl, begin) {
-        summaries.push(earnings);
+        summaries.push((earnings, None));
     }
 
-    let mut prices: Vec<Directive> = latest_prices.into_values().map(|(_, d)| d).collect();
-
-    let mut all = Vec::new();
-    all.append(&mut prices);
+    let mut all: Vec<(Directive, Option<usize>)> = Vec::new();
+    // Carried-forward prices: pass-through from their pre-`begin` source.
+    all.extend(latest_prices.into_values().map(|(_, d, i)| (d, Some(i))));
+    // Synthesized summaries: no source directive.
     all.append(&mut summaries);
-    all.append(&mut filtered);
+    // In-range entries and pre-`begin` Opens: pass-through.
+    all.extend(filtered.into_iter().map(|(d, i)| (d, Some(i))));
     all.sort_by(|a, b| {
-        a.date()
-            .cmp(&b.date())
-            .then_with(|| type_priority(a).cmp(&type_priority(b)))
+        a.0.date()
+            .cmp(&b.0.date())
+            .then_with(|| type_priority(&a.0).cmp(&type_priority(&b.0)))
             // Core directives carry no content hash; a Display key keeps the
             // order deterministic (the JSON version sorted by meta.hash).
-            .then_with(|| a.to_string().cmp(&b.to_string()))
+            .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
     });
     all
 }
@@ -263,6 +287,43 @@ mod tests {
     fn mentions(dir: &Directive, account: &str) -> bool {
         matches!(dir, Directive::Transaction(t)
             if t.postings.iter().any(|p| p.value.account.to_string() == account))
+    }
+
+    #[test]
+    fn clamp_indexed_tracks_source_provenance() {
+        let input = dirs(
+            "2023-06-01 * \"old\"\n  Assets:Cash  100 USD\n  Equity:Opening-Balances  -100 USD\n\
+             2024-02-01 * \"in range\"\n  Assets:Cash  -5 USD\n  Expenses:Food  5 USD\n",
+        );
+        let out = clamp_indexed(&input, d(2024, 1, 1), d(2024, 12, 31));
+
+        // The in-range transaction is a pass-through pointing back at its input
+        // (index 1), so a caller can restore its real filename/lineno.
+        let in_range = out
+            .iter()
+            .find(|(dir, _)| {
+                matches!(dir, Directive::Transaction(t)
+                if t.narration.to_string() == "in range")
+            })
+            .expect("in-range txn present");
+        assert_eq!(in_range.1, Some(1), "in-range entry maps back to input[1]");
+        assert!(matches!(&input[1], Directive::Transaction(t)
+            if t.narration.to_string() == "in range"));
+
+        // The synthesized opening-balance summary has no source directive.
+        let summary = out
+            .iter()
+            .find(|(dir, _)| is_summary(dir))
+            .expect("summary present");
+        assert_eq!(summary.1, None, "synthesized summary has no source index");
+
+        // `clamp` is exactly `clamp_indexed` with the indices dropped.
+        let plain = clamp(&input, d(2024, 1, 1), d(2024, 12, 31));
+        let indexed: Vec<_> = out.into_iter().map(|(dir, _)| dir).collect();
+        assert_eq!(
+            plain, indexed,
+            "clamp must equal clamp_indexed sans indices"
+        );
     }
 
     #[test]

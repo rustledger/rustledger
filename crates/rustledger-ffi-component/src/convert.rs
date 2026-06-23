@@ -1403,9 +1403,19 @@ impl SessionState {
         ) else {
             return self.entries();
         };
-        rustledger_ops::clamp::clamp(&self.directives, begin_date, end_date)
-            .iter()
-            .map(|d| directive(ffi::convert::directive_to_json(d, 0, "<clamped>")))
+        // Pass-through entries (in-window directives, carried-forward prices)
+        // keep their original filename/lineno via the source index; only the
+        // synthesized opening-balance / earnings summaries fall back to the
+        // `<clamped>` sentinel. (#1425 — restores provenance that the old
+        // `clamp` -> `directive_to_json(d, 0, "<clamped>")` mapping dropped.)
+        rustledger_ops::clamp::clamp_indexed(&self.directives, begin_date, end_date)
+            .into_iter()
+            .map(|(d, src)| {
+                let (line, file) = src
+                    .and_then(|i| self.lines.get(i).copied().zip(self.files.get(i)))
+                    .map_or((0, "<clamped>"), |(line, file)| (line, file.as_str()));
+                directive(ffi::convert::directive_to_json(&d, line, file))
+            })
             .collect()
     }
 }

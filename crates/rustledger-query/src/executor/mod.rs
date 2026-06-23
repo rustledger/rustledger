@@ -446,6 +446,33 @@ impl<'a> Executor<'a> {
         let where_reads_balance =
             where_clause.is_some_and(|w| expr_references_column(w, "balance"));
 
+        self.scan_postings(
+            from,
+            where_clause,
+            needs_balance,
+            needs_account_balance,
+            where_reads_balance,
+        )
+    }
+
+    /// The single posting-source scan, shared by the default `SELECT` path
+    /// ([`Self::collect_postings`]) and the `#postings` table
+    /// ([`Self::build_postings_table`]).
+    ///
+    /// Iterates the resolved directives in order, applies the optional `FROM` and
+    /// posting-level `WHERE` filters, accumulates the running cumulative `balance`
+    /// (over `WHERE`-passed postings) and the per-account `account_balance`, and
+    /// yields one [`PostingContext`] per surviving posting. The `needs_*` flags
+    /// gate the per-posting Inventory clones (issue #1080); pass them all `true`
+    /// with no filter to materialize the full unfiltered table.
+    fn scan_postings(
+        &self,
+        from: Option<&FromClause>,
+        where_clause: Option<&Expr>,
+        needs_balance: bool,
+        needs_account_balance: bool,
+        where_reads_balance: bool,
+    ) -> Result<Vec<PostingContext<'a>>, QueryError> {
         let mut postings = Vec::new();
         // Per-account running balance — accumulates every posting regardless of
         // FROM/WHERE filters, so `account_balance` always reflects the account's

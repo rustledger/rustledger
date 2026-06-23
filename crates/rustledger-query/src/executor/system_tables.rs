@@ -9,7 +9,7 @@
 use super::types::{SourceLocation, Table, Value};
 use super::{Executor, compute_posting_weight};
 use rustc_hash::FxHashMap;
-use rustledger_core::{Amount, Directive, Inventory, Position};
+use rustledger_core::{Amount, Directive, Position};
 
 impl Executor<'_> {
     /// Build the #prices table from price directives.
@@ -589,34 +589,22 @@ impl Executor<'_> {
         ];
         let mut table = Table::new(columns);
 
-        // Per-account running balance — exposed as `account_balance`.
-        let mut account_balances: FxHashMap<rustledger_core::Account, Inventory> =
-            FxHashMap::default();
-        // Cumulative running balance across all postings — exposed as `balance`,
-        // matching bean-query's "running sum of all postings rendered so far".
-        // The #postings table has no WHERE filter at this layer, so cumulative
-        // and account-aware accumulators get the same set of postings.
-        let mut cumulative_balance: Inventory = Inventory::default();
+        // Single posting-source scan, shared with the default `SELECT` path
+        // ([`Self::collect_postings`]): every posting in directive order, with no
+        // FROM/WHERE filter and both running balances tracked. With no filter
+        // there are no predicates to evaluate, so the scan can't fail here —
+        // degrade to an empty table rather than panic if that ever changes.
+        let Ok(contexts) = self.scan_postings(None, None, true, true, false) else {
+            return table;
+        };
 
-        // Collect transactions with their directive indices for source location lookup
-        let mut transactions: Vec<(usize, &rustledger_core::Transaction)> = self
-            .resolved_directives()
-            .enumerate()
-            .filter_map(|(idx, d)| {
-                if let Directive::Transaction(txn) = d {
-                    Some((idx, txn))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        transactions.sort_by_key(|(_, t)| t.date);
+        for ctx in contexts {
+            let txn = ctx.transaction;
+            let posting = &txn.postings[ctx.posting_index];
+            let dir_idx = ctx.directive_index.unwrap_or(0);
 
-        for (dir_idx, txn) in &transactions {
-            // Pre-compute transaction-level values shared across all postings
-            // Transaction-level location — used as the per-posting fallback
-            // below (for synthesized postings / no source map).
-            let source_loc = self.get_source_location(*dir_idx);
+            // Transaction-level location — the per-posting fallback below.
+            let source_loc = self.get_source_location(dir_idx);
 
             let tags: Vec<String> = txn.tags.iter().map(ToString::to_string).collect();
             let links: Vec<String> = txn.links.iter().map(ToString::to_string).collect();
@@ -639,43 +627,27 @@ impl Executor<'_> {
             let month = Value::Integer(i64::from(txn.date.month()));
             let day = Value::Integer(i64::from(txn.date.day()));
 
-            for posting in &txn.postings {
-                // Per-posting source location (the posting's own span), falling
-                // back to the transaction's when the posting has no real span
-                // (synthesized) or no source map is available. The single
-                // resolved location feeds both the location columns and the
-                // synthetic `filename`/`lineno` metadata keys below.
-                let posting_loc = self
-                    .span_source_location(posting.file_id, posting.span.start)
-                    .or_else(|| source_loc.cloned());
-                let loc = posting_loc.as_ref();
-                let (filename, lineno, location) = (
-                    Self::source_filename_value(loc),
-                    Self::source_lineno_value(loc),
-                    Self::source_location_value(loc),
-                );
+            // Per-posting source location (the posting's own span), falling back
+            // to the transaction's when the posting has no real span.
+            let posting_loc = self
+                .span_source_location(posting.file_id, posting.span.start)
+                .or_else(|| source_loc.cloned());
+            let loc = posting_loc.as_ref();
+            let (filename, lineno, location) = (
+                Self::source_filename_value(loc),
+                Self::source_lineno_value(loc),
+                Self::source_location_value(loc),
+            );
 
-                // Update running balances (per-account and cumulative).
-                if let Some(units) = posting.amount() {
-                    let pos = Position::from_posting(units, posting.cost.as_ref(), txn.date);
-                    account_balances
-                        .entry(posting.account.clone())
-                        .or_default()
-                        .add(pos.clone());
-                    cumulative_balance.add(pos);
-                }
+            let (number, currency) = posting.amount().map_or((Value::Null, Value::Null), |a| {
+                (
+                    Value::Number(a.number),
+                    Value::String(a.currency.to_string()),
+                )
+            });
 
-                // Extract posting data
-                let (number, currency) = posting.amount().map_or((Value::Null, Value::Null), |a| {
-                    (
-                        Value::Number(a.number),
-                        Value::String(a.currency.to_string()),
-                    )
-                });
-
-                let (cost_number, cost_currency, cost_date, cost_label) = if let Some(cost_spec) =
-                    &posting.cost
-                {
+            let (cost_number, cost_currency, cost_date, cost_label) =
+                if let Some(cost_spec) = &posting.cost {
                     let units = posting.amount();
                     if let Some(cost) = units.and_then(|u| cost_spec.resolve(u.number, txn.date)) {
                         (
@@ -693,91 +665,95 @@ impl Executor<'_> {
                     (Value::Null, Value::Null, Value::Null, Value::Null)
                 };
 
-                let position_val = if let Some(units) = posting.amount() {
-                    Value::Position(Box::new(Position::from_posting(
-                        units,
-                        posting.cost.as_ref(),
-                        txn.date,
-                    )))
-                } else {
-                    Value::Null
-                };
+            let position_val = if let Some(units) = posting.amount() {
+                Value::Position(Box::new(Position::from_posting(
+                    units,
+                    posting.cost.as_ref(),
+                    txn.date,
+                )))
+            } else {
+                Value::Null
+            };
 
-                let price_val = posting
-                    .price
+            let price_val = posting
+                .price
+                .as_ref()
+                .and_then(|p| p.amount())
+                .map_or(Value::Null, |a| Value::Amount(a.clone()));
+
+            // Weight delegates to `compute_posting_weight` so the `#postings`
+            // table and the default-FROM `weight` accessor stay in lockstep
+            // (issue #1052).
+            let weight_val = compute_posting_weight(posting, txn.date);
+
+            // The running balances come straight from the shared scan
+            // (`needs_balance`/`needs_account_balance` both `true` above), so they
+            // are identical to the old inline accumulators — proven by the
+            // #postings parity test.
+            let balance_val = ctx
+                .balance
+                .map_or(Value::Null, |inv| Value::Inventory(Box::new(inv)));
+            let account_balance_val = ctx
+                .account_balance
+                .map_or(Value::Null, |inv| Value::Inventory(Box::new(inv)));
+
+            // Other accounts: all accounts in the transaction except this posting's.
+            let other_accounts: Vec<String> = all_accounts
+                .iter()
+                .filter(|a| a.as_str() != posting.account.as_ref())
+                .cloned()
+                .collect();
+
+            let posting_flag = posting
+                .flag
+                .map_or(Value::Null, |f| Value::String(f.to_string()));
+
+            let row = vec![
+                // Entry-level
+                Value::String("transaction".to_string()),
+                Value::Integer(dir_idx as i64),
+                Value::Date(txn.date),
+                year,
+                month,
+                day,
+                filename,
+                lineno,
+                location,
+                // Transaction-level
+                Value::String(txn.flag.to_string()),
+                txn.payee
                     .as_ref()
-                    .and_then(|p| p.amount())
-                    .map_or(Value::Null, |a| Value::Amount(a.clone()));
-
-                // Weight delegates to `compute_posting_weight` so the
-                // `#postings` table and the default-FROM `weight` column
-                // accessor stay in lockstep — the two used to drift on
-                // `@@` sign handling (issue #1052).
-                let weight_val = compute_posting_weight(posting, txn.date);
-
-                let balance_val = Value::Inventory(Box::new(cumulative_balance.clone()));
-                let account_balance_val = account_balances
-                    .get(&posting.account)
-                    .map_or(Value::Null, |inv| Value::Inventory(Box::new(inv.clone())));
-
-                // Other accounts: all accounts in the transaction except this posting's
-                let other_accounts: Vec<String> = all_accounts
-                    .iter()
-                    .filter(|a| a.as_str() != posting.account.as_ref())
-                    .cloned()
-                    .collect();
-
-                let posting_flag = posting
-                    .flag
-                    .map_or(Value::Null, |f| Value::String(f.to_string()));
-
-                let row = vec![
-                    // Entry-level
-                    Value::String("transaction".to_string()),
-                    Value::Integer(*dir_idx as i64),
-                    Value::Date(txn.date),
-                    year.clone(),
-                    month.clone(),
-                    day.clone(),
-                    filename.clone(),
-                    lineno.clone(),
-                    location.clone(),
-                    // Transaction-level
-                    Value::String(txn.flag.to_string()),
-                    txn.payee
-                        .as_ref()
-                        .map_or(Value::Null, |p| Value::String(p.to_string())),
-                    Value::String(txn.narration.to_string()),
-                    Value::String(description.clone()),
-                    Value::StringSet(tags.clone()),
-                    Value::StringSet(links.clone()),
-                    // Posting-level
-                    posting_flag,
-                    Value::String(posting.account.to_string()),
-                    Value::StringSet(other_accounts),
-                    number,
-                    currency,
-                    cost_number,
-                    cost_currency,
-                    cost_date,
-                    cost_label,
-                    position_val,
-                    price_val,
-                    weight_val,
-                    balance_val,
-                    account_balance_val,
-                    // Metadata and collection
-                    Value::Metadata(Box::new(Self::augmented_meta(
-                        &posting.meta,
-                        posting_loc.as_ref(),
-                    ))),
-                    Value::StringSet(all_accounts.clone()),
-                    // Hidden metadata columns
-                    Self::metadata_to_value(&txn.meta),
-                    Self::metadata_to_value(&posting.meta),
-                ];
-                table.add_row(row);
-            }
+                    .map_or(Value::Null, |p| Value::String(p.to_string())),
+                Value::String(txn.narration.to_string()),
+                Value::String(description),
+                Value::StringSet(tags),
+                Value::StringSet(links),
+                // Posting-level
+                posting_flag,
+                Value::String(posting.account.to_string()),
+                Value::StringSet(other_accounts),
+                number,
+                currency,
+                cost_number,
+                cost_currency,
+                cost_date,
+                cost_label,
+                position_val,
+                price_val,
+                weight_val,
+                balance_val,
+                account_balance_val,
+                // Metadata and collection
+                Value::Metadata(Box::new(Self::augmented_meta(
+                    &posting.meta,
+                    posting_loc.as_ref(),
+                ))),
+                Value::StringSet(all_accounts),
+                // Hidden metadata columns
+                Self::metadata_to_value(&txn.meta),
+                Self::metadata_to_value(&posting.meta),
+            ];
+            table.add_row(row);
         }
 
         table

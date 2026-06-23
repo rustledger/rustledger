@@ -23,10 +23,14 @@ pub(super) fn data_to_transaction(
         "!" => '!',
         "P" => 'P',
         other => {
-            if let Some(c) = other.chars().next() {
-                c
-            } else {
-                return Err(ConversionError::InvalidFlag(other.to_string()));
+            // Reject empty AND multi-character flags rather than silently
+            // truncating (e.g. "txn" -> 't') — symmetric with the span/cost
+            // reject-don't-truncate discipline elsewhere in this module, and
+            // with the core flag being a single `char`.
+            let mut chars = other.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => c,
+                _ => return Err(ConversionError::InvalidFlag(other.to_string())),
             }
         }
     };

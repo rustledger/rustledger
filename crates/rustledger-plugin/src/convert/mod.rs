@@ -231,6 +231,39 @@ mod tests {
     }
 
     #[test]
+    fn test_multi_char_wire_flag_rejected_not_truncated() {
+        use rustledger_plugin_types::TransactionData;
+        let date = rustledger_core::naive_date(2024, 1, 1).unwrap();
+        let data = TransactionData {
+            flag: "txn".to_string(),
+            payee: None,
+            narration: "test".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![],
+        };
+        // A multi-char wire flag must be REJECTED, not silently truncated to
+        // its first char ("txn" -> 't').
+        let result = super::from_wrapper::data_to_transaction(&data, date);
+        assert!(
+            matches!(&result, Err(ConversionError::InvalidFlag(f)) if f == "txn"),
+            "multi-char flag must be rejected, got {result:?}"
+        );
+
+        // A single-char flag still converts.
+        let single = TransactionData {
+            flag: "x".to_string(),
+            ..data
+        };
+        let ok = super::from_wrapper::data_to_transaction(&single, date);
+        assert!(
+            matches!(ok, Ok(txn) if txn.flag == 'x'),
+            "single-char flag should convert"
+        );
+    }
+
+    #[test]
     fn test_roundtrip_transaction() {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
         let txn = Transaction {

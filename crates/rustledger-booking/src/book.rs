@@ -447,7 +447,18 @@ impl BookingEngine {
         })
     }
 
-    /// Apply a transaction to the inventories (update balances).
+    /// Apply a transaction's postings to the running inventories (update
+    /// balances).
+    ///
+    /// # Precondition
+    ///
+    /// The transaction MUST already be booked — postings filled with complete
+    /// units and resolved costs, as produced by [`Self::book_and_interpolate`]
+    /// or the free [`book`](crate::book) function. Applying an *unbooked*
+    /// transaction can silently over-sell an inventory: a reduction with no
+    /// matching lot yet is dropped (its `reduce` error is otherwise ignored).
+    /// The loader pipeline guarantees this ordering; the in-loop `debug_assert`
+    /// below catches a violating caller in debug builds.
     pub fn apply(&mut self, txn: &Transaction) {
         for posting in &txn.postings {
             if let Some(IncompleteAmount::Complete(units)) = &posting.units {
@@ -470,8 +481,22 @@ impl BookingEngine {
                     && inv.is_reduced_by(units, ReductionScope::CostBearingOnly);
 
                 if is_reduction {
-                    // Reduce from inventory
-                    let _ = inv.reduce(units, posting.cost.as_ref(), method);
+                    // Reduce from inventory. `reduce` only errors when the lot
+                    // it would match is missing — a "must book first" precondition
+                    // violation (see the fn-level doc). In release builds the
+                    // historical behavior (ignore) is kept; in debug builds we
+                    // surface the unbooked-apply bug instead of silently
+                    // over-selling.
+                    let reduced = inv.reduce(units, posting.cost.as_ref(), method);
+                    debug_assert!(
+                        reduced.is_ok(),
+                        "apply() reduction failed — the transaction must be booked \
+                         before apply() (postings filled, costs resolved); applying \
+                         an unbooked reduction silently over-sells inventory"
+                    );
+                    // `reduced` is consumed only by the debug assertion above;
+                    // release builds keep the historical ignore-the-Result behavior.
+                    let _ = reduced;
                 } else {
                     // Add to inventory
                     let position = if let Some(cost_spec) = &posting.cost {

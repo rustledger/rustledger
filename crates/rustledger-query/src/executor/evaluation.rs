@@ -238,16 +238,11 @@ impl Executor<'_> {
                 // Position includes both units and cost.
                 // Uses resolve() to handle both per-unit and total cost syntax.
                 if let Some(units) = posting.amount() {
-                    if let Some(cost_spec) = &posting.cost
-                        && let Some(cost) = cost_spec.resolve(units.number, ctx.transaction.date)
-                    {
-                        Ok(Value::Position(Box::new(Position::with_cost(
-                            units.clone(),
-                            cost,
-                        ))))
-                    } else {
-                        Ok(Value::Position(Box::new(Position::simple(units.clone()))))
-                    }
+                    Ok(Value::Position(Box::new(Position::from_posting(
+                        units,
+                        posting.cost.as_ref(),
+                        ctx.transaction.date,
+                    ))))
                 } else {
                     Ok(Value::Null)
                 }

@@ -402,15 +402,7 @@ impl<'a> Executor<'a> {
                     if let Some(units) = posting.amount() {
                         let balance = balances.entry(posting.account.clone()).or_default();
 
-                        let pos = if let Some(cost_spec) = &posting.cost {
-                            if let Some(cost) = cost_spec.resolve(units.number, txn.date) {
-                                Position::with_cost(units.clone(), cost)
-                            } else {
-                                Position::simple(units.clone())
-                            }
-                        } else {
-                            Position::simple(units.clone())
-                        };
+                        let pos = Position::from_posting(units, posting.cost.as_ref(), txn.date);
                         balance.add(pos);
                     }
                 }
@@ -471,18 +463,13 @@ impl<'a> Executor<'a> {
             self.resolved_directives().enumerate().collect();
 
         // Resolve a posting to a Position that preserves cost basis when present.
-        // Other balance accumulators in this crate (`build_balances_with_filter`,
-        // `build_postings_table`) use this same shape; running `balance` /
-        // `account_balance` need to match so lot details aren't dropped.
+        // The single cost-resolve lives in `Position::from_posting`, shared with
+        // every other balance accumulator in this crate so lot details can't be
+        // dropped by a divergent copy.
         let resolve_position = |posting: &rustledger_core::Posting, txn_date: NaiveDate| {
-            posting.amount().map(|units| {
-                if let Some(cost_spec) = &posting.cost
-                    && let Some(cost) = cost_spec.resolve(units.number, txn_date)
-                {
-                    return Position::with_cost(units.clone(), cost);
-                }
-                Position::simple(units.clone())
-            })
+            posting
+                .amount()
+                .map(|units| Position::from_posting(units, posting.cost.as_ref(), txn_date))
         };
 
         for (directive_index, directive) in directive_iter {

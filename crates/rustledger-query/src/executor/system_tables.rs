@@ -659,15 +659,7 @@ impl Executor<'_> {
 
                 // Update running balances (per-account and cumulative).
                 if let Some(units) = posting.amount() {
-                    let pos = if let Some(cost_spec) = &posting.cost {
-                        if let Some(cost) = cost_spec.resolve(units.number, txn.date) {
-                            Position::with_cost(units.clone(), cost)
-                        } else {
-                            Position::simple(units.clone())
-                        }
-                    } else {
-                        Position::simple(units.clone())
-                    };
+                    let pos = Position::from_posting(units, posting.cost.as_ref(), txn.date);
                     account_balances
                         .entry(posting.account.clone())
                         .or_default()
@@ -704,13 +696,11 @@ impl Executor<'_> {
                 };
 
                 let position_val = if let Some(units) = posting.amount() {
-                    if let Some(cost_spec) = &posting.cost
-                        && let Some(cost) = cost_spec.resolve(units.number, txn.date)
-                    {
-                        Value::Position(Box::new(Position::with_cost(units.clone(), cost)))
-                    } else {
-                        Value::Position(Box::new(Position::simple(units.clone())))
-                    }
+                    Value::Position(Box::new(Position::from_posting(
+                        units,
+                        posting.cost.as_ref(),
+                        txn.date,
+                    )))
                 } else {
                     Value::Null
                 };

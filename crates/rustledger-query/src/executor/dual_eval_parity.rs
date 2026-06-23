@@ -199,10 +199,13 @@ fn reconciled_getitem_on_null_both_null() {
 #[test]
 fn reconciled_extended_date_functions_registered_in_eager() {
     let d = |y, m, day| Value::Date(naive_date(y, m, day).unwrap());
+    // All args are valid invocations (note DATE_TRUNC/DATE_PART are
+    // `(field, date)`), so both paths must SUCCEED and agree — stronger than
+    // `assert_parity`, which would pass on a shared `(Err, Err)`.
     let cases: &[(&str, Vec<Value>)] = &[
         ("DATE", vec![s("2024-01-15")]),
         ("DATE_ADD", vec![d(2024, 1, 15), Value::Integer(5)]),
-        ("DATE_TRUNC", vec![d(2024, 1, 15), s("month")]),
+        ("DATE_TRUNC", vec![s("month"), d(2024, 1, 15)]),
         ("DATE_PART", vec![s("year"), d(2024, 1, 15)]),
         ("PARSE_DATE", vec![s("2024-01-15")]),
         (
@@ -212,14 +215,12 @@ fn reconciled_extended_date_functions_registered_in_eager() {
         ("INTERVAL", vec![Value::Integer(1), s("day")]),
     ];
     for (name, args) in cases {
-        let (eager, _) = run_both(name, args);
-        // No longer absent from the eager dispatcher...
-        assert!(
-            !matches!(eager, Err(QueryError::UnknownFunction(_))),
-            "{name} should be registered in the eager dispatcher now, got {eager:?}"
-        );
-        // ...and both paths agree (they share one value-core).
-        assert_parity(name, args);
+        let (eager, lazy) = run_both(name, args);
+        let lazy = lazy.expect("date-function args are literal-constructible");
+        match (&eager, &lazy) {
+            (Ok(e), Ok(l)) => assert_eq!(e, l, "{name}: eager {e:?} != lazy {l:?}"),
+            _ => panic!("{name} must now succeed on BOTH paths: eager={eager:?} lazy={lazy:?}"),
+        }
     }
 }
 

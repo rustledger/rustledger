@@ -205,7 +205,8 @@ impl Executor<'_> {
             3 => {
                 // DATE(year, month, day)
                 let year = match args[0].clone() {
-                    Value::Integer(i) => i as i32,
+                    Value::Integer(i) => i32::try_from(i)
+                        .map_err(|_| QueryError::Type("DATE: year out of range".to_string()))?,
                     Value::Number(n) => {
                         use rust_decimal::prelude::ToPrimitive;
                         n.to_i32().ok_or_else(|| {
@@ -219,7 +220,9 @@ impl Executor<'_> {
                     }
                 };
                 let month = match args[1].clone() {
-                    Value::Integer(i) => i as u32,
+                    Value::Integer(i) => u32::try_from(i).map_err(|_| {
+                        QueryError::Type("DATE: month must be a non-negative integer".to_string())
+                    })?,
                     Value::Number(n) => {
                         use rust_decimal::prelude::ToPrimitive;
                         n.to_u32().ok_or_else(|| {
@@ -233,7 +236,9 @@ impl Executor<'_> {
                     }
                 };
                 let day = match args[2].clone() {
-                    Value::Integer(i) => i as u32,
+                    Value::Integer(i) => u32::try_from(i).map_err(|_| {
+                        QueryError::Type("DATE: day must be a non-negative integer".to_string())
+                    })?,
                     Value::Number(n) => {
                         use rust_decimal::prelude::ToPrimitive;
                         n.to_u32().ok_or_else(|| {
@@ -606,6 +611,14 @@ impl Executor<'_> {
             }
         };
 
+        // A non-positive stride amount would divide-by-zero in the bucket math
+        // below; reject it rather than panic (reachable now via eager #postings).
+        if amount <= 0 {
+            return Err(QueryError::Type(format!(
+                "DATE_BIN: stride amount must be positive, got {amount}"
+            )));
+        }
+
         // Calculate days from origin to source
         let days_diff = i64::from(source.since(origin).unwrap_or_default().get_days());
 
@@ -614,22 +627,19 @@ impl Executor<'_> {
         let oy = i32::from(origin.year());
         let om = i32::from(origin.month());
         let od = origin.day() as u32;
-        let amt = amount as i32;
+        let amt = i32::try_from(amount)
+            .map_err(|_| QueryError::Type("DATE_BIN: stride amount too large".to_string()))?;
 
         // Calculate binned date based on unit
         let binned = match unit.trim_end_matches('s') {
             "day" => {
                 let bucket = days_diff / amount;
-                origin
-                    .checked_add(jiff::ToSpan::days(bucket * amount))
-                    .unwrap()
+                add_days(origin, bucket * amount)?
             }
             "week" => {
                 let days_per_stride = amount * 7;
                 let bucket = days_diff / days_per_stride;
-                origin
-                    .checked_add(jiff::ToSpan::days(bucket * days_per_stride))
-                    .unwrap()
+                add_days(origin, bucket * days_per_stride)?
             }
             "month" => {
                 let months_diff = (sy - oy) * 12 + sm - om;

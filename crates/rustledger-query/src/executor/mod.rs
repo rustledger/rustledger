@@ -293,7 +293,7 @@ impl<'a> Executor<'a> {
     /// (issue: BQL compat 93%→77%), after `SELECT`, `PRINT`, and `BALANCES` each
     /// had to be fixed the same way. Routing every generic walk through one
     /// accessor keeps the next command from re-introducing the bug.
-    pub(super) fn resolved_directives(&self) -> impl Iterator<Item = &Directive> + '_ {
+    pub(super) fn resolved_directives(&self) -> impl Iterator<Item = &'a Directive> {
         // The two sources are mutually exclusive (see the constructors):
         // `new_with_sources` leaves `directives` empty and fills
         // `spanned_directives`; `new` leaves `spanned_directives` None. Chaining
@@ -467,15 +467,7 @@ impl<'a> Executor<'a> {
         // Create an iterator over (directive_index, directive) pairs
         // Handle both spanned and unspanned directives
         let directive_iter: Vec<(usize, &Directive)> =
-            if let Some(spanned) = self.spanned_directives {
-                spanned
-                    .iter()
-                    .enumerate()
-                    .map(|(i, s)| (i, &s.value))
-                    .collect()
-            } else {
-                self.directives.iter().enumerate().collect()
-            };
+            self.resolved_directives().enumerate().collect();
 
         // Resolve a posting to a Position that preserves cost basis when present.
         // Other balance accumulators in this crate (`build_balances_with_filter`,
@@ -1953,29 +1945,16 @@ impl<'a> Executor<'a> {
         let mut table = Table::new(columns);
 
         // Collect balance directives from either spanned or unspanned directives
-        let mut balances: Vec<_> = if let Some(spanned) = self.spanned_directives {
-            spanned
-                .iter()
-                .filter_map(|s| {
-                    if let Directive::Balance(b) = &s.value {
-                        Some((b.date, b.account.as_ref(), b.amount.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            self.directives
-                .iter()
-                .filter_map(|d| {
-                    if let Directive::Balance(b) = d {
-                        Some((b.date, b.account.as_ref(), b.amount.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+        let mut balances: Vec<_> = self
+            .resolved_directives()
+            .filter_map(|d| {
+                if let Directive::Balance(b) = d {
+                    Some((b.date, b.account.as_ref(), b.amount.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         // Sort by (date, account) for consistent, deterministic output
         balances.sort_by(|(date_a, account_a, _), (date_b, account_b, _)| {
@@ -2004,29 +1983,16 @@ impl<'a> Executor<'a> {
         let mut table = Table::new(columns);
 
         // Collect commodity directives from either spanned or unspanned directives
-        let mut commodities: Vec<_> = if let Some(spanned) = self.spanned_directives {
-            spanned
-                .iter()
-                .filter_map(|s| {
-                    if let Directive::Commodity(c) = &s.value {
-                        Some((c.date, c.currency.as_ref()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            self.directives
-                .iter()
-                .filter_map(|d| {
-                    if let Directive::Commodity(c) = d {
-                        Some((c.date, c.currency.as_ref()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+        let mut commodities: Vec<_> = self
+            .resolved_directives()
+            .filter_map(|d| {
+                if let Directive::Commodity(c) = d {
+                    Some((c.date, c.currency.as_ref()))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         // Sort by (date, name) for consistent output
         commodities.sort_by(|(date_a, name_a), (date_b, name_b)| {
@@ -2056,29 +2022,16 @@ impl<'a> Executor<'a> {
         let mut table = Table::new(columns);
 
         // Collect event directives
-        let mut events: Vec<_> = if let Some(spanned) = self.spanned_directives {
-            spanned
-                .iter()
-                .filter_map(|s| {
-                    if let Directive::Event(e) = &s.value {
-                        Some((e.date, e.event_type.as_str(), e.value.as_str()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            self.directives
-                .iter()
-                .filter_map(|d| {
-                    if let Directive::Event(e) = d {
-                        Some((e.date, e.event_type.as_str(), e.value.as_str()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+        let mut events: Vec<_> = self
+            .resolved_directives()
+            .filter_map(|d| {
+                if let Directive::Event(e) = d {
+                    Some((e.date, e.event_type.as_str(), e.value.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         // Sort by (date, type) for consistent output
         events.sort_by(|(date_a, type_a, _), (date_b, type_b, _)| {
@@ -2112,29 +2065,16 @@ impl<'a> Executor<'a> {
         let mut table = Table::new(columns);
 
         // Collect note directives
-        let mut notes: Vec<_> = if let Some(spanned) = self.spanned_directives {
-            spanned
-                .iter()
-                .filter_map(|s| {
-                    if let Directive::Note(n) = &s.value {
-                        Some((n.date, n.account.as_ref(), n.comment.as_str()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            self.directives
-                .iter()
-                .filter_map(|d| {
-                    if let Directive::Note(n) = d {
-                        Some((n.date, n.account.as_ref(), n.comment.as_str()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+        let mut notes: Vec<_> = self
+            .resolved_directives()
+            .filter_map(|d| {
+                if let Directive::Note(n) = d {
+                    Some((n.date, n.account.as_ref(), n.comment.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         // Sort by (date, account) for consistent output
         notes.sort_by(|(date_a, account_a, _), (date_b, account_b, _)| {
@@ -2172,41 +2112,22 @@ impl<'a> Executor<'a> {
         let mut table = Table::new(columns);
 
         // Collect document directives
-        let mut documents: Vec<_> = if let Some(spanned) = self.spanned_directives {
-            spanned
-                .iter()
-                .filter_map(|s| {
-                    if let Directive::Document(d) = &s.value {
-                        Some((
-                            d.date,
-                            d.account.as_ref(),
-                            d.path.as_str(),
-                            &d.tags,
-                            &d.links,
-                        ))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            self.directives
-                .iter()
-                .filter_map(|d| {
-                    if let Directive::Document(doc) = d {
-                        Some((
-                            doc.date,
-                            doc.account.as_ref(),
-                            doc.path.as_str(),
-                            &doc.tags,
-                            &doc.links,
-                        ))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
+        let mut documents: Vec<_> = self
+            .resolved_directives()
+            .filter_map(|d| {
+                if let Directive::Document(doc) = d {
+                    Some((
+                        doc.date,
+                        doc.account.as_ref(),
+                        doc.path.as_str(),
+                        &doc.tags,
+                        &doc.links,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         // Sort by (date, account, filename) for consistent output
         documents.sort_by(
@@ -2264,14 +2185,7 @@ impl<'a> Executor<'a> {
         > = FxHashMap::default();
 
         // Process directives
-        let iter: Box<dyn Iterator<Item = &Directive>> =
-            if let Some(spanned) = self.spanned_directives {
-                Box::new(spanned.iter().map(|s| &s.value))
-            } else {
-                Box::new(self.directives.iter())
-            };
-
-        for directive in iter {
+        for directive in self.resolved_directives() {
             match directive {
                 Directive::Open(open) => {
                     let entry = accounts.entry(open.account.as_ref()).or_insert((
@@ -2338,14 +2252,8 @@ impl<'a> Executor<'a> {
         let mut table = Table::new(columns);
 
         // Collect transaction directives
-        let iter: Box<dyn Iterator<Item = &Directive>> =
-            if let Some(spanned) = self.spanned_directives {
-                Box::new(spanned.iter().map(|s| &s.value))
-            } else {
-                Box::new(self.directives.iter())
-            };
-
-        let mut transactions: Vec<_> = iter
+        let mut transactions: Vec<_> = self
+            .resolved_directives()
             .filter_map(|d| {
                 if let Directive::Transaction(txn) = d {
                     Some(txn)
@@ -2408,19 +2316,13 @@ impl<'a> Executor<'a> {
         ];
         let mut table = Table::new(columns);
 
-        // Process directives with optional source locations
-        if let Some(spanned) = self.spanned_directives {
-            for (idx, spanned_dir) in spanned.iter().enumerate() {
-                let directive = &spanned_dir.value;
-                let source_loc = self.get_source_location(idx);
-                let row = self.directive_to_entry_row(idx, directive, source_loc);
-                table.add_row(row);
-            }
-        } else {
-            for (idx, directive) in self.directives.iter().enumerate() {
-                let row = self.directive_to_entry_row(idx, directive, None);
-                table.add_row(row);
-            }
+        // Process directives with optional source locations. `get_source_location`
+        // returns `None` when there's no source map (the unspanned case), so this
+        // single loop covers both.
+        for (idx, directive) in self.resolved_directives().enumerate() {
+            let source_loc = self.get_source_location(idx);
+            let row = self.directive_to_entry_row(idx, directive, source_loc);
+            table.add_row(row);
         }
 
         table
@@ -2572,32 +2474,17 @@ impl<'a> Executor<'a> {
         let mut cumulative_balance: Inventory = Inventory::default();
 
         // Collect transactions with their directive indices for source location lookup
-        let mut transactions: Vec<(usize, &rustledger_core::Transaction)> =
-            if let Some(spanned) = self.spanned_directives {
-                spanned
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, s)| {
-                        if let Directive::Transaction(txn) = &s.value {
-                            Some((idx, txn))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            } else {
-                self.directives
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, d)| {
-                        if let Directive::Transaction(txn) = d {
-                            Some((idx, txn))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            };
+        let mut transactions: Vec<(usize, &rustledger_core::Transaction)> = self
+            .resolved_directives()
+            .enumerate()
+            .filter_map(|(idx, d)| {
+                if let Directive::Transaction(txn) = d {
+                    Some((idx, txn))
+                } else {
+                    None
+                }
+            })
+            .collect();
         transactions.sort_by_key(|(_, t)| t.date);
 
         for (dir_idx, txn) in &transactions {
@@ -4137,6 +4024,37 @@ mod tests {
         assert_eq!(
             result.rows[0][account_col],
             Value::String("Assets:Cash".to_string())
+        );
+    }
+
+    /// The system-table builders (BALANCES / #commodities / #events / …) and the
+    /// directive walks all route through `resolved_directives`, so they must see
+    /// the directives under `new_with_sources` (where they live in
+    /// `spanned_directives`, not `directives`) — the JOURNAL bug class. Run
+    /// `BALANCES` over a source-mapped executor and confirm it isn't empty.
+    #[test]
+    fn test_system_table_via_source_mapped_executor() {
+        use rustledger_parser::{Span, Spanned};
+
+        let directives = sample_directives();
+        let spanned: Vec<Spanned<Directive>> = directives
+            .iter()
+            .map(|d| Spanned {
+                value: d.clone(),
+                span: Span { start: 0, end: 1 },
+                file_id: 0,
+            })
+            .collect();
+        let source_map = rustledger_loader::SourceMap::new();
+        let mut executor = Executor::new_with_sources(&spanned, &source_map);
+
+        let result = executor
+            .execute(&parse("BALANCES").unwrap())
+            .expect("BALANCES");
+        assert!(
+            result.len() >= 3,
+            "BALANCES via source-mapped executor returned {} rows (expected >= 3)",
+            result.len()
         );
     }
 

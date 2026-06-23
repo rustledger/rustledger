@@ -152,44 +152,43 @@ fn shared_pure_functions_agree_across_both_paths() {
 }
 
 // ---------------------------------------------------------------------------
-// Drift pins — these assert the CURRENT divergence between the paths. The
-// reconciliation steps will flip each (and update the corresponding pin),
-// proving the change is deliberate rather than an accidental behavior shift.
+// Reconciled divergences + remaining drift pins. A pin asserts the CURRENT
+// behavior of a known divergence; the reconciliation steps flip each to assert
+// AGREEMENT (renamed `reconciled_*`), so the change is deliberate rather than
+// an accidental behavior shift. The extended-date pin is still pending (it
+// flips when those functions are registered in the eager path).
 // ---------------------------------------------------------------------------
 
-/// `ROOT(account, n)` with a negative depth: the lazy path correctly errors,
-/// the eager path has a `*i as usize` bug that turns `-1` into `usize::MAX` and
-/// silently returns the whole account. Reconciliation ports the lazy guard.
+/// RECONCILED: `ROOT(account, -1)`. The eager path previously had a
+/// `*i as usize` bug that turned `-1` into `usize::MAX` and silently returned
+/// the whole account; the lazy guard was ported into the eager arm, so both
+/// paths now reject a negative depth.
 #[test]
-fn drift_root_negative_depth() {
+fn reconciled_root_negative_depth_both_error() {
     let (eager, lazy) = run_both("ROOT", &[s("Assets:Bank:Checking"), Value::Integer(-1)]);
     assert!(
         lazy.unwrap().is_err(),
-        "lazy ROOT(acct,-1) should error (depth guard)"
+        "lazy ROOT(acct,-1) errors (depth guard)"
     );
-    // The `*i as usize` cast turns -1 into usize::MAX, so `n >= parts.len()`
-    // and eager returns the WHOLE account verbatim. Assert that exact value so
-    // the pin can't be satisfied by some other accidental Ok result.
     assert!(
-        matches!(&eager, Ok(Value::String(a)) if a == "Assets:Bank:Checking"),
-        "eager ROOT(acct,-1) currently returns the whole account (the `*i as usize` bug), \
-         got {eager:?} — flip this pin when the lazy guard is ported into the eager arm"
+        eager.is_err(),
+        "eager ROOT(acct,-1) now errors (guard ported)"
     );
 }
 
-/// `GETITEM(NULL, key)`: the eager path returns `NULL`, the lazy path falls
-/// into a catch-all and errors. Reconciliation adds the `NULL` arm to lazy.
+/// RECONCILED: `GETITEM(NULL, key)`. The eager path returned `NULL`; the lazy
+/// path fell into a catch-all and errored. A `(NULL, _) => NULL` arm was added
+/// to the lazy path, so both paths now return `NULL`.
 #[test]
-fn drift_getitem_on_null() {
+fn reconciled_getitem_on_null_both_null() {
     let (eager, lazy) = run_both("GETITEM", &[Value::Null, s("k")]);
     assert!(
         matches!(eager, Ok(Value::Null)),
-        "eager GETITEM(NULL,k) returns NULL, got {eager:?}"
+        "eager GETITEM(NULL,k) is NULL, got {eager:?}"
     );
     assert!(
-        lazy.unwrap().is_err(),
-        "lazy GETITEM(NULL,k) currently errors — flip this pin when the NULL arm \
-         is added to the lazy path"
+        matches!(lazy.unwrap(), Ok(Value::Null)),
+        "lazy GETITEM(NULL,k) now returns NULL (NULL arm added)"
     );
 }
 
@@ -226,18 +225,14 @@ fn drift_extended_date_functions_missing_from_eager() {
     }
 }
 
-/// `TODAY` takes no arguments; the lazy path rejects extra args, the eager path
-/// ignores them. Reconciliation tightens the eager arm to match lazy.
+/// RECONCILED: `TODAY` takes no arguments. The eager path ignored extras; it
+/// now rejects them with a zero-arg guard, matching the lazy path.
 #[test]
-fn drift_today_extra_arg() {
+fn reconciled_today_extra_arg_both_error() {
     let (eager, lazy) = run_both("TODAY", &[Value::Integer(1)]);
     assert!(
         lazy.unwrap().is_err(),
-        "lazy TODAY(x) should reject the extra arg"
+        "lazy TODAY(x) rejects the extra arg"
     );
-    assert!(
-        eager.is_ok(),
-        "eager TODAY(x) currently ignores the extra arg — flip this pin when the \
-         eager arm gains the zero-arg guard"
-    );
+    assert!(eager.is_err(), "eager TODAY(x) now errors (zero-arg guard)");
 }

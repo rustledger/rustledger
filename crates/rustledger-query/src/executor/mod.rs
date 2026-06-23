@@ -669,7 +669,11 @@ impl<'a> Executor<'a> {
         let name_upper = name.to_uppercase();
         match name_upper.as_str() {
             // Date functions
-            "TODAY" => Ok(Value::Date(jiff::Zoned::now().date())),
+            "TODAY" => {
+                // Takes no arguments; reject extras to match the lazy path.
+                Self::require_args_count(&name_upper, args, 0)?;
+                Ok(Value::Date(jiff::Zoned::now().date()))
+            }
             "YEAR" => {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
@@ -1005,10 +1009,22 @@ impl<'a> Executor<'a> {
                     ));
                 }
                 let n = if args.len() == 2 {
-                    match &args[1] {
-                        Value::Integer(i) => *i as usize,
-                        _ => 1,
-                    }
+                    let raw = match &args[1] {
+                        Value::Integer(i) => *i,
+                        _ => {
+                            return Err(QueryError::Type(
+                                "ROOT second arg must be integer".to_string(),
+                            ));
+                        }
+                    };
+                    // Reject negatives explicitly — `i as usize` would silently
+                    // turn -1 into `usize::MAX` and return the whole account.
+                    // Mirrors the lazy `eval_root` guard so both paths agree.
+                    usize::try_from(raw).map_err(|_| {
+                        QueryError::Type(format!(
+                            "ROOT second arg must be a non-negative integer, got {raw}"
+                        ))
+                    })?
                 } else {
                     1
                 };

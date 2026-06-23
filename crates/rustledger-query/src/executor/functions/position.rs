@@ -168,6 +168,9 @@ impl Executor<'_> {
             (Value::Object(obj), Value::String(key)) => {
                 Ok(obj.get(&key).cloned().unwrap_or(Value::Null))
             }
+            // `getitem(NULL, _)` is NULL, not an error — mirrors the eager
+            // `evaluate_function_on_values` arm so both paths agree.
+            (Value::Null, _) => Ok(Value::Null),
             _ => Err(QueryError::Type(
                 "GETITEM expects (inventory, string), (metadata, string), or (object, string)"
                     .to_string(),

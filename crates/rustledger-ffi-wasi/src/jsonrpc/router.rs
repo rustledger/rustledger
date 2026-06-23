@@ -565,22 +565,26 @@ fn handle_clamp_entries(params: &serde_json::Value) -> Result<serde_json::Value,
     // entries and carried-forward prices keep their original filename/lineno,
     // and only the synthesized opening-balance / earnings summaries are built
     // fresh. (Replaces the legacy 846-line JSON `clamp_entries`.)
-    let mut core: Vec<rustledger_core::Directive> = Vec::new();
-    let mut orig_index: Vec<usize> = Vec::new();
+    // Convert every entry up front. A conversion failure is rejected (not
+    // skipped): a silently-dropped pre-`begin` entry would under-count the
+    // summarized opening balance and return a confidently-wrong clamp. Because
+    // nothing is skipped, `core[i]` lines up with `params.entries[i]`, so a
+    // `clamp_indexed` source index maps straight back to the original entry.
+    let mut core: Vec<rustledger_core::Directive> = Vec::with_capacity(params.entries.len());
     for (i, entry) in params.entries.iter().enumerate() {
-        if let Ok(input) = serde_json::from_value::<InputEntry>(entry.clone())
-            && let Ok(directive) = input_entry_to_directive(&input)
-        {
-            core.push(directive);
-            orig_index.push(i);
-        }
+        let input: InputEntry = serde_json::from_value(entry.clone())
+            .map_err(|e| RpcError::invalid_params(format!("entry {i}: {e}")))?;
+        core.push(
+            input_entry_to_directive(&input)
+                .map_err(|e| RpcError::invalid_params(format!("entry {i}: {e}")))?,
+        );
     }
 
     let entries = rustledger_ops::clamp::clamp_indexed(&core, begin_date, end_date)
         .into_iter()
-        .map(|(d, src)| match src.and_then(|j| orig_index.get(j)) {
+        .map(|(d, src)| match src {
             // Pass-through: original JSON entry, full fidelity + provenance.
-            Some(&i) => Ok(params.entries[i].clone()),
+            Some(i) => Ok(params.entries[i].clone()),
             // Synthesized summary: build fresh with the `<summarization>` source.
             None => serde_json::to_value(directive_to_json(&d, 0, "<summarization>")),
         })

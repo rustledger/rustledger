@@ -454,8 +454,6 @@ fn engine_config() -> Config {
     config
 }
 
-/// Discover and read a Python plugin's source code.
-///
 /// Classify a Python plugin reference as a FILE path (vs a dotted module name):
 /// a file when it ends in `.py` (case-insensitive) or contains a path separator.
 /// Forward `/` counts even on Windows (where `MAIN_SEPARATOR` is `\`), so
@@ -473,6 +471,8 @@ pub fn is_python_plugin_file_ref(name: &str) -> bool {
         || name.contains(['/', std::path::MAIN_SEPARATOR])
 }
 
+/// Discover and read a Python plugin's source code.
+///
 /// For file-based plugins (`.py` files or paths), reads the file directly.
 /// For module-based plugins, returns `ModuleNotFound` error - the caller should
 /// use `suggest_module_path()` to provide a helpful hint to the user.

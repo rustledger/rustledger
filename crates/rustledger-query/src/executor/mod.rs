@@ -611,56 +611,30 @@ impl<'a> Executor<'a> {
     ) -> Result<Value, QueryError> {
         let name = func.name.to_uppercase();
         match name.as_str() {
-            // Date functions
-            "YEAR" | "MONTH" | "DAY" | "WEEKDAY" | "QUARTER" | "YMONTH" | "TODAY" => {
-                self.eval_date_function(&name, func, ctx)
-            }
-            // Extended date functions
-            "DATE" | "DATE_DIFF" | "DATE_ADD" | "DATE_TRUNC" | "DATE_PART" | "PARSE_DATE"
-            | "DATE_BIN" | "INTERVAL" => self.eval_extended_date_function(&name, func, ctx),
-            // String functions
-            "LENGTH" | "UPPER" | "LOWER" | "SUBSTR" | "SUBSTRING" | "TRIM" | "STARTSWITH"
-            | "ENDSWITH" | "GREP" | "GREPN" | "SUBST" | "SPLITCOMP" | "JOINSTR" | "MAXWIDTH" => {
-                self.eval_string_function(&name, func, ctx)
-            }
-            // Account functions
-            "PARENT" | "LEAF" | "ROOT" | "ACCOUNT_DEPTH" | "ACCOUNT_SORTKEY" => {
-                self.eval_account_function(&name, func, ctx)
-            }
-            // Account metadata functions
-            "OPEN_DATE" | "CLOSE_DATE" | "OPEN_META" => {
-                self.eval_account_meta_function(&name, func, ctx)
-            }
-            // Math functions
-            "ABS" | "NEG" | "ROUND" | "SAFEDIV" => self.eval_math_function(&name, func, ctx),
-            // Amount/Position functions
-            "NUMBER" | "CURRENCY" | "GETITEM" | "GET" | "UNITS" | "COST" | "WEIGHT" | "VALUE" => {
-                self.eval_position_function(&name, func, ctx)
-            }
-            // Inventory functions
-            "EMPTY" | "FILTER_CURRENCY" | "POSSIGN" => {
-                self.eval_inventory_function(&name, func, ctx)
-            }
-            // Price functions
-            "GETPRICE" => self.eval_getprice(func, ctx),
-            // Utility functions
-            "COALESCE" => self.eval_coalesce(func, ctx),
-            "ONLY" => self.eval_only(func, ctx),
-            // Metadata functions
+            // Metadata functions read the row's `PostingContext`, so they stay
+            // on the lazy path rather than routing through the value registry.
             "META" | "ENTRY_META" | "ANY_META" | "POSTING_META" => {
                 self.eval_meta_function(&name, func, ctx)
             }
-            // Currency conversion
-            "CONVERT" => self.eval_convert(func, ctx),
-            // Type casting functions
-            "INT" => self.eval_int(func, ctx),
-            "DECIMAL" => self.eval_decimal(func, ctx),
-            "STR" => self.eval_str(func, ctx),
-            "BOOL" => self.eval_bool(func, ctx),
-            // Aggregate functions return Null when evaluated on a single row
-            // They're handled specially in aggregate evaluation
+            // COALESCE short-circuits on its raw argument expressions and must
+            // NOT pre-evaluate every argument, so it stays on the lazy path.
+            "COALESCE" => self.eval_coalesce(func, ctx),
+            // Aggregates evaluate to Null per row; real aggregation happens in
+            // the aggregation pass.
             "SUM" | "COUNT" | "MIN" | "MAX" | "FIRST" | "LAST" | "AVG" => Ok(Value::Null),
-            _ => Err(QueryError::UnknownFunction(func.name.clone())),
+            // Every other function: evaluate the arguments, then dispatch through
+            // the single value-based registry shared with `#postings`, aggregates,
+            // and subqueries. Unknown names fall through to its `UnknownFunction`
+            // arm. This is the collapse of the formerly-duplicated lazy dispatch
+            // onto `evaluate_function_on_values` (dual-eval-path unification).
+            _ => {
+                let args = func
+                    .args
+                    .iter()
+                    .map(|a| self.evaluate_expr(a, ctx))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.evaluate_function_on_values(&name, &args)
+            }
         }
     }
 
@@ -701,7 +675,10 @@ impl<'a> Executor<'a> {
                 match &args[0] {
                     // Count Unicode characters, not UTF-8 bytes (matches beanquery).
                     Value::String(s) => Ok(Value::Integer(s.chars().count() as i64)),
-                    _ => Err(QueryError::Type("LENGTH expects a string".to_string())),
+                    Value::StringSet(s) => Ok(Value::Integer(s.len() as i64)),
+                    _ => Err(QueryError::Type(
+                        "LENGTH expects a string or set".to_string(),
+                    )),
                 }
             }
             "UPPER" => {
@@ -734,29 +711,7 @@ impl<'a> Executor<'a> {
                     _ => Err(QueryError::Type("ABS expects a number".to_string())),
                 }
             }
-            "ROUND" => {
-                if args.is_empty() || args.len() > 2 {
-                    return Err(QueryError::InvalidArguments(
-                        "ROUND".to_string(),
-                        "expected 1 or 2 arguments".to_string(),
-                    ));
-                }
-                match &args[0] {
-                    Value::Number(n) => {
-                        let scale = if args.len() == 2 {
-                            match &args[1] {
-                                Value::Integer(i) => *i as u32,
-                                _ => 0,
-                            }
-                        } else {
-                            0
-                        };
-                        Ok(Value::Number(n.round_dp(scale)))
-                    }
-                    Value::Integer(i) => Ok(Value::Integer(*i)),
-                    _ => Err(QueryError::Type("ROUND expects a number".to_string())),
-                }
-            }
+            "ROUND" => Self::round_on_values(args),
             // Utility functions
             "COALESCE" => {
                 for arg in args {
@@ -1187,6 +1142,13 @@ impl<'a> Executor<'a> {
                         let adjusted = if is_credit_normal { -n } else { *n };
                         Ok(Value::Number(adjusted))
                     }
+                    // Mirror the lazy `POSSIGN`: an integer amount is treated as
+                    // a number and sign-adjusted.
+                    Value::Integer(i) => {
+                        let n = Decimal::from(*i);
+                        let adjusted = if is_credit_normal { -n } else { n };
+                        Ok(Value::Number(adjusted))
+                    }
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "POSSIGN expects (amount, account_string)".to_string(),
@@ -1293,13 +1255,38 @@ impl<'a> Executor<'a> {
                         }
                     }
                     Value::Number(n) => Ok(Value::Amount(Amount::new(*n, &target_currency))),
+                    Value::String(s) => {
+                        // String input is a rustledger extension (issue #1179),
+                        // not present in Python beancount. Lets users write
+                        // ad-hoc currency conversions like
+                        // `SELECT CONVERT('100 USD', 'EUR')` without anchoring
+                        // them to a posting. Strict parser (see
+                        // `Amount::from_str`): malformed input surfaces as a
+                        // typed `QueryError` rather than a silent zero or a
+                        // panic.
+                        let amt: Amount = s.parse().map_err(|e| {
+                            QueryError::Type(format!(
+                                "CONVERT: first argument {e} (e.g. \"100 USD\")"
+                            ))
+                        })?;
+                        if amt.currency == target_currency {
+                            Ok(Value::Amount(amt))
+                        } else if let Some(converted) = convert_amount(&amt) {
+                            Ok(Value::Amount(converted))
+                        } else {
+                            // Match the `Value::Amount` arm: no price available
+                            // → return original unchanged.
+                            Ok(Value::Amount(amt))
+                        }
+                    }
                     Value::Null => {
                         // For null values (e.g., empty sum), return zero in target currency
                         // This matches Python beancount behavior for empty balances (issue #586)
                         Ok(Value::Amount(Amount::new(Decimal::ZERO, &target_currency)))
                     }
                     _ => Err(QueryError::Type(
-                        "CONVERT expects a position, amount, inventory, or number".to_string(),
+                        "CONVERT expects a position, amount, inventory, number, or amount-string"
+                            .to_string(),
                     )),
                 }
             }
@@ -1398,25 +1385,7 @@ impl<'a> Executor<'a> {
                     _ => Err(QueryError::Type("ENDSWITH expects two strings".to_string())),
                 }
             }
-            "MAXWIDTH" => {
-                Self::require_args_count(&name_upper, args, 2)?;
-                match (&args[0], &args[1]) {
-                    (Value::String(s), Value::Integer(max)) => {
-                        let n = *max as usize;
-                        if s.chars().count() <= n {
-                            Ok(Value::String(s.clone()))
-                        } else if n <= 3 {
-                            Ok(Value::String(s.chars().take(n).collect()))
-                        } else {
-                            let truncated: String = s.chars().take(n - 3).collect();
-                            Ok(Value::String(format!("{truncated}...")))
-                        }
-                    }
-                    _ => Err(QueryError::Type(
-                        "MAXWIDTH expects (string, integer)".to_string(),
-                    )),
-                }
-            }
+            "MAXWIDTH" => Self::maxwidth_on_values(args),
             // Account function used in GROUP BY
             "ACCOUNT_DEPTH" => {
                 Self::require_args_count(&name_upper, args, 1)?;
@@ -1601,18 +1570,17 @@ impl<'a> Executor<'a> {
                 }
             }
             "JOINSTR" => {
+                // Mirror the lazy `eval_joinstr`: stringify every non-String/Set
+                // arg via `value_to_string` and join with ", " (a comma+space).
                 let mut parts = Vec::new();
                 for v in args {
                     match v {
                         Value::String(s) => parts.push(s.clone()),
                         Value::StringSet(ss) => parts.extend(ss.iter().cloned()),
-                        Value::Integer(i) => parts.push(i.to_string()),
-                        Value::Number(n) => parts.push(n.to_string()),
-                        Value::Null => {}
-                        _ => {}
+                        other => parts.push(Self::value_to_string(other)),
                     }
                 }
-                Ok(Value::String(parts.join(",")))
+                Ok(Value::String(parts.join(", ")))
             }
             // Account metadata functions — look up open/close info
             "OPEN_DATE" => {

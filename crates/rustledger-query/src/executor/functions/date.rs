@@ -2,11 +2,10 @@
 
 use rustledger_core::NaiveDate;
 
-use crate::ast::FunctionCall;
 use crate::error::QueryError;
 
 use super::super::Executor;
-use super::super::types::{Interval, IntervalUnit, PostingContext, Value};
+use super::super::types::{Interval, IntervalUnit, Value};
 
 /// strftime formats the one-arg `PARSE_DATE` tries (after ISO `FromStr`),
 /// covering numeric and month-name shapes — `%m-%d-%Y` first so ambiguous
@@ -16,92 +15,6 @@ const PARSE_DATE_FORMATS: &[&str] = &[
 ];
 
 impl Executor<'_> {
-    /// Evaluate date functions: `YEAR`, `MONTH`, `DAY`, `WEEKDAY`, `QUARTER`, `YMONTH`, `TODAY`.
-    pub(crate) fn eval_date_function(
-        &self,
-        name: &str,
-        func: &FunctionCall,
-        ctx: &PostingContext,
-    ) -> Result<Value, QueryError> {
-        if name == "TODAY" {
-            if !func.args.is_empty() {
-                return Err(QueryError::InvalidArguments(
-                    "TODAY".to_string(),
-                    "expected 0 arguments".to_string(),
-                ));
-            }
-            return Ok(Value::Date(jiff::Zoned::now().date()));
-        }
-
-        // All other date functions expect exactly 1 argument
-        if func.args.len() != 1 {
-            return Err(QueryError::InvalidArguments(
-                name.to_string(),
-                "expected 1 argument".to_string(),
-            ));
-        }
-
-        let val = self.evaluate_expr(&func.args[0], ctx)?;
-        let date = match val {
-            Value::Date(d) => d,
-            _ => return Err(QueryError::Type(format!("{name} expects a date"))),
-        };
-
-        match name {
-            "YEAR" => Ok(Value::Integer(date.year().into())),
-            "MONTH" => Ok(Value::Integer(date.month().into())),
-            "DAY" => Ok(Value::Integer(date.day().into())),
-            "WEEKDAY" => Ok(Value::String(
-                super::weekday_abbrev(date.weekday().to_monday_zero_offset() as u32).to_string(),
-            )),
-            "QUARTER" => {
-                // beanquery returns a `YYYY-Qn` string, not an integer.
-                let quarter = (date.month() - 1) / 3 + 1;
-                Ok(Value::String(format!("{:04}-Q{}", date.year(), quarter)))
-            }
-            "YMONTH" => Ok(Value::String(format!(
-                "{:04}-{:02}",
-                date.year(),
-                date.month()
-            ))),
-            _ => unreachable!(),
-        }
-    }
-
-    /// Evaluate extended date functions.
-    pub(crate) fn eval_extended_date_function(
-        &self,
-        name: &str,
-        func: &FunctionCall,
-        ctx: &PostingContext,
-    ) -> Result<Value, QueryError> {
-        match name {
-            "DATE" => self.eval_date_construct(func, ctx),
-            "DATE_DIFF" => self.eval_date_diff(func, ctx),
-            "DATE_ADD" => self.eval_date_add(func, ctx),
-            "DATE_TRUNC" => self.eval_date_trunc(func, ctx),
-            "DATE_PART" => self.eval_date_part(func, ctx),
-            "PARSE_DATE" => self.eval_parse_date(func, ctx),
-            "DATE_BIN" => self.eval_date_bin(func, ctx),
-            "INTERVAL" => self.eval_interval(func, ctx),
-            _ => unreachable!(),
-        }
-    }
-
-    /// Evaluate INTERVAL function (construct an interval).
-    pub(crate) fn eval_interval(
-        &self,
-        func: &FunctionCall,
-        ctx: &PostingContext,
-    ) -> Result<Value, QueryError> {
-        let args = func
-            .args
-            .iter()
-            .map(|a| self.evaluate_expr(a, ctx))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::interval_on_values(&args)
-    }
-
     /// Value-core for `INTERVAL` function (construct an interval).
     pub(crate) fn interval_on_values(args: &[Value]) -> Result<Value, QueryError> {
         // interval(unit) - creates an interval of 1 unit
@@ -166,23 +79,6 @@ impl Executor<'_> {
                 "expected 1 or 2 arguments".to_string(),
             )),
         }
-    }
-
-    /// Evaluate DATE function (construct a date).
-    ///
-    /// `DATE(year, month, day)` - construct from components
-    /// `DATE(string)` - parse ISO date string
-    pub(crate) fn eval_date_construct(
-        &self,
-        func: &FunctionCall,
-        ctx: &PostingContext,
-    ) -> Result<Value, QueryError> {
-        let args = func
-            .args
-            .iter()
-            .map(|a| self.evaluate_expr(a, ctx))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::date_construct_on_values(&args)
     }
 
     /// Value-core for `DATE` function (construct a date).
@@ -260,54 +156,6 @@ impl Executor<'_> {
         }
     }
 
-    /// Evaluate `DATE_DIFF` function (difference in days).
-    ///
-    /// `DATE_DIFF(date1, date2)` - returns date1 - date2 in days
-    pub(crate) fn eval_date_diff(
-        &self,
-        func: &FunctionCall,
-        ctx: &PostingContext,
-    ) -> Result<Value, QueryError> {
-        Self::require_args("DATE_DIFF", func, 2)?;
-
-        let date1 = match self.evaluate_expr(&func.args[0], ctx)? {
-            Value::Date(d) => d,
-            _ => {
-                return Err(QueryError::Type(
-                    "DATE_DIFF: first argument must be a date".to_string(),
-                ));
-            }
-        };
-        let date2 = match self.evaluate_expr(&func.args[1], ctx)? {
-            Value::Date(d) => d,
-            _ => {
-                return Err(QueryError::Type(
-                    "DATE_DIFF: second argument must be a date".to_string(),
-                ));
-            }
-        };
-
-        let diff = i64::from(date1.since(date2).unwrap_or_default().get_days());
-        Ok(Value::Integer(diff))
-    }
-
-    /// Evaluate `DATE_ADD` function (add days or interval to a date).
-    ///
-    /// `DATE_ADD(date, days)` - returns date + days
-    /// `DATE_ADD(date, interval)` - returns date + interval
-    pub(crate) fn eval_date_add(
-        &self,
-        func: &FunctionCall,
-        ctx: &PostingContext,
-    ) -> Result<Value, QueryError> {
-        let args = func
-            .args
-            .iter()
-            .map(|a| self.evaluate_expr(a, ctx))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::date_add_on_values(&args)
-    }
-
     /// Value-core for `DATE_ADD` function (add days or interval to a date).
     pub(crate) fn date_add_on_values(args: &[Value]) -> Result<Value, QueryError> {
         Self::require_args_count("DATE_ADD", args, 2)?;
@@ -342,22 +190,6 @@ impl Executor<'_> {
         };
 
         Ok(Value::Date(result))
-    }
-
-    /// Evaluate `DATE_TRUNC` function (truncate date to field).
-    ///
-    /// `DATE_TRUNC(field, date)` - truncate to year/month
-    pub(crate) fn eval_date_trunc(
-        &self,
-        func: &FunctionCall,
-        ctx: &PostingContext,
-    ) -> Result<Value, QueryError> {
-        let args = func
-            .args
-            .iter()
-            .map(|a| self.evaluate_expr(a, ctx))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::date_trunc_on_values(&args)
     }
 
     /// Value-core for `DATE_TRUNC` function (truncate date to field).
@@ -406,22 +238,6 @@ impl Executor<'_> {
             .ok_or_else(|| QueryError::Type("DATE_TRUNC: invalid date result".to_string()))
     }
 
-    /// Evaluate `DATE_PART` function (extract date component).
-    ///
-    /// `DATE_PART(field, date)` - extract component
-    pub(crate) fn eval_date_part(
-        &self,
-        func: &FunctionCall,
-        ctx: &PostingContext,
-    ) -> Result<Value, QueryError> {
-        let args = func
-            .args
-            .iter()
-            .map(|a| self.evaluate_expr(a, ctx))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::date_part_on_values(&args)
-    }
-
     /// Value-core for `DATE_PART` function (extract date component).
     pub(crate) fn date_part_on_values(args: &[Value]) -> Result<Value, QueryError> {
         Self::require_args_count("DATE_PART", args, 2)?;
@@ -466,22 +282,6 @@ impl Executor<'_> {
         };
 
         Ok(Value::Integer(result))
-    }
-
-    /// Evaluate `PARSE_DATE` function (parse date with format).
-    ///
-    /// `PARSE_DATE(string, format)` - parse with chrono format
-    pub(crate) fn eval_parse_date(
-        &self,
-        func: &FunctionCall,
-        ctx: &PostingContext,
-    ) -> Result<Value, QueryError> {
-        let args = func
-            .args
-            .iter()
-            .map(|a| self.evaluate_expr(a, ctx))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::parse_date_on_values(&args)
     }
 
     /// Value-core for `PARSE_DATE` function (parse date with format).
@@ -539,25 +339,6 @@ impl Executor<'_> {
         Err(QueryError::Type(format!(
             "PARSE_DATE: cannot parse '{string}' (one-arg parse_date covers ISO/numeric/month-name formats)"
         )))
-    }
-
-    /// Evaluate `DATE_BIN` function (bin dates into buckets).
-    ///
-    /// `DATE_BIN(stride, source, origin)` - bins source date into buckets of stride size
-    /// starting from origin.
-    ///
-    /// Stride is a string like "1 day", "7 days", "1 week", "1 month", "3 months", "1 year".
-    pub(crate) fn eval_date_bin(
-        &self,
-        func: &FunctionCall,
-        ctx: &PostingContext,
-    ) -> Result<Value, QueryError> {
-        let args = func
-            .args
-            .iter()
-            .map(|a| self.evaluate_expr(a, ctx))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::date_bin_on_values(&args)
     }
 
     /// Value-core for `DATE_BIN` function (bin dates into buckets).

@@ -1640,15 +1640,24 @@ fn run_wasm_plugin(
 /// file-vs-module test used by the Python runtime (case-insensitive extension).
 #[cfg(feature = "python-plugins")]
 fn is_python_module_name(resolved: &std::path::Path, raw_name: &str) -> bool {
-    // Treat both `/` and the platform separator as path markers: forward
-    // slashes are common (and accepted) even on Windows, where
-    // `MAIN_SEPARATOR` is `\`, so a `plugins/foo.py` ref must not be mistaken
-    // for a module name.
-    !resolved.exists()
-        && !std::path::Path::new(raw_name)
+    !is_python_plugin_file(resolved, raw_name)
+}
+
+/// Classify a Python plugin reference as a FILE path (vs a dotted module name):
+/// a file when it resolves to an existing path, ends in `.py` (case-insensitive),
+/// or contains a path separator. Forward `/` counts even on Windows (where
+/// `MAIN_SEPARATOR` is `\`), so `plugins/foo.py` is never mistaken for a module.
+///
+/// Single source for the up-front #1432 rejection (via `is_python_module_name`)
+/// and the runtime file-vs-module dispatch, which previously used non-equivalent
+/// criteria (the dispatch omitted the forward slash) and could disagree.
+#[cfg(feature = "python-plugins")]
+fn is_python_plugin_file(resolved: &std::path::Path, raw_name: &str) -> bool {
+    resolved.exists()
+        || std::path::Path::new(raw_name)
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("py"))
-        && !raw_name.contains(['/', std::path::MAIN_SEPARATOR])
+        || raw_name.contains(['/', std::path::MAIN_SEPARATOR])
 }
 
 /// Actionable error for a Python plugin referenced by module name. `file` is the
@@ -1691,12 +1700,9 @@ fn run_python_plugin(
         config: config.clone(),
     };
 
-    // Try file-based execution first, then module-based
-    let is_file = resolved_path.exists()
-        || std::path::Path::new(module_name)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
-        || module_name.contains(std::path::MAIN_SEPARATOR);
+    // Try file-based execution first, then module-based. Same file-vs-module
+    // classifier as the up-front #1432 rejection — see `is_python_plugin_file`.
+    let is_file = is_python_plugin_file(resolved_path, module_name);
 
     let output = if is_file {
         runtime

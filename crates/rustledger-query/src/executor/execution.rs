@@ -907,13 +907,7 @@ impl Executor<'_> {
                         // posting carries a cost annotation; bare units
                         // otherwise.
                         let pos = posting.amount().map(|units| {
-                            if let Some(cost_spec) = &posting.cost
-                                && let Some(cost) = cost_spec.resolve(units.number, txn.date)
-                            {
-                                Position::with_cost(units.clone(), cost)
-                            } else {
-                                Position::simple(units.clone())
-                            }
+                            Position::from_posting(units, posting.cost.as_ref(), txn.date)
                         });
 
                         if let Some(ref p) = pos {

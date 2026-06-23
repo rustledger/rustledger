@@ -721,8 +721,18 @@ impl CostSpec {
         let number = match self.number? {
             // User-specified per-unit cost.
             CostNumber::PerUnit { value: per } => per,
-            // Calculated from total — preserve full precision.
-            CostNumber::Total { value: total } => total / units.abs(),
+            // Calculated from total — preserve full precision. Zero units make
+            // the per-unit cost undefined, and `total / 0` panics, so there is
+            // no cost to resolve: return `None` and let the caller book an
+            // uncosted position. Matches the zero-units guard in
+            // `BookingEngine::apply`; before this, `validate`/`pad` (which call
+            // `resolve`) panicked on `0 X {{n CUR}}`.
+            CostNumber::Total { value: total } => {
+                if units.is_zero() {
+                    return None;
+                }
+                total / units.abs()
+            }
             // Already booked: `b.per_unit == b.total / |units|` by
             // `BookedCost::new`'s invariant, so this is identical to
             // the `Total` arm above but without the redivision.
@@ -802,6 +812,22 @@ mod tests {
         let total = cost.total_cost(dec!(10));
         assert_eq!(total.number, dec!(1500.00));
         assert_eq!(total.currency, "USD");
+    }
+
+    #[test]
+    fn resolve_total_cost_with_zero_units_returns_none_not_panic() {
+        // `0 X {{100 USD}}`: a Total cost over zero units. Before the guard,
+        // `total / units.abs()` was `100 / 0`, which PANICKED in `validate`/`pad`
+        // (which call `resolve`). It must now resolve to `None` (uncosted).
+        let spec = CostSpec::empty()
+            .with_number(CostNumber::Total {
+                value: dec!(100.00),
+            })
+            .with_currency("USD");
+        assert_eq!(spec.resolve(Decimal::ZERO, date(2024, 1, 15)), None);
+        // Non-zero units still resolve to the per-unit cost.
+        let cost = spec.resolve(dec!(4), date(2024, 1, 15)).unwrap();
+        assert_eq!(cost.number, dec!(25)); // 100 / 4
     }
 
     #[test]

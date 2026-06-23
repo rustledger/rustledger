@@ -69,6 +69,27 @@ impl Position {
         }
     }
 
+    /// Build the booked position for a posting's `units` and optional cost
+    /// spec: [`Self::with_cost`] when the cost spec resolves to a [`Cost`],
+    /// otherwise [`Self::simple`].
+    ///
+    /// Single source for the validator's inventory-addition path and the pad
+    /// engine, which had byte-identical copies (mirrors the cost-bearing add
+    /// branch of `BookingEngine::apply`). [`CostSpec::resolve`] returns `None`
+    /// for an empty `{}` spec or a zero-units `Total` cost, so those book as a
+    /// simple (uncosted) position rather than panicking.
+    #[must_use]
+    pub fn from_posting(
+        units: &Amount,
+        cost_spec: Option<&CostSpec>,
+        date: crate::NaiveDate,
+    ) -> Self {
+        match cost_spec.and_then(|cs| cs.resolve(units.number, date)) {
+            Some(cost) => Self::with_cost(units.clone(), cost),
+            None => Self::simple(units.clone()),
+        }
+    }
+
     /// Check if this position is empty (zero units).
     #[must_use]
     pub const fn is_empty(&self) -> bool {
@@ -206,6 +227,33 @@ mod tests {
         assert_eq!(pos.units.number, dec!(10));
         assert_eq!(pos.currency(), "AAPL");
         assert_eq!(pos.cost_currency(), Some("USD"));
+    }
+
+    #[test]
+    fn from_posting_resolves_cost_else_simple_and_survives_zero_units() {
+        use crate::{CostNumber, CostSpec};
+        use rust_decimal::Decimal;
+
+        let units = Amount::new(dec!(10), "AAPL");
+        // Resolvable cost spec → with_cost.
+        let spec = CostSpec::empty()
+            .with_number(CostNumber::PerUnit { value: dec!(150) })
+            .with_currency("USD");
+        let pos = Position::from_posting(&units, Some(&spec), date(2024, 1, 15));
+        assert_eq!(pos.cost_currency(), Some("USD"));
+        // No cost spec → simple.
+        let pos = Position::from_posting(&units, None, date(2024, 1, 15));
+        assert!(pos.cost.is_none());
+        // Zero-units Total cost → simple (no cost), NOT a divide-by-zero panic.
+        let zero = Amount::new(Decimal::ZERO, "AAPL");
+        let total = CostSpec::empty()
+            .with_number(CostNumber::Total { value: dec!(100) })
+            .with_currency("USD");
+        let pos = Position::from_posting(&zero, Some(&total), date(2024, 1, 15));
+        assert!(
+            pos.cost.is_none(),
+            "zero-units Total cost must book uncosted, not panic"
+        );
     }
 
     #[test]

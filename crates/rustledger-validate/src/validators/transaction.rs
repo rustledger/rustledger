@@ -594,15 +594,7 @@ pub fn process_inventory_addition(
     units: &Amount,
     txn: &Transaction,
 ) {
-    let position = if let Some(cost_spec) = &posting.cost {
-        if let Some(cost) = cost_spec.resolve(units.number, txn.date) {
-            rustledger_core::Position::with_cost(units.clone(), cost)
-        } else {
-            rustledger_core::Position::simple(units.clone())
-        }
-    } else {
-        rustledger_core::Position::simple(units.clone())
-    };
+    let position = rustledger_core::Position::from_posting(units, posting.cost.as_ref(), txn.date);
 
     inv.add(position);
 }

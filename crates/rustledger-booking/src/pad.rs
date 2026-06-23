@@ -158,15 +158,8 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                     if let Some(units) = posting.amount()
                         && let Some(inv) = inventories.get_mut(&posting.account)
                     {
-                        let position = if let Some(cost_spec) = &posting.cost {
-                            if let Some(cost) = cost_spec.resolve(units.number, txn.date) {
-                                Position::with_cost(units.clone(), cost)
-                            } else {
-                                Position::simple(units.clone())
-                            }
-                        } else {
-                            Position::simple(units.clone())
-                        };
+                        let position =
+                            Position::from_posting(units, posting.cost.as_ref(), txn.date);
                         inv.add(position);
                     }
                 }

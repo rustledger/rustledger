@@ -154,6 +154,9 @@ jobs:
           mkdir -p .github/badges
           curl -sSf https://raw.githubusercontent.com/${{ github.repository }}/compatibility/.github/badges/compat-check-results.jsonl \
             -o .github/badges/previous-check-results.jsonl 2>/dev/null || echo "" > .github/badges/previous-check-results.jsonl
+          # BQL baseline (main's per-query results) for the regression gate below.
+          curl -sSf https://raw.githubusercontent.com/${{ github.repository }}/compatibility/.github/badges/compat-bql-results.jsonl \
+            -o .github/badges/previous-bql-results.jsonl 2>/dev/null || echo "" > .github/badges/previous-bql-results.jsonl
       - name: Run comprehensive compatibility test
         id: compat_test
         run: |
@@ -625,11 +628,15 @@ jobs:
         id: bql_compat
         run: |
           echo "=== BQL Compatibility Test ==="
+          # --baseline makes this step EXIT NON-ZERO (fail the job) if any
+          # (file, query) pair that matched on main now fails — i.e. a BQL
+          # regression. This is what blocks a JOURNAL-style drop from merging.
           python3 scripts/compat-bql-test.py \
             --corpus tests/compatibility/bql-queries.toml \
             --files-from compat-check-results.jsonl \
             --rledger ./target/release/rledger \
             --output compat-bql-results.jsonl \
+            --baseline .github/badges/previous-bql-results.jsonl \
             --github-output
       - name: Generate YAML summary
         run: |

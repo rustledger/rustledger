@@ -549,6 +549,16 @@ def main() -> int:
         default=MAX_FILES,
         help="Test against at most this many files",
     )
+    ap.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help=(
+            "Baseline JSONL (a previous run's --output) to gate against. "
+            "Exit non-zero if any (file, query) pair that matched in the "
+            "baseline now fails — i.e. a regression."
+        ),
+    )
     args = ap.parse_args()
 
     queries = load_corpus(args.corpus)
@@ -759,6 +769,45 @@ def main() -> int:
                 f.write(f"bql_known_rust={known_rs}\n")
                 f.write(f"bql_pct={pct}\n")
                 f.write(f"bql_weak_queries={len(weak)}\n")
+
+    # Regression gate. Compare against a baseline run (e.g. main's results from
+    # the `compatibility` branch) and FAIL if any (file, query) pair that
+    # *matched* in the baseline now fails. Comparing per-pair — not the overall
+    # percentage — is robust to corpus/coverage changes: a pair that simply drops
+    # out of the run (its file no longer qualifies) is NOT counted, only a real
+    # true→false flip is. This is the gate that would have caught the JOURNAL
+    # regression (90→12 matches) that previously merged unblocked.
+    if args.baseline and args.baseline.exists():
+        baseline_passing = set()
+        with open(args.baseline) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                b = json.loads(line)
+                if b.get("match"):
+                    baseline_passing.add((b.get("file"), b.get("query_name")))
+
+        regressed = [
+            r
+            for r in results
+            if not r.match and (r.file, r.query_name) in baseline_passing
+        ]
+        if regressed:
+            print()
+            print(
+                f"::error::BQL compat regression: {len(regressed)} (file, query) "
+                f"pair(s) that matched on the baseline now fail"
+            )
+            for r in sorted(regressed, key=lambda r: (r.query_name, r.file))[:30]:
+                print(f"  REGRESSED: {r.query_name} | {r.file}")
+            if len(regressed) > 30:
+                print(f"  ... and {len(regressed) - 30} more")
+            return 1
+        print(
+            f"\nNo BQL regressions vs baseline "
+            f"({len(baseline_passing)} baseline-passing pairs checked)."
+        )
 
     return 0
 

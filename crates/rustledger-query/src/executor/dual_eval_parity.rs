@@ -167,10 +167,13 @@ fn drift_root_negative_depth() {
         lazy.unwrap().is_err(),
         "lazy ROOT(acct,-1) should error (depth guard)"
     );
+    // The `*i as usize` cast turns -1 into usize::MAX, so `n >= parts.len()`
+    // and eager returns the WHOLE account verbatim. Assert that exact value so
+    // the pin can't be satisfied by some other accidental Ok result.
     assert!(
-        eager.is_ok(),
-        "eager ROOT(acct,-1) currently does NOT error (the `*i as usize` bug) — \
-         flip this pin when the lazy guard is ported into the eager arm"
+        matches!(&eager, Ok(Value::String(a)) if a == "Assets:Bank:Checking"),
+        "eager ROOT(acct,-1) currently returns the whole account (the `*i as usize` bug), \
+         got {eager:?} — flip this pin when the lazy guard is ported into the eager arm"
     );
 }
 
@@ -196,23 +199,29 @@ fn drift_getitem_on_null() {
 fn drift_extended_date_functions_missing_from_eager() {
     let directives: Vec<Directive> = Vec::new();
     let executor = Executor::new(&directives);
-    for name in [
-        "DATE",
-        "DATE_ADD",
-        "DATE_TRUNC",
-        "DATE_PART",
-        "PARSE_DATE",
-        "DATE_BIN",
-        "INTERVAL",
-    ] {
-        let r = executor.evaluate_function_on_values(
-            name,
-            &[Value::Integer(2024), Value::Integer(1), Value::Integer(15)],
-        );
+    let d = |y, m, day| Value::Date(naive_date(y, m, day).unwrap());
+    // Per-function args that would be VALID once the function is registered, so
+    // the only reason to error is that the name is unknown. Asserting the error
+    // is specifically `UnknownFunction` (not just any error) means a partial
+    // registration that errors on arity/type instead flips this pin red.
+    let cases: &[(&str, Vec<Value>)] = &[
+        ("DATE", vec![s("2024-01-15")]),
+        ("DATE_ADD", vec![d(2024, 1, 15), Value::Integer(5)]),
+        ("DATE_TRUNC", vec![d(2024, 1, 15), s("month")]),
+        ("DATE_PART", vec![s("year"), d(2024, 1, 15)]),
+        ("PARSE_DATE", vec![s("2024-01-15")]),
+        (
+            "DATE_BIN",
+            vec![Value::Integer(1), d(2024, 1, 15), d(2024, 1, 1)],
+        ),
+        ("INTERVAL", vec![Value::Integer(1), s("day")]),
+    ];
+    for (name, args) in cases {
+        let r = executor.evaluate_function_on_values(name, args);
         assert!(
-            r.is_err(),
-            "eager {name} currently errors (UnknownFunction) — flip this pin when {name} \
-             is registered in the eager dispatcher"
+            matches!(r, Err(QueryError::UnknownFunction(_))),
+            "eager {name} currently errors with UnknownFunction, got {r:?} — flip this pin \
+             when {name} is registered in the eager dispatcher"
         );
     }
 }

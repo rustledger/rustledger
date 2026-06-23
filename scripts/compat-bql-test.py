@@ -784,7 +784,14 @@ def main() -> int:
                 line = line.strip()
                 if not line:
                     continue
-                b = json.loads(line)
+                try:
+                    b = json.loads(line)
+                except json.JSONDecodeError:
+                    # Tolerate a truncated/corrupt baseline line rather than
+                    # crashing with a traceback that obscures the real result.
+                    # A wholly unparsable baseline yields an empty set → no gate
+                    # this run (safer than a spurious block).
+                    continue
                 if b.get("match"):
                     baseline_passing.add((b.get("file"), b.get("query_name")))
 

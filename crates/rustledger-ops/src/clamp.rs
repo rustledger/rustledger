@@ -262,6 +262,11 @@ pub fn clamp_indexed(
             // Core directives carry no content hash; a Display key keeps the
             // order deterministic (the JSON version sorted by meta.hash).
             .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
+            // Final tiebreaker so distinct entries with an identical
+            // (date, type, Display) sort to a total order regardless of
+            // `sort_by`'s instability. Synthesized entries (`None`) precede
+            // pass-throughs by `Option` ordering.
+            .then_with(|| a.1.cmp(&b.1))
     });
     all
 }

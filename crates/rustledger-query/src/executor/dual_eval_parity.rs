@@ -192,17 +192,13 @@ fn reconciled_getitem_on_null_both_null() {
     );
 }
 
-/// The 7 extended-date functions work in the lazy path but error
-/// `UnknownFunction` in the eager path. Reconciliation registers them in eager.
+/// RECONCILED: the 7 extended-date functions previously worked only in the lazy
+/// path and errored `UnknownFunction` in the eager path. They are now registered
+/// in the eager dispatcher (sharing the same value-cores as the lazy shells), so
+/// both paths produce them and agree.
 #[test]
-fn drift_extended_date_functions_missing_from_eager() {
-    let directives: Vec<Directive> = Vec::new();
-    let executor = Executor::new(&directives);
+fn reconciled_extended_date_functions_registered_in_eager() {
     let d = |y, m, day| Value::Date(naive_date(y, m, day).unwrap());
-    // Per-function args that would be VALID once the function is registered, so
-    // the only reason to error is that the name is unknown. Asserting the error
-    // is specifically `UnknownFunction` (not just any error) means a partial
-    // registration that errors on arity/type instead flips this pin red.
     let cases: &[(&str, Vec<Value>)] = &[
         ("DATE", vec![s("2024-01-15")]),
         ("DATE_ADD", vec![d(2024, 1, 15), Value::Integer(5)]),
@@ -216,12 +212,14 @@ fn drift_extended_date_functions_missing_from_eager() {
         ("INTERVAL", vec![Value::Integer(1), s("day")]),
     ];
     for (name, args) in cases {
-        let r = executor.evaluate_function_on_values(name, args);
+        let (eager, _) = run_both(name, args);
+        // No longer absent from the eager dispatcher...
         assert!(
-            matches!(r, Err(QueryError::UnknownFunction(_))),
-            "eager {name} currently errors with UnknownFunction, got {r:?} — flip this pin \
-             when {name} is registered in the eager dispatcher"
+            !matches!(eager, Err(QueryError::UnknownFunction(_))),
+            "{name} should be registered in the eager dispatcher now, got {eager:?}"
         );
+        // ...and both paths agree (they share one value-core).
+        assert_parity(name, args);
     }
 }
 

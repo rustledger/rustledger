@@ -1489,6 +1489,13 @@ impl<'a> Executor<'a> {
                     )),
                 }
             }
+            "DATE" => Self::date_construct_on_values(args),
+            "DATE_ADD" => Self::date_add_on_values(args),
+            "DATE_TRUNC" => Self::date_trunc_on_values(args),
+            "DATE_PART" => Self::date_part_on_values(args),
+            "PARSE_DATE" => Self::parse_date_on_values(args),
+            "DATE_BIN" => Self::date_bin_on_values(args),
+            "INTERVAL" => Self::interval_on_values(args),
             // Date: DATE_DIFF for wrapping aggregates like DATE_DIFF(MAX(date), MIN(date))
             "DATE_DIFF" => {
                 Self::require_args_count(&name_upper, args, 2)?;

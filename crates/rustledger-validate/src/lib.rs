@@ -304,10 +304,10 @@ pub struct LedgerState {
     inventories: FxHashMap<rustledger_core::Account, Inventory>,
     /// Lexically-sorted view of the `inventories` keys — the sub-account prefix
     /// index. Kept in lockstep with `inventories` (both gain a key only in
-    /// `register_open`/`register_open_late`; keys are never removed). Lets
-    /// [`Self::sum_account_and_subaccounts`] answer a balance assertion with a
-    /// range query over just the target's subtree, instead of an O(all-accounts)
-    /// scan per assertion (`Account`'s `Ord`/`Borrow<str>` are lexical).
+    /// `validate_open`/`register_open_late`; keys are never removed). Lets
+    /// [`sum_account_subtree`] answer a balance assertion with a range query over
+    /// just the target's subtree, instead of an O(all-accounts) scan per
+    /// assertion (`Account`'s `Ord`/`Borrow<str>` are lexical).
     inventory_accounts: BTreeSet<Account>,
     /// Declared commodities.
     commodities: FxHashSet<rustledger_core::Currency>,
@@ -478,9 +478,14 @@ fn sum_account_subtree(
         .map_or(Decimal::ZERO, |inv| inv.units(currency));
     // Its sub-accounts: the contiguous `["A:", "A;")` range. The explicit
     // `Bound` tuple gives `RangeBounds<str>` (a `&str..&str` range would be
-    // `RangeBounds<&str>`, which `range::<str>` doesn't accept).
-    let lower = format!("{acct}:");
-    let upper = format!("{acct};");
+    // `RangeBounds<&str>`, which `range::<str>` doesn't accept). Build the two
+    // bound strings without `format!` — this runs per balance assertion.
+    let mut lower = String::with_capacity(acct.len() + 1);
+    lower.push_str(acct);
+    lower.push(':');
+    let mut upper = String::with_capacity(acct.len() + 1);
+    upper.push_str(acct);
+    upper.push(';');
     let bounds = (
         std::ops::Bound::Included(lower.as_str()),
         std::ops::Bound::Excluded(upper.as_str()),
@@ -1145,7 +1150,7 @@ mod tests {
 
     #[test]
     fn sum_account_subtree_matches_scan_and_excludes_prefix_siblings() {
-        // Build inventories + the prefix index exactly as `register_open` does.
+        // Build inventories + the prefix index exactly as `validate_open` does.
         let mut state = LedgerState::default();
         let fixture = [
             ("Assets:Bank", dec!(10)),

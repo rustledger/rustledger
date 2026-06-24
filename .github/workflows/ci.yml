@@ -372,7 +372,15 @@ jobs:
           toolchain: stable
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      # `cargo bench` compiles the lib WITHOUT its `#[test]` fns (only `#[bench]`
+      # + the lib), so test-only helpers used solely by `#[test]` look dead here
+      # and the workflow-wide `-Dwarnings` (env above) would fail the gate on
+      # incidental dead-code — not a bench-compile problem. Cap lints to `warn`
+      # so this job checks *compilation* only; clippy / `ci` lint the real
+      # targets. A genuine compile error still fails (cap-lints affects lints).
       - name: Compile all criterion benches (--no-run)
+        env:
+          RUSTFLAGS: "--cap-lints=warn"
         run: cargo bench --workspace --no-run
   # Slim-build ratchet (#1427/#867): `cargo install rustledger
   # --no-default-features` must stay wasmtime/cranelift-free so the minimal

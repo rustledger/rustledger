@@ -892,13 +892,15 @@ fn lexically_normalize(p: &Path) -> std::path::PathBuf {
 /// Whether a `resolved` plugin path stays within `base_dir` under path-security.
 ///
 /// When the plugin file exists, both sides are `canonicalize`d so symlinks are
-/// resolved (symlink-safe). When it does NOT (a not-yet-created path, a typo, a
-/// permission error), both sides fall back to [`lexically_normalize`] in the
-/// SAME namespace, so a `..` escape is still caught. This closes the fail-OPEN
-/// hole in the previous `let (Ok, Ok) = (canonicalize, canonicalize)` guard,
-/// which skipped the check entirely whenever either `canonicalize` returned
-/// `Err` — and which, even on success, string-prefix-matched an unresolved
-/// absolute `/base/../../etc` past `/base` because `..` was never collapsed.
+/// resolved (symlink-safe). When it does NOT *yet* exist (`NotFound`), both sides
+/// fall back to [`lexically_normalize`] in the SAME namespace, so a `..` escape
+/// is still caught. Any OTHER canonicalize error (permission denied, I/O) is
+/// genuinely unverifiable and is REJECTED — fail closed. This closes the
+/// fail-OPEN hole in the previous `let (Ok, Ok) = (canonicalize, canonicalize)`
+/// guard, which skipped the check entirely whenever either `canonicalize`
+/// returned `Err` — and which, even on success, string-prefix-matched an
+/// unresolved absolute `/base/../../etc` past `/base` because `..` was never
+/// collapsed.
 #[cfg(feature = "plugins")]
 fn plugin_path_within_base(resolved: &Path, base_dir: &Path) -> bool {
     match resolved.canonicalize() {
@@ -908,7 +910,12 @@ fn plugin_path_within_base(resolved: &Path, base_dir: &Path) -> bool {
             // namespace, so fail closed.
             Err(_) => false,
         },
-        Err(_) => lexically_normalize(resolved).starts_with(lexically_normalize(base_dir)),
+        // Only a not-yet-existing path falls back to the lexical `..` check; a
+        // permission/I/O error is unverifiable, so reject rather than guess.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            lexically_normalize(resolved).starts_with(lexically_normalize(base_dir))
+        }
+        Err(_) => false,
     }
 }
 

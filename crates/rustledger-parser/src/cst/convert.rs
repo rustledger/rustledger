@@ -711,14 +711,11 @@ fn convert_transaction(
     // with no flag token; defaults to '*').
     let flag = node.flag().map_or('*', |f| flag_char_from_transaction(&f));
 
-    // Header strings: with 2 -> payee + narration; with 1 ->
-    // narration-only; with 3+ -> ambiguous (typed-AST surface
-    // returns None for both, matching the round-2 review fix).
-    let strings: Vec<String> = node.strings().filter_map(|s| s.text_decoded()).collect();
-    // Consume via the iterator (no count-then-unwrap): 0 -> empty narration;
-    // 1 -> narration only; 2 -> payee + narration; 3+ -> surface only the last
-    // as narration (middles unreachable through this typed shape).
-    let mut it = strings.into_iter();
+    // Header strings, consumed straight off the iterator (no intermediate Vec,
+    // no count-then-unwrap): 0 -> empty narration; 1 -> narration only;
+    // 2 -> payee + narration; 3+ -> surface only the last as narration (the
+    // middles are unreachable through this typed shape).
+    let mut it = node.strings().filter_map(|s| s.text_decoded());
     let (payee_str, narration_str) = match (it.next(), it.next(), it.next()) {
         (None, _, _) => (None, String::new()),
         (Some(n), None, _) => (None, n),

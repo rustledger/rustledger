@@ -99,7 +99,7 @@ pub struct TransferMatch {
 /// tag are skipped.
 #[must_use]
 pub fn find_transfers(
-    groups: &[(String, Vec<LocatedDirective>)],
+    groups: &[(String, Vec<LocatedDirective<'_>>)],
     config: &TransferConfig,
 ) -> Vec<TransferMatch> {
     let mut matches = Vec::new();

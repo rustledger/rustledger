@@ -251,6 +251,8 @@ fn meta_to_f64(v: &MetaValue) -> Option<f64> {
             use rust_decimal::prelude::ToPrimitive;
             d.to_f64()
         }
+        #[allow(clippy::cast_precision_loss)] // metadata magnitudes are tiny
+        MetaValue::Int(i) => Some(*i as f64),
         _ => None,
     }
 }

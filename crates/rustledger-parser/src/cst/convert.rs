@@ -35,6 +35,7 @@
 //! values in custom directives.
 
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rustledger_core::cost::{CostNumber, CostSpec};
 use rustledger_core::directive::{PriceAnnotation, PriceKind};
 use rustledger_core::{
@@ -673,7 +674,7 @@ fn extract_custom_values(node: &crate::SyntaxNode) -> Vec<MetaValue> {
                     continue;
                 }
                 if let Some(num) = parse_decimal_token(t.text()) {
-                    values.push(MetaValue::Number(num));
+                    values.push(number_meta_value(t.text(), num));
                 }
             }
             crate::SyntaxKind::DATE => {
@@ -1507,6 +1508,22 @@ fn meta_entry_has_minus_sign(entry: &MetaEntry) -> bool {
 /// typed [`MetaValue`]. Matches the legacy parser's preference
 /// order: string > number > date > account > currency > tag >
 /// link > bool > none.
+/// Classify a parsed numeric metadata literal. An *integer* literal — no decimal
+/// point or exponent in the source text, and within `i64` range — becomes
+/// [`MetaValue::Int`] for beancount type fidelity (`key: 42` is an int, `key: 42.0`
+/// a Decimal). Decimals, exponents, and `i64`-overflow stay [`MetaValue::Number`].
+/// `token_text` is the raw NUMBER token (the sign lives in a separate token, so it
+/// never appears here); `value` is the already-signed parsed decimal.
+fn number_meta_value(token_text: &str, value: Decimal) -> MetaValue {
+    if !token_text.contains(['.', 'e', 'E'])
+        && let Some(i) = value.to_i64()
+    {
+        MetaValue::Int(i)
+    } else {
+        MetaValue::Number(value)
+    }
+}
+
 fn meta_value_from_entry(entry: &MetaEntry) -> MetaValue {
     if let Some(s) = entry.value_string()
         && let Some(text) = s.text_decoded()
@@ -1529,7 +1546,7 @@ fn meta_value_from_entry(entry: &MetaEntry) -> MetaValue {
         if let Some(c) = entry.value_currency() {
             return MetaValue::Amount(Amount::new(decimal, Currency::new(c.text())));
         }
-        return MetaValue::Number(decimal);
+        return number_meta_value(n.text(), decimal);
     }
     if let Some(d) = entry.value_date()
         && let Some(date) = parse_date_token(d.text())
@@ -1631,7 +1648,7 @@ fn pushmeta_value(node: &crate::SyntaxNode) -> MetaValue {
             }
             crate::SyntaxKind::NUMBER => {
                 if let Some(n) = parse_decimal_token(t.text()) {
-                    return MetaValue::Number(n);
+                    return number_meta_value(t.text(), n);
                 }
             }
             crate::SyntaxKind::DATE => {
@@ -2580,9 +2597,35 @@ mod tests {
             open.meta.get("note"),
             Some(&MetaValue::String("main checking".to_string()))
         );
-        assert_eq!(
-            open.meta.get("number"),
-            Some(&MetaValue::Number(Decimal::from(42)))
+        // An integer literal parses as `Int` (beancount type fidelity), not `Number`.
+        assert_eq!(open.meta.get("number"), Some(&MetaValue::Int(42)));
+    }
+
+    #[test]
+    fn metadata_integer_vs_decimal_vs_overflow() {
+        // `42` -> Int; `42.0` and `4.2e1` (decimal point / exponent) -> Number;
+        // an i64-overflowing integer literal stays Number (lossless).
+        let src = "2024-01-15 open Assets:Cash\n  i: 42\n  d: 42.0\n  e: 4.2e1\n  neg: -7\n  big: 9999999999999999999999\n";
+        let result = parse_via_cst(src);
+        let Directive::Open(open) = &result.directives[0].value else {
+            panic!("expected Open");
+        };
+        assert_eq!(open.meta.get("i"), Some(&MetaValue::Int(42)));
+        assert_eq!(open.meta.get("neg"), Some(&MetaValue::Int(-7)));
+        assert!(
+            matches!(open.meta.get("d"), Some(MetaValue::Number(_))),
+            "decimal-point literal must be Number, got {:?}",
+            open.meta.get("d")
+        );
+        assert!(
+            matches!(open.meta.get("e"), Some(MetaValue::Number(_))),
+            "exponent literal must be Number, got {:?}",
+            open.meta.get("e")
+        );
+        assert!(
+            matches!(open.meta.get("big"), Some(MetaValue::Number(_))),
+            "i64-overflow integer literal must stay Number, got {:?}",
+            open.meta.get("big")
         );
     }
 
@@ -2750,7 +2793,8 @@ mod tests {
         assert_eq!(c.values.len(), 4);
         assert!(matches!(c.values[0], MetaValue::Account(_)));
         assert_eq!(c.values[1], MetaValue::Bool(true));
-        assert_eq!(c.values[2], MetaValue::Number(Decimal::from(42)));
+        // `42` is an integer literal -> `Int` (beancount type fidelity).
+        assert_eq!(c.values[2], MetaValue::Int(42));
         assert!(matches!(c.values[3], MetaValue::Date(_)));
     }
 

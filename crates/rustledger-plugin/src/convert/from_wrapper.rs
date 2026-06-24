@@ -250,7 +250,15 @@ pub(super) fn data_to_meta_value(data: &MetaValueData) -> MetaValue {
     match data {
         MetaValueData::String(s) => MetaValue::String(s.clone()),
         MetaValueData::Number(s) => {
-            if let Ok(n) = Decimal::from_str_exact(s) {
+            // The wire has no integer case (`to_wrapper` sends `Int` as a numeric
+            // string), so try `i64` first to round-trip integer metadata as `Int`;
+            // anything with a decimal point/exponent, or out of `i64` range, stays
+            // `Number`; a non-numeric string degrades to `String`.
+            if !s.contains(['.', 'e', 'E'])
+                && let Ok(i) = s.parse::<i64>()
+            {
+                MetaValue::Int(i)
+            } else if let Ok(n) = Decimal::from_str_exact(s) {
                 MetaValue::Number(n)
             } else {
                 MetaValue::String(s.clone())

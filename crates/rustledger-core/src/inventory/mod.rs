@@ -2327,6 +2327,52 @@ mod tests {
     }
 
     #[test]
+    fn is_booking_reduction_gates_on_method_cost_and_sign() {
+        // A cost-bearing long position.
+        let mut inv = Inventory::new();
+        inv.add(Position::with_cost(
+            Amount::new(dec!(10), "AAPL"),
+            Cost::new(dec!(150), "USD").with_date(date(2024, 1, 1)),
+        ));
+
+        let sell = Amount::new(dec!(-5), "AAPL"); // opposite sign of the held lot
+        let buy = Amount::new(dec!(5), "AAPL"); // same sign
+        let spec = CostSpec::empty(); // only spec *presence* (is_some) matters here
+
+        // Opposite-sign units carrying a cost spec under a lot-matching method
+        // is the one combination that reduces.
+        assert!(inv.is_booking_reduction(&sell, Some(&spec), BookingMethod::Strict));
+        // NONE never reduces — every posting accumulates (#1182).
+        assert!(!inv.is_booking_reduction(&sell, Some(&spec), BookingMethod::None));
+        // No cost spec -> augmentation.
+        assert!(!inv.is_booking_reduction(&sell, None, BookingMethod::Strict));
+        // Same sign as the held lot -> augmentation.
+        assert!(!inv.is_booking_reduction(&buy, Some(&spec), BookingMethod::Strict));
+    }
+
+    #[test]
+    fn sum_account_and_subaccounts_sums_children_not_prefix_siblings() {
+        let mut bank = Inventory::new();
+        bank.add(Position::simple(Amount::new(dec!(10), "USD")));
+        let mut checking = Inventory::new(); // sub-account: included
+        checking.add(Position::simple(Amount::new(dec!(40), "USD")));
+        let mut alias = Inventory::new(); // prefix sibling: excluded
+        alias.add(Position::simple(Amount::new(dec!(99), "USD")));
+
+        let mut map: FxHashMap<Account, Inventory> = FxHashMap::default();
+        map.insert(Account::from("Assets:Bank"), bank);
+        map.insert(Account::from("Assets:Bank:Checking"), checking);
+        map.insert(Account::from("Assets:BankAlias"), alias);
+
+        let total = sum_account_and_subaccounts(map.iter(), "Assets:Bank", &Currency::from("USD"));
+        assert_eq!(
+            total,
+            dec!(50),
+            "parent (10) + sub-account (40), excluding the Assets:BankAlias prefix sibling"
+        );
+    }
+
+    #[test]
     fn test_accounted_error_display_insufficient_units() {
         let err = BookingError::InsufficientUnits {
             currency: "AAPL".into(),

@@ -113,6 +113,10 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
 # absorbed by the same allowlist. Reported separately in the per-CI
 # summary so the count of Rust-side divergences is visible at a glance.
 #
+# Both lists are stale-checked at runtime (`stale_divergence_entries`): an entry
+# whose pair now MATCHES bean-query fails the run, so a mask can't outlive the
+# divergence it documents and then absorb a real regression on the same pair.
+#
 # Keyed by `(filename, query_name)` with the same surgical-pin semantics
 # as `KNOWN_PYTHON_DIVERGENCES`. Counted as "known" for the effective
 # match percentage (the values are correct — only display scale differs),
@@ -228,6 +232,127 @@ def _is_known_divergence(run: "QueryRun") -> bool:
     without caring which side has the bug.
     """
     return _is_known_python_divergence(run) or _is_known_rust_divergence(run)
+
+
+def _index_runs(
+    results: "list[QueryRun]",
+) -> "tuple[dict[tuple[str, str], list[QueryRun]], dict[str, list[QueryRun]]]":
+    """Index runs by `(file, query)` and by `file` for the stale-mask check."""
+    by_pair: dict[tuple[str, str], list] = {}
+    by_file: dict[str, list] = {}
+    for r in results:
+        by_pair.setdefault((r.file, r.query_name), []).append(r)
+        by_file.setdefault(r.file, []).append(r)
+    return by_pair, by_file
+
+
+def _stale_registry_entries(
+    registry: "set[tuple[str, str]]",
+    registry_name: str,
+    by_pair: "dict[tuple[str, str], list[QueryRun]]",
+    by_file: "dict[str, list[QueryRun]]",
+) -> "tuple[list[tuple[str, tuple[str, str]]], list[tuple[str, tuple[str, str]]]]":
+    """Split one registry's entries into (stale, dangling).
+
+    * STALE: the masked pair (or, for `(file, "*")`, every query on the file)
+      now MATCHES bean-query, so the divergence is gone.
+    * DANGLING: no run exercises the entry — the fixture or query was renamed
+      or removed.
+
+    Pure (takes the registry + the pre-built run indices) so it is unit-testable
+    without a live corpus; see `--self-test`.
+    """
+    stale: list = []
+    dangling: list = []
+    for file, query in registry:
+        if query == "*":
+            runs = by_file.get(file)
+            if not runs:
+                dangling.append((registry_name, (file, query)))
+            elif all(r.match for r in runs):
+                stale.append((registry_name, (file, query)))
+        else:
+            runs = by_pair.get((file, query))
+            if not runs:
+                dangling.append((registry_name, (file, query)))
+            elif all(r.match for r in runs):
+                stale.append((registry_name, (file, query)))
+    return stale, dangling
+
+
+def stale_divergence_entries(
+    results: "list[QueryRun]",
+) -> "tuple[list[tuple[str, tuple[str, str]]], list[tuple[str, tuple[str, str]]]]":
+    """Stale and dangling entries across both static deliberate-divergence lists.
+
+    The `KNOWN_*_DIVERGENCES` allowlists have no runtime check that the pair they
+    mask still actually diverges — a stale mask silently absorbs a future
+    regression that lands on the same pair. This applies the runtime
+    divergence-fingerprint defense that `_is_beanquery_empty_aggregate_quirk`
+    gives the one empty-aggregate quirk to the static lists too.
+    """
+    by_pair, by_file = _index_runs(results)
+    stale: list = []
+    dangling: list = []
+    for name, registry in (
+        ("KNOWN_PYTHON_DIVERGENCES", KNOWN_PYTHON_DIVERGENCES),
+        ("KNOWN_RUST_DIVERGENCES", KNOWN_RUST_DIVERGENCES),
+    ):
+        s, d = _stale_registry_entries(registry, name, by_pair, by_file)
+        stale += s
+        dangling += d
+    return stale, dangling
+
+
+def _run_self_test() -> int:
+    """Validate the stale-mask detection logic without a corpus or the tools.
+
+    Builds synthetic runs + registries and asserts `_stale_registry_entries`
+    flags exactly the now-matching (stale) and never-run (dangling) entries.
+    """
+
+    def run(file: str, query: str, match: bool) -> "QueryRun":
+        return QueryRun(file=file, query_name=query, query="", match=match)
+
+    runs = [
+        run("a.beancount", "q1", match=True),  # registered + matches -> STALE
+        run("a.beancount", "q2", match=False),  # registered + diverges -> OK
+        run("b.beancount", "q1", match=True),  # wildcard file, all match -> STALE
+        run("b.beancount", "q2", match=True),
+        run("c.beancount", "q1", match=False),  # wildcard file, one diverges -> OK
+        run("c.beancount", "q2", match=True),
+    ]
+    by_pair, by_file = _index_runs(runs)
+
+    surgical = {
+        ("a.beancount", "q1"),
+        ("a.beancount", "q2"),
+        ("gone.beancount", "q9"),
+    }
+    stale, dangling = _stale_registry_entries(surgical, "T", by_pair, by_file)
+    assert ("T", ("a.beancount", "q1")) in stale, "matching pair must be flagged stale"
+    assert (
+        "T",
+        ("a.beancount", "q2"),
+    ) not in stale, "diverging pair must NOT be flagged"
+    assert (
+        "T",
+        ("gone.beancount", "q9"),
+    ) in dangling, "never-run pair must be dangling"
+
+    wildcard = {("b.beancount", "*"), ("c.beancount", "*")}
+    stale_w, _ = _stale_registry_entries(wildcard, "T", by_pair, by_file)
+    assert (
+        "T",
+        ("b.beancount", "*"),
+    ) in stale_w, "all-matching file must make its wildcard stale"
+    assert (
+        "T",
+        ("c.beancount", "*"),
+    ) not in stale_w, "a file with one diverging query keeps its wildcard live"
+
+    print("self-test OK: stale/dangling divergence detection behaves correctly")
+    return 0
 
 
 # ---------------------------------------------------------------------
@@ -559,7 +684,18 @@ def main() -> int:
             "baseline now fails — i.e. a regression."
         ),
     )
+    ap.add_argument(
+        "--self-test",
+        action="store_true",
+        help=(
+            "Validate the stale-divergence detection logic on synthetic data "
+            "and exit (no corpus or tools required)."
+        ),
+    )
     args = ap.parse_args()
+
+    if args.self_test:
+        return _run_self_test()
 
     queries = load_corpus(args.corpus)
     print(f"Corpus: {len(queries)} queries from {args.corpus.name}")
@@ -769,6 +905,34 @@ def main() -> int:
                 f.write(f"bql_known_rust={known_rs}\n")
                 f.write(f"bql_pct={pct}\n")
                 f.write(f"bql_weak_queries={len(weak)}\n")
+
+    # Stale-mask gate. A KNOWN_*_DIVERGENCE entry whose pair now MATCHES
+    # bean-query is a stale mask — it would silently absorb a future regression
+    # on that pair (the failure mode the registry rationale warns about), so fail
+    # and force its removal. Dangling entries (no run exercises them) are warned
+    # but not failed: a partially-fetched corpus can transiently drop a file, and
+    # a warning is enough to prompt a cleanup.
+    stale, dangling = stale_divergence_entries(results)
+    for name, (file, query) in sorted(dangling):
+        print(
+            f"::warning::deliberate-divergence registry {name}: entry "
+            f"({file!r}, {query!r}) is dangling — no run exercises it "
+            "(fixture or query renamed/removed?)."
+        )
+    if stale:
+        print()
+        print(
+            f"::error::{len(stale)} deliberate-divergence registry "
+            f"entr{'y' if len(stale) == 1 else 'ies'} no longer diverge — the "
+            "mask is stale and would silently absorb a future regression on the "
+            "same pair."
+        )
+        for name, (file, query) in sorted(stale):
+            print(
+                f"  STALE [{name}]: ({file!r}, {query!r}) now matches bean-query."
+                " Remove the entry (and its code comment / tracking-issue note)."
+            )
+        return 1
 
     # Regression gate. Compare against a baseline run (e.g. main's results from
     # the `compatibility` branch) and FAIL if any (file, query) pair that

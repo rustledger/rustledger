@@ -624,6 +624,13 @@ jobs:
                   for r in regressions:
                       f.write(r + "\n")
           EOF
+      - name: Validate stale-divergence detection logic
+        run: |
+          # Unit-checks the stale/dangling-mask detection on synthetic data, so
+          # the logic is guarded even if the live corpus run below is skipped or
+          # the fixtures fail to fetch. The live stale-mask gate runs inside the
+          # main BQL step.
+          python3 scripts/compat-bql-test.py --self-test
       - name: Run BQL compatibility test
         id: bql_compat
         run: |

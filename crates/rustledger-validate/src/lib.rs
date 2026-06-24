@@ -106,8 +106,9 @@ const PARALLEL_SORT_THRESHOLD: usize = 5000;
 const PARALLEL_DOC_EXISTS_THRESHOLD: usize = 64;
 use rust_decimal::Decimal;
 use rustc_hash::{FxHashMap, FxHashSet};
-use rustledger_core::{BookingMethod, Commodity, Directive, Inventory};
+use rustledger_core::{Account, BookingMethod, Commodity, Currency, Directive, Inventory};
 use rustledger_parser::{SYNTHESIZED_FILE_ID, Spanned};
+use std::collections::BTreeSet;
 
 /// Account state for tracking lifecycle.
 #[derive(Debug, Clone)]
@@ -301,6 +302,13 @@ pub struct LedgerState {
     accounts: FxHashMap<rustledger_core::Account, AccountState>,
     /// Account inventories.
     inventories: FxHashMap<rustledger_core::Account, Inventory>,
+    /// Lexically-sorted view of the `inventories` keys — the sub-account prefix
+    /// index. Kept in lockstep with `inventories` (both gain a key only in
+    /// `register_open`/`register_open_late`; keys are never removed). Lets
+    /// [`Self::sum_account_and_subaccounts`] answer a balance assertion with a
+    /// range query over just the target's subtree, instead of an O(all-accounts)
+    /// scan per assertion (`Account`'s `Ord`/`Borrow<str>` are lexical).
+    inventory_accounts: BTreeSet<Account>,
     /// Declared commodities.
     commodities: FxHashSet<rustledger_core::Currency>,
     /// Pending pad directives (account -> list of pads).
@@ -442,6 +450,47 @@ impl ValidatableDirective for Spanned<Directive> {
     fn span_info(&self) -> Option<(rustledger_parser::Span, u16)> {
         Some((self.span, self.file_id))
     }
+}
+
+/// Sum the units of `currency` across `account` and all of its sub-accounts —
+/// the value a `balance` assertion checks (beancount includes sub-accounts).
+///
+/// Uses the `inventory_accounts` prefix index instead of scanning every account:
+/// the subtree of `Assets:Bank` is `Assets:Bank` itself plus the keys in the
+/// half-open range `["Assets:Bank:", "Assets:Bank;")` (`;` is the byte after
+/// `:`), which captures every `Assets:Bank:*` and nothing else — equivalent to
+/// [`rustledger_core::is_subaccount_or_equal`], answered by a `BTreeSet` range
+/// query in O(log A + subtree) rather than O(A) per assertion. Equivalence to
+/// the unindexed [`rustledger_core::sum_account_and_subaccounts`] is pinned by a
+/// parity test. Takes the two fields directly (not `&self`) so callers can hold
+/// a disjoint `&mut` borrow of another `LedgerState` field (e.g. `pending_pads`)
+/// at the same time.
+fn sum_account_subtree(
+    inventories: &FxHashMap<Account, Inventory>,
+    index: &BTreeSet<Account>,
+    account: &Account,
+    currency: &Currency,
+) -> Decimal {
+    let acct = account.as_str();
+    // The account itself (the `== A` arm of `is_subaccount_or_equal`).
+    let mut total = inventories
+        .get(account)
+        .map_or(Decimal::ZERO, |inv| inv.units(currency));
+    // Its sub-accounts: the contiguous `["A:", "A;")` range. The explicit
+    // `Bound` tuple gives `RangeBounds<str>` (a `&str..&str` range would be
+    // `RangeBounds<&str>`, which `range::<str>` doesn't accept).
+    let lower = format!("{acct}:");
+    let upper = format!("{acct};");
+    let bounds = (
+        std::ops::Bound::Included(lower.as_str()),
+        std::ops::Bound::Excluded(upper.as_str()),
+    );
+    for sub in index.range::<str, _>(bounds) {
+        if let Some(inv) = inventories.get(sub) {
+            total += inv.units(currency);
+        }
+    }
+    total
 }
 
 /// Internal: run ONE validation phase over a sorted view of `directives`,
@@ -1092,6 +1141,56 @@ mod tests {
         errors.extend(late_errors);
         errors.extend(session.finalize());
         errors
+    }
+
+    #[test]
+    fn sum_account_subtree_matches_scan_and_excludes_prefix_siblings() {
+        // Build inventories + the prefix index exactly as `register_open` does.
+        let mut state = LedgerState::default();
+        let fixture = [
+            ("Assets:Bank", dec!(10)),
+            ("Assets:Bank:Checking", dec!(40)),
+            ("Assets:Bank:Savings", dec!(5)),
+            ("Assets:BankAlias", dec!(99)), // prefix sibling — must be excluded
+            ("Assets:Other", dec!(7)),
+        ];
+        for (name, amt) in fixture {
+            let acct = Account::from(name);
+            let mut inv = Inventory::new();
+            inv.add(rustledger_core::Position::simple(Amount::new(amt, "USD")));
+            state.inventories.insert(acct.clone(), inv);
+            state.inventory_accounts.insert(acct);
+        }
+
+        let cur = Currency::from("USD");
+        // The indexed sum must equal the unindexed core scan for every target.
+        for name in [
+            "Assets:Bank",
+            "Assets:Bank:Checking",
+            "Assets:BankAlias",
+            "Assets:Other",
+            "Assets:Missing",
+        ] {
+            let acct = Account::from(name);
+            let indexed =
+                sum_account_subtree(&state.inventories, &state.inventory_accounts, &acct, &cur);
+            let scan =
+                rustledger_core::sum_account_and_subaccounts(state.inventories.iter(), name, &cur);
+            assert_eq!(indexed, scan, "indexed vs scan disagree for {name}");
+        }
+
+        // Parent sums itself + sub-accounts (10 + 40 + 5 = 55), NOT BankAlias.
+        let bank = sum_account_subtree(
+            &state.inventories,
+            &state.inventory_accounts,
+            &Account::from("Assets:Bank"),
+            &cur,
+        );
+        assert_eq!(
+            bank,
+            dec!(55),
+            "Assets:Bank must sum its subtree, excluding the Assets:BankAlias prefix sibling"
+        );
     }
 
     #[test]

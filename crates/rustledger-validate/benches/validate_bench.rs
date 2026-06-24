@@ -208,10 +208,74 @@ fn bench_validate_balance_assertions(c: &mut Criterion) {
     group.finish();
 }
 
+/// Scale the (accounts × balance-assertions) product that
+/// `bench_validate_balance_assertions` fixes at 2×1. A parent balance assertion
+/// sums the whole subtree, so this is the dimension a quadratic
+/// `sum_account_and_subaccounts` regression would surface in — and the one the
+/// prefix index removes. Each `accounts` value runs `assertions` parent
+/// assertions, each summing every sub-account.
+fn bench_validate_subaccount_balance_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("validate_subaccount_balance_scaling");
+
+    let assertions = 50u32;
+    for accounts in [32u32, 64, 128] {
+        let mut directives = Vec::new();
+        directives.push(Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")));
+        directives.push(Directive::Open(Open::new(
+            date(2024, 1, 1),
+            "Income:Salary",
+        )));
+        for a in 0..accounts {
+            directives.push(Directive::Open(Open::new(
+                date(2024, 1, 1),
+                format!("Assets:Bank:Sub{a}"),
+            )));
+        }
+
+        // Fund each sub-account once.
+        let per = dec!(10.00);
+        for a in 0..accounts {
+            let txn = Transaction::new(date(2024, 1, 2), format!("fund {a}"))
+                .with_flag('*')
+                .with_synthesized_posting(Posting::new(
+                    format!("Assets:Bank:Sub{a}"),
+                    Amount::new(per, "USD"),
+                ))
+                .with_synthesized_posting(Posting::new("Income:Salary", Amount::new(-per, "USD")));
+            directives.push(Directive::Transaction(txn));
+        }
+
+        // Many assertions on the PARENT — each sums all `accounts` sub-accounts.
+        let total = per * rust_decimal::Decimal::from(accounts);
+        for i in 0..assertions {
+            let day = 3 + (i % 27);
+            directives.push(Directive::Balance(Balance::new(
+                date(2024, 1, day),
+                "Assets:Bank",
+                Amount::new(total, "USD"),
+            )));
+        }
+
+        group.throughput(Throughput::Elements(
+            u64::from(accounts) * u64::from(assertions),
+        ));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(accounts),
+            &directives,
+            |b, directives| {
+                b.iter(|| std::hint::black_box(validate(std::hint::black_box(directives))));
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_validate_valid,
     bench_validate_with_errors,
     bench_validate_balance_assertions,
+    bench_validate_subaccount_balance_scaling,
 );
 criterion_main!(benches);

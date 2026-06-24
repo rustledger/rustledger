@@ -60,6 +60,8 @@ pub fn validate_open(state: &mut LedgerState, open: &Open, errors: &mut Vec<Vali
     state
         .inventories
         .insert(open.account.clone(), Inventory::new());
+    // Keep the sub-account prefix index in lockstep with `inventories`.
+    state.inventory_accounts.insert(open.account.clone());
 }
 
 /// Late-phase: reflect an `Open` in account/inventory state without re-running
@@ -89,6 +91,8 @@ pub fn register_open_late(state: &mut LedgerState, open: &Open) {
     state
         .inventories
         .insert(open.account.clone(), Inventory::new());
+    // Keep the sub-account prefix index in lockstep with `inventories`.
+    state.inventory_accounts.insert(open.account.clone());
 }
 
 /// Early-phase Close validation — runs on pre-booking directives.

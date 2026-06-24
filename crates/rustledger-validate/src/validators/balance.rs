@@ -175,10 +175,13 @@ pub fn validate_balance_late(
         // Use the most recent effective pad
         if let Some(pending_pad) = effective_idx.last().and_then(|&i| pending_pads.get_mut(i)) {
             // Apply padding: calculate difference and add to both accounts
-            // Balance assertions include sub-accounts, so sum them all up
-            let actual = rustledger_core::sum_account_and_subaccounts(
-                state.inventories.iter(),
-                bal.account.as_str(),
+            // Balance assertions include sub-accounts; the prefix index answers
+            // this without scanning every account (disjoint borrow from the
+            // `pending_pad` mutable borrow held here).
+            let actual = crate::sum_account_subtree(
+                &state.inventories,
+                &state.inventory_accounts,
+                &bal.account,
                 &bal.amount.currency,
             );
             {
@@ -222,9 +225,10 @@ pub fn validate_balance_late(
     // Get inventory and check balance (no padding case).
     // In beancount, balance assertions include sub-accounts
     // e.g., balance Assets:Checking includes Assets:Checking:Sub1, etc.
-    let actual = rustledger_core::sum_account_and_subaccounts(
-        state.inventories.iter(),
-        bal.account.as_str(),
+    let actual = crate::sum_account_subtree(
+        &state.inventories,
+        &state.inventory_accounts,
+        &bal.account,
         &bal.amount.currency,
     );
 

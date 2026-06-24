@@ -395,9 +395,11 @@ pub fn value_to_json(value: &rustledger_query::Value) -> serde_json::Value {
             serde_json::Value::Object(map)
         }
         Value::Metadata(meta) => {
+            // `Display` (`foo`), matching the canonical CLI, not `Debug`
+            // (which leaked `String("foo")`).
             let obj: serde_json::Map<String, serde_json::Value> = meta
                 .iter()
-                .map(|(k, v)| (k.clone(), serde_json::json!(format!("{v:?}"))))
+                .map(|(k, v)| (k.clone(), serde_json::json!(format!("{v}"))))
                 .collect();
             serde_json::Value::Object(obj)
         }

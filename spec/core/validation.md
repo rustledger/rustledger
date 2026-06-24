@@ -256,6 +256,16 @@ This document catalogs all validation errors and warnings with their trigger con
   Assets:Cash
 ```
 
+### BOOKING_NEGATIVE_COST
+
+**Code:** `E4005`
+
+**Condition:** A posting's cost amount is negative (a cost must be non-negative).
+
+**Message:** `Cost is negative: {label} cost ({value} {cost_currency}) for {units} in posting to {account}`
+
+**Severity:** Error
+
 ## Currency Errors
 
 ### CURRENCY_NOT_DECLARED
@@ -285,6 +295,16 @@ This document catalogs all validation errors and warnings with their trigger con
   Assets:USDOnly   100 EUR  ; ERROR: Only USD allowed
   Income:Salary
 ```
+
+### COMMODITY_INVALID_PRECISION_META
+
+**Code:** `E5003`
+
+**Condition:** A `commodity` directive carries a `precision` metadata value that does not parse as a non-negative integer. The declaration is ignored (display precision falls back to `option "display_precision"`, otherwise to inference).
+
+**Message:** `invalid `precision` metadata on commodity {currency}: {reason}; this declaration is ignored — display precision falls back to `option "display_precision"` if set, otherwise to inference`
+
+**Severity:** Warning
 
 ## Option Errors
 

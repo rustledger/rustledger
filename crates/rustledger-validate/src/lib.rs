@@ -10,7 +10,7 @@
 //!
 //! # Error Codes
 //!
-//! All error codes follow the spec in `spec/validation.md`:
+//! All error codes follow the spec in `spec/core/validation.md`:
 //!
 //! | Code | Description |
 //! |------|-------------|

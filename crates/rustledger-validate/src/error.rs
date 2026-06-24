@@ -6,7 +6,9 @@ use thiserror::Error;
 
 /// Validation error codes.
 ///
-/// Error codes follow the spec in `spec/validation.md`.
+/// Error codes follow the spec in `spec/core/validation.md`. Every variant's
+/// [`ErrorCode::code`] is asserted to appear in that spec by
+/// `error_codes_documented_in_spec` (a drift guard).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     // === Account Errors (E1xxx) ===
@@ -37,6 +39,11 @@ pub enum ErrorCode {
     /// E3002: Multiple postings missing amounts for same currency.
     MultipleInterpolation,
     /// E3003: Transaction has no postings.
+    ///
+    /// Reserved for spec parity but **never emitted**: rledger skips validation
+    /// of a posting-less transaction rather than flagging it (matching Python
+    /// beancount, which treats it as a structurally-valid no-op). See the
+    /// early return in `validate_transaction` and the `no_postings` test.
     NoPostings,
     /// E3004: Transaction has single posting (warning).
     SinglePosting,
@@ -79,6 +86,39 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// Every error-code variant. Used by the spec-drift guard test (and any
+    /// catalog enumeration). MUST list every variant — keep it in sync with the
+    /// enum; the exhaustive [`code`](Self::code) match is the compiler-enforced
+    /// source of truth for the code strings themselves.
+    pub const ALL: &'static [Self] = &[
+        Self::AccountNotOpen,
+        Self::AccountAlreadyOpen,
+        Self::AccountClosed,
+        Self::AccountCloseNotEmpty,
+        Self::InvalidAccountName,
+        Self::BalanceAssertionFailed,
+        Self::BalanceToleranceExceeded,
+        Self::PadWithoutBalance,
+        Self::MultiplePadForBalance,
+        Self::TransactionUnbalanced,
+        Self::MultipleInterpolation,
+        Self::NoPostings,
+        Self::SinglePosting,
+        Self::NoMatchingLot,
+        Self::InsufficientUnits,
+        Self::AmbiguousLotMatch,
+        Self::NegativeCost,
+        Self::UndeclaredCurrency,
+        Self::CurrencyNotAllowed,
+        Self::InvalidPrecisionMetadata,
+        Self::UnknownOption,
+        Self::InvalidOptionValue,
+        Self::DuplicateOption,
+        Self::DocumentNotFound,
+        Self::DateOutOfOrder,
+        Self::FutureDate,
+    ];
+
     /// Get the error code string (e.g., "E1001").
     #[must_use]
     pub const fn code(&self) -> &'static str {
@@ -295,6 +335,36 @@ impl ValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_codes_documented_in_spec() {
+        // Drift guard: every `ErrorCode` must be documented in the validation
+        // spec. (The spec may also carry codes emitted by other crates — e.g.
+        // loader include errors E9001/E9002 — so this is a subset check, not
+        // strict equality.) Codes are backtick-wrapped in the spec (`**Code:**
+        // `E1001``), so the backtick delimiters keep `E1001` from matching
+        // inside `E10001`.
+        let spec = include_str!("../../../spec/core/validation.md");
+        let missing: Vec<&str> = ErrorCode::ALL
+            .iter()
+            .map(ErrorCode::code)
+            .filter(|code| !spec.contains(&format!("`{code}`")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "error codes missing from spec/core/validation.md: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn all_lists_distinct_codes() {
+        // Cheap completeness/dup guard for `ALL`: every code string is unique.
+        let mut codes: Vec<&str> = ErrorCode::ALL.iter().map(ErrorCode::code).collect();
+        let n = codes.len();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), n, "duplicate code in ErrorCode::ALL");
+    }
 
     #[test]
     fn invalid_account_name_is_parse_phase() {

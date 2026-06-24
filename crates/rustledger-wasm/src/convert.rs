@@ -270,10 +270,11 @@ pub fn value_to_cell(value: &rustledger_query::Value) -> CellValue {
             CellValue::Set(values.iter().map(|v| Box::new(value_to_cell(v))).collect())
         }
         Value::Metadata(meta) => {
-            // Convert metadata to a string representation
+            // Render values via `Display` (`foo`), matching the canonical CLI
+            // (`cmd/query/output.rs`), not `Debug` (which leaked `String("foo")`).
             let repr = meta
                 .iter()
-                .map(|(k, v)| format!("{k}: {v:?}"))
+                .map(|(k, v)| format!("{k}: {v}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             CellValue::String(repr)

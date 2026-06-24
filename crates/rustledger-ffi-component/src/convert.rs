@@ -383,8 +383,10 @@ fn query_value(v: &Value) -> wit::QueryValue {
         Value::Inventory(inv) => Q::Inventory(inv.positions().map(position).collect()),
         Value::StringSet(set) => Q::StringSet(set.clone()),
         Value::Metadata(m) => Q::Metadata(
+            // `Display` (`foo`), matching the canonical CLI, not `Debug`
+            // (which leaked `String("foo")`).
             m.iter()
-                .map(|(k, val)| (k.clone(), format!("{val:?}")))
+                .map(|(k, val)| (k.clone(), format!("{val}")))
                 .collect(),
         ),
         Value::Interval(iv) => Q::Interval(wit::Interval {

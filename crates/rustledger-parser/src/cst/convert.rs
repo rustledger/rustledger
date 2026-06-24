@@ -715,19 +715,16 @@ fn convert_transaction(
     // narration-only; with 3+ -> ambiguous (typed-AST surface
     // returns None for both, matching the round-2 review fix).
     let strings: Vec<String> = node.strings().filter_map(|s| s.text_decoded()).collect();
-    let (payee_str, narration_str) = match strings.len() {
-        0 => (None, String::new()),
-        1 => (None, strings.into_iter().next().unwrap()),
-        2 => {
-            let mut it = strings.into_iter();
-            let p = it.next().unwrap();
-            let n = it.next().unwrap();
-            (Some(p), n)
-        }
-        // 3+ strings: surface only the last as narration; the
-        // middle ones are unreachable through this typed shape
-        // (matches the round-2 docstring).
-        _ => (None, strings.last().cloned().unwrap_or_default()),
+    // Consume via the iterator (no count-then-unwrap): 0 -> empty narration;
+    // 1 -> narration only; 2 -> payee + narration; 3+ -> surface only the last
+    // as narration (middles unreachable through this typed shape).
+    let last = strings.last().cloned().unwrap_or_default();
+    let mut it = strings.into_iter();
+    let (payee_str, narration_str) = match (it.next(), it.next(), it.next()) {
+        (None, _, _) => (None, String::new()),
+        (Some(n), None, _) => (None, n),
+        (Some(p), Some(n), None) => (Some(p), n),
+        (Some(_), Some(_), Some(_)) => (None, last),
     };
 
     let payee = payee_str.map(InternedStr::from);

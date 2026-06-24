@@ -485,7 +485,11 @@ impl SourceFile {
     #[must_use]
     pub fn parse(source: &str) -> Self {
         let node = crate::cst::parser::parse_structured(source);
-        Self::cast(node).expect("parse_structured always returns a SOURCE_FILE")
+        // `parse_structured` always produces a SOURCE_FILE root, so this cast is
+        // infallible — a parser invariant, not an input-driven path.
+        #[allow(clippy::expect_used)]
+        let source_file = Self::cast(node).expect("parse_structured always returns a SOURCE_FILE");
+        source_file
     }
 
     /// All recognized directives, in source order.

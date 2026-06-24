@@ -31,6 +31,13 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+// Never-panic surface: the parser must handle malformed input gracefully (no
+// panics — see CLAUDE.md), so production code must not `unwrap`/`expect`.
+// `not(test)` scopes the deny to non-test builds, exempting this crate's own
+// `#[cfg(test)]` code (it compiles with `cfg(test)`); integration tests under
+// `tests/` are separate crates. Proven-safe production sites (parser invariants
+// like "the root is always SOURCE_FILE") carry an audited `#[allow]` with reason.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod bom;
 pub mod cst;

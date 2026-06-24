@@ -622,6 +622,9 @@ const fn advance_source_state(
 /// tests.
 #[must_use]
 pub fn format_node(node: &crate::SyntaxNode) -> String {
+    // Precondition: `node` is the SOURCE_FILE parse root (the only thing callers
+    // pass); a wrong node is a caller bug, not input-driven.
+    #[allow(clippy::expect_used)]
     let source_file =
         SourceFile::cast(node.clone()).expect("format_node called on non-SOURCE_FILE node");
     let alignment = compute_alignment(&source_file);
@@ -818,8 +821,9 @@ pub fn format_node_range(
     node: &crate::SyntaxNode,
     range: rowan::TextRange,
 ) -> Option<(rowan::TextRange, String)> {
-    let source_file =
-        SourceFile::cast(node.clone()).expect("format_node_range called on non-SOURCE_FILE node");
+    // This returns `Option`, so a non-SOURCE_FILE node is a clean `None` rather
+    // than a panic (the precondition is still that callers pass the parse root).
+    let source_file = SourceFile::cast(node.clone())?;
     // File-wide alignment pre-pass: see rustdoc above for the
     // rationale. The selected subset always uses the full file's
     // alignment columns. Hot paths with a precomputed `PostingAlignment`
@@ -904,7 +908,12 @@ pub fn format_node_range_with_alignment(
     if !any_included {
         return None;
     }
-    let snap = rowan::TextRange::new(snap_start.unwrap(), snap_end.unwrap());
+    // `any_included` guarantees both bounds were set in the loop above; bail
+    // (return `None`) rather than `unwrap` if somehow not.
+    let (Some(snap_start), Some(snap_end)) = (snap_start, snap_end) else {
+        return None;
+    };
+    let snap = rowan::TextRange::new(snap_start, snap_end);
 
     // ERROR_NODE intersection bail: if the snap range covers any
     // top-level ERROR_NODE byte, refuse to format and return None.

@@ -265,18 +265,18 @@ def _stale_registry_entries(
     stale: list = []
     dangling: list = []
     for file, query in registry:
-        if query == "*":
-            runs = by_file.get(file)
-            if not runs:
-                dangling.append((registry_name, (file, query)))
-            elif all(r.match for r in runs):
-                stale.append((registry_name, (file, query)))
-        else:
-            runs = by_pair.get((file, query))
-            if not runs:
-                dangling.append((registry_name, (file, query)))
-            elif all(r.match for r in runs):
-                stale.append((registry_name, (file, query)))
+        runs = (by_file.get(file) if query == "*" else by_pair.get((file, query))) or []
+        if not runs:
+            dangling.append((registry_name, (file, query)))
+            continue
+        # Only runs where BOTH tools ran successfully are conclusive evidence. A
+        # timeout or non-zero exit yields `match == False` without proving a real
+        # divergence, so a failed run must NOT keep a stale mask alive (nor count
+        # as still-diverging). If every run for the entry was a tool failure the
+        # result is inconclusive — leave the mask in place rather than guess.
+        conclusive = [r for r in runs if not r.py_failed and not r.rs_failed]
+        if conclusive and all(r.match for r in conclusive):
+            stale.append((registry_name, (file, query)))
     return stale, dangling
 
 
@@ -311,8 +311,29 @@ def _run_self_test() -> int:
     flags exactly the now-matching (stale) and never-run (dangling) entries.
     """
 
-    def run(file: str, query: str, match: bool) -> "QueryRun":
-        return QueryRun(file=file, query_name=query, query="", match=match)
+    # Explicit checks rather than `assert` so the guard still fires under
+    # `python -O` / PYTHONOPTIMIZE (which strips assert statements).
+    failures: list[str] = []
+
+    def check(cond: bool, msg: str) -> None:
+        if not cond:
+            failures.append(msg)
+
+    def run(
+        file: str,
+        query: str,
+        match: bool,
+        py_failed: bool = False,
+        rs_failed: bool = False,
+    ) -> "QueryRun":
+        return QueryRun(
+            file=file,
+            query_name=query,
+            query="",
+            match=match,
+            py_failed=py_failed,
+            rs_failed=rs_failed,
+        )
 
     runs = [
         run("a.beancount", "q1", match=True),  # registered + matches -> STALE
@@ -321,6 +342,9 @@ def _run_self_test() -> int:
         run("b.beancount", "q2", match=True),
         run("c.beancount", "q1", match=False),  # wildcard file, one diverges -> OK
         run("c.beancount", "q2", match=True),
+        # Only run for this pair is a tool failure: inconclusive, must NOT be
+        # treated as stale (its match==False is a timeout, not a real divergence).
+        run("d.beancount", "q1", match=False, rs_failed=True),
     ]
     by_pair, by_file = _index_runs(runs)
 
@@ -328,29 +352,42 @@ def _run_self_test() -> int:
         ("a.beancount", "q1"),
         ("a.beancount", "q2"),
         ("gone.beancount", "q9"),
+        ("d.beancount", "q1"),
     }
     stale, dangling = _stale_registry_entries(surgical, "T", by_pair, by_file)
-    assert ("T", ("a.beancount", "q1")) in stale, "matching pair must be flagged stale"
-    assert (
-        "T",
-        ("a.beancount", "q2"),
-    ) not in stale, "diverging pair must NOT be flagged"
-    assert (
-        "T",
-        ("gone.beancount", "q9"),
-    ) in dangling, "never-run pair must be dangling"
+    check(("T", ("a.beancount", "q1")) in stale, "matching pair must be flagged stale")
+    check(
+        ("T", ("a.beancount", "q2")) not in stale,
+        "diverging pair must NOT be flagged",
+    )
+    check(
+        ("T", ("gone.beancount", "q9")) in dangling,
+        "never-run pair must be dangling",
+    )
+    check(
+        ("T", ("d.beancount", "q1")) not in stale,
+        "tool-failure-only pair must NOT be stale (inconclusive)",
+    )
+    check(
+        ("T", ("d.beancount", "q1")) not in dangling,
+        "tool-failure pair WAS exercised, so it is not dangling",
+    )
 
     wildcard = {("b.beancount", "*"), ("c.beancount", "*")}
     stale_w, _ = _stale_registry_entries(wildcard, "T", by_pair, by_file)
-    assert (
-        "T",
-        ("b.beancount", "*"),
-    ) in stale_w, "all-matching file must make its wildcard stale"
-    assert (
-        "T",
-        ("c.beancount", "*"),
-    ) not in stale_w, "a file with one diverging query keeps its wildcard live"
+    check(
+        ("T", ("b.beancount", "*")) in stale_w,
+        "all-matching file must make its wildcard stale",
+    )
+    check(
+        ("T", ("c.beancount", "*")) not in stale_w,
+        "a file with one diverging query keeps its wildcard live",
+    )
 
+    if failures:
+        for m in failures:
+            print(f"self-test FAIL: {m}", file=sys.stderr)
+        return 1
     print("self-test OK: stale/dangling divergence detection behaves correctly")
     return 0
 

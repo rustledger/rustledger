@@ -15,7 +15,8 @@
 use std::collections::HashSet;
 
 use rust_decimal::Decimal;
-use rustledger_plugin_types::{DirectiveData, DirectiveWrapper, PluginError, TransactionData};
+use rustledger_core::{Directive, Transaction};
+use rustledger_plugin_types::{DirectiveData, DirectiveWrapper, PluginError};
 
 use crate::fingerprint::structural_hash;
 
@@ -103,68 +104,77 @@ pub struct FuzzyDuplicateMatch {
 /// probable duplicates of existing ones.
 #[must_use]
 pub fn find_fuzzy_duplicates(
-    new_directives: &[DirectiveWrapper],
-    existing_directives: &[DirectiveWrapper],
+    new_directives: &[Directive],
+    existing_directives: &[Directive],
     config: &FuzzyDedupConfig,
 ) -> Vec<FuzzyDuplicateMatch> {
-    let mut matches = Vec::new();
-
-    // Pre-compute existing transaction info for efficient comparison
-    let existing: Vec<(usize, &str, Option<Decimal>, String)> = existing_directives
+    // Pre-collect existing transactions (with their directive index) once.
+    let existing: Vec<(usize, &Transaction)> = existing_directives
         .iter()
         .enumerate()
-        .filter_map(|(i, w)| {
-            if let DirectiveData::Transaction(txn) = &w.data {
-                Some((i, w.date.as_str(), first_posting_amount(txn), txn_text(txn)))
-            } else {
-                None
-            }
+        .filter_map(|(i, d)| match d {
+            Directive::Transaction(txn) => Some((i, txn)),
+            _ => None,
         })
         .collect();
 
-    for (new_i, wrapper) in new_directives.iter().enumerate() {
-        if let DirectiveData::Transaction(txn) = &wrapper.data {
-            let new_amount = first_posting_amount(txn);
-            let new_text = txn_text(txn);
-
-            for &(existing_i, existing_date, ref existing_amount, ref existing_text) in &existing {
-                if wrapper.date != existing_date {
-                    continue;
-                }
-                if new_amount != *existing_amount {
-                    continue;
-                }
-                if fuzzy_text_match(&new_text, existing_text, config.text_similarity_threshold) {
-                    matches.push(FuzzyDuplicateMatch {
-                        new_index: new_i,
-                        existing_index: existing_i,
-                    });
-                    break; // One match is enough
-                }
-            }
+    let mut matches = Vec::new();
+    for (new_i, directive) in new_directives.iter().enumerate() {
+        if let Directive::Transaction(new_txn) = directive
+            && let Some(&(existing_i, _)) = existing.iter().find(|(_, existing_txn)| {
+                is_fuzzy_duplicate(new_txn, existing_txn, config.text_similarity_threshold)
+            })
+        {
+            matches.push(FuzzyDuplicateMatch {
+                new_index: new_i,
+                existing_index: existing_i,
+            });
         }
     }
-
     matches
 }
 
+/// Whether `new_txn` is a fuzzy duplicate of any transaction in `existing`.
+///
+/// Per-transaction convenience over the same matcher as [`find_fuzzy_duplicates`]
+/// — the single source for `rledger extract --existing` duplicate filtering,
+/// which previously had its own copy with a divergent `> 0.5` threshold (this
+/// uses `config.text_similarity_threshold`, default `>= 0.5`).
+#[must_use]
+pub fn is_duplicate(
+    new_txn: &Transaction,
+    existing: &[Transaction],
+    config: &FuzzyDedupConfig,
+) -> bool {
+    existing.iter().any(|existing_txn| {
+        is_fuzzy_duplicate(new_txn, existing_txn, config.text_similarity_threshold)
+    })
+}
+
+/// Same date, same first-posting amount, and a fuzzy payee/narration match.
+fn is_fuzzy_duplicate(new_txn: &Transaction, existing_txn: &Transaction, threshold: f64) -> bool {
+    new_txn.date == existing_txn.date
+        && first_posting_amount(new_txn) == first_posting_amount(existing_txn)
+        && fuzzy_text_match(&txn_text(new_txn), &txn_text(existing_txn), threshold)
+}
+
 /// Get the decimal amount from the first posting of a transaction.
-fn first_posting_amount(txn: &TransactionData) -> Option<Decimal> {
+fn first_posting_amount(txn: &Transaction) -> Option<Decimal> {
     txn.postings.first().and_then(|p| {
         p.units
             .as_ref()
-            .and_then(|u| u.number.parse::<Decimal>().ok())
+            .and_then(rustledger_core::IncompleteAmount::number)
     })
 }
 
 /// Build a lowercase string combining payee and narration for fuzzy matching.
-fn txn_text(txn: &TransactionData) -> String {
+fn txn_text(txn: &Transaction) -> String {
     let mut text = String::new();
     if let Some(ref payee) = txn.payee {
-        text.push_str(payee);
+        text.push_str(payee.as_str());
         text.push(' ');
     }
-    text.push_str(&txn.narration);
+    text.push_str(txn.narration.as_str());
     text.to_lowercase()
 }
 
@@ -201,7 +211,25 @@ mod tests {
     use super::*;
     use rustledger_plugin_types::{AmountData, DirectiveData, PostingData, TransactionData};
 
-    fn make_directive(
+    /// Core-typed transaction directive for the fuzzy-dedup tests (which now run
+    /// on `core::Directive`).
+    fn make_directive(date: &str, payee: Option<&str>, narration: &str, amount: &str) -> Directive {
+        use std::str::FromStr;
+        let date: rustledger_core::NaiveDate = date.parse().unwrap();
+        let mut txn = Transaction::new(date, narration);
+        if let Some(p) = payee {
+            txn = txn.with_payee(p);
+        }
+        txn = txn.with_synthesized_posting(rustledger_core::Posting::new(
+            "Assets:Bank",
+            rustledger_core::Amount::new(Decimal::from_str(amount).unwrap(), "USD"),
+        ));
+        Directive::Transaction(txn)
+    }
+
+    /// Wire-typed directive for the structural-dedup tests (which stay on
+    /// `DirectiveWrapper`, the plugin boundary).
+    fn make_wrapper(
         date: &str,
         payee: Option<&str>,
         narration: &str,
@@ -240,8 +268,8 @@ mod tests {
     #[test]
     fn structural_finds_exact_duplicates() {
         let directives = vec![
-            make_directive("2024-01-15", Some("Store"), "Groceries", "-50.00"),
-            make_directive("2024-01-15", Some("Store"), "Groceries", "-50.00"),
+            make_wrapper("2024-01-15", Some("Store"), "Groceries", "-50.00"),
+            make_wrapper("2024-01-15", Some("Store"), "Groceries", "-50.00"),
         ];
         let dups = find_structural_duplicates(&directives);
         assert_eq!(dups.len(), 1);
@@ -251,8 +279,8 @@ mod tests {
     #[test]
     fn structural_no_false_positives() {
         let directives = vec![
-            make_directive("2024-01-15", Some("Store"), "Groceries", "-50.00"),
-            make_directive("2024-01-15", Some("Store"), "Groceries", "-51.00"),
+            make_wrapper("2024-01-15", Some("Store"), "Groceries", "-50.00"),
+            make_wrapper("2024-01-15", Some("Store"), "Groceries", "-51.00"),
         ];
         let dups = find_structural_duplicates(&directives);
         assert!(dups.is_empty());
@@ -383,17 +411,10 @@ mod tests {
 
     #[test]
     fn fuzzy_non_transaction_directives_are_skipped() {
-        let note_directive = DirectiveWrapper {
-            directive_type: "note".to_string(),
-            date: "2024-01-15".to_string(),
-            filename: None,
-            lineno: None,
-            data: DirectiveData::Note(rustledger_plugin_types::NoteData {
-                account: "Assets:Bank".to_string(),
-                comment: "A note".to_string(),
-                metadata: vec![],
-            }),
-        };
+        let note_directive = Directive::Open(rustledger_core::Open::new(
+            "2024-01-15".parse().unwrap(),
+            "Assets:Bank",
+        ));
         let txn = make_directive("2024-01-15", Some("Store"), "Groceries", "-50.00");
 
         // Note in new directives - should be skipped
@@ -538,5 +559,33 @@ mod tests {
         let matches = find_fuzzy_duplicates(&new, &existing, &config);
         // "alpha beta" shares 1/2 words with "alpha gamma delta" → 50% < 90%
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn fuzzy_threshold_is_inclusive_at_exactly_half() {
+        // Exactly 50% word overlap counts as a duplicate (ratio >= 0.5) — the
+        // boundary the CLI's now-deleted `> 0.5` copy got wrong. Same date and
+        // amount; the two narrations share 1 of 2 words.
+        let new = vec![make_directive("2024-01-15", None, "alpha beta", "-50.00")];
+        let existing = vec![make_directive("2024-01-15", None, "alpha gamma", "-50.00")];
+        assert_eq!(
+            find_fuzzy_duplicates(&new, &existing, &FuzzyDedupConfig::default()).len(),
+            1,
+            "exactly 50% overlap must be a duplicate (>= 0.5)",
+        );
+
+        // The per-transaction `is_duplicate` entry point (used by `extract
+        // --existing`) agrees with the batch API.
+        let Directive::Transaction(new_txn) = &new[0] else {
+            unreachable!()
+        };
+        let Directive::Transaction(existing_txn) = &existing[0] else {
+            unreachable!()
+        };
+        assert!(is_duplicate(
+            new_txn,
+            std::slice::from_ref(existing_txn),
+            &FuzzyDedupConfig::default(),
+        ));
     }
 }

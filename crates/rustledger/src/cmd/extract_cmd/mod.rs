@@ -69,7 +69,7 @@ use config::{
 // Used only by the WASM-importer-dir resolution path (gated below).
 #[cfg(feature = "python-plugin-wasm")]
 use config::expand_tilde;
-use duplicate::{is_duplicate, load_existing_transactions};
+use duplicate::load_existing_transactions;
 use format_num_pattern::Locale;
 use rustledger_core::{Directive, FormatConfig};
 use rustledger_importer::config::CsvConfigBuilder;
@@ -810,7 +810,11 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             .into_iter()
             .filter(|d| {
                 if let Directive::Transaction(txn) = d {
-                    !is_duplicate(txn, &existing_txns)
+                    !rustledger_ops::dedup::is_duplicate(
+                        txn,
+                        &existing_txns,
+                        &rustledger_ops::dedup::FuzzyDedupConfig::default(),
+                    )
                 } else {
                     true
                 }
@@ -898,9 +902,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
 #[cfg(test)]
 mod tests {
     use super::config::{ImporterEntry, parse_column_value};
-    use super::duplicate::{first_posting_amount, fuzzy_text_match, txn_match_text};
     use super::*;
-    use rustledger_core::Transaction;
     use rustledger_importer::config::ImporterType;
     use std::collections::HashMap;
 
@@ -1479,102 +1481,6 @@ default_expense = "Expenses:Uncategorized"
     }
 
     #[test]
-    fn test_fuzzy_text_match_exact() {
-        assert!(fuzzy_text_match("grocery store", "grocery store"));
-    }
-
-    #[test]
-    fn test_fuzzy_text_match_contains() {
-        assert!(fuzzy_text_match("grocery store #123", "grocery store"));
-        assert!(fuzzy_text_match("grocery store", "grocery store #123"));
-    }
-
-    #[test]
-    fn test_fuzzy_text_match_word_overlap() {
-        assert!(fuzzy_text_match("whole foods market", "whole foods"));
-    }
-
-    #[test]
-    fn test_fuzzy_text_match_no_match() {
-        assert!(!fuzzy_text_match("amazon", "netflix"));
-    }
-
-    #[test]
-    fn test_fuzzy_text_match_empty() {
-        assert!(!fuzzy_text_match("", "something"));
-        assert!(!fuzzy_text_match("something", ""));
-    }
-
-    #[test]
-    fn test_is_duplicate_matching() {
-        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let new_txn = Transaction::new(date, "GROCERY STORE").with_synthesized_posting(
-            rustledger_core::Posting::new(
-                "Assets:Bank",
-                rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
-            ),
-        );
-
-        let existing = vec![
-            Transaction::new(date, "GROCERY STORE #123").with_synthesized_posting(
-                rustledger_core::Posting::new(
-                    "Assets:Bank",
-                    rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
-                ),
-            ),
-        ];
-
-        assert!(is_duplicate(&new_txn, &existing));
-    }
-
-    #[test]
-    fn test_is_duplicate_different_date() {
-        let new_txn = Transaction::new(
-            rustledger_core::naive_date(2024, 1, 15).unwrap(),
-            "GROCERY STORE",
-        )
-        .with_synthesized_posting(rustledger_core::Posting::new(
-            "Assets:Bank",
-            rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
-        ));
-
-        let existing = vec![
-            Transaction::new(
-                rustledger_core::naive_date(2024, 1, 16).unwrap(),
-                "GROCERY STORE",
-            )
-            .with_synthesized_posting(rustledger_core::Posting::new(
-                "Assets:Bank",
-                rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
-            )),
-        ];
-
-        assert!(!is_duplicate(&new_txn, &existing));
-    }
-
-    #[test]
-    fn test_is_duplicate_different_amount() {
-        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let new_txn = Transaction::new(date, "GROCERY STORE").with_synthesized_posting(
-            rustledger_core::Posting::new(
-                "Assets:Bank",
-                rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
-            ),
-        );
-
-        let existing = vec![
-            Transaction::new(date, "GROCERY STORE").with_synthesized_posting(
-                rustledger_core::Posting::new(
-                    "Assets:Bank",
-                    rustledger_core::Amount::new(rust_decimal::Decimal::new(-7500, 2), "USD"),
-                ),
-            ),
-        ];
-
-        assert!(!is_duplicate(&new_txn, &existing));
-    }
-
-    #[test]
     fn test_load_existing_transactions() {
         let dir = tempfile::tempdir().unwrap();
         let ledger_path = dir.path().join("ledger.beancount");
@@ -1832,72 +1738,6 @@ amount_column = "Amount"
     }
 
     #[test]
-    fn test_first_posting_amount_no_postings() {
-        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let txn = Transaction::new(date, "Test");
-        assert_eq!(first_posting_amount(&txn), None);
-    }
-
-    #[test]
-    fn test_first_posting_amount_auto_posting() {
-        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let txn = Transaction::new(date, "Test")
-            .with_synthesized_posting(rustledger_core::Posting::auto("Expenses:Unknown"));
-        assert_eq!(first_posting_amount(&txn), None);
-    }
-
-    #[test]
-    fn test_txn_match_text_with_payee() {
-        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let txn = Transaction::new(date, "Weekly groceries").with_payee("Whole Foods");
-        let text = txn_match_text(&txn);
-        assert!(text.contains("whole foods"));
-        assert!(text.contains("weekly groceries"));
-    }
-
-    #[test]
-    fn test_txn_match_text_no_payee() {
-        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let txn = Transaction::new(date, "Coffee Shop");
-        let text = txn_match_text(&txn);
-        assert_eq!(text, "coffee shop");
-    }
-
-    #[test]
-    fn test_is_duplicate_no_existing() {
-        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let txn = Transaction::new(date, "Coffee").with_synthesized_posting(
-            rustledger_core::Posting::new(
-                "Assets:Bank",
-                rustledger_core::Amount::new(rust_decimal::Decimal::new(-500, 2), "USD"),
-            ),
-        );
-        assert!(!is_duplicate(&txn, &[]));
-    }
-
-    #[test]
-    fn test_is_duplicate_with_payee() {
-        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
-        let new_txn = Transaction::new(date, "Weekly groceries")
-            .with_payee("WHOLE FOODS")
-            .with_synthesized_posting(rustledger_core::Posting::new(
-                "Assets:Bank",
-                rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
-            ));
-
-        let existing = vec![
-            Transaction::new(date, "Weekly groceries")
-                .with_payee("Whole Foods Market")
-                .with_synthesized_posting(rustledger_core::Posting::new(
-                    "Assets:Bank",
-                    rustledger_core::Amount::new(rust_decimal::Decimal::new(-5000, 2), "USD"),
-                )),
-        ];
-
-        assert!(is_duplicate(&new_txn, &existing));
-    }
-
-    #[test]
     fn test_load_existing_transactions_nonexistent_file() {
         let result = load_existing_transactions(Path::new("/nonexistent/ledger.beancount"));
         assert!(result.is_err());
@@ -2082,24 +1922,6 @@ NEWFILEUID:NONE
         let output = std::fs::read_to_string(&output_path).unwrap();
         assert!(output.contains("2024-01-15"));
         assert!(output.contains("GROCERY STORE"));
-    }
-
-    #[test]
-    fn test_fuzzy_text_match_word_overlap_threshold() {
-        // 1 out of 3 words match — below 50% threshold
-        assert!(!fuzzy_text_match("the big store", "the small shop"));
-        // 2 out of 2 words match — above 50% threshold
-        assert!(fuzzy_text_match("grocery store", "grocery store extra"));
-    }
-
-    #[test]
-    fn test_fuzzy_text_match_longer_a_than_b() {
-        // a has more words than b, and neither contains the other as a substring
-        // This forces the word-overlap path with the swap branch
-        assert!(fuzzy_text_match(
-            "whole foods market store location",
-            "whole foods burgers"
-        ));
     }
 
     #[test]

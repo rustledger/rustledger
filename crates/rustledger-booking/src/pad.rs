@@ -188,10 +188,17 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                         continue;
                     }
 
-                    // Calculate padding amount
-                    let current = inventories
-                        .get(&bal.account)
-                        .map_or(Decimal::ZERO, |inv| inv.units(&bal.amount.currency));
+                    // Calculate padding amount. The balance assertion this pad
+                    // targets sums the account AND its sub-accounts (beancount
+                    // semantic, verified against bean-check), so the pad
+                    // difference must be measured the same way — using only the
+                    // leaf account here under-/over-padded a non-leaf target and
+                    // then tripped the (sub-account-summing) Late validator.
+                    let current = rustledger_core::sum_account_and_subaccounts(
+                        inventories.iter(),
+                        bal.account.as_str(),
+                        &bal.amount.currency,
+                    );
 
                     let difference = bal.amount.number - current;
 
@@ -462,6 +469,50 @@ mod tests {
         assert_eq!(
             txn.postings[0].amount(),
             Some(&Amount::new(dec!(500.00), "USD"))
+        );
+    }
+
+    #[test]
+    fn test_process_pads_sums_subaccounts_for_nonleaf_target() {
+        // A pad targeting a NON-LEAF account must measure the current balance the
+        // same way the balance assertion does — summing the account AND its
+        // sub-accounts (beancount semantic, verified against bean-check). Here the
+        // balance lives entirely in the sub-account `Assets:Bank:Checking`, so the
+        // pad to `Assets:Bank` must be 100 - 50 = 50, NOT 100 (the old leaf-only
+        // bug, which then tripped the sub-account-summing Late validator).
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank:Checking")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Income:Salary")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 5), "Deposit into sub-account")
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Bank:Checking",
+                        Amount::new(dec!(50.00), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Income:Salary",
+                        Amount::new(dec!(-50.00), "USD"),
+                    )),
+            ),
+            Directive::Pad(Pad::new(date(2024, 1, 10), "Assets:Bank", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 15),
+                "Assets:Bank",
+                Amount::new(dec!(100.00), "USD"),
+            )),
+        ];
+
+        let result = process_pads(&directives);
+
+        assert!(result.errors.is_empty());
+        assert_eq!(result.padding_transactions.len(), 1);
+        // 100 target - 50 already held in the sub-account = 50.
+        assert_eq!(
+            result.padding_transactions[0].postings[0].amount(),
+            Some(&Amount::new(dec!(50.00), "USD")),
+            "pad on a non-leaf account must sum sub-accounts (was leaf-only)"
         );
     }
 

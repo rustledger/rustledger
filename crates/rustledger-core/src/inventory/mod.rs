@@ -13,7 +13,7 @@ use smallvec::SmallVec;
 use std::fmt;
 use std::str::FromStr;
 
-use crate::{Amount, CostSpec, Position};
+use crate::{Account, Amount, CostSpec, Currency, Position, is_subaccount_or_equal};
 
 /// Inline storage for `BookingResult::matched`.
 ///
@@ -463,12 +463,14 @@ impl Inventory {
     /// decision shared by the booking engine (`BookingEngine::apply`) and the
     /// Late validator's inventory pass.
     ///
-    /// A posting reduces only when it carries a cost, the booking method isn't
-    /// `NONE` (issue #1182 — `NONE` accumulates every posting as an augmentation,
-    /// with no lot matching), and the inventory holds a cost-bearing position of
-    /// the opposite sign in the same currency ([`Self::is_reduced_by`] with
-    /// [`ReductionScope::CostBearingOnly`]). This gate was previously written
-    /// byte-for-byte in both crates and the #1182 fix had to be applied twice.
+    /// A posting reduces only when it carries a cost spec (`cost.is_some()` —
+    /// presence of the spec, which includes an empty/unresolved one like `{}`),
+    /// the booking method isn't `NONE` (issue #1182 — `NONE` accumulates every
+    /// posting as an augmentation, with no lot matching), and the inventory holds
+    /// a cost-bearing position of the opposite sign in the same currency
+    /// ([`Self::is_reduced_by`] with [`ReductionScope::CostBearingOnly`]). This
+    /// gate was previously written byte-for-byte in both crates and the #1182 fix
+    /// had to be applied twice.
     #[must_use]
     pub fn is_booking_reduction(
         &self,
@@ -682,6 +684,36 @@ impl Inventory {
 
         result
     }
+}
+
+/// Sum the units of `currency` across `account` AND all of its sub-accounts,
+/// over a map of per-account inventories.
+///
+/// Beancount's `balance Assets:Bank` assertion — and the pad math that targets
+/// it — includes `Assets:Bank:Checking`, `Assets:Bank:Savings`, etc. (verified
+/// against `bean-check`: an assertion on a parent passes when the balance is held
+/// in a sub-account). Sub-account membership uses [`is_subaccount_or_equal`], so
+/// the segment-boundary rule (`Assets:BankAlias` does NOT match `Assets:Bank`)
+/// is shared.
+///
+/// This is the single source for that sum, used by both the booking pad engine
+/// and the Late balance validator. They previously computed the pad/assertion
+/// difference differently — booking summed only the leaf account
+/// (`Inventory::units`) while the validator summed sub-accounts — so a pad
+/// targeting a non-leaf account inserted the wrong synthetic amount.
+pub fn sum_account_and_subaccounts<'a, I>(
+    inventories: I,
+    account: &str,
+    currency: &Currency,
+) -> Decimal
+where
+    I: IntoIterator<Item = (&'a Account, &'a Inventory)>,
+{
+    inventories
+        .into_iter()
+        .filter(|(inv_account, _)| is_subaccount_or_equal(inv_account.as_str(), account))
+        .map(|(_, inv)| inv.units(currency))
+        .sum()
 }
 
 impl fmt::Display for Inventory {

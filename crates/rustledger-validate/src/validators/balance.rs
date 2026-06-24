@@ -2,14 +2,11 @@
 
 // ratchet: fxhash-only — hot path; use FxHashMap/FxHashSet, not std SipHash collections (#1237).
 use rust_decimal::{Decimal, MathematicalOps};
-use rustledger_core::{Amount, Balance, Pad, Position, is_subaccount_or_equal};
+use rustledger_core::{Amount, Balance, Pad, Position};
 
 use super::helpers::require_account_open;
 use crate::error::{ErrorCode, ValidationError};
 use crate::{LedgerState, PendingPad};
-
-use rustc_hash::FxHashMap;
-use rustledger_core::Inventory;
 
 /// Multiplier for balance assertion tolerance (matches Python beancount).
 /// Balance assertions use 2x the `tolerance_multiplier` option.
@@ -48,28 +45,6 @@ pub fn balance_tolerance(
     } else {
         Decimal::ZERO
     }
-}
-
-/// Sum the units of a given currency across an account and all its sub-accounts.
-///
-/// In beancount, `balance Assets:Bank` includes `Assets:Bank:Checking`,
-/// `Assets:Bank:Savings`, etc. Account membership is delegated to
-/// [`is_subaccount_or_equal`] so the segment-boundary rule
-/// (`Assets:BankAlias` does NOT match `Assets:Bank`) lives in one
-/// definition shared with the LSP code-lens path.
-fn sum_account_and_subaccounts(
-    inventories: &FxHashMap<rustledger_core::Account, Inventory>,
-    account: &rustledger_core::Account,
-    currency: &rustledger_core::Currency,
-) -> Decimal {
-    let account_str = account.as_str();
-    let mut total = Decimal::ZERO;
-    for (inv_account, inv) in inventories {
-        if is_subaccount_or_equal(inv_account.as_str(), account_str) {
-            total += inv.units(currency);
-        }
-    }
-    total
 }
 
 /// Base 10 for tolerance scale calculation.
@@ -201,8 +176,11 @@ pub fn validate_balance_late(
         if let Some(pending_pad) = effective_idx.last().and_then(|&i| pending_pads.get_mut(i)) {
             // Apply padding: calculate difference and add to both accounts
             // Balance assertions include sub-accounts, so sum them all up
-            let actual =
-                sum_account_and_subaccounts(&state.inventories, &bal.account, &bal.amount.currency);
+            let actual = rustledger_core::sum_account_and_subaccounts(
+                state.inventories.iter(),
+                bal.account.as_str(),
+                &bal.amount.currency,
+            );
             {
                 let expected = bal.amount.number;
                 let difference = expected - actual;
@@ -244,8 +222,11 @@ pub fn validate_balance_late(
     // Get inventory and check balance (no padding case).
     // In beancount, balance assertions include sub-accounts
     // e.g., balance Assets:Checking includes Assets:Checking:Sub1, etc.
-    let actual =
-        sum_account_and_subaccounts(&state.inventories, &bal.account, &bal.amount.currency);
+    let actual = rustledger_core::sum_account_and_subaccounts(
+        state.inventories.iter(),
+        bal.account.as_str(),
+        &bal.amount.currency,
+    );
 
     // Always check balance assertions, even for accounts with no transactions.
     // This matches Python beancount behavior where `balance Account 1 USD` fails

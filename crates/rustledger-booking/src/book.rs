@@ -494,12 +494,14 @@ impl BookingEngine {
                     // Add to inventory via the canonical cost-resolve shared with
                     // the Late validator, `build_balances`, and the query engine.
                     // Its per-unit / date / label handling matches the block this
-                    // replaced (see `CostSpec::resolve`); the old inline price /
-                    // cross-posting cost-currency inference was dead code here
-                    // because `apply` only ever runs on *booked* transactions
-                    // (every caller `book_and_interpolate`s first — see the
-                    // `debug_assert` above), so booking has already filled
-                    // `cost_spec.currency`.
+                    // replaced (see `CostSpec::resolve`). The old inline price /
+                    // cross-posting cost-currency inference is unnecessary here:
+                    // `apply` is contracted to run on *booked* transactions (the
+                    // `debug_assert` above; the production pipeline always
+                    // `book_and_interpolate`s first), and booking fills the
+                    // inferred currency into `cost_spec.currency`. Tests that call
+                    // `apply` directly use explicit-currency fixtures, which need
+                    // no inference.
                     inv.add(Position::from_posting(
                         units,
                         posting.cost.as_ref(),
@@ -835,8 +837,9 @@ mod tests {
         // SELLOPT: -1 AAPL {40.0} @ 0.4 USD — the cost has a number (40.0) but no
         // cost currency. Booking infers it from the price annotation and fills it
         // *into* the cost spec, so by the time `apply` runs the currency is already
-        // resolved. `apply` is always called on booked transactions (see its doc),
-        // so this exercises the real pipeline rather than apply's standalone path.
+        // resolved. The production pipeline books before applying, so this drives
+        // that real `book_and_interpolate` → `apply` path rather than calling
+        // `apply` standalone.
         let sell = Transaction::new(date(2022, 6, 17), "SELLOPT")
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-1), "AAPL"))

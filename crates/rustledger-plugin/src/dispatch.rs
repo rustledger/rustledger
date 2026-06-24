@@ -280,7 +280,8 @@ impl ResolvedPlugin<'_> {
     }
 }
 
-/// Resolve a plugin reference to an absolute path under the ledger directory,
+/// Resolve a plugin reference to a path under the ledger directory (absolute
+/// when `base_dir` is — a relative `name` is joined onto `base_dir` as-is),
 /// enforcing path-security fail-closed (see [`path_within_base`]).
 #[cfg(any(feature = "wasm-runtime", feature = "python-plugins"))]
 fn resolve_path(

@@ -812,10 +812,9 @@ pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAl
 /// `format_node_range_full_range_matches_format_node` in this
 /// file's test module.
 ///
-/// # Panics
-///
-/// Panics if `node`'s kind is not `SOURCE_FILE` — same precondition
-/// as [`format_node`].
+/// Returns `None` if `node`'s kind is not `SOURCE_FILE` (the precondition is
+/// still that callers pass the parse root) or if `range` intersects no top-level
+/// child.
 #[must_use]
 pub fn format_node_range(
     node: &crate::SyntaxNode,

@@ -13,7 +13,6 @@
 use anyhow::{Context, Result, anyhow};
 use rustledger_core::{Directive, InternedStr, Transaction};
 use rustledger_ops::ml::CategorizationModel;
-use rustledger_plugin::convert::directives_to_wrappers;
 
 /// Outcome of running ML suggestion over a batch of imported directives.
 #[derive(Debug, Default)]
@@ -42,17 +41,17 @@ pub(super) fn apply_ml_suggestions(
     existing_txns: &[Transaction],
     fallback_accounts: &[String],
 ) -> Result<SuggestStats> {
-    // Wrap existing transactions as Directives for the wrapper-based ML API.
-    // Clone is unavoidable here — `existing_txns` is also used for duplicate
-    // detection in the calling path.
+    // Wrap existing transactions as core `Directive`s for the ML API (clone is
+    // unavoidable — `existing_txns` is also used for duplicate detection in the
+    // calling path). `train` now takes `&[Directive]` directly, so there is no
+    // longer a `DirectiveWrapper` conversion here.
     let training_directives: Vec<Directive> = existing_txns
         .iter()
         .cloned()
         .map(Directive::Transaction)
         .collect();
-    let training_wrappers = directives_to_wrappers(&training_directives);
 
-    let model = match CategorizationModel::train(&training_wrappers) {
+    let model = match CategorizationModel::train(&training_directives) {
         Ok(m) => m,
         Err(rustledger_ops::ml::MlError::InsufficientData(reason)) => {
             eprintln!(

@@ -19,7 +19,7 @@
 //! // → [("Expenses:Groceries", 0.92), ("Expenses:Dining", 0.05), ...]
 //! ```
 
-use rustledger_plugin_types::{DirectiveData, DirectiveWrapper};
+use rustledger_core::Directive;
 use std::collections::HashMap;
 
 /// A trained categorization model.
@@ -71,30 +71,30 @@ impl CategorizationModel {
     ///
     /// Returns `MlError::InsufficientData` if there aren't enough transactions
     /// or distinct categories to train a useful model.
-    pub fn train(directives: &[DirectiveWrapper]) -> Result<Self, MlError> {
+    pub fn train(directives: &[Directive]) -> Result<Self, MlError> {
         // Extract training data: (text, account) pairs
         let mut samples: Vec<(String, String)> = Vec::new();
 
         for d in directives {
-            if let DirectiveData::Transaction(txn) = &d.data {
+            if let Directive::Transaction(txn) = d {
                 // Skip transactions with fewer than 2 postings
                 if txn.postings.len() < 2 {
                     continue;
                 }
 
                 // The target account is the second posting (contra-account)
-                let account = &txn.postings[1].account;
+                let account = txn.postings[1].account.as_str();
 
                 // Build text from payee + narration
                 let mut text = String::new();
-                if let Some(ref payee) = txn.payee {
-                    text.push_str(payee);
+                if let Some(payee) = &txn.payee {
+                    text.push_str(payee.as_str());
                     text.push(' ');
                 }
-                text.push_str(&txn.narration);
+                text.push_str(txn.narration.as_str());
 
                 if !text.trim().is_empty() {
-                    samples.push((text.to_lowercase(), account.clone()));
+                    samples.push((text.to_lowercase(), account.to_string()));
                 }
             }
         }
@@ -362,54 +362,30 @@ fn tfidf_row(tokens: &[String], vocab: &HashMap<String, usize>, idf: &[f64]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustledger_plugin_types::{AmountData, PostingData, TransactionData};
+    use rust_decimal::Decimal;
+    use rustledger_core::{Amount, NaiveDate, Posting, Transaction};
 
     fn make_txn(
         payee: Option<&str>,
         narration: &str,
         from_account: &str,
         to_account: &str,
-    ) -> DirectiveWrapper {
-        DirectiveWrapper {
-            directive_type: "transaction".to_string(),
-            date: "2024-01-15".to_string(),
-            filename: None,
-            lineno: None,
-            data: DirectiveData::Transaction(TransactionData {
-                flag: "*".to_string(),
-                payee: payee.map(String::from),
-                narration: narration.to_string(),
-                tags: vec![],
-                links: vec![],
-                metadata: vec![],
-                postings: vec![
-                    PostingData {
-                        account: from_account.to_string(),
-                        units: Some(AmountData {
-                            number: "-50.00".to_string(),
-                            currency: "USD".to_string(),
-                        }),
-                        cost: None,
-                        price: None,
-                        flag: None,
-                        metadata: vec![],
-                        span: None,
-                    },
-                    PostingData {
-                        account: to_account.to_string(),
-                        units: None,
-                        cost: None,
-                        price: None,
-                        flag: None,
-                        metadata: vec![],
-                        span: None,
-                    },
-                ],
-            }),
+    ) -> Directive {
+        // First posting carries the amount; the second posting's account is the
+        // categorization target that `train` reads (`postings[1].account`).
+        let mut txn = Transaction::new("2024-01-15".parse::<NaiveDate>().unwrap(), narration)
+            .with_synthesized_posting(Posting::new(
+                from_account,
+                Amount::new("-50.00".parse::<Decimal>().unwrap(), "USD"),
+            ))
+            .with_synthesized_posting(Posting::auto(to_account));
+        if let Some(payee) = payee {
+            txn = txn.with_payee(payee);
         }
+        Directive::Transaction(txn)
     }
 
-    fn training_data() -> Vec<DirectiveWrapper> {
+    fn training_data() -> Vec<Directive> {
         vec![
             make_txn(
                 Some("Whole Foods"),

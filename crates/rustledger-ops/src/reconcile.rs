@@ -80,7 +80,7 @@ pub fn reconcile(
 
 /// Create a core balance-assertion [`Directive`] from a statement balance.
 ///
-/// Returns a `core::Directive` directly so the CLI can append it without a
+/// Returns a [`Directive`] directly so the CLI can append it without a
 /// `DirectiveWrapper` round-trip (it previously built a wrapper here only to call
 /// `wrapper_to_directive` on it one line later).
 #[must_use]

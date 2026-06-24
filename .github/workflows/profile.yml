@@ -1,0 +1,93 @@
+# Nightly heap profiling — surfaces allocation hotspots in the load → process
+# pipeline so we can spot optimization opportunities. Complements `bench.yml`
+# (wall-clock timing / regressions); this answers "where do the allocations
+# come from". Advisory only — uploads an artifact, never gates merges.
+#
+# Slice 1 (this file): a `dhat` heap profile of `examples/profile_pipeline`
+# over a generated ledger, uploaded as an artifact. Future slices may add
+# flamegraphs, iai-callgrind instruction counts, and a `profiling` data branch
+# for night-over-night trends.
+name: Profile
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # Nightly at 3 AM UTC (offset from bench.yml's 2 AM)
+  workflow_dispatch:
+    inputs:
+      transactions:
+        description: "Number of transactions in the generated workload"
+        default: "10000"
+
+# Profiling runs are independent; never cancel an in-flight one.
+concurrency:
+  group: profiling
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  heap-profile:
+    name: dhat heap profile (load + process)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+
+      - name: Generate workload ledger
+        env:
+          TXNS: ${{ github.event.inputs.transactions || '10000' }}
+        run: |
+          python3 - "$TXNS" > workload.beancount <<'PY'
+          import sys, random, datetime
+          random.seed(42)
+          n = int(sys.argv[1])
+          accounts = ["Assets:Bank:Checking", "Assets:Bank:Savings",
+                      "Expenses:Food", "Expenses:Rent", "Income:Salary",
+                      "Liabilities:CreditCard"]
+          print('option "title" "Profiling Workload"')
+          print('option "operating_currency" "USD"')
+          for a in accounts:
+              print(f"2020-01-01 open {a} USD")
+          print()
+          d = datetime.date(2020, 1, 2)
+          for i in range(n):
+              d += datetime.timedelta(days=1)
+              src, dst = random.choice(accounts), random.choice(accounts)
+              amt = round(random.uniform(1, 500), 2)
+              print(f'{d.isoformat()} * "Payee {i}" "memo {i}"')
+              print(f"  {src}  -{amt} USD")
+              print(f"  {dst}   {amt} USD")
+          PY
+          echo "workload: $(wc -l < workload.beancount) lines"
+
+      - name: Build profiling harness
+        run: cargo build -p rustledger --profile profiling --example profile_pipeline --features dhat-heap
+
+      - name: Run heap profile
+        run: ./target/profiling/examples/profile_pipeline workload.beancount
+
+      - name: Summarize
+        run: |
+          {
+            echo "## Nightly heap profile — load + process"
+            echo ""
+            echo "- Workload: \`$(wc -l < workload.beancount)\` lines"
+            echo "- Profile: \`dhat-heap.json\` ($(du -h dhat-heap.json | cut -f1))"
+            echo ""
+            echo "Download the **dhat-heap-profile** artifact and open \`dhat-heap.json\` at"
+            echo "<https://nnethercote.github.io/dh_view/> for the allocation tree"
+            echo "(which call paths allocate the most bytes — the optimization targets)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload heap profile
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dhat-heap-profile
+          path: |
+            dhat-heap.json
+            workload.beancount
+          retention-days: 30

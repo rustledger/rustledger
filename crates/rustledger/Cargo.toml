@@ -18,6 +18,10 @@ bench = false
 
 [features]
 default = ["python-plugin-wasm"]
+# Heap-profiling harness (`examples/profile_pipeline` + the nightly `profile.yml`
+# workflow). Off by default; pulls the optional `dhat` dep and installs its
+# global allocator in the example. Never enabled for the shipped binary.
+dhat-heap = ["dep:dhat"]
 # Enable Python plugin support via WASM sandbox (adds ~30s to build time).
 # This allows running existing Python beancount plugins, the WASM importer
 # loader, and the directive-plugin runtime — all of which pull `wasmtime`
@@ -53,6 +57,8 @@ required-features = ["ag-rledger"]
 # the sync `rledger` CLI/lib don't carry the async runtime by default.
 agcli = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt"], optional = true }
+# Heap profiling, only under the `dhat-heap` feature (see examples/profile_pipeline.rs).
+dhat = { workspace = true, optional = true }
 rustledger-core.workspace = true
 rustledger-parser.workspace = true
 rustledger-loader.workspace = true

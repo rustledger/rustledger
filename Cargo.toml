@@ -149,6 +149,9 @@ criterion = "0.8"
 insta = { version = "1", features = ["yaml"] }
 rust_decimal_macros = "1.40"
 tempfile = "3"
+# Heap profiling for the nightly `profile.yml` harness. Optional + off by
+# default (only pulled by `rustledger`'s `dhat-heap` feature).
+dhat = "0.3"
 
 # Data formats
 csv = "1"
@@ -269,3 +272,11 @@ opt-level = 3
 
 [profile.bench]
 debug = true
+
+# Profiling build: release-grade codegen, but keep debug symbols (release
+# `strip`s them) so dhat / flamegraph / samply backtraces symbolize. Used by the
+# nightly `profile.yml` heap-profiling harness (`examples/profile_pipeline`).
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

@@ -8,7 +8,7 @@
 //! allocation hotspots ("where do the bytes come from") to optimize.
 //!
 //! ```text
-//! cargo run --profile profiling --example profile_pipeline \
+//! cargo run -p rustledger --profile profiling --example profile_pipeline \
 //!     --features dhat-heap -- <ledger.beancount>
 //! ```
 //!
@@ -41,7 +41,16 @@ fn main() {
         ..Default::default()
     };
     match rustledger_loader::load(std::path::Path::new(&path), &options) {
-        Ok(ledger) => eprintln!("processed {} directives", ledger.directives.len()),
+        Ok(ledger) => {
+            // `load` returns `Ok` even when the pipeline accumulated validation
+            // errors (in `ledger.errors`, like `rledger check`). Surface the
+            // count so a profile over an erroring ledger isn't silently "clean".
+            eprintln!(
+                "processed {} directives ({} pipeline errors)",
+                ledger.directives.len(),
+                ledger.errors.len()
+            );
+        }
         Err(e) => {
             eprintln!("load/process failed: {e}");
             std::process::exit(1);

@@ -730,30 +730,33 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     #[cfg(not(feature = "python-plugin-wasm"))]
     let mut warning_count = warning_count;
     if args.lints.contains(&LintName::Transfers) {
-        let mut wrappers: Vec<rustledger_plugin::types::DirectiveWrapper> =
-            Vec::with_capacity(spanned_directives.len());
-        for spanned in &spanned_directives {
-            let (filename, lineno) = if let Some(file) = source_map.get(spanned.file_id as usize) {
-                let (line, _col) = file.line_col(spanned.span.start);
-                (
-                    Some(file.path.to_string_lossy().into_owned()),
-                    u32::try_from(line).ok(),
-                )
-            } else {
-                (None, None)
-            };
-            wrappers.push(rustledger_plugin::directive_to_wrapper_with_location(
-                &spanned.value,
-                filename,
-                lineno,
-            ));
-        }
+        // Pair each core directive with its source location (no `DirectiveWrapper`
+        // deep clone — the directive is borrowed, only the location is owned).
+        let located: Vec<rustledger_ops::transfer::LocatedDirective<'_>> = spanned_directives
+            .iter()
+            .map(|spanned| {
+                let (filename, lineno) =
+                    if let Some(file) = source_map.get(spanned.file_id as usize) {
+                        let (line, _col) = file.line_col(spanned.span.start);
+                        (
+                            Some(file.path.to_string_lossy().into_owned()),
+                            u32::try_from(line).ok(),
+                        )
+                    } else {
+                        (None, None)
+                    };
+                rustledger_ops::transfer::LocatedDirective {
+                    directive: &spanned.value,
+                    filename,
+                    lineno,
+                }
+            })
+            .collect();
         let config = rustledger_ops::transfer::TransferConfig::default();
-        let matches: Vec<_> =
-            rustledger_ops::transfer::find_transfers_in_ledger(&wrappers, &config)
-                .into_iter()
-                .filter(|m| m.confidence >= args.lint_min_confidence)
-                .collect();
+        let matches: Vec<_> = rustledger_ops::transfer::find_transfers_in_ledger(&located, &config)
+            .into_iter()
+            .filter(|m| m.confidence >= args.lint_min_confidence)
+            .collect();
         for m in &matches {
             let msg = format!(
                 "likely transfer pair: {} {} {} → {} (confidence {:.2}); link with ^xfer-... to silence",

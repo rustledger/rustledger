@@ -12,9 +12,9 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Parser, ValueEnum};
 use rust_decimal::Decimal;
 use rustledger_loader::Loader;
-use rustledger_ops::transfer::{TransferConfig, TransferMatch, find_transfers_in_ledger};
-use rustledger_plugin::convert::directive_to_wrapper_with_location;
-use rustledger_plugin::types::DirectiveWrapper;
+use rustledger_ops::transfer::{
+    LocatedDirective, TransferConfig, TransferMatch, find_transfers_in_ledger,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -99,37 +99,45 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
     };
 
     // Load every input file separately so we can attach the file's path to
-    // each directive's `filename`/`lineno` before merging into one flat list.
-    let mut wrappers: Vec<DirectiveWrapper> = Vec::new();
+    // each directive's `filename`/`lineno`. Keep the `LoadResult`s alive (in
+    // `loaded`) so the flat `LocatedDirective` list can borrow their directives
+    // without a `DirectiveWrapper` deep clone.
+    let mut loaded = Vec::with_capacity(args.files.len());
     for path in &args.files {
         let resolved = canonicalize_for_report(path)?;
         let mut loader = Loader::new();
         let result = loader
             .load(path)
             .with_context(|| format!("failed to load {}", path.display()))?;
-
-        for spanned in &result.directives {
-            let (filename, lineno) =
-                if let Some(file) = result.source_map.get(spanned.file_id as usize) {
-                    let (line, _col) = file.line_col(spanned.span.start);
-                    (
-                        Some(file.path.to_string_lossy().into_owned()),
-                        u32::try_from(line).ok(),
-                    )
-                } else {
-                    (Some(resolved.clone()), None)
-                };
-            wrappers.push(directive_to_wrapper_with_location(
-                &spanned.value,
-                filename,
-                lineno,
-            ));
-        }
+        loaded.push((resolved, result));
     }
+
+    let located: Vec<LocatedDirective<'_>> = loaded
+        .iter()
+        .flat_map(|(resolved, result)| {
+            result.directives.iter().map(move |spanned| {
+                let (filename, lineno) =
+                    if let Some(file) = result.source_map.get(spanned.file_id as usize) {
+                        let (line, _col) = file.line_col(spanned.span.start);
+                        (
+                            Some(file.path.to_string_lossy().into_owned()),
+                            u32::try_from(line).ok(),
+                        )
+                    } else {
+                        (Some(resolved.clone()), None)
+                    };
+                LocatedDirective {
+                    directive: &spanned.value,
+                    filename,
+                    lineno,
+                }
+            })
+        })
+        .collect();
 
     // Run detection. Phase 0's `find_transfers_in_ledger` groups by the
     // first posting's account and skips pairs that already share a link.
-    let all_matches = find_transfers_in_ledger(&wrappers, &config);
+    let all_matches = find_transfers_in_ledger(&located, &config);
     let matches: Vec<TransferMatch> = all_matches
         .into_iter()
         .filter(|m| m.confidence >= args.min_confidence)

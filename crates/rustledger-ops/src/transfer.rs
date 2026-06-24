@@ -17,9 +17,26 @@
 //! detector against an already-linked ledger is a no-op (idempotent).
 
 use rust_decimal::Decimal;
-use rustledger_plugin_types::{DirectiveData, DirectiveWrapper};
+use rustledger_core::{Directive, IncompleteAmount, Link, NaiveDate};
 use std::collections::{BTreeMap, HashSet};
-use std::str::FromStr;
+
+/// A core [`Directive`] paired with its source location — the input to transfer
+/// detection.
+///
+/// Carrying `(filename, lineno)` here keeps `ops` on `core::Directive` (no
+/// plugin `DirectiveWrapper` deep clone of the whole directive) while still
+/// letting [`TransferMatch`] report and rewrite `file:line`. The directive is
+/// borrowed; only the small location is owned, so cloning a `LocatedDirective`
+/// (e.g. during grouping) does not deep-copy the directive.
+#[derive(Debug, Clone)]
+pub struct LocatedDirective<'a> {
+    /// The directive (borrowed — not cloned).
+    pub directive: &'a Directive,
+    /// Source file of the directive, if known.
+    pub filename: Option<String>,
+    /// 1-based source line of the directive, if known.
+    pub lineno: Option<u32>,
+}
 
 /// Configuration for transfer matching.
 #[derive(Debug, Clone)]
@@ -82,7 +99,7 @@ pub struct TransferMatch {
 /// tag are skipped.
 #[must_use]
 pub fn find_transfers(
-    groups: &[(String, Vec<DirectiveWrapper>)],
+    groups: &[(String, Vec<LocatedDirective>)],
     config: &TransferConfig,
 ) -> Vec<TransferMatch> {
     let mut matches = Vec::new();
@@ -132,20 +149,22 @@ pub fn find_transfers(
 /// tag are skipped.
 #[must_use]
 pub fn find_transfers_in_ledger(
-    directives: &[DirectiveWrapper],
+    directives: &[LocatedDirective<'_>],
     config: &TransferConfig,
 ) -> Vec<TransferMatch> {
     // BTreeMap for deterministic group ordering by account name.
-    let mut by_account: BTreeMap<String, Vec<DirectiveWrapper>> = BTreeMap::new();
+    // Cloning a `LocatedDirective` copies only the borrowed directive pointer
+    // and the small location — it does not deep-copy the directive itself.
+    let mut by_account: BTreeMap<String, Vec<LocatedDirective<'_>>> = BTreeMap::new();
     for d in directives {
-        if let Some(account) = first_posting_account(d) {
+        if let Some(account) = first_posting_account(d.directive) {
             by_account
                 .entry(account.to_string())
                 .or_default()
                 .push(d.clone());
         }
     }
-    let groups: Vec<(String, Vec<DirectiveWrapper>)> = by_account.into_iter().collect();
+    let groups: Vec<(String, Vec<LocatedDirective<'_>>)> = by_account.into_iter().collect();
     find_transfers(&groups, config)
 }
 
@@ -153,9 +172,9 @@ pub fn find_transfers_in_ledger(
 #[allow(clippy::too_many_arguments)]
 fn find_matches_between(
     g1: usize,
-    directives1: &[DirectiveWrapper],
+    directives1: &[LocatedDirective<'_>],
     g2: usize,
-    directives2: &[DirectiveWrapper],
+    directives2: &[LocatedDirective<'_>],
     group_accounts: &[&str],
     config: &TransferConfig,
     matches: &mut Vec<TransferMatch>,
@@ -166,7 +185,7 @@ fn find_matches_between(
             continue;
         }
 
-        let Some((amount1, currency1)) = first_posting_amount_currency(d1) else {
+        let Some((amount1, currency1, date1)) = first_posting_amount_currency(d1.directive) else {
             continue;
         };
 
@@ -175,7 +194,8 @@ fn find_matches_between(
                 continue;
             }
 
-            let Some((amount2, currency2)) = first_posting_amount_currency(d2) else {
+            let Some((amount2, currency2, date2)) = first_posting_amount_currency(d2.directive)
+            else {
                 continue;
             };
 
@@ -191,26 +211,26 @@ fn find_matches_between(
             }
 
             // Must be within date window
-            if !within_date_window(&d1.date, &d2.date, config.date_window_days) {
+            if !within_date_window(date1, date2, config.date_window_days) {
                 continue;
             }
 
             // Idempotency: skip if both txns already share a link. Mark both
             // as "used" so they can't pair with a third party and produce a
             // redundant match.
-            if shares_link(d1, d2) {
+            if shares_link(d1.directive, d2.directive) {
                 globally_matched.insert((g1, i));
                 globally_matched.insert((g2, j));
                 break;
             }
 
-            let same_date = d1.date == d2.date;
+            let same_date = date1 == date2;
 
             // Compute confidence.
             let mut confidence: f64 = 0.7; // Base for amount + date match
 
-            let kw1 = classify_keywords(d1);
-            let kw2 = classify_keywords(d2);
+            let kw1 = classify_keywords(d1.directive);
+            let kw2 = classify_keywords(d2.directive);
             let strong = kw1.strong || kw2.strong;
             let weak = kw1.weak || kw2.weak;
             if strong || (weak && same_date) {
@@ -224,11 +244,11 @@ fn find_matches_between(
             let confidence = confidence.min(1.0);
 
             // Determine from/to based on sign
-            let (from_group, from_index, to_group, to_index, from, to) =
+            let (from_group, from_index, to_group, to_index, from, to, from_date) =
                 if amount1.is_sign_negative() {
-                    (g1, i, g2, j, d1, d2)
+                    (g1, i, g2, j, d1, d2, date1)
                 } else {
-                    (g2, j, g1, i, d2, d1)
+                    (g2, j, g1, i, d2, d1, date2)
                 };
 
             matches.push(TransferMatch {
@@ -251,7 +271,7 @@ fn find_matches_between(
                 amount: amount1.abs(),
                 currency: currency1.to_string(),
                 confidence,
-                date: from.date.clone(),
+                date: from_date.to_string(),
             });
 
             globally_matched.insert((g1, i));
@@ -261,21 +281,29 @@ fn find_matches_between(
     }
 }
 
-/// Extract the first posting's amount and currency from a directive.
-fn first_posting_amount_currency(d: &DirectiveWrapper) -> Option<(Decimal, &str)> {
-    if let DirectiveData::Transaction(txn) = &d.data
-        && let Some(posting) = txn.postings.first()
-        && let Some(units) = &posting.units
-    {
-        let amount = Decimal::from_str(&units.number).ok()?;
-        return Some((amount, &units.currency));
-    }
-    None
+/// Extract the first posting's amount, currency, and the transaction date.
+///
+/// Mirrors the previous wire behaviour exactly: a `Complete` first posting
+/// yields its number and currency; a `NumberOnly` posting yields its number
+/// with an empty currency (the wire serialized currency to `""`); a
+/// `CurrencyOnly` first posting is skipped (its wire number was `""`, which
+/// failed to parse).
+fn first_posting_amount_currency(d: &Directive) -> Option<(Decimal, &str, NaiveDate)> {
+    let Directive::Transaction(txn) = d else {
+        return None;
+    };
+    let posting = txn.postings.first()?;
+    let (number, currency) = match posting.units.as_ref()? {
+        IncompleteAmount::Complete(amount) => (amount.number, amount.currency.as_str()),
+        IncompleteAmount::NumberOnly(number) => (*number, ""),
+        IncompleteAmount::CurrencyOnly(_) => return None,
+    };
+    Some((number, currency, txn.date))
 }
 
 /// Extract the first posting's account name from a directive.
-fn first_posting_account(d: &DirectiveWrapper) -> Option<&str> {
-    if let DirectiveData::Transaction(txn) = &d.data
+fn first_posting_account(d: &Directive) -> Option<&str> {
+    if let Directive::Transaction(txn) = d
         && let Some(posting) = txn.postings.first()
     {
         return Some(posting.account.as_str());
@@ -285,36 +313,24 @@ fn first_posting_account(d: &DirectiveWrapper) -> Option<&str> {
 
 /// True if both transactions share at least one `^link:` tag.
 ///
-/// `link` strings in `TransactionData::links` are stored without the `^`
-/// sigil, so we compare them directly.
-fn shares_link(a: &DirectiveWrapper, b: &DirectiveWrapper) -> bool {
-    let (DirectiveData::Transaction(txn_a), DirectiveData::Transaction(txn_b)) = (&a.data, &b.data)
-    else {
+/// Links are interned without the `^` sigil, so we compare them directly.
+fn shares_link(a: &Directive, b: &Directive) -> bool {
+    let (Directive::Transaction(txn_a), Directive::Transaction(txn_b)) = (a, b) else {
         return false;
     };
     if txn_a.links.is_empty() || txn_b.links.is_empty() {
         return false;
     }
-    let set: HashSet<&str> = txn_a.links.iter().map(String::as_str).collect();
+    let set: HashSet<&str> = txn_a.links.iter().map(Link::as_str).collect();
     txn_b.links.iter().any(|l| set.contains(l.as_str()))
 }
 
-/// Check if two date strings are within a given window (in days).
-fn within_date_window(date1: &str, date2: &str, days: i64) -> bool {
-    // Simple date comparison for YYYY-MM-DD format
-    let d1: jiff::civil::Date = match date1.parse() {
-        Ok(d) => d,
-        Err(_) => return false,
-    };
-    let d2: jiff::civil::Date = match date2.parse() {
-        Ok(d) => d,
-        Err(_) => return false,
-    };
-    let Ok(span) = d2.since(d1) else {
+/// Check whether two dates are within a given window (in days).
+fn within_date_window(date1: NaiveDate, date2: NaiveDate, days: i64) -> bool {
+    let Ok(span) = date2.since(date1) else {
         return false;
     };
-    let diff = span.get_days().abs();
-    i64::from(diff) <= days
+    i64::from(span.get_days().abs()) <= days
 }
 
 /// Strong transfer keywords: explicit transfer language. Boost unconditionally.
@@ -331,13 +347,13 @@ struct KeywordHit {
     weak: bool,
 }
 
-fn classify_keywords(d: &DirectiveWrapper) -> KeywordHit {
-    let DirectiveData::Transaction(txn) = &d.data else {
+fn classify_keywords(d: &Directive) -> KeywordHit {
+    let Directive::Transaction(txn) = d else {
         return KeywordHit::default();
     };
     let mut hit = KeywordHit::default();
-    let narration_lower = txn.narration.to_lowercase();
-    let payee_lower = txn.payee.as_deref().unwrap_or("").to_lowercase();
+    let narration_lower = txn.narration.as_str().to_lowercase();
+    let payee_lower = txn.payee.as_ref().map_or("", |p| p.as_str()).to_lowercase();
     let scan = |needles: &[&str]| -> bool {
         needles
             .iter()
@@ -351,9 +367,9 @@ fn classify_keywords(d: &DirectiveWrapper) -> KeywordHit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustledger_plugin_types::{AmountData, PostingData, TransactionData};
+    use rustledger_core::{Amount, Posting, Transaction};
 
-    fn make_txn(date: &str, narration: &str, amount: &str, currency: &str) -> DirectiveWrapper {
+    fn make_txn(date: &str, narration: &str, amount: &str, currency: &str) -> Directive {
         make_txn_with(date, narration, amount, currency, "Assets:Bank", vec![])
     }
 
@@ -363,49 +379,45 @@ mod tests {
         amount: &str,
         currency: &str,
         account: &str,
-        links: Vec<String>,
-    ) -> DirectiveWrapper {
-        DirectiveWrapper {
-            directive_type: "transaction".to_string(),
-            date: date.to_string(),
+        links: Vec<&str>,
+    ) -> Directive {
+        let mut txn = Transaction::new(date.parse::<NaiveDate>().unwrap(), narration)
+            .with_synthesized_posting(Posting::new(
+                account,
+                Amount::new(amount.parse::<Decimal>().unwrap(), currency),
+            ));
+        for link in links {
+            txn = txn.with_link(link);
+        }
+        Directive::Transaction(txn)
+    }
+
+    /// Wrap a borrowed directive with no source location (test convenience).
+    fn loc(d: &Directive) -> LocatedDirective<'_> {
+        LocatedDirective {
+            directive: d,
             filename: None,
             lineno: None,
-            data: DirectiveData::Transaction(TransactionData {
-                flag: "*".to_string(),
-                payee: None,
-                narration: narration.to_string(),
-                tags: vec![],
-                links,
-                metadata: vec![],
-                postings: vec![PostingData {
-                    account: account.to_string(),
-                    units: Some(AmountData {
-                        number: amount.to_string(),
-                        currency: currency.to_string(),
-                    }),
-                    cost: None,
-                    price: None,
-                    flag: None,
-                    metadata: vec![],
-                    span: None,
-                }],
-            }),
         }
     }
 
-    fn make_txn_loc(
-        date: &str,
-        narration: &str,
-        amount: &str,
-        currency: &str,
-        account: &str,
-        filename: &str,
-        lineno: u32,
-    ) -> DirectiveWrapper {
-        let mut d = make_txn_with(date, narration, amount, currency, account, vec![]);
-        d.filename = Some(filename.to_string());
-        d.lineno = Some(lineno);
-        d
+    /// Run `find_transfers` over owned directive groups, building the borrowed
+    /// `LocatedDirective` view internally so tests can pass owned `Directive`s.
+    fn find_in_groups(
+        groups: &[(String, Vec<Directive>)],
+        config: &TransferConfig,
+    ) -> Vec<TransferMatch> {
+        let located: Vec<(String, Vec<LocatedDirective<'_>>)> = groups
+            .iter()
+            .map(|(account, dirs)| (account.clone(), dirs.iter().map(loc).collect()))
+            .collect();
+        find_transfers(&located, config)
+    }
+
+    /// Run `find_transfers_in_ledger` over an owned flat directive list.
+    fn find_in_ledger(directives: &[Directive], config: &TransferConfig) -> Vec<TransferMatch> {
+        let located: Vec<LocatedDirective<'_>> = directives.iter().map(loc).collect();
+        find_transfers_in_ledger(&located, config)
     }
 
     #[test]
@@ -430,7 +442,7 @@ mod tests {
                 )],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].amount, Decimal::new(50000, 2));
         assert!(matches[0].confidence > 0.8); // Strong keyword + exact date
@@ -448,7 +460,7 @@ mod tests {
                 vec![make_txn("2024-01-17", "Payment received", "200.00", "USD")],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert_eq!(matches.len(), 1);
     }
 
@@ -464,7 +476,7 @@ mod tests {
                 vec![make_txn("2024-01-25", "Transfer", "500.00", "USD")],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert!(matches.is_empty());
     }
 
@@ -480,7 +492,7 @@ mod tests {
                 vec![make_txn("2024-01-15", "Transfer", "500.00", "EUR")],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert!(matches.is_empty());
     }
 
@@ -496,7 +508,7 @@ mod tests {
                 vec![make_txn("2024-01-15", "Deposit", "500.00", "USD")],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert!(matches.is_empty());
     }
 
@@ -512,7 +524,7 @@ mod tests {
                 vec![make_txn("2024-01-15", "Transfer", "499.00", "USD")],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert!(matches.is_empty());
     }
 
@@ -538,7 +550,7 @@ mod tests {
                 )],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert_eq!(matches.len(), 1);
         // Strong keyword + exact date = max
         assert!(matches[0].confidence >= 0.9);
@@ -556,7 +568,7 @@ mod tests {
                 vec![make_txn("2024-01-17", "Something else", "500.00", "USD")],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert_eq!(matches.len(), 1);
         // No keywords, different dates = base only
         assert!(matches[0].confidence < 0.8);
@@ -580,7 +592,7 @@ mod tests {
                 ],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert_eq!(matches.len(), 2);
     }
 
@@ -600,7 +612,7 @@ mod tests {
                 vec![make_txn("2024-01-15", "Transfer", "500.00", "USD")],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert_eq!(matches.len(), 1);
     }
 
@@ -620,15 +632,15 @@ mod tests {
                 vec![make_txn("2024-01-15", "Payment", "200.00", "USD")],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         // Checking↔Savings matches; CreditCard has no opposite-sign match
         assert_eq!(matches.len(), 1);
     }
 
     #[test]
     fn empty_groups() {
-        let groups: Vec<(String, Vec<DirectiveWrapper>)> = vec![];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let groups: Vec<(String, Vec<Directive>)> = vec![];
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert!(matches.is_empty());
     }
 
@@ -655,7 +667,7 @@ mod tests {
                 vec![],
             ),
         ];
-        let matches = find_transfers_in_ledger(&directives, &TransferConfig::default());
+        let matches = find_in_ledger(&directives, &TransferConfig::default());
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].from_account.as_deref(), Some("Assets:Checking"));
         assert_eq!(matches[0].to_account.as_deref(), Some("Assets:Savings"));
@@ -682,36 +694,46 @@ mod tests {
                 vec![],
             ),
         ];
-        let matches = find_transfers_in_ledger(&directives, &TransferConfig::default());
+        let matches = find_in_ledger(&directives, &TransferConfig::default());
         assert!(matches.is_empty());
     }
 
     #[test]
     fn transfer_match_carries_filename_and_lineno() {
+        // Location lives in `LocatedDirective`, not the directive, so build them
+        // explicitly here (the directives must outlive the borrowed view).
+        let checking = make_txn_with(
+            "2024-01-15",
+            "Transfer",
+            "-500.00",
+            "USD",
+            "Assets:Checking",
+            vec![],
+        );
+        let savings = make_txn_with(
+            "2024-01-15",
+            "Transfer",
+            "500.00",
+            "USD",
+            "Assets:Savings",
+            vec![],
+        );
         let groups = vec![
             (
                 "Assets:Checking".to_string(),
-                vec![make_txn_loc(
-                    "2024-01-15",
-                    "Transfer",
-                    "-500.00",
-                    "USD",
-                    "Assets:Checking",
-                    "checking.bean",
-                    42,
-                )],
+                vec![LocatedDirective {
+                    directive: &checking,
+                    filename: Some("checking.bean".to_string()),
+                    lineno: Some(42),
+                }],
             ),
             (
                 "Assets:Savings".to_string(),
-                vec![make_txn_loc(
-                    "2024-01-15",
-                    "Transfer",
-                    "500.00",
-                    "USD",
-                    "Assets:Savings",
-                    "savings.bean",
-                    18,
-                )],
+                vec![LocatedDirective {
+                    directive: &savings,
+                    filename: Some("savings.bean".to_string()),
+                    lineno: Some(18),
+                }],
             ),
         ];
         let matches = find_transfers(&groups, &TransferConfig::default());
@@ -734,7 +756,7 @@ mod tests {
                     "-500.00",
                     "USD",
                     "Assets:Checking",
-                    vec!["xfer-001".to_string()],
+                    vec!["xfer-001"],
                 )],
             ),
             (
@@ -745,11 +767,11 @@ mod tests {
                     "500.00",
                     "USD",
                     "Assets:Savings",
-                    vec!["xfer-001".to_string()],
+                    vec!["xfer-001"],
                 )],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert!(
             matches.is_empty(),
             "already-linked pair must not be re-detected; got {matches:?}"
@@ -767,7 +789,7 @@ mod tests {
                     "-500.00",
                     "USD",
                     "Assets:Checking",
-                    vec!["batch-import-A".to_string()],
+                    vec!["batch-import-A"],
                 )],
             ),
             (
@@ -778,11 +800,11 @@ mod tests {
                     "500.00",
                     "USD",
                     "Assets:Savings",
-                    vec!["batch-import-B".to_string()],
+                    vec!["batch-import-B"],
                 )],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert_eq!(matches.len(), 1);
     }
 
@@ -798,7 +820,7 @@ mod tests {
                 vec![make_txn("2024-01-17", "PAYMENT", "200.00", "USD")],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert_eq!(matches.len(), 1);
         assert!(
             (matches[0].confidence - 0.7).abs() < 1e-9,
@@ -819,7 +841,7 @@ mod tests {
                 vec![make_txn("2024-01-15", "PAYMENT", "200.00", "USD")],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert_eq!(matches.len(), 1);
         // 0.7 base + 0.2 weak + 0.1 same-date = 1.0
         assert!(matches[0].confidence > 0.95);
@@ -837,7 +859,7 @@ mod tests {
                 vec![make_txn("2024-01-17", "TRANSFER", "500.00", "USD")],
             ),
         ];
-        let matches = find_transfers(&groups, &TransferConfig::default());
+        let matches = find_in_groups(&groups, &TransferConfig::default());
         assert_eq!(matches.len(), 1);
         // 0.7 base + 0.2 strong = 0.9 (no same-date bonus)
         assert!(

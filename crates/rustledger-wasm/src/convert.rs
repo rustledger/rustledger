@@ -270,8 +270,9 @@ pub fn value_to_cell(value: &rustledger_query::Value) -> CellValue {
             CellValue::Set(values.iter().map(|v| Box::new(value_to_cell(v))).collect())
         }
         Value::Metadata(meta) => {
-            // Render values via `Display` (`foo`), matching the canonical CLI
-            // (`cmd/query/output.rs`), not `Debug` (which leaked `String("foo")`).
+            // Render values via `Display`, matching the canonical CLI
+            // (`cmd/query/output.rs`), not `Debug` (which leaked the Rust
+            // wrapper, e.g. `String("foo")`).
             let repr = meta
                 .iter()
                 .map(|(k, v)| format!("{k}: {v}"))

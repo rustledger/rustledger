@@ -383,8 +383,8 @@ fn query_value(v: &Value) -> wit::QueryValue {
         Value::Inventory(inv) => Q::Inventory(inv.positions().map(position).collect()),
         Value::StringSet(set) => Q::StringSet(set.clone()),
         Value::Metadata(m) => Q::Metadata(
-            // `Display` (`foo`), matching the canonical CLI, not `Debug`
-            // (which leaked `String("foo")`).
+            // `Display`, matching the canonical CLI, not `Debug` (which leaked
+            // the Rust wrapper, e.g. `String("foo")`).
             m.iter()
                 .map(|(k, val)| (k.clone(), format!("{val}")))
                 .collect(),

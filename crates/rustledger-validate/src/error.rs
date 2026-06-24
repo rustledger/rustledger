@@ -42,8 +42,9 @@ pub enum ErrorCode {
     ///
     /// Reserved for spec parity but **never emitted**: rledger skips validation
     /// of a posting-less transaction rather than flagging it (matching Python
-    /// beancount, which treats it as a structurally-valid no-op). See the
-    /// early return in `validate_transaction` and the `no_postings` test.
+    /// beancount, which treats it as a structurally-valid no-op). See the early
+    /// return in `validate_transaction_structure` and the
+    /// `test_validate_no_postings_allowed` test.
     NoPostings,
     /// E3004: Transaction has single posting (warning).
     SinglePosting,

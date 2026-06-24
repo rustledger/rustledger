@@ -302,7 +302,7 @@ This document catalogs all validation errors and warnings with their trigger con
 
 **Condition:** A `commodity` directive carries a `precision` metadata value that does not parse as a non-negative integer. The declaration is ignored (display precision falls back to `option "display_precision"`, otherwise to inference).
 
-**Message:** `invalid `precision` metadata on commodity {currency}: {reason}; this declaration is ignored — display precision falls back to `option "display_precision"` if set, otherwise to inference`
+**Message:** `invalid precision metadata on commodity {currency}: {reason}; this declaration is ignored — display precision falls back to option "display_precision" if set, otherwise to inference`
 
 **Severity:** Warning
 

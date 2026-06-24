@@ -463,7 +463,8 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
 
     // All option warnings collected by `Options::set` (E7001 unknown option,
     // E7002 invalid value, E7003 duplicate non-repeatable, E7004/E7005/E7006
-    // read-only and related) are surfaced here as hard errors.
+    // read-only and related) are surfaced here. Everything except E7003 is a
+    // hard error; E7003 is a warning (see below).
     //
     // E7001/E7002 match beancount: `bean-check` exits non-zero on an unknown
     // option or an invalid option value.

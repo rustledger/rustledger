@@ -869,56 +869,6 @@ struct PluginInvocation {
     force_python: bool,
 }
 
-/// Lexically resolve `.` / `..` in `p` WITHOUT touching the filesystem,
-/// preserving the root/prefix. Unlike `Path::canonicalize` this works on paths
-/// that don't exist yet, so a `..` traversal is still collapsed (e.g.
-/// `/ledger/../../etc` → `/etc`). A `..` at the root is clamped (it can't escape
-/// above the root).
-#[cfg(any(feature = "wasm-plugins", feature = "python-plugins"))]
-fn lexically_normalize(p: &Path) -> std::path::PathBuf {
-    let mut out = std::path::PathBuf::new();
-    for component in p.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
-/// Whether a `resolved` plugin path stays within `base_dir` under path-security.
-///
-/// When the plugin file exists, both sides are `canonicalize`d so symlinks are
-/// resolved (symlink-safe). When it does NOT *yet* exist (`NotFound`), both sides
-/// fall back to [`lexically_normalize`] in the SAME namespace, so a `..` escape
-/// is still caught. Any OTHER canonicalize error (permission denied, I/O) is
-/// genuinely unverifiable and is REJECTED — fail closed. This closes the
-/// fail-OPEN hole in the previous `let (Ok, Ok) = (canonicalize, canonicalize)`
-/// guard, which skipped the check entirely whenever either `canonicalize`
-/// returned `Err` — and which, even on success, string-prefix-matched an
-/// unresolved absolute `/base/../../etc` past `/base` because `..` was never
-/// collapsed.
-#[cfg(any(feature = "wasm-plugins", feature = "python-plugins"))]
-fn plugin_path_within_base(resolved: &Path, base_dir: &Path) -> bool {
-    match resolved.canonicalize() {
-        Ok(canon_plugin) => match base_dir.canonicalize() {
-            Ok(canon_base) => canon_plugin.starts_with(&canon_base),
-            // Plugin canonicalized but base didn't — cannot compare in one
-            // namespace, so fail closed.
-            Err(_) => false,
-        },
-        // Only a not-yet-existing path falls back to the lexical `..` check; a
-        // permission/I/O error is unverifiable, so reject rather than guess.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            lexically_normalize(resolved).starts_with(lexically_normalize(base_dir))
-        }
-        Err(_) => false,
-    }
-}
-
 /// `pass` selects which subset of plugins to run — see [`PluginPass`].
 /// The loader pipeline calls this twice (synth pass before Early,
 /// regular pass after booking).
@@ -1036,33 +986,42 @@ pub fn run_plugins(
     // #1432 module-name rejection) lives in `resolve_plugin`; execution lives in
     // `ResolvedPlugin::run`. Building wrappers and applying ops here — once, not
     // once per runtime — is the point of the resolve/run split.
+    let pass_kind = match pass {
+        PluginPass::PreBookingSynth => rustledger_plugin::PluginPass::Synth,
+        PluginPass::PostBooking => rustledger_plugin::PluginPass::Regular,
+    };
     for invocation in &entries {
-        let resolved =
-            match resolve_plugin(invocation, pass, registry, base_dir, options.path_security) {
-                Ok(resolved) => resolved,
-                Err(e) => {
-                    errors.push(*e);
-                    continue;
-                }
-            };
+        // Resolution (classify + path-security + feature-gate + #1432 reject)
+        // lives in `rustledger_plugin::resolve_plugin`; execution in
+        // `ResolvedPlugin::run`. The loader keeps wrapper building, op
+        // application, and its error-code convention.
+        let resolved = match rustledger_plugin::resolve_plugin(
+            &invocation.name,
+            invocation.force_python,
+            pass_kind,
+            registry,
+            base_dir,
+            options.path_security,
+        ) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                errors.push(resolve_error_to_ledger(&e));
+                continue;
+            }
+        };
 
         // Rebuild wrappers per plugin so each sees the prior plugin's applied
-        // ops, then apply this plugin's ops back — identical for every runtime.
+        // ops, then convert + apply uniformly regardless of runtime. Every
+        // runtime's diagnostics now flow through `record_plugin_errors`, so a
+        // plugin-set source location is preserved (the old WASM/Python runner
+        // conversions dropped it; native always kept it).
         let wrappers = build_wrappers(directives, source_map);
-        match resolved.run(
-            wrappers,
-            &plugin_options,
-            &invocation.config,
-            base_dir,
-            source_map,
-        ) {
+        match resolved.run(wrappers, &plugin_options, &invocation.config, base_dir) {
             Ok(output) => {
-                for err in output.errors {
-                    errors.push(err);
-                }
+                record_plugin_errors(errors, output.errors, source_map);
                 apply_plugin_ops(directives, output.ops, errors, source_map)?;
             }
-            Err(e) => errors.push(*e),
+            Err(e) => errors.push(run_error_to_ledger(&e)),
         }
     }
 
@@ -1071,240 +1030,6 @@ pub fn run_plugins(
     // original spans on Keep/Modify ops. Plugin-synthesized directives
     // (Insert ops) get `SYNTHESIZED_FILE_ID` and a zero span.
     Ok(())
-}
-
-/// A plugin reference resolved to a concrete runtime, ready to execute.
-///
-/// [`resolve_plugin`] performs all classification, path-security, feature-gating,
-/// and the #1432 module-name rejection up front and returns this; then
-/// [`ResolvedPlugin::run`] only executes the chosen runtime. Splitting resolution
-/// from execution lets the dispatch loop build wrappers and apply ops **once per
-/// plugin** (not once per runtime) and makes classification unit-testable.
-#[cfg(feature = "plugins")]
-enum ResolvedPlugin<'a> {
-    /// A native plugin from the typed registry (already matched to the pass).
-    Native(&'a dyn rustledger_plugin::NativePlugin),
-    /// A WASM plugin file — path resolved and path-security-checked.
-    #[cfg(feature = "wasm-plugins")]
-    Wasm(std::path::PathBuf),
-    /// A Python file-based plugin — path resolved and checked. Bare module-name
-    /// references are rejected during resolution (#1432), so this is always a file.
-    #[cfg(feature = "python-plugins")]
-    Python {
-        raw: String,
-        resolved: std::path::PathBuf,
-    },
-}
-
-/// Normalized output of running one plugin: the ops to apply plus
-/// already-converted `LedgerError`s to record. Native plugins emit
-/// `PluginError`s (converted via [`record_plugin_errors`] inside `run`);
-/// WASM/Python runners already emit `LedgerError`s.
-#[cfg(feature = "plugins")]
-struct PluginRunOutput {
-    ops: Vec<rustledger_plugin::PluginOp>,
-    errors: Vec<LedgerError>,
-}
-
-/// Build a boxed plugin-phase `LedgerError`. Boxing keeps the `Ok` path of the
-/// resolve/run `Result`s small — `LedgerError` is large enough to trip
-/// `clippy::result_large_err` if returned by value.
-#[cfg(feature = "plugins")]
-fn plugin_error(code: &str, message: impl Into<String>) -> Box<LedgerError> {
-    Box::new(LedgerError::error(code, message.into()).with_phase("plugin"))
-}
-
-/// Resolve a plugin reference to an absolute path under the ledger directory,
-/// enforcing path-security fail-closed (see [`plugin_path_within_base`]).
-#[cfg(any(feature = "wasm-plugins", feature = "python-plugins"))]
-fn resolve_plugin_path(
-    name: &str,
-    base_dir: &std::path::Path,
-    path_security: bool,
-) -> Result<std::path::PathBuf, Box<LedgerError>> {
-    let p = std::path::Path::new(name);
-    let resolved = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        base_dir.join(name)
-    };
-    if path_security && !plugin_path_within_base(&resolved, base_dir) {
-        return Err(plugin_error(
-            "PLUGIN",
-            format!("plugin path '{name}' is outside the ledger directory"),
-        ));
-    }
-    Ok(resolved)
-}
-
-/// Classify a plugin invocation into a runnable [`ResolvedPlugin`], or return the
-/// `LedgerError` to record when it cannot run: an unknown name, a bare module-name
-/// reference (#1432), a path-security violation, or a runtime whose feature is off.
-///
-/// Native plugins resolve through the typed registry keyed on `pass`; everything
-/// else is classified by extension/shape, with the Python file-vs-module test
-/// single-sourced through `is_python_plugin_file`.
-#[cfg(feature = "plugins")]
-#[cfg_attr(
-    not(any(feature = "wasm-plugins", feature = "python-plugins")),
-    allow(unused_variables)
-)]
-fn resolve_plugin<'a>(
-    invocation: &PluginInvocation,
-    pass: PluginPass,
-    registry: &'a rustledger_plugin::NativePluginRegistry,
-    base_dir: &std::path::Path,
-    path_security: bool,
-) -> Result<ResolvedPlugin<'a>, Box<LedgerError>> {
-    let PluginInvocation {
-        name: raw_name,
-        force_python,
-        ..
-    } = invocation;
-
-    // Native plugins resolve through the typed registry keyed on the pass: a
-    // RegularPlugin is never returned from `find_synth` (and vice versa), even on
-    // a name collision. Prefixed names resolve via the short last segment.
-    let native: Option<&dyn rustledger_plugin::NativePlugin> = if *force_python {
-        None
-    } else {
-        match pass {
-            PluginPass::PreBookingSynth => registry
-                .find_synth(raw_name)
-                .map(|p| p as &dyn rustledger_plugin::NativePlugin),
-            PluginPass::PostBooking => registry
-                .find_regular(raw_name)
-                .map(|p| p as &dyn rustledger_plugin::NativePlugin),
-        }
-    };
-    if let Some(plugin) = native {
-        return Ok(ResolvedPlugin::Native(plugin));
-    }
-
-    // Not native — classify by extension / shape.
-    let ext = std::path::Path::new(raw_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    if ext == "wasm" {
-        #[cfg(feature = "wasm-plugins")]
-        {
-            return Ok(ResolvedPlugin::Wasm(resolve_plugin_path(
-                raw_name,
-                base_dir,
-                path_security,
-            )?));
-        }
-        #[cfg(not(feature = "wasm-plugins"))]
-        return Err(plugin_error(
-            "PLUGIN",
-            format!("WASM plugin '{raw_name}' requires the wasm-plugins feature"),
-        ));
-    }
-
-    if *force_python
-        || ext == "py"
-        || raw_name.contains(std::path::MAIN_SEPARATOR)
-        || raw_name.contains('.')
-    {
-        // Python module or file-based plugin (or `python:`-prefixed force_python).
-        #[cfg(feature = "python-plugins")]
-        {
-            let resolved = resolve_plugin_path(raw_name, base_dir, path_security)?;
-            // A bare module name (`plugin "pkg.mod"`) is unsupported by design —
-            // reject it up front with an actionable message rather than spinning
-            // up the runtime just to fail and relabel the error (#1432).
-            if is_python_module_name(&resolved, raw_name) {
-                let file = rustledger_plugin::python::suggest_module_path(raw_name);
-                return Err(plugin_error(
-                    "E8004",
-                    module_ref_message(raw_name, file.as_deref()),
-                ));
-            }
-            return Ok(ResolvedPlugin::Python {
-                raw: raw_name.clone(),
-                resolved,
-            });
-        }
-        #[cfg(not(feature = "python-plugins"))]
-        return Err(plugin_error(
-            "E8005",
-            format!("Python plugin \"{raw_name}\" requires the python-plugins feature"),
-        ));
-    }
-
-    // Completely unknown plugin name. If system Python can resolve it as a module,
-    // point at the file (same guidance as the module-name path); otherwise it is
-    // genuinely not found.
-    #[cfg(feature = "python-plugins")]
-    {
-        match rustledger_plugin::python::suggest_module_path(raw_name) {
-            Some(module_path) => Err(plugin_error(
-                "E8004",
-                module_ref_message(raw_name, Some(&module_path)),
-            )),
-            None => Err(plugin_error(
-                "E8001",
-                format!("Plugin not found: \"{raw_name}\""),
-            )),
-        }
-    }
-    #[cfg(not(feature = "python-plugins"))]
-    Err(plugin_error(
-        "E8001",
-        format!("Plugin not found: \"{raw_name}\""),
-    ))
-}
-
-#[cfg(feature = "plugins")]
-impl ResolvedPlugin<'_> {
-    /// Execute the resolved plugin against `wrappers`, normalizing every runtime
-    /// to `(ops, Vec<LedgerError>)`. Returns `Err` only for a runtime-level
-    /// failure (WASM load/exec or Python exec); per-directive plugin diagnostics
-    /// travel in `PluginRunOutput::errors`.
-    #[cfg_attr(not(feature = "python-plugins"), allow(unused_variables))]
-    fn run(
-        &self,
-        wrappers: Vec<rustledger_plugin::DirectiveWrapper>,
-        options: &rustledger_plugin::PluginOptions,
-        config: &Option<String>,
-        base_dir: &std::path::Path,
-        source_map: &SourceMap,
-    ) -> Result<PluginRunOutput, Box<LedgerError>> {
-        match self {
-            ResolvedPlugin::Native(plugin) => {
-                let input = rustledger_plugin::PluginInput {
-                    directives: wrappers,
-                    options: options.clone(),
-                    config: config.clone(),
-                };
-                let output = plugin.process(input);
-                let mut errors = Vec::new();
-                record_plugin_errors(&mut errors, output.errors, source_map);
-                Ok(PluginRunOutput {
-                    ops: output.ops,
-                    errors,
-                })
-            }
-            #[cfg(feature = "wasm-plugins")]
-            ResolvedPlugin::Wasm(path) => match run_wasm_plugin(path, &wrappers, options, config) {
-                Ok((ops, errors)) => Ok(PluginRunOutput { ops, errors }),
-                Err(e) => Err(plugin_error(
-                    "PLUGIN",
-                    format!("WASM plugin {} failed: {e}", path.display()),
-                )),
-            },
-            #[cfg(feature = "python-plugins")]
-            ResolvedPlugin::Python { raw, resolved } => {
-                match run_python_plugin(raw, resolved, base_dir, &wrappers, options, config) {
-                    Ok((ops, errors)) => Ok(PluginRunOutput { ops, errors }),
-                    Err(e) => Err(plugin_error("E8002", e)),
-                }
-            }
-        }
-    }
 }
 
 /// Build a fresh `Vec<DirectiveWrapper>` from the current directives,
@@ -1680,74 +1405,11 @@ pub fn load_raw(path: &Path) -> Result<LoadResult, LoadError> {
     crate::Loader::new().load(path)
 }
 
-/// Run a WASM plugin and return its output ops and errors.
-#[cfg(feature = "wasm-plugins")]
-fn run_wasm_plugin(
-    wasm_path: &std::path::Path,
-    directives: &[rustledger_plugin::DirectiveWrapper],
-    options: &rustledger_plugin::PluginOptions,
-    config: &Option<String>,
-) -> Result<(Vec<rustledger_plugin::PluginOp>, Vec<LedgerError>), String> {
-    use rustledger_plugin::{PluginInput, PluginManager};
-
-    let mut mgr = PluginManager::new();
-    let plugin_idx = mgr
-        .load(wasm_path)
-        .map_err(|e| format!("failed to load: {e}"))?;
-
-    let input = PluginInput {
-        directives: directives.to_vec(),
-        options: options.clone(),
-        config: config.clone(),
-    };
-
-    let output = mgr
-        .execute(plugin_idx, &input)
-        .map_err(|e| format!("execution failed: {e}"))?;
-
-    let mut errors = Vec::new();
-    for err in output.errors {
-        let ledger_err = match err.severity {
-            rustledger_plugin::PluginErrorSeverity::Error => {
-                LedgerError::error("PLUGIN", err.message).with_phase("plugin")
-            }
-            rustledger_plugin::PluginErrorSeverity::Warning => {
-                LedgerError::warning("PLUGIN", err.message).with_phase("plugin")
-            }
-        };
-        errors.push(ledger_err);
-    }
-
-    Ok((output.ops, errors))
-}
-
-/// Whether `raw_name` is a bare Python *module name* (beancount's
-/// `plugin "pkg.mod"`) rather than a file reference: no `.py` extension, no
-/// path separator, and no such file at `resolved`. Module names are unsupported
-/// by design — only file paths load (see `discover_module_source`). Mirrors the
-/// file-vs-module test used by the Python runtime (case-insensitive extension).
-#[cfg(feature = "python-plugins")]
-fn is_python_module_name(resolved: &std::path::Path, raw_name: &str) -> bool {
-    !is_python_plugin_file(resolved, raw_name)
-}
-
-/// Classify a Python plugin reference as a FILE path (vs a dotted module name):
-/// a file when it resolves to an existing path, or its name is file-like by the
-/// shared [`rustledger_plugin::python::is_python_plugin_file_ref`] criterion
-/// (`.py` extension or a path separator). That shared classifier is the single
-/// source for the up-front #1432 rejection, the runtime dispatch here, and the
-/// `discover_module_source` routing inside `rustledger-plugin` — they previously
-/// used non-equivalent criteria and could disagree about the same reference.
-#[cfg(feature = "python-plugins")]
-fn is_python_plugin_file(resolved: &std::path::Path, raw_name: &str) -> bool {
-    resolved.exists() || rustledger_plugin::python::is_python_plugin_file_ref(raw_name)
-}
-
 /// Actionable error for a Python plugin referenced by module name. `file` is the
 /// module's resolved source path when system Python could find it. The raw
 /// "module not found" reads as a venv/PYTHONPATH problem, so name the
 /// unsupported form and point at the file path instead. (#1432)
-#[cfg(feature = "python-plugins")]
+#[cfg(feature = "plugins")]
 fn module_ref_message(raw_name: &str, file: Option<&str>) -> String {
     match file {
         Some(path) => format!(
@@ -1763,54 +1425,60 @@ fn module_ref_message(raw_name: &str, file: Option<&str>) -> String {
     }
 }
 
-/// Run a Python module plugin via the WASI-based Python runtime.
-#[cfg(feature = "python-plugins")]
-fn run_python_plugin(
-    module_name: &str,
-    resolved_path: &std::path::Path,
-    base_dir: &std::path::Path,
-    directives: &[rustledger_plugin::DirectiveWrapper],
-    options: &rustledger_plugin::PluginOptions,
-    config: &Option<String>,
-) -> Result<(Vec<rustledger_plugin::PluginOp>, Vec<LedgerError>), String> {
-    use rustledger_plugin::{PluginInput, python::PythonRuntime};
-
-    let runtime = PythonRuntime::new().map_err(|e| format!("Python runtime unavailable: {e}"))?;
-
-    let input = PluginInput {
-        directives: directives.to_vec(),
-        options: options.clone(),
-        config: config.clone(),
-    };
-
-    // Try file-based execution first, then module-based. Same file-vs-module
-    // classifier as the up-front #1432 rejection — see `is_python_plugin_file`.
-    let is_file = is_python_plugin_file(resolved_path, module_name);
-
-    let output = if is_file {
-        runtime
-            .execute_module(module_name, &input, Some(base_dir))
-            .map_err(|e| format!("Python plugin execution failed: {e}"))?
-    } else {
-        runtime
-            .execute_module(module_name, &input, Some(base_dir))
-            .map_err(|e| format!("Python plugin '{module_name}' execution failed: {e}"))?
-    };
-
-    let mut errors = Vec::new();
-    for err in output.errors {
-        let ledger_err = match err.severity {
-            rustledger_plugin::PluginErrorSeverity::Error => {
-                LedgerError::error("PLUGIN", err.message).with_phase("plugin")
-            }
-            rustledger_plugin::PluginErrorSeverity::Warning => {
-                LedgerError::warning("PLUGIN", err.message).with_phase("plugin")
-            }
-        };
-        errors.push(ledger_err);
+/// Map a typed [`rustledger_plugin::PluginResolveError`] to a host `LedgerError`,
+/// preserving the loader's plugin error codes (`E8001`/`E8004`/`E8005`/`PLUGIN`)
+/// and messages. The `rustledger-plugin` dispatcher is runtime-knowledge-pure
+/// and does not own these codes; this is where the host convention is applied.
+#[cfg(feature = "plugins")]
+fn resolve_error_to_ledger(e: &rustledger_plugin::PluginResolveError) -> LedgerError {
+    use rustledger_plugin::PluginResolveError as Re;
+    match e {
+        Re::PathOutsideBase { name } => LedgerError::error(
+            "PLUGIN",
+            format!("plugin path '{name}' is outside the ledger directory"),
+        )
+        .with_phase("plugin"),
+        Re::WasmFeatureDisabled { name } => LedgerError::error(
+            "PLUGIN",
+            format!("WASM plugin '{name}' requires the wasm-plugins feature"),
+        )
+        .with_phase("plugin"),
+        Re::PythonFeatureDisabled { name } => LedgerError::error(
+            "E8005",
+            format!("Python plugin \"{name}\" requires the python-plugins feature"),
+        )
+        .with_phase("plugin"),
+        Re::PythonModuleName {
+            name,
+            suggested_file,
+        } => LedgerError::error("E8004", module_ref_message(name, suggested_file.as_deref()))
+            .with_phase("plugin"),
+        Re::NotFound {
+            name,
+            suggested_file,
+        } => match suggested_file {
+            Some(path) => LedgerError::error("E8004", module_ref_message(name, Some(path)))
+                .with_phase("plugin"),
+            None => LedgerError::error("E8001", format!("Plugin not found: \"{name}\""))
+                .with_phase("plugin"),
+        },
     }
+}
 
-    Ok((output.ops, errors))
+/// Map a typed [`rustledger_plugin::PluginRunError`] to a host `LedgerError`.
+#[cfg(feature = "plugins")]
+fn run_error_to_ledger(e: &rustledger_plugin::PluginRunError) -> LedgerError {
+    use rustledger_plugin::PluginRunError as Rn;
+    match e {
+        Rn::WasmFailed { path, message } => LedgerError::error(
+            "PLUGIN",
+            format!("WASM plugin {} failed: {message}", path.display()),
+        )
+        .with_phase("plugin"),
+        Rn::PythonFailed { message } => {
+            LedgerError::error("E8002", message.clone()).with_phase("plugin")
+        }
+    }
 }
 
 #[cfg(all(test, feature = "plugins"))]
@@ -1944,91 +1612,12 @@ mod sanitize_tests {
     }
 }
 
-#[cfg(all(test, any(feature = "wasm-plugins", feature = "python-plugins")))]
-mod plugin_path_security_tests {
-    use super::{lexically_normalize, plugin_path_within_base};
-    use std::path::Path;
-
-    #[test]
-    fn lexically_normalize_resolves_dotdot_for_nonexistent_paths() {
-        // The whole point: it works without the path existing on disk.
-        assert_eq!(
-            lexically_normalize(Path::new("/ledger/../../etc/passwd")),
-            Path::new("/etc/passwd"),
-        );
-        // `..` at the root is clamped — can't escape above root.
-        assert_eq!(lexically_normalize(Path::new("/../../x")), Path::new("/x"));
-        // `.` segments dropped, structure preserved.
-        assert_eq!(
-            lexically_normalize(Path::new("/ledger/./plugins/p.py")),
-            Path::new("/ledger/plugins/p.py"),
-        );
-    }
-
-    #[test]
-    fn plugin_path_within_base_rejects_traversal_even_when_path_absent() {
-        let base = Path::new("/ledger");
-        // A `..` escape on a path that does NOT exist (canonicalize fails, so the
-        // old `(Ok, Ok)` guard skipped the check entirely) must still be rejected.
-        assert!(!plugin_path_within_base(
-            Path::new("/ledger/../../etc/passwd"),
-            base
-        ));
-        // An in-bounds (also non-existent) path is allowed.
-        assert!(plugin_path_within_base(
-            Path::new("/ledger/plugins/p.py"),
-            base
-        ));
-        // A sibling that merely shares a string prefix is NOT within (component
-        // comparison, not string prefix).
-        assert!(!plugin_path_within_base(
-            Path::new("/ledger-evil/p.py"),
-            base
-        ));
-    }
-}
-
-#[cfg(all(test, feature = "python-plugins"))]
-mod python_plugin_ref_tests {
-    use super::{is_python_module_name, module_ref_message};
-    use std::path::Path;
-
-    #[test]
-    fn bare_module_name_is_a_module() {
-        // No `.py`, no separator, and the resolved path does not exist.
-        let missing = Path::new("/nonexistent/beancount.plugins.foo");
-        assert!(is_python_module_name(missing, "beancount.plugins.foo"));
-    }
-
-    #[test]
-    fn py_file_is_not_a_module() {
-        let missing = Path::new("/nonexistent/myplugin.py");
-        assert!(!is_python_module_name(missing, "myplugin.py"));
-        // Case-insensitive extension (mirrors the runtime).
-        assert!(!is_python_module_name(
-            Path::new("/nonexistent/MyPlugin.PY"),
-            "MyPlugin.PY"
-        ));
-    }
-
-    #[test]
-    fn path_separated_ref_is_not_a_module() {
-        // Both `/` and the platform separator count as path markers, so a
-        // forward-slash ref is a file even on Windows.
-        assert!(!is_python_module_name(
-            Path::new("/nonexistent/plugins/foo"),
-            "plugins/foo"
-        ));
-    }
-
-    #[test]
-    fn existing_file_is_not_a_module() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("pkg.mod");
-        std::fs::write(&file, "").unwrap();
-        // A real file named like a module is still a file reference.
-        assert!(!is_python_module_name(&file, "pkg.mod"));
-    }
+// The `is_python_module_name` classifier moved with dispatch into
+// `rustledger-plugin`; its tests live there now. `module_ref_message` (the host's
+// E8004 wording) stays here, so its tests do too.
+#[cfg(all(test, feature = "plugins"))]
+mod module_ref_message_tests {
+    use super::module_ref_message;
 
     #[test]
     fn message_uses_resolved_path_when_known() {

@@ -405,7 +405,7 @@ impl<'a> Executor<'a> {
         // — `BALANCES` applies its own `WHERE` to the result afterward, and
         // `account_balances` is WHERE-independent by construction anyway.
         Ok(self
-            .scan_postings(from, None, false, true, false)?
+            .scan_postings(from, None, false, true, false, false)?
             .account_balances)
     }
 
@@ -450,6 +450,7 @@ impl<'a> Executor<'a> {
                 needs_balance,
                 needs_account_balance,
                 where_reads_balance,
+                true,
             )?
             .postings)
     }
@@ -464,6 +465,15 @@ impl<'a> Executor<'a> {
     /// yields one [`PostingContext`] per surviving posting. The `needs_*` flags
     /// gate the per-posting Inventory clones (issue #1080); pass them all `true`
     /// with no filter to materialize the full unfiltered table.
+    ///
+    /// `collect_contexts` controls whether the per-posting [`PostingContext`]
+    /// stream is built at all. Callers that only consume `account_balances` (the
+    /// `BALANCES` command) pass `false` to skip materializing — and immediately
+    /// discarding — a context per posting; the returned `postings` is then empty.
+    // Four independent, individually-documented scan toggles on one internal hot
+    // path; a flags struct would add per-call construction churn here without
+    // changing the boolean nature of the configuration.
+    #[allow(clippy::fn_params_excessive_bools)]
     fn scan_postings(
         &self,
         from: Option<&FromClause>,
@@ -471,6 +481,7 @@ impl<'a> Executor<'a> {
         needs_balance: bool,
         needs_account_balance: bool,
         where_reads_balance: bool,
+        collect_contexts: bool,
     ) -> Result<PostingScan<'a>, QueryError> {
         let mut postings = Vec::new();
         // Per-account running balance — accumulates every posting the FROM clause
@@ -551,6 +562,16 @@ impl<'a> Executor<'a> {
                     if needs_account_balance && let Some(pos) = resolved.clone() {
                         let bal = account_balances.entry(posting.account.clone()).or_default();
                         bal.add(pos);
+                    }
+
+                    // Callers that only want the per-account totals (BALANCES, via
+                    // `build_balances_with_filter`) pass `collect_contexts = false`:
+                    // `account_balances` is already updated above, so skip building
+                    // and pushing a `PostingContext` (and its per-posting Inventory
+                    // clone) for every posting — a large-ledger CPU/memory win that
+                    // avoids materializing a stream BALANCES would just discard.
+                    if !collect_contexts {
+                        continue;
                     }
 
                     // Build the context with both balance views. The cumulative

@@ -283,6 +283,10 @@ criteria = "safe-to-deploy"
 version = "1.0.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.dhat]]
+version = "0.3.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.digest]]
 version = "0.10.7"
 criteria = "safe-to-deploy"
@@ -546,6 +550,10 @@ criteria = "safe-to-deploy"
 [[exemptions.minicov]]
 version = "0.3.8"
 criteria = "safe-to-run"
+
+[[exemptions.mintex]]
+version = "0.1.4"
+criteria = "safe-to-deploy"
 
 [[exemptions.mio]]
 version = "1.2.1"
@@ -869,6 +877,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.text-size]]
 version = "1.1.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.thousands]]
+version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.time]]

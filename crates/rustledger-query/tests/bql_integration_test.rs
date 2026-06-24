@@ -1543,6 +1543,27 @@ fn test_close_on_first_txn_date_yields_empty() {
 }
 
 #[test]
+fn test_balances_honors_close_on_window() {
+    // Regression: `BALANCES FROM CLOSE ON D` must honor the FROM date window like
+    // the SELECT path (and bean-query). `build_balances_with_filter` previously
+    // applied only `from.filter`, silently ignoring `open_on`/`close_on` — so a
+    // windowed BALANCES summed every posting regardless of the close date. Now it
+    // routes through `scan_postings`, which excludes post-`close_on` txns. With
+    // CLOSE ON the earliest txn date, every txn is excluded → no balances.
+    let directives = make_test_directives();
+    let windowed = execute_query("BALANCES FROM CLOSE ON 2024-01-15", &directives);
+    assert!(
+        windowed.is_empty(),
+        "BALANCES FROM CLOSE ON the earliest txn date must exclude all txns; got {} rows",
+        windowed.len()
+    );
+    // Sanity: the same query without the window has balances, so the empty
+    // result above is the window doing its job (not an empty ledger).
+    let full = execute_query("BALANCES", &directives);
+    assert!(!full.is_empty(), "unfiltered BALANCES should have balances");
+}
+
+#[test]
 fn test_execute_balances_with_where() {
     let directives = make_test_directives();
     let query = parse("BALANCES WHERE account ~ 'Assets:'").expect("should parse");

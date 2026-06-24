@@ -121,6 +121,16 @@ mod window;
 pub const WILDCARD_COLUMNS: &[&str] =
     &["date", "flag", "payee", "narration", "account", "position"];
 
+/// Result of [`Executor::scan_postings`]: the per-posting contexts plus the
+/// final per-account running balances. `account_balances` is only meaningful
+/// when the scan was asked for it (`needs_account_balance`); it honors the same
+/// `FROM` window (`open_on`/`close_on`) as the rest of the scan, so consumers
+/// like `BALANCES` get the windowed per-account totals for free.
+pub(crate) struct PostingScan<'a> {
+    pub(crate) postings: Vec<PostingContext<'a>>,
+    pub(crate) account_balances: FxHashMap<rustledger_core::Account, Inventory>,
+}
+
 impl<'a> Executor<'a> {
     /// Create a new executor with the given directives.
     pub fn new(directives: &'a [Directive]) -> Self {
@@ -384,32 +394,19 @@ impl<'a> Executor<'a> {
         &self,
         from: Option<&FromClause>,
     ) -> Result<FxHashMap<rustledger_core::Account, Inventory>, QueryError> {
-        let mut balances: FxHashMap<rustledger_core::Account, Inventory> = FxHashMap::default();
-
-        // Iterate over whichever directive source is populated (see
-        // `resolved_directives`).
-        for directive in self.resolved_directives() {
-            if let Directive::Transaction(txn) = directive {
-                // Apply FROM filter if present
-                if let Some(from_clause) = from
-                    && let Some(filter) = &from_clause.filter
-                    && !self.evaluate_from_filter(filter, txn)?
-                {
-                    continue;
-                }
-
-                for posting in &txn.postings {
-                    if let Some(units) = posting.amount() {
-                        let balance = balances.entry(posting.account.clone()).or_default();
-
-                        let pos = Position::from_posting(units, posting.cost.as_ref(), txn.date);
-                        balance.add(pos);
-                    }
-                }
-            }
-        }
-
-        Ok(balances)
+        // Delegate to the shared posting scan so BALANCES uses the SAME cost
+        // resolution AND the SAME `FROM` window (`open_on` / `close_on`) as the
+        // default SELECT path. `scan_postings`' per-account `account_balances`
+        // (requested via `needs_account_balance = true`) is exactly the windowed
+        // per-account total BALANCES wants. Previously this re-iterated postings
+        // and applied only `from.filter`, silently ignoring `OPEN ON`/`CLOSE ON`.
+        //
+        // `needs_balance = false` (no cumulative needed); `where_clause = None`
+        // — `BALANCES` applies its own `WHERE` to the result afterward, and
+        // `account_balances` is WHERE-independent by construction anyway.
+        Ok(self
+            .scan_postings(from, None, false, true, false)?
+            .account_balances)
     }
 
     /// Collect postings matching the FROM and WHERE clauses.
@@ -446,13 +443,15 @@ impl<'a> Executor<'a> {
         let where_reads_balance =
             where_clause.is_some_and(|w| expr_references_column(w, "balance"));
 
-        self.scan_postings(
-            from,
-            where_clause,
-            needs_balance,
-            needs_account_balance,
-            where_reads_balance,
-        )
+        Ok(self
+            .scan_postings(
+                from,
+                where_clause,
+                needs_balance,
+                needs_account_balance,
+                where_reads_balance,
+            )?
+            .postings)
     }
 
     /// The single posting-source scan, shared by the default `SELECT` path
@@ -472,7 +471,7 @@ impl<'a> Executor<'a> {
         needs_balance: bool,
         needs_account_balance: bool,
         where_reads_balance: bool,
-    ) -> Result<Vec<PostingContext<'a>>, QueryError> {
+    ) -> Result<PostingScan<'a>, QueryError> {
         let mut postings = Vec::new();
         // Per-account running balance — accumulates every posting the FROM clause
         // keeps (plus the pre-`open_on` carry-in below), independent of the WHERE
@@ -617,7 +616,10 @@ impl<'a> Executor<'a> {
             }
         }
 
-        Ok(postings)
+        Ok(PostingScan {
+            postings,
+            account_balances,
+        })
     }
     fn evaluate_function(
         &self,

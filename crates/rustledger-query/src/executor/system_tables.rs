@@ -596,7 +596,8 @@ impl Executor<'_> {
         // assert that invariant rather than silently emitting an empty table.
         let contexts = self
             .scan_postings(None, None, true, true, false)
-            .expect("scan_postings(None, None, ..) evaluates no predicates, so it cannot fail");
+            .expect("scan_postings(None, None, ..) evaluates no predicates, so it cannot fail")
+            .postings;
 
         for ctx in contexts {
             let txn = ctx.transaction;

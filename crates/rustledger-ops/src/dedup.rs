@@ -178,7 +178,7 @@ impl TxnKey {
     }
 
     /// Same date, same first-posting amount, and a fuzzy payee/narration match.
-    fn is_duplicate_of(&self, other: &TxnKey, threshold: f64) -> bool {
+    fn is_duplicate_of(&self, other: &Self, threshold: f64) -> bool {
         self.date == other.date
             && self.amount == other.amount
             && fuzzy_text_match(&self.text, &other.text, threshold)

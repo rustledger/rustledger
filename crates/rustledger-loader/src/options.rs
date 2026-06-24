@@ -246,10 +246,12 @@ impl Options {
 
         // Check for duplicate non-repeatable options (E7003).
         //
-        // Stricter than beancount: `bean-check` silently lets the last value
-        // win (exit 0). We flag the duplicate so the CLI can surface it as an
-        // error (a repeated non-repeatable option is almost always a mistake) —
-        // a DELIBERATE deviation. See `cmd::check` E7003 handling.
+        // Emitted as a WARNING (not an error), matching `bean-check`, which
+        // silently lets the last value win (exit 0). A master ledger that
+        // `include`s self-contained sub-ledgers — each setting its own
+        // `option "title"` / `booking_method` / ... for standalone use — is a
+        // legitimate layout (issue #1546). The value below is applied last-wins
+        // to match. `cmd::check` and `validate` both surface this as a warning.
         let is_repeatable = REPEATABLE_OPTIONS.contains(&key);
         if is_known && !is_repeatable && self.set_options.contains(key) {
             self.warnings.push(OptionWarning {

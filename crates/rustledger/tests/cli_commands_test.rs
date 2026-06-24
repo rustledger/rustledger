@@ -1749,13 +1749,13 @@ fn test_price_no_self_quote_directive() {
     );
 }
 
-/// `rledger check` rejects a repeated non-repeatable option (E7003) as an
-/// error. This is a DELIBERATE deviation, stricter than beancount: `bean-check`
-/// silently accepts the duplicate (last value wins, exit 0). A duplicated
-/// non-repeatable `option` is almost always a copy-paste mistake, so we surface
-/// it. See the E7003 handling in `cmd::check`.
+/// `rledger check` treats a repeated non-repeatable option (E7003) as a
+/// WARNING, not an error — matching `bean-check` (last value wins, exit 0), the
+/// loader, and `validate`. Issue #1546: erroring rejected the legitimate
+/// multi-entity `include` layout and disagreed with our own loader/`validate`.
+/// See the E7003 handling in `cmd::check`.
 #[test]
-fn test_check_duplicate_option_is_error() {
+fn test_check_duplicate_option_warns() {
     let rledger = require_rledger!();
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
     std::fs::write(
@@ -1771,8 +1771,9 @@ fn test_check_duplicate_option_is_error() {
         .expect("Failed to run rledger check");
 
     assert!(
-        !output.status.success(),
-        "duplicate non-repeatable option should fail check (stricter than beancount)"
+        output.status.success(),
+        "duplicate non-repeatable option must NOT fail check (last value wins, like beancount); stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
     let combined = format!(
         "{}{}",
@@ -1780,8 +1781,45 @@ fn test_check_duplicate_option_is_error() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("E7003"),
-        "output should cite E7003; got: {combined}"
+        combined.contains("E7003") && combined.contains("warning"),
+        "output should surface E7003 as a warning; got: {combined}"
+    );
+}
+
+/// Issue #1546 end-to-end: a master ledger that `include`s self-contained
+/// sub-ledgers, each setting its own `option "title"`, must pass `check`
+/// (matching beancount) — the cross-include duplicate is a warning, not an error.
+#[test]
+fn test_check_multi_entity_include_duplicate_option_ok() {
+    let rledger = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.beancount"),
+        "option \"title\" \"Entity A\"\n2020-01-01 open Assets:A\n",
+    )
+    .expect("write a");
+    std::fs::write(
+        dir.path().join("b.beancount"),
+        "option \"title\" \"Entity B\"\n2020-01-01 open Assets:B\n",
+    )
+    .expect("write b");
+    let master = dir.path().join("master.beancount");
+    std::fs::write(
+        &master,
+        "option \"title\" \"Combined\"\ninclude \"a.beancount\"\ninclude \"b.beancount\"\n",
+    )
+    .expect("write master");
+
+    let output = Command::new(&rledger)
+        .args(["check", "--no-cache"])
+        .arg(&master)
+        .output()
+        .expect("Failed to run rledger check");
+
+    assert!(
+        output.status.success(),
+        "multi-entity include tree with per-entity `option \"title\"` must pass check; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

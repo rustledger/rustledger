@@ -468,15 +468,20 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     // E7001/E7002 match beancount: `bean-check` exits non-zero on an unknown
     // option or an invalid option value.
     //
-    // E7003 is a DELIBERATE deviation, stricter than beancount (Python
-    // compatibility policy bucket 1): `bean-check` silently accepts a repeated
-    // non-repeatable option (last value wins, exit 0), but a duplicated
-    // `option "title"` / `option "name_*"` is almost always a copy-paste
-    // mistake, so we surface it as an error. Pinned by
-    // `cli_commands_test::test_check_duplicate_option_is_error`.
+    // E7003 (duplicate non-repeatable option) is a WARNING, not an error —
+    // matching `bean-check` (last value wins, exit 0), the loader, and
+    // `validate`. A master ledger that `include`s self-contained sub-ledgers,
+    // each declaring its own `option "title"` / `booking_method` / ... for
+    // standalone use, is a legitimate beancount layout; erroring on it rejected
+    // that pattern and disagreed with our own loader/`validate` (issue #1546).
+    // The value is already last-wins (the loader applies the latest). Pinned by
+    // `cli_commands_test::test_check_duplicate_option_warns`.
     let main_file_str = file.display().to_string();
-    let option_error_count = load_result.options.warnings.len();
+    let mut option_error_count = 0;
+    let mut option_warning_count = 0;
     for warning in &load_result.options.warnings {
+        let is_error = warning.code != "E7003";
+        let severity = if is_error { "error" } else { "warning" };
         if json_mode {
             diagnostics.push(JsonDiagnostic {
                 file: main_file_str.clone(),
@@ -484,16 +489,23 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 column: 1,
                 end_line: 1,
                 end_column: 1,
-                severity: "error".to_string(),
+                severity: severity.to_string(),
                 phase: "parse".to_string(),
                 code: warning.code.to_string(),
                 message: warning.message.clone(),
                 hint: None,
                 context: None,
             });
-            parse_error_count += 1;
+            if is_error {
+                parse_error_count += 1;
+            }
         } else if !args.quiet {
-            writeln!(stdout, "error[{}]: {}", warning.code, warning.message)?;
+            writeln!(stdout, "{severity}[{}]: {}", warning.code, warning.message)?;
+        }
+        if is_error {
+            option_error_count += 1;
+        } else {
+            option_warning_count += 1;
         }
     }
     error_count += option_error_count;
@@ -609,14 +621,15 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             error_count += 1;
         }
     }
-    let warning_count = ledger
-        .errors
-        .iter()
-        .filter(|e| {
-            matches!(e.severity, rustledger_loader::ErrorSeverity::Warning)
-                && !is_advisory_only_code(&e.code)
-        })
-        .count();
+    let warning_count = option_warning_count
+        + ledger
+            .errors
+            .iter()
+            .filter(|e| {
+                matches!(e.severity, rustledger_loader::ErrorSeverity::Warning)
+                    && !is_advisory_only_code(&e.code)
+            })
+            .count();
     #[cfg(feature = "python-plugin-wasm")]
     let mut warning_count = warning_count;
 

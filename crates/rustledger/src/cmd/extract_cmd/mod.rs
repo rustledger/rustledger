@@ -841,10 +841,13 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
 
         let amount = Decimal::from_str(balance_amount)
             .with_context(|| format!("Invalid balance amount: {balance_amount}"))?;
-        let date = args
+        let date_str = args
             .balance_date
             .clone()
             .unwrap_or_else(|| jiff::Zoned::now().date().to_string());
+        let date = date_str
+            .parse::<rustledger_core::NaiveDate>()
+            .with_context(|| format!("Invalid balance date: {date_str}"))?;
 
         let balance = rustledger_ops::reconcile::StatementBalance {
             date,
@@ -852,11 +855,9 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             number: amount,
             currency: args.currency.clone(),
         };
-        let balance_wrapper = rustledger_ops::reconcile::create_balance_directive(&balance);
-
-        // Convert DirectiveWrapper to core Directive
-        let balance_directive = rustledger_plugin::convert::wrapper_to_directive(&balance_wrapper)
-            .map_err(|e| anyhow!("Failed to create balance directive: {e:?}"))?;
+        // `create_balance_directive` returns a core `Directive` directly now — no
+        // `DirectiveWrapper` round-trip through `wrapper_to_directive`.
+        let balance_directive = rustledger_ops::reconcile::create_balance_directive(&balance);
 
         let mut with_balance = directives;
         with_balance.push(balance_directive);

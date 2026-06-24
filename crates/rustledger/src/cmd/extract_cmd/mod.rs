@@ -1508,6 +1508,48 @@ default_expense = "Expenses:Uncategorized"
     }
 
     #[test]
+    fn test_load_existing_resolves_includes_and_interpolates() {
+        // Regression: a raw parse only saw the top file and left elided amounts
+        // as None. Routing through the loader pipeline makes `include`d
+        // transactions visible AND fills the interpolated amount — both needed so
+        // dedup compares against the user's real (resolved, booked) ledger.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("sub.beancount"),
+            "2024-02-01 * \"PHONE BILL\" \"Monthly\"\n  \
+             Assets:Bank:Checking  -40.00 USD\n  Expenses:Phone\n",
+        )
+        .unwrap();
+        let main_path = dir.path().join("main.beancount");
+        std::fs::write(
+            &main_path,
+            "include \"sub.beancount\"\n\n2024-01-15 * \"GROCERY STORE\" \"Weekly\"\n  \
+             Assets:Bank:Checking  -50.00 USD\n  Expenses:Food          50.00 USD\n",
+        )
+        .unwrap();
+
+        let txns = load_existing_transactions(&main_path).unwrap();
+        // The INCLUDED transaction is visible (a raw parse missed it entirely).
+        assert_eq!(txns.len(), 2, "included transaction must be loaded");
+        let phone = txns
+            .iter()
+            .find(|t| t.narration.as_str() == "Monthly")
+            .expect("included PHONE BILL transaction must be present");
+        // Its elided `Expenses:Phone` posting was interpolated (raw parse: None).
+        let amount = phone
+            .postings
+            .iter()
+            .find(|p| p.account.as_str() == "Expenses:Phone")
+            .and_then(|p| p.units.as_ref())
+            .and_then(rustledger_core::IncompleteAmount::number);
+        assert_eq!(
+            amount,
+            Some("40.00".parse::<rust_decimal::Decimal>().unwrap()),
+            "elided posting must be interpolated by booking",
+        );
+    }
+
+    #[test]
     fn test_end_to_end_output_file() {
         let dir = tempfile::tempdir().unwrap();
 

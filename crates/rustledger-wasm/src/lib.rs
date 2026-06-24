@@ -34,6 +34,12 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+// Never-panic surface: WASM is the sandboxed, attacker-facing boundary and ships
+// with `panic = "abort"` in release, so a stray `unwrap`/`expect` is a hard crash
+// of the embedder. Deny both in production code; `not(test)` scopes it so test
+// code (incl. `#[cfg(all(test, feature = ...))]` modules) may unwrap/expect
+// freely. Proven-safe production sites carry an audited `#[allow]` with reason.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 // wasm_bindgen doesn't support const fn on exported methods
 #![allow(clippy::missing_const_for_fn)]
 

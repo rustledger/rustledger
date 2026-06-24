@@ -70,7 +70,9 @@ fn strip_header(bytes: &[u8], expected_magic: [u8; 8]) -> Result<&[u8], String> 
     if header[..8] != expected_magic {
         return Err("Invalid cache: wrong payload type or unrecognized magic bytes".to_string());
     }
-    let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
+    // `header` is exactly `HEADER_SIZE` (12) bytes — the length was checked
+    // above — so bytes 8..12 are always present (no panic, no unwrap).
+    let version = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
     if version != CACHE_VERSION {
         return Err(format!(
             "Cache version mismatch: expected {CACHE_VERSION}, got {version}. Re-parse the ledger."

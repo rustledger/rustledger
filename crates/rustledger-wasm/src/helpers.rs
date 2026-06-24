@@ -140,6 +140,8 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     // future-date warnings — WASM has no reliable wall clock and the
     // legacy `validate()` shortcut also didn't fire these warnings
     // unless `warn_future_dates` was explicitly enabled (it isn't here).
+    // 2999-12-31 is a valid Gregorian date, so `naive_date` is always `Some`.
+    #[allow(clippy::unwrap_used)]
     let today = rustledger_core::naive_date(2999, 12, 31).unwrap();
     let session = ValidationSession::new(ValidationOptions::default());
     let (session, mut errors) = session.run_early(&load.directives, today);

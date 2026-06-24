@@ -27,6 +27,12 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+// Never-panic surface: the loader resolves attacker-controlled `include` paths
+// and parser output, so production code must not `unwrap`/`expect`. `not(test)`
+// scopes the deny so test code (incl. `#[cfg(all(test, feature = ...))]` modules)
+// may unwrap/expect freely. Proven-safe production sites carry an audited
+// `#[allow]` with a justification.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 #[cfg(feature = "cache")]
 pub mod cache;

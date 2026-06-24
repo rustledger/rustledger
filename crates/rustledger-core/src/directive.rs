@@ -1498,6 +1498,65 @@ mod tests {
         crate::naive_date(year, month, day).unwrap()
     }
 
+    /// Layout/distinctness snapshot for [`MetaValue`] — the rkyv companion to
+    /// `CostNumber`'s `cost_number_archived_bytes_snapshot`.
+    ///
+    /// The cache archives the whole `Directive` graph, including metadata, but the
+    /// only frozen-byte tripwire pinned `CostNumber`. A `MetaValue` variant
+    /// reorder or discriminant collision changes the on-disk bytes while
+    /// `CostNumber` stays identical, so a stale cache would deserialize old bytes
+    /// into the new layout. This pins that every variant archives non-empty and
+    /// PAIRWISE-DISTINCT — including same-payload pairs like `Number(42)`/`Int(42)`
+    /// and `String("USD")`/`Currency("USD")` whose only difference is the
+    /// discriminant. A collision or reorder trips here; the exact frozen bytes
+    /// that also catch a *uniform* encoding shift live in `rustledger-loader::cache`.
+    #[cfg(feature = "rkyv")]
+    #[test]
+    fn meta_value_archived_bytes_snapshot() {
+        let archive = |mv: &MetaValue| rkyv::to_bytes::<rkyv::rancor::Error>(mv).unwrap().to_vec();
+
+        // Same-payload pairs are deliberate so pairwise distinctness exercises the
+        // discriminant, not the payload.
+        let cases: &[(&str, MetaValue)] = &[
+            ("String", MetaValue::String("USD".to_string())),
+            (
+                "Account",
+                MetaValue::Account(crate::Account::from("Assets:Bank")),
+            ),
+            (
+                "Currency",
+                MetaValue::Currency(crate::Currency::from("USD")),
+            ),
+            ("Tag", MetaValue::Tag(crate::Tag::from("t"))),
+            ("Link", MetaValue::Link(crate::Link::from("t"))),
+            ("Date", MetaValue::Date(date(2024, 1, 15))),
+            ("Number", MetaValue::Number(dec!(42))),
+            ("Bool", MetaValue::Bool(true)),
+            ("Amount", MetaValue::Amount(Amount::new(dec!(10), "USD"))),
+            ("None", MetaValue::None),
+            ("Int", MetaValue::Int(42)),
+        ];
+
+        let archived: Vec<(&str, Vec<u8>)> =
+            cases.iter().map(|(n, mv)| (*n, archive(mv))).collect();
+
+        for (name, bytes) in &archived {
+            assert!(
+                !bytes.is_empty(),
+                "MetaValue::{name} archived to empty bytes"
+            );
+        }
+        for (i, (na, a)) in archived.iter().enumerate() {
+            for (nb, b) in archived.iter().skip(i + 1) {
+                assert_ne!(
+                    a, b,
+                    "MetaValue::{na} and MetaValue::{nb} archive identically — a \
+                     discriminant collision (variant reorder?) the cache can't tell apart"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_transaction() {
         let txn = Transaction::new(date(2024, 1, 15), "Grocery shopping")

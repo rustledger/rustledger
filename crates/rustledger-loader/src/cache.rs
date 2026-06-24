@@ -1092,6 +1092,74 @@ mod tests {
         );
     }
 
+    /// Layout-hash tripwire for [`rustledger_core::MetaValue`] — generalizes the
+    /// `CostNumber` frozen-byte fixtures above to the metadata value type the
+    /// cache also archives.
+    ///
+    /// The `CostNumber` fixtures only catch drift in cost numbers. A `MetaValue`
+    /// variant reorder, or an rkyv encoding shift in how `InternedStr` / `String`
+    /// / `Decimal` / `Amount` pack, changes the on-disk metadata bytes while
+    /// `CostNumber` stays byte-identical — and `MetaValue::Int` (v11) was
+    /// previously guarded only by a code comment, not a test. This hashes the
+    /// archived bytes of one of every `MetaValue` variant (declaration order,
+    /// length-prefixed) and pins the digest. Any archived-layout drift trips this,
+    /// forcing the developer to bump `CACHE_VERSION` (so stale on-disk caches
+    /// short-circuit at the header check) and regenerate the hash.
+    ///
+    /// Little-endian only, like the `CostNumber` fixtures — `rkyv::to_bytes` uses
+    /// native endianness, and `CACHE_VERSION` guards same-machine reads.
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn meta_value_archived_layout_hash_matches() {
+        use rustledger_core::{Account, Currency, Link, MetaValue, Tag};
+
+        // Tripwire: regenerating the hash without bumping CACHE_VERSION leaves
+        // users with rotten metadata caches.
+        const FIXTURE_VERSION: u32 = 12;
+        const META_VALUE_LAYOUT_HASH: &str =
+            "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
+        assert_eq!(
+            CACHE_VERSION, FIXTURE_VERSION,
+            "CACHE_VERSION advanced past the MetaValue layout-hash fixture; if the \
+             MetaValue archived layout changed, bump CACHE_VERSION and regenerate \
+             META_VALUE_LAYOUT_HASH below in the same commit, else just bump \
+             FIXTURE_VERSION.",
+        );
+
+        // One value of every variant in declaration order. Each is archived alone
+        // (no metadata map), so the bytes are deterministic.
+        let variants: &[MetaValue] = &[
+            MetaValue::String("USD".to_string()),
+            MetaValue::Account(Account::from("Assets:Bank")),
+            MetaValue::Currency(Currency::from("USD")),
+            MetaValue::Tag(Tag::from("t")),
+            MetaValue::Link(Link::from("t")),
+            MetaValue::Date(rustledger_core::naive_date(2024, 1, 15).unwrap()),
+            MetaValue::Number(dec!(42)),
+            MetaValue::Bool(true),
+            MetaValue::Amount(Amount::new(dec!(10), "USD")),
+            MetaValue::None,
+            MetaValue::Int(42),
+        ];
+
+        let mut hasher = Hasher::new();
+        for mv in variants {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(mv).unwrap();
+            // Length-prefix so a byte moving across a variant boundary can't be
+            // masked by a compensating change in the neighbour.
+            hasher.update(&(bytes.len() as u64).to_le_bytes());
+            hasher.update(&bytes);
+        }
+        let digest = hasher.finalize().to_hex();
+
+        assert_eq!(
+            digest.as_str(),
+            META_VALUE_LAYOUT_HASH,
+            "MetaValue archived layout changed. If intentional, bump CACHE_VERSION \
+             and set META_VALUE_LAYOUT_HASH to: {digest}",
+        );
+    }
+
     #[test]
     fn test_reintern_directives_deduplication() {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();

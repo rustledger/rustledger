@@ -440,11 +440,13 @@ pub fn bql_completions(partial_query: &str, cursor_pos: usize) -> Result<JsValue
 /// resolving `include` directives across the files. This enables multi-file ledgers
 /// in WASM environments where filesystem access is not available.
 ///
-/// The returned directives are run through the same processing pipeline as
-/// `validateMultiFile` / `queryMultiFile` (sort → synth-plugins → book →
-/// regular-plugins, validation excluded), so they are sorted, include
+/// On a clean parse, the returned directives are run through the same processing
+/// pipeline as `validateMultiFile` / `queryMultiFile` (sort → synth-plugins →
+/// book → regular-plugins, validation excluded), so they are sorted, include
 /// plugin-synthesized `Open`/`Document` directives, and have booked amounts —
-/// consistent with the other multi-file surfaces.
+/// consistent with the other multi-file surfaces. If parsing produced errors, the
+/// raw parsed directives are returned instead (the pipeline is not run on a
+/// malformed ledger) alongside those errors.
 ///
 /// # Arguments
 ///

@@ -491,50 +491,20 @@ impl BookingEngine {
                     // release builds keep the historical ignore-the-Result behavior.
                     let _ = reduced;
                 } else {
-                    // Add to inventory
-                    let position = if let Some(cost_spec) = &posting.cost {
-                        // Resolve per-unit cost: PerUnit/PerUnitFromTotal
-                        // carry it directly; Total needs the
-                        // total/|units| division.
-                        let per_unit_cost = match cost_spec.number {
-                            Some(rustledger_core::CostNumber::PerUnit { value: per }) => Some(per),
-                            Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => {
-                                Some(b.per_unit)
-                            }
-                            Some(rustledger_core::CostNumber::Total { value: total })
-                                if !units.number.is_zero() =>
-                            {
-                                Some(total / units.number.abs())
-                            }
-                            Some(rustledger_core::CostNumber::Total { value: _ }) | None => None,
-                        };
-
-                        // Infer cost currency from price annotation or other postings.
-                        // `kind` doesn't affect the currency — see the parallel
-                        // block above for the same pattern.
-                        let cost_currency = cost_spec.currency.clone().or_else(|| {
-                            posting
-                                .price
-                                .as_ref()
-                                .and_then(|p| p.amount.as_ref())
-                                .and_then(|inc| inc.currency().map(Into::into))
-                                .or_else(|| crate::infer_cost_currency_from_postings(txn))
-                        });
-
-                        if let (Some(per_unit), Some(currency)) = (per_unit_cost, cost_currency) {
-                            Position::with_cost(
-                                units.clone(),
-                                Cost::new(per_unit, currency)
-                                    .with_date_opt(cost_spec.date.or(Some(txn.date)))
-                                    .with_label_opt(cost_spec.label.clone()),
-                            )
-                        } else {
-                            Position::simple(units.clone())
-                        }
-                    } else {
-                        Position::simple(units.clone())
-                    };
-                    inv.add(position);
+                    // Add to inventory via the canonical cost-resolve shared with
+                    // the Late validator, `build_balances`, and the query engine.
+                    // Its per-unit / date / label handling matches the block this
+                    // replaced (see `CostSpec::resolve`); the old inline price /
+                    // cross-posting cost-currency inference was dead code here
+                    // because `apply` only ever runs on *booked* transactions
+                    // (every caller `book_and_interpolate`s first — see the
+                    // `debug_assert` above), so booking has already filled
+                    // `cost_spec.currency`.
+                    inv.add(Position::from_posting(
+                        units,
+                        posting.cost.as_ref(),
+                        txn.date,
+                    ));
                 }
             }
         }
@@ -862,8 +832,11 @@ mod tests {
     fn test_cost_spec_currency_inference() {
         let mut engine = BookingEngine::new();
 
-        // Create SELLOPT: -1 AAPL {40.0} @ 0.4 USD
-        // This has cost number (40.0) but NO cost currency - should infer from price
+        // SELLOPT: -1 AAPL {40.0} @ 0.4 USD — the cost has a number (40.0) but no
+        // cost currency. Booking infers it from the price annotation and fills it
+        // *into* the cost spec, so by the time `apply` runs the currency is already
+        // resolved. `apply` is always called on booked transactions (see its doc),
+        // so this exercises the real pipeline rather than apply's standalone path.
         let sell = Transaction::new(date(2022, 6, 17), "SELLOPT")
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-1), "AAPL"))
@@ -876,21 +849,18 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:Stock", Amount::new(dec!(40.0), "USD")));
 
-        eprintln!("SELLOPT posting.cost = {:?}", sell.postings[0].cost);
-        eprintln!("SELLOPT posting.price = {:?}", sell.postings[0].price);
-
-        engine.apply(&sell);
+        let booked = engine
+            .book_and_interpolate(&sell)
+            .expect("booking should succeed");
+        engine.apply(&booked.transaction);
 
         let inv = engine.inventory(&"Assets:Stock".into()).unwrap();
-        eprintln!("Inventory after SELLOPT: {inv:?}");
 
-        // Check that the AAPL position has cost with USD currency
+        // The AAPL position carries cost with the price-inferred USD currency.
         let aapl_pos = inv
             .positions()
             .find(|p| p.units.currency.as_ref() == "AAPL")
             .expect("Should have AAPL position");
-
-        eprintln!("AAPL position: {aapl_pos:?}");
 
         assert!(aapl_pos.cost.is_some(), "AAPL position should have cost");
         let cost = aapl_pos.cost.as_ref().unwrap();

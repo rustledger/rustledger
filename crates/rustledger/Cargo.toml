@@ -22,6 +22,9 @@ default = ["python-plugin-wasm"]
 # workflow). Off by default; pulls the optional `dhat` dep and installs its
 # global allocator in the example. Never enabled for the shipped binary.
 dhat-heap = ["dep:dhat"]
+# CPU flamegraph harness (`examples/flamegraph_pipeline` + the nightly
+# `profile.yml`). Off by default; pulls the optional `pprof` dep. Never shipped.
+flamegraph = ["dep:pprof"]
 # Enable Python plugin support via WASM sandbox (adds ~30s to build time).
 # This allows running existing Python beancount plugins, the WASM importer
 # loader, and the directive-plugin runtime — all of which pull `wasmtime`
@@ -59,6 +62,8 @@ agcli = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt"], optional = true }
 # Heap profiling, only under the `dhat-heap` feature (see examples/profile_pipeline.rs).
 dhat = { workspace = true, optional = true }
+# CPU flamegraph profiling, only under the `flamegraph` feature (see examples/flamegraph_pipeline.rs).
+pprof = { workspace = true, optional = true }
 rustledger-core.workspace = true
 rustledger-parser.workspace = true
 rustledger-loader.workspace = true

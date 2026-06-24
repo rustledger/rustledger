@@ -70,24 +70,32 @@ jobs:
       - name: Run heap profile
         run: ./target/profiling/examples/profile_pipeline workload.beancount
 
+      - name: Build CPU-flamegraph harness
+        run: cargo build -p rustledger --profile profiling --example flamegraph_pipeline --features flamegraph
+
+      - name: Run CPU profile (flamegraph)
+        # In-process sampling (pprof) — no `perf` privileges needed. Loop the
+        # pipeline so the 1 kHz sampler collects enough samples.
+        run: ./target/profiling/examples/flamegraph_pipeline workload.beancount 50
+
       - name: Summarize
         run: |
           {
-            echo "## Nightly heap profile — load + process"
+            echo "## Nightly profile — load + process"
             echo ""
             echo "- Workload: \`$(wc -l < workload.beancount)\` lines"
-            echo "- Profile: \`dhat-heap.json\` ($(du -h dhat-heap.json | cut -f1))"
+            echo "- Heap: \`dhat-heap.json\` ($(du -h dhat-heap.json | cut -f1)) — open at <https://nnethercote.github.io/dh_view/> (where the bytes go)"
+            echo "- CPU: \`flamegraph.svg\` ($(du -h flamegraph.svg | cut -f1)) — open in a browser (where the time goes)"
             echo ""
-            echo "Download the **dhat-heap-profile** artifact and open \`dhat-heap.json\` at"
-            echo "<https://nnethercote.github.io/dh_view/> for the allocation tree"
-            echo "(which call paths allocate the most bytes — the optimization targets)."
+            echo "Download the **nightly-profile** artifact for both — the hottest call paths are the optimization targets."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload heap profile
+      - name: Upload profiles
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: dhat-heap-profile
+          name: nightly-profile
           path: |
             dhat-heap.json
+            flamegraph.svg
             workload.beancount
           retention-days: 30

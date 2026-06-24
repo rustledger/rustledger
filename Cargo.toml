@@ -152,6 +152,9 @@ tempfile = "3"
 # Heap profiling for the nightly `profile.yml` harness. Optional + off by
 # default (only pulled by `rustledger`'s `dhat-heap` feature).
 dhat = "0.3"
+# CPU sampling → flamegraph for the nightly `profile.yml` harness. In-process
+# (signal-based, no `perf` privileges). Optional; only via the `flamegraph` feature.
+pprof = { version = "0.14", features = ["flamegraph"] }
 
 # Data formats
 csv = "1"

@@ -440,6 +440,12 @@ pub fn bql_completions(partial_query: &str, cursor_pos: usize) -> Result<JsValue
 /// resolving `include` directives across the files. This enables multi-file ledgers
 /// in WASM environments where filesystem access is not available.
 ///
+/// The returned directives are run through the same processing pipeline as
+/// `validateMultiFile` / `queryMultiFile` (sort → synth-plugins → book →
+/// regular-plugins, validation excluded), so they are sorted, include
+/// plugin-synthesized `Open`/`Document` directives, and have booked amounts —
+/// consistent with the other multi-file surfaces.
+///
 /// # Arguments
 ///
 /// * `files` - A JavaScript object mapping file paths to their contents.
@@ -468,8 +474,7 @@ pub fn bql_completions(partial_query: &str, cursor_pos: usize) -> Result<JsValue
 /// ```
 #[wasm_bindgen(js_name = "parseMultiFile")]
 pub fn parse_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue, JsError> {
-    use rustledger_booking::interpolate;
-    use rustledger_loader::{Loader, VirtualFileSystem};
+    use rustledger_loader::{LoadOptions, Loader, VirtualFileSystem, process};
 
     // Parse the JavaScript object to a HashMap
     let file_map: HashMap<String, String> = serde_wasm_bindgen::from_value(files)
@@ -513,28 +518,42 @@ pub fn parse_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue, Js
         operating_currencies: load_result.options.operating_currency.clone(),
     };
 
-    // Extract and interpolate directives
-    let mut directives: Vec<Directive> = load_result
-        .directives
-        .into_iter()
-        .map(|s| s.value)
-        .collect();
-
-    // Interpolate transactions (fill in missing amounts)
-    if errors.is_empty() {
-        for directive in &mut directives {
-            if let Directive::Transaction(txn) = directive {
-                match interpolate(txn) {
-                    Ok(result) => {
-                        *txn = result.transaction;
-                    }
-                    Err(e) => {
-                        errors.push(Error::new(e.to_string()));
-                    }
-                }
+    // Run the canonical processing pipeline (sort → synth-plugins → book →
+    // regular-plugins) on a clean parse, so the directive stream matches what
+    // `validateMultiFile` / `queryMultiFile` see — sorted, with synthesized
+    // Opens/Documents, and booked amounts. (Previously this used a manual
+    // per-transaction interpolate loop that skipped sort/synth/booking, so a JS
+    // consumer got an unsorted, synth-free, merely-interpolated stream.)
+    // Validation is OFF: this is the parse surface, so it surfaces parse + booking
+    // errors but not balance/assertion failures.
+    //
+    // On parse errors we keep the raw directives we managed to parse rather than
+    // book a malformed ledger (mirroring the old "interpolate only when clean").
+    let directives: Vec<Directive> = if errors.is_empty() {
+        let process_options = LoadOptions {
+            validate: false,
+            ..Default::default()
+        };
+        match process(load_result, &process_options) {
+            Ok(ledger) => {
+                errors.extend(ledger.errors.into_iter().map(Error::from));
+                ledger.directives.into_iter().map(|s| s.value).collect()
+            }
+            Err(e) => {
+                let result = ParseResult {
+                    ledger: None,
+                    errors: vec![Error::new(format!("Processing error: {e}"))],
+                };
+                return to_js(&result);
             }
         }
-    }
+    } else {
+        load_result
+            .directives
+            .into_iter()
+            .map(|s| s.value)
+            .collect()
+    };
 
     let ledger = Some(Ledger {
         directives: directives.iter().map(directive_to_json).collect(),

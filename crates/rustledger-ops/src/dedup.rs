@@ -108,27 +108,33 @@ pub fn find_fuzzy_duplicates(
     existing_directives: &[Directive],
     config: &FuzzyDedupConfig,
 ) -> Vec<FuzzyDuplicateMatch> {
-    // Pre-collect existing transactions (with their directive index) once.
-    let existing: Vec<(usize, &Transaction)> = existing_directives
+    let threshold = config.text_similarity_threshold;
+    // Pre-compute each existing transaction's comparison key ONCE (its
+    // date/amount/text), so the per-new scan below doesn't re-derive — and
+    // re-allocate — them for every candidate.
+    let existing: Vec<(usize, TxnKey)> = existing_directives
         .iter()
         .enumerate()
         .filter_map(|(i, d)| match d {
-            Directive::Transaction(txn) => Some((i, txn)),
+            Directive::Transaction(txn) => Some((i, TxnKey::of(txn))),
             _ => None,
         })
         .collect();
 
     let mut matches = Vec::new();
     for (new_i, directive) in new_directives.iter().enumerate() {
-        if let Directive::Transaction(new_txn) = directive
-            && let Some(&(existing_i, _)) = existing.iter().find(|(_, existing_txn)| {
-                is_fuzzy_duplicate(new_txn, existing_txn, config.text_similarity_threshold)
-            })
-        {
-            matches.push(FuzzyDuplicateMatch {
-                new_index: new_i,
-                existing_index: existing_i,
-            });
+        if let Directive::Transaction(new_txn) = directive {
+            // Compute the new transaction's key once per new transaction.
+            let key = TxnKey::of(new_txn);
+            if let Some((existing_i, _)) = existing
+                .iter()
+                .find(|(_, ek)| key.is_duplicate_of(ek, threshold))
+            {
+                matches.push(FuzzyDuplicateMatch {
+                    new_index: new_i,
+                    existing_index: *existing_i,
+                });
+            }
         }
     }
     matches
@@ -146,16 +152,37 @@ pub fn is_duplicate(
     existing: &[Transaction],
     config: &FuzzyDedupConfig,
 ) -> bool {
+    // Compute the new transaction's key once, not once per existing candidate.
+    let key = TxnKey::of(new_txn);
     existing.iter().any(|existing_txn| {
-        is_fuzzy_duplicate(new_txn, existing_txn, config.text_similarity_threshold)
+        key.is_duplicate_of(&TxnKey::of(existing_txn), config.text_similarity_threshold)
     })
 }
 
-/// Same date, same first-posting amount, and a fuzzy payee/narration match.
-fn is_fuzzy_duplicate(new_txn: &Transaction, existing_txn: &Transaction, threshold: f64) -> bool {
-    new_txn.date == existing_txn.date
-        && first_posting_amount(new_txn) == first_posting_amount(existing_txn)
-        && fuzzy_text_match(&txn_text(new_txn), &txn_text(existing_txn), threshold)
+/// A transaction's fuzzy-dedup comparison key: date, first-posting amount, and
+/// the lowercased payee/narration text. Computing this once and reusing it
+/// across a scan avoids recomputing (and reallocating) `txn_text` per candidate.
+struct TxnKey {
+    date: rustledger_core::NaiveDate,
+    amount: Option<Decimal>,
+    text: String,
+}
+
+impl TxnKey {
+    fn of(txn: &Transaction) -> Self {
+        Self {
+            date: txn.date,
+            amount: first_posting_amount(txn),
+            text: txn_text(txn),
+        }
+    }
+
+    /// Same date, same first-posting amount, and a fuzzy payee/narration match.
+    fn is_duplicate_of(&self, other: &TxnKey, threshold: f64) -> bool {
+        self.date == other.date
+            && self.amount == other.amount
+            && fuzzy_text_match(&self.text, &other.text, threshold)
+    }
 }
 
 /// Get the decimal amount from the first posting of a transaction.

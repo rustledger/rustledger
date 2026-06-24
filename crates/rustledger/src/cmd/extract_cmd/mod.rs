@@ -805,16 +805,14 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     let directives = if let Some(ref existing_path) = args.existing {
         let existing_txns = load_existing_transactions(existing_path)?;
         let before_count = result.directives.len();
+        // Build the dedup config once, not once per filtered directive.
+        let dedup_config = rustledger_ops::dedup::FuzzyDedupConfig::default();
         let mut filtered: Vec<_> = result
             .directives
             .into_iter()
             .filter(|d| {
                 if let Directive::Transaction(txn) = d {
-                    !rustledger_ops::dedup::is_duplicate(
-                        txn,
-                        &existing_txns,
-                        &rustledger_ops::dedup::FuzzyDedupConfig::default(),
-                    )
+                    !rustledger_ops::dedup::is_duplicate(txn, &existing_txns, &dedup_config)
                 } else {
                     true
                 }

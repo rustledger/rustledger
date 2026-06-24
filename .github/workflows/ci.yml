@@ -354,6 +354,26 @@ jobs:
             issue=$(basename "$f" .beancount | sed 's/issue-//')
             echo "- [#$issue](https://github.com/rustledger/rustledger/issues/$issue)" >> $GITHUB_STEP_SUMMARY
           done
+  # Criterion benches must keep COMPILING so they don't bitrot. Nothing else
+  # builds them: `bench-pr.yml` runs a separate custom timing benchmark, and
+  # ci.yml never referenced the criterion targets despite a stale comment in
+  # `bench-pr.yml` claiming it did. We compile only (`--no-run`) — running the
+  # benches on shared CI runners is timing-noisy and adds no gating value; the
+  # real risk this guards is a source change silently breaking a bench build.
+  bench-build:
+    name: Benchmarks Compile
+    needs: [changes]
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+        with:
+          toolchain: stable
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      - name: Compile all criterion benches (--no-run)
+        run: cargo bench --workspace --no-run
   # Slim-build ratchet (#1427/#867): `cargo install rustledger
   # --no-default-features` must stay wasmtime/cranelift-free so the minimal
   # native binary builds on platforms where cranelift can't (e.g. Termux). Two
@@ -420,7 +440,7 @@ jobs:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, ci, doctest, regressions, bindings-fresh, component-parity, wit-version-gate]
+    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate]
     steps:
       - name: Check results
         run: |
@@ -452,7 +472,7 @@ jobs:
           # part of the gate (ADR-0004 Phase 3 / #1232): wire-format
           # drift in the generated TS / JSON Schema / Python artifacts
           # blocks merge just like any other failure.
-          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.sync-primitives.result }} ${{ needs.hot-path-collections.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bindings-fresh.result }} ${{ needs.component-parity.result }}"
+          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.sync-primitives.result }} ${{ needs.hot-path-collections.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bench-build.result }} ${{ needs.bindings-fresh.result }} ${{ needs.component-parity.result }}"
           echo "Job results: $results"
 
           if echo "$results" | grep -qE '(failure|cancelled)'; then

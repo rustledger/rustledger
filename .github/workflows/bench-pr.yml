@@ -143,8 +143,10 @@ jobs:
 
           echo "rustledger: ${rustledger_mb}MB"
           echo "beancount:  ${beancount_mb}MB"
-      # Note: Criterion benchmarks removed - they're tracked in ci.yml on main branch pushes
-      # and weren't being reported in the PR comment anyway
+      # Note: Criterion benchmarks aren't run here (timings are noisy on shared
+      # runners and weren't reported in the PR comment anyway). They are compiled
+      # — but not run — by the `Benchmarks Compile` job in ci.yml, which guards
+      # against the criterion bench targets bitrotting.
       - name: Fetch baseline from main branch
         id: baseline
         run: |

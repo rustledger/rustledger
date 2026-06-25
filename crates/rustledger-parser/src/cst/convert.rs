@@ -67,7 +67,7 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
 /// highlight). The loader / CLI processing path never reads them, so passing
 /// `false` skips the per-`ACCOUNT`/`CURRENCY` `Account::new` / `Currency::new`
 /// construction and the per-token in-`ERROR_NODE` ancestor walk inside
-/// [`walk_descendants_once`] — profiling flagged that walk as the #1
+/// `walk_descendants_once` — profiling flagged that walk as the #1
 /// allocation-count site. Inline errors and top-level comments are still
 /// collected unconditionally (the processing path needs them).
 #[must_use]

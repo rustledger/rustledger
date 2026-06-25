@@ -25,7 +25,9 @@ const UTF8_BOM_LEN: usize = 3;
 /// covering every byte exactly once.
 #[must_use]
 pub fn lossless_kind_tokens(source: &str) -> Vec<(SyntaxKind, Range<usize>)> {
-    let mut out: Vec<(SyntaxKind, Range<usize>)> = Vec::new();
+    // Pre-size (~4 bytes per token) to avoid reallocation churn — profiling
+    // flagged this as the 2nd-largest lexer allocation. See `tokenize_inner`.
+    let mut out: Vec<(SyntaxKind, Range<usize>)> = Vec::with_capacity(source.len() / 4);
 
     let (lexer_source, had_bom) = strip_leading(source);
     let offset = if had_bom {

@@ -548,7 +548,12 @@ pub fn tokenize_lossless(source: &str) -> Vec<(Token<'_>, Span)> {
 }
 
 fn tokenize_inner(source: &str, keep_whitespace: bool) -> Vec<(Token<'_>, Span)> {
-    let mut tokens = Vec::new();
+    // Pre-size to avoid reallocation churn. A beancount token averages ~4 bytes
+    // of source (dates, numbers, currencies, whitespace runs), so `len / 4` is a
+    // close estimate of the token count. Profiling showed the unsized `Vec`
+    // reallocating ~17× — the single largest lexer allocation (see the
+    // `profiling` data branch).
+    let mut tokens = Vec::with_capacity(source.len() / 4);
     let mut lexer = Token::lexer(source);
     let mut at_line_start = true;
     let mut last_newline_end = 0usize;

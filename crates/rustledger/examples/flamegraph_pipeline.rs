@@ -26,9 +26,11 @@ fn main() {
     };
     // Loop the pipeline so the sampler (1 kHz) collects enough samples on even a
     // fast run; default chosen for a ~10k-txn ledger.
-    let iterations: usize = std::env::args()
+    // Read from `args_os` (not `args`) so a non-UTF8 ledger path in argv[1]
+    // doesn't panic the whole iterator before we reach the count.
+    let iterations: usize = std::env::args_os()
         .nth(2)
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| s.to_str().and_then(|t| t.parse().ok()))
         .unwrap_or(50);
 
     // Same pipeline as `rledger check`: the one-shot `load` runs parse +
@@ -53,11 +55,21 @@ fn main() {
     };
 
     let p = std::path::Path::new(&path);
+    let mut pipeline_errors = 0usize;
     for _ in 0..iterations {
-        if let Err(e) = rustledger_loader::load(p, &options) {
-            eprintln!("load/process failed: {e}");
-            std::process::exit(1);
+        match rustledger_loader::load(p, &options) {
+            // `load` returns `Ok` even when the pipeline accumulated validation
+            // errors (in `ledger.errors`); record the count so a flamegraph over
+            // an erroring workload isn't silently reported as clean.
+            Ok(ledger) => pipeline_errors = ledger.errors.len(),
+            Err(e) => {
+                eprintln!("load/process failed: {e}");
+                std::process::exit(1);
+            }
         }
+    }
+    if pipeline_errors > 0 {
+        eprintln!("note: workload produced {pipeline_errors} pipeline errors");
     }
 
     #[cfg(feature = "flamegraph")]

@@ -99,3 +99,71 @@ jobs:
             flamegraph.svg
             workload.beancount
           retention-days: 30
+
+  # Deterministic instruction count via cachegrind (Valgrind). Counts every
+  # instruction the load → process pipeline executes — identical run-to-run, so
+  # diffable night-over-night unlike wall-clock. Reuses the `profile_pipeline`
+  # binary built WITHOUT dhat (for a clean count); no crate dep, no runner.
+  cachegrind:
+    name: Instruction counts (cachegrind)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Generate workload ledger
+        env:
+          TXNS: ${{ github.event.inputs.transactions || '10000' }}
+        run: |
+          python3 - "$TXNS" > workload.beancount <<'PY'
+          import sys, random, datetime
+          random.seed(42)
+          n = int(sys.argv[1])
+          accounts = ["Assets:Bank:Checking", "Assets:Bank:Savings",
+                      "Expenses:Food", "Expenses:Rent", "Income:Salary",
+                      "Liabilities:CreditCard"]
+          print('option "title" "Profiling Workload"')
+          print('option "operating_currency" "USD"')
+          for a in accounts:
+              print(f"2020-01-01 open {a} USD")
+          print()
+          d = datetime.date(2020, 1, 2)
+          for i in range(n):
+              d += datetime.timedelta(days=1)
+              src, dst = random.choice(accounts), random.choice(accounts)
+              amt = round(random.uniform(1, 500), 2)
+              print(f'{d.isoformat()} * "Payee {i}" "memo {i}"')
+              print(f"  {src}  -{amt} USD")
+              print(f"  {dst}   {amt} USD")
+          PY
+          echo "workload: $(wc -l < workload.beancount) lines"
+      - name: Build harness (no dhat — clean instruction count)
+        run: cargo build -p rustledger --profile profiling --example profile_pipeline
+      - name: Run cachegrind
+        run: |
+          valgrind --tool=cachegrind --cachegrind-out-file=cachegrind.out \
+            ./target/profiling/examples/profile_pipeline workload.beancount 2> cachegrind.txt
+          grep -E "I +refs:" cachegrind.txt
+      - name: Summarize
+        run: |
+          {
+            echo "## Nightly instruction count (cachegrind)"
+            echo ""
+            echo '```'
+            grep -E "I +refs:|I1 +misses:|LLi +misses:|D +refs:" cachegrind.txt
+            echo '```'
+            echo ""
+            echo "Deterministic (machine-independent) total instructions for the load → process pipeline — diff night-over-night to catch regressions. \`cg_annotate cachegrind.out\` breaks it down by function."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload cachegrind profile
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cachegrind-instructions
+          path: |
+            cachegrind.out
+            cachegrind.txt
+          retention-days: 30

@@ -199,13 +199,16 @@ jobs:
           # heap totals from dhat-heap.json: sum tb (total bytes), tbk (blocks), gb (peak bytes)
           read -r HB HK HP < <(python3 -c "import json;d=json.load(open('dl-profile/dhat-heap.json'));print(sum(p['tb'] for p in d['pps']),sum(p['tbk'] for p in d['pps']),sum(p.get('gb',0) for p in d['pps']))")
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          COMMIT=$(git rev-parse HEAD)   # the commit being measured (before switching branches)
+          COMMIT=$(git rev-parse HEAD)   # the measured commit, from this job's main checkout
           # Operate on the orphan `profiling` branch in a SEPARATE worktree so it
           # never collides with this job's main checkout. Checking it out in
           # place fails with "untracked working tree files would be overwritten
           # by checkout" (the orphan branch's files clash with the working tree).
           git fetch origin profiling
           PROF="$(mktemp -d)"
+          # Clean up the worktree even if a later step fails (set -e short-
+          # circuits before the explicit removal below).
+          trap 'git worktree remove --force "$PROF" 2>/dev/null || true' EXIT
           git worktree add --detach "$PROF" origin/profiling
           mkdir -p "$PROF/latest"
           cp dl-profile/flamegraph.svg dl-profile/dhat-heap.json "$PROF/latest/"

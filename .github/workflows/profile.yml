@@ -199,17 +199,26 @@ jobs:
           # heap totals from dhat-heap.json: sum tb (total bytes), tbk (blocks), gb (peak bytes)
           read -r HB HK HP < <(python3 -c "import json;d=json.load(open('dl-profile/dhat-heap.json'));print(sum(p['tb'] for p in d['pps']),sum(p['tbk'] for p in d['pps']),sum(p.get('gb',0) for p in d['pps']))")
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          COMMIT=$(git rev-parse HEAD)   # the commit being measured (before switching branches)
+          COMMIT=$(git rev-parse HEAD)   # the measured commit, from this job's main checkout
+          # Operate on the orphan `profiling` branch in a SEPARATE worktree so it
+          # never collides with this job's main checkout. Checking it out in
+          # place fails with "untracked working tree files would be overwritten
+          # by checkout" (the orphan branch's files clash with the working tree).
           git fetch origin profiling
-          git checkout profiling
-          mkdir -p latest
-          cp dl-profile/flamegraph.svg dl-profile/dhat-heap.json latest/
+          PROF="$(mktemp -d)"
+          # Clean up the worktree even if a later step fails (set -e short-
+          # circuits before the explicit removal below).
+          trap 'git worktree remove --force "$PROF" 2>/dev/null || true' EXIT
+          git worktree add --detach "$PROF" origin/profiling
+          mkdir -p "$PROF/latest"
+          cp dl-profile/flamegraph.svg dl-profile/dhat-heap.json "$PROF/latest/"
           printf '{"date":"%s","commit":"%s","txns":%s,"instructions":%s,"heap_total_bytes":%s,"heap_peak_bytes":%s,"heap_blocks":%s}\n' \
-            "$DATE" "$COMMIT" "$TXNS" "$INSTR" "$HB" "$HP" "$HK" >> history.jsonl
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+            "$DATE" "$COMMIT" "$TXNS" "$INSTR" "$HB" "$HP" "$HK" >> "$PROF/history.jsonl"
+          git -C "$PROF" config user.name "github-actions[bot]"
+          git -C "$PROF" config user.email "github-actions[bot]@users.noreply.github.com"
           # Stage only the data-branch files — NOT the downloaded `dl-*` artifact
           # dirs, which `git add -A` would commit into the data branch.
-          git add history.jsonl latest/
-          git diff --staged --quiet || git commit -m "profiling: nightly data point ($DATE)"
-          git push origin profiling
+          git -C "$PROF" add history.jsonl latest/
+          git -C "$PROF" diff --staged --quiet || git -C "$PROF" commit -m "profiling: nightly data point ($DATE)"
+          git -C "$PROF" push origin HEAD:profiling
+          git worktree remove --force "$PROF"

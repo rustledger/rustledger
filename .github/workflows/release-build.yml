@@ -256,16 +256,17 @@ jobs:
           fi
 
           if [ "${{ matrix.cross }}" = "true" ]; then
-            # NOTE: mimalloc (a vendored C lib) is intentionally NOT enabled for
-            # cross-compiled targets — its C build isn't validated under `cross`
-            # here, and a release shouldn't hinge on it. Cross targets ship
-            # without the allocator; native (PGO + non-cross) targets get it.
+            # Cross-compiled targets: NO mimalloc. mimalloc is a vendored C lib
+            # whose cross build isn't validated under `cross`, and a release
+            # shouldn't hinge on it — these targets ship without the allocator.
+            # (The non-cross `else` branch below enables it, as do the PGO steps.)
             cross build --profile $PROFILE --target ${{ matrix.target }} --no-default-features
             # Build LSP separately
             cross build --profile $PROFILE --target ${{ matrix.target }} -p rustledger-lsp
             # Build the agent-native CLI (ag-rledger) separately — feature-gated
             cross build --profile $PROFILE --target ${{ matrix.target }} -p rustledger --bin ag-rledger --no-default-features --features ag-rledger
           else
+            # Native (non-cross) target: mimalloc enabled (cc is available).
             cargo build --profile $PROFILE --target ${{ matrix.target }} --no-default-features --features mimalloc
             # Build LSP separately
             cargo build --profile $PROFILE --target ${{ matrix.target }} -p rustledger-lsp

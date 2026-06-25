@@ -17,10 +17,13 @@ default-run = "rledger"
 bench = false
 
 [features]
-default = ["python-plugin-wasm", "mimalloc"]
-# `mimalloc` global allocator for the `rledger` binary (see src/bin/rledger.rs).
-# Default-on for the ~7% load win; opt out with `--no-default-features` (e.g. a
-# build host without a C toolchain). Never affects the library or wasm.
+default = ["python-plugin-wasm"]
+# `mimalloc` global allocator for the `rledger` binary (see src/bin/rledger.rs):
+# ~7% lower load instruction count. **Opt-in, NOT default** — default features
+# apply to library consumers too, and the `rustledger` lib is published to
+# crates.io, so a default would force a vendored C dependency (+ a C toolchain)
+# onto every embedder. Enable it for the binary with `--features mimalloc`
+# (the release builds do; see release-build.yml). Never on wasm.
 mimalloc = ["dep:mimalloc"]
 # Heap-profiling harness (`examples/profile_pipeline` + the nightly `profile.yml`
 # workflow). Off by default; pulls the optional `dhat` dep and installs its

@@ -213,6 +213,10 @@ jobs:
 
           # Build LSP separately (no PGO needed)
           cargo build --release --target ${{ matrix.target }} -p rustledger-lsp
+
+          # Build the agent-native CLI (ag-rledger) separately — feature-gated
+          # (pulls agcli/tokio), no PGO.
+          cargo build --release --target ${{ matrix.target }} -p rustledger --bin ag-rledger --no-default-features --features ag-rledger
       - name: Build with PGO (Windows)
         if: matrix.pgo && runner.os == 'Windows'
         shell: pwsh
@@ -232,6 +236,10 @@ jobs:
 
           # Build LSP separately (no PGO needed)
           cargo build --release --target ${{ matrix.target }} -p rustledger-lsp
+
+          # Build the agent-native CLI (ag-rledger) separately — feature-gated
+          # (pulls agcli/tokio), no PGO.
+          cargo build --release --target ${{ matrix.target }} -p rustledger --bin ag-rledger --no-default-features --features ag-rledger
       - name: Build without PGO (cross-compiled targets)
         if: ${{ !matrix.pgo }}
         shell: bash
@@ -251,10 +259,14 @@ jobs:
             cross build --profile $PROFILE --target ${{ matrix.target }} --no-default-features
             # Build LSP separately
             cross build --profile $PROFILE --target ${{ matrix.target }} -p rustledger-lsp
+            # Build the agent-native CLI (ag-rledger) separately — feature-gated
+            cross build --profile $PROFILE --target ${{ matrix.target }} -p rustledger --bin ag-rledger --no-default-features --features ag-rledger
           else
             cargo build --profile $PROFILE --target ${{ matrix.target }} --no-default-features
             # Build LSP separately
             cargo build --profile $PROFILE --target ${{ matrix.target }} -p rustledger-lsp
+            # Build the agent-native CLI (ag-rledger) separately — feature-gated
+            cargo build --profile $PROFILE --target ${{ matrix.target }} -p rustledger --bin ag-rledger --no-default-features --features ag-rledger
           fi
       - name: Package (Unix)
         if: runner.os != 'Windows'
@@ -274,7 +286,7 @@ jobs:
           # Create archive with all binaries
           ARCHIVE="rustledger-${VERSION}-${{ matrix.target }}.tar.gz"
           tar -czvf "../../../${ARCHIVE}" \
-            rledger rledger-lsp
+            rledger rledger-lsp ag-rledger
 
           # Create checksum
           cd ../../..
@@ -291,7 +303,7 @@ jobs:
           # Create archive with all binaries
           $ARCHIVE = "rustledger-${VERSION}-${{ matrix.target }}.zip"
           $binaries = @(
-            "rledger.exe", "rledger-lsp.exe"
+            "rledger.exe", "rledger-lsp.exe", "ag-rledger.exe"
           )
           Compress-Archive -Path $binaries -DestinationPath "../../../${ARCHIVE}"
 

@@ -189,6 +189,8 @@ jobs:
           name: cachegrind-instructions
           path: dl-cg
       - name: Append data point to the profiling branch
+        env:
+          TXNS: ${{ github.event.inputs.transactions || '10000' }}
         run: |
           set -euo pipefail
           # The count is AFTER "refs:" — the line is "==PID== I refs: N", so take
@@ -202,10 +204,12 @@ jobs:
           git checkout profiling
           mkdir -p latest
           cp dl-profile/flamegraph.svg dl-profile/dhat-heap.json latest/
-          printf '{"date":"%s","commit":"%s","txns":10000,"instructions":%s,"heap_total_bytes":%s,"heap_peak_bytes":%s,"heap_blocks":%s}\n' \
-            "$DATE" "$COMMIT" "$INSTR" "$HB" "$HP" "$HK" >> history.jsonl
+          printf '{"date":"%s","commit":"%s","txns":%s,"instructions":%s,"heap_total_bytes":%s,"heap_peak_bytes":%s,"heap_blocks":%s}\n' \
+            "$DATE" "$COMMIT" "$TXNS" "$INSTR" "$HB" "$HP" "$HK" >> history.jsonl
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
+          # Stage only the data-branch files — NOT the downloaded `dl-*` artifact
+          # dirs, which `git add -A` would commit into the data branch.
+          git add history.jsonl latest/
           git diff --staged --quiet || git commit -m "profiling: nightly data point ($DATE)"
           git push origin profiling

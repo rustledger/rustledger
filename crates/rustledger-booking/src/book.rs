@@ -519,6 +519,17 @@ impl BookingEngine {
         &self,
         txn: &Transaction,
     ) -> Result<InterpolationResult, BookingError> {
+        // Fast path: with no cost specs, `book` is an identity that only clones
+        // `txn` verbatim (profiling flagged that clone as ~6 MB / 10k txns — the
+        // common case). This method consumes only `booked.transaction` — the
+        // `gains` / `booked_indices` are unused here — and in the fast path that
+        // transaction *equals* `txn`, so `interpolate(&book(txn).transaction)`
+        // is provably identical to `interpolate(txn)`. Interpolate the original
+        // directly and skip the clone.
+        if !txn.postings.iter().any(|p| p.cost.is_some()) {
+            return Ok(interpolate(txn)?);
+        }
+
         // First book (fill in costs)
         let booked = self.book(txn)?;
 

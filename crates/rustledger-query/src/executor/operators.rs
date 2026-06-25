@@ -346,7 +346,10 @@ impl Executor<'_> {
                             .map(Value::Date)
                             .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
                     }
-                    _ => self.arithmetic_op(left, right, |a, b| Some(a + b)),
+                    // `checked_add` so a value-range overflow yields NULL (like
+                    // div-by-zero — see `arithmetic_op`) instead of panicking;
+                    // `rust_decimal` panics on raw `+`/`-`/`*` overflow.
+                    _ => self.arithmetic_op(left, right, Decimal::checked_add),
                 }
             }
             BinaryOperator::Sub => {
@@ -362,10 +365,10 @@ impl Executor<'_> {
                             .map(Value::Date)
                             .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
                     }
-                    _ => self.arithmetic_op(left, right, |a, b| Some(a - b)),
+                    _ => self.arithmetic_op(left, right, Decimal::checked_sub),
                 }
             }
-            BinaryOperator::Mul => self.arithmetic_op(left, right, |a, b| Some(a * b)),
+            BinaryOperator::Mul => self.arithmetic_op(left, right, Decimal::checked_mul),
             BinaryOperator::Div => self.arithmetic_op(left, right, Decimal::checked_div),
             BinaryOperator::Mod => self.modulo_op(left, right),
         }

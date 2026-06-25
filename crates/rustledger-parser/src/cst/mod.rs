@@ -51,6 +51,7 @@
 pub mod ast;
 mod convert;
 pub(crate) mod format;
+mod green;
 mod lossless_tokens;
 mod parser;
 mod syntax_kind;

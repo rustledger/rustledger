@@ -87,6 +87,7 @@ pub(super) fn convert_transaction_header(
     let span = Span::new(base, base + u32::from(node.text_len()) as usize);
 
     let mut date: Option<NaiveDate> = None;
+    let mut date_seen = false;
     let mut flag = '*';
     let mut seen_flag = false;
     let mut seen_str_tag_link = false;
@@ -123,7 +124,13 @@ pub(super) fn convert_transaction_header(
         } else {
             match kind {
                 K::NEWLINE => past_header = true,
-                K::DATE if date.is_none() => date = parse_date_token(text),
+                // Latch on the FIRST date token (like red's `node.date()`): if it
+                // fails to parse, `date` stays None and the directive bails to red
+                // — don't scan ahead to a later valid-looking date in junk input.
+                K::DATE if !date_seen => {
+                    date_seen = true;
+                    date = parse_date_token(text);
+                }
                 K::STRING => {
                     seen_str_tag_link = true;
                     if let Some(s) = decode_string_token(text) {
@@ -245,7 +252,9 @@ fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
     let mut post_hash_total: Option<rust_decimal::Decimal> = None;
     let mut currency: Option<Currency> = None;
     let mut date: Option<NaiveDate> = None;
+    let mut date_seen = false;
     let mut label: Option<String> = None;
+    let mut label_seen = false;
     for child in node.children() {
         let NodeOrToken::Token(t) = child else {
             continue;
@@ -282,12 +291,14 @@ fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
                 merge_phase = false;
                 currency = Some(Currency::new(t.text()));
             }
-            K::DATE if date.is_none() => {
+            K::DATE if !date_seen => {
                 merge_phase = false;
+                date_seen = true;
                 date = parse_date_token(t.text());
             }
-            K::STRING if label.is_none() => {
+            K::STRING if !label_seen => {
                 merge_phase = false;
+                label_seen = true;
                 label = decode_string_token(t.text());
             }
             _ => merge_phase = false,
@@ -534,12 +545,11 @@ mod tests {
                     NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
                     NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
                 };
-                if let NodeOrToken::Node(n) = child {
-                    if crate::BeancountLanguage::kind_from_raw(n.kind()) == SyntaxKind::TRANSACTION
-                    {
-                        txn_node = Some((n, offset));
-                        break;
-                    }
+                if let NodeOrToken::Node(n) = child
+                    && crate::BeancountLanguage::kind_from_raw(n.kind()) == SyntaxKind::TRANSACTION
+                {
+                    txn_node = Some((n, offset));
+                    break;
                 }
                 offset += len;
             }
@@ -598,12 +608,11 @@ mod tests {
                     NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
                     NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
                 };
-                if let NodeOrToken::Node(n) = child {
-                    if crate::BeancountLanguage::kind_from_raw(n.kind()) == SyntaxKind::TRANSACTION
-                    {
-                        txn = Some((n, off));
-                        break;
-                    }
+                if let NodeOrToken::Node(n) = child
+                    && crate::BeancountLanguage::kind_from_raw(n.kind()) == SyntaxKind::TRANSACTION
+                {
+                    txn = Some((n, off));
+                    break;
                 }
                 off += len;
             }
@@ -616,14 +625,14 @@ mod tests {
                     NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
                     NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
                 };
-                if let NodeOrToken::Node(n) = child {
-                    if crate::BeancountLanguage::kind_from_raw(n.kind()) == SyntaxKind::POSTING {
-                        let gp = convert_simple_posting(n, poff).expect("simple posting");
-                        let rp = &rtxn.postings[gi];
-                        assert_eq!(gp.value, rp.value, "posting {gi} value {src:?}");
-                        assert_eq!(gp.span, rp.span, "posting {gi} span {src:?}");
-                        gi += 1;
-                    }
+                if let NodeOrToken::Node(n) = child
+                    && crate::BeancountLanguage::kind_from_raw(n.kind()) == SyntaxKind::POSTING
+                {
+                    let gp = convert_simple_posting(n, poff).expect("simple posting");
+                    let rp = &rtxn.postings[gi];
+                    assert_eq!(gp.value, rp.value, "posting {gi} value {src:?}");
+                    assert_eq!(gp.span, rp.span, "posting {gi} span {src:?}");
+                    gi += 1;
                 }
                 poff += len;
             }
@@ -650,6 +659,12 @@ mod tests {
             "2020-01-01 * \"p\"\n  A 5 USD 3 USD\n  B\n", // multi-amount -> fallback
             "2020-01-01 * \"p\" | \"n\"\n  A 1 USD\n  B\n", // deprecated pipe -> fallback
             "2020-13-99 * \"bad date\"\n  A 1 USD\n  B\n", // invalid date -> fallback
+            // Regression (fuzz_green_eq_red crash-a45e3089): an invalid FIRST date
+            // followed by a valid-looking later date token. Green must latch the
+            // first date (-> None -> bail to red, which drops the directive), NOT
+            // scan ahead to the second date and keep a directive red discards.
+            "2020-99-99 * \"x\" 2021-01-01\n  A 1 USD\n  B\n",
+            "3333/33/3 X\n", // the minimized fuzz shape (slash date, month 33)
             "\u{feff}2020-01-01 * \"p\"\n  A 1 USD\n  B\n", // BOM
             "2020-01-01 * \"é\" \"münts\"\n  Aaa 1 EUR\n  B\n", // multi-byte
             "garbage\n2020-01-01 open A\n2020-01-01 * \"p\"\n  A 1 USD\n  B\n", // error recovery

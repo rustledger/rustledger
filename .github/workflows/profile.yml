@@ -191,7 +191,9 @@ jobs:
       - name: Append data point to the profiling branch
         run: |
           set -euo pipefail
-          INSTR=$(grep -aE "I +refs:" dl-cg/cachegrind.txt | grep -aoE "[0-9,]+" | head -1 | tr -d ,)
+          # The count is AFTER "refs:" — the line is "==PID== I refs: N", so take
+          # the number following the label (not the leading PID).
+          INSTR=$(grep -aE "I +refs:" dl-cg/cachegrind.txt | sed -E 's/.*refs:[[:space:]]*([0-9,]+).*/\1/' | tr -d ' ,')
           # heap totals from dhat-heap.json: sum tb (total bytes), tbk (blocks), gb (peak bytes)
           read -r HB HK HP < <(python3 -c "import json;d=json.load(open('dl-profile/dhat-heap.json'));print(sum(p['tb'] for p in d['pps']),sum(p['tbk'] for p in d['pps']),sum(p.get('gb',0) for p in d['pps']))")
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)

@@ -5,7 +5,8 @@
 //! transaction converter returns `Some` only when it exactly replicates red,
 //! and bails to red otherwise — so any divergence here is a green-path bug.
 use libfuzzer_sys::fuzz_target;
-use rustledger_parser::{parse, parse_red_only};
+use rustledger_parser::cst::parse_red_only;
+use rustledger_parser::parse;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(src) = std::str::from_utf8(data) else {

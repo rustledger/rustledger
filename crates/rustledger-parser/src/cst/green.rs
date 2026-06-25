@@ -16,10 +16,6 @@
 //! Pinned by field-level oracles + the `parse_green_eq_red_corpus` differential
 //! test + the `fuzz_green_eq_red` fuzz target.
 
-// `top_level_node_spans` is a span-validation helper exercised only by the
-// differential tests; the rest of this module is wired into `parse_via_cst_opts`.
-#![allow(dead_code)]
-
 use super::convert::{decode_string_token, is_comment_kind, parse_date_token, parse_decimal_token};
 use rowan::{Language, NodeOrToken};
 use rustledger_core::cost::{CostNumber, CostSpec};
@@ -35,6 +31,10 @@ use rustledger_core::{
 /// red tree; the differential test pins that equivalence. Offset drift (esp.
 /// across a leading BOM and multi-byte text) is the #1 correctness hazard, so
 /// this validates it before any body conversion rides on it.
+// Span-validation helper exercised only by the differential tests (the wired
+// path threads offsets inline); targeted allow so the rest of the module is
+// still checked for dead code.
+#[allow(dead_code)]
 pub(super) fn top_level_node_spans(
     root: &crate::SyntaxNode,
     bom_offset: u32,
@@ -231,7 +231,9 @@ fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
 /// Convert a `COST_SPEC` green node into a `CostSpec` (forms `{N CCY}`,
 /// `{{T CCY}}`, `{N # T CCY}`, `{*}` merge, plus optional date + label). Mirrors
 /// `convert_cost_spec` / `cost_total_after_hash` in [`super::convert`]. Cost
-/// numbers are plain `NUMBER` tokens (no arithmetic), so this always succeeds.
+/// numbers are plain `NUMBER` tokens (no arithmetic evaluation); an unparseable
+/// one yields `number: None` like red, which emits no diagnostic for cost
+/// numbers — so this needs no bail and always returns a `CostSpec`.
 fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
     use crate::SyntaxKind as K;
     let mut is_total = false;
@@ -347,12 +349,12 @@ fn convert_price_annotation(node: &rowan::GreenNodeData) -> Option<PriceAnnotati
     })
 }
 
-/// Convert a **simple** `POSTING` green node (account + non-arithmetic units +
-/// span + same-line trailing comments). Returns `None` for postings with a
-/// flag, cost spec, price annotation, metadata, a trailing-sibling amount, or
-/// an arithmetic amount — those layer on in later increments, and the simple
-/// oracle corpus excludes them. `base` is the node's absolute start offset.
-/// Span policy matches red `posting_span`: ends at the first NEWLINE's start.
+/// Convert a `POSTING` green node (account + non-arithmetic units + cost spec +
+/// price annotation + span + same-line trailing comments). Returns `None` for
+/// postings with a flag, per-posting metadata, a trailing-sibling amount, or an
+/// arithmetic amount — those layer on in later increments, so the posting falls
+/// back to red. `base` is the node's absolute start offset. Span policy matches
+/// red `posting_span`: ends at the first NEWLINE's start.
 pub(super) fn convert_simple_posting(
     node: &rowan::GreenNodeData,
     base: usize,
@@ -655,7 +657,7 @@ mod tests {
         ];
         for src in corpus {
             let g = crate::parse(src);
-            let r = crate::parse_red_only(src);
+            let r = crate::cst::parse_red_only(src);
             let dbg = |p: &crate::ParseResult| {
                 (
                     format!("{:?}", p.directives),

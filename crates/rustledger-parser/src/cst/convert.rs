@@ -98,7 +98,17 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
     comments.sort_by_key(|s| s.span.start);
     comments.dedup_by_key(|s| s.span.start);
     let mut errors = top_level_errors;
-    errors.extend(extract_unclosed_cost_brace_errors(&source_file, bom_offset));
+    // Cost specs are always delimited by '{' (L_BRACE / L_DOUBLE_BRACE /
+    // L_BRACE_HASH all start with it). If the source has no '{' at all there can
+    // be no COST_SPEC node, so skip the whole-tree `descendants()` scan inside
+    // `extract_unclosed_cost_brace_errors` — it allocates a red `SyntaxNode` per
+    // node. Profiling flagged that scan as ~50k wasted allocations on
+    // cost-spec-free ledgers (the common case); the `contains('{')` guard is a
+    // memchr byte scan with no allocation. A '{' inside a string/comment only
+    // costs the (already-correct) full scan — never a false skip.
+    if stripped.contains('{') {
+        errors.extend(extract_unclosed_cost_brace_errors(&source_file, bom_offset));
+    }
     errors.extend(inline_errors);
     let warnings = Vec::new();
 

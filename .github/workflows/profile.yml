@@ -167,3 +167,43 @@ jobs:
             cachegrind.out
             cachegrind.txt
           retention-days: 30
+
+  # Append a deterministic data point to the `profiling` data branch each night
+  # (mirrors how bench.yml maintains `benchmarks`). Reuses the instruction count
+  # from the `cachegrind` job + the heap totals from the `profile` job — no
+  # re-running of the tools.
+  trend:
+    name: Commit trend data point
+    needs: [profile, cachegrind]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nightly-profile
+          path: dl-profile
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cachegrind-instructions
+          path: dl-cg
+      - name: Append data point to the profiling branch
+        run: |
+          set -euo pipefail
+          INSTR=$(grep -aE "I +refs:" dl-cg/cachegrind.txt | grep -aoE "[0-9,]+" | head -1 | tr -d ,)
+          # heap totals from dhat-heap.json: sum tb (total bytes), tbk (blocks), gb (peak bytes)
+          read -r HB HK HP < <(python3 -c "import json;d=json.load(open('dl-profile/dhat-heap.json'));print(sum(p['tb'] for p in d['pps']),sum(p['tbk'] for p in d['pps']),sum(p.get('gb',0) for p in d['pps']))")
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          COMMIT=$(git rev-parse HEAD)   # the commit being measured (before switching branches)
+          git fetch origin profiling
+          git checkout profiling
+          mkdir -p latest
+          cp dl-profile/flamegraph.svg dl-profile/dhat-heap.json latest/
+          printf '{"date":"%s","commit":"%s","txns":10000,"instructions":%s,"heap_total_bytes":%s,"heap_peak_bytes":%s,"heap_blocks":%s}\n' \
+            "$DATE" "$COMMIT" "$INSTR" "$HB" "$HP" "$HK" >> history.jsonl
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --staged --quiet || git commit -m "profiling: nightly data point ($DATE)"
+          git push origin profiling

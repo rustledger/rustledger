@@ -1153,8 +1153,23 @@ fn parse_without_occurrences_skips_indices_but_matches_directives() {
         lean.account_occurrences.is_empty() && lean.currency_occurrences.is_empty(),
         "lean parse must skip occurrence collection"
     );
-    // Everything the processing pipeline consumes is unchanged.
-    assert_eq!(full.directives.len(), lean.directives.len());
-    assert_eq!(full.errors.len(), lean.errors.len());
-    assert_eq!(full.options.len(), lean.options.len());
+    // Everything the processing pipeline consumes must be byte-for-byte
+    // identical — only the occurrence indices differ. Compare full contents
+    // (via Debug), not just counts, so a content regression that preserves
+    // lengths can't slip through.
+    assert_eq!(
+        format!("{:?}", full.directives),
+        format!("{:?}", lean.directives),
+        "directives must be identical"
+    );
+    assert_eq!(
+        format!("{:?}", full.errors),
+        format!("{:?}", lean.errors),
+        "errors must be identical"
+    );
+    assert_eq!(
+        format!("{:?}", full.options),
+        format!("{:?}", lean.options),
+        "options must be identical"
+    );
 }

@@ -35,6 +35,16 @@
 //! rledger bal  # Expands to: rledger report balances
 //! ```
 
+// `mimalloc` as the process-wide allocator. rledger's load → process pipeline
+// makes thousands of small, short-lived allocations (green-tree build + AST
+// conversion + booking); mimalloc's thread-local heaps + low per-alloc overhead
+// cut ~7% of the load's instruction count vs glibc malloc (cachegrind, 10k-txn
+// workload) and more in wall-clock. Binary-only — never set on the library (an
+// embedder picks its own allocator) — and not on wasm (mimalloc is a C lib).
+#[cfg(all(feature = "mimalloc", not(target_arch = "wasm32")))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use rustledger::config::Config;

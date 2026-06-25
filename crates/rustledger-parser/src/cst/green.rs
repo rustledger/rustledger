@@ -181,6 +181,7 @@ fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
     use crate::SyntaxKind as K;
     let mut sign_minus = false;
     let mut number: Option<rust_decimal::Decimal> = None;
+    let mut number_seen = false;
     let mut currency: Option<Currency> = None;
     let mut complex = false;
     for child in node.children() {
@@ -189,9 +190,17 @@ fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
             continue;
         };
         match crate::BeancountLanguage::kind_from_raw(t.kind()) {
-            K::MINUS if number.is_none() => sign_minus = true,
-            K::PLUS if number.is_none() => {}
-            K::NUMBER if number.is_none() => number = parse_decimal_token(t.text()),
+            K::MINUS if !number_seen => sign_minus = true,
+            K::PLUS if !number_seen => {}
+            K::NUMBER if !number_seen => {
+                number_seen = true;
+                number = parse_decimal_token(t.text());
+                // An unparseable NUMBER (e.g. >28 digits) makes red emit a
+                // diagnostic; bail to red so the error isn't dropped.
+                if number.is_none() {
+                    complex = true;
+                }
+            }
             K::CURRENCY if currency.is_none() => currency = Some(Currency::new(t.text())),
             K::WHITESPACE => {}
             // Operator, second number, or extra currency => arithmetic/complex.
@@ -406,6 +415,51 @@ pub(super) fn convert_simple_posting(
             trailing_comments,
         },
         Span::new(base, end),
+    ))
+}
+
+/// Assemble a full `TRANSACTION` directive from its green node, or return `None`
+/// to fall back to red. Returns `Some` **only** when the transaction is fully
+/// and identically convertible on green: a valid date and all simple postings,
+/// with NO transaction-level metadata, direct-child comments, or deprecated `|`
+/// — each of which red handles with attach/diagnostic logic the green path
+/// doesn't yet replicate. Bailing to red on those keeps the hybrid's output
+/// exactly equal to the pure-red path. `base` is the node's absolute start.
+pub(super) fn convert_transaction(
+    node: &rowan::GreenNodeData,
+    base: usize,
+) -> Option<Spanned<rustledger_core::Directive>> {
+    use crate::SyntaxKind as K;
+    let (mut txn, span) = convert_transaction_header(node, base)?;
+    let mut postings = Vec::new();
+    let mut offset = base;
+    for child in node.children() {
+        let len = match &child {
+            NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+            NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+        };
+        match &child {
+            NodeOrToken::Token(t) => {
+                let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
+                // Direct-child comments (header-trailing / inter-posting /
+                // txn-trailing) and the deprecated `|` need red's attach +
+                // diagnostic logic — bail.
+                if is_comment_kind(kind) || kind == K::PIPE {
+                    return None;
+                }
+            }
+            NodeOrToken::Node(n) => match crate::BeancountLanguage::kind_from_raw(n.kind()) {
+                K::POSTING => postings.push(convert_simple_posting(n, offset)?),
+                K::META_ENTRY => return None, // transaction-level metadata — later increment
+                _ => {}
+            },
+        }
+        offset += len;
+    }
+    txn.postings = postings;
+    Some(Spanned::new(
+        rustledger_core::Directive::Transaction(txn),
+        span,
     ))
 }
 

@@ -183,7 +183,17 @@ pub fn parse_via_cst_opts(source: &str, collect_occurrences: bool) -> ParseResul
             ast::Directive::Pad(node) => convert_pad(&node, bom_offset, &mut errors),
             ast::Directive::Custom(node) => convert_custom(&node, bom_offset, &mut errors),
             ast::Directive::Transaction(node) => {
-                convert_transaction(&node, bom_offset, &mut errors)
+                // Green-tree conversion (no red-node allocation) with a red
+                // fallback for transactions it doesn't yet handle exactly. The
+                // green path returns `Some` only when its output is identical to
+                // red's, so the hybrid is output-equivalent to the pure-red path.
+                let green = node.syntax().green();
+                let base =
+                    u32::from(node.syntax().text_range().start()) as usize + bom_offset as usize;
+                match super::green::convert_transaction(&green, base) {
+                    Some(d) => Some(d),
+                    None => convert_transaction(&node, bom_offset, &mut errors),
+                }
             }
             ast::Directive::Option(node) => {
                 if let Some(triple) = convert_option(&node, bom_offset) {

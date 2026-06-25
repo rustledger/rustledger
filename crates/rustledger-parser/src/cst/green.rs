@@ -21,6 +21,8 @@
 
 use super::convert::{decode_string_token, is_comment_kind, parse_date_token, parse_decimal_token};
 use rowan::{Language, NodeOrToken};
+use rustledger_core::cost::{CostNumber, CostSpec};
+use rustledger_core::directive::{PriceAnnotation, PriceKind};
 use rustledger_core::{
     Account, Amount, Currency, IncompleteAmount, InternedStr, Link, Metadata, NaiveDate, Posting,
     Span, Spanned, Tag,
@@ -216,6 +218,125 @@ fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
     }
 }
 
+/// Convert a `COST_SPEC` green node into a `CostSpec` (forms `{N CCY}`,
+/// `{{T CCY}}`, `{N # T CCY}`, `{*}` merge, plus optional date + label). Mirrors
+/// `convert_cost_spec` / `cost_total_after_hash` in [`super::convert`]. Cost
+/// numbers are plain `NUMBER` tokens (no arithmetic), so this always succeeds.
+fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
+    use crate::SyntaxKind as K;
+    let mut is_total = false;
+    let mut is_merge = false;
+    let mut merge_phase = false; // after opener, while only WHITESPACE seen
+    let mut first_number: Option<rust_decimal::Decimal> = None;
+    let mut seen_number = false;
+    let mut past_hash = false;
+    let mut post_hash_total: Option<rust_decimal::Decimal> = None;
+    let mut currency: Option<Currency> = None;
+    let mut date: Option<NaiveDate> = None;
+    let mut label: Option<String> = None;
+    for child in node.children() {
+        let NodeOrToken::Token(t) = child else {
+            continue;
+        };
+        match crate::BeancountLanguage::kind_from_raw(t.kind()) {
+            K::L_DOUBLE_BRACE => {
+                is_total = true;
+                merge_phase = true;
+            }
+            K::L_BRACE | K::L_BRACE_HASH => merge_phase = true,
+            K::WHITESPACE => {} // keep merge_phase across leading whitespace
+            K::STAR => {
+                if merge_phase {
+                    is_merge = true;
+                }
+                merge_phase = false;
+            }
+            K::NUMBER => {
+                merge_phase = false;
+                if past_hash && post_hash_total.is_none() {
+                    post_hash_total = parse_decimal_token(t.text());
+                } else if !seen_number {
+                    seen_number = true;
+                    first_number = parse_decimal_token(t.text());
+                }
+            }
+            K::HASH => {
+                merge_phase = false;
+                if seen_number {
+                    past_hash = true;
+                }
+            }
+            K::CURRENCY if currency.is_none() => {
+                merge_phase = false;
+                currency = Some(Currency::new(t.text()));
+            }
+            K::DATE if date.is_none() => {
+                merge_phase = false;
+                date = parse_date_token(t.text());
+            }
+            K::STRING if label.is_none() => {
+                merge_phase = false;
+                label = decode_string_token(t.text());
+            }
+            _ => merge_phase = false,
+        }
+    }
+    let number = if let Some(total) = post_hash_total {
+        Some(CostNumber::Total { value: total })
+    } else {
+        match (first_number, is_total) {
+            (Some(v), true) => Some(CostNumber::Total { value: v }),
+            (Some(v), false) => Some(CostNumber::PerUnit { value: v }),
+            (None, _) => None,
+        }
+    };
+    CostSpec {
+        number,
+        currency,
+        date,
+        label,
+        merge: is_merge,
+    }
+}
+
+/// Convert a `PRICE_ANNOTATION` green node into a `PriceAnnotation`: `@@`→Total,
+/// `@`→Unit, with the (non-arithmetic) amount. Returns `None` when the amount is
+/// present but arithmetic/malformed, signalling the caller to bail (later
+/// increment evaluates those).
+fn convert_price_annotation(node: &rowan::GreenNodeData) -> Option<PriceAnnotation> {
+    use crate::SyntaxKind as K;
+    let mut is_total = false;
+    let mut amount_present = false;
+    let mut amount: Option<IncompleteAmount> = None;
+    for child in node.children() {
+        match &child {
+            NodeOrToken::Token(t) => {
+                if crate::BeancountLanguage::kind_from_raw(t.kind()) == K::AT_AT {
+                    is_total = true;
+                }
+            }
+            NodeOrToken::Node(n) => {
+                if crate::BeancountLanguage::kind_from_raw(n.kind()) == K::AMOUNT && !amount_present
+                {
+                    amount_present = true;
+                    amount = simple_amount(n);
+                }
+            }
+        }
+    }
+    if amount_present && amount.is_none() {
+        return None; // arithmetic / malformed price amount — bail
+    }
+    Some(PriceAnnotation {
+        kind: if is_total {
+            PriceKind::Total
+        } else {
+            PriceKind::Unit
+        },
+        amount,
+    })
+}
+
 /// Convert a **simple** `POSTING` green node (account + non-arithmetic units +
 /// span + same-line trailing comments). Returns `None` for postings with a
 /// flag, cost spec, price annotation, metadata, a trailing-sibling amount, or
@@ -229,6 +350,8 @@ pub(super) fn convert_simple_posting(
     use crate::SyntaxKind as K;
     let mut account: Option<Account> = None;
     let mut units: Option<IncompleteAmount> = None;
+    let mut cost: Option<CostSpec> = None;
+    let mut price: Option<PriceAnnotation> = None;
     let mut trailing_comments: Vec<String> = Vec::new();
     let mut newline_off: Option<usize> = None;
     let mut amount_seen = false;
@@ -257,7 +380,13 @@ pub(super) fn convert_simple_posting(
                     // `?` bails on an arithmetic/malformed amount (later increment).
                     units = Some(simple_amount(n)?);
                 }
-                K::AMOUNT | K::COST_SPEC | K::PRICE_ANNOTATION | K::META_ENTRY => return None,
+                K::COST_SPEC if cost.is_none() => cost = Some(convert_cost_spec(n)),
+                // `?` bails if the price amount is arithmetic/malformed.
+                K::PRICE_ANNOTATION if price.is_none() => {
+                    price = Some(convert_price_annotation(n)?);
+                }
+                // second amount / posting metadata — later increments.
+                K::AMOUNT | K::META_ENTRY => return None,
                 _ => {}
             },
         }
@@ -269,8 +398,8 @@ pub(super) fn convert_simple_posting(
         Posting {
             account,
             units,
-            cost: None,
-            price: None,
+            cost,
+            price,
             flag: None,
             meta: Metadata::default(),
             comments: Vec::new(),
@@ -386,6 +515,16 @@ mod tests {
             "2020-01-01 * \"p\"\n  Assets:A -10 EUR\n  Assets:B 10 EUR\n",
             "2020-01-01 * \"p\"\n  A 5 USD  ; note here\n  B\n",
             "2020-01-01 * \"p\"\n  A 1234.5678 USD\n  B 0 USD\n",
+            // cost specs
+            "2020-01-01 * \"p\"\n  Assets:Stock 10 AAPL {2.00 USD}\n  Assets:Cash -20.00 USD\n",
+            "2020-01-01 * \"p\"\n  Assets:Stock 10 AAPL {{20.00 USD}}\n  Assets:Cash -20.00 USD\n",
+            "2020-01-01 * \"p\"\n  A 10 AAPL {2.00 USD, 2021-06-01}\n  B -20.00 USD\n",
+            "2020-01-01 * \"p\"\n  A 10 AAPL {2.00 USD, \"lot-1\"}\n  B -20.00 USD\n",
+            "2020-01-01 * \"p\"\n  A -5 AAPL {1.50 # 8.00 USD}\n  B 8.00 USD\n  Income:G\n",
+            // prices (@ unit, @@ total) + cost+price together
+            "2020-01-01 * \"p\"\n  A 10 AAPL @ 3.00 USD\n  B -30.00 USD\n",
+            "2020-01-01 * \"p\"\n  A 10 AAPL @@ 25.00 USD\n  B -25.00 USD\n",
+            "2020-01-01 * \"p\"\n  A -5 AAPL {2.00 USD} @ 3.00 USD\n  B 15.00 USD\n  Income:G\n",
         ];
         for src in cases {
             let red = crate::parse(src);

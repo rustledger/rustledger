@@ -109,7 +109,12 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         top_level_comments,
         currency_occurrences,
         account_occurrences,
-    } = walk_descendants_once(&source_file, bom_offset, collect_occurrences);
+    } = if use_green {
+        // Green-tree walk (no per-node red allocation); byte-identical to red.
+        super::green::walk_descendants(source_file.syntax(), bom_offset, collect_occurrences)
+    } else {
+        walk_descendants_once(&source_file, bom_offset, collect_occurrences)
+    };
 
     // Fused single pass over the top-level children replaces the
     // five former per-child traversals (error-node, transaction-body,
@@ -2171,11 +2176,11 @@ fn classify_recovery_error(line_text: &str, span: Span) -> crate::ParseError {
 /// already cover those.
 /// Result of the fused descendants-walk visitor that powers
 /// `walk_descendants_once`.
-struct DescendantsWalkResult {
-    inline_errors: Vec<crate::ParseError>,
-    top_level_comments: Vec<Spanned<String>>,
-    currency_occurrences: Vec<Spanned<Currency>>,
-    account_occurrences: Vec<Spanned<rustledger_core::Account>>,
+pub(super) struct DescendantsWalkResult {
+    pub(super) inline_errors: Vec<crate::ParseError>,
+    pub(super) top_level_comments: Vec<Spanned<String>>,
+    pub(super) currency_occurrences: Vec<Spanned<Currency>>,
+    pub(super) account_occurrences: Vec<Spanned<rustledger_core::Account>>,
 }
 
 /// Fused single-pass visitor over `source_file`'s descendants -

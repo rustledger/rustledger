@@ -16,8 +16,10 @@
 //! Pinned by field-level oracles + the `parse_green_eq_red_corpus` differential
 //! test + the `fuzz_green_eq_red` fuzz target.
 
+use super::ast::AstNode as _; // brings `Directive::can_cast` into scope
 use super::convert::{
-    decode_string_token, is_comment_kind, number_meta_value, parse_date_token, parse_decimal_token,
+    DescendantsWalkResult, decode_string_token, is_comment_kind, number_meta_value,
+    parse_date_token, parse_decimal_token,
 };
 use rowan::{Language, NodeOrToken};
 use rustledger_core::cost::{CostNumber, CostSpec};
@@ -624,6 +626,137 @@ pub(super) fn convert_transaction(
     ))
 }
 
+/// Green-tree re-implementation of `walk_descendants_once` — the #1 allocation
+/// site in the conversion (red `descendants_with_tokens()` heap-allocates +
+/// refcounts a `NodeData` per node touched, over EVERY token in the file).
+///
+/// Recursively walks the green tree threading three pieces of state that red got
+/// for free from the red cursor: the absolute byte `offset`, an `in_error_node`
+/// flag (replacing red's per-token `parent_ancestors()` `ERROR_NODE` probe — the
+/// green tree has no parent pointers), and the linear `preceded_by_ws` column-0
+/// comment state. Produces a byte-identical [`DescendantsWalkResult`]. Tree
+/// depth is grammar-bounded (~6 levels; arithmetic and error recovery don't nest
+/// structurally), so the recursion can't blow the stack on adversarial input.
+pub(super) fn walk_descendants(
+    root: &crate::SyntaxNode,
+    bom_offset: u32,
+    collect_occurrences: bool,
+) -> DescendantsWalkResult {
+    let mut w = DescendantsWalker {
+        offset: bom_offset as usize,
+        preceded_by_ws: false,
+        collect_occurrences,
+        result: DescendantsWalkResult {
+            inline_errors: Vec::new(),
+            top_level_comments: Vec::new(),
+            currency_occurrences: Vec::new(),
+            account_occurrences: Vec::new(),
+        },
+    };
+    w.walk(&root.green(), false);
+    w.result
+}
+
+struct DescendantsWalker {
+    offset: usize,
+    preceded_by_ws: bool,
+    collect_occurrences: bool,
+    result: DescendantsWalkResult,
+}
+
+impl DescendantsWalker {
+    fn walk(&mut self, node: &rowan::GreenNodeData, in_error_node: bool) {
+        use crate::SyntaxKind as K;
+        for child in node.children() {
+            match child {
+                NodeOrToken::Node(n) => {
+                    let kind = crate::BeancountLanguage::kind_from_raw(n.kind());
+                    // Directive nodes reset the column-0 comment state (mirrors the
+                    // red walk's `Node` arm).
+                    if super::ast::Directive::can_cast(kind) {
+                        self.preceded_by_ws = false;
+                    }
+                    self.walk(n, in_error_node || kind == K::ERROR_NODE);
+                }
+                NodeOrToken::Token(t) => {
+                    let start = self.offset;
+                    let len = u32::from(t.text_len()) as usize;
+                    self.offset += len;
+                    let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
+                    self.token(kind, t.text(), start, len, in_error_node);
+                }
+            }
+        }
+    }
+
+    fn token(
+        &mut self,
+        kind: crate::SyntaxKind,
+        text: &str,
+        start: usize,
+        len: usize,
+        in_error_node: bool,
+    ) {
+        use crate::SyntaxKind as K;
+        // ---- column-0 comment state machine ----
+        match kind {
+            K::NEWLINE => self.preceded_by_ws = false,
+            K::WHITESPACE => self.preceded_by_ws = true,
+            k if is_comment_kind(k) => {
+                if !self.preceded_by_ws {
+                    self.result.top_level_comments.push(Spanned::new(
+                        text.to_string(),
+                        Span::new(start, start + len),
+                    ));
+                }
+            }
+            _ => self.preceded_by_ws = false,
+        }
+
+        // ---- inline errors + occurrence collection ----
+        if kind == K::BOM {
+            return;
+        }
+        let has_bom = text.contains(crate::bom::BOM_CHAR);
+        let is_error_token = kind == K::ERROR_TOKEN;
+        // The ERROR_NODE check is only consulted for tokens whose emission depends
+        // on it; gate the rest out fast (most tokens are plain whitespace/idents).
+        let needs = (self.collect_occurrences && matches!(kind, K::CURRENCY | K::ACCOUNT))
+            || has_bom
+            || is_error_token;
+        if !needs {
+            return;
+        }
+        let span = Span::new(start, start + len);
+        if self.collect_occurrences && kind == K::CURRENCY && !in_error_node {
+            self.result
+                .currency_occurrences
+                .push(Spanned::new(Currency::new(text), span));
+        }
+        if self.collect_occurrences && kind == K::ACCOUNT && !in_error_node {
+            self.result
+                .account_occurrences
+                .push(Spanned::new(Account::new(text), span));
+        }
+        // Inline errors: a BOM byte (-> BomInDirectiveBody) or ERROR_TOKEN
+        // (-> SyntaxError) in a recognized directive; skip inside ERROR_NODE.
+        if (!has_bom && !is_error_token) || in_error_node {
+            return;
+        }
+        if has_bom {
+            self.result.inline_errors.push(
+                crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
+                    .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
+            );
+        } else {
+            self.result.inline_errors.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
+                span,
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,6 +959,12 @@ mod tests {
             "2020-01-01 * \"p\"\n  meta1: \"x\"\n  count: 3\n  Assets:A 1 USD\n  Assets:B -1 USD\n",
             // flag + cost + price + posting-meta together
             "2020-01-01 * \"p\"\n  ! Assets:S 10 AAPL {2 USD} @ 3 USD\n    lot: \"q1\"\n  Assets:C 15 USD\n  Income:G\n",
+            // walk_descendants distinctive paths:
+            "; column-0 comment\n  ; indented comment\n2020-01-01 open Assets:A USD\n",
+            "2020-01-01 * \"p\"\n  Assets:Cash 5 USD\n  Income:Salary -5 EUR\n", // occurrences
+            "!!garbage Assets:InError 5 BAD!!\n2020-01-01 open Assets:Real USD\n", // error-node suppresses occ
+            "* Org Section Heading\n** Sub\n2020-01-01 open A\n", // org-mode section markers
+            "2020-01-01 open A\n2020-01-01 open B\n2020-01-01 open C\n", // many account occurrences
         ];
         for src in corpus {
             let g = crate::parse(src);
@@ -836,6 +975,9 @@ mod tests {
                     format!("{:?}", p.errors),
                     format!("{:?}", p.comments),
                     format!("{:?}", p.options),
+                    // The green walk_descendants produces these too.
+                    format!("{:?}", p.account_occurrences),
+                    format!("{:?}", p.currency_occurrences),
                 )
             };
             assert_eq!(

@@ -37,4 +37,15 @@ fuzz_target!(|data: &[u8]| {
         format!("{:?}", red.comments),
         "green vs red comments diverged"
     );
+    // Occurrences come from the green walk_descendants pass.
+    assert_eq!(
+        format!("{:?}", green.account_occurrences),
+        format!("{:?}", red.account_occurrences),
+        "green vs red account_occurrences diverged"
+    );
+    assert_eq!(
+        format!("{:?}", green.currency_occurrences),
+        format!("{:?}", red.currency_occurrences),
+        "green vs red currency_occurrences diverged"
+    );
 });

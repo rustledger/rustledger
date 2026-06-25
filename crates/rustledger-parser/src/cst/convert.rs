@@ -2478,7 +2478,7 @@ pub(super) fn parse_decimal_token(text: &str) -> Option<Decimal> {
 /// `Int`; decimals, exponents, and out-of-range integers stay `Number`. `value`
 /// is the parsed (and sign-applied) magnitude. (Thousands-separator commas are
 /// irrelevant to integer-ness, so they aren't stripped before the check.)
-fn number_meta_value(text: &str, value: Decimal) -> MetaValue {
+pub(super) fn number_meta_value(text: &str, value: Decimal) -> MetaValue {
     use rust_decimal::prelude::ToPrimitive;
     if !text.contains('.')
         && !text.contains('e')

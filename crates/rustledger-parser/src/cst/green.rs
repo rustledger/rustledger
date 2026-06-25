@@ -16,13 +16,15 @@
 //! Pinned by field-level oracles + the `parse_green_eq_red_corpus` differential
 //! test + the `fuzz_green_eq_red` fuzz target.
 
-use super::convert::{decode_string_token, is_comment_kind, parse_date_token, parse_decimal_token};
+use super::convert::{
+    decode_string_token, is_comment_kind, number_meta_value, parse_date_token, parse_decimal_token,
+};
 use rowan::{Language, NodeOrToken};
 use rustledger_core::cost::{CostNumber, CostSpec};
 use rustledger_core::directive::{PriceAnnotation, PriceKind};
 use rustledger_core::{
-    Account, Amount, Currency, IncompleteAmount, InternedStr, Link, Metadata, NaiveDate, Posting,
-    Span, Spanned, Tag,
+    Account, Amount, Currency, IncompleteAmount, InternedStr, Link, MetaValue, Metadata, NaiveDate,
+    Posting, Span, Spanned, Tag,
 };
 
 /// Every top-level (child-of-root) **node** paired with its source [`Span`],
@@ -360,21 +362,163 @@ fn convert_price_annotation(node: &rowan::GreenNodeData) -> Option<PriceAnnotati
     })
 }
 
-/// Convert a `POSTING` green node (account + non-arithmetic units + cost spec +
-/// price annotation + span + same-line trailing comments). Returns `None` for
-/// postings with a flag, per-posting metadata, a trailing-sibling amount, or an
-/// arithmetic amount — those layer on in later increments, so the posting falls
-/// back to red. `base` is the node's absolute start offset. Span policy matches
-/// red `posting_span`: ends at the first NEWLINE's start.
+/// Derive the typed [`MetaValue`] of a `META_ENTRY` green node. Mirrors
+/// `meta_value_from_entry` in [`super::convert`] exactly: priority is string >
+/// number/amount > date > account > currency > bool > tag/link > none, and a
+/// type that's present-but-unparseable (e.g. a malformed string, an
+/// over-precision number, a bad date) falls through to the next, matching red.
+fn meta_value(entry: &rowan::GreenNodeData) -> MetaValue {
+    use crate::SyntaxKind as K;
+    let mut string_t: Option<String> = None;
+    let mut number_t: Option<String> = None;
+    let mut currency_t: Option<String> = None;
+    let mut date_t: Option<String> = None;
+    let mut account_t: Option<String> = None;
+    let mut bool_v: Option<bool> = None;
+    let mut tag_link: Option<MetaValue> = None;
+    // Minus sign negating the number: a MINUS token AFTER the key and BEFORE the
+    // first NUMBER (mirrors `meta_entry_has_minus_sign`).
+    let mut past_key = false;
+    let mut minus = false;
+    let mut minus_decided = false;
+
+    for child in entry.children() {
+        let NodeOrToken::Token(t) = child else {
+            continue;
+        };
+        let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
+        // First-of-kind value tokens (matches red's `first_token` accessors).
+        match kind {
+            K::STRING if string_t.is_none() => string_t = Some(t.text().to_string()),
+            K::NUMBER if number_t.is_none() => number_t = Some(t.text().to_string()),
+            K::CURRENCY if currency_t.is_none() => currency_t = Some(t.text().to_string()),
+            K::DATE if date_t.is_none() => date_t = Some(t.text().to_string()),
+            K::ACCOUNT if account_t.is_none() => account_t = Some(t.text().to_string()),
+            K::BOOL_TRUE if bool_v.is_none() => bool_v = Some(true),
+            K::BOOL_FALSE if bool_v.is_none() => bool_v = Some(false),
+            K::TAG if tag_link.is_none() => {
+                tag_link = Some(MetaValue::Tag(Tag::new(t.text().trim_start_matches('#'))));
+            }
+            K::LINK if tag_link.is_none() => {
+                tag_link = Some(MetaValue::Link(Link::new(t.text().trim_start_matches('^'))));
+            }
+            _ => {}
+        }
+        if past_key && !minus_decided {
+            match kind {
+                K::MINUS => {
+                    minus = true;
+                    minus_decided = true;
+                }
+                K::NUMBER => minus_decided = true,
+                _ => {}
+            }
+        }
+        if kind == K::META_KEY {
+            past_key = true;
+        }
+    }
+
+    if let Some(s) = string_t
+        && let Some(decoded) = decode_string_token(&s)
+    {
+        return MetaValue::String(decoded);
+    }
+    if let Some(nt) = number_t
+        && let Some(mut dec) = parse_decimal_token(&nt)
+    {
+        if minus {
+            dec = -dec;
+        }
+        if let Some(c) = currency_t {
+            return MetaValue::Amount(Amount::new(dec, Currency::new(&c)));
+        }
+        return number_meta_value(&nt, dec);
+    }
+    if let Some(dt) = date_t
+        && let Some(date) = parse_date_token(&dt)
+    {
+        return MetaValue::Date(date);
+    }
+    if let Some(a) = account_t {
+        return MetaValue::Account(Account::new(&a));
+    }
+    if let Some(c) = currency_t {
+        return MetaValue::Currency(Currency::new(&c));
+    }
+    if let Some(b) = bool_v {
+        return MetaValue::Bool(b);
+    }
+    if let Some(tl) = tag_link {
+        return tl;
+    }
+    MetaValue::None
+}
+
+/// Convert the `META_ENTRY` child nodes of a directive/posting green node into a
+/// [`Metadata`] map. Mirrors `convert_meta_entries`: each entry's key
+/// (`META_KEY` with the trailing `:` stripped) maps to its typed `meta_value`.
+fn convert_meta_entries(node: &rowan::GreenNodeData) -> Metadata {
+    use crate::SyntaxKind as K;
+    let mut meta = Metadata::default();
+    for child in node.children() {
+        let NodeOrToken::Node(n) = child else {
+            continue;
+        };
+        if crate::BeancountLanguage::kind_from_raw(n.kind()) != K::META_ENTRY {
+            continue;
+        }
+        // Key = first META_KEY token, trailing ':' stripped.
+        let key = n.children().find_map(|c| match c {
+            NodeOrToken::Token(t)
+                if crate::BeancountLanguage::kind_from_raw(t.kind()) == K::META_KEY =>
+            {
+                Some(t.text().strip_suffix(':').unwrap_or(t.text()).to_string())
+            }
+            _ => None,
+        });
+        let Some(key) = key else {
+            continue;
+        };
+        meta.insert(key, meta_value(n));
+    }
+    meta
+}
+
+/// Posting flag char. Mirrors `PostingFlag::cast` + `flag_char_from_posting`:
+/// STAR→`*`, PENDING→`!`, HASH→`#`, FLAG/single-char-CURRENCY → first char.
+/// Note: unlike a transaction flag this does NOT accept `txn`.
+fn posting_flag_char(kind: crate::SyntaxKind, text: &str) -> Option<char> {
+    use crate::SyntaxKind as K;
+    match kind {
+        K::STAR => Some('*'),
+        K::PENDING_KW => Some('!'),
+        K::HASH => Some('#'),
+        K::FLAG => text.chars().next(),
+        K::CURRENCY if text.len() == 1 => text.chars().next(),
+        _ => None,
+    }
+}
+
+/// Convert a `POSTING` green node (flag + account + non-arithmetic units + cost
+/// spec + price annotation + per-posting metadata + span + same-line trailing
+/// comments). Returns `None` for postings with a trailing-sibling amount or an
+/// arithmetic amount — those fall back to red. `base` is the node's absolute
+/// start offset. Span policy matches red `posting_span`: ends at the first
+/// NEWLINE's start.
 pub(super) fn convert_simple_posting(
     node: &rowan::GreenNodeData,
     base: usize,
 ) -> Option<Spanned<Posting>> {
     use crate::SyntaxKind as K;
+    let mut flag: Option<char> = None;
+    let mut flag_decided = false;
     let mut account: Option<Account> = None;
     let mut units: Option<IncompleteAmount> = None;
     let mut cost: Option<CostSpec> = None;
     let mut price: Option<PriceAnnotation> = None;
+    // Per-posting metadata: one pass over the posting's META_ENTRY children.
+    let meta = convert_meta_entries(node);
     let mut trailing_comments: Vec<String> = Vec::new();
     let mut newline_off: Option<usize> = None;
     let mut amount_seen = false;
@@ -388,13 +532,17 @@ pub(super) fn convert_simple_posting(
             NodeOrToken::Token(t) => {
                 let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
                 if kind == K::ACCOUNT && account.is_none() {
+                    flag_decided = true; // account reached; flag decision is settled
                     account = Some(Account::new(t.text()));
                 } else if kind == K::NEWLINE && newline_off.is_none() {
                     newline_off = Some(offset);
                 } else if newline_off.is_none() && is_comment_kind(kind) {
                     trailing_comments.push(t.text().to_string());
-                } else if matches!(kind, K::FLAG | K::STAR | K::HASH | K::PENDING_KW) {
-                    return None; // posting flag — later increment
+                } else if !flag_decided && account.is_none() && kind != K::WHITESPACE {
+                    // First non-whitespace token before the account is the flag iff
+                    // it's a flag kind (else `None`), matching red's `Posting::flag`.
+                    flag_decided = true;
+                    flag = posting_flag_char(kind, t.text());
                 }
             }
             NodeOrToken::Node(n) => match crate::BeancountLanguage::kind_from_raw(n.kind()) {
@@ -408,8 +556,9 @@ pub(super) fn convert_simple_posting(
                 K::PRICE_ANNOTATION if price.is_none() => {
                     price = Some(convert_price_annotation(n)?);
                 }
-                // second amount / posting metadata — later increments.
-                K::AMOUNT | K::META_ENTRY => return None,
+                // META_ENTRY handled in one pass above (convert_meta_entries).
+                // second amount — arithmetic/multi-amount falls back to red.
+                K::AMOUNT => return None,
                 _ => {}
             },
         }
@@ -423,8 +572,8 @@ pub(super) fn convert_simple_posting(
             units,
             cost,
             price,
-            flag: None,
-            meta: Metadata::default(),
+            flag,
+            meta,
             comments: Vec::new(),
             trailing_comments,
         },
@@ -445,6 +594,9 @@ pub(super) fn convert_transaction(
 ) -> Option<Spanned<rustledger_core::Directive>> {
     use crate::SyntaxKind as K;
     let (mut txn, span) = convert_transaction_header(node, base)?;
+    // Transaction-level metadata: the directive's direct META_ENTRY children
+    // (posting metadata lives inside POSTING nodes, handled per-posting).
+    txn.meta = convert_meta_entries(node);
     let mut postings = Vec::new();
     let mut offset = base;
     for child in node.children() {
@@ -462,11 +614,13 @@ pub(super) fn convert_transaction(
                     return None;
                 }
             }
-            NodeOrToken::Node(n) => match crate::BeancountLanguage::kind_from_raw(n.kind()) {
-                K::POSTING => postings.push(convert_simple_posting(n, offset)?),
-                K::META_ENTRY => return None, // transaction-level metadata — later increment
-                _ => {}
-            },
+            NodeOrToken::Node(n) => {
+                // META_ENTRY children are handled in one pass above
+                // (convert_meta_entries); here we only fold in postings.
+                if crate::BeancountLanguage::kind_from_raw(n.kind()) == K::POSTING {
+                    postings.push(convert_simple_posting(n, offset)?);
+                }
+            }
         }
         offset += len;
     }
@@ -669,6 +823,16 @@ mod tests {
             "2020-01-01 * \"é\" \"münts\"\n  Aaa 1 EUR\n  B\n", // multi-byte
             "garbage\n2020-01-01 open A\n2020-01-01 * \"p\"\n  A 1 USD\n  B\n", // error recovery
             "2020-01-01 open A\n2020-01-02 close A\noption \"x\" \"y\"\n", // non-txn
+            // posting flags (now green, were red fallback)
+            "2020-01-01 * \"p\"\n  ! Assets:A 1 USD\n  * Assets:B -1 USD\n",
+            "2020-01-01 * \"p\"\n  A Assets:Letter 1 USD\n  Assets:B -1 USD\n",
+            "2020-01-01 * \"p\"\n  # Assets:A 1 USD\n  Assets:B -1 USD\n",
+            // per-posting metadata — every MetaValue type
+            "2020-01-01 * \"p\"\n  Assets:A 1 USD\n    str: \"hello\"\n    int: 42\n    neg: -7\n    dec: 3.14\n    amt: 5.00 USD\n    dt: 2021-06-01\n    acct: Assets:Other\n    cur: EUR\n    yes: TRUE\n    no: FALSE\n    tg: #atag\n    lk: ^alink\n    empty:\n  Assets:B -1 USD\n",
+            // transaction-level metadata (now green, was red fallback)
+            "2020-01-01 * \"p\"\n  meta1: \"x\"\n  count: 3\n  Assets:A 1 USD\n  Assets:B -1 USD\n",
+            // flag + cost + price + posting-meta together
+            "2020-01-01 * \"p\"\n  ! Assets:S 10 AAPL {2 USD} @ 3 USD\n    lot: \"q1\"\n  Assets:C 15 USD\n  Income:G\n",
         ];
         for src in corpus {
             let g = crate::parse(src);

@@ -119,6 +119,10 @@ criteria = "safe-to-deploy"
 version = "0.4.10"
 criteria = "safe-to-deploy"
 
+[[exemptions.bincode]]
+version = "1.3.3"
+criteria = "safe-to-run"
+
 [[exemptions.bitflags]]
 version = "2.13.0"
 criteria = "safe-to-deploy"
@@ -291,6 +295,14 @@ criteria = "safe-to-deploy"
 version = "1.0.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.derive_more]]
+version = "2.1.1"
+criteria = "safe-to-run"
+
+[[exemptions.derive_more-impl]]
+version = "2.1.1"
+criteria = "safe-to-run"
+
 [[exemptions.dhat]]
 version = "0.3.3"
 criteria = "safe-to-deploy"
@@ -426,6 +438,18 @@ criteria = "safe-to-deploy"
 [[exemptions.hybrid-array]]
 version = "0.4.12"
 criteria = "safe-to-deploy"
+
+[[exemptions.iai-callgrind]]
+version = "0.16.1"
+criteria = "safe-to-run"
+
+[[exemptions.iai-callgrind-macros]]
+version = "0.6.1"
+criteria = "safe-to-run"
+
+[[exemptions.iai-callgrind-runner]]
+version = "0.16.1"
+criteria = "safe-to-run"
 
 [[exemptions.iana-time-zone]]
 version = "0.1.65"

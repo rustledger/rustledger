@@ -584,6 +584,19 @@ impl Inventory {
     ) -> Result<BookingResult, BookingError> {
         let spec = cost_spec.cloned().unwrap_or_default();
 
+        // Force a uniquely-owned positions Vector before any reduction mutates
+        // it. `self.positions` is often structurally shared — the booking engine
+        // clones an account's inventory into a working copy via imbl's O(1)
+        // `clone` — and every reduction method below mutates it in place (via
+        // `IndexMut` / `retain`). Mutating a SHARED imbl `Vector` in place drives
+        // `imbl-sized-chunks`' copy-on-write into a use-after-free of the
+        // interned `Arc<str>` inside `Position` — heap corruption / SIGSEGV on
+        // large ledgers with many lot reductions (found by the rich-workload
+        // profiler). Rebuilding from cloned positions restores a refcount-1
+        // Vector with correct `Arc` refcounting, so in-place mutation below has
+        // no shared chunk to corrupt.
+        self.positions = self.positions.iter().cloned().collect();
+
         // {*} merge operator: merge all lots into a single weighted-average-cost
         // lot before reducing, regardless of the account's booking method.
         if spec.merge {

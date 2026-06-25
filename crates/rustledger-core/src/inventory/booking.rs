@@ -1401,6 +1401,34 @@ mod reduction_tests {
     }
 
     #[test]
+    fn reduce_on_large_shared_inventory_does_not_corrupt() {
+        // Regression: the rich-workload profiler found a heap-corruption /
+        // SIGSEGV when reducing an inventory that had been cloned (imbl O(1)
+        // structural share, as the booking engine does for working copies).
+        // In-place mutation of the SHARED imbl `Vector` double-freed the interned
+        // `Arc<str>` inside `Position`. Needs >64 distinct lots so the `Vector`
+        // spans multiple Arc-backed chunks — the representation that actually
+        // shares (and corrupted). Without the fix this aborts/segfaults on drop.
+        // 100 distinct-cost lots (>64 = the imbl chunk size) so the `Vector`
+        // spans multiple Arc-backed chunks — the shared representation that
+        // corrupted. Day stays a valid 1..=28 (lots remain distinct by cost).
+        // The Miri CI job (`rustledger-core`, strict provenance) executes this
+        // and flags the use-after-free deterministically when the guard is gone.
+        let mut inv = mk((0i64..100).map(|i| lot(10, 100 + i, ((i % 28) + 1) as u32)));
+        let snapshot = inv.clone(); // structurally shares chunks with `inv`
+        inv.reduce(
+            &sell_stk(700),
+            Some(&CostSpec::default()),
+            BookingMethod::Fifo,
+        )
+        .unwrap();
+        assert_eq!(inv.units("STK"), dec!(300)); // 1000 - 700
+        // The shared snapshot stays independent and intact; `units` re-reads
+        // every interned currency, and dropping both must not double-free.
+        assert_eq!(snapshot.units("STK"), dec!(1000));
+    }
+
+    #[test]
     fn reduce_hifo_commits_basis_units_insufficient() {
         let mut inv = mk([lot(10, 100, 1), lot(10, 300, 2)]);
         let r = inv

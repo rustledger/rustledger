@@ -547,13 +547,22 @@ pub fn tokenize_lossless(source: &str) -> Vec<(Token<'_>, Span)> {
     tokenize_inner(source, /* keep_whitespace = */ true)
 }
 
+/// Upper bound on the up-front token-vector reservation (see `tokenize_inner` /
+/// `lossless_kind_tokens`). ~4M entries (~100 MB for a `(kind, span)` tuple) is
+/// far above any real ledger's token count, but stops a pathological input from
+/// turning `source.len() / 4` into a multi-GB reservation.
+pub(crate) const TOKEN_CAPACITY_CAP: usize = 4 << 20;
+
 fn tokenize_inner(source: &str, keep_whitespace: bool) -> Vec<(Token<'_>, Span)> {
     // Pre-size to avoid reallocation churn. A beancount token averages ~4 bytes
     // of source (dates, numbers, currencies, whitespace runs), so `len / 4` is a
     // close estimate of the token count. Profiling showed the unsized `Vec`
     // reallocating ~17× — the single largest lexer allocation (see the
-    // `profiling` data branch).
-    let mut tokens = Vec::with_capacity(source.len() / 4);
+    // `profiling` data branch). Capped so a pathological input (e.g. a huge
+    // whitespace/comment run that lexes to few tokens) can't amplify into a
+    // multi-GB up-front reservation — the parser must handle malformed input
+    // gracefully; beyond the cap the `Vec` just grows normally.
+    let mut tokens = Vec::with_capacity((source.len() / 4).min(TOKEN_CAPACITY_CAP));
     let mut lexer = Token::lexer(source);
     let mut at_line_start = true;
     let mut last_newline_end = 0usize;

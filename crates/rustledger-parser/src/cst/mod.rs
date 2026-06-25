@@ -56,7 +56,7 @@ mod parser;
 mod syntax_kind;
 mod trivia;
 
-pub use convert::parse_via_cst;
+pub use convert::{parse_via_cst, parse_via_cst_opts};
 // Formatter exports do NOT re-export through `cst` — the sole
 // import path for the formatter is `rustledger_parser::format`
 // (the crate-root sub-module that re-exports the six symbols

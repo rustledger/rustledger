@@ -470,7 +470,9 @@ impl Loader {
             } else {
                 self.fs.read(path)?
             };
-            let parsed = rustledger_parser::parse(&src);
+            // The processing pipeline never reads currency/account occurrences
+            // (LSP-only); skip collecting them — see `parse_without_occurrences`.
+            let parsed = rustledger_parser::parse_without_occurrences(&src);
             (src, parsed)
         };
 
@@ -645,7 +647,8 @@ impl Loader {
                             // Read through the FileSystem trait so all I/O goes
                             // through one code path (UTF-8 handling, error types, etc.)
                             let source = fs.read(p).ok()?;
-                            let parsed = rustledger_parser::parse(&source);
+                            // Occurrences are LSP-only; skip them on the load path.
+                            let parsed = rustledger_parser::parse_without_occurrences(&source);
                             Some((source, parsed))
                         })
                         .collect();

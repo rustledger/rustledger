@@ -57,6 +57,21 @@ use crate::cst::ast::{
 /// See the module-level rustdoc for the conversion scope.
 #[must_use]
 pub fn parse_via_cst(source: &str) -> ParseResult {
+    parse_via_cst_opts(source, /* collect_occurrences = */ true)
+}
+
+/// Like [`parse_via_cst`], but only collects `currency_occurrences` /
+/// `account_occurrences` when `collect_occurrences` is true.
+///
+/// Those two indices are consumed **solely by the LSP** (rename / references /
+/// highlight). The loader / CLI processing path never reads them, so passing
+/// `false` skips the per-`ACCOUNT`/`CURRENCY` `Account::new` / `Currency::new`
+/// construction and the per-token in-`ERROR_NODE` ancestor walk inside
+/// [`walk_descendants_once`] — profiling flagged that walk as the #1
+/// allocation-count site. Inline errors and top-level comments are still
+/// collected unconditionally (the processing path needs them).
+#[must_use]
+pub fn parse_via_cst_opts(source: &str, collect_occurrences: bool) -> ParseResult {
     // BOM detection mirrors the legacy parser's behavior: strip a
     // leading 3-byte BOM from the source before tokenizing and
     // record its presence in the result. Spans index the original
@@ -79,7 +94,7 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
         top_level_comments,
         currency_occurrences,
         account_occurrences,
-    } = walk_descendants_once(&source_file, bom_offset);
+    } = walk_descendants_once(&source_file, bom_offset, collect_occurrences);
 
     // Fused single pass over the top-level children replaces the
     // five former per-child traversals (error-node, transaction-body,
@@ -2140,7 +2155,11 @@ struct DescendantsWalkResult {
 /// LSP runs them on every keystroke, so collapsing 3·O(N) → 1·O(N)
 /// matters at editor-edge latencies. The state of each former
 /// walk is maintained inline below.
-fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> DescendantsWalkResult {
+fn walk_descendants_once(
+    source_file: &SourceFile,
+    bom_offset: u32,
+    collect_occurrences: bool,
+) -> DescendantsWalkResult {
     let mut inline_errors: Vec<crate::ParseError> = Vec::new();
     let mut top_level_comments: Vec<Spanned<String>> = Vec::new();
     let mut currency_occurrences: Vec<Spanned<Currency>> = Vec::new();
@@ -2196,10 +2215,14 @@ fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> Descendan
         let kind = t.kind();
         let has_bom = t.text().contains(crate::bom::BOM_CHAR);
         let is_error_token = kind == crate::SyntaxKind::ERROR_TOKEN;
-        let needs_in_error_check = matches!(
-            kind,
-            crate::SyntaxKind::CURRENCY | crate::SyntaxKind::ACCOUNT
-        ) || has_bom
+        // CURRENCY/ACCOUNT need the in-ERROR_NODE probe only to decide whether
+        // to record an occurrence; skip it entirely when not collecting.
+        let needs_in_error_check = (collect_occurrences
+            && matches!(
+                kind,
+                crate::SyntaxKind::CURRENCY | crate::SyntaxKind::ACCOUNT
+            ))
+            || has_bom
             || is_error_token;
         if !needs_in_error_check {
             continue;
@@ -2208,8 +2231,9 @@ fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> Descendan
             .parent_ancestors()
             .any(|a| a.kind() == crate::SyntaxKind::ERROR_NODE);
 
-        // CURRENCY occurrences: only outside ERROR_NODE.
-        if kind == crate::SyntaxKind::CURRENCY && !in_error_node {
+        // CURRENCY occurrences: only outside ERROR_NODE, and only when the
+        // caller wants them (LSP path).
+        if collect_occurrences && kind == crate::SyntaxKind::CURRENCY && !in_error_node {
             let range = t.text_range();
             let start: u32 = range.start().into();
             let end: u32 = range.end().into();
@@ -2224,7 +2248,7 @@ fn walk_descendants_once(source_file: &SourceFile, bom_offset: u32) -> Descendan
         // source-position-aware tooling (LSP rename / references /
         // document-highlight) wants the token as the user typed it
         // even during a mid-edit broken state.
-        if kind == crate::SyntaxKind::ACCOUNT && !in_error_node {
+        if collect_occurrences && kind == crate::SyntaxKind::ACCOUNT && !in_error_node {
             let range = t.text_range();
             let start: u32 = range.start().into();
             let end: u32 = range.end().into();

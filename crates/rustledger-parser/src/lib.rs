@@ -69,7 +69,7 @@ pub mod format {
 
 pub use cst::{
     BeancountLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, lossless_kind_tokens,
-    parse_flat, parse_structured, parse_via_cst,
+    parse_flat, parse_structured, parse_via_cst, parse_via_cst_opts,
 };
 
 // Rowan types CST consumers need. Flat re-exports at the crate
@@ -398,6 +398,23 @@ impl ParseWarning {
 #[must_use]
 pub fn parse(source: &str) -> ParseResult {
     parse_via_cst(source)
+}
+
+/// Parse beancount source for the processing pipeline, **without** collecting
+/// the `currency_occurrences` / `account_occurrences` indices.
+///
+/// Those two indices are consumed only by the LSP. The loader / CLI processing
+/// path (`rustledger_loader::load` and friends) never reads them, so skipping
+/// their collection avoids the largest per-token allocation+CPU cost in the
+/// parser (one `Account::new` / `Currency::new` plus an in-`ERROR_NODE` ancestor
+/// walk per `ACCOUNT` / `CURRENCY` token). The returned [`ParseResult`] is
+/// identical to [`parse`]'s except both occurrence vectors are empty.
+///
+/// Editor / LSP callers that need rename / references / highlight data must use
+/// [`parse`] instead.
+#[must_use]
+pub fn parse_without_occurrences(source: &str) -> ParseResult {
+    parse_via_cst_opts(source, /* collect_occurrences = */ false)
 }
 
 /// Parse beancount source code, returning only directives and errors.

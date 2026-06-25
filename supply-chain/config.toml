@@ -515,6 +515,10 @@ criteria = "safe-to-deploy"
 version = "0.2.5"
 criteria = "safe-to-deploy"
 
+[[exemptions.libmimalloc-sys]]
+version = "0.1.49"
+criteria = "safe-to-deploy"
+
 [[exemptions.libredox]]
 version = "0.1.17"
 criteria = "safe-to-deploy"
@@ -581,6 +585,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.miette-derive]]
 version = "7.6.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.mimalloc]]
+version = "0.1.52"
 criteria = "safe-to-deploy"
 
 [[exemptions.minicov]]

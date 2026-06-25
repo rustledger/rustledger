@@ -18,6 +18,13 @@ bench = false
 
 [features]
 default = ["python-plugin-wasm"]
+# `mimalloc` global allocator for the `rledger` binary (see src/bin/rledger.rs):
+# ~7% lower load instruction count. **Opt-in, NOT default** — default features
+# apply to library consumers too, and the `rustledger` lib is published to
+# crates.io, so a default would force a vendored C dependency (+ a C toolchain)
+# onto every embedder. Enable it for the binary with `--features mimalloc`
+# (the release builds do; see release-build.yml). Never on wasm.
+mimalloc = ["dep:mimalloc"]
 # Heap-profiling harness (`examples/profile_pipeline` + the nightly `profile.yml`
 # workflow). Off by default; pulls the optional `dhat` dep and installs its
 # global allocator in the example. Never enabled for the shipped binary.
@@ -64,6 +71,8 @@ tokio = { workspace = true, features = ["macros", "rt"], optional = true }
 dhat = { workspace = true, optional = true }
 # CPU flamegraph profiling, only under the `flamegraph` feature (see examples/flamegraph_pipeline.rs).
 pprof = { workspace = true, optional = true }
+# Global allocator for the `rledger` binary (default-on `mimalloc` feature).
+mimalloc = { version = "0.1", optional = true }
 rustledger-core.workspace = true
 rustledger-parser.workspace = true
 rustledger-loader.workspace = true

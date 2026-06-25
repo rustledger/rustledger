@@ -2344,7 +2344,7 @@ fn section_marker_check(
 /// and single-digit month/day. Returns `None` when the token
 /// can't be turned into a real calendar date (invalid month,
 /// invalid day for the given month, etc.).
-fn parse_date_token(text: &str) -> Option<NaiveDate> {
+pub(super) fn parse_date_token(text: &str) -> Option<NaiveDate> {
     // Fast path: canonical "YYYY-MM-DD".
     if text.len() == 10
         && text.as_bytes()[4] == b'-'
@@ -2390,6 +2390,40 @@ fn parse_directive_date(
         span,
     ));
     None
+}
+
+/// Decode a `STRING` token's text (with surrounding quotes) into its semantic
+/// value: quotes stripped, escapes decoded (`\"`→`"`, `\\`→`\`, `\n`/`\t`/`\r`,
+/// unknown escape drops the backslash). `None` if not a well-formed quoted
+/// string. Text-based so both the red ([`ast::StringLit::text_decoded`]) and
+/// green conversion paths share one source of truth.
+pub(super) fn decode_string_token(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
+        return None;
+    }
+    let raw = &text[1..text.len() - 1];
+    if !raw.contains('\\') {
+        return Some(raw.to_string());
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some(other) => out.push(other),
+            None => {}
+        }
+    }
+    Some(out)
 }
 
 /// Parse a numeric token. Tolerates leading sign and thousands-

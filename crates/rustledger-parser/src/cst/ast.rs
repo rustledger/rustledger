@@ -188,30 +188,8 @@ impl StringLit {
     /// lexer. Returns an owned `String` (decoding may shrink the content).
     /// Returns `None` if the raw text isn't a well-formed quoted string.
     pub fn text_decoded(&self) -> Option<String> {
-        let raw = self.text_unquoted()?;
-        if !raw.contains('\\') {
-            return Some(raw.to_string());
-        }
-        let mut out = String::with_capacity(raw.len());
-        let mut chars = raw.chars();
-        while let Some(c) = chars.next() {
-            if c != '\\' {
-                out.push(c);
-                continue;
-            }
-            match chars.next() {
-                Some('"') => out.push('"'),
-                Some('\\') => out.push('\\'),
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                // Unknown escape: drop the backslash, keep the char (Beancount).
-                Some(other) => out.push(other),
-                // Trailing lone backslash (not reachable for a valid token).
-                None => {}
-            }
-        }
-        Some(out)
+        // Shared text-based decoder (one source of truth for red + green paths).
+        super::convert::decode_string_token(self.text())
     }
 }
 

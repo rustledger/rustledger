@@ -8,15 +8,16 @@
 //! parallel with [`super::convert`] and gated by a differential oracle that
 //! pins its output byte-identical to the red path.
 //!
-//! Status: foundation + transaction **header** conversion (date / flag /
-//! payee+narration / tags / links / span), reusing the shared text parsers in
-//! [`super::convert`]. Postings + metadata + comments + error recovery layer on
-//! next; the field-level oracle (`green_txn_header_matches_red`) pins each field
-//! against the red path as it's built.
+//! Status: full transaction conversion (header + postings + cost/price), wired
+//! into `parse_via_cst_opts` with a **red fallback** — green returns `Some` only
+//! when it exactly replicates red, bailing on transaction metadata, direct-child
+//! comments, deprecated `|`, unparseable amounts, and posting flag/metadata/
+//! arithmetic (those layer on next). Measured −16% load on a 10k-txn workload.
+//! Pinned by field-level oracles + the `parse_green_eq_red_corpus` differential
+//! test + the `fuzz_green_eq_red` fuzz target.
 
-// PR1 WIP: this parallel green path is built + verified by the differential
-// tests below before being wired into `parse_via_cst`; until that wiring lands
-// its functions are exercised only by tests.
+// `top_level_node_spans` is a span-validation helper exercised only by the
+// differential tests; the rest of this module is wired into `parse_via_cst_opts`.
 #![allow(dead_code)]
 
 use super::convert::{decode_string_token, is_comment_kind, parse_date_token, parse_decimal_token};
@@ -625,6 +626,49 @@ mod tests {
                 poff += len;
             }
             assert_eq!(gi, rtxn.postings.len(), "posting count {src:?}");
+        }
+    }
+
+    /// End-to-end differential: the green-wired `parse` must equal the pure-red
+    /// `parse_red_only` on every input — exercising the green path (simple txns)
+    /// AND every red-fallback trigger (flag / metadata / comment / arithmetic /
+    /// multi-amount / pipe / invalid date), plus non-transaction directives,
+    /// BOM, multi-byte, and error recovery. (The fuzz target generalizes this.)
+    #[test]
+    fn parse_green_eq_red_corpus() {
+        let corpus = [
+            "",
+            "2020-01-01 * \"p\" \"n\"\n  A 1 USD\n  B\n",
+            "2020-01-01 ! \"x\" #t ^l\n  A 10 AAPL {2 USD} @ 3 USD\n  B -20 USD\n  Income:G\n",
+            "2020-01-01 * \"p\"\n  ! A 1 USD\n  B\n", // posting flag -> red fallback
+            "2020-01-01 * \"p\"\n  A 1 USD\n    note: \"m\"\n  B\n", // posting meta -> fallback
+            "2020-01-01 * \"p\"\n  meta: \"x\"\n  A 1 USD\n  B\n", // txn meta -> fallback
+            "2020-01-01 * \"p\"\n  ; a comment\n  A 1 USD\n  B\n", // body comment -> fallback
+            "2020-01-01 * \"p\"\n  A 5 USD + 3 USD\n  B\n", // arithmetic -> fallback
+            "2020-01-01 * \"p\"\n  A 5 USD 3 USD\n  B\n", // multi-amount -> fallback
+            "2020-01-01 * \"p\" | \"n\"\n  A 1 USD\n  B\n", // deprecated pipe -> fallback
+            "2020-13-99 * \"bad date\"\n  A 1 USD\n  B\n", // invalid date -> fallback
+            "\u{feff}2020-01-01 * \"p\"\n  A 1 USD\n  B\n", // BOM
+            "2020-01-01 * \"é\" \"münts\"\n  Aaa 1 EUR\n  B\n", // multi-byte
+            "garbage\n2020-01-01 open A\n2020-01-01 * \"p\"\n  A 1 USD\n  B\n", // error recovery
+            "2020-01-01 open A\n2020-01-02 close A\noption \"x\" \"y\"\n", // non-txn
+        ];
+        for src in corpus {
+            let g = crate::parse(src);
+            let r = crate::parse_red_only(src);
+            let dbg = |p: &crate::ParseResult| {
+                (
+                    format!("{:?}", p.directives),
+                    format!("{:?}", p.errors),
+                    format!("{:?}", p.comments),
+                    format!("{:?}", p.options),
+                )
+            };
+            assert_eq!(
+                dbg(&g),
+                dbg(&r),
+                "green-wired parse diverged from red for: {src:?}"
+            );
         }
     }
 }

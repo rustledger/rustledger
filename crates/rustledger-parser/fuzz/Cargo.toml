@@ -32,3 +32,10 @@ path = "fuzz_targets/fuzz_parse_line.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_green_eq_red"
+path = "fuzz_targets/fuzz_green_eq_red.rs"
+test = false
+doc = false
+bench = false

@@ -72,6 +72,21 @@ pub fn parse_via_cst(source: &str) -> ParseResult {
 /// collected unconditionally (the processing path needs them).
 #[must_use]
 pub fn parse_via_cst_opts(source: &str, collect_occurrences: bool) -> ParseResult {
+    parse_via_cst_inner(source, collect_occurrences, /* use_green = */ true)
+}
+
+/// Test/fuzz hook: parse like [`crate::parse`] but force the **red** conversion
+/// path (green transaction conversion disabled). Used by the `green_eq_red`
+/// differential fuzz target to assert the green-wired path is output-equivalent.
+#[doc(hidden)]
+#[must_use]
+pub fn parse_red_only(source: &str) -> ParseResult {
+    parse_via_cst_inner(
+        source, /* collect_occurrences = */ true, /* use_green = */ false,
+    )
+}
+
+fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool) -> ParseResult {
     // BOM detection mirrors the legacy parser's behavior: strip a
     // leading 3-byte BOM from the source before tokenizing and
     // record its presence in the result. Spans index the original
@@ -190,7 +205,12 @@ pub fn parse_via_cst_opts(source: &str, collect_occurrences: bool) -> ParseResul
                 let green = node.syntax().green();
                 let base =
                     u32::from(node.syntax().text_range().start()) as usize + bom_offset as usize;
-                match super::green::convert_transaction(&green, base) {
+                let green_dir = if use_green {
+                    super::green::convert_transaction(&green, base)
+                } else {
+                    None
+                };
+                match green_dir {
                     Some(d) => Some(d),
                     None => convert_transaction(&node, bom_offset, &mut errors),
                 }

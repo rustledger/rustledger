@@ -31,6 +31,7 @@ on:
           - all
           - fuzz_parse
           - fuzz_parse_line
+          - fuzz_green_eq_red
           - fuzz_query_parse
           - fuzz_query_execute
           - fuzz_booking
@@ -55,7 +56,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fuzz_parse, fuzz_parse_line]
+        target: [fuzz_parse, fuzz_parse_line, fuzz_green_eq_red]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Check if target should run

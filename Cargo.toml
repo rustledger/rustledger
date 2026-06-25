@@ -146,6 +146,8 @@ imbl = { version = "7", features = ["serde"] }
 # Testing
 proptest = "1"
 criterion = "0.8"
+# Deterministic instruction-count benchmarks (Valgrind/Callgrind), run nightly.
+iai-callgrind = "0.16"
 insta = { version = "1", features = ["yaml"] }
 rust_decimal_macros = "1.40"
 tempfile = "3"

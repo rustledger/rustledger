@@ -99,3 +99,37 @@ jobs:
             flamegraph.svg
             workload.beancount
           retention-days: 30
+
+  # Deterministic instruction counts (Valgrind/Callgrind via iai-callgrind) —
+  # identical run-to-run, so diffable night-over-night unlike wall-clock. The
+  # runner version must match the `iai-callgrind` crate version (see Cargo.toml).
+  iai:
+    name: Instruction counts (iai-callgrind)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Install iai-callgrind-runner (must match the crate version)
+        run: cargo install iai-callgrind-runner --version 0.16.1 --locked
+      - name: Run instruction-count benches
+        run: cargo bench -p rustledger --bench iai_pipeline | tee iai-results.txt
+      - name: Summarize
+        run: |
+          {
+            echo "## Nightly instruction counts (iai-callgrind)"
+            echo ""
+            echo '```'
+            grep -E "parse_ledger|Instructions|Estimated Cycles" iai-results.txt || cat iai-results.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload instruction counts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: iai-instruction-counts
+          path: iai-results.txt
+          retention-days: 30

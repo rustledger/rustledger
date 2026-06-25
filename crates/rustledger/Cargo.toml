@@ -107,9 +107,18 @@ insta.workspace = true
 # tests to author tiny .wasm fixtures for build_registry coverage
 # without checking compiled binaries into the repo.
 wat = { workspace = true }
+# Deterministic instruction-count benchmarks (Valgrind/Callgrind) — immune to
+# CI runner noise. Run nightly by profile.yml; see benches/iai_pipeline.rs.
+iai-callgrind = { workspace = true }
 
 [[bench]]
 name = "pipeline_bench"
+harness = false
+
+# Deterministic instruction counts via iai-callgrind (Valgrind). Not in PR CI
+# (needs Valgrind + the runner); run nightly by profile.yml.
+[[bench]]
+name = "iai_pipeline"
 harness = false
 
 # Baseline for the v0.16.0 perf-sensitive paths. Not wired into PR CI — too

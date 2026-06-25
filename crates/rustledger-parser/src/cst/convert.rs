@@ -1705,7 +1705,7 @@ fn pushmeta_value(node: &crate::SyntaxNode) -> MetaValue {
 /// Comment-like syntax kinds that the legacy parser surfaces as
 /// `ParseResult.comments` entries when they appear at the top
 /// level (outside any directive's content).
-const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
+pub(super) const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
     matches!(
         kind,
         crate::SyntaxKind::COMMENT
@@ -2428,7 +2428,7 @@ pub(super) fn decode_string_token(text: &str) -> Option<String> {
 
 /// Parse a numeric token. Tolerates leading sign and thousands-
 /// separator commas (legacy parser drops them).
-fn parse_decimal_token(text: &str) -> Option<Decimal> {
+pub(super) fn parse_decimal_token(text: &str) -> Option<Decimal> {
     use std::str::FromStr;
     let cleaned: String;
     let s = if text.contains(',') {

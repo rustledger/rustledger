@@ -19,9 +19,12 @@
 // its functions are exercised only by tests.
 #![allow(dead_code)]
 
-use super::convert::{decode_string_token, parse_date_token};
+use super::convert::{decode_string_token, is_comment_kind, parse_date_token, parse_decimal_token};
 use rowan::{Language, NodeOrToken};
-use rustledger_core::{InternedStr, Link, Metadata, NaiveDate, Span, Tag};
+use rustledger_core::{
+    Account, Amount, Currency, IncompleteAmount, InternedStr, Link, Metadata, NaiveDate, Posting,
+    Span, Spanned, Tag,
+};
 
 /// Every top-level (child-of-root) **node** paired with its source [`Span`],
 /// computed by threading the absolute byte offset through the green tree — no
@@ -169,6 +172,114 @@ pub(super) fn convert_transaction_header(
     Some((txn, span))
 }
 
+/// Convert a non-arithmetic `AMOUNT` green node into an `IncompleteAmount`.
+/// Returns `None` for arithmetic-expression amounts (`5 + 3 USD`) — those are a
+/// later increment; the simple oracle corpus excludes them.
+fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
+    use crate::SyntaxKind as K;
+    let mut sign_minus = false;
+    let mut number: Option<rust_decimal::Decimal> = None;
+    let mut currency: Option<Currency> = None;
+    let mut complex = false;
+    for child in node.children() {
+        let NodeOrToken::Token(t) = child else {
+            complex = true;
+            continue;
+        };
+        match crate::BeancountLanguage::kind_from_raw(t.kind()) {
+            K::MINUS if number.is_none() => sign_minus = true,
+            K::PLUS if number.is_none() => {}
+            K::NUMBER if number.is_none() => number = parse_decimal_token(t.text()),
+            K::CURRENCY if currency.is_none() => currency = Some(Currency::new(t.text())),
+            K::WHITESPACE => {}
+            // Operator, second number, or extra currency => arithmetic/complex.
+            K::NUMBER
+            | K::PLUS
+            | K::MINUS
+            | K::STAR
+            | K::SLASH
+            | K::L_PAREN
+            | K::R_PAREN
+            | K::CURRENCY => complex = true,
+            _ => {}
+        }
+    }
+    if complex {
+        return None;
+    }
+    let number = number.map(|n| if sign_minus { -n } else { n });
+    match (number, currency) {
+        (Some(n), Some(c)) => Some(IncompleteAmount::Complete(Amount::new(n, c))),
+        (Some(n), None) => Some(IncompleteAmount::NumberOnly(n)),
+        (None, Some(c)) => Some(IncompleteAmount::CurrencyOnly(c)),
+        (None, None) => None,
+    }
+}
+
+/// Convert a **simple** `POSTING` green node (account + non-arithmetic units +
+/// span + same-line trailing comments). Returns `None` for postings with a
+/// flag, cost spec, price annotation, metadata, a trailing-sibling amount, or
+/// an arithmetic amount — those layer on in later increments, and the simple
+/// oracle corpus excludes them. `base` is the node's absolute start offset.
+/// Span policy matches red `posting_span`: ends at the first NEWLINE's start.
+pub(super) fn convert_simple_posting(
+    node: &rowan::GreenNodeData,
+    base: usize,
+) -> Option<Spanned<Posting>> {
+    use crate::SyntaxKind as K;
+    let mut account: Option<Account> = None;
+    let mut units: Option<IncompleteAmount> = None;
+    let mut trailing_comments: Vec<String> = Vec::new();
+    let mut newline_off: Option<usize> = None;
+    let mut amount_seen = false;
+    let mut offset = base;
+    for child in node.children() {
+        let len = match &child {
+            NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+            NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+        };
+        match &child {
+            NodeOrToken::Token(t) => {
+                let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
+                if kind == K::ACCOUNT && account.is_none() {
+                    account = Some(Account::new(t.text()));
+                } else if kind == K::NEWLINE && newline_off.is_none() {
+                    newline_off = Some(offset);
+                } else if newline_off.is_none() && is_comment_kind(kind) {
+                    trailing_comments.push(t.text().to_string());
+                } else if matches!(kind, K::FLAG | K::STAR | K::HASH | K::PENDING_KW) {
+                    return None; // posting flag — later increment
+                }
+            }
+            NodeOrToken::Node(n) => match crate::BeancountLanguage::kind_from_raw(n.kind()) {
+                K::AMOUNT if !amount_seen => {
+                    amount_seen = true;
+                    // `?` bails on an arithmetic/malformed amount (later increment).
+                    units = Some(simple_amount(n)?);
+                }
+                K::AMOUNT | K::COST_SPEC | K::PRICE_ANNOTATION | K::META_ENTRY => return None,
+                _ => {}
+            },
+        }
+        offset += len;
+    }
+    let account = account?;
+    let end = newline_off.unwrap_or(base + u32::from(node.text_len()) as usize);
+    Some(Spanned::new(
+        Posting {
+            account,
+            units,
+            cost: None,
+            price: None,
+            flag: None,
+            meta: Metadata::default(),
+            comments: Vec::new(),
+            trailing_comments,
+        },
+        Span::new(base, end),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +373,65 @@ mod tests {
             assert_eq!(g.tags, r.tags, "tags {src:?}");
             assert_eq!(g.links, r.links, "links {src:?}");
             assert_eq!(g_span, red_sp.span, "span {src:?}");
+        }
+    }
+
+    /// Field oracle: green simple-posting conversion must equal the red path's,
+    /// for simple postings (account + non-arithmetic units + trailing comment +
+    /// elided units). No BOM in these cases.
+    #[test]
+    fn green_simple_posting_matches_red() {
+        let cases = [
+            "2020-01-01 * \"p\"\n  Assets:Cash 5.00 USD\n  Income:X\n",
+            "2020-01-01 * \"p\"\n  Assets:A -10 EUR\n  Assets:B 10 EUR\n",
+            "2020-01-01 * \"p\"\n  A 5 USD  ; note here\n  B\n",
+            "2020-01-01 * \"p\"\n  A 1234.5678 USD\n  B 0 USD\n",
+        ];
+        for src in cases {
+            let red = crate::parse(src);
+            let Directive::Transaction(rtxn) = &red.directives[0].value else {
+                panic!("txn {src:?}");
+            };
+            let root = parse_structured(src);
+            let green = root.green();
+            // locate the TRANSACTION node + base
+            let mut off = 0usize;
+            let mut txn = None;
+            for child in green.children() {
+                let len = match &child {
+                    NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+                    NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+                };
+                if let NodeOrToken::Node(n) = child {
+                    if crate::BeancountLanguage::kind_from_raw(n.kind()) == SyntaxKind::TRANSACTION
+                    {
+                        txn = Some((n, off));
+                        break;
+                    }
+                }
+                off += len;
+            }
+            let (txn_node, txn_base) = txn.expect("txn node");
+            // walk its POSTING children, comparing each to red.
+            let mut poff = txn_base;
+            let mut gi = 0usize;
+            for child in txn_node.children() {
+                let len = match &child {
+                    NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+                    NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+                };
+                if let NodeOrToken::Node(n) = child {
+                    if crate::BeancountLanguage::kind_from_raw(n.kind()) == SyntaxKind::POSTING {
+                        let gp = convert_simple_posting(n, poff).expect("simple posting");
+                        let rp = &rtxn.postings[gi];
+                        assert_eq!(gp.value, rp.value, "posting {gi} value {src:?}");
+                        assert_eq!(gp.span, rp.span, "posting {gi} span {src:?}");
+                        gi += 1;
+                    }
+                }
+                poff += len;
+            }
+            assert_eq!(gi, rtxn.postings.len(), "posting count {src:?}");
         }
     }
 }

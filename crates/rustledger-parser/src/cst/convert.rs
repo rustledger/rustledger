@@ -123,7 +123,11 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     let TopLevelWalkResult {
         errors: top_level_errors,
         section_marker_comments,
-    } = walk_top_level_once(&source_file, stripped, bom_offset);
+    } = if use_green {
+        super::green::walk_top_level(source_file.syntax(), stripped, bom_offset)
+    } else {
+        walk_top_level_once(&source_file, stripped, bom_offset)
+    };
 
     let mut comments: Vec<Spanned<String>> = top_level_comments;
     comments.extend(section_marker_comments);
@@ -1751,9 +1755,9 @@ pub(super) const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
 }
 
 /// Output of the fused top-level pass [`walk_top_level_once`].
-struct TopLevelWalkResult {
-    errors: Vec<crate::ParseError>,
-    section_marker_comments: Vec<Spanned<String>>,
+pub(super) struct TopLevelWalkResult {
+    pub(super) errors: Vec<crate::ParseError>,
+    pub(super) section_marker_comments: Vec<Spanned<String>>,
 }
 
 /// Single walk over `source_file`'s direct children that runs
@@ -2141,7 +2145,7 @@ fn error_node_check(
 /// Order matters: a Windows-exported file with a Unicode account
 /// AND an internal BOM gets the Unicode-account diagnostic
 /// (the BOM is usually a side effect, not the root cause).
-fn classify_recovery_error(line_text: &str, span: Span) -> crate::ParseError {
+pub(super) fn classify_recovery_error(line_text: &str, span: Span) -> crate::ParseError {
     if let Some(account) = crate::diagnostics::find_unicode_account(line_text) {
         return crate::ParseError::new(
             crate::ParseErrorKind::InvalidAccount(account.to_string()),
@@ -2518,7 +2522,7 @@ fn node_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span {
 /// `SyntaxKind::is_trivia()` minus `BOM` - a mid-file BOM byte
 /// is an error to surface (`extract_inline_token_errors` /
 /// `classify_recovery_error`), not trivia to silently skip.
-const fn is_trivia_kind(kind: crate::SyntaxKind) -> bool {
+pub(super) const fn is_trivia_kind(kind: crate::SyntaxKind) -> bool {
     matches!(
         kind,
         crate::SyntaxKind::WHITESPACE

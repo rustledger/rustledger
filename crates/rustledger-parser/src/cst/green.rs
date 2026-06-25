@@ -18,8 +18,8 @@
 
 use super::ast::AstNode as _; // brings `Directive::can_cast` into scope
 use super::convert::{
-    DescendantsWalkResult, decode_string_token, is_comment_kind, number_meta_value,
-    parse_date_token, parse_decimal_token,
+    DescendantsWalkResult, TopLevelWalkResult, classify_recovery_error, decode_string_token,
+    is_comment_kind, is_trivia_kind, number_meta_value, parse_date_token, parse_decimal_token,
 };
 use rowan::{Language, NodeOrToken};
 use rustledger_core::cost::{CostNumber, CostSpec};
@@ -757,6 +757,297 @@ impl DescendantsWalker {
     }
 }
 
+/// Length of a green child (node or token) in bytes.
+fn child_len(child: NodeOrToken<&rowan::GreenNodeData, &rowan::GreenTokenData>) -> usize {
+    match child {
+        NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+        NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+    }
+}
+
+/// Green-tree re-implementation of `walk_top_level_once`: per-top-level-directive
+/// validation (indentation, custom-value, transaction-body, error-node, and
+/// org-section-marker comments). Iterates the green root's direct children
+/// threading the stripped-frame byte offset — no per-child red-node allocation —
+/// and dispatches the same five checks, producing a byte-identical
+/// [`TopLevelWalkResult`]. `offset` is stripped-frame; spans add `bom_offset`.
+pub(super) fn walk_top_level(
+    root: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+) -> TopLevelWalkResult {
+    use crate::SyntaxKind as K;
+    let mut errors = Vec::new();
+    let mut section_marker_comments = Vec::new();
+    let green = root.green();
+    let mut offset = 0usize;
+    for child in green.children() {
+        let len = child_len(child);
+        if let NodeOrToken::Node(n) = &child {
+            let kind = crate::BeancountLanguage::kind_from_raw(n.kind());
+            if super::ast::Directive::can_cast(kind) {
+                tl_indented_check(n, offset, bom_offset, stripped, &mut errors);
+            }
+            match kind {
+                K::CUSTOM_DIRECTIVE => tl_custom_check(n, offset, bom_offset, &mut errors),
+                K::TRANSACTION => tl_transaction_body_check(n, offset, bom_offset, &mut errors),
+                K::ERROR_NODE => {
+                    tl_error_node_check(n, offset, bom_offset, stripped, &mut errors);
+                    tl_section_marker_check(n, offset, bom_offset, &mut section_marker_comments);
+                }
+                _ => {}
+            }
+        }
+        offset += len;
+    }
+    TopLevelWalkResult {
+        errors,
+        section_marker_comments,
+    }
+}
+
+/// `indented_directive_check` on green: a directive's first non-trivia token
+/// starting past its line's column 0 is a "must start at column 0" error.
+fn tl_indented_check(
+    node: &rowan::GreenNodeData,
+    base: usize,
+    bom_offset: u32,
+    stripped: &str,
+    out: &mut Vec<crate::ParseError>,
+) {
+    let mut offset = base;
+    let mut content: Option<(usize, usize)> = None;
+    for child in node.children() {
+        let len = child_len(child);
+        if let NodeOrToken::Token(t) = &child
+            && !is_trivia_kind(crate::BeancountLanguage::kind_from_raw(t.kind()))
+        {
+            content = Some((offset, offset + len));
+            break;
+        }
+        offset += len;
+    }
+    let Some((content_start, content_end)) = content else {
+        return;
+    };
+    // Line start: last '\n' before content_start (byte scan — boundary-agnostic).
+    let line_start = stripped
+        .as_bytes()
+        .get(..content_start)
+        .and_then(|bytes| bytes.iter().rposition(|&b| b == b'\n'))
+        .map_or(0, |nl| nl + 1);
+    if content_start > line_start {
+        let span = Span::new(
+            line_start + bom_offset as usize,
+            content_end + bom_offset as usize,
+        );
+        out.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(
+                "top-level directive must start at column 0".to_string(),
+            ),
+            span,
+        ));
+    }
+}
+
+/// `custom_value_check` on green: after the header (date / `custom` / type
+/// string), a bare CURRENCY (not paired as `NUMBER CURRENCY`) is invalid.
+fn tl_custom_check(
+    node: &rowan::GreenNodeData,
+    base: usize,
+    bom_offset: u32,
+    out: &mut Vec<crate::ParseError>,
+) {
+    use crate::SyntaxKind as K;
+    // Non-trivia direct tokens with their stripped offsets.
+    let mut toks: Vec<(crate::SyntaxKind, usize, usize)> = Vec::new();
+    let mut offset = base;
+    for child in node.children() {
+        let len = child_len(child);
+        if let NodeOrToken::Token(t) = &child {
+            let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
+            if !is_trivia_kind(kind) {
+                toks.push((kind, offset, len));
+            }
+        }
+        offset += len;
+    }
+    let mut seen_type_string = false;
+    for i in 0..toks.len() {
+        let (kind, start, len) = toks[i];
+        if !seen_type_string {
+            if kind == K::STRING {
+                seen_type_string = true;
+            }
+            continue;
+        }
+        if kind == K::CURRENCY && !(i > 0 && toks[i - 1].0 == K::NUMBER) {
+            let span = Span::new(
+                start + bom_offset as usize,
+                start + len + bom_offset as usize,
+            );
+            out.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError(
+                    "bare currency literal is not a valid custom directive value".to_string(),
+                ),
+                span,
+            ));
+        }
+    }
+}
+
+/// `transaction_body_check` on green: a body line with catch-all tokens (outside
+/// `POSTING` / `META_ENTRY` nodes) is "unexpected input".
+fn tl_transaction_body_check(
+    node: &rowan::GreenNodeData,
+    base: usize,
+    bom_offset: u32,
+    out: &mut Vec<crate::ParseError>,
+) {
+    use crate::SyntaxKind as K;
+    let mut past_header = false;
+    let mut saw_header_content = false;
+    let mut line_start: Option<usize> = None;
+    let mut line_has_content = false;
+    let mut offset = base;
+    for child in node.children() {
+        let len = child_len(child);
+        match &child {
+            NodeOrToken::Token(t) => {
+                let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
+                let (start, end) = (offset, offset + len);
+                if past_header {
+                    if line_start.is_none() {
+                        line_start = Some(start);
+                    }
+                    if kind == K::NEWLINE {
+                        if line_has_content && let Some(ls) = line_start {
+                            let span =
+                                Span::new(ls + bom_offset as usize, end + bom_offset as usize);
+                            out.push(crate::ParseError::new(
+                                crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
+                                span,
+                            ));
+                        }
+                        line_start = None;
+                        line_has_content = false;
+                    } else if !is_trivia_kind(kind)
+                        && !is_comment_kind(kind)
+                        && !matches!(kind, K::TAG | K::LINK)
+                    {
+                        line_has_content = true;
+                    }
+                } else if kind == K::NEWLINE {
+                    if saw_header_content {
+                        past_header = true;
+                    }
+                } else if !is_trivia_kind(kind) {
+                    saw_header_content = true;
+                }
+            }
+            NodeOrToken::Node(_) => {
+                // POSTING / META_ENTRY: not catch-all. Reset line state.
+                line_start = None;
+                line_has_content = false;
+                past_header = true;
+            }
+        }
+        offset += len;
+    }
+}
+
+/// `error_node_check` on green: each `ERROR_NODE` line that is neither a section
+/// marker nor a column-0 comment emits a classified recovery error (+ a
+/// secondary BOM diagnostic when the line also contains a BOM byte).
+fn tl_error_node_check(
+    node: &rowan::GreenNodeData,
+    base: usize,
+    bom_offset: u32,
+    stripped: &str,
+    out: &mut Vec<crate::ParseError>,
+) {
+    use crate::SyntaxKind as K;
+    let mut line_start: Option<usize> = None;
+    let mut first_non_trivia: Option<crate::SyntaxKind> = None;
+    let mut offset = base;
+    for child in node.children() {
+        let len = child_len(child);
+        if let NodeOrToken::Token(t) = &child {
+            let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
+            let (start, end) = (offset, offset + len);
+            if line_start.is_none() {
+                line_start = Some(start);
+            }
+            if kind == K::NEWLINE {
+                let is_section = first_non_trivia == Some(K::STAR);
+                let is_comment = matches!(first_non_trivia, Some(k) if is_comment_kind(k));
+                if !is_section
+                    && !is_comment
+                    && first_non_trivia.is_some()
+                    && let Some(ls) = line_start
+                {
+                    let span = Span::new(ls + bom_offset as usize, end + bom_offset as usize);
+                    let line_text = stripped.get(ls..end).unwrap_or("");
+                    let primary = classify_recovery_error(line_text, span);
+                    let primary_is_bom =
+                        matches!(primary.kind, crate::ParseErrorKind::BomInDirectiveBody);
+                    out.push(primary);
+                    if !primary_is_bom && line_text.contains(crate::bom::BOM_CHAR) {
+                        out.push(
+                            crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
+                                .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
+                        );
+                    }
+                }
+                line_start = None;
+                first_non_trivia = None;
+            } else if first_non_trivia.is_none() && !is_trivia_kind(kind) {
+                first_non_trivia = Some(kind);
+            }
+        }
+        offset += len;
+    }
+}
+
+/// `section_marker_check` on green: emit an empty-string comment for each
+/// `*`-starting (org-mode section) line inside an `ERROR_NODE`.
+fn tl_section_marker_check(
+    node: &rowan::GreenNodeData,
+    base: usize,
+    bom_offset: u32,
+    out: &mut Vec<Spanned<String>>,
+) {
+    use crate::SyntaxKind as K;
+    let mut line_start: Option<usize> = None;
+    let mut first_non_trivia: Option<crate::SyntaxKind> = None;
+    let mut offset = base;
+    for child in node.children() {
+        let len = child_len(child);
+        if let NodeOrToken::Token(t) = &child {
+            let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
+            let (start, end) = (offset, offset + len);
+            if line_start.is_none() {
+                line_start = Some(start);
+            }
+            if kind == K::NEWLINE {
+                if first_non_trivia == Some(K::STAR)
+                    && let Some(ls) = line_start
+                {
+                    out.push(Spanned::new(
+                        String::new(),
+                        Span::new(ls + bom_offset as usize, end + bom_offset as usize),
+                    ));
+                }
+                line_start = None;
+                first_non_trivia = None;
+            } else if first_non_trivia.is_none() && !is_trivia_kind(kind) {
+                first_non_trivia = Some(kind);
+            }
+        }
+        offset += len;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -965,6 +1256,15 @@ mod tests {
             "!!garbage Assets:InError 5 BAD!!\n2020-01-01 open Assets:Real USD\n", // error-node suppresses occ
             "* Org Section Heading\n** Sub\n2020-01-01 open A\n", // org-mode section markers
             "2020-01-01 open A\n2020-01-01 open B\n2020-01-01 open C\n", // many account occurrences
+            // walk_top_level distinctive checks:
+            "  2020-01-01 open Assets:A USD\n", // indented directive -> col-0 error
+            "\t2020-01-01 close Assets:A\n",    // tab-indented directive
+            "2020-01-01 custom \"budget\" USD\n", // bare currency in custom -> error
+            "2020-01-01 custom \"b\" 10 USD \"ok\" NZD\n", // amount ok, trailing bare cur -> error
+            "2020-01-01 * \"p\"\n  unexpected junk here\n  A 1 USD\n  B\n", // txn body catch-all
+            "2020-01-01 * \"p\" #tag1\n  A 1 USD\n  #bodytag\n  B\n", // body tag/link is valid (no error)
+            "@@@ totally invalid line @@@\n2020-01-01 open A\n", // error-node classified recovery error
+            "* Section\n**  Indented Sub\n; c0 comment\n2020-01-01 open A\n", // section markers + comment
         ];
         for src in corpus {
             let g = crate::parse(src);

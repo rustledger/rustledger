@@ -455,34 +455,21 @@ fn meta_value(entry: &rowan::GreenNodeData) -> MetaValue {
     MetaValue::None
 }
 
-/// Convert the `META_ENTRY` child nodes of a directive/posting green node into a
-/// [`Metadata`] map. Mirrors `convert_meta_entries`: each entry's key
-/// (`META_KEY` with the trailing `:` stripped) maps to its typed `meta_value`.
-fn convert_meta_entries(node: &rowan::GreenNodeData) -> Metadata {
+/// Key + typed value for a single `META_ENTRY` green node (key = first
+/// `META_KEY` token with the trailing `:` stripped), or `None` if it has no key.
+/// Folded directly into the posting/transaction conversion loops so the parent's
+/// children are walked only once — no separate metadata pass over them.
+fn meta_entry_kv(entry: &rowan::GreenNodeData) -> Option<(String, MetaValue)> {
     use crate::SyntaxKind as K;
-    let mut meta = Metadata::default();
-    for child in node.children() {
-        let NodeOrToken::Node(n) = child else {
-            continue;
-        };
-        if crate::BeancountLanguage::kind_from_raw(n.kind()) != K::META_ENTRY {
-            continue;
+    let key = entry.children().find_map(|c| match c {
+        NodeOrToken::Token(t)
+            if crate::BeancountLanguage::kind_from_raw(t.kind()) == K::META_KEY =>
+        {
+            Some(t.text().strip_suffix(':').unwrap_or(t.text()).to_string())
         }
-        // Key = first META_KEY token, trailing ':' stripped.
-        let key = n.children().find_map(|c| match c {
-            NodeOrToken::Token(t)
-                if crate::BeancountLanguage::kind_from_raw(t.kind()) == K::META_KEY =>
-            {
-                Some(t.text().strip_suffix(':').unwrap_or(t.text()).to_string())
-            }
-            _ => None,
-        });
-        let Some(key) = key else {
-            continue;
-        };
-        meta.insert(key, meta_value(n));
-    }
-    meta
+        _ => None,
+    })?;
+    Some((key, meta_value(entry)))
 }
 
 /// Posting flag char. Mirrors `PostingFlag::cast` + `flag_char_from_posting`:
@@ -517,8 +504,7 @@ pub(super) fn convert_simple_posting(
     let mut units: Option<IncompleteAmount> = None;
     let mut cost: Option<CostSpec> = None;
     let mut price: Option<PriceAnnotation> = None;
-    // Per-posting metadata: one pass over the posting's META_ENTRY children.
-    let meta = convert_meta_entries(node);
+    let mut meta = Metadata::default();
     let mut trailing_comments: Vec<String> = Vec::new();
     let mut newline_off: Option<usize> = None;
     let mut amount_seen = false;
@@ -556,7 +542,11 @@ pub(super) fn convert_simple_posting(
                 K::PRICE_ANNOTATION if price.is_none() => {
                     price = Some(convert_price_annotation(n)?);
                 }
-                // META_ENTRY handled in one pass above (convert_meta_entries).
+                K::META_ENTRY => {
+                    if let Some((k, v)) = meta_entry_kv(n) {
+                        meta.insert(k, v);
+                    }
+                }
                 // second amount — arithmetic/multi-amount falls back to red.
                 K::AMOUNT => return None,
                 _ => {}
@@ -583,21 +573,19 @@ pub(super) fn convert_simple_posting(
 
 /// Assemble a full `TRANSACTION` directive from its green node, or return `None`
 /// to fall back to red. Returns `Some` **only** when the transaction is fully
-/// and identically convertible on green: a valid date and all simple postings,
-/// with NO transaction-level metadata, direct-child comments, or deprecated `|`
-/// — each of which red handles with attach/diagnostic logic the green path
-/// doesn't yet replicate. Bailing to red on those keeps the hybrid's output
-/// exactly equal to the pure-red path. `base` is the node's absolute start.
+/// and identically convertible on green: a valid date, all simple postings, and
+/// no direct-child comments or deprecated `|` — those need red's attach +
+/// diagnostic logic the green path doesn't yet replicate. Header fields,
+/// postings, and transaction-level metadata are all converted here. Bailing to
+/// red keeps the hybrid's output exactly equal to red. `base` is the node start.
 pub(super) fn convert_transaction(
     node: &rowan::GreenNodeData,
     base: usize,
 ) -> Option<Spanned<rustledger_core::Directive>> {
     use crate::SyntaxKind as K;
     let (mut txn, span) = convert_transaction_header(node, base)?;
-    // Transaction-level metadata: the directive's direct META_ENTRY children
-    // (posting metadata lives inside POSTING nodes, handled per-posting).
-    txn.meta = convert_meta_entries(node);
     let mut postings = Vec::new();
+    let mut meta = Metadata::default();
     let mut offset = base;
     for child in node.children() {
         let len = match &child {
@@ -614,17 +602,22 @@ pub(super) fn convert_transaction(
                     return None;
                 }
             }
-            NodeOrToken::Node(n) => {
-                // META_ENTRY children are handled in one pass above
-                // (convert_meta_entries); here we only fold in postings.
-                if crate::BeancountLanguage::kind_from_raw(n.kind()) == K::POSTING {
-                    postings.push(convert_simple_posting(n, offset)?);
+            // One pass: postings and transaction-level metadata (posting
+            // metadata lives inside the POSTING nodes, handled per-posting).
+            NodeOrToken::Node(n) => match crate::BeancountLanguage::kind_from_raw(n.kind()) {
+                K::POSTING => postings.push(convert_simple_posting(n, offset)?),
+                K::META_ENTRY => {
+                    if let Some((k, v)) = meta_entry_kv(n) {
+                        meta.insert(k, v);
+                    }
                 }
-            }
+                _ => {}
+            },
         }
         offset += len;
     }
     txn.postings = postings;
+    txn.meta = meta;
     Some(Spanned::new(
         rustledger_core::Directive::Transaction(txn),
         span,

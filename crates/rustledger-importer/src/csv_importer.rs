@@ -4,9 +4,9 @@ use crate::config::{AmountFormat, ColumnSpec, CsvConfig, ImporterConfig, Importe
 use crate::{EnrichedImportResult, ImportResult, Importer};
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
+use rustc_hash::FxHashMap as HashMap;
 use rustledger_core::{Amount, Directive, Posting, Transaction};
 use rustledger_ops::enrichment::{CategorizationMethod, Enrichment};
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -112,7 +112,7 @@ impl CsvImporter {
                 .map(|(i, h)| (h.to_string(), i))
                 .collect()
         } else {
-            HashMap::new()
+            HashMap::default()
         };
 
         let mut directives = Vec::new();

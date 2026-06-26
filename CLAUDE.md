@@ -391,16 +391,18 @@ Before marking the PR as ready:
 
 ## Known Limitations & TODOs
 
-### Decimal Precision (1 compat test failure)
+### Decimal Precision — RESOLVED (#1240)
 
-**Issue**: `rust_decimal` has a maximum precision of 28 digits, while Python's `decimal.Decimal` has arbitrary precision. This causes 1 compatibility test failure out of 694 (99.86% pass rate).
+`rustledger-core::Decimal` is now arbitrary-large precision (a `fastnum::D512`
+newtype, ~154 significant digits), replacing `rust_decimal`'s 28-digit cap. The
+former `beancount-lazy-plugins/tests_data_output_some_fund_output.beancount`
+divergence — Python detected a `2×10⁻²⁵ USD` residual that Rust rounded to zero —
+no longer occurs: `rledger check` now reports residuals well beyond 28 digits
+(verified down to `2E-30`).
 
-**Affected file**: `beancount-lazy-plugins/tests_data_output_some_fund_output.beancount`
-
-- Contains amounts with 28 decimal places (e.g., `0.7142857142857142857142857143`)
-- Python detects a `2×10⁻²⁵ USD` residual imbalance
-- Rust considers it balanced due to precision limits
-
-**TODO**: Replace `rust_decimal` with an arbitrary-precision decimal library (e.g., `bigdecimal`) to achieve 100% compatibility with Python beancount's balance checking. This is a significant refactor affecting `rustledger-core` and all downstream crates.
-
-**Practical impact**: None for real-world usage. No legitimate ledger has 28-decimal-place amounts.
+Notes for future work:
+- fastnum 0.7's `RoundingMode::HalfEven` mis-rounds "5 followed by nonzero"
+  (`1234.56` → `1234`); `core::Decimal::round_dp` implements banker's rounding
+  itself to work around it. Re-check on fastnum upgrades.
+- `Decimal` is 64 bytes (vs rust_decimal's 16), pushing query `Value` to 96
+  bytes. If query memory bites, box it (`Number(Box<Decimal>)`).

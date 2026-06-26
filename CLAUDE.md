@@ -246,9 +246,9 @@ rledger aims for full Python beancount compatibility on **correct behavior**, bu
 
 Each Python bug we encounter falls into one of three buckets:
 
-1. **Fixable** — we deviate, stay stricter or more correct than Python. Examples: cost-spec precision (beanquery#275, fixed in #1106 / #1113), `FIRST` aggregator short-circuit (beanquery#279, we evaluate eagerly), empty-aggregate quirk (beanquery#1055, we return the SQL identity), elided-zero-to-unopened-account check (Python #877-equivalent, we catch via two-phase validation).
+1. **Fixable** — we deviate, stay stricter or more correct than Python. Examples: cost-spec precision (beanquery#275, fixed in #1106 / #1113), `FIRST` aggregator short-circuit (beanquery#279, we evaluate eagerly), empty-aggregate quirk (beanquery#1055, we return the SQL identity), elided-zero-to-unopened-account check (Python #877-equivalent, we catch via two-phase validation), and **decimal-precision residuals** (the `decimal_exact` side channel + two-tier balance validator — we meet *or exceed* Python without leaving `rust_decimal`; see Known Limitations).
 
-1. **Not fixable locally** — we match Python and document the limitation. Example: the `rust_decimal` 28-digit ceiling (would require migrating to an arbitrary-precision library like `bigdecimal` — significant refactor for negligible practical benefit).
+1. **Not fixable locally** — we match Python and document the limitation. (The long-standing example here, the `rust_decimal` 28-digit ceiling, graduated to "Fixable" above once the `decimal_exact` side channel landed in #1613 — no standing example at present.)
 
 1. **Out of scope** — we mask the Python-side divergence in the compat suite so it doesn't pollute the metric. Example: `KNOWN_PYTHON_DIVERGENCES` entries in `scripts/compat-bql-test.py`.
 
@@ -391,16 +391,46 @@ Before marking the PR as ready:
 
 ## Known Limitations & TODOs
 
-### Decimal Precision (1 compat test failure)
+### Decimal Precision — RESOLVED (side channel, not a type migration)
 
-**Issue**: `rust_decimal` has a maximum precision of 28 digits, while Python's `decimal.Decimal` has arbitrary precision. This causes 1 compatibility test failure out of 694 (99.86% pass rate).
+`core::Decimal` is **deliberately still `rust_decimal::Decimal`** (16 bytes,
+`Copy`). It holds ~29 significant digits; Python's `decimal.Decimal` (Beancount)
+keeps more. We meet-or-exceed Beancount on precision **without** touching the
+number type, via two mechanisms:
 
-**Affected file**: `beancount-lazy-plugins/tests_data_output_some_fund_output.beancount`
+1. **28-digit residuals** (the former `some_fund` divergence — amounts like
+   `0.7142857142857142857142857143`, where Python catches a `2×10⁻²⁵` residual):
+   handled by the **two-tier balance validator**. `validate` computes the fast
+   residual in `rust_decimal`; if it's non-zero it escalates to
+   `booking::calculate_residual_precise` (a `BigDecimal` residual recomputed
+   from the exact ≤29-digit inputs). rust_decimal's `656.25 × cost` keeps enough
+   digits (~29) for the residual to read non-zero, so the escalation fires.
 
-- Contains amounts with 28 decimal places (e.g., `0.7142857142857142857142857143`)
-- Python detects a `2×10⁻²⁵ USD` residual imbalance
-- Rust considers it balanced due to precision limits
+2. **>29-digit literals** (beyond rust_decimal's coefficient, which Beancount
+   keeps but rust_decimal rounds at parse): handled by the **`decimal_exact`
+   side channel** (`crates/rustledger-core/src/decimal_exact.rs`, PR #1613).
+   The exact value is stashed in a process-global table at parse time, gated by
+   a digit count so ≤29-digit literals cost nothing, and consulted only in cold
+   paths — `booking::to_big` (residual), `Amount::Display`, and the validator's
+   `any_overprecise()` escalation. Verified to flag a `1e-30` residual matching
+   Beancount that rust_decimal alone rounds to zero.
 
-**TODO**: Replace `rust_decimal` with an arbitrary-precision decimal library (e.g., `bigdecimal`) to achieve 100% compatibility with Python beancount's balance checking. This is a significant refactor affecting `rustledger-core` and all downstream crates.
+**Why not migrate to an arbitrary-precision type.** Four type migrations were
+prototyped and benchmarked (fastnum `D512`/`D256`/`D128`, and a `bigdecimal`
+hybrid). *All* regressed the hot paths **+22–35%** (e.g. validate +35%): a hybrid
+`enum { Small(rust_decimal), Big(..) }` pays per-op `match` dispatch and inflates
+`Decimal`/`Amount`/`Posting` on **every** ledger, to serve a case that occurs in
+essentially none. The side channel keeps the 99.999% at full `rust_decimal`
+speed (validate ~0% vs main) while still exceeding Beancount. (The closed PR
+#1612 carried the fastnum hybrid; it is **not** the approach we kept.)
 
-**Practical impact**: None for real-world usage. No legitimate ledger has 28-decimal-place amounts.
+**Side-channel soundness** (see the module docs for detail): thread-safe
+(`RwLock`; the loader parses includes in parallel), collision-safe (distinct
+literals rounding to the same `Decimal` poison the key and fall back to
+rust_decimal — never wrong), append-only (over-precise literals are vanishingly
+rare), and cache-aware (the on-disk parse cache is skipped for over-precise loads,
+since a cache hit bypasses parse and the side channel).
+
+**Practical impact**: none for real-world usage — no legitimate ledger has
+>29-significant-digit amounts; the machinery exists to match Beancount on the
+pathological fixtures it's tested against.

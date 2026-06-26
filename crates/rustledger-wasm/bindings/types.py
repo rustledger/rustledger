@@ -304,17 +304,43 @@ class BeancountError(BaseModel):
     `#[ts(rename = ...)]` so consumers see a non-shadowing name.
     """
 
+    code: str | None = Field(
+        ...,
+        description='Stable error code (e.g. `"P0001"` for a parse error, `"E3001"` for a\nvalidation error). `null` for errors without a code (generic processing\n/ query / plugin errors). Lets consumers branch on error type instead of\nmatching on message text.',
+    )
     column: int | None = Field(
         ...,
-        description="Column number (1-based). `null` when the error has no source\nlocation. See `line` above for `range` rationale.",
+        description="Start column (1-based). `null` when the error has no source\nlocation. See `line` above for `range` rationale.",
         ge=1,
+    )
+    end_column: int | None = Field(
+        ...,
+        description="End column (1-based) of the error span. `null` when no span. See `line`.",
+        ge=1,
+    )
+    end_line: int | None = Field(
+        ...,
+        description="End line (1-based) of the error span. `null` when no span. See `line`.",
+        ge=1,
+    )
+    file: str | None = Field(
+        ...,
+        description="Source file the error came from (multi-file ledgers). `null` for the\nsingle-source WASM entry points (`parse`, `check`, …).",
+    )
+    hint: str | None = Field(
+        ...,
+        description="Actionable hint for fixing the error, when one is available. `null`\notherwise.",
     )
     line: int | None = Field(
         ...,
-        description="Line number (1-based). `null` when the error has no source\nlocation (e.g. validation errors not tied to a span). Field is\nalways present on the wire (no `skip_serializing_if`); see the\nstruct-level `schemars(extend)` for the required-and-nullable\nrationale. `range(min = 1)` enforces the 1-based documented\ncontract on the JSON Schema side (schemars defaults to\n`minimum: 0` for u32).",
+        description="Start line (1-based). `null` when the error has no source\nlocation (e.g. validation errors not tied to a span). Field is\nalways present on the wire (no `skip_serializing_if`); see the\nstruct-level `schemars(extend)` for the required-and-nullable\nrationale. `range(min = 1)` enforces the 1-based documented\ncontract on the JSON Schema side (schemars defaults to\n`minimum: 0` for u32).",
         ge=1,
     )
     message: str = Field(..., description="Error message.")
+    phase: str | None = Field(
+        ...,
+        description='Processing phase that produced the error: typically `"parse"`,\n`"validate"`, `"plugin"`, or `"lint"`. `null` when not\nattributable to a phase. The set is open (the loader phase is a free\nstring), so the TS type is a union of the known values plus `string` —\nconsumers get autocomplete on the common phases without rejecting others.',
+    )
     severity: Severity = Field(..., description="Error severity.")
 
 

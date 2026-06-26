@@ -33,7 +33,32 @@ export type BeancountError = {
    */
   message: string;
   /**
-   * Line number (1-based). `null` when the error has no source
+   * Stable error code (e.g. `"P0001"` for a parse error, `"E3001"` for a
+   * validation error). `null` for errors without a code (generic processing
+   * / query / plugin errors). Lets consumers branch on error type instead of
+   * matching on message text.
+   */
+  code: string | null;
+  /**
+   * Processing phase that produced the error: typically `"parse"`,
+   * `"validate"`, `"plugin"`, or `"lint"`. `null` when not
+   * attributable to a phase. The set is open (the loader phase is a free
+   * string), so the TS type is a union of the known values plus `string` —
+   * consumers get autocomplete on the common phases without rejecting others.
+   */
+  phase: "parse" | "validate" | "plugin" | "lint" | (string & {}) | null;
+  /**
+   * Actionable hint for fixing the error, when one is available. `null`
+   * otherwise.
+   */
+  hint: string | null;
+  /**
+   * Source file the error came from (multi-file ledgers). `null` for the
+   * single-source WASM entry points (`parse`, `check`, …).
+   */
+  file: string | null;
+  /**
+   * Start line (1-based). `null` when the error has no source
    * location (e.g. validation errors not tied to a span). Field is
    * always present on the wire (no `skip_serializing_if`); see the
    * struct-level `schemars(extend)` for the required-and-nullable
@@ -43,10 +68,18 @@ export type BeancountError = {
    */
   line: number | null;
   /**
-   * Column number (1-based). `null` when the error has no source
+   * Start column (1-based). `null` when the error has no source
    * location. See `line` above for `range` rationale.
    */
   column: number | null;
+  /**
+   * End line (1-based) of the error span. `null` when no span. See `line`.
+   */
+  end_line: number | null;
+  /**
+   * End column (1-based) of the error span. `null` when no span. See `line`.
+   */
+  end_column: number | null;
   /**
    * Error severity.
    */

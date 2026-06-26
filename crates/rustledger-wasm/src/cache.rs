@@ -25,7 +25,11 @@ use rustledger_core::Directive;
 use crate::types::{Error, LedgerOptions};
 
 /// Current cache format version. Increment when the serialized format changes.
-pub const CACHE_VERSION: u32 = 1;
+///
+/// v2 (#1597): `Error` gained `code`/`phase`/`hint`/`file`/`end_line`/
+/// `end_column`, changing its rkyv archived layout — a v1 blob must be rejected
+/// and re-parsed rather than mis-read under the new layout.
+pub const CACHE_VERSION: u32 = 2;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

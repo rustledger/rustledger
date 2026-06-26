@@ -10,6 +10,61 @@ use rustledger_parser::{ParseResult as ParserResult, parse as parse_beancount};
 use crate::types::{Error, LedgerOptions, Severity};
 use crate::utils::LineLookup;
 
+/// Convert a parser [`rustledger_parser::ParseError`] into the rich WASM
+/// [`Error`]: stable code (`P####`), `phase: "parse"`, hint, and the full
+/// source span (start + end line/column).
+pub fn parse_error_to_wasm(
+    e: &rustledger_parser::ParseError,
+    lookup: &LineLookup,
+    file: Option<String>,
+) -> Error {
+    Error::new(e.to_string())
+        .with_code(format!("P{:04}", e.kind_code()))
+        .with_phase("parse")
+        .with_hint(e.hint.clone())
+        .with_file(file)
+        .with_span(
+            lookup.byte_to_line_col(e.span.start),
+            lookup.byte_to_line_col(e.span.end),
+        )
+}
+
+/// Convert a [`rustledger_validate::ValidationError`] into the rich WASM
+/// [`Error`]: stable code (`E####`), `phase: "validate"`, hint (the advisory
+/// note, else context), and the source span when present. When the error has
+/// no span, falls back to `fallback_line` (the directive's date→line) to
+/// preserve the prior location behavior.
+pub fn validation_error_to_wasm(
+    e: &rustledger_validate::ValidationError,
+    lookup: &LineLookup,
+    file: Option<String>,
+    fallback_line: Option<u32>,
+) -> Error {
+    // Map the validation code's own severity (Info/Warning/Error) to the WASM
+    // 2-level severity, so advisory codes (FutureDate, SinglePosting, …) surface
+    // as warnings instead of being reported as hard errors — matching `rledger
+    // check`'s error/warning split.
+    let base = if matches!(e.code.severity(), rustledger_validate::Severity::Error) {
+        Error::new(e.message.clone())
+    } else {
+        Error::warning(e.message.clone())
+    };
+    let mut out = base
+        .with_code(e.code.code())
+        .with_phase("validate")
+        .with_hint(e.note.clone().or_else(|| e.context.clone()))
+        .with_file(file);
+    if let Some(span) = e.span {
+        out = out.with_span(
+            lookup.byte_to_line_col(span.start),
+            lookup.byte_to_line_col(span.end),
+        );
+    } else {
+        out.line = fallback_line;
+    }
+    out
+}
+
 /// Result of loading and processing a source file.
 pub struct ProcessedLedger {
     pub directives: Vec<Directive>,
@@ -35,7 +90,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
         let errors: Vec<Error> = parse_result
             .errors
             .iter()
-            .map(|e| Error::with_line(e.to_string(), lookup.byte_to_line(e.span().0)))
+            .map(|e| parse_error_to_wasm(e, &lookup, None))
             .collect();
 
         let options = extract_options(&parse_result.options);
@@ -150,15 +205,10 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     errors.extend(session.finalize());
 
     errors
-        .into_iter()
+        .iter()
         .map(|err| {
-            let line = date_to_line.get(&err.date.to_string()).copied();
-            Error {
-                message: err.message,
-                line,
-                column: None,
-                severity: Severity::Error,
-            }
+            let fallback_line = date_to_line.get(&err.date.to_string()).copied();
+            validation_error_to_wasm(err, &load.lookup, None, fallback_line)
         })
         .collect()
 }
@@ -231,9 +281,59 @@ mod warning_severity_tests {
         );
         assert!(!has_fatal(&load.errors), "a warning must not be fatal");
         let validation = run_validation(&load);
+        let e = validation
+            .iter()
+            .find(|e| e.message.contains("NeverOpened"))
+            .expect("validation must run despite the warning and report E1001");
+        // #1597: validation errors now carry a stable code + phase + location.
+        assert_eq!(e.phase.as_deref(), Some("validate"), "phase");
         assert!(
-            validation.iter().any(|e| e.message.contains("NeverOpened")),
-            "validation must run despite the warning and report E1001"
+            e.code.as_deref().is_some_and(|c| c.starts_with('E')),
+            "expected an E#### code, got {:?}",
+            e.code
         );
+        assert!(e.line.is_some(), "validation error should carry a line");
+    }
+
+    /// #1597: parse errors carry a `P####` code, `phase: "parse"`, and the full
+    /// start + end span.
+    #[test]
+    fn parse_error_carries_rich_fields() {
+        // A top-level directive indented past column 0 is a parse error.
+        let load = load_and_book("  2020-01-01 open Assets:A\n");
+        let e = load
+            .errors
+            .iter()
+            .find(|e| e.phase.as_deref() == Some("parse"))
+            .expect("expected a parse-phase error");
+        assert!(
+            e.code.as_deref().is_some_and(|c| c.starts_with('P')),
+            "expected a P#### code, got {:?}",
+            e.code
+        );
+        assert!(
+            e.line.is_some() && e.column.is_some(),
+            "parse error should have start line+column"
+        );
+        assert!(
+            e.end_line.is_some() && e.end_column.is_some(),
+            "parse error should have an end position"
+        );
+    }
+
+    /// #1597: a validation error's WASM severity now follows its code's own
+    /// severity — advisory codes surface as `Warning` (so they don't invalidate
+    /// a ledger), real codes as `Error`.
+    #[test]
+    fn validation_severity_follows_code() {
+        use rustledger_validate::{ErrorCode, ValidationError};
+        let lookup = LineLookup::new("x");
+        let date = rustledger_core::naive_date(2020, 1, 1).unwrap();
+        let mk = |code| ValidationError::new(code, "m", date);
+        // DateOutOfOrder is a warning code; AccountNotOpen (E1001) is an error.
+        let warn = validation_error_to_wasm(&mk(ErrorCode::DateOutOfOrder), &lookup, None, Some(1));
+        assert_eq!(warn.severity, Severity::Warning);
+        let err = validation_error_to_wasm(&mk(ErrorCode::AccountNotOpen), &lookup, None, Some(1));
+        assert_eq!(err.severity, Severity::Error);
     }
 }

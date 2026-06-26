@@ -18,14 +18,38 @@
     "BeancountError": {
       "description": "An error with source location.\n\n**Renamed to `BeancountError` on the TS side** to avoid shadowing\nthe JS-builtin `Error` type. The Rust struct keeps the shorter\n`Error` name for internal use; the rename is applied via\n`#[ts(rename = ...)]` so consumers see a non-shadowing name.",
       "properties": {
+        "code": {
+          "description": "Stable error code (e.g. `\"P0001\"` for a parse error, `\"E3001\"` for a\nvalidation error). `null` for errors without a code (generic processing\n/ query / plugin errors). Lets consumers branch on error type instead of\nmatching on message text.",
+          "type": ["string", "null"]
+        },
         "column": {
-          "description": "Column number (1-based). `null` when the error has no source\nlocation. See `line` above for `range` rationale.",
+          "description": "Start column (1-based). `null` when the error has no source\nlocation. See `line` above for `range` rationale.",
           "format": "uint32",
           "minimum": 1,
           "type": ["integer", "null"]
         },
+        "end_column": {
+          "description": "End column (1-based) of the error span. `null` when no span. See `line`.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": ["integer", "null"]
+        },
+        "end_line": {
+          "description": "End line (1-based) of the error span. `null` when no span. See `line`.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": ["integer", "null"]
+        },
+        "file": {
+          "description": "Source file the error came from (multi-file ledgers). `null` for the\nsingle-source WASM entry points (`parse`, `check`, …).",
+          "type": ["string", "null"]
+        },
+        "hint": {
+          "description": "Actionable hint for fixing the error, when one is available. `null`\notherwise.",
+          "type": ["string", "null"]
+        },
         "line": {
-          "description": "Line number (1-based). `null` when the error has no source\nlocation (e.g. validation errors not tied to a span). Field is\nalways present on the wire (no `skip_serializing_if`); see the\nstruct-level `schemars(extend)` for the required-and-nullable\nrationale. `range(min = 1)` enforces the 1-based documented\ncontract on the JSON Schema side (schemars defaults to\n`minimum: 0` for u32).",
+          "description": "Start line (1-based). `null` when the error has no source\nlocation (e.g. validation errors not tied to a span). Field is\nalways present on the wire (no `skip_serializing_if`); see the\nstruct-level `schemars(extend)` for the required-and-nullable\nrationale. `range(min = 1)` enforces the 1-based documented\ncontract on the JSON Schema side (schemars defaults to\n`minimum: 0` for u32).",
           "format": "uint32",
           "minimum": 1,
           "type": ["integer", "null"]
@@ -34,12 +58,27 @@
           "description": "Error message.",
           "type": "string"
         },
+        "phase": {
+          "description": "Processing phase that produced the error: typically `\"parse\"`,\n`\"validate\"`, `\"plugin\"`, or `\"lint\"`. `null` when not\nattributable to a phase. The set is open (the loader phase is a free\nstring), so the TS type is a union of the known values plus `string` —\nconsumers get autocomplete on the common phases without rejecting others.",
+          "type": ["string", "null"]
+        },
         "severity": {
           "$ref": "#/$defs/Severity",
           "description": "Error severity."
         }
       },
-      "required": ["message", "line", "column", "severity"],
+      "required": [
+        "message",
+        "code",
+        "phase",
+        "hint",
+        "file",
+        "line",
+        "column",
+        "end_line",
+        "end_column",
+        "severity"
+      ],
       "type": "object"
     },
     "CellValue": {

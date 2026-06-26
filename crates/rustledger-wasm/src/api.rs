@@ -11,7 +11,9 @@ use rustledger_loader::{FileSystem, LoadError, LoadResult};
 use rustledger_parser::parse as parse_beancount;
 
 use crate::convert::{directive_to_json, value_to_cell};
-use crate::helpers::{extract_options, has_fatal, load_and_book, run_validation, to_js};
+use crate::helpers::{
+    extract_options, has_fatal, load_and_book, parse_error_to_wasm, run_validation, to_js,
+};
 #[cfg(feature = "completions")]
 use crate::types::{CompletionJson, CompletionResultJson};
 use crate::types::{
@@ -33,21 +35,22 @@ fn load_errors_to_errors(load_result: &LoadResult) -> Vec<Error> {
                 path,
                 errors: parse_errors,
             } => {
-                // Expand parse errors with file path and line info
+                // Expand parse errors with the same rich fields as the
+                // single-file path (code / phase / hint / file / full span).
                 for parse_error in parse_errors {
                     let span = parse_error.span();
-                    // Try to get line number from source map
-                    let line = load_result
-                        .source_map
-                        .get_by_path(path)
-                        .map(|file| file.line_col(span.0).0 as u32);
-
-                    let msg = format!("{}: {}", path.display(), parse_error);
-                    if let Some(line_num) = line {
-                        errors.push(Error::with_line(msg, line_num));
-                    } else {
-                        errors.push(Error::new(msg));
+                    let file = load_result.source_map.get_by_path(path);
+                    let mut err = Error::new(format!("{}: {}", path.display(), parse_error))
+                        .with_code(format!("P{:04}", parse_error.kind_code()))
+                        .with_phase("parse")
+                        .with_hint(parse_error.hint.clone())
+                        .with_file(Some(path.display().to_string()));
+                    if let Some(file) = file {
+                        let (sl, sc) = file.line_col(span.0);
+                        let (el, ec) = file.line_col(span.1);
+                        err = err.with_span((sl as u32, sc as u32), (el as u32, ec as u32));
                     }
+                    errors.push(err);
                 }
             }
             other => {
@@ -71,7 +74,7 @@ pub fn parse(source: &str) -> Result<JsValue, JsError> {
     let errors: Vec<Error> = result
         .errors
         .iter()
-        .map(|e| Error::with_line(e.to_string(), lookup.byte_to_line(e.span().0)))
+        .map(|e| parse_error_to_wasm(e, &lookup, None))
         .collect();
 
     // Extract options from parsed result
@@ -211,7 +214,7 @@ pub fn format(source: &str) -> Result<JsValue, JsError> {
             errors: parse_result
                 .errors
                 .iter()
-                .map(|e| Error::with_line(e.to_string(), lookup.byte_to_line(e.span().0)))
+                .map(|e| parse_error_to_wasm(e, &lookup, None))
                 .collect(),
         };
         return to_js(&result);

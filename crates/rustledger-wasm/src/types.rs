@@ -565,13 +565,34 @@ pub enum Severity {
     feature = "json-schema",
     schemars(
         rename = "BeancountError",
-        extend("required" = ["message", "line", "column", "severity"])
+        extend("required" = ["message", "code", "phase", "hint", "file", "line", "column", "end_line", "end_column", "severity"])
     )
 )]
 pub struct Error {
     /// Error message.
     pub message: String,
-    /// Line number (1-based). `null` when the error has no source
+    /// Stable error code (e.g. `"P0001"` for a parse error, `"E3001"` for a
+    /// validation error). `null` for errors without a code (generic processing
+    /// / query / plugin errors). Lets consumers branch on error type instead of
+    /// matching on message text.
+    pub code: Option<String>,
+    /// Processing phase that produced the error: typically `"parse"`,
+    /// `"validate"`, `"plugin"`, or `"lint"`. `null` when not
+    /// attributable to a phase. The set is open (the loader phase is a free
+    /// string), so the TS type is a union of the known values plus `string` —
+    /// consumers get autocomplete on the common phases without rejecting others.
+    #[cfg_attr(
+        feature = "ts-export",
+        ts(type = "\"parse\" | \"validate\" | \"plugin\" | \"lint\" | (string & {}) | null")
+    )]
+    pub phase: Option<String>,
+    /// Actionable hint for fixing the error, when one is available. `null`
+    /// otherwise.
+    pub hint: Option<String>,
+    /// Source file the error came from (multi-file ledgers). `null` for the
+    /// single-source WASM entry points (`parse`, `check`, …).
+    pub file: Option<String>,
+    /// Start line (1-based). `null` when the error has no source
     /// location (e.g. validation errors not tied to a span). Field is
     /// always present on the wire (no `skip_serializing_if`); see the
     /// struct-level `schemars(extend)` for the required-and-nullable
@@ -580,56 +601,117 @@ pub struct Error {
     /// `minimum: 0` for u32).
     #[cfg_attr(feature = "json-schema", schemars(range(min = 1)))]
     pub line: Option<u32>,
-    /// Column number (1-based). `null` when the error has no source
+    /// Start column (1-based). `null` when the error has no source
     /// location. See `line` above for `range` rationale.
     #[cfg_attr(feature = "json-schema", schemars(range(min = 1)))]
     pub column: Option<u32>,
+    /// End line (1-based) of the error span. `null` when no span. See `line`.
+    #[cfg_attr(feature = "json-schema", schemars(range(min = 1)))]
+    pub end_line: Option<u32>,
+    /// End column (1-based) of the error span. `null` when no span. See `line`.
+    #[cfg_attr(feature = "json-schema", schemars(range(min = 1)))]
+    pub end_column: Option<u32>,
     /// Error severity.
     pub severity: Severity,
 }
 
 impl Error {
-    /// Create a new error with a message.
-    pub fn new(message: impl Into<String>) -> Self {
+    /// Bare error with the given message + severity; all location/code/phase/
+    /// hint/file fields `None`. Fill them via the builder methods below or the
+    /// `*_to_wasm` conversion helpers in `helpers`.
+    fn base(message: impl Into<String>, severity: Severity) -> Self {
         Self {
             message: message.into(),
+            code: None,
+            phase: None,
+            hint: None,
+            file: None,
             line: None,
             column: None,
-            severity: Severity::Error,
+            end_line: None,
+            end_column: None,
+            severity,
         }
     }
 
-    /// Create an error with a line number.
+    /// Create a new error with a message.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self::base(message, Severity::Error)
+    }
+
+    /// Create an error with a (start) line number.
     pub fn with_line(message: impl Into<String>, line: u32) -> Self {
         Self {
-            message: message.into(),
             line: Some(line),
-            column: None,
-            severity: Severity::Error,
+            ..Self::base(message, Severity::Error)
         }
     }
 
     /// Create a warning.
     pub fn warning(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            line: None,
-            column: None,
-            severity: Severity::Warning,
-        }
+        Self::base(message, Severity::Warning)
+    }
+
+    /// Builder: set the stable error code (e.g. `"P0001"`, `"E3001"`).
+    #[must_use]
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+
+    /// Builder: set the processing phase (`"parse"`, `"validate"`, …).
+    #[must_use]
+    pub fn with_phase(mut self, phase: impl Into<String>) -> Self {
+        self.phase = Some(phase.into());
+        self
+    }
+
+    /// Builder: set the actionable hint (no-op for `None`).
+    #[must_use]
+    pub fn with_hint(mut self, hint: Option<String>) -> Self {
+        self.hint = hint;
+        self
+    }
+
+    /// Builder: set the source file.
+    #[must_use]
+    pub fn with_file(mut self, file: Option<String>) -> Self {
+        self.file = file;
+        self
+    }
+
+    /// Builder: set the full 1-based span (start + end line/column).
+    #[must_use]
+    pub fn with_span(mut self, start: (u32, u32), end: (u32, u32)) -> Self {
+        self.line = Some(start.0);
+        self.column = Some(start.1);
+        self.end_line = Some(end.0);
+        self.end_column = Some(end.1);
+        self
     }
 }
 
 impl From<rustledger_loader::LedgerError> for Error {
     fn from(e: rustledger_loader::LedgerError) -> Self {
         Self {
-            message: e.message,
+            // `LedgerError` already carries code + phase + file location.
+            code: (!e.code.is_empty()).then(|| e.code.clone()),
+            phase: (!e.phase.is_empty()).then(|| e.phase.clone()),
+            hint: None,
+            file: e
+                .location
+                .as_ref()
+                .map(|loc| loc.file.display().to_string()),
             line: e.location.as_ref().map(|loc| loc.line as u32),
             column: e.location.as_ref().map(|loc| loc.column as u32),
+            // `ErrorLocation` is a single point (no end); leave end positions null.
+            end_line: None,
+            end_column: None,
             severity: match e.severity {
                 rustledger_loader::ErrorSeverity::Error => Severity::Error,
                 rustledger_loader::ErrorSeverity::Warning => Severity::Warning,
             },
+            message: e.message,
         }
     }
 }

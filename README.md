@@ -1,7 +1,10 @@
 # rustledger profiling trends
 
+📊 **Live dashboard: <https://rustledger.github.io/rustledger/>** — instruction + heap trends over time, rendered from `history.jsonl`.
+
 **CI-managed data branch** (like `benchmarks` / `compatibility`). **Do not hand-edit** —
-the nightly `profile.yml` workflow appends a data point each night.
+the nightly `profile.yml` workflow appends a data point each night. (`index.html` is the
+dashboard; it reads `history.jsonl` live, so new nightly points appear automatically.)
 
 ## Contents
 

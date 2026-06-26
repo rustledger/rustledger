@@ -35,21 +35,22 @@ fn load_errors_to_errors(load_result: &LoadResult) -> Vec<Error> {
                 path,
                 errors: parse_errors,
             } => {
-                // Expand parse errors with file path and line info
+                // Expand parse errors with the same rich fields as the
+                // single-file path (code / phase / hint / file / full span).
                 for parse_error in parse_errors {
                     let span = parse_error.span();
-                    // Try to get line number from source map
-                    let line = load_result
-                        .source_map
-                        .get_by_path(path)
-                        .map(|file| file.line_col(span.0).0 as u32);
-
-                    let msg = format!("{}: {}", path.display(), parse_error);
-                    if let Some(line_num) = line {
-                        errors.push(Error::with_line(msg, line_num));
-                    } else {
-                        errors.push(Error::new(msg));
+                    let file = load_result.source_map.get_by_path(path);
+                    let mut err = Error::new(format!("{}: {}", path.display(), parse_error))
+                        .with_code(format!("P{:04}", parse_error.kind_code()))
+                        .with_phase("parse")
+                        .with_hint(parse_error.hint.clone())
+                        .with_file(Some(path.display().to_string()));
+                    if let Some(file) = file {
+                        let (sl, sc) = file.line_col(span.0);
+                        let (el, ec) = file.line_col(span.1);
+                        err = err.with_span((sl as u32, sc as u32), (el as u32, ec as u32));
                     }
+                    errors.push(err);
                 }
             }
             other => {

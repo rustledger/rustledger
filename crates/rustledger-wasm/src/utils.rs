@@ -65,6 +65,23 @@ mod tests {
     }
 
     #[test]
+    fn test_byte_to_line_col() {
+        let source = "ab\ncde\n"; // line1="ab"(0,1,\n@2), line2="cde"(3,4,5,\n@6), len=7
+        let lookup = LineLookup::new(source);
+        assert_eq!(lookup.byte_to_line_col(0), (1, 1)); // 'a'
+        assert_eq!(lookup.byte_to_line_col(1), (1, 2)); // 'b'
+        assert_eq!(lookup.byte_to_line_col(2), (1, 3)); // '\n' (col past 'b')
+        assert_eq!(lookup.byte_to_line_col(3), (2, 1)); // 'c' (start of line 2)
+        assert_eq!(lookup.byte_to_line_col(5), (2, 3)); // 'e'
+        // End-of-file on a trailing newline maps to the next (empty) line, col 1
+        // — this matches the CLI's `byte_offset_to_line_col` for an end-exclusive
+        // span boundary at EOF (both walk past the final '\n').
+        assert_eq!(lookup.byte_to_line_col(7), (3, 1));
+        // Empty source: offset 0 is (1, 1).
+        assert_eq!(LineLookup::new("").byte_to_line_col(0), (1, 1));
+    }
+
+    #[test]
     fn test_byte_to_line_no_trailing_newline() {
         let source = "line1\nline2";
         let lookup = LineLookup::new(source);

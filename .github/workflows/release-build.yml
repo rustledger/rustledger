@@ -201,7 +201,7 @@ jobs:
           fi
 
           # Step 1: Build instrumented binary
-          cargo pgo build -- --no-default-features
+          cargo pgo build -- --no-default-features --features mimalloc
 
           # Step 2: Run workload to collect profile data
           for i in {1..10}; do
@@ -209,7 +209,7 @@ jobs:
           done
 
           # Step 3: Build optimized binary using profile data
-          cargo pgo optimize build -- --no-default-features
+          cargo pgo optimize build -- --no-default-features --features mimalloc
 
           # Build LSP separately (no PGO needed)
           cargo build --release --target ${{ matrix.target }} -p rustledger-lsp
@@ -224,7 +224,7 @@ jobs:
           $benchmarkPath = Join-Path $env:RUNNER_TEMP "benchmark.beancount"
 
           # Step 1: Build instrumented binary
-          cargo pgo build -- --no-default-features
+          cargo pgo build -- --no-default-features --features mimalloc
 
           # Step 2: Run workload to collect profile data
           for ($i = 0; $i -lt 10; $i++) {
@@ -232,7 +232,7 @@ jobs:
           }
 
           # Step 3: Build optimized binary using profile data
-          cargo pgo optimize build -- --no-default-features
+          cargo pgo optimize build -- --no-default-features --features mimalloc
 
           # Build LSP separately (no PGO needed)
           cargo build --release --target ${{ matrix.target }} -p rustledger-lsp
@@ -256,13 +256,18 @@ jobs:
           fi
 
           if [ "${{ matrix.cross }}" = "true" ]; then
+            # Cross-compiled targets: NO mimalloc. mimalloc is a vendored C lib
+            # whose cross build isn't validated under `cross`, and a release
+            # shouldn't hinge on it — these targets ship without the allocator.
+            # (The non-cross `else` branch below enables it, as do the PGO steps.)
             cross build --profile $PROFILE --target ${{ matrix.target }} --no-default-features
             # Build LSP separately
             cross build --profile $PROFILE --target ${{ matrix.target }} -p rustledger-lsp
             # Build the agent-native CLI (ag-rledger) separately — feature-gated
             cross build --profile $PROFILE --target ${{ matrix.target }} -p rustledger --bin ag-rledger --no-default-features --features ag-rledger
           else
-            cargo build --profile $PROFILE --target ${{ matrix.target }} --no-default-features
+            # Native (non-cross) target: mimalloc enabled (cc is available).
+            cargo build --profile $PROFILE --target ${{ matrix.target }} --no-default-features --features mimalloc
             # Build LSP separately
             cargo build --profile $PROFILE --target ${{ matrix.target }} -p rustledger-lsp
             # Build the agent-native CLI (ag-rledger) separately — feature-gated

@@ -3524,6 +3524,7 @@ dependencies = [
  "regex",
  "rmp-serde",
  "rust_decimal",
+ "rustc-hash 2.1.2",
  "rustledger-core",
  "rustledger-ops",
  "rustledger-plugin",

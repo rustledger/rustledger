@@ -75,4 +75,11 @@ fn main() {
          dirs={} booked_sink={sink} failed/iter={failed}",
         directives.len()
     );
+    // A non-zero failure count shifts the profile toward error-handling paths
+    // and makes the numbers misleading — surface it loudly rather than silently.
+    assert_eq!(
+        failed, 0,
+        "{failed} bookings failed for these args; the profile would not reflect \
+         the steady-state booking path — adjust accounts/lots so all bookings succeed"
+    );
 }

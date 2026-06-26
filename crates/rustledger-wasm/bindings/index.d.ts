@@ -40,10 +40,13 @@ export type BeancountError = {
    */
   code: string | null;
   /**
-   * Processing phase that produced the error: `"parse"`, `"validate"`,
-   * `"booking"`, or `"plugin"`. `null` when not attributable to a phase.
+   * Processing phase that produced the error: typically `"parse"`,
+   * `"validate"`, `"booking"`, `"plugin"`, or `"lint"`. `null` when not
+   * attributable to a phase. The set is open (the loader phase is a free
+   * string), so the TS type is a union of the known values plus `string` —
+   * consumers get autocomplete on the common phases without rejecting others.
    */
-  phase: string | null;
+  phase: "parse" | "validate" | "booking" | "plugin" | "lint" | (string & {}) | null;
   /**
    * Actionable hint for fixing the error, when one is available. `null`
    * otherwise.

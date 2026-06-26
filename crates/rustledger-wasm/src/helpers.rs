@@ -40,7 +40,16 @@ pub fn validation_error_to_wasm(
     file: Option<String>,
     fallback_line: Option<u32>,
 ) -> Error {
-    let mut out = Error::new(e.message.clone())
+    // Map the validation code's own severity (Info/Warning/Error) to the WASM
+    // 2-level severity, so advisory codes (FutureDate, SinglePosting, …) surface
+    // as warnings instead of being reported as hard errors — matching `rledger
+    // check`'s error/warning split.
+    let base = if matches!(e.code.severity(), rustledger_validate::Severity::Error) {
+        Error::new(e.message.clone())
+    } else {
+        Error::warning(e.message.clone())
+    };
+    let mut out = base
         .with_code(e.code.code())
         .with_phase("validate")
         .with_hint(e.note.clone().or_else(|| e.context.clone()))
@@ -310,5 +319,21 @@ mod warning_severity_tests {
             e.end_line.is_some() && e.end_column.is_some(),
             "parse error should have an end position"
         );
+    }
+
+    /// #1597: a validation error's WASM severity now follows its code's own
+    /// severity — advisory codes surface as `Warning` (so they don't invalidate
+    /// a ledger), real codes as `Error`.
+    #[test]
+    fn validation_severity_follows_code() {
+        use rustledger_validate::{ErrorCode, ValidationError};
+        let lookup = LineLookup::new("x");
+        let date = rustledger_core::naive_date(2020, 1, 1).unwrap();
+        let mk = |code| ValidationError::new(code, "m", date);
+        // DateOutOfOrder is a warning code; AccountNotOpen (E1001) is an error.
+        let warn = validation_error_to_wasm(&mk(ErrorCode::DateOutOfOrder), &lookup, None, Some(1));
+        assert_eq!(warn.severity, Severity::Warning);
+        let err = validation_error_to_wasm(&mk(ErrorCode::AccountNotOpen), &lookup, None, Some(1));
+        assert_eq!(err.severity, Severity::Error);
     }
 }

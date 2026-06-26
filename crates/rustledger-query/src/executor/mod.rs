@@ -325,7 +325,7 @@ impl<'a> Executor<'a> {
 
     /// Get or compile a regex pattern from the cache.
     ///
-    /// Returns `Some(Regex)` if the pattern is valid, `None` if it's invalid.
+    /// Returns `Some(Arc<Regex>)` if the pattern is valid, `None` if it's invalid.
     /// Invalid patterns are cached as `None` to avoid repeated compilation attempts.
     fn get_or_compile_regex(&self, pattern: &str) -> Option<Arc<Regex>> {
         // Fast path: check read lock first

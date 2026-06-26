@@ -1,6 +1,6 @@
 //! Window function support.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::ast::{Expr, SortDirection, Target, WindowFunction};
 use crate::error::QueryError;
@@ -54,7 +54,7 @@ impl Executor<'_> {
         }
 
         // Group posting indices by partition key
-        let mut partitions: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut partitions: HashMap<String, Vec<usize>> = HashMap::default();
         for (idx, key) in partition_keys.iter().enumerate() {
             partitions.entry(key.clone()).or_default().push(idx);
         }

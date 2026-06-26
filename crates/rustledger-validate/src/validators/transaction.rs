@@ -306,7 +306,14 @@ pub fn validate_transaction_balance(
         .values()
         .all(|residual| *residual == Decimal::ZERO);
 
-    if all_zero {
+    // Skip the expensive BigDecimal pass only when the fast residual is exactly
+    // zero AND no over-precise literal exists. A literal carrying more than
+    // rust_decimal's ~29 digits can round so the fast residual reads zero while
+    // the exact values don't balance — so escalate to the precise path (which
+    // consults the exact-value side channel). `any_overprecise` is a cheap
+    // global empty-map test: false for every ordinary ledger, so this is a
+    // no-op for the 99.999% case.
+    if all_zero && !rustledger_core::decimal_exact::any_overprecise() {
         return;
     }
 

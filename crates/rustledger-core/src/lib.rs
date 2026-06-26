@@ -43,6 +43,7 @@
 
 pub mod amount;
 pub mod cost;
+pub mod decimal_exact;
 pub mod directive;
 pub mod display_context;
 pub mod extract;

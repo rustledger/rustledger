@@ -2163,3 +2163,27 @@ fn test_e1001_dedup_is_per_posting_not_account_date() {
         ledger.errors
     );
 }
+
+/// Over-precise literal: `1 + 1e-30` (31 sig digits) rounds to exactly `1` in
+/// rust_decimal, so a rust_decimal-only balance check sees `1 + (-1) = 0` and
+/// would call the transaction balanced. The `decimal_exact` side channel
+/// preserves the exact value, so the precise residual path catches the `1e-30`
+/// imbalance — matching Beancount, at zero hot-path cost.
+#[test]
+fn over_precise_literal_residual_detected_beyond_rust_decimal() {
+    let path = fixtures_path("over_precise_residual.beancount");
+    let options = rustledger_loader::LoadOptions {
+        validate: true,
+        ..Default::default()
+    };
+    let ledger = rustledger_loader::load(&path, &options).expect("should load");
+    assert!(
+        ledger.errors.iter().any(|e| e.message.contains("balance")),
+        "expected an imbalance error from the over-precise residual; got: {:?}",
+        ledger
+            .errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+}

@@ -315,6 +315,14 @@ pub fn calculate_residual(transaction: &Transaction) -> HashMap<Currency, Decima
 /// preserves full precision.
 fn to_big(d: Decimal) -> BigDecimal {
     use std::str::FromStr;
+    // Side channel: if `d` is the rounded form of an over-precise literal (more
+    // than rust_decimal's ~29 digits), use its exact value so the balance
+    // residual matches Beancount's arbitrary-precision arithmetic. This lookup
+    // is in the cold precise-residual path only, and short-circuits instantly
+    // when no over-precise literal exists (the 99.999% case).
+    if let Some(exact) = rustledger_core::decimal_exact::exact_of(d) {
+        return exact;
+    }
     // rust_decimal Display is exact; BigDecimal FromStr handles any decimal string
     BigDecimal::from_str(&d.to_string()).expect("Decimal always produces valid decimal string")
 }

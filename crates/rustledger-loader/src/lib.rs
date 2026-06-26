@@ -360,6 +360,10 @@ impl Loader {
     /// [`LoadResult::errors`] rather than returned directly, allowing
     /// partial results to be returned.
     pub fn load(&mut self, path: &Path) -> Result<LoadResult, LoadError> {
+        // NOTE: side-channel clear() intentionally NOT here — this method
+        // re-enters for includes, which would wipe earlier files' recordings.
+        // (Debugging the right chokepoint.)
+
         let mut directives = Vec::new();
         let mut options = Options::default();
         let mut plugins = Vec::new();

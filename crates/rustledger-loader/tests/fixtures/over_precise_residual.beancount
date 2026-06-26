@@ -1,0 +1,10 @@
+2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+
+; Assets:A is 1 + 1e-30 (31 significant digits). rust_decimal rounds it to
+; exactly 1, so a rust_decimal-only check would see 1 + (-1) = 0 and report the
+; transaction as balanced. Beancount (arbitrary precision) keeps the 1e-30 and
+; flags an imbalance; the decimal_exact side channel lets us match that.
+2024-01-02 * "over-precise residual"
+  Assets:A   1.000000000000000000000000000001 USD
+  Assets:B  -1 USD

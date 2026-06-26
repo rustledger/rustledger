@@ -2476,7 +2476,13 @@ pub(super) fn parse_decimal_token(text: &str) -> Option<Decimal> {
     } else {
         text
     };
-    Decimal::from_str(s).ok()
+    let d = Decimal::from_str(s).ok()?;
+    // Side channel: if this literal carries more precision than rust_decimal can
+    // hold, stash the exact value so the cold paths (balance residual, exact
+    // display) can recover it. Cheap-gated on digit count — every real amount
+    // (≤29 digits) returns immediately, costing nothing on the hot parse path.
+    rustledger_core::decimal_exact::record_if_overprecise(d, s);
+    Some(d)
 }
 
 /// Choose `Int` vs `Number` for a numeric metadata literal.

@@ -11,7 +11,9 @@ use rustledger_loader::{FileSystem, LoadError, LoadResult};
 use rustledger_parser::parse as parse_beancount;
 
 use crate::convert::{directive_to_json, value_to_cell};
-use crate::helpers::{extract_options, has_fatal, load_and_book, run_validation, to_js};
+use crate::helpers::{
+    extract_options, has_fatal, load_and_book, parse_error_to_wasm, run_validation, to_js,
+};
 #[cfg(feature = "completions")]
 use crate::types::{CompletionJson, CompletionResultJson};
 use crate::types::{
@@ -71,7 +73,7 @@ pub fn parse(source: &str) -> Result<JsValue, JsError> {
     let errors: Vec<Error> = result
         .errors
         .iter()
-        .map(|e| Error::with_line(e.to_string(), lookup.byte_to_line(e.span().0)))
+        .map(|e| parse_error_to_wasm(e, &lookup, None))
         .collect();
 
     // Extract options from parsed result
@@ -211,7 +213,7 @@ pub fn format(source: &str) -> Result<JsValue, JsError> {
             errors: parse_result
                 .errors
                 .iter()
-                .map(|e| Error::with_line(e.to_string(), lookup.byte_to_line(e.span().0)))
+                .map(|e| parse_error_to_wasm(e, &lookup, None))
                 .collect(),
         };
         return to_js(&result);

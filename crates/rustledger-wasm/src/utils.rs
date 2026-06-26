@@ -20,6 +20,20 @@ impl LineLookup {
     pub fn byte_to_line(&self, byte: usize) -> u32 {
         self.line_starts.partition_point(|&start| start <= byte) as u32
     }
+
+    /// Convert a byte offset to a 1-based `(line, column)`. The column is the
+    /// byte offset within the line + 1 — equal to the character column for
+    /// ASCII text; on lines with multi-byte UTF-8 it may read higher (we don't
+    /// retain the source here to count characters). Lines are exact.
+    #[must_use]
+    pub fn byte_to_line_col(&self, byte: usize) -> (u32, u32) {
+        let line = self
+            .line_starts
+            .partition_point(|&start| start <= byte)
+            .max(1);
+        let line_start = self.line_starts.get(line - 1).copied().unwrap_or(0);
+        (line as u32, (byte.saturating_sub(line_start) as u32) + 1)
+    }
 }
 
 #[cfg(test)]

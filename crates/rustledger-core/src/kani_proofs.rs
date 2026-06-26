@@ -25,7 +25,7 @@
 
 #![cfg(kani)]
 
-use rust_decimal::Decimal;
+use crate::Decimal;
 
 // ============================================================================
 // CONSERVATION PROOFS (from Conservation.tla)

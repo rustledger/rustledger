@@ -4,7 +4,7 @@
 //! number with a currency code. It supports arithmetic operations and tolerance-based
 //! comparison for balance checking.
 
-use rust_decimal::Decimal;
+use crate::Decimal;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, AddAssign, Neg, Sub, SubAssign};
@@ -19,7 +19,7 @@ use crate::intern::AsDecimal;
 ///
 /// ```
 /// use rustledger_core::Amount;
-/// use rust_decimal_macros::dec;
+/// use rustledger_core::dec;
 ///
 /// let amount = Amount::new(dec!(100.00), "USD");
 /// assert_eq!(amount.number, dec!(100.00));
@@ -130,7 +130,7 @@ impl Amount {
     ///
     /// ```
     /// use rustledger_core::Amount;
-    /// use rust_decimal_macros::dec;
+    /// use rustledger_core::dec;
     ///
     /// let a = Amount::new(dec!(100.00), "USD");
     /// let b = Amount::new(dec!(100.004), "USD");
@@ -155,7 +155,7 @@ impl Amount {
     ///
     /// ```
     /// use rustledger_core::Amount;
-    /// use rust_decimal_macros::dec;
+    /// use rustledger_core::dec;
     ///
     /// let a = Amount::new(dec!(100.00), "USD");  // scale 2 -> tolerance 0.005
     /// let b = Amount::new(dec!(100.004), "USD"); // scale 3 -> tolerance 0.0005
@@ -523,7 +523,7 @@ impl fmt::Display for IncompleteAmount {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use crate::dec;
 
     #[test]
     fn test_new() {

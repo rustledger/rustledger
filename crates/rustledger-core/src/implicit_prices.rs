@@ -18,7 +18,7 @@
 //!
 //! [issue #992]: https://github.com/rustledger/rustledger/issues/992
 
-use rust_decimal::Decimal;
+use crate::Decimal;
 
 /// Decide the per-unit price implied by a posting and the quote
 /// currency to pair with it.
@@ -114,7 +114,7 @@ pub fn extract_per_unit_price<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use crate::dec;
 
     // Tests use `&'static str` for the currency type for readability.
     // Real callers pass `InternedStr` (query path) or `String`

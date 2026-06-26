@@ -2,7 +2,7 @@
 //!
 //! A thin newtype over [`fastnum::D512`] (a stack-allocated, `Copy`, 512-bit /
 //! ~154-significant-digit decimal) that mirrors the slice of the
-//! `rust_decimal::Decimal` API the codebase used, so the migration off
+//! `crate::Decimal` API the codebase used, so the migration off
 //! `rust_decimal` (issue #1240) is a drop-in for call sites. The point of the
 //! switch is precision: `rust_decimal` capped at ~28 digits and rounded away
 //! residuals Python's unbounded `Decimal` caught; `D512` does not.
@@ -58,32 +58,91 @@ impl Decimal {
         self.0
     }
 
-    /// `rust_decimal::Decimal::new(num, scale)` — `num * 10^-scale`.
+    /// `crate::Decimal::new(num, scale)` — `num * 10^-scale`.
     #[must_use]
     pub fn new(num: i64, scale: u32) -> Self {
         // Exact: build the scientific-notation string and parse it.
         Self::from_str(&format!("{num}e-{scale}")).unwrap_or(Self::ZERO)
     }
 
+    /// `crate::Decimal::from_str_exact` — strict parse: plain decimals only,
+    /// no scientific notation (matching rust_decimal, so ledger amount literals
+    /// like `1e2` are rejected). `new()` uses the lenient `from_str` internally.
+    pub fn from_str_exact(s: &str) -> Result<Self, DecimalParseError> {
+        if s.contains(['e', 'E']) {
+            return Err(DecimalParseError(s.to_string()));
+        }
+        Self::from_str(s)
+    }
+
     /// 0 if non-finite (NaN/Inf never occur for valid ledger values).
     #[must_use]
-    pub fn scale(self) -> u32 {
-        u32::try_from(self.0.fractional_digits_count().max(0)).unwrap_or(0)
+    pub const fn scale(self) -> u32 {
+        let f = self.0.fractional_digits_count();
+        if f < 0 { 0 } else { f as u32 }
     }
 
     #[must_use]
-    pub fn is_zero(self) -> bool {
+    pub const fn is_zero(self) -> bool {
         self.0.is_zero()
     }
 
     #[must_use]
-    pub fn is_sign_negative(self) -> bool {
+    pub const fn is_sign_negative(self) -> bool {
         self.0.is_sign_negative()
     }
 
     #[must_use]
-    pub fn is_sign_positive(self) -> bool {
+    pub const fn is_sign_positive(self) -> bool {
         self.0.is_sign_positive()
+    }
+
+    /// `num_traits::Signed::is_positive` — strictly greater than zero (unlike
+    /// `is_sign_positive`, which is also true for `+0`).
+    #[must_use]
+    pub fn is_positive(self) -> bool {
+        !self.0.is_zero() && self.0.is_sign_positive()
+    }
+
+    /// `num_traits::Signed::is_negative` — strictly less than zero.
+    #[must_use]
+    pub fn is_negative(self) -> bool {
+        !self.0.is_zero() && self.0.is_sign_negative()
+    }
+
+    /// Round to `dp` places with a rust_decimal-compatible strategy.
+    #[must_use]
+    pub fn round_dp_with_strategy(self, dp: u32, strategy: RoundingStrategy) -> Self {
+        self.round_dp_with_mode(dp, strategy.mode())
+    }
+
+    /// Number of significant digits in the coefficient (0 for zero). Replaces
+    /// counting `mantissa()` digits, which `i128` can't hold at high precision.
+    #[must_use]
+    pub fn significant_digits(self) -> u32 {
+        if self.0.is_zero() {
+            0
+        } else {
+            u32::try_from(self.0.digits_count()).unwrap_or(u32::MAX)
+        }
+    }
+
+    /// `crate::Decimal::rescale` — set the scale in place to exactly
+    /// `scale` fractional digits (pad or banker's-round).
+    pub fn rescale(&mut self, scale: u32) {
+        let s = i16::try_from(scale).unwrap_or(i16::MAX);
+        *self = wrap(self.0.with_rounding_mode(RoundingMode::HalfEven).rescale(s));
+    }
+
+    /// `self^exp` for an unsigned integer exponent; `None` on overflow
+    /// (`rust_decimal::MathematicalOps::checked_powu`).
+    #[must_use]
+    pub fn checked_powu(self, exp: u64) -> Option<Self> {
+        let mut result = Self::ONE;
+        for _ in 0..exp {
+            result = result.checked_mul(self)?;
+        }
+        Some(result)
     }
 
     #[must_use]
@@ -188,7 +247,7 @@ impl Decimal {
         f.is_finite().then_some(f)
     }
 
-    /// `rust_decimal::Decimal::from_f64` — exact-ish from a float, `None` on
+    /// `crate::Decimal::from_f64` — exact-ish from a float, `None` on
     /// non-finite input.
     #[must_use]
     pub fn from_f64(f: f64) -> Option<Self> {
@@ -211,6 +270,32 @@ fn finite(d: D512) -> Option<Decimal> {
 #[inline]
 fn wrap(d: D512) -> Decimal {
     Decimal(if d.is_zero() { d.abs() } else { d })
+}
+
+/// rust_decimal-compatible rounding strategies (mapped to fastnum modes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoundingStrategy {
+    MidpointNearestEven,
+    MidpointAwayFromZero,
+    MidpointTowardZero,
+    ToZero,
+    AwayFromZero,
+    ToNegativeInfinity,
+    ToPositiveInfinity,
+}
+
+impl RoundingStrategy {
+    const fn mode(self) -> RoundingMode {
+        match self {
+            Self::MidpointNearestEven => RoundingMode::HalfEven,
+            Self::MidpointAwayFromZero => RoundingMode::HalfUp,
+            Self::MidpointTowardZero => RoundingMode::HalfDown,
+            Self::ToZero => RoundingMode::Down,
+            Self::AwayFromZero => RoundingMode::Up,
+            Self::ToNegativeInfinity => RoundingMode::Floor,
+            Self::ToPositiveInfinity => RoundingMode::Ceiling,
+        }
+    }
 }
 
 // ---- equality / ordering / hashing (delegate to D512) ----------------------
@@ -250,7 +335,14 @@ impl Default for Decimal {
 
 impl fmt::Display for Decimal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
+        // Canonicalize signed zero on the way out (`dec!(-0.0)` is built via the
+        // const `from_d512`, which can't run the `wrap` check) — display `-0` as
+        // `0`, preserving scale. rust_decimal has no signed zero.
+        if self.0.is_zero() {
+            fmt::Display::fmt(&self.0.abs(), f)
+        } else {
+            fmt::Display::fmt(&self.0, f)
+        }
     }
 }
 impl fmt::Debug for Decimal {
@@ -359,7 +451,7 @@ impl<'de> serde::Deserialize<'de> for Decimal {
     }
 }
 
-/// `dec!(...)` — compile-time decimal literal, like `rust_decimal_macros::dec!`.
+/// `dec!(...)` — compile-time decimal literal, like `crate::dec!`.
 #[macro_export]
 macro_rules! dec {
     ($($t:tt)*) => {
@@ -370,7 +462,7 @@ macro_rules! dec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal::Decimal as Rd;
+    use crate::Decimal as Rd;
     use std::str::FromStr as _;
 
     /// Cross-check a value+op against rust_decimal for parity.

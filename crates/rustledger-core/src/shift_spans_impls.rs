@@ -68,7 +68,7 @@ impl<K, V: ShiftSpans, S> ShiftSpans for std::collections::HashMap<K, V, S> {
 // free" set is easy to audit.
 
 crate::impl_shift_spans_noop!(
-    rust_decimal::Decimal,
+    crate::Decimal,
     jiff::civil::Date,
     char,
     f32,
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn directive_shift_spans_propagates_into_posting_spans() {
         use crate::Amount;
-        use rust_decimal_macros::dec;
+        use crate::dec;
 
         let posting = Spanned::new(
             Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")),
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn metadata_shift_spans_dispatches_via_value_impl() {
         use crate::Amount;
-        use rust_decimal_macros::dec;
+        use crate::dec;
 
         let mut meta = crate::Metadata::default();
         meta.insert(

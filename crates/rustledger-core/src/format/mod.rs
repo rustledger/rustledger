@@ -137,12 +137,12 @@ mod tests {
     };
     use super::transaction::{format_posting, format_transaction};
     use super::*;
+    use crate::dec;
     use crate::{
         Amount, Balance, Close, Commodity, CostSpec, Custom, Directive, Document, Event,
         IncompleteAmount, MetaValue, Metadata, NaiveDate, Note, Open, Pad, Posting, Price,
         PriceAnnotation, Query, Transaction,
     };
-    use rust_decimal_macros::dec;
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         crate::naive_date(year, month, day).unwrap()

@@ -4,8 +4,7 @@
 //! `STRICT_WITH_SIZE`, FIFO, LIFO, HIFO, AVERAGE, NONE) used to reduce positions
 //! from an inventory.
 
-use rust_decimal::Decimal;
-use rust_decimal::prelude::Signed;
+use crate::Decimal;
 
 use smallvec::{SmallVec, smallvec};
 
@@ -1054,9 +1053,9 @@ mod reduction_tests {
     //! the lot-reduction mutants surfaced by the #1309 audit are killed
     //! (the public mutating `reduce_*` path was covered indirectly, but
     //! the `try_reduce_*` preview path had no direct assertions).
+    use crate::Decimal;
+    use crate::dec;
     use crate::{Amount, BookingMethod, Cost, CostSpec, Inventory, Position, naive_date};
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
 
     fn d(n: i64) -> Decimal {
         Decimal::from(n)

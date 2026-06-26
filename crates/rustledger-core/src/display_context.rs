@@ -18,7 +18,7 @@
 //!
 //! ```
 //! use rustledger_core::DisplayContext;
-//! use rust_decimal_macros::dec;
+//! use rustledger_core::dec;
 //!
 //! let mut ctx = DisplayContext::new();
 //!
@@ -38,7 +38,7 @@
 //! assert_eq!(ctx.format(dec!(1.5), "EUR"), "1.5");
 //! ```
 
-use rust_decimal::{Decimal, MathematicalOps};
+use crate::Decimal;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Sentinel currency key for "naked-decimal" observations.
@@ -584,12 +584,11 @@ impl DisplayContext {
     ///   integer, which puts it in scientific form with a 28-digit
     ///   mantissa. Caught by Copilot review on PR #1064.
     fn cap_significant_digits(number: Decimal, max_sig: u32) -> Decimal {
-        // mantissa() returns the integer mantissa; its decimal length is
-        // the number of significant digits regardless of scale. Zero has
-        // zero significant digits by this convention — `ilog10` returns
-        // `None` and we fall through to the early-return below.
-        let mantissa_abs = number.mantissa().unsigned_abs();
-        let digits = mantissa_abs.checked_ilog10().map_or(0, |x| x + 1);
+        // The coefficient's digit count is the number of significant digits
+        // regardless of scale. Zero has zero by this convention. (Was a
+        // `mantissa()`/`ilog10` dance; `i128` can't hold the coefficient at the
+        // arbitrary precision the Decimal now supports.)
+        let digits = number.significant_digits();
         if digits <= max_sig {
             return number;
         }
@@ -599,7 +598,7 @@ impl DisplayContext {
             // dp-based rounding directly.
             return number.round_dp_with_strategy(
                 number.scale() - excess,
-                rust_decimal::RoundingStrategy::MidpointNearestEven,
+                crate::RoundingStrategy::MidpointNearestEven,
             );
         }
         // Excess exceeds the available fractional digits: we have to
@@ -617,7 +616,7 @@ impl DisplayContext {
         };
         let lifted = number / factor;
         let rounded =
-            lifted.round_dp_with_strategy(0, rust_decimal::RoundingStrategy::MidpointNearestEven);
+            lifted.round_dp_with_strategy(0, crate::RoundingStrategy::MidpointNearestEven);
         rounded * factor
     }
 
@@ -688,7 +687,7 @@ impl DisplayContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use crate::dec;
 
     #[test]
     fn test_update_and_get_precision_most_common_default() {

@@ -75,7 +75,7 @@ pub const fn meta_value_type_tag(value: &MetaValue) -> &'static str {
 /// honest result.
 #[must_use]
 pub fn json_to_meta_value(value: &serde_json::Value) -> MetaValue {
-    use rust_decimal::Decimal;
+    use crate::Decimal;
     match value {
         serde_json::Value::String(s) => MetaValue::String(s.clone()),
         serde_json::Value::Bool(b) => MetaValue::Bool(*b),
@@ -108,7 +108,7 @@ pub fn json_to_meta_value(value: &serde_json::Value) -> MetaValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use crate::dec;
 
     /// Every variant maps to a non-degenerate tag + JSON, and the
     /// round-trippable ones survive `to_json -> json_to`. This is the fitness

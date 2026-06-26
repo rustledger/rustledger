@@ -7,7 +7,7 @@
 //! valgrind --tool=cachegrind ./target/profiling/examples/profile_format 20000 5
 //! ```
 
-use rust_decimal_macros::dec;
+use rustledger_core::dec;
 use rustledger_core::{
     Amount, Balance, CostNumber, CostSpec, Directive, FormatConfig, Open, Posting, PriceAnnotation,
     Transaction, format_directives,
@@ -30,7 +30,7 @@ fn generate(n: usize) -> Vec<Directive> {
     for i in 0..n {
         let month = (i % 12 + 1) as u32;
         let day = (i % 28 + 1) as u32;
-        let amt = dec!(10.00) + rust_decimal::Decimal::from((i % 9000) as i64);
+        let amt = dec!(10.00) + rustledger_core::Decimal::from((i % 9000) as i64);
         let txn = if i % 3 == 0 {
             // cost + price posting (exercises format_cost_spec / format_price)
             Transaction::new(d(2024, month, day), format!("Buy lot {i}"))

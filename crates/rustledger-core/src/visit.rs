@@ -387,11 +387,11 @@ fn visit_price_currency<'a>(price: &'a PriceAnnotation, visit: &mut impl FnMut(&
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dec;
     use crate::{
         Amount, Balance, Close, Commodity, CostSpec, Custom, Document, MetaValue, Metadata,
         NaiveDate, Note, Open, Pad, Posting, Price, Spanned, Transaction,
     };
-    use rust_decimal_macros::dec;
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         crate::naive_date(y, m, d).unwrap()

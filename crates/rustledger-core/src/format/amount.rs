@@ -84,8 +84,8 @@ pub fn format_price_annotation(price: &PriceAnnotation) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dec;
     use crate::{BookedCost, CostNumber, CostSpec};
-    use rust_decimal_macros::dec;
 
     #[test]
     fn cost_spec_per_unit_renders_single_braces() {

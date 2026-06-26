@@ -173,7 +173,7 @@ mod tests {
             Directive::Balance(Balance {
                 date: date(2024, 1, 3),
                 account: "Assets:Cash".into(),
-                amount: Amount::new(rust_decimal_macros::dec!(100), "CHF"),
+                amount: Amount::new(crate::dec!(100), "CHF"),
                 tolerance: None,
                 meta: Default::default(),
             }),
@@ -189,7 +189,7 @@ mod tests {
                     crate::Spanned::synthesized(Posting {
                         account: "Expenses:Food".into(),
                         units: Some(crate::IncompleteAmount::from(Amount::new(
-                            rust_decimal_macros::dec!(25),
+                            crate::dec!(25),
                             "USD",
                         ))),
                         cost: None,
@@ -357,8 +357,8 @@ mod tests {
     /// the user had typed.
     #[test]
     fn test_extract_currencies_covers_cost_price_meta_custom() {
+        use crate::dec;
         use crate::{CostSpec, Custom, Price, PriceAnnotation};
-        use rust_decimal_macros::dec;
 
         // CAD in transaction metadata as MetaValue::Currency.
         // KRW in posting metadata as MetaValue::Amount.

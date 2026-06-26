@@ -15,8 +15,8 @@
 //! - [`Price`] - Record a price for a commodity
 //! - [`Custom`] - Custom directive type
 
+use crate::Decimal;
 use crate::NaiveDate;
-use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -96,7 +96,6 @@ pub type Metadata = FxHashMap<String, MetaValue>;
 /// is negative, has a fractional part, or is out of `u32` range.
 #[must_use = "ignoring the result silently drops invalid `precision:` metadata; the loader expects to skip invalid values, the validator expects to surface them"]
 pub fn parse_precision_meta(value: &MetaValue) -> Result<u32, String> {
-    use rust_decimal::prelude::ToPrimitive;
     match value {
         // `precision: 2` now parses as an integer metadata value.
         MetaValue::Int(i) => u32::try_from(*i).map_err(|_| {
@@ -242,7 +241,7 @@ impl Posting {
     ///
     /// ```no_run
     /// # use rustledger_core::{Posting, Amount, CostSpec, CostNumber, Spanned};
-    /// # use rust_decimal_macros::dec;
+    /// # use rustledger_core::dec;
     /// # let cost = CostSpec { number: Some(CostNumber::PerUnit { value: dec!(150) }),
     /// #     currency: Some("USD".into()), date: None, label: None, merge: false };
     /// let spanned: Spanned<Posting> = Spanned::synthesized(
@@ -1492,7 +1491,7 @@ impl fmt::Display for Directive {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use crate::dec;
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         crate::naive_date(year, month, day).unwrap()
@@ -1992,7 +1991,7 @@ mod tests {
         // names the kind ("string value", "bool value", etc.) so users
         // see what they actually wrote.
         use crate::Amount;
-        use rust_decimal_macros::dec;
+        use crate::dec;
         let cases = [
             (MetaValue::String("2".into()), "string"),
             (MetaValue::Account("Assets:Cash".into()), "account"),

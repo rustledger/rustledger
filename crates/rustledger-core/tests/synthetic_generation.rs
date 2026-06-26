@@ -6,7 +6,7 @@
 //! Run with: cargo test -p rustledger-core --test `synthetic_generation`
 
 use proptest::prelude::*;
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::NaiveDate;
 use rustledger_core::{
     Amount, Balance, Close, Commodity, Custom, Directive, Document, Event, FormatConfig, MetaValue,

@@ -10,12 +10,12 @@
 //! - Boundary dates
 //! - Special characters
 
+use crate::Decimal;
 use crate::{
     Amount, Balance, Close, Commodity, Directive, Event, Note, Open, Pad, Posting, Price,
     Transaction,
     format::{FormatConfig, FormatLine, format_directive_lines, render_lines},
 };
-use rust_decimal::Decimal;
 use std::str::FromStr;
 
 /// Collection of edge case directives grouped by category.

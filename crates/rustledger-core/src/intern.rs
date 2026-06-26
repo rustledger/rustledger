@@ -486,51 +486,60 @@ mod tests {
     }
 }
 
-// rkyv wrapper for rust_decimal::Decimal - serialize as fixed 16 bytes
+// rkyv wrapper for crate::Decimal — archive as its decimal string.
+//
+// The previous form was rust_decimal's fixed 16 bytes; the arbitrary-precision
+// `Decimal` (fastnum D512) has no such form, so we archive the value's decimal
+// string (backing-agnostic, exact). This changes the archived layout — the
+// loader cache version must be bumped (#1240).
 #[cfg(feature = "rkyv")]
 pub use rkyv_decimal::AsDecimal;
 
 #[cfg(feature = "rkyv")]
 mod rkyv_decimal {
+    use core::str::FromStr;
+
     use rkyv::Place;
     use rkyv::rancor::Fallible;
+    use rkyv::string::ArchivedString;
     use rkyv::with::{ArchiveWith, DeserializeWith, SerializeWith};
-    use rust_decimal::Decimal;
 
-    /// Wrapper to serialize `Decimal` as fixed 16-byte binary with rkyv.
-    /// This is more compact and faster than string serialization.
+    use crate::Decimal;
+
+    /// Wrapper to archive `Decimal` as a decimal string with rkyv.
+    /// Use with `#[rkyv(with = AsDecimal)]` on `Decimal` fields.
     pub struct AsDecimal;
 
     impl ArchiveWith<Decimal> for AsDecimal {
-        type Archived = [u8; 16];
-        type Resolver = [(); 16];
+        type Archived = ArchivedString;
+        type Resolver = rkyv::string::StringResolver;
 
         fn resolve_with(field: &Decimal, resolver: Self::Resolver, out: Place<Self::Archived>) {
-            let bytes = field.serialize();
-            // Use rkyv's Archive impl for [u8; 16] which handles this safely
-            rkyv::Archive::resolve(&bytes, resolver, out);
+            ArchivedString::resolve_from_str(&field.to_string(), resolver, out);
         }
     }
 
     impl<S> SerializeWith<Decimal, S> for AsDecimal
     where
-        S: Fallible + ?Sized,
+        S: Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
+        S::Error: rkyv::rancor::Source,
     {
-        fn serialize_with(
-            _field: &Decimal,
-            _serializer: &mut S,
-        ) -> Result<Self::Resolver, S::Error> {
-            // No extra serialization needed - data is inlined
-            Ok([(); 16])
+        fn serialize_with(field: &Decimal, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+            ArchivedString::serialize_from_str(&field.to_string(), serializer)
         }
     }
 
-    impl<D> DeserializeWith<[u8; 16], Decimal, D> for AsDecimal
+    impl<D> DeserializeWith<ArchivedString, Decimal, D> for AsDecimal
     where
         D: Fallible + ?Sized,
     {
-        fn deserialize_with(field: &[u8; 16], _deserializer: &mut D) -> Result<Decimal, D::Error> {
-            Ok(Decimal::deserialize(*field))
+        fn deserialize_with(
+            field: &ArchivedString,
+            _deserializer: &mut D,
+        ) -> Result<Decimal, D::Error> {
+            // A valid (version-checked) cache always holds a valid decimal
+            // string; fall back to zero rather than failing the whole load.
+            Ok(Decimal::from_str(field.as_str()).unwrap_or(Decimal::ZERO))
         }
     }
 }

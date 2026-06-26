@@ -4,8 +4,8 @@
 //! optionally with an associated cost basis (lot). Positions with costs are used
 //! for tracking investments and calculating capital gains.
 
-use rust_decimal::Decimal;
-use rust_decimal::prelude::Signed;
+use crate::Decimal;
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -21,7 +21,7 @@ use crate::{Amount, Cost, CostSpec};
 ///
 /// ```
 /// use rustledger_core::{Amount, Cost, Position};
-/// use rust_decimal_macros::dec;
+/// use rustledger_core::dec;
 ///
 /// // Simple position (no cost)
 /// let cash = Position::simple(Amount::new(dec!(1000.00), "USD"));
@@ -205,7 +205,7 @@ impl fmt::Display for Position {
 mod tests {
     use super::*;
     use crate::NaiveDate;
-    use rust_decimal_macros::dec;
+    use crate::dec;
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         crate::naive_date(year, month, day).unwrap()
@@ -231,8 +231,8 @@ mod tests {
 
     #[test]
     fn test_from_posting_resolves_cost_or_simple() {
+        use crate::Decimal;
         use crate::{CostNumber, CostSpec};
-        use rust_decimal::Decimal;
 
         let units = Amount::new(dec!(10), "AAPL");
         // Resolvable cost spec → with_cost.

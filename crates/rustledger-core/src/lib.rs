@@ -14,7 +14,7 @@
 //!
 //! ```
 //! use rustledger_core::{Amount, Cost, Position, Inventory, BookingMethod};
-//! use rust_decimal_macros::dec;
+//! use rustledger_core::dec;
 //!
 //! // Create an inventory
 //! let mut inv = Inventory::new();
@@ -97,7 +97,7 @@ pub use visit::{visit_accounts, visit_currencies};
 /// Calendar date without timezone. Alias for `jiff::civil::Date`.
 pub type NaiveDate = jiff::civil::Date;
 pub mod decimal;
-pub use rust_decimal::Decimal;
+pub use decimal::{Decimal, RoundingStrategy};
 
 /// Construct a [`NaiveDate`] from `(year, month, day)` with i32/u32 arguments.
 ///

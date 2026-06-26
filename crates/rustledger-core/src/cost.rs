@@ -17,8 +17,8 @@
 // (review A-3.2).
 #![cfg_attr(feature = "rkyv", allow(missing_docs))]
 
+use crate::Decimal;
 use crate::NaiveDate;
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -45,7 +45,7 @@ use crate::intern::{AsDecimal, AsNaiveDate};
 ///
 /// ```
 /// use rustledger_core::Cost;
-/// use rust_decimal_macros::dec;
+/// use rustledger_core::dec;
 ///
 /// let cost = Cost::new(dec!(150.00), "USD")
 ///     .with_date(rustledger_core::naive_date(2024, 1, 15).unwrap());
@@ -185,7 +185,7 @@ impl fmt::Display for Cost {
 ///
 /// ```
 /// use rustledger_core::{Cost, CostSpec};
-/// use rust_decimal_macros::dec;
+/// use rustledger_core::dec;
 ///
 /// let cost = Cost::new(dec!(150.00), "USD")
 ///     .with_date(rustledger_core::naive_date(2024, 1, 15).unwrap());
@@ -781,7 +781,7 @@ impl fmt::Display for CostSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use crate::dec;
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         crate::naive_date(year, month, day).unwrap()
@@ -1064,49 +1064,28 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "overflow")]
-    fn booked_cost_new_panics_in_debug_on_overflow() {
-        // `BookedCost::new` debug-asserts the invariant. Overflow
-        // should reach the assertion via `check_invariant`'s Err, then
-        // panic with a message that names the failure mode — same
-        // contract as the existing zero-units / mismatch debug
-        // asserts. Without this test, a future refactor of
-        // `check_invariant`'s error path could swallow the overflow
-        // case at the `new` call site (e.g. by short-circuiting to
-        // Ok or by using a different Display) and the `new`-side
-        // contract would degrade silently. Inputs: 5e15 × 5e15 →
-        // 2.5e31, which exceeds Decimal::MAX (~7.92e28).
-        let huge = Decimal::from_str_exact("5000000000000000").unwrap();
-        let _ = BookedCost::new(huge, Decimal::from_str_exact("0.01").unwrap(), huge);
+    fn booked_cost_new_handles_formerly_overflowing_product() {
+        // #1240: `5e15 × 5e15 = 2.5e31` overflowed rust_decimal's ~7.92e28 cap
+        // and tripped the BookedCost overflow guard. With the arbitrary-precision
+        // Decimal the product is representable, the invariant holds, and `new`
+        // constructs without panicking. (`check_invariant`'s overflow branch is
+        // kept as defensive code but is effectively unreachable now — D512's
+        // exponent range puts overflow far beyond any ledger value.)
+        let per_unit = Decimal::from_str_exact("5000000000000000").unwrap(); // 5e15
+        let total = Decimal::from_str_exact("25000000000000000000000000000000").unwrap(); // 2.5e31
+        let _ = BookedCost::new(per_unit, total, per_unit);
     }
 
     #[test]
-    fn booked_cost_try_new_surfaces_overflow_instead_of_panicking() {
-        // Trust-boundary regression guard: a wire client can submit
-        // per_unit and units that each fit in Decimal but whose product
-        // exceeds Decimal::MAX (~7.92e28). Pre-fix `check_invariant`
-        // used bare `*` and panicked the host on multiplication;
-        // `try_new` now surfaces it as a typed error so FFI / plugin
-        // bridges can map it to ConversionError and propagate to the
-        // caller. Inputs: 5e15 × 5e15 = 2.5e31, well over Decimal::MAX.
-        let per_unit = Decimal::from_str_exact("5000000000000000").unwrap();
-        let units = Decimal::from_str_exact("5000000000000000").unwrap();
-        let total = Decimal::from_str_exact("0.01").unwrap();
-        let err = BookedCost::try_new(per_unit, total, units)
-            .expect_err("overflow must surface as Err, not panic");
-        assert!(err.overflow, "overflow flag must be set");
-        assert!(
-            err.tolerance.is_none(),
-            "no tolerance comparison performed for overflow",
-        );
-        assert_eq!(err.derived_total, Decimal::ZERO);
-        assert_eq!(err.abs_diff, Decimal::ZERO);
-
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("overflow") || msg.contains("Decimal::MAX"),
-            "error message must name the overflow condition, got: {msg}"
-        );
+    fn booked_cost_try_new_accepts_formerly_overflowing_product() {
+        // Trust-boundary regression guard, updated for #1240: a product like
+        // `5e15 × 5e15 = 2.5e31` used to exceed rust_decimal's ~7.92e28 cap and
+        // surface as an overflow error. With the arbitrary-precision Decimal the
+        // product is exact, the invariant holds, and `try_new` returns `Ok` —
+        // documenting that the formerly-lossy case is now correct.
+        let per_unit = Decimal::from_str_exact("5000000000000000").unwrap(); // 5e15
+        let total = Decimal::from_str_exact("25000000000000000000000000000000").unwrap(); // 2.5e31
+        assert!(BookedCost::try_new(per_unit, total, per_unit).is_ok());
     }
 
     #[test]

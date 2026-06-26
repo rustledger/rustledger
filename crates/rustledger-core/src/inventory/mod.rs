@@ -5,8 +5,8 @@
 //! using different booking methods (FIFO, LIFO, STRICT, NONE).
 
 // ratchet: fxhash-only — hot path; use FxHashMap/FxHashSet, not std SipHash collections (#1237).
+use crate::Decimal;
 use imbl::Vector;
-use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -284,7 +284,7 @@ impl std::error::Error for AccountedBookingError {}
 ///
 /// ```
 /// use rustledger_core::{Inventory, Position, Amount, Cost, BookingMethod};
-/// use rust_decimal_macros::dec;
+/// use rustledger_core::dec;
 ///
 /// let mut inv = Inventory::new();
 ///
@@ -777,7 +777,7 @@ mod tests {
     use super::*;
     use crate::Cost;
     use crate::NaiveDate;
-    use rust_decimal_macros::dec;
+    use crate::dec;
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         crate::naive_date(year, month, day).unwrap()

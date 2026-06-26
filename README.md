@@ -30,7 +30,7 @@ ______________________________________________________________________
 | **Drop-in replacement** | Compatible `bean-*` CLI commands for easy migration |
 | **Full compatibility** | Parses any valid beancount file |
 | **Editor support** | LSP server for VS Code, Neovim, Helix, and more |
-| **AI-ready** | MCP server for Claude, Cursor, and other AI assistants |
+| **AI-ready** | MCP server for AI assistants, plus `ag-rledger` — an agent-native CLI with JSON envelopes |
 | **Runs anywhere** | WebAssembly support for browser and Node.js |
 | **Better errors** | Detailed error messages with source locations |
 | **31 built-in plugins** | Plus Python plugin compatibility via WASI sandbox |
@@ -88,6 +88,21 @@ ______________________________________________________________________
 <sub>Missing your platform? [Open an issue](https://github.com/rustledger/rustledger/issues/new) to request it.</sub>
 
 **Coming from Python beancount?** See the [Migration Guide](docs/migration/index.md) for command equivalents and plugin mapping.
+
+## AI & agents
+
+Two complementary ways to drive rustledger from AI tools:
+
+- **MCP server** — `npx @rustledger/mcp-server` exposes rustledger to AI assistants (Claude, Cursor, …) over the [Model Context Protocol](https://modelcontextprotocol.io). Best for **interactive** assistants that call tools mid-conversation.
+
+- **`ag-rledger`** — an *agent-native* CLI that mirrors every `rledger` command but emits a single structured **JSON envelope** per call instead of human-readable text, so coding agents and scripts parse results directly (no output scraping). Each envelope carries `ok`, a typed `exit_code`, the command's `result.data`, and a HATEOAS `next_action` hint. Best for **headless** agents and shell pipelines. It ships beside `rledger` in the [release archives](https://github.com/rustledger/rustledger/releases) (and builds from source with `cargo build -p rustledger --bin ag-rledger --features ag-rledger`):
+
+  ```console
+  $ ag-rledger check ledger.beancount
+  {"ok":true,"exit_code":0,"result":{"data":{"error_count":0}}, …}
+  ```
+
+  Same subcommands as `rledger` (`check`, `query`, `format`, `import`, …) — only the I/O is JSON.
 
 ## Quick Start
 

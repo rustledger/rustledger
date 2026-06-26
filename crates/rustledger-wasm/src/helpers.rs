@@ -18,7 +18,7 @@ pub fn parse_error_to_wasm(
     lookup: &LineLookup,
     file: Option<String>,
 ) -> Error {
-    Error::new(e.message())
+    Error::new(e.to_string())
         .with_code(format!("P{:04}", e.kind_code()))
         .with_phase("parse")
         .with_hint(e.hint.clone())

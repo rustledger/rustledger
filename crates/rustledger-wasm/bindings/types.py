@@ -339,7 +339,7 @@ class BeancountError(BaseModel):
     message: str = Field(..., description="Error message.")
     phase: str | None = Field(
         ...,
-        description='Processing phase that produced the error: typically `"parse"`,\n`"validate"`, `"booking"`, `"plugin"`, or `"lint"`. `null` when not\nattributable to a phase. The set is open (the loader phase is a free\nstring), so the TS type is a union of the known values plus `string` —\nconsumers get autocomplete on the common phases without rejecting others.',
+        description='Processing phase that produced the error: typically `"parse"`,\n`"validate"`, `"plugin"`, or `"lint"`. `null` when not\nattributable to a phase. The set is open (the loader phase is a free\nstring), so the TS type is a union of the known values plus `string` —\nconsumers get autocomplete on the common phases without rejecting others.',
     )
     severity: Severity = Field(..., description="Error severity.")
 

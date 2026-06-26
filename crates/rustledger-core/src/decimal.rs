@@ -225,13 +225,47 @@ impl Decimal {
     pub fn round_dp_with_mode(self, dp: u32, mode: RoundingMode) -> Self {
         // Match rust_decimal: round *down* to `dp` places but never pad. A value
         // already within `dp` fractional digits is returned unchanged (so 2.5
-        // round_dp(2) stays "2.5", not "2.50"); only over-precise values are
-        // rescaled. `rescale`'s rounding mode comes from the attached context.
+        // round_dp(2) stays "2.5", not "2.50"); only over-precise values round.
         if self.scale() <= dp {
             return self;
         }
+        // fastnum 0.7's HalfEven is buggy — it treats "5 followed by more
+        // nonzero digits" as a tie (`1234.56` → `1234`), so we implement
+        // banker's rounding ourselves. Other modes use fastnum's rescale.
+        if matches!(mode, RoundingMode::HalfEven) {
+            return self.round_half_even(dp);
+        }
         let scaled = self.0.with_rounding_mode(mode);
         wrap(scaled.rescale(i16::try_from(dp).unwrap_or(i16::MAX)))
+    }
+
+    /// Correct round-half-to-even to `dp` places (works around fastnum's buggy
+    /// `HalfEven`). Pads the result to exactly `dp` places.
+    #[must_use]
+    fn round_half_even(self, dp: u32) -> Self {
+        let factor = Self::TEN.checked_powu(u64::from(dp)).unwrap_or(Self::ONE);
+        let scaled = self * factor; // shift the point right by dp
+        let floor = scaled.trunc(); // toward zero
+        let frac = (scaled - floor).abs(); // |fractional part| in [0, 1)
+        let half = Self(fastnum::dec512!(0.5));
+        let step = if scaled.is_sign_negative() {
+            Self::NEGATIVE_ONE
+        } else {
+            Self::ONE
+        };
+        let rounded = match frac.cmp(&half) {
+            Ordering::Less => floor,
+            Ordering::Greater => floor + step,
+            // exact tie → round to even
+            Ordering::Equal => {
+                let even = floor.checked_rem(Self::TWO).unwrap_or(Self::ZERO).is_zero();
+                if even { floor } else { floor + step }
+            }
+        };
+        // `rounded / factor` is exact (rounded is integer-valued); rescale only
+        // pads to `dp`, no further rounding.
+        let val = rounded / factor;
+        wrap(val.0.rescale(i16::try_from(dp).unwrap_or(i16::MAX)))
     }
 
     /// Round to a whole number, banker's rounding (`rust_decimal::round`).
@@ -647,6 +681,17 @@ mod tests {
         assert_eq!(fd("100").scale(), 0);
     }
 
+    #[test]
+    fn bankers_rounding_workaround_for_fastnum_bug() {
+        // fastnum 0.7 HalfEven mis-rounds "5 followed by nonzero" (1234.56 -> 1234);
+        // our manual banker's must round it up, while keeping true ties to even.
+        assert_eq!(fd("1234.56").round().to_string(), "1235");
+        assert_eq!(fd("1234.44").round().to_string(), "1234");
+        assert_eq!(fd("0.56").round_dp(1).to_string(), "0.6");
+        assert_eq!(fd("2.5").round().to_string(), "2"); // tie -> even
+        assert_eq!(fd("3.5").round().to_string(), "4"); // tie -> even
+        assert_eq!(fd("-1234.56").round().to_string(), "-1235");
+    }
     #[test]
     fn round_dp_banker() {
         // half-even: 2.5 -> 2, 3.5 -> 4, 1.235 -> 1.24, 1.245 -> 1.24

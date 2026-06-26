@@ -343,7 +343,12 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     silently ignored `option "display_precision" "USD:0.0001"` (formatting
 ///     fell back to inferred precision) and the other two settings. New fields
 ///     change the archived layout, so old bytes must be regenerated.
-const CACHE_VERSION: u32 = 12;
+/// v13: `Decimal` migrated to arbitrary precision (fastnum D512, #1240). The
+///     rkyv `AsDecimal` adapter now archives a decimal *string* instead of
+///     rust_decimal's fixed 16 bytes, changing the archived layout of every
+///     `Decimal` field (amounts, costs, prices, inventory). Old bytes would be
+///     misread under the new layout, so they must be regenerated.
+const CACHE_VERSION: u32 = 13;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1042,7 +1047,7 @@ mod tests {
         // v12 (`CachedOptions` field-parity) all bumped CACHE_VERSION without
         // touching the `CostNumber` archived layout these fixtures pin, so the
         // byte arrays below are still valid and only FIXTURE_VERSION moves.
-        const FIXTURE_VERSION: u32 = 12;
+        const FIXTURE_VERSION: u32 = 13;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1051,29 +1056,30 @@ mod tests {
              encoding is byte-identical to the fixtures.",
         );
 
+        // v13 (#1240): each Decimal now archives as its decimal string (e.g.
+        // "150" = bytes 49,53,48) behind an rkyv relative pointer, replacing the
+        // old rust_decimal 16-byte form — so these fixtures were regenerated.
         let cases: &[(&str, CostNumber, &[u8])] = &[
             (
                 "PerUnit { value: 150 }",
                 CostNumber::PerUnit { value: dec!(150) },
                 &[
-                    0, 0, 0, 0, 0, 150, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 49, 53, 48, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
                 ],
             ),
             (
                 "Total { value: 1500 }",
                 CostNumber::Total { value: dec!(1500) },
                 &[
-                    1, 0, 0, 0, 0, 220, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0,
+                    1, 0, 0, 0, 49, 53, 48, 48, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0,
                 ],
             ),
             (
                 "PerUnitFromTotal { per_unit: 150, total: 300 }",
                 CostNumber::PerUnitFromTotal(BookedCost::new(dec!(150), dec!(300), dec!(2))),
                 &[
-                    2, 0, 0, 0, 0, 150, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 44, 1, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0,
+                    2, 0, 0, 0, 49, 53, 48, 255, 255, 255, 255, 255, 51, 48, 48, 255, 255, 255,
+                    255, 255,
                 ],
             ),
         ];
@@ -1115,9 +1121,9 @@ mod tests {
 
         // Tripwire: regenerating the hash without bumping CACHE_VERSION leaves
         // users with rotten metadata caches.
-        const FIXTURE_VERSION: u32 = 12;
+        const FIXTURE_VERSION: u32 = 13;
         const META_VALUE_LAYOUT_HASH: &str =
-            "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
+            "2f458560498937fd706e9f083e37ee64d1c515228f3d0d052e7bbeb085269cdf";
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the MetaValue layout-hash fixture; if the \

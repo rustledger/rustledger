@@ -447,9 +447,12 @@ mod tests {
     #[test]
     fn test_value_size() {
         use std::mem::size_of;
-        // Value should be ~40 bytes with boxed variants (vs 120 unboxed)
+        // #1240: `Decimal` (fastnum D512) is 64 bytes vs rust_decimal's 16, so
+        // the inline `Number`/`Amount` variants push `Value` to 96 bytes. If this
+        // ever bites query memory, box the `Decimal` (`Number(Box<Decimal>)`) to
+        // get back to ~40; until a benchmark shows it matters, keep it unboxed.
         assert!(
-            size_of::<Value>() <= 48,
+            size_of::<Value>() <= 96,
             "Value enum too large: {} bytes",
             size_of::<Value>()
         );

@@ -496,17 +496,18 @@ fn test_arithmetic_expressions() {
 
 #[test]
 fn test_arithmetic_overflow_yields_null_not_panic() {
-    // Regression (found by the `fuzz_query_execute` fuzzer): BQL `+`/`-`/`*` on
-    // values exceeding rust_decimal's 96-bit range used to panic
-    // ("Multiplication overflowed") instead of yielding NULL like div-by-zero.
-    // `arithmetic_op` now uses the checked operators, so overflow → NULL.
+    // Regression (found by the `fuzz_query_execute` fuzzer): `arithmetic_op`
+    // must yield NULL, not panic, when an operation can't produce a value.
+    // The original trigger was rust_decimal multiplication overflow; the
+    // arbitrary-precision Decimal (#1240) no longer overflows on ledger-scale
+    // values, so the surviving NULL-producing case is division by zero —
+    // `checked_div` returns `None`, which `arithmetic_op` maps to NULL.
     let directives = sample_directives();
     let mut executor = Executor::new(&directives);
-    // A single overflowing operation yields NULL (like div-by-zero).
     for q in [
-        "SELECT 59999999999000999999990009 * 9999999",
-        "SELECT 79228162514264337593543950335 + 79228162514264337593543950335",
-        "SELECT 0 - 79228162514264337593543950335 - 79228162514264337593543950335",
+        "SELECT 1 / 0",
+        "SELECT 79228162514264337593543950335 / 0",
+        "SELECT 5 / (3 - 3)",
     ] {
         let result = executor.execute(&parse(q).unwrap()).unwrap();
         assert!(

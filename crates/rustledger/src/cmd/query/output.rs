@@ -1231,16 +1231,14 @@ mod tests {
         let date = |y, m, d| rustledger_core::naive_date(y, m, d).unwrap();
 
         // Build a tiny ledger where SUM(number) GROUP BY currency on USD
-        // ends up with a value at a scale ≤ USD's tracked 2dp. The
-        // `0.000` and `0.0` inputs collapse to a zero whose scale ≤ 2 in
-        // rust_decimal Add semantics, and a USD-tracked DisplayContext
-        // at 2dp pads up to `0.00` via `max(value_scale, currency_dp)`.
-        // After PR #1106, the hint pads up but never quantizes down, so
-        // a SUM result with scale > 2 would render at its higher scale
-        // — that case is covered by the per-currency unit tests in
-        // `display_context.rs`; this e2e test verifies the executor
-        // populates `row_group_keys` so the renderer's hint resolution
-        // can route the value through the per-currency context.
+        // sums to zero but with a scale-3 input. Python `decimal` (and now
+        // our arbitrary-precision Decimal, #1240) preserves the max scale on
+        // add: `0.00 + 0.000 = 0.000`, rendered at its intrinsic scale (the
+        // hint pads up but never quantizes down, post #1106). The prior
+        // rust_decimal backing collapsed this to scale 2 (`0.00`) — a
+        // divergence from bean-query that #1240 fixes. This e2e test verifies
+        // the executor populates `row_group_keys` so the renderer's hint
+        // resolution routes the value through the per-currency context.
         let directives = vec![
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "Coffee")
@@ -1305,8 +1303,9 @@ mod tests {
             .last()
             .unwrap_or_else(|| panic!("expected non-empty data row; got: {data_row:?}"));
         assert_eq!(
-            sum_cell, "0.00",
-            "SUM cell should be quantized to USD's 2dp; row was {data_row:?}, raw output:\n{text}"
+            sum_cell, "0.000",
+            "SUM preserves Python's max-scale add semantics (#1240): 0.00 + 0.000 = 0.000, \
+             rendered at its intrinsic scale; row was {data_row:?}, raw output:\n{text}"
         );
     }
 
@@ -1380,8 +1379,8 @@ mod tests {
             .unwrap_or_else(|| panic!("expected USD data row; raw output:\n{text}"));
         let sum_cell = data_row.split_whitespace().last().expect("non-empty row");
         assert_eq!(
-            sum_cell, "0.00",
-            "implicit GROUP BY should quantize same as explicit; got {sum_cell:?} \
+            sum_cell, "0.000",
+            "implicit GROUP BY matches explicit; Python max-scale add (#1240): 0.000; got {sum_cell:?} \
              in row {data_row:?}\n full output:\n{text}"
         );
     }

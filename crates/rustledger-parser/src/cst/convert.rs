@@ -3684,12 +3684,11 @@ mod tests {
     }
 
     #[test]
-    fn oversized_number_in_amount_emits_diagnostic() {
-        // F5-bis: the non-arithmetic NUMBER path is now symmetric
-        // with the arithmetic-evaluation path. A NUMBER whose
-        // text the lexer accepts but `Decimal::from_str` rejects
-        // (e.g., 30+ digits, exceeding the 28-digit precision
-        // ceiling) used to silently degrade to `CurrencyOnly`.
+    fn oversized_number_in_amount_now_parses() {
+        // #1240: a 39-digit number used to exceed rust_decimal's 28-digit
+        // ceiling, so `Decimal::from_str` rejected it and the converter emitted
+        // an "invalid number" diagnostic. The arbitrary-precision Decimal parses
+        // it exactly, so the amount round-trips as a normal value — no error.
         let huge = "1".to_string() + &"2345678901234567890".repeat(2); // 39 digits
         let src = format!("2024-01-15 * \"big\"\n  Expenses:X   {huge} USD\n  Assets:Y\n");
         let result = parse_via_cst(&src);
@@ -3702,10 +3701,12 @@ mod tests {
             })
             .count();
         assert_eq!(
-            invalid_num, 1,
-            "expected one invalid-number diagnostic, got: {:?}",
+            invalid_num, 0,
+            "39-digit number now parses (no invalid-number diagnostic), got: {:?}",
             result.errors
         );
+        // And it parsed to a directive with the full-precision amount.
+        assert_directive_count(&result, 1);
     }
 
     // ---- round-4 architecture review (#1281) -------------------
@@ -3797,9 +3798,10 @@ mod tests {
         // to silently produce CurrencyOnly. Now an explicit
         // SyntaxError fires so the user sees the actual root
         // cause instead of just a downstream "doesn't balance".
-        // Decimal max is 28 digits - `9999999999999999999999999999 *
-        // 9999999999999999999999999999` overflows.
-        let huge = "9999999999999999999999999999 * 9999999999999999999999999999";
+        // The arbitrary-precision Decimal of #1240 no longer overflows on
+        // `9...9 * 9...9` (56 digits fits), so trigger the give-up path with a
+        // division by zero, which still fails regardless of precision.
+        let huge = "1 / 0";
         let src = format!("2024-01-15 * \"big\"\n  Expenses:X   {huge} USD\n  Assets:Y\n");
         let result = parse_via_cst(&src);
         let arith_errs = result

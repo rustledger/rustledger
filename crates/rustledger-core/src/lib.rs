@@ -96,6 +96,7 @@ pub use visit::{visit_accounts, visit_currencies};
 // Re-export commonly used external types
 /// Calendar date without timezone. Alias for `jiff::civil::Date`.
 pub type NaiveDate = jiff::civil::Date;
+pub mod decimal;
 pub use rust_decimal::Decimal;
 
 /// Construct a [`NaiveDate`] from `(year, month, day)` with i32/u32 arguments.

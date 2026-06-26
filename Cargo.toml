@@ -58,6 +58,7 @@ name = "rustledger"
 agcli = "0.13.0"
 # Core
 rust_decimal = { version = "1.42", features = ["serde"] }
+fastnum = { version = "0.7.5", features = ["serde"] }
 # `js` feature is wasm32-only (cfg-gated inside jiff) and pulls in
 # js-sys so jiff::Zoned::now() / Timestamp::now() work in browsers
 # instead of panicking with "getting the current time in

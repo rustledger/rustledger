@@ -22,6 +22,7 @@ use rustledger_core::{Amount, Directive, Inventory, NaiveDate, Position};
 use rustledger_core::{MetaValue, Transaction};
 use rustledger_loader::SourceMap;
 use rustledger_parser::Spanned;
+use std::sync::Arc;
 
 use crate::ast::{Expr, FromClause, FunctionCall, Query, SelectQuery, Target};
 use crate::error::QueryError;
@@ -94,7 +95,12 @@ pub struct Executor<'a> {
     /// Query date for price lookups (defaults to today).
     query_date: rustledger_core::NaiveDate,
     /// Cache for compiled regex patterns (`RwLock` for thread-safe parallel execution).
-    regex_cache: RwLock<FxHashMap<String, Option<Regex>>>,
+    // `Arc<Regex>`, not `Regex`: the `~`/`!~` operators look the regex up per
+    // row, and cloning a `Regex` gives the clone a fresh, empty lazy-DFA cache
+    // pool — so every row rebuilt the DFA from scratch (`Lazy::init_cache` was
+    // ~18% of a regex-filter query). Cloning the `Arc` shares the one regex (and
+    // its cache), so the DFA is built once per query, not once per row.
+    regex_cache: RwLock<FxHashMap<String, Option<Arc<Regex>>>>,
     /// Account info cache from Open/Close directives.
     account_info: FxHashMap<String, AccountInfo>,
     /// Source locations for directives (indexed by directive index).
@@ -321,7 +327,7 @@ impl<'a> Executor<'a> {
     ///
     /// Returns `Some(Regex)` if the pattern is valid, `None` if it's invalid.
     /// Invalid patterns are cached as `None` to avoid repeated compilation attempts.
-    fn get_or_compile_regex(&self, pattern: &str) -> Option<Regex> {
+    fn get_or_compile_regex(&self, pattern: &str) -> Option<Arc<Regex>> {
         // Fast path: check read lock first
         {
             // parking_lot's RwLock does not poison, so the read guard is
@@ -337,7 +343,8 @@ impl<'a> Executor<'a> {
         let compiled = RegexBuilder::new(pattern)
             .case_insensitive(true)
             .build()
-            .ok();
+            .ok()
+            .map(Arc::new);
         let mut cache = self.regex_cache.write();
         // Double-check in case another thread inserted while we waited
         if let Some(cached) = cache.get(pattern) {
@@ -348,7 +355,7 @@ impl<'a> Executor<'a> {
     }
 
     /// Get or compile a regex pattern, returning an error if invalid.
-    fn require_regex(&self, pattern: &str) -> Result<Regex, QueryError> {
+    fn require_regex(&self, pattern: &str) -> Result<Arc<Regex>, QueryError> {
         self.get_or_compile_regex(pattern)
             .ok_or_else(|| QueryError::Type(format!("invalid regex: {pattern}")))
     }

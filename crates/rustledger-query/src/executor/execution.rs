@@ -573,7 +573,7 @@ impl Executor<'_> {
         table: &Table,
         column_map: &FxHashMap<String, usize>,
     ) -> Result<QueryResult, QueryError> {
-        use std::collections::HashMap;
+        use rustc_hash::FxHashMap as HashMap;
 
         // Determine column names for the result
         let column_names = self.resolve_subquery_column_names(&query.targets, &table.columns)?;
@@ -594,7 +594,7 @@ impl Executor<'_> {
 
         // Group table rows by GROUP BY key.
         // Maintain a Vec of keys in insertion order for deterministic results.
-        let mut group_map: HashMap<String, (Vec<Value>, Vec<&Row>)> = HashMap::new();
+        let mut group_map: HashMap<String, (Vec<Value>, Vec<&Row>)> = HashMap::default();
         let mut key_order: Vec<String> = Vec::new();
 
         for row in &table.rows {

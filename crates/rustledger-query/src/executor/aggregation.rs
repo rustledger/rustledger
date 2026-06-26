@@ -1,6 +1,6 @@
 //! Aggregation and grouping functions.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use rust_decimal::Decimal;
 use rustledger_core::{Amount, Inventory, Position};
@@ -192,7 +192,7 @@ impl<'a> Executor<'a> {
             // Use HashMap for O(1) grouping, with a Vec to preserve insertion order
             // so results without ORDER BY are deterministic across runs.
             let mut group_map: HashMap<String, (Vec<Value>, Vec<&PostingContext<'a>>)> =
-                HashMap::new();
+                HashMap::default();
             let mut key_order: Vec<String> = Vec::new();
 
             for ctx in postings {

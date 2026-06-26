@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rustledger — profiling trends</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1a1a1a; --muted:#6b7280; --grid:#e5e7eb; --line:#2563eb; --line2:#dc2626; --bg:#ffffff; --card:#f9fafb; }
+  @media (prefers-color-scheme: dark){ :root{ --fg:#e5e7eb; --muted:#9ca3af; --grid:#30363d; --bg:#0d1117; --card:#161b22; } }
+  *{ box-sizing:border-box; }
+  body{ font:14px/1.55 system-ui,-apple-system,Segoe UI,sans-serif; color:var(--fg); background:var(--bg); margin:0 auto; padding:24px; max-width:1000px; }
+  h1{ font-size:20px; margin:0 0 2px; }
+  .sub{ color:var(--muted); margin:0 0 24px; }
+  .sub code{ font-size:12px; }
+  a{ color:var(--line); }
+  .cards{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:24px; }
+  .card{ background:var(--card); border:1px solid var(--grid); border-radius:8px; padding:12px 14px; }
+  .card .k{ color:var(--muted); font-size:12px; }
+  .card .v{ font-size:21px; font-weight:650; margin:2px 0; letter-spacing:-.02em; }
+  .card .d{ font-size:12px; }
+  .up{ color:var(--line2); } .down{ color:#16a34a; }
+  .chart{ border:1px solid var(--grid); border-radius:8px; padding:8px 8px 2px; margin-bottom:18px; background:var(--card); }
+  .chart h2{ font-size:12px; margin:4px 8px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  svg{ width:100%; height:240px; display:block; }
+  .gridline{ stroke:var(--grid); stroke-width:1; }
+  .axis{ fill:var(--muted); font-size:10px; }
+  .legend{ font-size:11px; fill:var(--fg); }
+  table{ border-collapse:collapse; width:100%; font-size:12px; margin-top:8px; }
+  th,td{ text-align:right; padding:5px 8px; border-bottom:1px solid var(--grid); white-space:nowrap; }
+  th:first-child,td:first-child{ text-align:left; }
+  th{ color:var(--muted); font-weight:600; }
+  code{ font-size:11px; color:var(--muted); }
+  .err{ color:var(--line2); }
+</style>
+</head>
+<body>
+<h1>rustledger — profiling trends</h1>
+<p class="sub">Deterministic load&nbsp;→&nbsp;process metrics, one point per nightly run (cachegrind instruction count + dhat heap). Live from <code>history.jsonl</code>; updated by <code>profile.yml</code>.</p>
+<div id="cards" class="cards"></div>
+<div class="chart"><h2>Instructions — cachegrind I refs (lower is better)</h2><svg id="c-instr"></svg></div>
+<div class="chart"><h2>Heap — total bytes &amp; allocation count</h2><svg id="c-heap"></svg></div>
+<table id="table"></table>
+<p class="sub" style="margin-top:18px">Latest artifacts: <a href="latest/flamegraph.svg">flamegraph.svg</a> · <a href="latest/dhat-heap.json">dhat-heap.json</a> (open at <a href="https://nnethercote.github.io/dh_view/">dh_view</a>).</p>
+
+<script>
+const fmt = n => Number(n).toLocaleString('en-US');
+const shortNum = v => v>=1e9 ? (v/1e9).toFixed(2)+'B' : v>=1e6 ? (v/1e6).toFixed(1)+'M' : v>=1e3 ? (v/1e3).toFixed(0)+'k' : ''+Math.round(v);
+const pct = (a,b) => (b-a)/a*100;
+
+async function main(){
+  let txt;
+  try { txt = await (await fetch('history.jsonl', {cache:'no-store'})).text(); }
+  catch(e){ document.body.insertAdjacentHTML('beforeend', '<p class="err">Could not load history.jsonl ('+e+'). Serve this page over HTTP (e.g. GitHub Pages) — fetch is blocked on file://.</p>'); return; }
+  const pts = txt.trim().split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return null; } })
+    .filter(Boolean).sort((a,b)=> new Date(a.date) - new Date(b.date));
+  if(!pts.length){ document.body.insertAdjacentHTML('beforeend', '<p>No data points yet.</p>'); return; }
+
+  const first = pts[0], last = pts[pts.length-1];
+  const delta = (a,b) => { const p = pct(a,b); return `<span class="${p<=0?'down':'up'}">${p>=0?'+':''}${p.toFixed(1)}% vs first</span>`; };
+  const card = (k,v,d) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
+  document.getElementById('cards').innerHTML =
+    card('Instructions', fmt(last.instructions), delta(first.instructions, last.instructions)) +
+    card('Heap total', fmt(last.heap_total_bytes)+' B', delta(first.heap_total_bytes, last.heap_total_bytes)) +
+    card('Heap blocks', fmt(last.heap_blocks), delta(first.heap_blocks, last.heap_blocks)) +
+    card('Data points', pts.length, `over ${first.date.slice(0,10)} → ${last.date.slice(0,10)}`);
+
+  drawChart('c-instr', pts, [{key:'instructions', color:'var(--line)', label:'instructions'}]);
+  drawChart('c-heap', pts, [
+    {key:'heap_total_bytes', color:'var(--line)', label:'heap bytes'},
+    {key:'heap_blocks', color:'var(--line2)', label:'heap blocks'}
+  ]);
+
+  document.getElementById('table').innerHTML =
+    '<thead><tr><th>Date</th><th>Commit</th><th>Instructions</th><th>Heap bytes</th><th>Heap blocks</th></tr></thead><tbody>' +
+    pts.slice().reverse().map(p =>
+      `<tr><td>${p.date.slice(0,10)}</td><td><code>${(p.commit||'').slice(0,7)}</code></td><td>${fmt(p.instructions)}</td><td>${fmt(p.heap_total_bytes)}</td><td>${fmt(p.heap_blocks)}</td></tr>`
+    ).join('') + '</tbody>';
+}
+
+function drawChart(id, pts, series){
+  const svg = document.getElementById(id);
+  const W = 960, H = 240, pad = {l:62, r:14, t:14, b:30};
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const vals = series.flatMap(s => pts.map(p => p[s.key]));
+  let min = Math.min(...vals), max = Math.max(...vals);
+  if (min === max) { min = 0; if (max === 0) max = 1; }
+  const x = i => pad.l + (pts.length<=1 ? (W-pad.l-pad.r)/2 : (i/(pts.length-1))*(W-pad.l-pad.r));
+  const y = v => pad.t + (1-(v-min)/(max-min))*(H-pad.t-pad.b);
+  let h = '';
+  for (let g=0; g<=4; g++){ const v = min+(max-min)*g/4, yy = y(v);
+    h += `<line class="gridline" x1="${pad.l}" y1="${yy.toFixed(1)}" x2="${W-pad.r}" y2="${yy.toFixed(1)}"/>`;
+    h += `<text class="axis" x="${pad.l-6}" y="${(yy+3).toFixed(1)}" text-anchor="end">${shortNum(v)}</text>`;
+  }
+  h += `<text class="axis" x="${pad.l}" y="${H-9}">${pts[0].date.slice(0,10)}</text>`;
+  if (pts.length>1) h += `<text class="axis" x="${W-pad.r}" y="${H-9}" text-anchor="end">${pts[pts.length-1].date.slice(0,10)}</text>`;
+  series.forEach((s,si) => {
+    const d = pts.map((p,i)=> `${i?'L':'M'}${x(i).toFixed(1)},${y(p[s.key]).toFixed(1)}`).join(' ');
+    h += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2"/>`;
+    h += pts.map((p,i)=> `<circle cx="${x(i).toFixed(1)}" cy="${y(p[s.key]).toFixed(1)}" r="2.6" fill="${s.color}"/>`).join('');
+    h += `<rect x="${pad.l + si*120}" y="2" width="9" height="9" fill="${s.color}"/><text class="legend" x="${pad.l + si*120 + 13}" y="10">${s.label}</text>`;
+  });
+  svg.innerHTML = h;
+}
+main();
+</script>
+</body>
+</html>

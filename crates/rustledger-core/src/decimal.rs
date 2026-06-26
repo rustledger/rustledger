@@ -3,15 +3,15 @@
 //! `Decimal` is a `Copy` newtype over an enum:
 //! - `Small(rust_decimal::Decimal)` — 16 bytes, the fast common case (money at a
 //!   handful of decimal places). All hot arithmetic stays here.
-//! - `Big(fastnum::D512)` — ~154 significant digits, used only when an operation
+//! - `Big(fastnum::D256)` — ~77 significant digits, used only when an operation
 //!   would exceed `rust_decimal`'s 28-digit precision (the residual case #1240
 //!   needs: Python keeps digits `rust_decimal` rounds away).
 //!
 //! This preserves `rust_decimal`'s speed for everyday ledgers while matching
 //! Python's unbounded precision where it actually matters. The numeric results
-//! are identical to a pure-`D512` implementation: add/sub/mul take the
+//! are identical to a pure-`D256` implementation: add/sub/mul take the
 //! `rust_decimal` path *only when the exact result fits in 28 digits* (so no
-//! rounding happens either way), and fall back to `D512` otherwise.
+//! rounding happens either way), and fall back to `D256` otherwise.
 //!
 //! Invariant: `Big` never holds a value representable exactly in `rust_decimal`
 //! — every `Big`-producing path runs [`demote`]. So a given numeric value has
@@ -19,7 +19,7 @@
 //! same-variant `Small` comparisons use the fast path.
 //!
 //! Differences from `rust_decimal` callers must not rely on: `Big` values carry
-//! more than 28 digits; `D512` has `NaN`/`±Inf` (constructors reject them,
+//! more than 28 digits; `D256` has `NaN`/`±Inf` (constructors reject them,
 //! `checked_*` returns `None`); `scale()` is clamped to `u32`.
 
 use core::cmp::Ordering;
@@ -29,16 +29,16 @@ use core::iter::{Product, Sum};
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Rem, Sub, SubAssign};
 use core::str::FromStr;
 
-use fastnum::D512;
+use fastnum::D256;
 use fastnum::decimal::{Context, RoundingMode};
 use rust_decimal::Decimal as Rd;
 use rust_decimal::prelude::ToPrimitive;
 
 /// Re-export so the [`crate::dec`] macro can reach fastnum's compile-time macro.
 #[doc(hidden)]
-pub use fastnum::dec512 as __dec512;
+pub use fastnum::dec256 as __dec256;
 
-/// Context for `D512` parse/arithmetic: full precision, no traps (a bad op
+/// Context for `D256` parse/arithmetic: full precision, no traps (a bad op
 /// yields a detectable non-finite value rather than panicking).
 const CTX: Context = Context::default().without_traps();
 
@@ -53,7 +53,7 @@ pub struct Decimal(Repr);
 #[derive(Clone, Copy)]
 enum Repr {
     Small(Rd),
-    Big(D512),
+    Big(D256),
 }
 
 // ---- representation helpers ------------------------------------------------
@@ -74,21 +74,21 @@ fn int_digits(x: Rd) -> u32 {
     sig_digits(x.mantissa()).saturating_sub(x.scale())
 }
 
-/// Widen any representation to `D512` (exact). Cheap for `Big`; a string parse
+/// Widen any representation to `D256` (exact). Cheap for `Big`; a string parse
 /// for `Small` (only hit on the rare fallback path or cross-variant compare).
 #[inline]
-fn to_big(r: Repr) -> D512 {
+fn to_big(r: Repr) -> D256 {
     match r {
-        Repr::Small(rd) => D512::from_str(&rd.to_string(), CTX).unwrap_or(D512::ZERO),
+        Repr::Small(rd) => D256::from_str(&rd.to_string(), CTX).unwrap_or(D256::ZERO),
         Repr::Big(d) => d,
     }
 }
 
-/// Build a `Decimal` from a `D512`, demoting to `Small` when it fits in
+/// Build a `Decimal` from a `D256`, demoting to `Small` when it fits in
 /// `rust_decimal` exactly. Canonicalizes signed zero (`-0` → `+0`). This is the
 /// single choke point that maintains the `Big`-never-holds-a-small invariant.
 #[inline]
-fn demote(d: D512) -> Decimal {
+fn demote(d: D256) -> Decimal {
     if !d.is_finite() {
         return Decimal(Repr::Big(d));
     }
@@ -100,7 +100,7 @@ fn demote(d: D512) -> Decimal {
         // Candidate fits; confirm the conversion is lossless via a numeric
         // round-trip (guards magnitude / formatting corner cases).
         if let Ok(rd) = Rd::from_str(&d.to_string()) {
-            if D512::from_str(&rd.to_string(), CTX).is_ok_and(|b| b == d) {
+            if D256::from_str(&rd.to_string(), CTX).is_ok_and(|b| b == d) {
                 return Decimal(Repr::Small(rd));
             }
         }
@@ -159,8 +159,8 @@ fn mul_core(a: Repr, b: Repr) -> Decimal {
     demote(to_big(a) * to_big(b))
 }
 
-/// Division always uses `D512` so the result is identical to the
-/// arbitrary-precision implementation (rust_decimal and D512 round
+/// Division always uses `D256` so the result is identical to the
+/// arbitrary-precision implementation (rust_decimal and D256 round
 /// non-terminating quotients differently). Division is rare on ledger hot paths.
 #[inline]
 fn div_core(a: Repr, b: Repr) -> Decimal {
@@ -179,20 +179,20 @@ impl Decimal {
     pub const TEN: Self = small(Rd::TEN);
     pub const NEGATIVE_ONE: Self = small(Rd::NEGATIVE_ONE);
     // Genuinely beyond rust_decimal's range, so they live in `Big`.
-    pub const MAX: Self = Decimal(Repr::Big(D512::MAX));
-    pub const MIN: Self = Decimal(Repr::Big(D512::MIN));
+    pub const MAX: Self = Decimal(Repr::Big(D256::MAX));
+    pub const MIN: Self = Decimal(Repr::Big(D256::MIN));
 
-    /// Wrap a raw `D512` (used by the `dec!` macro), demoting to `Small` when it
+    /// Wrap a raw `D256` (used by the `dec!` macro), demoting to `Small` when it
     /// fits. Not `const` (demotion runs a fits check) — no const callers exist.
     #[doc(hidden)]
     #[must_use]
-    pub fn from_d512(d: D512) -> Self {
+    pub fn from_d512(d: D256) -> Self {
         demote(d)
     }
 
-    /// The value as a `D512` (escape hatch / wire + cache encoding).
+    /// The value as a `D256` (escape hatch / wire + cache encoding).
     #[must_use]
-    pub fn into_inner(self) -> D512 {
+    pub fn into_inner(self) -> D256 {
         to_big(self.0)
     }
 
@@ -206,8 +206,8 @@ impl Decimal {
     /// rust_decimal's inherent `from_str`).
     pub fn from_str(s: &str) -> Result<Self, DecimalParseError> {
         // Try rust_decimal first (fast, covers the common case exactly). Fall
-        // back to D512 for inputs it can't hold without rounding.
-        match D512::from_str(s, CTX) {
+        // back to D256 for inputs it can't hold without rounding.
+        match D256::from_str(s, CTX) {
             Ok(d) if d.is_finite() => Ok(demote(d)),
             _ => Err(DecimalParseError(s.to_string())),
         }
@@ -396,7 +396,7 @@ impl Decimal {
         }
         // fastnum 0.7's HalfEven is buggy (treats "5 followed by nonzero" as a
         // tie: 1234.56 → 1234), so do banker's ourselves via Decimal ops (which
-        // take the fast path). Other modes use D512's rescale.
+        // take the fast path). Other modes use D256's rescale.
         if matches!(mode, RoundingMode::HalfEven) {
             return self.round_half_even(dp);
         }
@@ -476,7 +476,7 @@ impl Decimal {
     pub fn from_i128_with_scale(num: i128, scale: u32) -> Self {
         match Rd::try_from_i128_with_scale(num, scale) {
             Ok(rd) => small(rd),
-            Err(_) => demote(D512::from_str(&format!("{num}e-{scale}"), CTX).unwrap_or(D512::ZERO)),
+            Err(_) => demote(D256::from_str(&format!("{num}e-{scale}"), CTX).unwrap_or(D256::ZERO)),
         }
     }
 
@@ -587,7 +587,7 @@ impl RoundingStrategy {
 
 impl Decimal {
     /// Compare numerically. Same-variant `Small` uses rust_decimal directly
-    /// (fast); any `Big` involvement widens to `D512`.
+    /// (fast); any `Big` involvement widens to `D256`.
     #[inline]
     fn cmp_value(&self, other: &Self) -> Ordering {
         match (self.0, other.0) {
@@ -793,7 +793,7 @@ impl<'de> serde::Deserialize<'de> for Decimal {
 #[macro_export]
 macro_rules! dec {
     ($($t:tt)*) => {
-        $crate::Decimal::from_d512($crate::decimal::__dec512!($($t)*))
+        $crate::Decimal::from_d512($crate::decimal::__dec256!($($t)*))
     };
 }
 

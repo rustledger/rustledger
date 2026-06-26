@@ -3,7 +3,6 @@
 use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
 use rustledger_core::{Amount, BookingMethod, Inventory, Posting, Transaction};
-use std::collections::HashMap;
 
 use super::helpers::push_account_not_open;
 use crate::error::{ErrorCode, ValidationError};
@@ -278,7 +277,7 @@ pub fn validate_posting_currency(
 ///    `tolerance = units_quantum * cost_per_unit * tolerance_multiplier`
 pub fn validate_transaction_balance(
     txn: &Transaction,
-    tolerances: &HashMap<rustledger_core::Currency, Decimal>,
+    tolerances: &FxHashMap<rustledger_core::Currency, Decimal>,
     errors: &mut Vec<ValidationError>,
 ) {
     // Skip balance checking if there are any empty cost specs (e.g., `{}`).
@@ -357,10 +356,10 @@ pub fn decimal_quantum(value: Decimal) -> Decimal {
 pub fn calculate_tolerances(
     txn: &Transaction,
     options: &ValidationOptions,
-) -> HashMap<rustledger_core::Currency, Decimal> {
+) -> FxHashMap<rustledger_core::Currency, Decimal> {
     // Pre-allocate for typical case (1-2 currencies)
-    let mut tolerances: HashMap<rustledger_core::Currency, Decimal> =
-        HashMap::with_capacity(txn.postings.len().min(4));
+    let mut tolerances: FxHashMap<rustledger_core::Currency, Decimal> =
+        FxHashMap::with_capacity_and_hasher(txn.postings.len().min(4), Default::default());
 
     // Default tolerance based on quantum of amounts in postings.
     // Only amounts with decimal places contribute (Python's `if expo < 0:` guard).
@@ -387,7 +386,8 @@ pub fn calculate_tolerances(
     // across postings, then max'd with the existing tolerance per currency.
     if options.infer_tolerance_from_cost {
         // Accumulated cost/price tolerances per currency
-        let mut cost_tolerances: HashMap<rustledger_core::Currency, Decimal> = HashMap::new();
+        let mut cost_tolerances: FxHashMap<rustledger_core::Currency, Decimal> =
+            FxHashMap::default();
 
         for posting in &txn.postings {
             if let Some(units) = posting.amount() {
@@ -767,8 +767,8 @@ mod validator_comparison_tests {
 
     // ---- validate_transaction_balance: `residual.abs() > tolerance`
 
-    fn usd_tol(t: Decimal) -> HashMap<rustledger_core::Currency, Decimal> {
-        let mut m = HashMap::new();
+    fn usd_tol(t: Decimal) -> FxHashMap<rustledger_core::Currency, Decimal> {
+        let mut m = FxHashMap::default();
         m.insert(rustledger_core::Currency::from("USD"), t);
         m
     }

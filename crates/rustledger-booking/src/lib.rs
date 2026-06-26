@@ -39,16 +39,17 @@ pub use pad::{
 use bigdecimal::BigDecimal;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Signed;
+use rustc_hash::FxHashMap;
 use rustledger_core::{Amount, Currency, IncompleteAmount, Transaction};
-use std::collections::HashMap;
 
 /// Calculate the tolerance for a set of amounts.
 ///
 /// Tolerance is the maximum of all individual amount tolerances.
 #[must_use]
-pub fn calculate_tolerance(amounts: &[&Amount]) -> HashMap<Currency, Decimal> {
+pub fn calculate_tolerance(amounts: &[&Amount]) -> FxHashMap<Currency, Decimal> {
     // Pre-allocate for typical case (1-3 currencies per transaction)
-    let mut tolerances: HashMap<Currency, Decimal> = HashMap::with_capacity(amounts.len().min(4));
+    let mut tolerances: FxHashMap<Currency, Decimal> =
+        FxHashMap::with_capacity_and_hasher(amounts.len().min(4), Default::default());
 
     for amount in amounts {
         let tol = amount.inferred_tolerance();
@@ -217,10 +218,10 @@ fn cost_weight<D: WeightNum>(
 /// Weight rule (Beancount): a cost spec puts the weight in the cost currency
 /// (`cost` beats `price`); else a price annotation puts it in the price
 /// currency; else the weight is the units themselves.
-fn residual_weight<D: WeightNum>(transaction: &Transaction) -> HashMap<Currency, D> {
+fn residual_weight<D: WeightNum>(transaction: &Transaction) -> FxHashMap<Currency, D> {
     // Pre-allocate for typical case (1-2 currencies per transaction)
-    let mut residuals: HashMap<Currency, D> =
-        HashMap::with_capacity(transaction.postings.len().min(4));
+    let mut residuals: FxHashMap<Currency, D> =
+        FxHashMap::with_capacity_and_hasher(transaction.postings.len().min(4), Default::default());
 
     // Lazily compute inferred currency only when needed (most transactions don't need it)
     let mut inferred_cost_currency: Option<Option<Currency>> = None;
@@ -304,7 +305,7 @@ fn residual_weight<D: WeightNum>(transaction: &Transaction) -> HashMap<Currency,
 /// See: `spec/tla/DoubleEntry.tla`
 #[must_use]
 #[allow(clippy::implicit_hasher)]
-pub fn calculate_residual(transaction: &Transaction) -> HashMap<Currency, Decimal> {
+pub fn calculate_residual(transaction: &Transaction) -> FxHashMap<Currency, Decimal> {
     residual_weight::<Decimal>(transaction)
 }
 
@@ -326,14 +327,14 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// significant digits; this function handles arbitrary precision correctly.
 #[must_use]
 #[allow(clippy::implicit_hasher)]
-pub fn calculate_residual_precise(transaction: &Transaction) -> HashMap<Currency, BigDecimal> {
+pub fn calculate_residual_precise(transaction: &Transaction) -> FxHashMap<Currency, BigDecimal> {
     residual_weight::<BigDecimal>(transaction)
 }
 
 /// Check if a transaction is balanced within tolerance.
 #[must_use]
 #[allow(clippy::implicit_hasher)]
-pub fn is_balanced(transaction: &Transaction, tolerances: &HashMap<Currency, Decimal>) -> bool {
+pub fn is_balanced(transaction: &Transaction, tolerances: &FxHashMap<Currency, Decimal>) -> bool {
     let residuals = calculate_residual(transaction);
 
     for (currency, residual) in residuals {
@@ -493,7 +494,7 @@ mod tests {
                 Amount::new(dec!(-49.00), "USD"),
             ));
         // Residual is 1.00 USD against zero tolerance — clearly unbalanced.
-        let mut tolerances = HashMap::new();
+        let mut tolerances = FxHashMap::default();
         tolerances.insert(Currency::from("USD"), Decimal::ZERO);
         assert!(
             !is_balanced(&txn, &tolerances),
@@ -517,7 +518,7 @@ mod tests {
                 Amount::new(dec!(-50.00), "USD"),
             ));
         // Residual 0.01 exactly equals the tolerance: balanced under `>`.
-        let mut tolerances = HashMap::new();
+        let mut tolerances = FxHashMap::default();
         tolerances.insert(Currency::from("USD"), dec!(0.01));
         assert!(
             is_balanced(&txn, &tolerances),

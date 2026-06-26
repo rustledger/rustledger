@@ -6,7 +6,7 @@
 use super::sources::PriceSource;
 use super::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::NaiveDate;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};

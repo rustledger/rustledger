@@ -26,7 +26,7 @@ fn meta_value_to_json(value: &MetaValue) -> MetaValueJson {
         MetaValue::Link(l) => MetaValueJson::String(l.to_string()),
         MetaValue::Date(d) => MetaValueJson::String(d.to_string()),
         // Numbers go through `to_string` to preserve precision — JSON
-        // numbers can't represent `rust_decimal::Decimal` losslessly,
+        // numbers can't represent `rustledger_core::Decimal` losslessly,
         // and matching FFI-WASI's behavior keeps the wire shape
         // portable.
         MetaValue::Number(n) => MetaValueJson::String(n.to_string()),
@@ -59,7 +59,7 @@ fn metadata_to_json(meta: &Metadata) -> HashMap<String, MetaValueJson> {
 /// bindings emit identical tagged-union envelopes.
 ///
 /// Stringified-decimal handling matches [`meta_value_to_json`] — JSON
-/// numbers can't represent `rust_decimal::Decimal` losslessly.
+/// numbers can't represent `rustledger_core::Decimal` losslessly.
 fn meta_value_to_typed_json(value: &MetaValue) -> TypedValueJson {
     // The type tag is single-sourced in core (`serde_json`-free, so this crate
     // can share it); the typed `value` reuses this crate's own `meta_value_to_json`

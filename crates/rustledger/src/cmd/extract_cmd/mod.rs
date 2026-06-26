@@ -836,7 +836,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
 
     // Append balance assertion if --balance is specified
     let directives = if let Some(ref balance_amount) = args.balance {
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
         use std::str::FromStr;
 
         let amount = Decimal::from_str(balance_amount)
@@ -1545,7 +1545,7 @@ default_expense = "Expenses:Uncategorized"
             .and_then(rustledger_core::IncompleteAmount::number);
         assert_eq!(
             amount,
-            Some("40.00".parse::<rust_decimal::Decimal>().unwrap()),
+            Some("40.00".parse::<rustledger_core::Decimal>().unwrap()),
             "elided posting must be interpolated by booking",
         );
     }

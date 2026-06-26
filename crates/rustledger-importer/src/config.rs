@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use format_num_pattern::{Locale, NumberFormat, NumberSymbols, fmt_to, parse_fmt};
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use std::{fmt::Display, ops::Neg, str::FromStr};
 
 /// Configuration for an importer.
@@ -166,7 +166,10 @@ pub enum AmountFormat {
 
 // Do not replace with `format_num_pattern::core::parse_sym`: its `clean_num` strips post-decimal
 // leading zeros, so "0.00" fails and "0.01" silently parses as 0.1. See issue #972.
-fn parse_with_symbols(s: &str, sym: &NumberSymbols) -> Result<Decimal, rust_decimal::Error> {
+fn parse_with_symbols(
+    s: &str,
+    sym: &NumberSymbols,
+) -> Result<Decimal, rustledger_core::DecimalParseError> {
     let mut buf = String::with_capacity(s.len());
     for c in s.chars() {
         if c.is_ascii_digit() {

@@ -682,7 +682,7 @@ fn escape_csv(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
     use rustledger_core::{Amount, Cost, Inventory, Position};
 
     /// Cost-spec braces in BQL output match Beancount's
@@ -945,7 +945,7 @@ mod tests {
     // SUM cell receives the GROUP BY currency from the row sidecar and
     // quantizes via DisplayContext. Concretely, the bug shows up when
     // inputs have varying scales (e.g. one `0.000` mixed with several
-    // `0.00`s): `rust_decimal::Decimal::add` returns max-scale, so the sum
+    // `0.00`s): `rustledger_core::Decimal::add` returns max-scale, so the sum
     // keeps the wider `0.000` form even though USD's tracked precision is
     // 2dp. After the fix, the per-currency hint pulls the SUM through
     // `DisplayContext::format(_, "USD")`, rounding back to 2dp.

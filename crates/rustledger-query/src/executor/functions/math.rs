@@ -1,6 +1,6 @@
 //! Math function implementations for the BQL executor.
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 
 use crate::error::QueryError;
 
@@ -43,7 +43,6 @@ impl Executor<'_> {
                 if decimals >= 0 {
                     Ok(Value::Integer(i))
                 } else {
-                    use rust_decimal::prelude::ToPrimitive;
                     let r = round_decimal(Decimal::from(i), decimals);
                     Ok(r.to_i64().map_or(Value::Number(r), Value::Integer))
                 }

@@ -9,7 +9,7 @@
 //! valgrind --tool=cachegrind ./target/profiling/examples/profile_query 20000 5
 //! ```
 
-use rust_decimal_macros::dec;
+use rustledger_core::dec;
 use rustledger_core::{Amount, Directive, Posting, Transaction};
 use rustledger_query::{Executor, parse as parse_query};
 
@@ -19,7 +19,7 @@ fn generate(n: usize) -> Vec<Directive> {
     let mut out = Vec::with_capacity(n);
     let (mut y, mut m, mut d) = (2020i32, 1u32, 1u32);
     for i in 0..n {
-        let amount = dec!(10.00) + rust_decimal::Decimal::from((i % 500) as i32);
+        let amount = dec!(10.00) + rustledger_core::Decimal::from((i % 500) as i32);
         let date = rustledger_core::naive_date(y, m, d).unwrap();
         let txn = Transaction::new(date, format!("Txn {i}"))
             .with_payee(payees[i % payees.len()])

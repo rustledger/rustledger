@@ -217,7 +217,7 @@ impl Fingerprint {
         hasher.update(b"|");
         if let Some(amt) = amount {
             // Normalize amount so "50" and "50.00" produce the same fingerprint.
-            let normalized_amt = rust_decimal::Decimal::from_str(amt)
+            let normalized_amt = rustledger_core::Decimal::from_str(amt)
                 .map_or_else(|_| amt.to_string(), |d| d.normalize().to_string());
             hasher.update(normalized_amt.as_bytes());
         }

@@ -2033,7 +2033,7 @@ fn test_non_zero_interpolated_posting_is_preserved() {
         .as_ref()
         .and_then(|u| u.as_amount())
         .expect("filled");
-    assert_eq!(amount.number, rust_decimal::Decimal::from(-50));
+    assert_eq!(amount.number, rustledger_core::Decimal::from(-50));
 }
 
 // (Test for the INTERPOLATED_MARKER side channel was deleted with the

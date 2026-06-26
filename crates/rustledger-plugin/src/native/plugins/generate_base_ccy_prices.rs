@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 
 use crate::types::{
     AmountData, DirectiveData, DirectiveWrapper, PluginInput, PluginOp, PluginOutput, PriceData,

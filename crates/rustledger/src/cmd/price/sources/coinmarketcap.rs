@@ -5,7 +5,7 @@
 use super::{PriceSource, user_agent};
 use crate::cmd::price::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use std::env;
 use std::str::FromStr;
 use std::time::Duration;

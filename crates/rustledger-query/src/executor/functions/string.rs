@@ -29,12 +29,9 @@ impl Executor<'_> {
             Value::Integer(i) => usize::try_from(*i).map_err(|_| {
                 QueryError::Type("MAXWIDTH: second argument must be a positive integer".to_string())
             })?,
-            Value::Number(n) => {
-                use rust_decimal::prelude::ToPrimitive;
-                n.to_usize().ok_or_else(|| {
-                    QueryError::Type("MAXWIDTH: second argument must be a positive integer".into())
-                })?
-            }
+            Value::Number(n) => n.to_usize().ok_or_else(|| {
+                QueryError::Type("MAXWIDTH: second argument must be a positive integer".into())
+            })?,
             _ => {
                 return Err(QueryError::Type(
                     "MAXWIDTH: second argument must be an integer".to_string(),

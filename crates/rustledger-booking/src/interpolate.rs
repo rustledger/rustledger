@@ -2,8 +2,8 @@
 //!
 //! Fills in missing posting amounts to balance transactions.
 
-use rust_decimal::Decimal;
-use rust_decimal::prelude::Signed;
+use rustledger_core::Decimal;
+
 use rustledger_core::{Amount, Currency, IncompleteAmount, Transaction};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -546,7 +546,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
     use rustledger_core::{NaiveDate, Posting};
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {

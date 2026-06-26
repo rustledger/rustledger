@@ -62,7 +62,7 @@ impl NativePlugin for CurrencyAccountsPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         use crate::types::{AmountData, OpenData, PostingData};
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
         use std::collections::{BTreeMap, HashSet};
         use std::str::FromStr;
 

@@ -1485,7 +1485,7 @@ fn run_error_to_ledger(e: &rustledger_plugin::PluginRunError) -> LedgerError {
 mod sanitize_tests {
     use super::sanitize_inner_posting_spans;
     use crate::source_map::SourceMap;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
     use rustledger_core::{
         Amount, Directive, IncompleteAmount, Posting, SYNTHESIZED_FILE_ID, Span, Spanned,
         Transaction,

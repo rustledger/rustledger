@@ -121,7 +121,7 @@ pub(super) fn apply_ml_suggestions_with_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal::Decimal;
+    use rustledger_core::Decimal;
     use rustledger_core::{Amount, Posting, Transaction, naive_date};
 
     fn txn(payee: &str, narration: &str, contra_account: &str, amount: i64) -> Transaction {

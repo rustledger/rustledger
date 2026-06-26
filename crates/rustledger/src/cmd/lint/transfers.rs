@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, ValueEnum};
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_loader::Loader;
 use rustledger_ops::transfer::{
     LocatedDirective, TransferConfig, TransferMatch, find_transfers_in_ledger,

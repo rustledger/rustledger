@@ -6,7 +6,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use rust_decimal_macros::dec;
+use rustledger_core::dec;
 use rustledger_core::{Amount, Directive, Posting, Transaction};
 use rustledger_query::{Executor, parse as parse_query};
 
@@ -24,7 +24,7 @@ fn generate_directives(num_transactions: usize) -> Vec<Directive> {
     for i in 0..num_transactions {
         let category = categories[i % categories.len()];
         let payee = payees[i % payees.len()];
-        let amount = dec!(10.00) + rust_decimal::Decimal::from(i as i32 % 100);
+        let amount = dec!(10.00) + rustledger_core::Decimal::from(i as i32 % 100);
 
         let date = rustledger_core::naive_date(year, month, day).unwrap();
 

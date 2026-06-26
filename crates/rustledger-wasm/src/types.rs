@@ -138,7 +138,7 @@ pub struct LedgerOptions {
 #[cfg_attr(feature = "ts-export", ts(export, export_to = "bindings/"))]
 pub enum MetaValueJson {
     /// String/Account/Currency/Tag/Link/Date/Number — anything the
-    /// host can represent as a string, including `rust_decimal::Decimal`
+    /// host can represent as a string, including `rustledger_core::Decimal`
     /// values stringified to preserve precision (JSON numbers can't
     /// represent arbitrary-precision decimals losslessly).
     String(String),

@@ -2,7 +2,7 @@
 
 use rustc_hash::FxHashMap as HashMap;
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, Inventory, Position};
 
 use crate::ast::{Expr, Literal, Target, UnaryOperator};

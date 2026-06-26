@@ -1,7 +1,7 @@
 //! Regression: NULL sorts as the smallest value (matching beanquery) — ORDER BY
 //! ASC places NULLs first, DESC places them last.
 
-use rust_decimal_macros::dec;
+use rustledger_core::dec;
 use rustledger_core::{Amount, Directive, NaiveDate, Open, Posting, Transaction};
 use rustledger_query::{Executor, Value, parse};
 

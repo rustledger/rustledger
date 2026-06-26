@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::NaiveDate;
 use serde::{Deserialize, Serialize};
 

@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{Directive, Transaction};
 use rustledger_plugin_types::{DirectiveData, DirectiveWrapper, PluginError};
 

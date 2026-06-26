@@ -362,7 +362,7 @@ fn tfidf_row(tokens: &[String], vocab: &HashMap<String, usize>, idf: &[f64]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal::Decimal;
+    use rustledger_core::Decimal;
     use rustledger_core::{Amount, NaiveDate, Posting, Transaction};
 
     fn make_txn(

@@ -20,7 +20,7 @@ impl NativePlugin for SellGainsPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
         use std::str::FromStr;
 
         let mut errors = Vec::new();

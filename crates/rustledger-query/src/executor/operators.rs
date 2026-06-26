@@ -1,6 +1,6 @@
 //! Binary and unary operators, comparisons, and arithmetic operations.
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 
 use crate::ast::{BinaryOp, BinaryOperator, UnaryOp, UnaryOperator};
 use crate::error::QueryError;

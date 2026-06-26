@@ -6,9 +6,9 @@
 //! Reference: spec/tla/Interpolation.tla
 
 use proptest::prelude::*;
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use rustledger_booking::{calculate_residual, interpolate};
+use rustledger_core::Decimal;
+use rustledger_core::dec;
 use rustledger_core::{Amount, IncompleteAmount, NaiveDate, Posting, Transaction};
 
 // ============================================================================

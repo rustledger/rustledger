@@ -281,7 +281,7 @@ fn test_parse_custom_directive() {
 /// value-token extractors now share `value_tokens_to_meta`.
 #[test]
 fn test_custom_directive_preserves_sign_and_tag_link() {
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
     use rustledger_core::{Amount, Currency, MetaValue};
 
     let source = r#"2024-01-01 custom "budget" -50.00 USD #quarterly ^plan-2024 TRUE"#;
@@ -316,7 +316,7 @@ fn test_custom_directive_preserves_sign_and_tag_link() {
 /// dropped the currency (`5 USD` became `Number(5)`).
 #[test]
 fn test_pushmeta_value_with_currency_is_amount() {
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
     use rustledger_core::{Amount, Currency, MetaValue};
 
     let source = r"
@@ -1071,8 +1071,8 @@ fn test_reject_incomplete_final_directive_at_eof() {
 /// read of this spec form).
 #[test]
 fn test_cost_spec_n_hash_t_uses_total() {
-    use rust_decimal_macros::dec;
     use rustledger_core::CostNumber;
+    use rustledger_core::dec;
 
     let source = "
 2024-01-01 open Assets:Stock

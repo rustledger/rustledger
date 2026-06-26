@@ -247,10 +247,7 @@ pub fn import_code_lens(
 /// Extract f64 from MetaValue.
 fn meta_to_f64(v: &MetaValue) -> Option<f64> {
     match v {
-        MetaValue::Number(d) => {
-            use rust_decimal::prelude::ToPrimitive;
-            d.to_f64()
-        }
+        MetaValue::Number(d) => d.to_f64(),
         _ => None,
     }
 }
@@ -266,7 +263,7 @@ fn meta_to_str(v: &MetaValue) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal::Decimal;
+    use rustledger_core::Decimal;
     use rustledger_core::{Metadata, Posting, Transaction, naive_date};
     use rustledger_parser::Span;
     use std::str::FromStr;

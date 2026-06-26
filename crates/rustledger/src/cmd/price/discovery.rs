@@ -33,7 +33,7 @@
 //! transaction-walking semantics is tracked in the audit issue.
 
 use crate::config::{CommodityMapping, DetailedMapping, FallbackDetail, FallbackEntry, SourceRef};
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{Directive, MetaValue, NaiveDate};
 use rustledger_loader::Options;
 use rustledger_parser::Spanned;
@@ -685,7 +685,7 @@ fn active_commodities(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
     use rustledger_core::{Amount, Close, Commodity, NaiveDate, Open, Posting, Transaction};
     use rustledger_parser::Span;
 

@@ -2580,9 +2580,9 @@ fn test_implicit_prices_from_total_annotation_issue_992() {
     assert_eq!(base, "BAM");
     assert_eq!(quote, "EUR");
     // The per-unit price is 15152.07 / 27204.53 ≈ 0.5569...
-    let parsed: rust_decimal::Decimal = num_str.parse().expect("price parses");
+    let parsed: rustledger_core::Decimal = num_str.parse().expect("price parses");
     assert!(
-        parsed > rust_decimal_macros::dec!(0.55) && parsed < rust_decimal_macros::dec!(0.56),
+        parsed > rustledger_core::dec!(0.55) && parsed < rustledger_core::dec!(0.56),
         "@@ total must be divided by units.abs(); got {num_str}"
     );
 }
@@ -2980,7 +2980,7 @@ proptest::proptest! {
         per_unit_cents in 1u32..1_000_000,
         is_total in proptest::bool::ANY,
     ) {
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
         use std::str::FromStr;
 
         let units_d = Decimal::from(units);
@@ -5316,7 +5316,7 @@ proptest::proptest! {
         sale_cents in 1u32..1_000_000,
         with_income_posting in proptest::bool::ANY,
     ) {
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
 
         let plugin = SellGainsPlugin;
         let cost_d = Decimal::new(i64::from(cost_cents), 2);
@@ -6242,7 +6242,7 @@ proptest::proptest! {
         c_to_x_cents in 1u32..10_000_000,
         x_to_base_cents in 1u32..10_000_000,
     ) {
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
 
         let to_dollars = |cents: u32| Decimal::new(i64::from(cents), 2);
         let c_x = to_dollars(c_to_x_cents);
@@ -6547,7 +6547,7 @@ proptest::proptest! {
         amount_cents in 1u32..1_000_000,
         member_count in 1usize..=5,
     ) {
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
         use std::str::FromStr;
 
         let amount = Decimal::new(i64::from(amount_cents), 2);
@@ -6876,7 +6876,7 @@ proptest::proptest! {
         cost_cents in 1u32..1_000_000,
         market_cents in 1u32..1_000_000,
     ) {
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
 
         // cents -> dollars: divide by 100.
         let to_dollars = |cents: u32| -> Decimal {
@@ -6944,7 +6944,7 @@ proptest::proptest! {
         cost_b_cents in 1u32..1_000_000,
         market_cents in 1u32..1_000_000,
     ) {
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
 
         let to_dollars = |cents: u32| Decimal::new(i64::from(cents), 2);
         let cost_a_d = to_dollars(cost_a_cents);
@@ -7236,7 +7236,7 @@ fn test_check_average_cost_skips_account_without_booking_specified() {
 /// the same sale would have warned.
 #[test]
 fn test_check_average_cost_respects_custom_tolerance() {
-    use rust_decimal::Decimal;
+    use rustledger_core::Decimal;
 
     // 50% tolerance plugin instance.
     let plugin = CheckAverageCostPlugin::with_tolerance(Decimal::new(5, 1)); // 0.5
@@ -7295,7 +7295,7 @@ proptest::proptest! {
             1..=5,
         ),
     ) {
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
 
         // Compute the expected weighted mean using the same arithmetic
         // the plugin uses internally: `total_cost / total_units`, with
@@ -7630,7 +7630,7 @@ fn test_box_accrual_no_metadata_passthrough() {
 /// preservation invariant.
 #[test]
 fn test_box_accrual_multi_year_splits_preserve_total() {
-    use rust_decimal::Decimal;
+    use rustledger_core::Decimal;
     use std::str::FromStr;
 
     let plugin = BoxAccrualPlugin;
@@ -7850,7 +7850,7 @@ proptest::proptest! {
         expiry_month in 1u32..=12,
         expiry_day in 1u32..=28,
     ) {
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
         use std::str::FromStr;
 
         let start_date = format!("2024-{start_month:02}-{start_day:02}");

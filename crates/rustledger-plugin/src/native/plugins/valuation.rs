@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 
 use crate::types::{
     AmountData, CommodityData, CostData, DirectiveData, DirectiveWrapper, MetaValueData,
@@ -37,7 +37,7 @@ use super::super::{NativePlugin, RegularPlugin};
 
 const MAPPED_CURRENCY_PRECISION: u32 = 7;
 const TAG_TO_ADD: &str = "valuation-applied";
-const EPSILON: Decimal = Decimal::from_parts(1, 0, 0, false, 9); // 1e-9
+const EPSILON: Decimal = rustledger_core::dec!(0.000000001); // 1e-9
 
 /// Plugin for tracking opaque fund values.
 pub struct ValuationPlugin;

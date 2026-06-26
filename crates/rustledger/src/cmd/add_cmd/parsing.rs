@@ -1,7 +1,7 @@
 //! Date, amount, and balance parsing for the add command.
 
 use anyhow::{Context, Result, bail};
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, NaiveDate};
 use std::str::FromStr;
 

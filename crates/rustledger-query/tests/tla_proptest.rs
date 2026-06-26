@@ -8,8 +8,8 @@
 //! - spec/tla/PriceDB.tla
 
 use proptest::prelude::*;
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
+use rustledger_core::Decimal;
+use rustledger_core::dec;
 use rustledger_core::{
     Amount, Directive, NaiveDate, Posting, Price as PriceDirective, Transaction,
 };

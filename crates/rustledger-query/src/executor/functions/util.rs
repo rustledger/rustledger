@@ -2,7 +2,7 @@
 //!
 //! This module includes metadata, conversion, casting, and helper functions.
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{MetaValue, Metadata};
 
 use crate::ast::FunctionCall;
@@ -171,7 +171,6 @@ impl Executor<'_> {
 
     /// Convert a Value to integer.
     pub(crate) fn value_to_int(val: &Value) -> Result<Value, QueryError> {
-        use rust_decimal::prelude::ToPrimitive;
         match val {
             Value::Integer(i) => Ok(Value::Integer(*i)),
             Value::Number(n) => {

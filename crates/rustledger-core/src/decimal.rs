@@ -65,6 +65,28 @@ impl Decimal {
         Self::from_str(&format!("{num}e-{scale}")).unwrap_or(Self::ZERO)
     }
 
+    /// Parse a decimal string (lenient — accepts scientific notation, like
+    /// rust_decimal's inherent `from_str`). Inherent so `Decimal::from_str(s)`
+    /// works without importing the `FromStr` trait.
+    pub fn from_str(s: &str) -> Result<Self, DecimalParseError> {
+        match D512::from_str(s, CTX) {
+            Ok(d) if d.is_finite() => Ok(wrap(d)),
+            _ => Err(DecimalParseError(s.to_string())),
+        }
+    }
+
+    /// Smallest integer `>= self` (`rust_decimal::MathematicalOps::ceil`).
+    #[must_use]
+    pub fn ceil(self) -> Self {
+        self.round_dp_with_mode(0, RoundingMode::Ceiling)
+    }
+
+    /// Largest integer `<= self` (`rust_decimal::MathematicalOps::floor`).
+    #[must_use]
+    pub fn floor(self) -> Self {
+        self.round_dp_with_mode(0, RoundingMode::Floor)
+    }
+
     /// `crate::Decimal::from_str_exact` — strict parse: plain decimals only,
     /// no scientific notation (matching rust_decimal, so ledger amount literals
     /// like `1e2` are rejected). `new()` uses the lenient `from_str` internally.
@@ -143,6 +165,21 @@ impl Decimal {
             result = result.checked_mul(self)?;
         }
         Some(result)
+    }
+
+    /// `self^exp` for a signed integer exponent (negative → reciprocal).
+    /// `rust_decimal::MathematicalOps::powi`.
+    #[must_use]
+    pub fn powi(self, exp: i64) -> Self {
+        if exp == 0 {
+            return Self::ONE;
+        }
+        let mag = self.checked_powu(exp.unsigned_abs()).unwrap_or(Self::ZERO);
+        if exp < 0 {
+            Self::ONE.checked_div(mag).unwrap_or(Self::ZERO)
+        } else {
+            mag
+        }
     }
 
     #[must_use]
@@ -239,6 +276,62 @@ impl Decimal {
     #[must_use]
     pub fn to_i128(self) -> Option<i128> {
         self.0.trunc().to_i128().ok()
+    }
+
+    /// `rust_decimal::Decimal::from_i128_with_scale` — `num * 10^-scale`.
+    #[must_use]
+    pub fn from_i128_with_scale(num: i128, scale: u32) -> Self {
+        Self::from_str(&format!("{num}e-{scale}")).unwrap_or(Self::ZERO)
+    }
+
+    /// `self % other`; `None` when `other` is zero.
+    #[must_use]
+    pub fn checked_rem(self, other: Self) -> Option<Self> {
+        if other.0.is_zero() {
+            return None;
+        }
+        finite(self.0.rem(other.0))
+    }
+
+    /// Truncate toward zero and convert to `i32` (`None` if out of range).
+    #[must_use]
+    pub fn to_i32(self) -> Option<i32> {
+        self.to_i128().and_then(|v| i32::try_from(v).ok())
+    }
+    /// Truncate toward zero and convert to `i16`.
+    #[must_use]
+    pub fn to_i16(self) -> Option<i16> {
+        self.to_i128().and_then(|v| i16::try_from(v).ok())
+    }
+    /// Truncate toward zero and convert to `i8`.
+    #[must_use]
+    pub fn to_i8(self) -> Option<i8> {
+        self.to_i128().and_then(|v| i8::try_from(v).ok())
+    }
+    /// Truncate toward zero and convert to `isize`.
+    #[must_use]
+    pub fn to_isize(self) -> Option<isize> {
+        self.to_i128().and_then(|v| isize::try_from(v).ok())
+    }
+    /// Truncate toward zero and convert to `u64`.
+    #[must_use]
+    pub fn to_u64(self) -> Option<u64> {
+        self.to_i128().and_then(|v| u64::try_from(v).ok())
+    }
+    /// Truncate toward zero and convert to `u16`.
+    #[must_use]
+    pub fn to_u16(self) -> Option<u16> {
+        self.to_i128().and_then(|v| u16::try_from(v).ok())
+    }
+    /// Truncate toward zero and convert to `u8`.
+    #[must_use]
+    pub fn to_u8(self) -> Option<u8> {
+        self.to_i128().and_then(|v| u8::try_from(v).ok())
+    }
+    /// Truncate toward zero and convert to `usize`.
+    #[must_use]
+    pub fn to_usize(self) -> Option<usize> {
+        self.to_i128().and_then(|v| usize::try_from(v).ok())
     }
 
     #[must_use]
@@ -351,6 +444,16 @@ impl fmt::Debug for Decimal {
         fmt::Display::fmt(&self.0, f)
     }
 }
+impl fmt::LowerExp for Decimal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerExp::fmt(&self.0, f)
+    }
+}
+impl fmt::UpperExp for Decimal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::UpperExp::fmt(&self.0, f)
+    }
+}
 
 /// Parse error — opaque, mirrors how callers used `rust_decimal::Error`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -366,10 +469,7 @@ impl std::error::Error for DecimalParseError {}
 impl FromStr for Decimal {
     type Err = DecimalParseError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match D512::from_str(s, CTX) {
-            Ok(d) if d.is_finite() => Ok(wrap(d)),
-            _ => Err(DecimalParseError(s.to_string())),
-        }
+        Decimal::from_str(s)
     }
 }
 
@@ -401,6 +501,30 @@ macro_rules! bin_op {
                 *self = wrap(self.0.$method(rhs.0));
             }
         }
+        // Reference operands (rust_decimal had these; `Decimal` is `Copy`).
+        impl $trait<&Decimal> for Decimal {
+            type Output = Self;
+            fn $method(self, rhs: &Self) -> Self {
+                self.$method(*rhs)
+            }
+        }
+        impl $trait<Decimal> for &Decimal {
+            type Output = Decimal;
+            fn $method(self, rhs: Decimal) -> Decimal {
+                (*self).$method(rhs)
+            }
+        }
+        impl $trait<&Decimal> for &Decimal {
+            type Output = Decimal;
+            fn $method(self, rhs: &Decimal) -> Decimal {
+                (*self).$method(*rhs)
+            }
+        }
+        impl $assign<&Decimal> for Decimal {
+            fn $assign_method(&mut self, rhs: &Self) {
+                *self = wrap(self.0.$method(rhs.0));
+            }
+        }
     };
 }
 bin_op!(Add, add, AddAssign, add_assign);
@@ -417,6 +541,12 @@ impl Rem for Decimal {
 impl Neg for Decimal {
     type Output = Self;
     fn neg(self) -> Self {
+        wrap(self.0.neg())
+    }
+}
+impl Neg for &Decimal {
+    type Output = Decimal;
+    fn neg(self) -> Decimal {
         wrap(self.0.neg())
     }
 }

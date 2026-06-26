@@ -19,19 +19,19 @@ use super::super::{NativePlugin, RegularPlugin};
 /// This matches Python beancount's `beancount.plugins.check_average_cost` behavior.
 pub struct CheckAverageCostPlugin {
     /// Tolerance for cost comparison (default: 0.01 = 1%).
-    tolerance: rust_decimal::Decimal,
+    tolerance: rustledger_core::Decimal,
 }
 
 impl CheckAverageCostPlugin {
     /// Create with default tolerance (1%).
     pub fn new() -> Self {
         Self {
-            tolerance: rust_decimal::Decimal::new(1, 2), // 0.01 = 1%
+            tolerance: rustledger_core::Decimal::new(1, 2), // 0.01 = 1%
         }
     }
 
     /// Create with custom tolerance.
-    pub const fn with_tolerance(tolerance: rust_decimal::Decimal) -> Self {
+    pub const fn with_tolerance(tolerance: rustledger_core::Decimal) -> Self {
         Self { tolerance }
     }
 }
@@ -52,7 +52,7 @@ impl NativePlugin for CheckAverageCostPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
         use std::collections::{HashMap, HashSet};
         use std::str::FromStr;
 

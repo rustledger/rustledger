@@ -1,7 +1,7 @@
 //! Transaction validation.
 
-use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, BookingMethod, Inventory, Posting, Transaction};
 use std::collections::HashMap;
 
@@ -590,7 +590,7 @@ mod tolerance_tests {
     //! arithmetic and the per-currency default/floor logic went
     //! unasserted.
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
 
     fn cur(s: &str) -> rustledger_core::Currency {
         rustledger_core::Currency::from(s)
@@ -714,7 +714,7 @@ mod validator_comparison_tests {
     //! observable error.
     use super::*;
     use crate::AccountState;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
 
     fn d(y: i32, m: u32, day: u32) -> rustledger_core::NaiveDate {
         rustledger_core::naive_date(y, m, day).unwrap()

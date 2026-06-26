@@ -5,9 +5,9 @@
 use super::types::{hash_row, hash_single_value};
 use super::*;
 use crate::parse;
-use rust_decimal_macros::dec;
 use rustledger_core::Metadata;
 use rustledger_core::Posting;
+use rustledger_core::dec;
 
 fn date(year: i32, month: u32, day: u32) -> NaiveDate {
     rustledger_core::naive_date(year, month, day).unwrap()
@@ -1073,7 +1073,7 @@ fn test_inventory_functions() {
     let result = executor.execute(&query).unwrap();
     assert_eq!(
         result.rows[0][0],
-        Value::Number(rust_decimal::Decimal::from(100))
+        Value::Number(rustledger_core::Decimal::from(100))
     );
 
     // Test POSSIGN with credit account (Income) - sign is negated
@@ -1081,7 +1081,7 @@ fn test_inventory_functions() {
     let result = executor.execute(&query).unwrap();
     assert_eq!(
         result.rows[0][0],
-        Value::Number(rust_decimal::Decimal::from(-100))
+        Value::Number(rustledger_core::Decimal::from(-100))
     );
 
     // Test POSSIGN with Expenses (debit normal) - no sign change
@@ -1089,7 +1089,7 @@ fn test_inventory_functions() {
     let result = executor.execute(&query).unwrap();
     assert_eq!(
         result.rows[0][0],
-        Value::Number(rust_decimal::Decimal::from(50))
+        Value::Number(rustledger_core::Decimal::from(50))
     );
 
     // Test POSSIGN with Liabilities (credit normal) - sign is negated
@@ -1097,7 +1097,7 @@ fn test_inventory_functions() {
     let result = executor.execute(&query).unwrap();
     assert_eq!(
         result.rows[0][0],
-        Value::Number(rust_decimal::Decimal::from(-200))
+        Value::Number(rustledger_core::Decimal::from(-200))
     );
 
     // Test POSSIGN with Equity (credit normal) - sign is negated
@@ -1105,7 +1105,7 @@ fn test_inventory_functions() {
     let result = executor.execute(&query).unwrap();
     assert_eq!(
         result.rows[0][0],
-        Value::Number(rust_decimal::Decimal::from(-300))
+        Value::Number(rustledger_core::Decimal::from(-300))
     );
 }
 

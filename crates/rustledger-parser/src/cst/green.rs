@@ -192,7 +192,7 @@ pub(super) fn convert_transaction_header(
 fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
     use crate::SyntaxKind as K;
     let mut sign_minus = false;
-    let mut number: Option<rust_decimal::Decimal> = None;
+    let mut number: Option<rustledger_core::Decimal> = None;
     let mut number_seen = false;
     let mut currency: Option<Currency> = None;
     let mut complex = false;
@@ -248,10 +248,10 @@ fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
 fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
     use crate::SyntaxKind as K;
     let mut is_total = false;
-    let mut first_number: Option<rust_decimal::Decimal> = None;
+    let mut first_number: Option<rustledger_core::Decimal> = None;
     let mut seen_number = false;
     let mut past_hash = false;
-    let mut post_hash_total: Option<rust_decimal::Decimal> = None;
+    let mut post_hash_total: Option<rustledger_core::Decimal> = None;
     let mut currency: Option<Currency> = None;
     let mut date: Option<NaiveDate> = None;
     let mut date_seen = false;

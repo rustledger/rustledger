@@ -6,7 +6,7 @@
 //! Reference: spec/tla/ValidationCorrect.tla
 
 use proptest::prelude::*;
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::NaiveDate;
 use rustledger_core::Spanned;
 use rustledger_core::{Amount, Balance, Directive, IncompleteAmount, Open, Posting, Transaction};

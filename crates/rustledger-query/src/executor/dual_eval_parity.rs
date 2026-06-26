@@ -19,7 +19,7 @@ use super::Executor;
 use super::types::{PostingContext, Value};
 use crate::ast::{Expr, FunctionCall, Literal};
 use crate::error::QueryError;
-use rust_decimal_macros::dec;
+use rustledger_core::dec;
 use rustledger_core::{Amount, Directive, Posting, Transaction, naive_date};
 
 /// A throwaway transaction for the lazy path's `PostingContext`. The pure

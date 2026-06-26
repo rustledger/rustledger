@@ -23,7 +23,7 @@
 //!   Expenses:Accommodation:Caroline   134.50 USD
 //! ```
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use std::collections::HashSet;
 use std::str::FromStr;
 

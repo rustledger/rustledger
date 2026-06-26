@@ -16,7 +16,7 @@ use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
 use regex::{Regex, RegexBuilder};
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, Directive, Inventory, NaiveDate, Position};
 #[cfg(test)]
 use rustledger_core::{MetaValue, Transaction};
@@ -1542,10 +1542,7 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 3)?;
                 let n = match &args[2] {
                     Value::Integer(i) => (*i).max(0) as usize,
-                    Value::Number(n) => {
-                        use rust_decimal::prelude::ToPrimitive;
-                        n.to_usize().unwrap_or(0)
-                    }
+                    Value::Number(n) => n.to_usize().unwrap_or(0),
                     _ => {
                         return Err(QueryError::Type(
                             "GREPN: third argument must be an integer".to_string(),
@@ -1591,10 +1588,7 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 3)?;
                 let n = match &args[2] {
                     Value::Integer(i) => (*i).max(0) as usize,
-                    Value::Number(n) => {
-                        use rust_decimal::prelude::ToPrimitive;
-                        n.to_usize().unwrap_or(0)
-                    }
+                    Value::Number(n) => n.to_usize().unwrap_or(0),
                     _ => {
                         return Err(QueryError::Type(
                             "SPLITCOMP: third argument must be an integer".to_string(),

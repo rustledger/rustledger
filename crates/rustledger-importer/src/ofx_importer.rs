@@ -128,7 +128,7 @@ impl OfxImporter {
         default_currency: &str,
     ) -> Result<Transaction> {
         let date = ofx_date_to_naive(&txn.date_posted)?;
-        let amount: rust_decimal::Decimal = txn
+        let amount: rustledger_core::Decimal = txn
             .amount
             .parse()
             .with_context(|| format!("invalid amount: {:?}", txn.amount))?;
@@ -156,7 +156,7 @@ impl OfxImporter {
         let posting = Posting::new(account, units);
 
         // Create balancing posting
-        let contra_account = if amount < rust_decimal::Decimal::ZERO {
+        let contra_account = if amount < rustledger_core::Decimal::ZERO {
             "Expenses:Unknown"
         } else {
             "Income:Unknown"

@@ -3,8 +3,8 @@
 //! This module provides a price database that stores historical prices
 //! and allows looking up prices for currency conversions.
 
-use rust_decimal::Decimal;
 use rustc_hash::FxHashMap as HashMap;
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, Directive, NaiveDate, Price as PriceDirective, Transaction};
 
 /// A price entry.
@@ -518,7 +518,7 @@ impl PriceDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         rustledger_core::naive_date(y, m, d).unwrap()

@@ -3,7 +3,7 @@
 //! This module defines the AST for Beancount Query Language (BQL),
 //! a SQL-like query language for financial data analysis.
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::NaiveDate;
 use std::fmt;
 
@@ -671,7 +671,7 @@ impl fmt::Display for UnaryOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
 
     #[test]
     fn test_expr_display_wildcard() {

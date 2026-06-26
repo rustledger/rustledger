@@ -30,7 +30,7 @@
 //! order or parallel scheduling, not a per-run hashing seed.
 
 use proptest::prelude::*;
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, Directive, NaiveDate, Open, Posting, Transaction};
 use rustledger_query::{Executor, QueryResult, parse};
 

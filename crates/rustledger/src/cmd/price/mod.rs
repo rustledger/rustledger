@@ -13,7 +13,7 @@ pub mod sources;
 
 use crate::config::{CommodityMapping, PriceConfig, PriceSourceConfig, SourceRef};
 use anyhow::{Context, Result};
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::NaiveDate;
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,7 +1,7 @@
 //! Balance and pad validation.
 
 // ratchet: fxhash-only — hot path; use FxHashMap/FxHashSet, not std SipHash collections (#1237).
-use rust_decimal::{Decimal, MathematicalOps};
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, Balance, Pad, Position};
 
 use super::helpers::require_account_open;
@@ -279,7 +279,7 @@ pub fn validate_balance_late(
 #[cfg(test)]
 mod tolerance_tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
 
     /// Default `tolerance_multiplier` from `ValidationOptions::default()`
     /// (also the loader's default via `Options::new()`).

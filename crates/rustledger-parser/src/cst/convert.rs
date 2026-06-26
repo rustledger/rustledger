@@ -34,7 +34,7 @@
 //! cost braces, indented top-level directives, and bare-currency
 //! values in custom directives.
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::cost::{CostNumber, CostSpec};
 use rustledger_core::directive::{PriceAnnotation, PriceKind};
 use rustledger_core::{
@@ -2488,7 +2488,6 @@ pub(super) fn parse_decimal_token(text: &str) -> Option<Decimal> {
 /// is the parsed (and sign-applied) magnitude. (Thousands-separator commas are
 /// irrelevant to integer-ness, so they aren't stripped before the check.)
 pub(super) fn number_meta_value(text: &str, value: Decimal) -> MetaValue {
-    use rust_decimal::prelude::ToPrimitive;
     if !text.contains('.')
         && !text.contains('e')
         && !text.contains('E')
@@ -2904,7 +2903,7 @@ mod tests {
 
     #[test]
     fn number_meta_value_int_vs_decimal_discriminator() {
-        use rust_decimal_macros::dec;
+        use rustledger_core::dec;
         // Integer literals -> Int (the token text is unsigned; `value` carries
         // the sign, e.g. `precision: -1` parses the token "1" with value -1).
         assert_eq!(number_meta_value("42", dec!(42)), MetaValue::Int(42));
@@ -3940,7 +3939,7 @@ mod tests {
 
     #[test]
     fn cost_spec_n_hash_t_uses_total_form() {
-        use rust_decimal_macros::dec;
+        use rustledger_core::dec;
         let src = "2024-01-01 open Assets:Stock\n\
                    2024-01-01 open Assets:Cash USD\n\
                    2024-01-15 *\n  \

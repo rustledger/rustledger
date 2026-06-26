@@ -6,8 +6,8 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use rust_decimal_macros::dec;
 use rustledger_core::NaiveDate;
+use rustledger_core::dec;
 use rustledger_core::{Amount, Balance, Directive, Open, Posting, Transaction};
 use rustledger_validate::{ValidationError, ValidationOptions, ValidationSession};
 
@@ -53,7 +53,7 @@ fn generate_valid_ledger(num_transactions: usize) -> Vec<Directive> {
 
     for i in 0..num_transactions {
         let expense = expense_accounts[i % expense_accounts.len()];
-        let amount = dec!(10.00) + rust_decimal::Decimal::from(i as i32 % 50);
+        let amount = dec!(10.00) + rustledger_core::Decimal::from(i as i32 % 50);
 
         let txn = Transaction::new(date(2024, month, day), format!("Transaction {i}"))
             .with_flag('*')
@@ -166,7 +166,7 @@ fn bench_validate_balance_assertions(c: &mut Criterion) {
         )));
 
         // Add transactions
-        let mut running_total = rust_decimal::Decimal::ZERO;
+        let mut running_total = rustledger_core::Decimal::ZERO;
         for i in 0..size {
             let amount = dec!(100.00);
             running_total += amount;
@@ -246,7 +246,7 @@ fn bench_validate_subaccount_balance_scaling(c: &mut Criterion) {
         }
 
         // Many assertions on the PARENT — each sums all `accounts` sub-accounts.
-        let total = per * rust_decimal::Decimal::from(accounts);
+        let total = per * rustledger_core::Decimal::from(accounts);
         for i in 0..assertions {
             let day = 3 + (i % 27);
             directives.push(Directive::Balance(Balance::new(

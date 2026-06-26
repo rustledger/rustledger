@@ -13,8 +13,8 @@
 //!   Income:Capital-Losses  -500 USD
 //! ```
 
-use rust_decimal::Decimal;
-use rust_decimal::prelude::*;
+use rustledger_core::{Decimal, RoundingStrategy};
+
 use rustledger_core::NaiveDate;
 
 use crate::types::{

@@ -14,7 +14,7 @@
 //! equality check.
 
 use proptest::prelude::*;
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{
     Amount, Balance, Close, Commodity, CostNumber, CostSpec, Directive, Document, Event, NaiveDate,
     Note, Open, Pad, Posting, Price, PriceAnnotation, Query, Transaction,

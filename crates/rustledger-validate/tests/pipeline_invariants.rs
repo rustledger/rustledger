@@ -14,7 +14,7 @@
 //! separately on top of the public one-shot `book` helper added in #1362.)
 
 use proptest::prelude::*;
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, Directive, NaiveDate, Open, Posting, Transaction};
 use rustledger_validate::{ErrorCode, ValidationOptions, ValidationSession};
 

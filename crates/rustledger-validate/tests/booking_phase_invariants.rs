@@ -19,8 +19,8 @@
 //!    fixed point that validation agrees on.
 
 use proptest::prelude::*;
-use rust_decimal::Decimal;
 use rustledger_booking::book;
+use rustledger_core::Decimal;
 use rustledger_core::{
     Amount, BookingMethod, CostNumber, CostSpec, Directive, NaiveDate, Open, Posting,
     PriceAnnotation, Transaction,

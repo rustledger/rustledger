@@ -2,7 +2,7 @@
 
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::Directive;
 use std::collections::BTreeMap;
 use std::io::Write;

@@ -37,8 +37,8 @@ pub use pad::{
 };
 
 use bigdecimal::BigDecimal;
-use rust_decimal::Decimal;
-use rust_decimal::prelude::Signed;
+use rustledger_core::Decimal;
+
 use rustledger_core::{Amount, Currency, IncompleteAmount, Transaction};
 use std::collections::HashMap;
 
@@ -308,7 +308,7 @@ pub fn calculate_residual(transaction: &Transaction) -> HashMap<Currency, Decima
     residual_weight::<Decimal>(transaction)
 }
 
-/// Convert a `rust_decimal::Decimal` to `BigDecimal` for arbitrary-precision arithmetic.
+/// Convert a `rustledger_core::Decimal` to `BigDecimal` for arbitrary-precision arithmetic.
 ///
 /// Individual `Decimal` values are representable exactly (≤28 significant digits).
 /// The precision loss only occurs during arithmetic, so converting before operations
@@ -393,7 +393,7 @@ pub fn normalize_prices(txn: &mut Transaction) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
     use rustledger_core::{CostSpec, IncompleteAmount, NaiveDate, Posting, PriceAnnotation};
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {

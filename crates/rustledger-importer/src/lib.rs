@@ -302,7 +302,7 @@ pub fn auto_extract(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal::Decimal;
+    use rustledger_core::Decimal;
     use rustledger_core::{Amount, Posting, Transaction};
     use std::str::FromStr;
 

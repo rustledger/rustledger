@@ -3,7 +3,7 @@
 //! Uses chumsky for parser combinators.
 
 use chumsky::prelude::*;
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use std::str::FromStr;
 
 use crate::ast::{
@@ -1095,7 +1095,7 @@ fn integer<'a>() -> impl Parser<'a, ParserInput<'a>, i64, ParserExtra<'a>> + Clo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
 
     #[test]
     fn test_trailing_tokens_are_named_not_mislabeled_eof() {

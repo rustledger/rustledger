@@ -653,7 +653,7 @@ pub fn book(directives: &[Directive], method: BookingMethod) -> LedgerBookResult
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
     use rustledger_core::{NaiveDate, Posting, PriceAnnotation};
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {

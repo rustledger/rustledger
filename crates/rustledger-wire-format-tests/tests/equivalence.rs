@@ -61,7 +61,7 @@
 //!    defensive guard against future regression but no longer masks
 //!    any known divergence.
 
-use rust_decimal_macros::dec;
+use rustledger_core::dec;
 use rustledger_core::{
     Account, Amount, Balance, Close, Commodity, CostNumber, CostSpec, Currency, Custom, Directive,
     Document, Event, IncompleteAmount, Link, MetaValue, Metadata, Note, Open, Pad, Posting, Price,

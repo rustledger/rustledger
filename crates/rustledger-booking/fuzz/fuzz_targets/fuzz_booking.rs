@@ -7,7 +7,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_booking::BookingEngine;
 use rustledger_core::{
     Amount, BookedCost, BookingMethod, CostNumber, CostSpec, IncompleteAmount, NaiveDate, Posting,

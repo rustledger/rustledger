@@ -178,7 +178,7 @@ fn render_display_context<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
 
     /// Render with no source map — exercises the programmatic-source
     /// fallback. Used by tests that hand-build a `DisplayContext`.

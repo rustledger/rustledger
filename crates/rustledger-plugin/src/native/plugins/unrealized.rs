@@ -45,7 +45,7 @@ impl NativePlugin for UnrealizedPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        use rust_decimal::Decimal;
+        use rustledger_core::Decimal;
         use std::collections::HashMap;
         use std::str::FromStr;
 

@@ -12,8 +12,8 @@
 //! time.
 
 use proptest::prelude::*;
-use rust_decimal::Decimal;
 use rustledger_booking::{calculate_residual, interpolate};
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, IncompleteAmount, NaiveDate, Posting, Transaction};
 
 fn date_strategy() -> impl Strategy<Value = NaiveDate> {

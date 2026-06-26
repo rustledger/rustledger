@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, Inventory, Metadata, NaiveDate, Position, Transaction};
 
 /// Source location information for a directive.
@@ -135,7 +135,7 @@ impl Value {
         std::mem::discriminant(self).hash(state);
         match self {
             Self::String(s) => s.hash(state),
-            Self::Number(d) => d.serialize().hash(state),
+            Self::Number(d) => d.hash(state),
             Self::Integer(i) => i.hash(state),
             Self::Date(d) => {
                 d.year().hash(state);
@@ -144,25 +144,25 @@ impl Value {
             }
             Self::Boolean(b) => b.hash(state),
             Self::Amount(a) => {
-                a.number.serialize().hash(state);
+                a.number.hash(state);
                 a.currency.as_str().hash(state);
             }
             Self::Position(p) => {
                 // Dereference boxed position
-                p.units.number.serialize().hash(state);
+                p.units.number.hash(state);
                 p.units.currency.as_str().hash(state);
                 if let Some(cost) = &p.cost {
-                    cost.number.serialize().hash(state);
+                    cost.number.hash(state);
                     cost.currency.as_str().hash(state);
                 }
             }
             Self::Inventory(inv) => {
                 // Dereference boxed inventory
                 for pos in inv.positions() {
-                    pos.units.number.serialize().hash(state);
+                    pos.units.number.hash(state);
                     pos.units.currency.as_str().hash(state);
                     if let Some(cost) = &pos.cost {
-                        cost.number.serialize().hash(state);
+                        cost.number.hash(state);
                         cost.currency.as_str().hash(state);
                     }
                 }

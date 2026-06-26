@@ -11,7 +11,7 @@
 //! any future drift on a shared column (the structural root of the balance bug
 //! #2 the audit flagged) is caught here.
 
-use rust_decimal_macros::dec;
+use rustledger_core::dec;
 use rustledger_core::{
     Amount, CostNumber, CostSpec, Directive, NaiveDate, Open, Posting, Transaction,
 };
@@ -27,9 +27,9 @@ fn fixture() -> Vec<Directive> {
     let txn = |d: u32,
                narr: &str,
                a: &str,
-               an: rust_decimal::Decimal,
+               an: rustledger_core::Decimal,
                b: &str,
-               bn: rust_decimal::Decimal| {
+               bn: rustledger_core::Decimal| {
         Directive::Transaction(
             Transaction::new(date(2024, 1, d), narr)
                 .with_flag('*')

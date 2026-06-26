@@ -20,7 +20,7 @@
 //! verifiable subset and a prerequisite for any commutativity claim.
 
 use proptest::prelude::*;
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, Directive, NaiveDate, Open, Posting, PriceAnnotation, Transaction};
 use rustledger_plugin::{
     NativePluginRegistry, PluginInput, PluginOptions, PluginOutput, directives_to_wrappers,

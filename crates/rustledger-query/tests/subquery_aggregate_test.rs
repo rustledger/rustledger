@@ -2,7 +2,7 @@
 //! must aggregate to a single value, not evaluate per inner row — and
 //! `COUNT(col)` in that path must exclude NULLs.
 
-use rust_decimal_macros::dec;
+use rustledger_core::dec;
 use rustledger_core::{Amount, Directive, NaiveDate, Open, Posting, Transaction};
 use rustledger_query::{Executor, Value, parse};
 

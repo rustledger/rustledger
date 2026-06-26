@@ -16,7 +16,7 @@
 //! Pairs that already share a `^link:` tag are skipped — re-running the
 //! detector against an already-linked ledger is a no-op (idempotent).
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{Directive, IncompleteAmount, Link, NaiveDate};
 use std::collections::{BTreeMap, HashSet};
 

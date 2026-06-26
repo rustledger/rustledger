@@ -4,7 +4,7 @@ use crate::types::{
     AmountData, CostData, DirectiveData, DirectiveWrapper, PluginError, PluginInput, PluginOp,
     PluginOutput, PriceAnnotationData, PriceAnnotationView, PriceData,
 };
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::extract_per_unit_price;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;

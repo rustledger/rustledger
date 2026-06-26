@@ -41,7 +41,6 @@ impl Executor<'_> {
                 let count = match args[0].clone() {
                     Value::Integer(n) => n,
                     Value::Number(d) => {
-                        use rust_decimal::prelude::ToPrimitive;
                         // Reject decimals with fractional parts
                         if !d.fract().is_zero() {
                             return Err(QueryError::Type(
@@ -103,12 +102,9 @@ impl Executor<'_> {
                 let year = match args[0].clone() {
                     Value::Integer(i) => i32::try_from(i)
                         .map_err(|_| QueryError::Type("DATE: year out of range".to_string()))?,
-                    Value::Number(n) => {
-                        use rust_decimal::prelude::ToPrimitive;
-                        n.to_i32().ok_or_else(|| {
-                            QueryError::Type("DATE: year must be an integer".to_string())
-                        })?
-                    }
+                    Value::Number(n) => n.to_i32().ok_or_else(|| {
+                        QueryError::Type("DATE: year must be an integer".to_string())
+                    })?,
                     _ => {
                         return Err(QueryError::Type(
                             "DATE: year must be an integer".to_string(),
@@ -119,12 +115,9 @@ impl Executor<'_> {
                     Value::Integer(i) => u32::try_from(i).map_err(|_| {
                         QueryError::Type("DATE: month must be a non-negative integer".to_string())
                     })?,
-                    Value::Number(n) => {
-                        use rust_decimal::prelude::ToPrimitive;
-                        n.to_u32().ok_or_else(|| {
-                            QueryError::Type("DATE: month must be an integer".to_string())
-                        })?
-                    }
+                    Value::Number(n) => n.to_u32().ok_or_else(|| {
+                        QueryError::Type("DATE: month must be an integer".to_string())
+                    })?,
                     _ => {
                         return Err(QueryError::Type(
                             "DATE: month must be an integer".to_string(),
@@ -135,12 +128,9 @@ impl Executor<'_> {
                     Value::Integer(i) => u32::try_from(i).map_err(|_| {
                         QueryError::Type("DATE: day must be a non-negative integer".to_string())
                     })?,
-                    Value::Number(n) => {
-                        use rust_decimal::prelude::ToPrimitive;
-                        n.to_u32().ok_or_else(|| {
-                            QueryError::Type("DATE: day must be an integer".to_string())
-                        })?
-                    }
+                    Value::Number(n) => n.to_u32().ok_or_else(|| {
+                        QueryError::Type("DATE: day must be an integer".to_string())
+                    })?,
                     _ => return Err(QueryError::Type("DATE: day must be an integer".to_string())),
                 };
                 rustledger_core::naive_date(year, month, day)
@@ -173,7 +163,6 @@ impl Executor<'_> {
         let result = match second_arg {
             Value::Integer(days) => add_days(date, days)?,
             Value::Number(n) => {
-                use rust_decimal::prelude::ToPrimitive;
                 let days = n.to_i64().ok_or_else(|| {
                     QueryError::Type("DATE_ADD: days must be an integer".to_string())
                 })?;

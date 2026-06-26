@@ -1,6 +1,6 @@
 //! Regression for issue #972: sub-cent CSV amounts (e.g. `0.01`) used to silently parse as `0.1`.
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_importer::{ImporterConfig, csv_importer::CsvImporter};
 use std::str::FromStr;
 

@@ -4,7 +4,7 @@
 //! to verify that all transactions were captured correctly. Generates
 //! balance assertion directives for the ledger.
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, Balance, Directive, MetaValue, Metadata, NaiveDate};
 
 /// A balance point extracted from a bank statement.

@@ -22,7 +22,7 @@
 //!   Equity:Opening-Balances -1000.00 USD
 //! ```
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::{
     Amount, Currency, Directive, Inventory, NaiveDate, Pad, Position, Posting, Spanned, Transaction,
 };
@@ -390,7 +390,7 @@ pub fn merge_with_padding_spanned(directives: &[Spanned<Directive>]) -> Vec<Span
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
     use rustledger_core::{Balance, Open};
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {

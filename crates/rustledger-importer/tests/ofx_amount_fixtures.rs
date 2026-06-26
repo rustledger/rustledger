@@ -1,11 +1,11 @@
 //! Differential tests for OFX amount parsing.
 //!
-//! The OFX importer parses `<TRNAMT>` values into `rust_decimal::Decimal`. These tests
+//! The OFX importer parses `<TRNAMT>` values into `rustledger_core::Decimal`. These tests
 //! construct OFX content with known amounts (sub-cent, negative, large) and assert that
 //! every posting carries the exact `Decimal` value from the source — so that any silent
 //! corruption in amount parsing would surface here, the same way #972 surfaced for CSV.
 
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_importer::{
     OfxImporter,
     config::{CsvConfig, ImporterConfig, ImporterType},

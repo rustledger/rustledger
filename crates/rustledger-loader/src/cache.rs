@@ -30,7 +30,7 @@
 
 use crate::Options;
 use blake3::Hasher;
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::Directive;
 use rustledger_parser::Spanned;
 use std::fs;
@@ -647,7 +647,7 @@ pub fn invalidate_cache(main_file: &Path) {
 mod tests {
     use super::*;
     use crate::dedup::reintern_directives;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
     use rustledger_core::{Amount, Posting, Transaction};
     use rustledger_parser::Span;
 
@@ -1029,7 +1029,7 @@ mod tests {
     #[cfg(target_endian = "little")]
     #[test]
     fn cost_number_archived_bytes_match_v8_fixtures() {
-        use rust_decimal_macros::dec;
+        use rustledger_core::dec;
         use rustledger_core::{BookedCost, CostNumber};
 
         // Tripwire: regenerating the byte fixtures below without
@@ -1214,7 +1214,7 @@ mod tests {
     /// here too.**
     #[test]
     fn cached_options_field_parity() {
-        use rust_decimal_macros::dec;
+        use rustledger_core::dec;
 
         let mut opts = Options::new();
         opts.title = Some("T".into());

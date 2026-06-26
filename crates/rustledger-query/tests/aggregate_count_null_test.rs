@@ -1,7 +1,7 @@
 //! Regression: `COUNT(column)` counts only non-NULL values (SQL semantics,
 //! matching beanquery), while `COUNT(*)` counts every row.
 
-use rust_decimal_macros::dec;
+use rustledger_core::dec;
 use rustledger_core::{Amount, Directive, NaiveDate, Open, Posting, Transaction};
 use rustledger_query::{Executor, Value, parse};
 

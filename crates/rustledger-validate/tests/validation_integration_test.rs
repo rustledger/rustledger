@@ -3,7 +3,7 @@
 //! Tests cover all validation rules: account lifecycle, balance assertions,
 //! transaction balancing, currency constraints, and booking validation.
 
-use rust_decimal_macros::dec;
+use rustledger_core::dec;
 use rustledger_core::{
     Amount, Balance, Close, Directive, NaiveDate, Open, Pad, Posting, PriceAnnotation, Transaction,
 };

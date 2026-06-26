@@ -19,7 +19,7 @@
 //! ```
 
 use regex::Regex;
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_core::NaiveDate;
 use std::collections::HashSet;
 use std::str::FromStr;

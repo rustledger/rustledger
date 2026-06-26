@@ -1,6 +1,5 @@
 use super::Conversion;
 use anyhow::{Context, Result};
-use rust_decimal;
 use rustledger_core::Directive;
 use rustledger_loader::Loader;
 use std::collections::BTreeMap;
@@ -72,7 +71,7 @@ pub(super) fn cmd_region<W: Write>(
     writeln!(writer)?;
 
     // Calculate balances for these transactions
-    let mut balances: BTreeMap<String, rust_decimal::Decimal> = BTreeMap::new();
+    let mut balances: BTreeMap<String, rustledger_core::Decimal> = BTreeMap::new();
 
     for txn in &region_transactions {
         writeln!(writer, "{} {} \"{}\"", txn.date, txn.flag, txn.narration)?;

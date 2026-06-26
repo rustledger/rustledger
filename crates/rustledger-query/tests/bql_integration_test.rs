@@ -2,7 +2,7 @@
 //!
 //! Tests cover parsing, execution, aggregation, filtering, and real-world query scenarios.
 
-use rust_decimal_macros::dec;
+use rustledger_core::dec;
 use rustledger_core::{
     Amount, Close, Commodity, CostSpec, Directive, Document, Event, Inventory, NaiveDate, Note,
     Open, Posting, PriceAnnotation, Transaction,
@@ -790,12 +790,12 @@ fn test_average_account_sum_position_merges_to_single_pool() {
     fn buy(account: &str, qty: i64, price: i64) -> Posting {
         Posting::new(
             account,
-            Amount::new(rust_decimal::Decimal::from(qty), "AAPL"),
+            Amount::new(rustledger_core::Decimal::from(qty), "AAPL"),
         )
         .with_cost(
             CostSpec::empty()
                 .with_number(rustledger_core::CostNumber::PerUnit {
-                    value: rust_decimal::Decimal::from(price),
+                    value: rustledger_core::Decimal::from(price),
                 })
                 .with_currency("USD"),
         )
@@ -1216,7 +1216,7 @@ fn test_journal_at_cost_balance_keeps_mixed_cost_currencies() {
         Value::Inventory(inv) => inv,
         other => panic!("expected Inventory, got {other:?}"),
     };
-    let mut by_currency: std::collections::HashMap<&str, rust_decimal::Decimal> =
+    let mut by_currency: std::collections::HashMap<&str, rustledger_core::Decimal> =
         std::collections::HashMap::new();
     for p in last_balance.positions() {
         by_currency.insert(p.units.currency.as_str(), p.units.number);
@@ -5176,11 +5176,17 @@ fn make_large_directives() -> Vec<Directive> {
         let txn = Transaction::new(date(2024, 1, day), format!("Transaction {i}"))
             .with_synthesized_posting(Posting::new(
                 "Expenses:Test",
-                Amount::new(dec!(10) + rust_decimal::Decimal::from(i64::from(i)), "USD"),
+                Amount::new(
+                    dec!(10) + rustledger_core::Decimal::from(i64::from(i)),
+                    "USD",
+                ),
             ))
             .with_synthesized_posting(Posting::new(
                 "Assets:Bank",
-                Amount::new(dec!(-10) - rust_decimal::Decimal::from(i64::from(i)), "USD"),
+                Amount::new(
+                    dec!(-10) - rustledger_core::Decimal::from(i64::from(i)),
+                    "USD",
+                ),
             ));
         directives.push(Directive::Transaction(txn));
     }

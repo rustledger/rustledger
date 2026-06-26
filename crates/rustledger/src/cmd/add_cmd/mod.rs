@@ -51,7 +51,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read as IoRead, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 #[cfg(test)]
-use {rust_decimal::Decimal, std::str::FromStr};
+use {rustledger_core::Decimal, std::str::FromStr};
 
 /// Add transactions to beancount files.
 #[derive(Parser, Debug)]

@@ -104,8 +104,8 @@ const PARALLEL_SORT_THRESHOLD: usize = 5000;
 /// out via rayon. Below this, the dispatch overhead outweighs the
 /// per-syscall savings.
 const PARALLEL_DOC_EXISTS_THRESHOLD: usize = 64;
-use rust_decimal::Decimal;
 use rustc_hash::{FxHashMap, FxHashSet};
+use rustledger_core::Decimal;
 use rustledger_core::{Account, BookingMethod, Commodity, Currency, Directive, Inventory};
 use rustledger_parser::{SYNTHESIZED_FILE_ID, Spanned};
 use std::collections::BTreeSet;
@@ -1099,7 +1099,7 @@ fn validate_commodity_precision_meta(comm: &Commodity, errors: &mut Vec<Validati
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal_macros::dec;
+    use rustledger_core::dec;
     use rustledger_core::{
         Amount, Balance, Close, Document, MetaValue, NaiveDate, Open, Pad, Posting, Transaction,
     };

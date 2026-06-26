@@ -11,7 +11,7 @@
 //! isn't idempotent fails here.
 
 use proptest::prelude::*;
-use rust_decimal::Decimal;
+use rustledger_core::Decimal;
 use rustledger_parser::format::format_source;
 use rustledger_parser::parse;
 

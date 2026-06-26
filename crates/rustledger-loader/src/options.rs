@@ -1,7 +1,7 @@
 //! Beancount options parsing and storage.
 
-use rust_decimal::Decimal;
 use rustc_hash::{FxHashMap, FxHashSet};
+use rustledger_core::Decimal;
 use std::str::FromStr;
 
 /// Known beancount option names.
@@ -917,7 +917,7 @@ mod tests {
         assert!(opts.warnings.is_empty());
         assert_eq!(
             opts.inferred_tolerance_default.get("USD"),
-            Some(&rust_decimal_macros::dec!(0.005))
+            Some(&rustledger_core::dec!(0.005))
         );
 
         // Test wildcard
@@ -926,7 +926,7 @@ mod tests {
         assert!(opts2.warnings.is_empty());
         assert_eq!(
             opts2.inferred_tolerance_default.get("*"),
-            Some(&rust_decimal_macros::dec!(0.01))
+            Some(&rustledger_core::dec!(0.01))
         );
 
         // Test invalid format

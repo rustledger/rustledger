@@ -3,8 +3,8 @@
 use crate::config::{AmountFormat, ColumnSpec, CsvConfig, ImporterConfig, ImporterType};
 use crate::{EnrichedImportResult, ImportResult, Importer};
 use anyhow::{Context, Result};
-use rust_decimal::Decimal;
 use rustc_hash::FxHashMap as HashMap;
+use rustledger_core::Decimal;
 use rustledger_core::{Amount, Directive, Posting, Transaction};
 use rustledger_ops::enrichment::{CategorizationMethod, Enrichment};
 use std::fs::File;

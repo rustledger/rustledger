@@ -304,6 +304,8 @@ fn residual_weight<D: WeightNum>(transaction: &Transaction) -> FxHashMap<Currenc
 ///
 /// See: `spec/tla/DoubleEntry.tla`
 #[must_use]
+// clippy::implicit_hasher still fires for a concrete `FxBuildHasher` (it wants
+// the fn generic over `S: BuildHasher`); the explicit fast hasher is the point.
 #[allow(clippy::implicit_hasher)]
 pub fn calculate_residual(transaction: &Transaction) -> FxHashMap<Currency, Decimal> {
     residual_weight::<Decimal>(transaction)

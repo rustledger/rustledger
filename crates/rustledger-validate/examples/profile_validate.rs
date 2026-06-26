@@ -72,6 +72,10 @@ fn main() {
     let subaccounts: usize = a.next().and_then(|s| s.parse().ok()).unwrap_or(64);
     let txns: usize = a.next().and_then(|s| s.parse().ok()).unwrap_or(20_000);
     let iters: usize = a.next().and_then(|s| s.parse().ok()).unwrap_or(5);
+    if subaccounts == 0 {
+        eprintln!("error: <subaccounts> must be > 0");
+        std::process::exit(2);
+    }
 
     let directives = generate(subaccounts, txns);
     let mut sink = 0usize;

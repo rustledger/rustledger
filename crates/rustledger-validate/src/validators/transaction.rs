@@ -387,7 +387,7 @@ pub fn calculate_tolerances(
     if options.infer_tolerance_from_cost {
         // Accumulated cost/price tolerances per currency
         let mut cost_tolerances: FxHashMap<rustledger_core::Currency, Decimal> =
-            FxHashMap::default();
+            FxHashMap::with_capacity_and_hasher(txn.postings.len().min(4), Default::default());
 
         for posting in &txn.postings {
             if let Some(units) = posting.amount() {

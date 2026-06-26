@@ -248,8 +248,6 @@ fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
 fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
     use crate::SyntaxKind as K;
     let mut is_total = false;
-    let mut is_merge = false;
-    let mut merge_phase = false; // after opener, while only WHITESPACE seen
     let mut first_number: Option<rust_decimal::Decimal> = None;
     let mut seen_number = false;
     let mut past_hash = false;
@@ -264,20 +262,11 @@ fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
             continue;
         };
         match crate::BeancountLanguage::kind_from_raw(t.kind()) {
-            K::L_DOUBLE_BRACE => {
-                is_total = true;
-                merge_phase = true;
-            }
-            K::L_BRACE | K::L_BRACE_HASH => merge_phase = true,
-            K::WHITESPACE => {} // keep merge_phase across leading whitespace
-            K::STAR => {
-                if merge_phase {
-                    is_merge = true;
-                }
-                merge_phase = false;
-            }
+            // `is_total` = any `{{` present anywhere — mirrors red `is_total()`
+            // (`first_token(.., L_DOUBLE_BRACE).is_some()`). The merge flag is
+            // computed separately in `cost_is_merge` (see its note).
+            K::L_DOUBLE_BRACE => is_total = true,
             K::NUMBER => {
-                merge_phase = false;
                 if past_hash && post_hash_total.is_none() {
                     post_hash_total = parse_decimal_token(t.text());
                 } else if !seen_number {
@@ -286,26 +275,22 @@ fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
                 }
             }
             K::HASH => {
-                merge_phase = false;
                 if seen_number {
                     past_hash = true;
                 }
             }
             K::CURRENCY if currency.is_none() => {
-                merge_phase = false;
                 currency = Some(Currency::new(t.text()));
             }
             K::DATE if !date_seen => {
-                merge_phase = false;
                 date_seen = true;
                 date = parse_date_token(t.text());
             }
             K::STRING if !label_seen => {
-                merge_phase = false;
                 label_seen = true;
                 label = decode_string_token(t.text());
             }
-            _ => merge_phase = false,
+            _ => {}
         }
     }
     let number = if let Some(total) = post_hash_total {
@@ -322,8 +307,33 @@ fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
         currency,
         date,
         label,
-        merge: is_merge,
+        merge: cost_is_merge(node),
     }
+}
+
+/// Whether a cost spec is a merge cost (`{*}`). Exact mirror of red
+/// [`super::ast`]'s `CostSpec::is_merge`: only the first non-whitespace token
+/// after the opener decides (`*` → merge, anything else → not), and it stops
+/// there. The previous scan-everything pass kept re-arming on later openers, so
+/// a malformed cost containing a stray `{*}`-shaped run flipped the flag where
+/// red did not — the divergence `fuzz_green_eq_red` caught. Keep byte-for-byte
+/// with red.
+fn cost_is_merge(node: &rowan::GreenNodeData) -> bool {
+    use crate::SyntaxKind as K;
+    let mut past_opener = false;
+    for child in node.children() {
+        let NodeOrToken::Token(t) = child else {
+            continue;
+        };
+        match crate::BeancountLanguage::kind_from_raw(t.kind()) {
+            K::L_BRACE | K::L_DOUBLE_BRACE | K::L_BRACE_HASH => past_opener = true,
+            K::WHITESPACE if past_opener => {}
+            K::STAR if past_opener => return true,
+            _ if past_opener => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Convert a `PRICE_ANNOTATION` green node into a `PriceAnnotation`: `@@`→Total,
@@ -1236,6 +1246,11 @@ mod tests {
             // scan ahead to the second date and keep a directive red discards.
             "2020-99-99 * \"x\" 2021-01-01\n  A 1 USD\n  B\n",
             "3333/33/3 X\n", // the minimized fuzz shape (slash date, month 33)
+            // Regression (fuzz_green_eq_red cost-merge): a malformed cost `{,{*`
+            // — opener, a non-`*` token (red's is_merge decides not-merge and
+            // stops), then a SECOND opener + `*`. Green must mirror red and not
+            // re-arm on the later `{`, which used to flip `merge` to true.
+            "2020-01-01 *\n Aa:B 1 USD{,{*",
             "\u{feff}2020-01-01 * \"p\"\n  A 1 USD\n  B\n", // BOM
             "2020-01-01 * \"é\" \"münts\"\n  Aaa 1 EUR\n  B\n", // multi-byte
             "garbage\n2020-01-01 open A\n2020-01-01 * \"p\"\n  A 1 USD\n  B\n", // error recovery

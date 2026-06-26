@@ -37,6 +37,17 @@ use rust_decimal::prelude::ToPrimitive;
 /// Re-export so the [`crate::dec`] macro can reach fastnum's compile-time macro.
 #[doc(hidden)]
 pub use fastnum::dec256 as __dec256;
+/// `dec!` literals always fit rust_decimal (≤28 digits), so they go through its
+/// compile-time macro — `const`, `Small`, zero runtime cost (no demote).
+#[doc(hidden)]
+pub use rust_decimal_macros::dec as __rd_dec;
+
+/// Wrap a compile-time rust_decimal literal as a `Small` decimal (`const`).
+#[doc(hidden)]
+#[must_use]
+pub const fn from_small_const(rd: Rd) -> Decimal {
+    small(rd)
+}
 
 /// Context for `D256` parse/arithmetic: full precision, no traps (a bad op
 /// yields a detectable non-finite value rather than panicking).
@@ -793,7 +804,7 @@ impl<'de> serde::Deserialize<'de> for Decimal {
 #[macro_export]
 macro_rules! dec {
     ($($t:tt)*) => {
-        $crate::Decimal::from_d512($crate::decimal::__dec256!($($t)*))
+        $crate::decimal::from_small_const($crate::decimal::__rd_dec!($($t)*))
     };
 }
 

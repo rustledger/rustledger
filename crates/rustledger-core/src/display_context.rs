@@ -621,7 +621,7 @@ impl DisplayContext {
     }
 
     /// Get the decimal precision (number of digits after decimal point) of a number.
-    const fn decimal_precision(number: Decimal) -> u32 {
+    fn decimal_precision(number: Decimal) -> u32 {
         // scale() returns the number of decimal digits
         number.scale()
     }

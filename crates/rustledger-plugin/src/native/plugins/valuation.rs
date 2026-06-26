@@ -37,7 +37,9 @@ use super::super::{NativePlugin, RegularPlugin};
 
 const MAPPED_CURRENCY_PRECISION: u32 = 7;
 const TAG_TO_ADD: &str = "valuation-applied";
-const EPSILON: Decimal = rustledger_core::dec!(0.000000001); // 1e-9
+fn epsilon() -> Decimal {
+    rustledger_core::Decimal::new(1, 9)
+} // 1e-9
 
 /// Plugin for tracking opaque fund values.
 pub struct ValuationPlugin;
@@ -507,11 +509,11 @@ fn process_fifo_sell(
     let mut total_pnl = Decimal::ZERO;
     let current_price = state.last_price;
 
-    while remaining > EPSILON && !state.lots.is_empty() {
+    while remaining > epsilon() && !state.lots.is_empty() {
         let lot = &mut state.lots[0];
         let lot_value_at_current_price = lot.units * current_price;
 
-        if lot_value_at_current_price <= remaining + EPSILON {
+        if lot_value_at_current_price <= remaining + epsilon() {
             // Sell entire lot
             let units_to_sell = lot.units;
             let pnl = (current_price - lot.cost_per_unit) * units_to_sell;
@@ -650,7 +652,7 @@ fn process_valuation_assertion(
     // Get current balance in synthetic units
     let last_balance = state.total_units;
 
-    if last_balance.abs() < EPSILON {
+    if last_balance.abs() < epsilon() {
         errors.push(PluginError {
             message: format!("Valuation called on empty account {account}"),
             source_file: directive.filename.clone(),

@@ -64,19 +64,19 @@ impl Amount {
 
     /// Check if the amount is zero.
     #[must_use]
-    pub const fn is_zero(&self) -> bool {
+    pub fn is_zero(&self) -> bool {
         self.number.is_zero()
     }
 
     /// Check if the amount is positive.
     #[must_use]
-    pub const fn is_positive(&self) -> bool {
+    pub fn is_positive(&self) -> bool {
         self.number.is_sign_positive() && !self.number.is_zero()
     }
 
     /// Check if the amount is negative.
     #[must_use]
-    pub const fn is_negative(&self) -> bool {
+    pub fn is_negative(&self) -> bool {
         self.number.is_sign_negative()
     }
 
@@ -91,7 +91,7 @@ impl Amount {
 
     /// Get the scale (number of decimal places) of this amount.
     #[must_use]
-    pub const fn scale(&self) -> u32 {
+    pub fn scale(&self) -> u32 {
         self.number.scale()
     }
 

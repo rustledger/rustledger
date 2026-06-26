@@ -92,7 +92,7 @@ impl Position {
 
     /// Check if this position is empty (zero units).
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.units.is_zero()
     }
 

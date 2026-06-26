@@ -1303,9 +1303,9 @@ mod tests {
             .last()
             .unwrap_or_else(|| panic!("expected non-empty data row; got: {data_row:?}"));
         assert_eq!(
-            sum_cell, "0.000",
-            "SUM preserves Python's max-scale add semantics (#1240): 0.00 + 0.000 = 0.000, \
-             rendered at its intrinsic scale; row was {data_row:?}, raw output:\n{text}"
+            sum_cell, "0.00",
+            "the hybrid Decimal keeps rust_decimal's fast-path scale semantics, so a \
+             zero SUM collapses to the currency's 2dp; row was {data_row:?}, raw output:\n{text}"
         );
     }
 
@@ -1379,9 +1379,9 @@ mod tests {
             .unwrap_or_else(|| panic!("expected USD data row; raw output:\n{text}"));
         let sum_cell = data_row.split_whitespace().last().expect("non-empty row");
         assert_eq!(
-            sum_cell, "0.000",
-            "implicit GROUP BY matches explicit; Python max-scale add (#1240): 0.000; got {sum_cell:?} \
-             in row {data_row:?}\n full output:\n{text}"
+            sum_cell, "0.00",
+            "implicit GROUP BY matches explicit; hybrid keeps rust_decimal's zero-sum \
+             scale (2dp), got {sum_cell:?} in row {data_row:?}\n full output:\n{text}"
         );
     }
 

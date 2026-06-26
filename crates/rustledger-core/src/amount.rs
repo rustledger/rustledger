@@ -184,13 +184,6 @@ impl Amount {
 
 impl fmt::Display for Amount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // If this number came from an over-precise literal (more than
-        // rust_decimal's ~29 digits), show the exact value Beancount keeps
-        // rather than the rounded one. `exact_of` short-circuits via a lock-free
-        // flag for the common case (no over-precise literal in the load).
-        if let Some(exact) = crate::decimal_exact::exact_of(self.number) {
-            return write!(f, "{exact} {}", self.currency);
-        }
         write!(f, "{} {}", self.number, self.currency)
     }
 }

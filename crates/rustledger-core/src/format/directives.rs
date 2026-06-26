@@ -22,6 +22,13 @@ pub(super) fn metadata_lines(meta: &Metadata, indent: &str, out: &mut Vec<Format
     let mut keys: Vec<_> = meta.keys().collect();
     keys.sort();
     for key in keys {
+        // `__`-prefixed keys are internal (the over-precise-units exact literal
+        // `decimal_exact::EXACT_NUMBER_META_KEY`, interpolation's `__automatic__`);
+        // they are not user-written source and must not be emitted, so formatted
+        // output round-trips.
+        if key.starts_with("__") {
+            continue;
+        }
         out.push(FormatLine::Plain(format!(
             "{indent}{}: {}",
             key,

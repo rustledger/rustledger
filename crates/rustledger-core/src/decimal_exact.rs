@@ -1,174 +1,121 @@
-//! Side channel for over-precise decimal literals.
+//! Carry over-precise decimal literals (more than `rust_decimal`'s ~28 digits)
+//! by **identity**, not by value.
 //!
-//! `Decimal` is a 16-byte [`rust_decimal::Decimal`] so every hot path runs at
-//! full speed. rust_decimal holds ~29 significant digits; a literal with more
-//! — which Beancount, using Python's arbitrary-precision `Decimal`, keeps
-//! exactly — is rounded on parse. To *match or exceed* Beancount without taxing
-//! the hot path, the exact value is stashed here, keyed by the rounded value,
-//! and consulted only in the cold paths that need full precision: balance
-//! residual computation and exact display.
+//! `Decimal` stays a 16-byte `rust_decimal::Decimal` so every hot path runs at
+//! full speed. rust_decimal holds ~28–29 significant digits; Beancount (Python's
+//! arbitrary-precision `Decimal`) keeps more, so a literal beyond that is rounded
+//! on parse and a balance residual that depends on those digits can read zero
+//! (the transaction looks balanced) where Beancount flags an imbalance.
 //!
-//! Hot paths — arithmetic, comparison, the 99.999% of ledgers with no
-//! over-precise literal — never touch this table: the `Decimal` is unchanged,
-//! and [`any_overprecise`] is a single relaxed atomic load (no lock) so callers
-//! can skip per-value lookups entirely when nothing is recorded.
+//! This module is **stateless**. It only *detects* over-precision
+//! ([`overprecise_literal`]) and *reconstitutes* an exact value
+//! ([`exact_to_bigdecimal`]). The exact literal is stored on the specific
+//! posting that owns it, in posting metadata under [`EXACT_NUMBER_META_KEY`], so:
+//! - there is no global table and no value-keyed lookup, so an over-precise
+//!   literal can never leak its exact value onto an unrelated amount that merely
+//!   shares its rounded value (the bug a value-keyed side table had);
+//! - the exact value travels with the directive through booking and the on-disk
+//!   parse cache (it is ordinary metadata, archived for free);
+//! - the validator escalates to the precise residual **per transaction** (does
+//!   this transaction have a posting carrying the key?), not process-globally.
 //!
-//! ## Soundness
-//!
-//! - **Thread-safe.** The loader parses includes in parallel (rayon), so the
-//!   table is an `RwLock` written from any thread during parse and read during
-//!   validation. Over-precise literals are rare, so write contention is
-//!   negligible; lookups take a shared read lock.
-//! - **Collision-safe.** If two *distinct* over-precise literals round to the
-//!   same `Decimal`, the key is poisoned (`None`) and both fall back to the
-//!   rounded value — i.e. to plain rust_decimal behaviour, which is exactly what
-//!   we'd have without this channel. So a collision can only *lose* the
-//!   precision bonus, never produce a wrong value.
-//! - **Append-only, self-bounding.** Entries are only added, never auto-cleared:
-//!   a `clear` racing a concurrent load could wipe a live entry, and the cost of
-//!   *not* clearing is trivial because over-precise literals are vanishingly
-//!   rare (a handful of entries per affected file, and affected files barely
-//!   exist). [`clear`] is exposed for explicit reset (tests, long-lived
-//!   embedders).
-//! - **Cache-aware.** A cache hit skips parsing, so an over-precise value would
-//!   never be recorded. The loader therefore does **not** write the on-disk
-//!   parse cache for a load containing an over-precise literal (see
-//!   `rustledger`'s `loadcache`), so such files re-parse every time and the
-//!   channel stays correct. Caching the exact values instead is a future option.
+//! Scope: only an over-precise **posting units** literal is carried (the case
+//! that affects balance residuals). Over-precise numbers in other positions
+//! (cost/price/metadata) round like plain `rust_decimal` — sound (never wrong),
+//! just not extended to exceed Beancount there. That's an extension point, not a
+//! correctness gap.
 
-use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, RwLock};
 
 use bigdecimal::BigDecimal;
 use rust_decimal::Decimal;
 
-/// Rounded value → exact value. `None` marks a poisoned (collided) key.
-static EXACT: LazyLock<RwLock<HashMap<Decimal, Option<BigDecimal>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+/// Posting-metadata key holding the exact, **unsigned** literal of an
+/// over-precise units amount (the sign lives on `units.number`). Internal:
+/// `__`-prefixed keys are filtered from formatted output.
+pub const EXACT_NUMBER_META_KEY: &str = "__exact_number__";
 
-/// Lock-free fast path for [`any_overprecise`]: set whenever a value is
-/// recorded, cleared by [`clear`]. Lets the hot validate gate skip the lock.
-static PRESENT: AtomicBool = AtomicBool::new(false);
+/// A literal with at most this many digit characters always fits rust_decimal
+/// (≤28 significant digits is guaranteed, and a ≤28-digit integer is < 2^96), so
+/// the round-trip check can be skipped. 29+ digit chars *may* exceed it and are
+/// checked.
+const MAX_FIT_DIGITS: usize = 28;
 
-/// Number of significant digits beyond which a literal *might* exceed
-/// rust_decimal and is worth the precise round-trip check. rust_decimal holds a
-/// 96-bit coefficient (~29 digits), so anything with ≤29 digits is exact.
-const MAX_EXACT_DIGITS: usize = 29;
-
-/// If `literal` carries more precision than `rounded` (its rust_decimal parse)
-/// can hold, record the exact value. Cheap-gated on digit count, so the common
-/// case (≤29 digits — every real amount) returns immediately with no lock, no
-/// allocation, no `BigDecimal`.
-pub fn record_if_overprecise(rounded: Decimal, literal: &str) {
-    if literal.bytes().filter(u8::is_ascii_digit).count() <= MAX_EXACT_DIGITS {
-        return; // fits rust_decimal exactly — nothing to stash
-    }
-    let Ok(exact) = BigDecimal::from_str(literal) else {
-        return;
-    };
-    // Only stash if rust_decimal actually lost precision.
-    let rounded_big = BigDecimal::from_str(&rounded.to_string()).unwrap_or_default();
-    if exact == rounded_big {
-        return;
-    }
-    let mut table = EXACT
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match table.get(&rounded) {
-        // Same exact value already recorded — idempotent.
-        Some(Some(existing)) if *existing == exact => {}
-        // Distinct value already recorded (or already poisoned): collision →
-        // poison so both fall back to the rounded value. Sound, never wrong.
-        Some(_) => {
-            table.insert(rounded, None);
-        }
-        None => {
-            table.insert(rounded, Some(exact));
-        }
-    }
-    PRESENT.store(true, Ordering::Relaxed);
-}
-
-/// The exact value behind a (possibly rounded) `Decimal`, if it came from an
-/// over-precise literal. `None` for everything that fit rust_decimal — and the
-/// overwhelmingly common case (nothing recorded) returns via the lock-free flag
-/// without ever taking the lock.
+/// If `literal` carries more precision than its rust_decimal parse (`rounded`)
+/// can hold, return the exact literal verbatim. `None` when it fits — the common
+/// case, gated cheaply on digit count so ordinary amounts cost only a scan.
+///
+/// `literal` must be the cleaned numeric text (no thousands separators).
 #[must_use]
-pub fn exact_of(rounded: Decimal) -> Option<BigDecimal> {
-    if !PRESENT.load(Ordering::Relaxed) {
+pub fn overprecise_literal(rounded: Decimal, literal: &str) -> Option<String> {
+    if literal.bytes().filter(u8::is_ascii_digit).count() <= MAX_FIT_DIGITS {
         return None;
     }
-    let table = EXACT
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    table.get(&rounded).cloned().flatten()
+    let exact = BigDecimal::from_str(literal).ok()?;
+    let rounded_big = BigDecimal::from_str(&rounded.to_string()).ok()?;
+    (exact != rounded_big).then(|| literal.to_string())
 }
 
-/// Whether any over-precise literal has been recorded. A single relaxed atomic
-/// load — cheap enough for the per-transaction validation gate.
+/// Reconstitute a stored exact literal as a `BigDecimal`, applying `negative`
+/// (the literal is stored unsigned; the sign lives on the posting's number).
 #[must_use]
-pub fn any_overprecise() -> bool {
-    PRESENT.load(Ordering::Relaxed)
-}
-
-/// Reset the side channel. Called at the start of each load to bound memory and
-/// drop stale entries.
-pub fn clear() {
-    EXACT
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
-    PRESENT.store(false, Ordering::Relaxed);
+pub fn exact_to_bigdecimal(literal: &str, negative: bool) -> Option<BigDecimal> {
+    let v = BigDecimal::from_str(literal).ok()?;
+    Some(if negative { -v } else { v })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // One test: the static table is process-global, so separate `#[test]`
-    // functions would race on it under cargo's parallel runner. The sections run
-    // sequentially here.
     #[test]
-    fn side_channel_behaviour() {
-        // 1. ≤29-digit literals fit rust_decimal — never recorded.
-        clear();
-        let d = Decimal::from_str("1.2345678901234567890123456789").unwrap(); // 29 digits
-        record_if_overprecise(d, "1.2345678901234567890123456789");
-        assert!(
-            !any_overprecise(),
-            "≤29-digit literal must not touch the table"
-        );
-        assert_eq!(exact_of(d), None);
+    fn fits_rust_decimal_returns_none() {
+        for s in [
+            "0",
+            "1",
+            "123.45",
+            "0.0000000000000000000000000001", // 1e-28, fits (scale 28)
+            "9999999999999999999999999999",   // 28-digit integer, fits
+            "1.2345678901234567890123456789", // 28 sig digits
+        ] {
+            let d = Decimal::from_str(s).unwrap();
+            assert_eq!(overprecise_literal(d, s), None, "{s} fits rust_decimal");
+        }
+    }
 
-        // 2. An over-precise literal is preserved exactly; clear() resets.
-        clear();
-        let lit = "1.234567890123456789012345678901234"; // 34 sig digits
-        let rounded = Decimal::from_str(lit).unwrap(); // rounded to ~29
-        record_if_overprecise(rounded, lit);
-        assert!(any_overprecise());
+    #[test]
+    fn over_precise_returns_exact_literal() {
+        // 1 + 1e-30 (31 sig digits): rust_decimal rounds away the final 1, so
+        // the detector returns the exact literal verbatim.
+        let s = "1.000000000000000000000000000001";
+        let d = Decimal::from_str(s).unwrap();
+        assert_ne!(
+            d.to_string(),
+            s,
+            "rust_decimal must have rounded the literal"
+        );
+        assert_eq!(overprecise_literal(d, s).as_deref(), Some(s));
+
+        // A sub-1 literal whose rounded value is ZERO is still detected. Crucial:
+        // the rounded value (0) is NOT a shared key — the exact literal is carried
+        // per-posting — so this can't leak onto unrelated zero amounts.
+        let z = "0.000000000000000000000000000001"; // 1e-30, 30 fractional places
+        if let Ok(zd) = Decimal::from_str(z) {
+            assert!(zd.is_zero(), "rust_decimal rounded it to 0");
+            assert_eq!(overprecise_literal(zd, z).as_deref(), Some(z));
+        }
+    }
+
+    #[test]
+    fn sign_is_applied_on_reconstitution() {
+        let s = "1.000000000000000000000000000001";
         assert_eq!(
-            exact_of(rounded).expect("recorded").to_string(),
-            lit,
-            "exact literal recovered, unrounded"
+            exact_to_bigdecimal(s, false).unwrap().to_string(),
+            "1.000000000000000000000000000001"
         );
-        assert_ne!(rounded.to_string(), lit, "rust_decimal really did round it");
-        clear();
-        assert!(!any_overprecise(), "clear() resets the flag");
-        assert_eq!(exact_of(rounded), None);
-
-        // 3. Two distinct literals that round to the same Decimal → poisoned →
-        //    both fall back to rust_decimal (None). Sound, never wrong.
-        clear();
-        let a = "1.000000000000000000000000000000001"; // …0001
-        let b = "1.000000000000000000000000000000002"; // …0002
-        let ra = Decimal::from_str(a).unwrap();
-        let rb = Decimal::from_str(b).unwrap();
-        assert_eq!(ra, rb, "both round to the same Decimal (precondition)");
-        record_if_overprecise(ra, a);
-        record_if_overprecise(rb, b);
-        assert_eq!(exact_of(ra), None, "collided key falls back, never wrong");
-        clear();
+        assert_eq!(
+            exact_to_bigdecimal(s, true).unwrap().to_string(),
+            "-1.000000000000000000000000000001"
+        );
     }
 }

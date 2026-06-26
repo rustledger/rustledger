@@ -343,7 +343,10 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     silently ignored `option "display_precision" "USD:0.0001"` (formatting
 ///     fell back to inferred precision) and the other two settings. New fields
 ///     change the archived layout, so old bytes must be regenerated.
-const CACHE_VERSION: u32 = 12;
+// v13: postings may carry an over-precise-units exact literal in metadata
+// (`decimal_exact::EXACT_NUMBER_META_KEY`); pre-v13 caches lack it, so a hit
+// would miss the residual it exists to catch — invalidate them.
+const CACHE_VERSION: u32 = 13;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1042,7 +1045,7 @@ mod tests {
         // v12 (`CachedOptions` field-parity) all bumped CACHE_VERSION without
         // touching the `CostNumber` archived layout these fixtures pin, so the
         // byte arrays below are still valid and only FIXTURE_VERSION moves.
-        const FIXTURE_VERSION: u32 = 12;
+        const FIXTURE_VERSION: u32 = 13;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1115,7 +1118,7 @@ mod tests {
 
         // Tripwire: regenerating the hash without bumping CACHE_VERSION leaves
         // users with rotten metadata caches.
-        const FIXTURE_VERSION: u32 = 12;
+        const FIXTURE_VERSION: u32 = 13;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

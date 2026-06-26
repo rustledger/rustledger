@@ -307,13 +307,20 @@ pub fn validate_transaction_balance(
         .all(|residual| *residual == Decimal::ZERO);
 
     // Skip the expensive BigDecimal pass only when the fast residual is exactly
-    // zero AND no over-precise literal exists. A literal carrying more than
-    // rust_decimal's ~29 digits can round so the fast residual reads zero while
-    // the exact values don't balance — so escalate to the precise path (which
-    // consults the exact-value side channel). `any_overprecise` is a cheap
-    // global empty-map test: false for every ordinary ledger, so this is a
-    // no-op for the 99.999% case.
-    if all_zero && !rustledger_core::decimal_exact::any_overprecise() {
+    // zero AND no posting in THIS transaction carries an over-precise units
+    // literal. Such a literal (more than rust_decimal's ~28 digits) is rounded,
+    // so the fast residual can read zero while the exact values don't balance —
+    // escalate to the precise path, which reconstitutes the exact value from the
+    // posting's metadata. The probe is per-transaction (no global state) and
+    // short-circuits on `all_zero`, and skips the key hash entirely for the
+    // common empty-metadata posting, so it costs nothing for ordinary ledgers.
+    if all_zero
+        && !txn.postings.iter().any(|p| {
+            !p.meta.is_empty()
+                && p.meta
+                    .contains_key(rustledger_core::decimal_exact::EXACT_NUMBER_META_KEY)
+        })
+    {
         return;
     }
 

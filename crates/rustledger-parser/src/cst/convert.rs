@@ -1056,14 +1056,35 @@ fn convert_posting(
             span,
         ));
     }
-    let units = first_amount
-        .and_then(ast::Amount::cast)
-        .and_then(|amt| convert_amount_to_incomplete(&amt, errors, bom_offset));
+    let amount_node = first_amount.and_then(ast::Amount::cast);
+    let units = amount_node
+        .as_ref()
+        .and_then(|amt| convert_amount_to_incomplete(amt, errors, bom_offset));
     let cost = node.cost_spec().map(|cs| convert_cost_spec(&cs));
     let price = node
         .price_annotation()
         .map(|pa| convert_price_annotation(&pa, errors, bom_offset));
-    let meta = convert_meta_entries(node.syntax());
+    let mut meta = convert_meta_entries(node.syntax());
+
+    // If the units literal carries more precision than `rust_decimal` can hold,
+    // stash the exact (unsigned) literal on THIS posting's metadata, keyed by
+    // identity (the posting itself). The balance residual reconstitutes it (with
+    // the units sign) so we match Beancount's arbitrary precision; everything
+    // else sees the rounded `rust_decimal` value, untouched. Only a simple-number
+    // units amount qualifies (arithmetic results round, like rust_decimal).
+    if let Some(IncompleteAmount::Complete(amt)) = &units
+        && let Some(num) = amount_node.as_ref().and_then(ast::Amount::number)
+    {
+        let cleaned = num.text().replace(',', "");
+        if let Some(exact) =
+            rustledger_core::decimal_exact::overprecise_literal(amt.number, &cleaned)
+        {
+            meta.insert(
+                rustledger_core::decimal_exact::EXACT_NUMBER_META_KEY.to_string(),
+                rustledger_core::MetaValue::String(exact),
+            );
+        }
+    }
 
     // Trailing comments on the posting line: COMMENT direct-
     // child tokens BEFORE the terminator NEWLINE. The legacy
@@ -2476,13 +2497,7 @@ pub(super) fn parse_decimal_token(text: &str) -> Option<Decimal> {
     } else {
         text
     };
-    let d = Decimal::from_str(s).ok()?;
-    // Side channel: if this literal carries more precision than rust_decimal can
-    // hold, stash the exact value so the cold paths (balance residual, exact
-    // display) can recover it. Cheap-gated on digit count — every real amount
-    // (≤29 digits) returns immediately, costing nothing on the hot parse path.
-    rustledger_core::decimal_exact::record_if_overprecise(d, s);
-    Some(d)
+    Decimal::from_str(s).ok()
 }
 
 /// Choose `Int` vs `Number` for a numeric metadata literal.

@@ -2167,23 +2167,31 @@ fn test_e1001_dedup_is_per_posting_not_account_date() {
 /// Over-precise literal: `1 + 1e-30` (31 sig digits) rounds to exactly `1` in
 /// rust_decimal, so a rust_decimal-only balance check sees `1 + (-1) = 0` and
 /// would call the transaction balanced. The `decimal_exact` side channel
-/// preserves the exact value, so the precise residual path catches the `1e-30`
-/// imbalance — matching Beancount, at zero hot-path cost.
+/// preserves the exact value (per-posting, by identity), so the precise residual
+/// path catches the `1e-30` imbalance — matching Beancount.
+///
+/// The fixture also contains a genuinely-balanced `1 - 1 = 0` transaction that
+/// must NOT be flagged: this pins the no-value-leak property — the exact value
+/// of the over-precise literal must not contaminate an unrelated amount that
+/// merely shares its rounded value (`1`).
 #[test]
-fn over_precise_literal_residual_detected_beyond_rust_decimal() {
+fn over_precise_literal_residual_detected_without_value_leak() {
     let path = fixtures_path("over_precise_residual.beancount");
     let options = rustledger_loader::LoadOptions {
         validate: true,
         ..Default::default()
     };
     let ledger = rustledger_loader::load(&path, &options).expect("should load");
-    assert!(
-        ledger.errors.iter().any(|e| e.message.contains("balance")),
-        "expected an imbalance error from the over-precise residual; got: {:?}",
-        ledger
-            .errors
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
+    let balance_errors: Vec<&str> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("balance"))
+        .map(|e| e.message.as_str())
+        .collect();
+    assert_eq!(
+        balance_errors.len(),
+        1,
+        "expected exactly ONE imbalance (the over-precise txn); a second would \
+         mean the exact value leaked onto the plain `1 - 1` txn. Got: {balance_errors:?}"
     );
 }

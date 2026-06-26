@@ -189,6 +189,22 @@ pub(super) fn convert_transaction_header(
 /// Convert a non-arithmetic `AMOUNT` green node into an `IncompleteAmount`.
 /// Returns `None` for arithmetic-expression amounts (`5 + 3 USD`) — those are a
 /// later increment; the simple oracle corpus excludes them.
+/// The cleaned (comma-free) text of the first `NUMBER` token in an `AMOUNT`
+/// node, or `None` if the amount has no plain number (arithmetic). Used to
+/// detect over-precise units literals; mirrors the red path's
+/// `ast::Amount::number().text()`.
+fn green_number_text(node: &rowan::GreenNodeData) -> Option<String> {
+    use crate::SyntaxKind as K;
+    for child in node.children() {
+        if let NodeOrToken::Token(t) = child
+            && crate::BeancountLanguage::kind_from_raw(t.kind()) == K::NUMBER
+        {
+            return Some(t.text().replace(',', ""));
+        }
+    }
+    None
+}
+
 fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
     use crate::SyntaxKind as K;
     let mut sign_minus = false;
@@ -520,6 +536,7 @@ pub(super) fn convert_simple_posting(
     let mut trailing_comments: Vec<String> = Vec::new();
     let mut newline_off: Option<usize> = None;
     let mut amount_seen = false;
+    let mut exact_units: Option<String> = None;
     let mut offset = base;
     for child in node.children() {
         let len = match &child {
@@ -547,7 +564,20 @@ pub(super) fn convert_simple_posting(
                 K::AMOUNT if !amount_seen => {
                     amount_seen = true;
                     // `?` bails on an arithmetic/malformed amount (later increment).
-                    units = Some(simple_amount(n)?);
+                    let u = simple_amount(n)?;
+                    // Over-precise units literal (more than rust_decimal's ~28
+                    // digits): stash the exact literal on this posting's metadata
+                    // so the balance residual recovers full precision. Mirrors
+                    // the red path in `convert.rs` — green and red are two
+                    // independent converters and both must carry it.
+                    if let IncompleteAmount::Complete(a) = &u
+                        && let Some(numtxt) = green_number_text(n)
+                        && let Some(exact) =
+                            rustledger_core::decimal_exact::overprecise_literal(a.number, &numtxt)
+                    {
+                        exact_units = Some(exact);
+                    }
+                    units = Some(u);
                 }
                 K::COST_SPEC if cost.is_none() => cost = Some(convert_cost_spec(n)),
                 // `?` bails if the price amount is arithmetic/malformed.
@@ -567,6 +597,12 @@ pub(super) fn convert_simple_posting(
         offset += len;
     }
     let account = account?;
+    if let Some(exact) = exact_units {
+        meta.insert(
+            rustledger_core::decimal_exact::EXACT_NUMBER_META_KEY.to_string(),
+            rustledger_core::MetaValue::String(exact),
+        );
+    }
     let end = newline_off.unwrap_or(base + u32::from(node.text_len()) as usize);
     Some(Spanned::new(
         Posting {

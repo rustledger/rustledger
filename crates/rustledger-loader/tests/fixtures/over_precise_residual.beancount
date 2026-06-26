@@ -1,10 +1,17 @@
 2024-01-01 open Assets:A
 2024-01-01 open Assets:B
+2024-01-01 open Assets:C
+2024-01-01 open Assets:D
 
-; Assets:A is 1 + 1e-30 (31 significant digits). rust_decimal rounds it to
-; exactly 1, so a rust_decimal-only check would see 1 + (-1) = 0 and report the
-; transaction as balanced. Beancount (arbitrary precision) keeps the 1e-30 and
-; flags an imbalance; the decimal_exact side channel lets us match that.
-2024-01-02 * "over-precise residual"
+; A is 1 + 1e-30 (31 sig digits). rust_decimal rounds it to exactly 1, so a
+; rust_decimal-only check sees 1 + (-1) = 0 and calls this balanced. Beancount
+; keeps the 1e-30 and flags an imbalance; the decimal_exact side channel matches it.
+2024-01-02 * "over-precise residual (must be flagged)"
   Assets:A   1.000000000000000000000000000001 USD
   Assets:B  -1 USD
+
+; Plain 1 - 1 = 0. Genuinely balanced. Must NOT be flagged — i.e. the exact
+; value of A's literal must not leak onto this unrelated amount equal to 1.
+2024-01-03 * "plain balanced (must NOT be flagged — no value leak)"
+  Assets:C   1 USD
+  Assets:D  -1 USD

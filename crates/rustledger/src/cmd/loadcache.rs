@@ -76,16 +76,7 @@ pub fn load_result_cached(
     // Save to cache unless disabled, or the load had errors / option
     // warnings (E7001-E7006 are not stored, so caching would silently
     // drop them on a later hit). Mirrors `check`.
-    //
-    // Also skip caching when the load contained an over-precise literal: its
-    // exact value lives in a parse-time side channel (`decimal_exact`), which a
-    // cache hit would bypass — so such (extremely rare) files re-parse every
-    // time, keeping the side channel correct. See `rustledger_core::decimal_exact`.
-    if !cache_disabled
-        && result.errors.is_empty()
-        && result.options.warnings.is_empty()
-        && !rustledger_core::decimal_exact::any_overprecise()
-    {
+    if !cache_disabled && result.errors.is_empty() && result.options.warnings.is_empty() {
         let files: Vec<String> = result
             .source_map
             .files()

@@ -143,6 +143,16 @@ pub(crate) fn infer_cost_currency_from_postings(transaction: &Transaction) -> Op
 /// reproduces the precise path's arithmetic byte-for-byte.
 trait WeightNum: Clone + Default + std::ops::AddAssign + std::ops::Mul<Output = Self> {
     fn from_decimal(d: Decimal) -> Self;
+
+    /// The value of a posting's **units**, exact-aware. When this posting parsed
+    /// an over-precise units literal (more than `rust_decimal`'s ~28 digits), it
+    /// carries the exact literal in metadata ([`EXACT_NUMBER_META_KEY`]); the
+    /// full-precision backend (`BigDecimal`) reconstitutes it (with the units
+    /// sign) so the residual matches Beancount. The fast backend (`Decimal`)
+    /// uses the rounded value — the default below.
+    fn units_value(_posting: &rustledger_core::Posting, units: &Amount) -> Self {
+        Self::from_decimal(units.number)
+    }
 }
 
 impl WeightNum for Decimal {
@@ -154,6 +164,17 @@ impl WeightNum for Decimal {
 impl WeightNum for BigDecimal {
     fn from_decimal(d: Decimal) -> Self {
         to_big(d)
+    }
+
+    fn units_value(posting: &rustledger_core::Posting, units: &Amount) -> Self {
+        use rustledger_core::decimal_exact::{EXACT_NUMBER_META_KEY, exact_to_bigdecimal};
+        if let Some(rustledger_core::MetaValue::String(lit)) =
+            posting.meta.get(EXACT_NUMBER_META_KEY)
+            && let Some(exact) = exact_to_bigdecimal(lit, units.number.is_sign_negative())
+        {
+            return exact;
+        }
+        to_big(units.number)
     }
 }
 
@@ -281,8 +302,10 @@ fn residual_weight<D: WeightNum>(transaction: &Transaction) -> HashMap<Currency,
                     D::from_decimal(units.number);
             }
         } else {
-            // Simple posting: weight is just the units
-            *residuals.entry(units.currency.clone()).or_default() += D::from_decimal(units.number);
+            // Simple posting: weight is just the units (exact-aware, so an
+            // over-precise units literal contributes its full precision to the
+            // residual rather than its rounded value).
+            *residuals.entry(units.currency.clone()).or_default() += D::units_value(posting, units);
         }
     }
 
@@ -315,15 +338,7 @@ pub fn calculate_residual(transaction: &Transaction) -> HashMap<Currency, Decima
 /// preserves full precision.
 fn to_big(d: Decimal) -> BigDecimal {
     use std::str::FromStr;
-    // Side channel: if `d` is the rounded form of an over-precise literal (more
-    // than rust_decimal's ~29 digits), use its exact value so the balance
-    // residual matches Beancount's arbitrary-precision arithmetic. This lookup
-    // is in the cold precise-residual path only, and short-circuits instantly
-    // when no over-precise literal exists (the 99.999% case).
-    if let Some(exact) = rustledger_core::decimal_exact::exact_of(d) {
-        return exact;
-    }
-    // rust_decimal Display is exact; BigDecimal FromStr handles any decimal string
+    // rust_decimal Display is exact; BigDecimal FromStr handles any decimal string.
     BigDecimal::from_str(&d.to_string()).expect("Decimal always produces valid decimal string")
 }
 

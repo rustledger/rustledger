@@ -95,14 +95,14 @@ Two complementary ways to drive rustledger from AI tools:
 
 - **MCP server** — `npx @rustledger/mcp-server` exposes rustledger to AI assistants (Claude, Cursor, …) over the [Model Context Protocol](https://modelcontextprotocol.io). Best for **interactive** assistants that call tools mid-conversation.
 
-- **`ag-rledger`** — an *agent-native* CLI that mirrors every `rledger` command but emits a single structured **JSON envelope** per call instead of human-readable text, so coding agents and scripts parse results directly (no output scraping). Each envelope carries `ok`, a typed `exit_code`, the command's `result.data`, and a HATEOAS `next_action` hint. Best for **headless** agents and shell pipelines. It ships beside `rledger` in the [release archives](https://github.com/rustledger/rustledger/releases) (and builds from source with `cargo build -p rustledger --bin ag-rledger --features ag-rledger`):
+- **`ag-rledger`** — an *agent-native* CLI that mirrors every `rledger` command but emits a single structured **JSON envelope** per call instead of human-readable text, so coding agents and scripts parse results directly (no output scraping). Each envelope carries `ok`, a typed `exit_code`, the command's output under `result`, and a HATEOAS `next_action` hint; pass the inner command's `--json` to get fully structured `result.data`. Best for **headless** agents and shell pipelines. It ships beside `rledger` in the [release archives](https://github.com/rustledger/rustledger/releases) (or build it with `cargo build -p rustledger --bin ag-rledger --no-default-features --features ag-rledger`):
 
   ```console
-  $ ag-rledger check ledger.beancount
-  {"ok":true,"exit_code":0,"result":{"data":{"error_count":0}}, …}
+  $ ag-rledger check --json ledger.beancount
+  {"ok":true,"exit_code":0,"result":{"data":{"error_count":0}},"next_action":"…"}
   ```
 
-  Same subcommands as `rledger` (`check`, `query`, `format`, `import`, …) — only the I/O is JSON.
+  Same subcommands as `rledger` (`check`, `query`, `format`, `report`, `extract`, …) — only the I/O is JSON.
 
 ## Quick Start
 

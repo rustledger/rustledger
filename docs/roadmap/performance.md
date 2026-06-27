@@ -11,7 +11,7 @@ Items that are partially done or the most valuable next steps.
 | Item | Notes |
 |------|-------|
 | Bumpalo arena for AST nodes | Phase 6 (lexer + arena) is partial: the Logos lexer and structured CST parser shipped, but AST allocation still uses the global allocator. Move AST nodes into a [bumpalo](https://github.com/fitzgen/bumpalo) arena (~11 instructions/alloc, mass-reset on discard), which fits the parse → use → discard lifecycle exactly. The win depends on how alloc-bound parsing actually is — measure with `pipeline_bench` before and after rather than committing to a number up front. |
-| Pre-allocate hot HashMaps | Add `.with_capacity()` in validation and query execution to avoid rehashing on known-size maps (`rustledger-validate`, `rustledger-query/src/executor.rs`). |
+| Pre-size remaining hot HashMaps | Largely addressed — the dominant lever turned out to be the *hasher*, not capacity. Hot per-item maps (validation balance/tolerance, CSV-import header→column, query GROUP BY / pivot / window / price) used the default SipHash where the codebase standard is `FxHashMap`; now swapped across all three (≈ −8.3% validation, −5.6% import, SipHash eliminated in query). What's left is pre-sizing the query-executor maps with `with_capacity_and_hasher` on known-size inputs. |
 
 ## Next
 
@@ -31,11 +31,14 @@ Aspirational ideas; not yet committed and may not pan out.
 |------|-------|
 | Query-result caching / materialized views | Cache or pre-materialize results of repeated BQL queries (e.g. balance/inventory rollups) so dashboards and watch-mode workflows avoid recomputing from scratch. Needs an invalidation story tied to ledger changes. Exploratory. |
 | Streaming / large-ledger handling | Process very large ledgers without holding the full directive set in memory at once — streaming parse/validate and chunked computation for ledgers that exceed comfortable memory budgets. Exploratory; depends on demand for 1M+ transaction files. |
-| Further parallelism | Extend rayon-based parallelism into additional independent stages where profiling shows multi-core headroom, keeping order-sensitive steps (sorting, booking) sequential for correctness. Exploratory. |
+| Further parallelism | Extend rayon-based parallelism into additional independent stages where profiling shows multi-core headroom, keeping order-sensitive steps (sorting, booking) sequential. The inverse is also open: validation *already* uses rayon, and on small ledgers its plumbing (~9% of instructions in a profile) is pure overhead — a size threshold that runs serially below N directives may help typical-ledger latency more than adding parallelism would. Exploratory. |
+| Formatter allocation churn | `format_directives` is ~40% allocator-bound on large output — a fresh `String` / `format!` per line and per amount (measured with the `profile_format` example). The lever is rendering into one reused buffer. Deferred: `rledger format` is an occasional command, off the per-check hot path, so only worth it if it surfaces for a real user. |
 
 ## Notes
 
 - Benchmark each change with `cargo bench --bench pipeline_bench`; nightly CI tracks results on the benchmarks branch.
+- Per-subsystem cachegrind harnesses exist as `profile_*` examples (`pipeline` / `query` / `booking` / `validate` / `format` / `import`): build with `--profile profiling`, then run under `valgrind --tool=cachegrind` + `cg_annotate`.
+- The booking lot inventory's `imbl::Vector` cost (~20% on cost-heavy ledgers) is a **deliberate** trade for O(1) BQL JOURNAL snapshots (#1086, documented on `core::Inventory`) — not a target; don't revert it to `Vec`.
 - Only pursue arena/mmap/streaming work if profiling shows the corresponding bottleneck on real workloads — correctness first.
 
 ---

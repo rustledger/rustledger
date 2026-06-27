@@ -251,6 +251,7 @@ fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
     let mut first_number: Option<rust_decimal::Decimal> = None;
     let mut seen_number = false;
     let mut past_hash = false;
+    let mut post_hash_seen = false;
     let mut post_hash_total: Option<rust_decimal::Decimal> = None;
     let mut currency: Option<Currency> = None;
     let mut date: Option<NaiveDate> = None;
@@ -267,8 +268,19 @@ fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
             // computed separately in `cost_is_merge` (see its note).
             K::L_DOUBLE_BRACE => is_total = true,
             K::NUMBER => {
-                if past_hash && post_hash_total.is_none() {
-                    post_hash_total = parse_decimal_token(t.text());
+                if past_hash {
+                    // Latch the FIRST post-`#` NUMBER token (parsed or not),
+                    // exactly like red's `cost_total_after_hash`, which `return`s
+                    // at the first NUMBER after the hash regardless of whether it
+                    // parses. The old `post_hash_total.is_none()` guard kept
+                    // scanning past an unparseable total and latched a *later*
+                    // number, so green produced `Total{later}` where red yielded
+                    // `None` (→ `PerUnit{first}`) — the `fuzz_green_eq_red`
+                    // divergence on `{N # <unparseable> T}`.
+                    if !post_hash_seen {
+                        post_hash_seen = true;
+                        post_hash_total = parse_decimal_token(t.text());
+                    }
                 } else if !seen_number {
                     seen_number = true;
                     first_number = parse_decimal_token(t.text());
@@ -1251,6 +1263,13 @@ mod tests {
             // stops), then a SECOND opener + `*`. Green must mirror red and not
             // re-arm on the later `{`, which used to flip `merge` to true.
             "2020-01-01 *\n Aa:B 1 USD{,{*",
+            // Regression (fuzz_green_eq_red cost-number): `{N # <X> T}` where the
+            // first post-`#` token is a NUMBER that does NOT parse (here
+            // `\u{06f6}`, an Arabic-Indic digit the lexer tokenizes as NUMBER but
+            // rust_decimal rejects). Green must latch that FIRST post-hash NUMBER
+            // (-> None -> PerUnit{N}, mirroring red's `cost_total_after_hash`),
+            // NOT scan on to the later parseable `0` and emit `Total{0}`.
+            "7046/7/1D\n\tA:F{7#\u{06f6}>0",
             "\u{feff}2020-01-01 * \"p\"\n  A 1 USD\n  B\n", // BOM
             "2020-01-01 * \"é\" \"münts\"\n  Aaa 1 EUR\n  B\n", // multi-byte
             "garbage\n2020-01-01 open A\n2020-01-01 * \"p\"\n  A 1 USD\n  B\n", // error recovery

@@ -178,26 +178,6 @@ impl ManifestEntry {
     }
 }
 
-/// Calculate SHA-256 hash of content (requires sha2 crate in calling code).
-/// Returns hex-encoded string.
-pub fn sha256_hex(content: &[u8]) -> String {
-    use std::fmt::Write;
-
-    // Simple SHA-256 implementation using std only is complex,
-    // so this function expects the caller to provide the hash.
-    // This is a placeholder that returns a dummy value.
-    // In actual use, use sha2::Sha256::digest(content).
-    let mut result = String::with_capacity(64);
-    for byte in content.iter().take(32) {
-        write!(&mut result, "{byte:02x}").unwrap();
-    }
-    // Pad with zeros if content is shorter
-    while result.len() < 64 {
-        result.push('0');
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

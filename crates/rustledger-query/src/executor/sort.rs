@@ -1,6 +1,6 @@
 //! Sorting and pivoting functions.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::ast::{Expr, Literal, OrderSpec, SortDirection};
 use crate::error::QueryError;
@@ -25,7 +25,7 @@ impl Executor<'_> {
         }
 
         // Build a map from column names to indices
-        let column_indices: std::collections::HashMap<&str, usize> = result
+        let column_indices: rustc_hash::FxHashMap<&str, usize> = result
             .columns
             .iter()
             .enumerate()
@@ -254,7 +254,7 @@ impl Executor<'_> {
         // that share a u64 hash (probability ~2⁻⁶⁴, but pinned out
         // for correctness). Same pattern as `pivot_lookup` below.
         let mut groups: Vec<(Value, Vec<&Row>)> = Vec::new();
-        let mut group_index: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut group_index: HashMap<u64, Vec<usize>> = HashMap::default();
         for row in &result.rows {
             let key = row.get(key_col_idx).cloned().unwrap_or(Value::Null);
             let h = hash_single_value(&key);
@@ -282,7 +282,7 @@ impl Executor<'_> {
             // If multiple input rows share the same `(key, pivot_value)`
             // pair, only the first one wins — see "Input contract" in
             // the function docstring.
-            let mut pivot_lookup: HashMap<u64, Vec<&Row>> = HashMap::new();
+            let mut pivot_lookup: HashMap<u64, Vec<&Row>> = HashMap::default();
             for &row in &group_rows {
                 let pv = row.get(pivot_value_col_idx).cloned().unwrap_or(Value::Null);
                 pivot_lookup

@@ -4,8 +4,8 @@
 //! and allows looking up prices for currency conversions.
 
 use rust_decimal::Decimal;
+use rustc_hash::FxHashMap as HashMap;
 use rustledger_core::{Amount, Directive, NaiveDate, Price as PriceDirective, Transaction};
-use std::collections::HashMap;
 
 /// A price entry.
 ///
@@ -48,7 +48,7 @@ impl PriceDatabase {
     /// Create a new empty price database.
     pub fn new() -> Self {
         Self {
-            prices: HashMap::new(),
+            prices: HashMap::default(),
         }
     }
 

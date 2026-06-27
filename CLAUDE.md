@@ -246,9 +246,9 @@ rledger aims for full Python beancount compatibility on **correct behavior**, bu
 
 Each Python bug we encounter falls into one of three buckets:
 
-1. **Fixable** — we deviate, stay stricter or more correct than Python. Examples: cost-spec precision (beanquery#275, fixed in #1106 / #1113), `FIRST` aggregator short-circuit (beanquery#279, we evaluate eagerly), empty-aggregate quirk (beanquery#1055, we return the SQL identity), elided-zero-to-unopened-account check (Python #877-equivalent, we catch via two-phase validation).
+1. **Fixable** — we deviate, stay stricter or more correct than Python. Examples: cost-spec precision (beanquery#275, fixed in #1106 / #1113), `FIRST` aggregator short-circuit (beanquery#279, we evaluate eagerly), empty-aggregate quirk (beanquery#1055, we return the SQL identity), elided-zero-to-unopened-account check (Python #877-equivalent, we catch via two-phase validation), over-precise balance residuals beyond `rust_decimal`'s ~28–29-significant-digit ceiling (#1240 — a two-tier validator recomputes the residual in `BigDecimal`; see Decimal Precision below).
 
-1. **Not fixable locally** — we match Python and document the limitation. Example: the `rust_decimal` 28-digit ceiling (would require migrating to an arbitrary-precision library like `bigdecimal` — significant refactor for negligible practical benefit).
+1. **Not fixable locally** — we match Python and document the limitation. Example: an amount *literal* written with more than ~28–29 significant digits is rounded on parse (`rust_decimal`'s coefficient ceiling); no real ledger contains them, and a recovery side channel was prototyped and rejected (see Decimal Precision below). Over-precise *residuals* are a separate, already-fixed case (above).
 
 1. **Out of scope** — we mask the Python-side divergence in the compat suite so it doesn't pollute the metric. Example: `KNOWN_PYTHON_DIVERGENCES` entries in `scripts/compat-bql-test.py`.
 
@@ -391,16 +391,32 @@ Before marking the PR as ready:
 
 ## Known Limitations & TODOs
 
-### Decimal Precision (1 compat test failure)
+### Decimal Precision (#1240 — resolved via two-tier validation)
 
-**Issue**: `rust_decimal` has a maximum precision of 28 digits, while Python's `decimal.Decimal` has arbitrary precision. This causes 1 compatibility test failure out of 694 (99.86% pass rate).
+`rustledger-core::Decimal` is `rust_decimal::Decimal` (16 bytes, `Copy`, ~28–29
+significant digits), kept as-is for hot-path speed. Python's `decimal.Decimal` is
+arbitrary precision, so a balance **residual** born from products of
+normal-precision inputs can require more digits than `rust_decimal` can hold.
+Historically rledger rounded such a residual to zero and called the transaction
+balanced where Python flagged an imbalance — e.g.
+`beancount-lazy-plugins/tests_data_output_some_fund_output.beancount`, where
+Python detects a `2.19×10⁻²⁵ USD` residual.
 
-**Affected file**: `beancount-lazy-plugins/tests_data_output_some_fund_output.beancount`
+**Resolved** by a two-tier check in the balance validator
+(`validate_transaction_balance` in `rustledger-validate`): it computes the fast
+residual via `rustledger_booking::calculate_residual` (`rust_decimal`); when that
+is non-zero it escalates to `rustledger_booking::calculate_residual_precise`,
+which recomputes the residual in `BigDecimal` from each posting's exact
+(≤28–29-digit) inputs.
+`rledger check` now reports that residual (`2.187500000E-25 USD`) — at full
+hot-path speed for ordinary ledgers, with no change to the `Decimal` type.
 
-- Contains amounts with 28 decimal places (e.g., `0.7142857142857142857142857143`)
-- Python detects a `2×10⁻²⁵ USD` residual imbalance
-- Rust considers it balanced due to precision limits
-
-**TODO**: Replace `rust_decimal` with an arbitrary-precision decimal library (e.g., `bigdecimal`) to achieve 100% compatibility with Python beancount's balance checking. This is a significant refactor affecting `rustledger-core` and all downstream crates.
-
-**Practical impact**: None for real-world usage. No legitimate ledger has 28-decimal-place amounts.
+**Remaining limitation (a non-issue):** a single amount *literal* written with
+more than ~28–29 significant digits is still rounded when parsed, because the
+value itself cannot be held in `rust_decimal`. No legitimate ledger contains such
+literals. A per-posting "side channel" to carry the exact literal into the
+precise residual was prototyped and **rejected** (`spike/decimal-exact-sidechannel`,
+PR #1613): recovering the value is not enough — the tolerance comparison,
+cost/price weights, and every metadata egress (text / BQL / wasm) would each have
+to become exact-aware, which is disproportionate work for a case that does not
+occur in practice.

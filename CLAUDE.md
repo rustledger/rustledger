@@ -246,7 +246,7 @@ rledger aims for full Python beancount compatibility on **correct behavior**, bu
 
 Each Python bug we encounter falls into one of three buckets:
 
-1. **Fixable** — we deviate, stay stricter or more correct than Python. Examples: cost-spec precision (beanquery#275, fixed in #1106 / #1113), `FIRST` aggregator short-circuit (beanquery#279, we evaluate eagerly), empty-aggregate quirk (beanquery#1055, we return the SQL identity), elided-zero-to-unopened-account check (Python #877-equivalent, we catch via two-phase validation), over-precise balance residuals beyond `rust_decimal`'s 28-digit ceiling (#1240 — a two-tier validator recomputes the residual in `BigDecimal`; see Decimal Precision below).
+1. **Fixable** — we deviate, stay stricter or more correct than Python. Examples: cost-spec precision (beanquery#275, fixed in #1106 / #1113), `FIRST` aggregator short-circuit (beanquery#279, we evaluate eagerly), empty-aggregate quirk (beanquery#1055, we return the SQL identity), elided-zero-to-unopened-account check (Python #877-equivalent, we catch via two-phase validation), over-precise balance residuals beyond `rust_decimal`'s ~28–29-significant-digit ceiling (#1240 — a two-tier validator recomputes the residual in `BigDecimal`; see Decimal Precision below).
 
 1. **Not fixable locally** — we match Python and document the limitation. Example: an amount *literal* written with more than ~28–29 significant digits is rounded on parse (`rust_decimal`'s coefficient ceiling); no real ledger contains them, and a recovery side channel was prototyped and rejected (see Decimal Precision below). Over-precise *residuals* are a separate, already-fixed case (above).
 
@@ -402,10 +402,12 @@ balanced where Python flagged an imbalance — e.g.
 `beancount-lazy-plugins/tests_data_output_some_fund_output.beancount`, where
 Python detects a `2.19×10⁻²⁵ USD` residual.
 
-**Resolved** by a two-tier balance validator (`rustledger-booking`): the fast
-path computes the residual in `rust_decimal` (`calculate_residual`); when that is
-non-zero it escalates to `calculate_residual_precise`, which recomputes the
-residual in `BigDecimal` from each posting's exact (≤28–29-digit) inputs.
+**Resolved** by a two-tier check in the balance validator
+(`validate_transaction_balance` in `rustledger-validate`): it computes the fast
+residual via `rustledger_booking::calculate_residual` (`rust_decimal`); when that
+is non-zero it escalates to `rustledger_booking::calculate_residual_precise`,
+which recomputes the residual in `BigDecimal` from each posting's exact
+(≤28–29-digit) inputs.
 `rledger check` now reports that residual (`2.187500000E-25 USD`) — at full
 hot-path speed for ordinary ledgers, with no change to the `Decimal` type.
 

@@ -66,6 +66,13 @@ jobs:
           # post-1.93 language feature would still surface as a normal compile
           # error rather than this spurious gate.
           sed -i 's/^rust-version = .*/rust-version = "1.85"/' Cargo.toml
+          # Fail loudly if the substitution did not take (e.g. the Cargo.toml
+          # layout changed), instead of silently leaving the gate in place and
+          # letting Kani hit the same cryptic MSRV error later.
+          grep -qx 'rust-version = "1.85"' Cargo.toml || {
+            echo "::error::MSRV relax failed: did not rewrite [workspace.package].rust-version in Cargo.toml" >&2
+            exit 1
+          }
       - name: Install Kani
         run: |
           cargo install --locked kani-verifier

@@ -54,6 +54,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
           toolchain: stable
+      - name: Relax the MSRV gate for Kani's bundled toolchain
+        run: |
+          # Kani vendors its own nightly (v0.67 ships nightly-2025-11-21 =
+          # rustc 1.93.0-nightly), OLDER than our workspace MSRV. Kani only needs
+          # the proof harnesses to compile, not MSRV enforcement, so cargo's
+          # `rust-version` gate fails the whole run before any harness executes
+          # ("rustc 1.93.0-nightly is not supported ... requires rustc 1.96").
+          # Lower `[workspace.package].rust-version` below Kani's toolchain for
+          # this ephemeral CI checkout only (never committed). A genuine
+          # post-1.93 language feature would still surface as a normal compile
+          # error rather than this spurious gate.
+          sed -i 's/^rust-version = .*/rust-version = "1.85"/' Cargo.toml
       - name: Install Kani
         run: |
           cargo install --locked kani-verifier

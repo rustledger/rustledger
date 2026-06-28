@@ -60,13 +60,22 @@ jobs:
           cargo +nightly miri test --package rustledger-query --all-features
           echo "::endgroup::"
         env:
+          # -Zmiri-tree-borrows: use the Tree Borrows aliasing model instead of
+          # the default Stacked Borrows. `rowan` (our lossless-CST library) holds
+          # the green tree in a `ThinArc` whose internal `unsafe` pointer
+          # arithmetic is valid under Tree Borrows but trips a Stacked Borrows
+          # false positive — a "retag ... tag does not exist in the borrow stack"
+          # error at `SyntaxNode::green().into_owned()` (rustledger-parser is
+          # `#![forbid(unsafe_code)]`, so the UB is entirely in rowan). TB is the
+          # more permissive successor model and still catches real UB; rowan /
+          # rust-analyzer run Miri under TB for exactly this reason.
           # -Zmiri-disable-isolation: some tests read the realtime clock
           # (e.g. "today"-based date helpers), which miri rejects under its
           # default isolation ("clock_gettime ... not available when isolation
           # is enabled"). Disabling isolation lets those tests run; it only
           # permits host clock/entropy access and does not weaken miri's
           # UB/aliasing checks, which is what this job is for.
-          MIRIFLAGS: -Zmiri-symbolic-alignment-check -Zmiri-strict-provenance -Zmiri-disable-isolation
+          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-symbolic-alignment-check -Zmiri-strict-provenance -Zmiri-disable-isolation
       - name: Summary
         run: |
           echo "## Miri Results" >> $GITHUB_STEP_SUMMARY

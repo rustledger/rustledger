@@ -115,11 +115,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # WASM
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
-wasmtime = "45.0.0"
-wasmtime-wasi = "45.0.0"
+wasmtime = "46.0.0"
+wasmtime-wasi = "46.0.0"
 wat = "1"
 # WIT / Component Model guest bindings (rustledger-ffi-component, #1384)
-wit-bindgen = "0.57"
+wit-bindgen = "0.58"
 
 # Parallelization
 rayon = "1.12"
@@ -154,7 +154,7 @@ tempfile = "3"
 dhat = "0.3"
 # CPU sampling → flamegraph for the nightly `profile.yml` harness. In-process
 # (signal-based, no `perf` privileges). Optional; only via the `flamegraph` feature.
-pprof = { version = "0.14", features = ["flamegraph"] }
+pprof = { version = "0.15", features = ["flamegraph"] }
 
 # Data formats
 csv = "1"
@@ -177,7 +177,7 @@ tokio = { version = "1", features = ["full"] }
 getrandom = { version = "0.2", features = ["js"] }
 
 # LSP
-lsp-server = "0.7"
+lsp-server = "0.8"
 lsp-types = "0.97"
 # Pin to `cr_lines` feature only (no `unicode_lines`) so ropey's line
 # breaks match `similar::TextDiff::from_lines` semantics: LF, CRLF, bare

@@ -567,6 +567,10 @@ criteria = "safe-to-deploy"
 version = "0.4.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.mach2]]
+version = "0.6.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.macro-string]]
 version = "0.2.0"
 criteria = "safe-to-deploy"

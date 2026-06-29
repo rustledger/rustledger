@@ -192,9 +192,12 @@ fn clamp_runs_and_summarizes_pre_range() -> Result<()> {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
-    let loaded =
-        inst.rustledger_ledger_ledger()
-            .call_load(&mut store, LEDGER_WITH_HISTORY, "<stdin>", false)?;
+    let loaded = inst.rustledger_ledger_ledger().call_load(
+        &mut store,
+        LEDGER_WITH_HISTORY,
+        "<stdin>",
+        false,
+    )?;
     let clamped = inst.rustledger_ledger_builder().call_clamp(
         &mut store,
         &loaded.entries,
@@ -351,9 +354,13 @@ fn load_file_reads_and_resolves_includes() -> Result<()> {
         "include \"sub.bean\"\n2024-01-02 open Expenses:Food USD\n",
     )?;
     let (mut store, inst) = instantiate_in(dir.path())?;
-    let r =
-        inst.rustledger_ledger_ledger()
-            .call_load_file(&mut store, "/work/main.bean", true, &[], false)?;
+    let r = inst.rustledger_ledger_ledger().call_load_file(
+        &mut store,
+        "/work/main.bean",
+        true,
+        &[],
+        false,
+    )?;
     assert!(r.errors.is_empty(), "load_file errored: {:?}", r.errors);
     // Opens from both the entry file and the included file.
     assert!(
@@ -437,9 +444,13 @@ fn load_file_runs_requested_plugin() -> Result<()> {
 ",
     )?;
     let (mut store, inst) = instantiate_in(dir.path())?;
-    let without =
-        inst.rustledger_ledger_ledger()
-            .call_load_file(&mut store, "/work/main.bean", true, &[], false)?;
+    let without = inst.rustledger_ledger_ledger().call_load_file(
+        &mut store,
+        "/work/main.bean",
+        true,
+        &[],
+        false,
+    )?;
     let with = inst.rustledger_ledger_ledger().call_load_file(
         &mut store,
         "/work/main.bean",
@@ -507,9 +518,12 @@ fn load_runs_auto_accounts_synth() -> Result<()> {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
-    let loaded =
-        inst.rustledger_ledger_ledger()
-            .call_load(&mut store, AUTO_ACCOUNTS_LEDGER, "<stdin>", false)?;
+    let loaded = inst.rustledger_ledger_ledger().call_load(
+        &mut store,
+        AUTO_ACCOUNTS_LEDGER,
+        "<stdin>",
+        false,
+    )?;
     assert_generated_opens(&loaded.entries, "component load");
     Ok(())
 }
@@ -523,9 +537,13 @@ fn load_file_runs_auto_accounts_synth() -> Result<()> {
     let dir = tempfile::tempdir()?;
     std::fs::write(dir.path().join("main.bean"), AUTO_ACCOUNTS_LEDGER)?;
     let (mut store, inst) = instantiate_in(dir.path())?;
-    let loaded =
-        inst.rustledger_ledger_ledger()
-            .call_load_file(&mut store, "/work/main.bean", true, &[], false)?;
+    let loaded = inst.rustledger_ledger_ledger().call_load_file(
+        &mut store,
+        "/work/main.bean",
+        true,
+        &[],
+        false,
+    )?;
     assert_generated_opens(&loaded.entries, "component load_file");
     Ok(())
 }

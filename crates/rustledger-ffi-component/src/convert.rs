@@ -2,9 +2,8 @@
 //!
 //! The loader orchestration (`load_source`) is reused from `rustledger-ffi-wasi`,
 //! but each core [`rustledger_core::Directive`] is mapped **directly** to its WIT
-//! shape here (no JSON DTO middle layer). Mirrors the field mapping that
-//! `rustledger_ffi_wasi::convert::directive_to_json` performs into the DTO,
-//! emitting WIT types instead.
+//! shape here (no JSON DTO middle layer). Mirrors the field mapping the former
+//! JSON DTO conversion performed, emitting WIT types instead.
 //!
 //! Doing the conversion against core gives metadata full fidelity: a numeric
 //! metadata value surfaces as the typed `meta-value::number` (the DTO path
@@ -121,8 +120,8 @@ fn posting_from_core(p: &rustledger_core::Posting) -> wit::Posting {
 
 /// Map a core [`Directive`] directly to its WIT shape, deriving `meta.hash` the
 /// same way the DTO path did (`compute_directive_hash`). Field-for-field mirror
-/// of `rustledger_ffi_wasi::convert::directive_to_json`, emitting WIT types and
-/// fully-typed metadata.
+/// of the former JSON DTO conversion, emitting WIT types and fully-typed
+/// metadata.
 fn directive_from_core(d: &Directive, line: u32, filename: &str) -> wit::Directive {
     let hash = ffi::compute_directive_hash(d);
     let meta = |m: &Metadata| meta_from_core(m, line, filename, hash.clone());
@@ -404,8 +403,8 @@ fn query_value(v: &Value) -> wit::QueryValue {
 
 /// `rustledger_query::Value` → `serde_json` form, for the `object`/`set` cases
 /// that WIT can't type (they are self-referential). Self-contained equivalent of
-/// the former `rustledger_ffi_wasi::convert::value_to_json` — recursion has to
-/// handle every nested variant even though only `object`/`set` reach it here.
+/// the former JSON DTO query-value conversion — recursion has to handle every
+/// nested variant even though only `object`/`set` reach it here.
 fn value_to_json(value: &Value) -> Json {
     match value {
         Value::Null => Json::Null,
@@ -454,7 +453,7 @@ fn value_to_json(value: &Value) -> Json {
 }
 
 /// A position's units (+ realized per-unit cost, when held at cost) as JSON.
-/// Mirrors the former `rustledger_ffi_wasi::convert::position_to_json`.
+/// Mirrors the former JSON DTO position conversion.
 fn position_to_json(p: &rustledger_core::Position) -> Json {
     let mut obj = serde_json::json!({
         "units": {
@@ -479,7 +478,7 @@ fn position_to_json(p: &rustledger_core::Position) -> Json {
 }
 
 /// Datatype string for a query `Value` (column-type inference). Self-contained
-/// equivalent of the former `rustledger_ffi_wasi::convert::value_datatype`.
+/// equivalent of the former JSON DTO datatype helper.
 const fn value_datatype(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",

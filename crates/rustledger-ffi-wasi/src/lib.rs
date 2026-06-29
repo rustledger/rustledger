@@ -1,47 +1,46 @@
-// The exposed DTO types (DirectiveJson, Posting, Amount, etc.) carry
-// many fields whose meaning is the JSON-RPC API. Per-field rustdoc
-// would duplicate the JSON-RPC reference and drift from it. The lib
-// is internal-for-testing scope, not a stable public API — until
-// item 2 of issue #1200 (ts-rs generation) lands, treat the
+// The surviving load-result types (`LedgerOptions`, `Plugin`, `Include`,
+// `Error`) carry many self-describing fields the component maps straight into
+// WIT. Per-field rustdoc would duplicate the WIT contract and drift from it;
+// the crate is FFI-support glue, not a stable public API, so treat the
 // rust-side type docs as authoritative for shape only.
 #![allow(missing_docs)]
 
-//! Shared loader/conversion helpers for the rustledger WASI component FFI.
+//! Slimmed FFI-support helpers for the rustledger WASI component FFI.
 //!
-//! # The wasip1 JSON-RPC surface was removed (Phase 5, #1419)
+//! # Phase 5 (#1419) is complete
 //!
 //! This crate used to expose a wasip1 JSON-RPC 2.0 embedding API (a server
-//! binary in `main.rs` + a `jsonrpc` router). That surface was retired in
-//! Phase 5 ([#1419](https://github.com/rustledger/rustledger/issues/1419)) now
-//! that the typed WASI Preview 2 / Component Model binding,
+//! binary in `main.rs` + a `jsonrpc` router) plus a `Directive → JSON` output
+//! DTO. Both are gone: the JSON-RPC surface was retired earlier in Phase 5
+//! ([#1419](https://github.com/rustledger/rustledger/issues/1419)) now that the
+//! typed WASI Preview 2 / Component Model binding,
 //! [`rustledger-ffi-component`](https://github.com/rustledger/rustledger/issues/1384)
-//! (#1384), is the default embedding path (default in rustfava as of Phase 4).
-//! The router, the server binary, the round-trip wire-format tests, and the
-//! `rustledger-ffi-wasi-*.wasm` release artifact are gone.
+//! (#1384), is the default embedding path (default in rustfava as of Phase 4);
+//! the output DTO was removed once the component switched to converting
+//! core→WIT directly.
 //!
-//! What remains is a **library only**: the loader orchestration ([`helpers`])
-//! and the `Directive → JSON` DTO conversion ([`convert`]) that
-//! `rustledger-ffi-component` still reuses. The remaining Phase 5 stages retire
-//! the DTO layer (the component will convert core→WIT directly) and relocate
-//! this shared code to its final home — at which point this crate is removed.
+//! What remains is a **library only** of FFI-support glue the component reuses:
+//! the loader orchestration ([`helpers`]), the WIT-input construction path
+//! ([`input_entry_to_directive`] + the `Input*` types) and directive hashing
+//! ([`compute_directive_hash`]). These survivors are deliberately FFI glue kept
+//! OUT of the core `rustledger-loader` crate, so the crate is retained slimmed
+//! rather than relocated or deleted (the "retained … document the decision"
+//! outcome of #1419 item 6).
 
-pub mod convert;
 // `helpers` is `pub` so the WIT/Component-Model crate
 // (`rustledger-ffi-component`, #1384) can reuse the loader orchestration
 // (`load_source`) instead of duplicating it.
 pub mod helpers;
+// Directive hashing is core→hash (no DTO involved).
+pub mod hash;
 pub(crate) mod types;
 
-// Re-export the wire-format DTOs that cross-binding tests inspect, plus the
-// load-result DTOs the component crate maps into WIT types.
-pub use types::{
-    Amount, CostNumber, DirectiveJson, Error, Include, LedgerOptions, Meta, Plugin, Posting,
-    PostingCost, TypedValue,
-};
+// Re-export the load-result DTOs the component crate maps into WIT types.
+pub use types::{Error, Include, LedgerOptions, Plugin};
 // Directive hashing is core→hash (no DTO involved); re-exported at the crate
 // root so the component can compute the `meta.hash` field when converting
-// core→WIT directly, without depending on the DTO-shaped `convert` module.
-pub use convert::compute_directive_hash;
+// core→WIT directly.
+pub use hash::compute_directive_hash;
 // Input/construction types + converter the component crate maps WIT input into
 // (`entry.create`).
 pub use types::input::{InputAmount, InputCost, InputCostNumber, InputEntry, InputPosting};

@@ -4,7 +4,8 @@
 //! replacement for the `rustledger-ffi-wasi` JSON-RPC surface.
 //!
 //! All four interfaces (`ledger`, `builder`, `util`, `format`) are wired: each
-//! Guest method delegates to [`convert`], which maps between the WIT types and
+//! Guest method delegates to the private `convert` module, which maps between
+//! the WIT types and
 //! the loader/query logic reused from `rustledger-ffi-wasi`. `ledger` also
 //! exports a stateful `session` resource (a held, booked ledger queried/filtered
 //! /clamped without re-parsing) and `builder` a `query-entries` func (BQL over an

@@ -1,6 +1,6 @@
 [package]
 name = "rustledger-ffi-wasi"
-description = "Shared loader/conversion helpers reused by the rustledger WASI component FFI (the wasip1 JSON-RPC embedding surface was removed in #1419)"
+description = "Slimmed FFI-support helpers reused by the rustledger WASI component FFI (loader orchestration + WIT-input construction + directive hashing; the wasip1 JSON-RPC surface and Directive-to-JSON DTO were removed in #1419)"
 version = "0.16.5"
 edition.workspace = true
 rust-version.workspace = true

@@ -58,7 +58,7 @@ This document describes rustledger's crate structure and data flow.
     │  reconcile, etc.)   │   │  Model, typed WIT)       │
     └────────┬────────────┘   └────────┬─────────────────┘
               │                         │
-              │                         └──► ffi-wasi (shared loader/conversion during dual-ship), core, ops, query, ...
+              │                         └──► ffi-wasi (slimmed FFI-support helpers), core, ops, query, ...
               └──► plugin-types only
 ```
 
@@ -69,10 +69,12 @@ This document describes rustledger's crate structure and data flow.
 > JSON-RPC** surface was removed in Phase 5
 > ([#1419](https://github.com/rustledger/rustledger/issues/1419)): the router,
 > the server binary, the wire-format tests, and the `rustledger-ffi-wasi-*.wasm`
-> release artifact are gone. `rustledger-ffi-wasi` now exists only as the shared
-> loader/conversion helpers the component reuses; the remaining Phase 5 stages
-> retire its DTO layer (the component converts core→WIT directly) and move the
-> shared code to its final home.
+> release artifact are gone. Phase 5 is now **complete**: the Directive→JSON DTO
+> layer was also removed (the component converts core→WIT directly), and
+> `rustledger-ffi-wasi` is **retained slimmed** as the shared FFI-support helpers
+> the component reuses (loader orchestration + WIT-input construction +
+> `compute_directive_hash`). The decision (per #1419) is deliberate: these
+> survivors are FFI glue that stays OUT of the core `rustledger-loader` crate.
 
 ## Crate Descriptions
 
@@ -108,7 +110,7 @@ This document describes rustledger's crate structure and data flow.
 |-------|---------|
 | `rustledger` | CLI binary (`rledger`, `bean-*` commands) |
 | `rustledger-wasm` | WebAssembly bindings for JS/TS |
-| `rustledger-ffi-wasi` | Shared loader/conversion helpers reused by `rustledger-ffi-component`. The wasip1 JSON-RPC embedding surface was removed in Phase 5 ([#1419](https://github.com/rustledger/rustledger/issues/1419)); remaining stages retire the DTO layer and relocate the shared code. |
+| `rustledger-ffi-wasi` | Slimmed FFI-support helpers reused by `rustledger-ffi-component` (loader orchestration + WIT-input construction + `compute_directive_hash`). Phase 5 ([#1419](https://github.com/rustledger/rustledger/issues/1419)) is complete: the wasip1 JSON-RPC surface and the Directive→JSON DTO are removed; the crate is deliberately retained (FFI glue kept out of core `rustledger-loader`). |
 | `rustledger-ffi-component` | FFI via WASI Preview 2 / Component Model (typed WIT contract, `rustledger:ledger@3.0.0`) — primary embedding surface, default in the rustfava embedder ([#1384](https://github.com/rustledger/rustledger/issues/1384) Phase 4) |
 
 ## Data Flow

@@ -18,7 +18,8 @@ and `src/convert.rs` implement the `rustledger` world's exports.
   (create / create-batch / filter / clamp / query-entries), `util` (types /
   is-encrypted / get-account-type), `format` (source / file / entry / entries).
 - Exports reuse `rustledger-ffi-wasi`'s loader/query/ops logic via shared
-  helpers; the DTO↔WIT conversion lives in `src/convert.rs`.
+  helpers; the core→WIT conversion lives in `src/convert.rs` (core directives
+  map straight to WIT — there is no JSON DTO middle layer).
 - **Parity-tested** by `rustledger-ffi-component-tests`: it instantiates the
   built component in a wasmtime host (typed `bindgen!`, no JSON-RPC) and asserts
   agreement with the reused `rustledger-ffi-wasi` path.
@@ -26,10 +27,10 @@ and `src/convert.rs` implement the `rustledger` world's exports.
   component as its primary embedding path
   ([#172](https://github.com/rustledger/rustledger/issues/172) /
   rustfava [#183](https://github.com/rustledger/rustfava/pull/183), Phase 4).
-  The JSON-RPC (wasip1) surface of `rustledger-ffi-wasi` still exists — its
-  deprecation/removal is Phase 5
-  ([#1419](https://github.com/rustledger/rustledger/issues/1419), deferred) — but
-  it is no longer the default consumer path; the two dual-ship until then.
+  The JSON-RPC (wasip1) surface of `rustledger-ffi-wasi` was removed in Phase 5
+  ([#1419](https://github.com/rustledger/rustledger/issues/1419)), which is now
+  complete; `rustledger-ffi-wasi` is retained slimmed as shared FFI-support
+  helpers (loader orchestration + WIT-input construction + `compute_directive_hash`).
 
 ```bash
 # the wasip2 target lives in the default dev shell (flake.nix)
@@ -44,9 +45,11 @@ wit-bindgen rust crates/rustledger-ffi-component/wit/world.wit --out-dir /tmp/g
 ## Scope covered
 
 **Read surface** (`interface ledger`) — `version`, `load`, `validate`, `query`,
-and their `-file` variants. `load` takes `load(source, filename)`: the
-`filename` is recorded as the directives' source location (pass `<stdin>` if
-unknown). Translated 1:1 from `types/output.rs`: `amount`,
+and their `-file` variants. `load` takes `load(source, filename, expand-pads)`:
+the `filename` is recorded as the directives' source location (pass `<stdin>` if
+unknown), and `expand-pads` (bool, #1628) opts into materializing `pad`
+directives into synthesized `Padding` transactions. Translated 1:1 from
+`types/output.rs`: `amount`,
 `cost-number`, `cost`, `meta`/`meta-value`, `posting`, all 12 `directive` cases,
 `error`, `plugin`, `source-include`, `ledger-options`, `position`,
 `column-info`, `query-value`, and the load/validate/query result records.
@@ -128,10 +131,13 @@ directive representation.
   `meta-value::number`.
 - **Broaden parity coverage** (all exports; field-level diff) and wire the
   component-build step + an end-to-end `load-file` parity test into CI ([#1402](https://github.com/rustledger/rustledger/issues/1402)).
-- **Phase 5** (deferred) — deprecate then remove the JSON-RPC (wasip1) surface
-  and move the shared loader/conversion logic to a neutral home
-  ([#1419](https://github.com/rustledger/rustledger/issues/1419)). This is the
-  one remaining open phase; Phase 3 (release artifact) and Phase 4 (rustfava
-  migration — now the default backend) are done. See
-  [#1384](https://github.com/rustledger/rustledger/issues/1384) for the full
-  plan.
+- ~~**Phase 5** — deprecate then remove the JSON-RPC (wasip1) surface and the
+  shared `Directive → JSON` DTO.~~ **Done**
+  ([#1419](https://github.com/rustledger/rustledger/issues/1419)): the JSON-RPC
+  surface and the DTO are gone, the component converts core directives straight
+  to WIT (`directive_from_core`), and `rustledger-ffi-wasi` is retained slimmed
+  as shared FFI-support helpers (FFI glue kept out of core `rustledger-loader`).
+  Phase 3 (release artifact) and Phase 4 (rustfava migration — now the default
+  backend) were already done; with Phase 5 complete the
+  [#1384](https://github.com/rustledger/rustledger/issues/1384) plan has no open
+  phases.

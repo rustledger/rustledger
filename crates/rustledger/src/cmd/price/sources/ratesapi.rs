@@ -6,7 +6,6 @@ use super::{PriceSource, user_agent};
 use crate::cmd::price::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
-use std::str::FromStr;
 use std::time::Duration;
 
 /// Rates API price source.
@@ -93,16 +92,8 @@ impl PriceSource for RatesApiSource {
             .get(&target_currency)
             .with_context(|| format!("Rate for {target_currency} not found"))?;
 
-        let rate_str = if let Some(n) = rate_value.as_f64() {
-            n.to_string()
-        } else if let Some(s) = rate_value.as_str() {
-            s.to_string()
-        } else {
-            anyhow::bail!("Invalid rate format");
-        };
-
-        let price = Decimal::from_str(&rate_str)
-            .with_context(|| format!("Failed to parse rate: {rate_str}"))?;
+        let price = crate::cmd::price::price_decimal_from_json(rate_value)
+            .with_context(|| format!("Invalid rate format: {rate_value}"))?;
 
         let date = request.date.unwrap_or_else(|| jiff::Zoned::now().date());
 

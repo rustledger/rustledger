@@ -132,15 +132,7 @@ impl ExternalCommandSource {
 
         let price = json
             .get("price")
-            .and_then(|v| {
-                if let Some(n) = v.as_number() {
-                    Decimal::from_str(&n.to_string()).ok()
-                } else if let Some(s) = v.as_str() {
-                    Decimal::from_str(s).ok()
-                } else {
-                    None
-                }
-            })
+            .and_then(super::price_decimal_from_json)
             .with_context(|| "Missing or invalid 'price' field in JSON")?;
 
         let currency = json

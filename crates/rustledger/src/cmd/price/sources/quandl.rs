@@ -5,10 +5,8 @@
 use super::{PriceSource, user_agent};
 use crate::cmd::price::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
-use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
 use std::env;
-use std::str::FromStr;
 use std::time::Duration;
 
 /// Quandl (Nasdaq Data Link) price source.
@@ -157,16 +155,8 @@ impl PriceSource for QuandlSource {
         // Extract price
         let price_value = data.get(price_idx).with_context(|| "Missing price value")?;
 
-        let price_str = if let Some(n) = price_value.as_f64() {
-            n.to_string()
-        } else if let Some(s) = price_value.as_str() {
-            s.to_string()
-        } else {
-            anyhow::bail!("Invalid price format");
-        };
-
-        let price = Decimal::from_str(&price_str)
-            .with_context(|| format!("Failed to parse price: {price_str}"))?;
+        let price = crate::cmd::price::price_decimal_from_json(price_value)
+            .with_context(|| format!("Invalid price format: {price_value}"))?;
 
         Ok(PriceResponse {
             price,

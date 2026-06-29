@@ -7,7 +7,6 @@ use crate::cmd::price::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
-use std::str::FromStr;
 use std::time::Duration;
 
 /// European Central Bank price source.
@@ -89,10 +88,9 @@ impl EcbSource {
         let rate_value = obs_value
             .as_array()
             .and_then(|a| a.first())
-            .and_then(serde_json::Value::as_f64)
             .with_context(|| "Invalid rate value in ECB response")?;
 
-        let rate = Decimal::from_str(&rate_value.to_string())
+        let rate = crate::cmd::price::price_decimal_from_json(rate_value)
             .with_context(|| format!("Failed to parse rate: {rate_value}"))?;
 
         // Try to get the date from the structure

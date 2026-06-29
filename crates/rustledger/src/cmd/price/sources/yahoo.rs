@@ -5,8 +5,6 @@
 use super::{PriceSource, user_agent};
 use crate::cmd::price::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
-use rust_decimal::Decimal;
-use std::str::FromStr;
 use std::time::Duration;
 
 /// Yahoo Finance price source.
@@ -82,15 +80,8 @@ impl PriceSource for YahooFinanceSource {
             .get("regularMarketPrice")
             .with_context(|| format!("No price found for {}", request.ticker))?;
 
-        // Parse directly from JSON number representation to avoid f64 precision loss
-        let price_str = match price_value {
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::String(s) => s.clone(),
-            _ => anyhow::bail!("Invalid price format for {}", request.ticker),
-        };
-
-        let price = Decimal::from_str(&price_str)
-            .with_context(|| format!("Failed to convert price {price_str} to decimal"))?;
+        let price = crate::cmd::price::price_decimal_from_json(price_value)
+            .with_context(|| format!("Invalid price for {}", request.ticker))?;
 
         // Get the currency from the response
         let currency = meta

@@ -63,6 +63,32 @@ pub struct PriceResponse {
     pub source: String,
 }
 
+/// Parse a price quote from a JSON value into a [`Decimal`].
+///
+/// Handles both shapes price APIs use:
+/// - **String** quotes (`"1.2345"`) parse exactly.
+/// - **Integer** numbers parse exactly.
+/// - **Float** numbers are bounded by `f64` (~15–17 significant digits): a JSON
+///   float has already been parsed into an `f64` by the time it reaches a
+///   `serde_json::Value` (serde_json is built without `arbitrary_precision`), so
+///   the most we can recover is its shortest round-trippable string. That is
+///   exact for every human-scale quote (FX / equities / crypto) and only loses
+///   precision past ~15 significant digits — far beyond any real price.
+///
+/// We deliberately do not enable serde_json's `arbitrary_precision` feature: it
+/// is global and breaks the workspace's `#[serde(untagged)]` / `flatten` enums.
+/// A per-field `RawValue` rewrite of every network source was judged
+/// disproportionate for the negligible gain (see #1621).
+#[must_use]
+pub fn price_decimal_from_json(value: &serde_json::Value) -> Option<Decimal> {
+    use std::str::FromStr;
+    match value {
+        serde_json::Value::String(s) => Decimal::from_str(s).ok(),
+        serde_json::Value::Number(n) => Decimal::from_str(&n.to_string()).ok(),
+        _ => None,
+    }
+}
+
 /// Registry of available price sources.
 pub struct PriceSourceRegistry {
     sources: HashMap<String, Arc<dyn PriceSource>>,
@@ -351,6 +377,34 @@ pub fn fetch_price(
 mod tests {
     use super::*;
     use crate::config::{FallbackDetail, FallbackEntry};
+
+    #[test]
+    fn test_price_decimal_from_json() {
+        use std::str::FromStr;
+        // String quotes parse exactly, including beyond f64 precision.
+        assert_eq!(
+            price_decimal_from_json(&serde_json::json!("1.23456789012345678901234567")),
+            Some(Decimal::from_str("1.23456789012345678901234567").unwrap())
+        );
+        // Integer numbers are exact.
+        assert_eq!(
+            price_decimal_from_json(&serde_json::json!(42)),
+            Some(Decimal::from(42))
+        );
+        // Ordinary float quotes round-trip to the expected decimal.
+        assert_eq!(
+            price_decimal_from_json(&serde_json::json!(1.25)),
+            Some(Decimal::from_str("1.25").unwrap())
+        );
+        // Non-numeric / wrong-shape values yield None.
+        assert_eq!(
+            price_decimal_from_json(&serde_json::json!("not-a-number")),
+            None
+        );
+        assert_eq!(price_decimal_from_json(&serde_json::json!(true)), None);
+        assert_eq!(price_decimal_from_json(&serde_json::json!(null)), None);
+        assert_eq!(price_decimal_from_json(&serde_json::json!([1, 2])), None);
+    }
 
     #[test]
     fn test_price_request_builder() {

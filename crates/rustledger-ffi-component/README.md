@@ -121,9 +121,11 @@ directive representation.
 
 ## Known gaps / remaining work
 
-- **Metadata fidelity:** numeric metadata currently surfaces as
-  `meta-value::text` because the reused DTO stringifies it — faithful typing
-  needs the core `MetaValue` (`directive_to_json` flattens it).
+- ~~**Metadata fidelity:** numeric metadata surfaces as `meta-value::text`.~~
+  **Resolved** in Phase 5 (#1419): the component now converts core directives
+  straight to WIT (`directive_from_core`), reading the typed `MetaValue` directly
+  instead of the stringified JSON DTO — so numeric metadata is now a typed
+  `meta-value::number`.
 - **Broaden parity coverage** (all exports; field-level diff) and wire the
   component-build step + an end-to-end `load-file` parity test into CI ([#1402](https://github.com/rustledger/rustledger/issues/1402)).
 - **Phase 5** (deferred) — deprecate then remove the JSON-RPC (wasip1) surface

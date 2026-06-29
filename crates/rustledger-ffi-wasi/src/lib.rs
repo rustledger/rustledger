@@ -38,6 +38,10 @@ pub use types::{
     Amount, CostNumber, DirectiveJson, Error, Include, LedgerOptions, Meta, Plugin, Posting,
     PostingCost, TypedValue,
 };
+// Directive hashing is core→hash (no DTO involved); re-exported at the crate
+// root so the component can compute the `meta.hash` field when converting
+// core→WIT directly, without depending on the DTO-shaped `convert` module.
+pub use convert::compute_directive_hash;
 // Input/construction types + converter the component crate maps WIT input into
 // (`entry.create`).
 pub use types::input::{InputAmount, InputCost, InputCostNumber, InputEntry, InputPosting};

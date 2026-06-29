@@ -1,18 +1,20 @@
-//! Conversion from the reused `rustledger-ffi-wasi` DTOs into the generated
-//! WIT types.
+//! Conversion from `rustledger-core` types into the generated WIT types.
 //!
-//! The loader orchestration (`load_source`) and the core→DTO conversion
-//! (`directive_to_json`) are reused wholesale; this module is the mechanical
-//! DTO→WIT shuffle, since the WIT types were authored 1:1 with the DTOs.
+//! The loader orchestration (`load_source`) is reused from `rustledger-ffi-wasi`,
+//! but each core [`rustledger_core::Directive`] is mapped **directly** to its WIT
+//! shape here (no JSON DTO middle layer). Mirrors the field mapping that
+//! `rustledger_ffi_wasi::convert::directive_to_json` performs into the DTO,
+//! emitting WIT types instead.
 //!
-//! Known fidelity gap: directive/posting *metadata* (`meta.user`) is reused from
-//! the DTO, which flattens `MetaValue` to JSON and stringifies numbers — so a
-//! numeric metadata value currently surfaces as `meta-value::text`. Faithful
-//! typing requires reading the core `MetaValue` directly; tracked as a
-//! follow-up. (Custom-directive arguments are *not* affected: they carry their
-//! `value-type` tag via the WIT `typed-value` record, so account/currency/tag/…
-//! stay distinguishable.)
+//! Doing the conversion against core gives metadata full fidelity: a numeric
+//! metadata value surfaces as the typed `meta-value::number` (the DTO path
+//! stringified it to JSON, collapsing it to `meta-value::text`). The string-like
+//! `MetaValue` variants (string/account/currency/tag/link/date/int) still lower
+//! to `text`, matching the JSON surface; `bool`/`amount`/`none` keep their typed
+//! cases. (Custom-directive arguments additionally carry their `value-type` tag
+//! via the WIT `typed-value` record.)
 
+use rustledger_core::{Directive, MetaValue, Metadata};
 use rustledger_ffi_wasi as ffi;
 use rustledger_query::{Executor, IntervalUnit, Value, parse as parse_query};
 use serde_json::Value as Json;
@@ -20,237 +22,222 @@ use serde_json::Value as Json;
 use crate::exports::rustledger::ledger::ledger as out;
 use crate::rustledger::ledger::types as wit;
 
-fn amount(a: ffi::Amount) -> wit::Amount {
+/// Core `Amount` → WIT `amount` (decimal preserved as text).
+fn amount_from_core(a: &rustledger_core::Amount) -> wit::Amount {
     wit::Amount {
-        number: a.number,
-        currency: a.currency,
+        number: a.number.to_string(),
+        currency: a.currency.to_string(),
     }
 }
 
-fn cost_number(n: ffi::CostNumber) -> wit::CostNumber {
+/// Core `CostNumber` → WIT `cost-number` (mirrors the DTO's tagged mapping).
+fn cost_number_from_core(n: rustledger_core::CostNumber) -> wit::CostNumber {
     match n {
-        ffi::CostNumber::PerUnit { value } => wit::CostNumber::PerUnit(value),
-        ffi::CostNumber::Total { value } => wit::CostNumber::Total(value),
-        ffi::CostNumber::PerUnitFromTotal { per_unit, total } => {
-            wit::CostNumber::PerUnitFromTotal((per_unit, total))
+        rustledger_core::CostNumber::PerUnit { value } => {
+            wit::CostNumber::PerUnit(value.to_string())
+        }
+        rustledger_core::CostNumber::Total { value } => wit::CostNumber::Total(value.to_string()),
+        rustledger_core::CostNumber::PerUnitFromTotal(b) => {
+            wit::CostNumber::PerUnitFromTotal((b.per_unit.to_string(), b.total.to_string()))
         }
     }
 }
 
-fn cost(c: ffi::PostingCost) -> wit::Cost {
+/// Core posting `CostSpec` → WIT `cost`. Every field optional (a bare `{USD}`
+/// lot match carries no `number`), matching the lean `PostingCost` shape.
+fn cost_from_core(c: &rustledger_core::CostSpec) -> wit::Cost {
     wit::Cost {
-        number: c.number.map(cost_number),
-        currency: c.currency,
-        date: c.date,
-        label: c.label,
+        number: c.number.map(cost_number_from_core),
+        currency: c.currency.as_ref().map(std::string::ToString::to_string),
+        date: c.date.map(|d| d.to_string()),
+        label: c.label.clone(),
     }
 }
 
-/// JSON metadata value → WIT `meta-value`. See the module-level fidelity note.
-fn meta_value(v: Json) -> wit::MetaValue {
+/// Core `MetaValue` → WIT `meta-value`, fully typed.
+///
+/// `Number` becomes the typed `meta-value::number` (the fidelity fix vs the old
+/// JSON DTO path, which stringified it to `text`); `bool`/`amount`/`none` keep
+/// their typed cases. The string-like variants (`String`/`Account`/`Currency`/
+/// `Tag`/`Link`/`Date`/`Int`) lower to `text`, matching the JSON surface
+/// (`Int` is stringified, like the DTO did).
+fn meta_value_from_core(v: &MetaValue) -> wit::MetaValue {
     match v {
-        Json::Null => wit::MetaValue::Null,
-        Json::Bool(b) => wit::MetaValue::Boolean(b),
-        Json::Number(n) => wit::MetaValue::Number(n.to_string()),
-        Json::Object(map) => {
-            match (map.get("number"), map.get("currency")) {
-                (Some(Json::String(n)), Some(Json::String(c))) => {
-                    wit::MetaValue::Amount(wit::Amount {
-                        number: n.clone(),
-                        currency: c.clone(),
-                    })
-                }
-                // Not an amount object — preserve a best-effort textual form.
-                _ => wit::MetaValue::Text(Json::Object(map).to_string()),
-            }
-        }
-        Json::String(s) => wit::MetaValue::Text(s),
-        arr @ Json::Array(_) => wit::MetaValue::Text(arr.to_string()),
+        MetaValue::String(s) => wit::MetaValue::Text(s.clone()),
+        MetaValue::Account(a) => wit::MetaValue::Text(a.to_string()),
+        MetaValue::Currency(c) => wit::MetaValue::Text(c.to_string()),
+        MetaValue::Tag(t) => wit::MetaValue::Text(t.to_string()),
+        MetaValue::Link(l) => wit::MetaValue::Text(l.to_string()),
+        MetaValue::Date(d) => wit::MetaValue::Text(d.to_string()),
+        MetaValue::Int(i) => wit::MetaValue::Text(i.to_string()),
+        MetaValue::Number(n) => wit::MetaValue::Number(n.to_string()),
+        MetaValue::Bool(b) => wit::MetaValue::Boolean(*b),
+        MetaValue::Amount(a) => wit::MetaValue::Amount(amount_from_core(a)),
+        MetaValue::None => wit::MetaValue::Null,
     }
 }
 
-fn meta_entries(user: std::collections::HashMap<String, Json>) -> Vec<(String, wit::MetaValue)> {
-    let mut entries: Vec<(String, wit::MetaValue)> =
-        user.into_iter().map(|(k, v)| (k, meta_value(v))).collect();
-    // Deterministic order (HashMap iteration is not).
+/// Core metadata map → WIT `meta-entry` list, key-sorted (the source map has no
+/// stable order; WIT has no map type so it is modeled as an ordered pair list).
+fn meta_entries_from_core(m: &Metadata) -> Vec<(String, wit::MetaValue)> {
+    let mut entries: Vec<(String, wit::MetaValue)> = m
+        .iter()
+        .map(|(k, v)| (k.clone(), meta_value_from_core(v)))
+        .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries
 }
 
-fn meta(m: ffi::Meta) -> wit::Meta {
+/// Build the WIT `meta` record (source location + typed user key/values).
+fn meta_from_core(m: &Metadata, line: u32, filename: &str, hash: String) -> wit::Meta {
     wit::Meta {
-        filename: m.filename,
-        lineno: m.lineno,
-        hash: m.hash,
-        user: meta_entries(m.user),
+        filename: filename.to_string(),
+        lineno: line,
+        hash,
+        user: meta_entries_from_core(m),
     }
 }
 
-fn posting(p: ffi::Posting) -> wit::Posting {
+/// Core `Posting` → WIT `posting` (mirrors `directive_to_json`'s posting arm:
+/// units from the complete amount, optional cost/price, flag, posting meta).
+fn posting_from_core(p: &rustledger_core::Posting) -> wit::Posting {
     wit::Posting {
-        account: p.account,
-        units: p.units.map(amount),
-        cost: p.cost.map(cost),
-        price: p.price.map(amount),
-        flag: p.flag,
-        meta: meta_entries(p.meta),
+        account: p.account.to_string(),
+        units: p
+            .units
+            .as_ref()
+            .and_then(|u| u.as_amount())
+            .map(amount_from_core),
+        cost: p.cost.as_ref().map(cost_from_core),
+        price: p
+            .price
+            .as_ref()
+            .and_then(|pr| pr.amount())
+            .map(amount_from_core),
+        flag: p.flag.map(|c| c.to_string()),
+        meta: meta_entries_from_core(&p.meta),
     }
 }
 
-fn directive(d: ffi::DirectiveJson) -> wit::Directive {
-    use ffi::DirectiveJson as D;
+/// Map a core [`Directive`] directly to its WIT shape, deriving `meta.hash` the
+/// same way the DTO path did (`compute_directive_hash`). Field-for-field mirror
+/// of `rustledger_ffi_wasi::convert::directive_to_json`, emitting WIT types and
+/// fully-typed metadata.
+fn directive_from_core(d: &Directive, line: u32, filename: &str) -> wit::Directive {
+    let hash = ffi::compute_directive_hash(d);
+    let meta = |m: &Metadata| meta_from_core(m, line, filename, hash.clone());
     match d {
-        D::Transaction {
-            date,
-            flag,
-            payee,
-            narration,
-            tags,
-            links,
-            postings,
-            meta: m,
-        } => wit::Directive::Transaction(wit::Transaction {
-            date,
-            flag,
-            payee,
-            narration,
-            tags,
-            links,
-            postings: postings.into_iter().map(posting).collect(),
-            meta: meta(m),
+        Directive::Transaction(t) => wit::Directive::Transaction(wit::Transaction {
+            date: t.date.to_string(),
+            flag: t.flag.to_string(),
+            payee: t.payee.as_ref().map(std::string::ToString::to_string),
+            // Empty narration is omitted (the DTO maps "" → None).
+            narration: if t.narration.is_empty() {
+                None
+            } else {
+                Some(t.narration.to_string())
+            },
+            tags: t
+                .tags
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            links: t
+                .links
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            postings: t.postings.iter().map(|p| posting_from_core(p)).collect(),
+            meta: meta(&t.meta),
         }),
-        D::Open {
-            date,
-            account,
-            currencies,
-            booking,
-            meta: m,
-        } => wit::Directive::Open(wit::OpenDir {
-            date,
-            account,
-            currencies,
-            booking,
-            meta: meta(m),
+        Directive::Open(o) => wit::Directive::Open(wit::OpenDir {
+            date: o.date.to_string(),
+            account: o.account.to_string(),
+            currencies: o
+                .currencies
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            booking: o.booking.clone(),
+            meta: meta(&o.meta),
         }),
-        D::Close {
-            date,
-            account,
-            meta: m,
-        } => wit::Directive::Close(wit::CloseDir {
-            date,
-            account,
-            meta: meta(m),
+        Directive::Close(c) => wit::Directive::Close(wit::CloseDir {
+            date: c.date.to_string(),
+            account: c.account.to_string(),
+            meta: meta(&c.meta),
         }),
-        D::Balance {
-            date,
-            account,
-            amount: amt,
-            tolerance,
-            meta: m,
-        } => wit::Directive::Balance(wit::BalanceDir {
-            date,
-            account,
-            amount: amount(amt),
-            tolerance,
-            meta: meta(m),
+        Directive::Balance(b) => wit::Directive::Balance(wit::BalanceDir {
+            date: b.date.to_string(),
+            account: b.account.to_string(),
+            amount: amount_from_core(&b.amount),
+            tolerance: b.tolerance.map(|t| t.to_string()),
+            meta: meta(&b.meta),
         }),
-        D::Pad {
-            date,
-            account,
-            source_account,
-            meta: m,
-        } => wit::Directive::Pad(wit::PadDir {
-            date,
-            account,
-            source_account,
-            meta: meta(m),
+        Directive::Pad(p) => wit::Directive::Pad(wit::PadDir {
+            date: p.date.to_string(),
+            account: p.account.to_string(),
+            source_account: p.source_account.to_string(),
+            meta: meta(&p.meta),
         }),
-        D::Commodity {
-            date,
-            currency,
-            meta: m,
-        } => wit::Directive::Commodity(wit::CommodityDir {
-            date,
-            currency,
-            meta: meta(m),
+        Directive::Commodity(c) => wit::Directive::Commodity(wit::CommodityDir {
+            date: c.date.to_string(),
+            currency: c.currency.to_string(),
+            meta: meta(&c.meta),
         }),
-        D::Price {
-            date,
-            currency,
-            amount: amt,
-            meta: m,
-        } => wit::Directive::Price(wit::PriceDir {
-            date,
-            currency,
-            amount: amount(amt),
-            meta: meta(m),
+        Directive::Price(p) => wit::Directive::Price(wit::PriceDir {
+            date: p.date.to_string(),
+            currency: p.currency.to_string(),
+            amount: amount_from_core(&p.amount),
+            meta: meta(&p.meta),
         }),
-        D::Event {
-            date,
-            event_type,
-            value,
-            meta: m,
-        } => wit::Directive::Event(wit::EventDir {
-            date,
-            event_type,
-            value,
-            meta: meta(m),
+        Directive::Event(e) => wit::Directive::Event(wit::EventDir {
+            date: e.date.to_string(),
+            event_type: e.event_type.clone(),
+            value: e.value.clone(),
+            meta: meta(&e.meta),
         }),
-        D::Note {
-            date,
-            account,
-            comment,
-            meta: m,
-        } => wit::Directive::Note(wit::NoteDir {
-            date,
-            account,
-            comment,
-            meta: meta(m),
+        Directive::Note(n) => wit::Directive::Note(wit::NoteDir {
+            date: n.date.to_string(),
+            account: n.account.to_string(),
+            comment: n.comment.clone(),
+            meta: meta(&n.meta),
         }),
-        D::Document {
-            date,
-            account,
-            path,
-            tags,
-            links,
-            meta: m,
-        } => wit::Directive::Document(wit::DocumentDir {
-            date,
-            account,
-            path,
-            tags,
-            links,
-            meta: meta(m),
+        Directive::Document(doc) => wit::Directive::Document(wit::DocumentDir {
+            date: doc.date.to_string(),
+            account: doc.account.to_string(),
+            path: doc.path.clone(),
+            tags: doc
+                .tags
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            links: doc
+                .links
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            meta: meta(&doc.meta),
         }),
-        D::Query {
-            date,
-            name,
-            query_string,
-            meta: m,
-        } => wit::Directive::Query(wit::QueryDir {
-            date,
-            name,
-            query_string,
-            meta: meta(m),
+        Directive::Query(q) => wit::Directive::Query(wit::QueryDir {
+            date: q.date.to_string(),
+            name: q.name.clone(),
+            query_string: q.query.clone(),
+            meta: meta(&q.meta),
         }),
-        D::Custom {
-            date,
-            custom_type,
-            values,
-            meta: m,
-        } => wit::Directive::Custom(wit::CustomDir {
-            date,
-            custom_type,
+        Directive::Custom(c) => wit::Directive::Custom(wit::CustomDir {
+            date: c.date.to_string(),
+            custom_type: c.custom_type.clone(),
             // Carry the `value-type` tag (account/currency/tag/…) alongside the
             // value, which `meta-value` alone would flatten to `text`.
-            values: values
-                .into_iter()
-                .map(|tv| wit::TypedValue {
-                    value_type: tv.value_type.to_string(),
-                    value: meta_value(tv.value),
+            values: c
+                .values
+                .iter()
+                .map(|v| wit::TypedValue {
+                    value_type: rustledger_core::meta_value_type_tag(v).to_string(),
+                    value: meta_value_from_core(v),
                 })
                 .collect(),
-            meta: meta(m),
+            meta: meta(&c.meta),
         }),
     }
 }
@@ -328,7 +315,7 @@ fn load_result(
     let entries = directives
         .iter()
         .zip(directive_lines.iter())
-        .map(|(d, &line)| directive(ffi::convert::directive_to_json(d, line, filename)))
+        .map(|(d, &line)| directive_from_core(d, line, filename))
         .collect();
     out::LoadResult {
         entries,
@@ -411,7 +398,103 @@ fn query_value(v: &Value) -> wit::QueryValue {
                 IntervalUnit::Year => wit::IntervalUnit::Year,
             },
         }),
-        Value::Object(_) | Value::Set(_) => Q::Json(ffi::convert::value_to_json(v).to_string()),
+        Value::Object(_) | Value::Set(_) => Q::Json(value_to_json(v).to_string()),
+    }
+}
+
+/// `rustledger_query::Value` → `serde_json` form, for the `object`/`set` cases
+/// that WIT can't type (they are self-referential). Self-contained equivalent of
+/// the former `rustledger_ffi_wasi::convert::value_to_json` — recursion has to
+/// handle every nested variant even though only `object`/`set` reach it here.
+fn value_to_json(value: &Value) -> Json {
+    match value {
+        Value::Null => Json::Null,
+        Value::Boolean(b) => Json::Bool(*b),
+        Value::Integer(i) => serde_json::json!(i),
+        Value::String(s) => Json::String(s.clone()),
+        Value::Date(d) => Json::String(d.to_string()),
+        Value::Number(d) => serde_json::json!({ "number": d.to_string() }),
+        Value::Amount(a) => serde_json::json!({
+            "number": a.number.to_string(),
+            "currency": a.currency.to_string(),
+        }),
+        Value::Position(p) => position_to_json(p),
+        Value::Inventory(inv) => {
+            let positions: Vec<Json> = inv.positions().map(position_to_json).collect();
+            serde_json::json!({ "positions": positions })
+        }
+        Value::StringSet(set) => serde_json::json!(set),
+        Value::Object(obj) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in obj.as_ref() {
+                map.insert(k.clone(), value_to_json(v));
+            }
+            Json::Object(map)
+        }
+        Value::Metadata(m) => {
+            // `Display`, matching the canonical CLI, not `Debug`.
+            let obj: serde_json::Map<String, Json> = m
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::json!(format!("{v}"))))
+                .collect();
+            Json::Object(obj)
+        }
+        Value::Interval(iv) => serde_json::json!({
+            "count": iv.count,
+            "unit": match iv.unit {
+                IntervalUnit::Day => "day",
+                IntervalUnit::Week => "week",
+                IntervalUnit::Month => "month",
+                IntervalUnit::Quarter => "quarter",
+                IntervalUnit::Year => "year",
+            },
+        }),
+        Value::Set(set) => Json::Array(set.iter().map(value_to_json).collect()),
+    }
+}
+
+/// A position's units (+ realized per-unit cost, when held at cost) as JSON.
+/// Mirrors the former `rustledger_ffi_wasi::convert::position_to_json`.
+fn position_to_json(p: &rustledger_core::Position) -> Json {
+    let mut obj = serde_json::json!({
+        "units": {
+            "number": p.units.number.to_string(),
+            "currency": p.units.currency.to_string(),
+        }
+    });
+    if let Some(cost) = &p.cost {
+        let mut cost_obj = serde_json::json!({
+            "number": { "kind": "per_unit", "value": cost.number.to_string() },
+            "currency": cost.currency.to_string(),
+        });
+        if let Some(date) = cost.date {
+            cost_obj["date"] = Json::String(date.to_string());
+        }
+        if let Some(label) = &cost.label {
+            cost_obj["label"] = Json::String(label.clone());
+        }
+        obj["cost"] = cost_obj;
+    }
+    obj
+}
+
+/// Datatype string for a query `Value` (column-type inference). Self-contained
+/// equivalent of the former `rustledger_ffi_wasi::convert::value_datatype`.
+const fn value_datatype(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Boolean(_) => "bool",
+        Value::Integer(_) => "int",
+        Value::String(_) => "str",
+        Value::Date(_) => "date",
+        Value::Number(_) => "Decimal",
+        Value::Amount(_) => "Amount",
+        Value::Position(_) => "Position",
+        Value::Inventory(_) => "Inventory",
+        Value::StringSet(_) | Value::Set(_) => "set",
+        Value::Object(_) => "object",
+        Value::Metadata(_) => "Metadata",
+        Value::Interval(_) => "Interval",
     }
 }
 
@@ -497,7 +580,7 @@ pub fn run_query(directives: &[rustledger_core::Directive], query_str: &str) -> 
                     .zip(first.iter())
                     .map(|(name, value)| wit::ColumnInfo {
                         name: name.clone(),
-                        datatype: ffi::convert::value_datatype(value).to_string(),
+                        datatype: value_datatype(value).to_string(),
                     })
                     .collect()
             } else {
@@ -614,7 +697,7 @@ pub fn load_file(
                 .map(|(i, d)| {
                     let line = directive_lines.get(i).copied().unwrap_or(0);
                     let file = directive_files.get(i).map_or("<unknown>", String::as_str);
-                    directive(ffi::convert::directive_to_json(d, line, file))
+                    directive_from_core(d, line, file)
                 })
                 .collect();
             out::LoadResult {
@@ -849,11 +932,7 @@ fn input_entry(d: &wit::InputDirective) -> ffi::InputEntry {
 /// `entry.create` — build one directive from typed input.
 pub fn create(entry: &wit::InputDirective) -> Result<wit::Directive, String> {
     let core = ffi::input_entry_to_directive(&input_entry(entry))?;
-    Ok(directive(ffi::convert::directive_to_json(
-        &core,
-        0,
-        "<created>",
-    )))
+    Ok(directive_from_core(&core, 0, "<created>"))
 }
 
 /// `entry.createBatch` — all-or-nothing (first failure fails the call).
@@ -1163,7 +1242,7 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
             // Pass-through: hand back the original WIT directive untouched.
             Some(&i) => entries[i].clone(),
             // Synthesized summary: build from core with the `<clamped>` source.
-            None => directive(ffi::convert::directive_to_json(&d, 0, "<clamped>")),
+            None => directive_from_core(&d, 0, "<clamped>"),
         })
         .collect()
 }
@@ -1278,7 +1357,7 @@ impl SessionState {
             .map(|(i, d)| {
                 let line = self.lines.get(i).copied().unwrap_or(0);
                 let file = self.files.get(i).map_or("<unknown>", String::as_str);
-                directive(ffi::convert::directive_to_json(d, line, file))
+                directive_from_core(d, line, file)
             })
             .collect()
     }
@@ -1350,8 +1429,265 @@ impl SessionState {
                 let (line, file) = src
                     .and_then(|i| self.lines.get(i).copied().zip(self.files.get(i)))
                     .map_or((0, "<clamped>"), |(line, file)| (line, file.as_str()));
-                directive(ffi::convert::directive_to_json(&d, line, file))
+                directive_from_core(&d, line, file)
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Field-level correctness of the direct core→WIT conversion
+    //! (`directive_from_core`). The cross-binding parity crate
+    //! (`rustledger-ffi-component-tests`) only checks entry *counts*; this pins
+    //! the actual mapped fields for a comprehensive ledger, and in particular
+    //! the metadata-fidelity fix: numeric metadata now surfaces as the typed
+    //! `meta-value::number` (the old JSON-DTO path stringified it to
+    //! `meta-value::text`).
+
+    use super::{directive_from_core, ffi, wit};
+    use rustledger_core::Directive;
+
+    // Covers most directive types, a posting carrying BOTH cost and price, and
+    // transaction metadata with a NUMERIC value (`num`) and a STRING value
+    // (`note`) — the two whose typing the fix distinguishes.
+    const LEDGER: &str = r#"
+2024-01-01 open Assets:Stock
+2024-01-01 open Assets:Cash
+2024-01-01 commodity AAPL
+  name: "Apple Inc"
+2024-01-15 * "Broker" "Buy shares" #trip ^inv-1
+  num: 42.50
+  note: "hello"
+  Assets:Stock  10 AAPL {150.00 USD} @ 155.00 USD
+  Assets:Cash  -1500.00 USD
+2024-02-01 balance Assets:Cash  -1500.00 USD
+2024-03-01 price AAPL  160.00 USD
+2024-03-04 document Assets:Cash "/docs/x.pdf" #dtag ^dlink
+2024-03-05 query "recent" "SELECT date, account"
+2024-03-06 custom "budget" "groceries" 500.00
+2024-12-31 close Assets:Cash
+"#;
+
+    fn dir_meta(d: &wit::Directive) -> &wit::Meta {
+        use wit::Directive as D;
+        match d {
+            D::Transaction(t) => &t.meta,
+            D::Open(o) => &o.meta,
+            D::Close(c) => &c.meta,
+            D::Balance(b) => &b.meta,
+            D::Pad(p) => &p.meta,
+            D::Commodity(c) => &c.meta,
+            D::Price(p) => &p.meta,
+            D::Event(e) => &e.meta,
+            D::Note(n) => &n.meta,
+            D::Document(doc) => &doc.meta,
+            D::Query(q) => &q.meta,
+            D::Custom(c) => &c.meta,
+        }
+    }
+
+    fn user_get<'a>(m: &'a wit::Meta, key: &str) -> &'a wit::MetaValue {
+        m.user
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| panic!("missing meta key {key}"))
+    }
+
+    fn load() -> (Vec<Directive>, Vec<u32>) {
+        let loaded = ffi::helpers::load_source(LEDGER);
+        let msgs: Vec<String> = loaded.errors.iter().map(|e| e.message.clone()).collect();
+        assert!(loaded.errors.is_empty(), "unexpected load errors: {msgs:?}");
+        (loaded.directives, loaded.directive_lines)
+    }
+
+    /// Every directive's `meta` carries the source location we passed in, and a
+    /// non-empty hash matching `compute_directive_hash` (proves the meta record
+    /// is wired through `directive_from_core`/`meta_from_core`).
+    #[test]
+    fn meta_source_location_and_hash_wired() {
+        let (dirs, lines) = load();
+        assert!(!dirs.is_empty());
+        for (d, &line) in dirs.iter().zip(&lines) {
+            let w = directive_from_core(d, line, "<test>");
+            let m = dir_meta(&w);
+            assert_eq!(m.filename, "<test>");
+            assert_eq!(m.lineno, line);
+            assert_eq!(m.hash, ffi::compute_directive_hash(d));
+            assert!(!m.hash.is_empty());
+            // User entries are key-sorted (deterministic, unlike the source map).
+            let keys: Vec<&String> = m.user.iter().map(|(k, _)| k).collect();
+            let mut sorted = keys.clone();
+            sorted.sort();
+            assert_eq!(keys, sorted, "meta user entries must be key-sorted");
+        }
+    }
+
+    /// THE FIDELITY FIX: a numeric metadatum is now `meta-value::number` (typed),
+    /// while a string metadatum stays `meta-value::text`. The old
+    /// `directive(directive_to_json(..))` path gave `text` for BOTH.
+    #[test]
+    fn numeric_metadata_is_typed_number_string_is_text() {
+        let (dirs, lines) = load();
+        let txn = dirs
+            .iter()
+            .zip(&lines)
+            .find_map(|(d, &l)| match directive_from_core(d, l, "<test>") {
+                wit::Directive::Transaction(t) => Some(t),
+                _ => None,
+            })
+            .expect("transaction present");
+
+        match user_get(&txn.meta, "num") {
+            wit::MetaValue::Number(s) => assert_eq!(s, "42.50"),
+            _ => panic!(
+                "numeric metadata must be typed meta-value::number (the old DTO \
+                 path collapsed it to text)"
+            ),
+        }
+        match user_get(&txn.meta, "note") {
+            wit::MetaValue::Text(s) => assert_eq!(s, "hello"),
+            _ => panic!("string metadata must be meta-value::text"),
+        }
+    }
+
+    /// Full field check of the transaction + its cost/price posting.
+    #[test]
+    fn transaction_fields_and_posting_cost_price() {
+        let (dirs, lines) = load();
+        let txn = dirs
+            .iter()
+            .zip(&lines)
+            .find_map(|(d, &l)| match directive_from_core(d, l, "<test>") {
+                wit::Directive::Transaction(t) => Some(t),
+                _ => None,
+            })
+            .expect("transaction present");
+
+        assert_eq!(txn.date, "2024-01-15");
+        assert_eq!(txn.flag, "*");
+        assert_eq!(txn.payee.as_deref(), Some("Broker"));
+        assert_eq!(txn.narration.as_deref(), Some("Buy shares"));
+        assert_eq!(txn.tags, vec!["trip".to_string()]);
+        assert_eq!(txn.links, vec!["inv-1".to_string()]);
+        assert_eq!(txn.postings.len(), 2);
+
+        let stock = &txn.postings[0];
+        assert_eq!(stock.account, "Assets:Stock");
+        let units = stock.units.as_ref().expect("units");
+        assert_eq!(units.number, "10");
+        assert_eq!(units.currency, "AAPL");
+        let cost = stock.cost.as_ref().expect("cost");
+        match &cost.number {
+            Some(wit::CostNumber::PerUnit(v)) => assert_eq!(v, "150.00"),
+            _ => panic!("expected per-unit cost number"),
+        }
+        assert_eq!(cost.currency.as_deref(), Some("USD"));
+        let price = stock.price.as_ref().expect("price");
+        assert_eq!(price.number, "155.00");
+        assert_eq!(price.currency, "USD");
+
+        let cash = &txn.postings[1];
+        assert_eq!(cash.account, "Assets:Cash");
+        let cu = cash.units.as_ref().expect("units");
+        assert_eq!(cu.number, "-1500.00");
+        assert_eq!(cu.currency, "USD");
+        assert!(cash.cost.is_none());
+        assert!(cash.price.is_none());
+    }
+
+    /// Spot-check the remaining directive shapes (balance/price/commodity/
+    /// document/custom/close), including typed `custom` arguments.
+    #[test]
+    fn other_directive_shapes() {
+        let (dirs, lines) = load();
+        let wits: Vec<wit::Directive> = dirs
+            .iter()
+            .zip(&lines)
+            .map(|(d, &l)| directive_from_core(d, l, "<test>"))
+            .collect();
+
+        // balance: amount + tolerance None (none was written).
+        let bal = wits
+            .iter()
+            .find_map(|w| match w {
+                wit::Directive::Balance(b) => Some(b),
+                _ => None,
+            })
+            .expect("balance");
+        assert_eq!(bal.account, "Assets:Cash");
+        assert_eq!(bal.amount.number, "-1500.00");
+        assert_eq!(bal.amount.currency, "USD");
+        assert!(bal.tolerance.is_none());
+
+        // price.
+        let price = wits
+            .iter()
+            .find_map(|w| match w {
+                wit::Directive::Price(p) => Some(p),
+                _ => None,
+            })
+            .expect("price");
+        assert_eq!(price.currency, "AAPL");
+        assert_eq!(price.amount.number, "160.00");
+        assert_eq!(price.amount.currency, "USD");
+
+        // commodity: string meta stays text.
+        let com = wits
+            .iter()
+            .find_map(|w| match w {
+                wit::Directive::Commodity(c) => Some(c),
+                _ => None,
+            })
+            .expect("commodity");
+        assert_eq!(com.currency, "AAPL");
+        match user_get(&com.meta, "name") {
+            wit::MetaValue::Text(s) => assert_eq!(s, "Apple Inc"),
+            _ => panic!("commodity name meta must be text"),
+        }
+
+        // document: tags + links carried.
+        let doc = wits
+            .iter()
+            .find_map(|w| match w {
+                wit::Directive::Document(d) => Some(d),
+                _ => None,
+            })
+            .expect("document");
+        assert_eq!(doc.path, "/docs/x.pdf");
+        assert_eq!(doc.tags, vec!["dtag".to_string()]);
+        assert_eq!(doc.links, vec!["dlink".to_string()]);
+
+        // custom: typed values carry their value-type tag; numeric arg is number.
+        let custom = wits
+            .iter()
+            .find_map(|w| match w {
+                wit::Directive::Custom(c) => Some(c),
+                _ => None,
+            })
+            .expect("custom");
+        assert_eq!(custom.custom_type, "budget");
+        assert_eq!(custom.values.len(), 2);
+        assert_eq!(custom.values[0].value_type, "string");
+        match &custom.values[0].value {
+            wit::MetaValue::Text(s) => assert_eq!(s, "groceries"),
+            _ => panic!("custom string arg must be text"),
+        }
+        assert_eq!(custom.values[1].value_type, "number");
+        match &custom.values[1].value {
+            wit::MetaValue::Number(s) => assert_eq!(s, "500.00"),
+            _ => panic!("custom numeric arg must be number"),
+        }
+
+        // close.
+        let close = wits
+            .iter()
+            .find_map(|w| match w {
+                wit::Directive::Close(c) => Some(c),
+                _ => None,
+            })
+            .expect("close");
+        assert_eq!(close.account, "Assets:Cash");
     }
 }

@@ -257,6 +257,12 @@ Or use `rledger doctor missing-open` to generate them.
 
 **Fix**: Remove duplicate option directives.
 
+### E7007: Option Accepted but Has No Effect
+
+**Cause**: A recognized Beancount option is parsed for compatibility but is intentionally a no-op in rustledger. Currently this applies to `account_rounding`: Beancount uses it to absorb the residual created when an interpolated leg is *rounded* and the rounding breaks the sum, but rustledger preserves full precision during interpolation (it never rounds a non-zero residual to zero), so no rounding residual is ever produced and there is nothing for a rounding account to catch.
+
+**Fix**: None required — the option is harmless. Remove it if you want the warning to go away.
+
 ## Document Errors (E8xxx)
 
 ### E8001: Document Not Found / Plugin Not Found

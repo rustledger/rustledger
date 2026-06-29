@@ -55,7 +55,7 @@ const READONLY_OPTIONS: &[&str] = &["filename"];
 /// Option validation warning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionWarning {
-    /// Warning code (E7001 through E7006).
+    /// Warning code (E7001 through E7007).
     pub code: &'static str,
     /// Warning message.
     pub message: String,
@@ -283,6 +283,23 @@ impl Options {
                         value: value.to_string(),
                     });
                 }
+                // Accepted for Beancount compatibility but intentionally a no-op.
+                // Beancount uses `account_rounding` to absorb the residual created
+                // when an interpolated leg is *rounded* and the rounding breaks the
+                // sum. rustledger never produces such a residual: `round_interpolated`
+                // (rustledger-booking) preserves full precision instead of rounding a
+                // non-zero residual to zero, so there is nothing for a rounding
+                // account to catch. Warn so the option isn't silently swallowed.
+                self.warnings.push(OptionWarning {
+                    code: "E7007",
+                    message: "Option 'account_rounding' is accepted for compatibility \
+                              but has no effect: rustledger preserves full precision \
+                              during interpolation rather than rounding into a rounding \
+                              account, so no rounding residual is produced."
+                        .to_string(),
+                    option: key.to_string(),
+                    value: value.to_string(),
+                });
                 self.account_rounding = Some(value.to_string());
             }
             "account_current_conversions" => {
@@ -791,14 +808,37 @@ mod tests {
     }
 
     #[test]
+    fn test_account_rounding_accepted_but_warns_noop() {
+        let mut opts = Options::new();
+        opts.set("account_rounding", "Equity:Rounding");
+
+        // Still stored for Beancount compatibility...
+        assert_eq!(opts.account_rounding.as_deref(), Some("Equity:Rounding"));
+        // ...but a no-op warning is emitted so the option isn't silently swallowed.
+        let w = opts
+            .warnings
+            .iter()
+            .find(|w| w.code == "E7007")
+            .expect("expected an E7007 no-op warning for account_rounding");
+        assert!(w.message.contains("no effect"));
+        assert_eq!(w.option, "account_rounding");
+        // A valid account name must NOT also trip E7002 (invalid value).
+        assert!(!opts.warnings.iter().any(|w| w.code == "E7002"));
+    }
+
+    #[test]
     fn test_invalid_account_name_validation() {
-        // Test account_rounding with invalid value
+        // account_rounding with an invalid value: both the invalid-account
+        // warning (E7002) and the accepted-but-no-op warning (E7007) fire.
         let mut opts = Options::new();
         opts.set("account_rounding", "invalid");
 
-        assert_eq!(opts.warnings.len(), 1);
-        assert_eq!(opts.warnings[0].code, "E7002");
-        assert!(opts.warnings[0].message.contains("Invalid leaf account"));
+        assert!(
+            opts.warnings
+                .iter()
+                .any(|w| w.code == "E7002" && w.message.contains("Invalid leaf account"))
+        );
+        assert!(opts.warnings.iter().any(|w| w.code == "E7007"));
     }
 
     #[test]
@@ -806,11 +846,10 @@ mod tests {
         let mut opts = Options::new();
         opts.set("account_rounding", "Equity:Rounding");
 
-        assert!(
-            opts.warnings.is_empty(),
-            "Valid account name should not produce warnings: {:?}",
-            opts.warnings
-        );
+        // A valid account name does not trip E7002; the value is stored, but
+        // account_rounding is a no-op in rustledger so an E7007 warning fires.
+        assert!(!opts.warnings.iter().any(|w| w.code == "E7002"));
+        assert!(opts.warnings.iter().any(|w| w.code == "E7007"));
         assert_eq!(opts.account_rounding, Some("Equity:Rounding".to_string()));
     }
 

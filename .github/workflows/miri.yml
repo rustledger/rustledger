@@ -6,12 +6,11 @@
 # are miri-compatible; WASM/FFI crates and fs/wasmtime-heavy crates are
 # excluded because miri can't run their targets.
 #
-# Memory model: Stacked Borrows (miri's default). #1239 Q2 originally chose
-# Tree Borrows, but the *experimental* Tree-Borrows ruleset false-positives on
-# the `rowan` dependency's `ThinArc::clone` (a "write through Frozen" report
-# that miri itself flags as experimental), which the parser reaches via CST
-# conversion. `rowan` is clean under Stacked Borrows (as it is for
-# rust-analyzer), so we use the default model.
+# Memory model: Stacked Borrows (miri's default). The job is scoped to the
+# rowan-free crates because rowan's `ThinArc` green tree trips miri under BOTH
+# Stacked Borrows AND Tree Borrows (a known, open aliasing-model question, not a
+# rowan bug), so no memory-model flag fixes it. See the "Run Miri on rowan-free
+# crates" step below for the full rationale and upstream references.
 name: Miri
 on:
   schedule:
@@ -51,8 +50,9 @@ jobs:
       # internal unsafe, not ours. It's a known, still-open upstream question, not
       # a rowan bug we can fix or upgrade away from:
       #   - https://github.com/rust-analyzer/rowan/issues/108 (open since 2021)
-      #   - tied to rust-lang/unsafe-code-guidelines #134 / #256 / #276; the Rust
-      #     teams' "general temperature" is that this pattern SHOULD be allowed.
+      #   - tied to rust-lang/unsafe-code-guidelines#134 / #256 / #276 (i.e.
+      #     github.com/rust-lang/unsafe-code-guidelines/issues/{134,256,276}); the
+      #     Rust teams' "general temperature" is that this pattern SHOULD be allowed.
       #   - rowan 0.16.1 is the latest release; no Miri-clean version exists.
       # Tree Borrows does not help (verified), so the established practice for a
       # Miri-incompatible dependency applies: scope Miri away from it. We still
@@ -83,8 +83,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Memory model: Stacked Borrows (miri default)." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Checked crates:" >> $GITHUB_STEP_SUMMARY
+          echo "Checked crates (rowan-free):" >> $GITHUB_STEP_SUMMARY
           echo "- rustledger-core" >> $GITHUB_STEP_SUMMARY
-          echo "- rustledger-parser" >> $GITHUB_STEP_SUMMARY
           echo "- rustledger-booking" >> $GITHUB_STEP_SUMMARY
-          echo "- rustledger-query" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Excluded — rowan's ThinArc is miri-incompatible under Stacked AND Tree Borrows: rustledger-parser, rustledger-query." >> $GITHUB_STEP_SUMMARY

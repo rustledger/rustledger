@@ -154,7 +154,7 @@ tempfile = "3"
 dhat = "0.3"
 # CPU sampling → flamegraph for the nightly `profile.yml` harness. In-process
 # (signal-based, no `perf` privileges). Optional; only via the `flamegraph` feature.
-pprof = { version = "0.14", features = ["flamegraph"] }
+pprof = { version = "0.15", features = ["flamegraph"] }
 
 # Data formats
 csv = "1"

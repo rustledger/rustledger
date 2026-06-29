@@ -256,7 +256,7 @@ A 3-tier pipeline automatically categorizes transactions:
 
 1. **Rules engine** — substring, regex, and exact match patterns from `importers.toml`
 1. **Merchant dictionary** — ~75 built-in patterns across 10 categories (groceries, dining, transport, subscriptions, etc.)
-1. **ML categorization** — TF-IDF + Naive Bayes classification via `linfa`
+1. **ML categorization** — TF-IDF + a self-contained Multinomial Naive Bayes classifier (pure `std`, no ML framework dependency)
 
 ### Transfer Detection
 

@@ -289,18 +289,19 @@ impl Executor<'_> {
                 }
             }
 
-            // Check if it's already in SELECT (by expression or by alias)
+            // Check if this ORDER BY is already reachable by name in the
+            // projected output. A target only covers it when the sorted output
+            // column carries the ORDER BY's name: either the target is
+            // unaliased (its output name is the expression itself) or its alias
+            // equals the ORDER BY reference. A target whose expression matches
+            // but is aliased to a *different* name does NOT cover it — the
+            // output column is named by the alias, so `sort_results` would fail
+            // a literal name lookup for the raw column (#1627). In that case we
+            // still append a hidden column carrying the raw name.
             let expr_str = spec.expr.to_string();
             let in_select = query.targets.iter().any(|t| {
-                if t.expr == spec.expr {
-                    return true;
-                }
-                if let Some(alias) = &t.alias
-                    && alias == &expr_str
-                {
-                    return true;
-                }
-                false
+                (t.expr == spec.expr && t.alias.is_none())
+                    || t.alias.as_deref() == Some(expr_str.as_str())
             });
 
             if !in_select {

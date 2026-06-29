@@ -164,6 +164,43 @@ fn test_order_by() {
 }
 
 #[test]
+fn order_by_raw_column_when_aliased_in_select() {
+    // #1627: ORDER BY a raw column that is aliased in SELECT must not fail with
+    // "column not found". The alias renames the output column, but the raw name
+    // is still a valid sort reference — a hidden sort column is appended and
+    // stripped after sorting.
+    let directives = sample_directives();
+    let mut executor = Executor::new(&directives);
+
+    // Aggregate: alias the grouped column, then ORDER BY the raw column.
+    let aliased = executor
+        .execute(&parse("SELECT date AS d GROUP BY date ORDER BY date").unwrap())
+        .expect("ORDER BY raw column should resolve even when aliased (#1627)");
+    // The hidden `date` sort column is stripped; only the aliased column shows.
+    assert_eq!(aliased.columns, vec!["d"]);
+
+    // Same result as ORDER BY <alias> (the documented workaround) and as the
+    // un-aliased form.
+    let by_alias = executor
+        .execute(&parse("SELECT date AS d GROUP BY date ORDER BY d").unwrap())
+        .unwrap();
+    assert_eq!(aliased.rows, by_alias.rows);
+
+    let unaliased = executor
+        .execute(&parse("SELECT date GROUP BY date ORDER BY date").unwrap())
+        .unwrap();
+    assert_eq!(aliased.rows, unaliased.rows);
+
+    // DESC and the non-aggregate form must resolve too.
+    executor
+        .execute(&parse("SELECT date AS d GROUP BY date ORDER BY date DESC").unwrap())
+        .expect("aliased ORDER BY ... DESC should resolve (#1627)");
+    executor
+        .execute(&parse("SELECT date AS d ORDER BY date").unwrap())
+        .expect("non-aggregate aliased ORDER BY should resolve (#1627)");
+}
+
+#[test]
 fn test_hash_value_all_variants() {
     use rustledger_core::{Cost, Inventory, Position};
 

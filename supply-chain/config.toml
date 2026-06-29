@@ -552,7 +552,7 @@ version = "0.16.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.lsp-server]]
-version = "0.7.9"
+version = "0.8.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.lsp-types]]

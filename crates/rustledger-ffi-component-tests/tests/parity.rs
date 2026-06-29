@@ -138,7 +138,7 @@ fn load_entry_count_matches_jsonrpc() -> Result<()> {
     let (mut store, inst) = instantiate()?;
     let result = inst
         .rustledger_ledger_ledger()
-        .call_load(&mut store, LEDGER, "<stdin>")?;
+        .call_load(&mut store, LEDGER, "<stdin>", false)?;
     let expected = rustledger_ffi_wasi::helpers::load_source(LEDGER)
         .directives
         .len();
@@ -194,7 +194,7 @@ fn clamp_runs_and_summarizes_pre_range() -> Result<()> {
     let (mut store, inst) = instantiate()?;
     let loaded =
         inst.rustledger_ledger_ledger()
-            .call_load(&mut store, LEDGER_WITH_HISTORY, "<stdin>")?;
+            .call_load(&mut store, LEDGER_WITH_HISTORY, "<stdin>", false)?;
     let clamped = inst.rustledger_ledger_builder().call_clamp(
         &mut store,
         &loaded.entries,
@@ -273,7 +273,7 @@ fn filter_keeps_pre_begin_open_and_drops_commodity() -> Result<()> {
 ";
     let loaded = inst
         .rustledger_ledger_ledger()
-        .call_load(&mut store, src, "<stdin>")?;
+        .call_load(&mut store, src, "<stdin>", false)?;
     let filtered = inst.rustledger_ledger_builder().call_filter(
         &mut store,
         &loaded.entries,
@@ -306,7 +306,7 @@ fn custom_directive_values_keep_their_type_tag() -> Result<()> {
     let src = "2024-01-01 custom \"budget\" Assets:Cash \"monthly\"\n";
     let loaded = inst
         .rustledger_ledger_ledger()
-        .call_load(&mut store, src, "<stdin>")?;
+        .call_load(&mut store, src, "<stdin>", false)?;
     let custom = loaded
         .entries
         .iter()
@@ -353,7 +353,7 @@ fn load_file_reads_and_resolves_includes() -> Result<()> {
     let (mut store, inst) = instantiate_in(dir.path())?;
     let r =
         inst.rustledger_ledger_ledger()
-            .call_load_file(&mut store, "/work/main.bean", true, &[])?;
+            .call_load_file(&mut store, "/work/main.bean", true, &[], false)?;
     assert!(r.errors.is_empty(), "load_file errored: {:?}", r.errors);
     // Opens from both the entry file and the included file.
     assert!(
@@ -388,6 +388,7 @@ fn load_file_path_security_confines_cross_tree_includes() -> Result<()> {
         "/work/entry/main.bean",
         false,
         &[],
+        false,
     )?;
     // Assert specifically on the path-traversal rejection, not just any error,
     // so an incidental I/O or parse failure can't make this pass for the wrong
@@ -407,6 +408,7 @@ fn load_file_path_security_confines_cross_tree_includes() -> Result<()> {
         "/work/entry/main.bean",
         true,
         &[],
+        false,
     )?;
     assert!(
         open.errors.is_empty(),
@@ -437,12 +439,13 @@ fn load_file_runs_requested_plugin() -> Result<()> {
     let (mut store, inst) = instantiate_in(dir.path())?;
     let without =
         inst.rustledger_ledger_ledger()
-            .call_load_file(&mut store, "/work/main.bean", true, &[])?;
+            .call_load_file(&mut store, "/work/main.bean", true, &[], false)?;
     let with = inst.rustledger_ledger_ledger().call_load_file(
         &mut store,
         "/work/main.bean",
         true,
         &["implicit_prices".to_string()],
+        false,
     )?;
     let count_prices = |entries: &[Directive]| {
         entries
@@ -506,7 +509,7 @@ fn load_runs_auto_accounts_synth() -> Result<()> {
     let (mut store, inst) = instantiate()?;
     let loaded =
         inst.rustledger_ledger_ledger()
-            .call_load(&mut store, AUTO_ACCOUNTS_LEDGER, "<stdin>")?;
+            .call_load(&mut store, AUTO_ACCOUNTS_LEDGER, "<stdin>", false)?;
     assert_generated_opens(&loaded.entries, "component load");
     Ok(())
 }
@@ -522,7 +525,7 @@ fn load_file_runs_auto_accounts_synth() -> Result<()> {
     let (mut store, inst) = instantiate_in(dir.path())?;
     let loaded =
         inst.rustledger_ledger_ledger()
-            .call_load_file(&mut store, "/work/main.bean", true, &[])?;
+            .call_load_file(&mut store, "/work/main.bean", true, &[], false)?;
     assert_generated_opens(&loaded.entries, "component load_file");
     Ok(())
 }
@@ -604,7 +607,7 @@ fn query_entries_matches_source_query() -> Result<()> {
     let q = "SELECT account, position";
     let loaded = inst
         .rustledger_ledger_ledger()
-        .call_load(&mut store, LEDGER, "<stdin>")?;
+        .call_load(&mut store, LEDGER, "<stdin>", false)?;
     let via_entries =
         inst.rustledger_ledger_builder()
             .call_query_entries(&mut store, &loaded.entries, q)?;

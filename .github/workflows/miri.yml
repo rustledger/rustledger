@@ -42,22 +42,30 @@ jobs:
       # "the 'miri' component ... is not available for the 'stable' toolchain").
       - name: Setup Miri
         run: cargo +nightly miri setup
-      - name: Run Miri on core crates
+      # Scoped to the rowan-free crates. rustledger-parser and rustledger-query
+      # depend on `rowan`, whose green tree is a `ThinArc` (header + slice packed
+      # into one allocation). That thin-pointer "header fattening" is rejected by
+      # Miri under BOTH Stacked Borrows and Tree Borrows (a write/retag through a
+      # pointer not in the borrow stack at SyntaxNode::green().into_owned()).
+      # rustledger-parser is #![forbid(unsafe_code)], so this is entirely rowan's
+      # internal unsafe, not ours. It's a known, still-open upstream question, not
+      # a rowan bug we can fix or upgrade away from:
+      #   - https://github.com/rust-analyzer/rowan/issues/108 (open since 2021)
+      #   - tied to rust-lang/unsafe-code-guidelines #134 / #256 / #276; the Rust
+      #     teams' "general temperature" is that this pattern SHOULD be allowed.
+      #   - rowan 0.16.1 is the latest release; no Miri-clean version exists.
+      # Tree Borrows does not help (verified), so the established practice for a
+      # Miri-incompatible dependency applies: scope Miri away from it. We still
+      # catch transitive-`unsafe` UB in our own logic via core + booking (+ their
+      # deps: rust_decimal, bigdecimal, imbl, smallvec, ...).
+      - name: Run Miri on rowan-free crates
         run: |
           echo "::group::rustledger-core"
           cargo +nightly miri test --package rustledger-core --all-features
           echo "::endgroup::"
 
-          echo "::group::rustledger-parser"
-          cargo +nightly miri test --package rustledger-parser --all-features
-          echo "::endgroup::"
-
           echo "::group::rustledger-booking"
           cargo +nightly miri test --package rustledger-booking --all-features
-          echo "::endgroup::"
-
-          echo "::group::rustledger-query"
-          cargo +nightly miri test --package rustledger-query --all-features
           echo "::endgroup::"
         env:
           # -Zmiri-disable-isolation: some tests read the realtime clock

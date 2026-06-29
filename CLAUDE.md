@@ -102,7 +102,7 @@ The project is a Cargo workspace with 16 crates plus editor extensions:
 | `rustledger-wasm` | WebAssembly library target |
 | `rustledger-lsp` | Language Server Protocol implementation |
 | `rustledger-ffi-wasi` | FFI via WASI (wasip1) JSON-RPC for embedding — legacy, slated for removal in Phase 5 (#1419) |
-| `rustledger-ffi-component` | FFI via WASI Preview 2 / Component Model (typed WIT contract, `rustledger:ledger@2.1.0`) — primary embedding surface, default in the rustfava embedder (#1384 Phase 4) |
+| `rustledger-ffi-component` | FFI via WASI Preview 2 / Component Model (typed WIT contract, `rustledger:ledger@3.0.0`) — primary embedding surface, default in the rustfava embedder (#1384 Phase 4) |
 
 | Package | Purpose |
 |---------|---------|

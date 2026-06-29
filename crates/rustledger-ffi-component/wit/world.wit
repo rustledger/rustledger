@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@2.1.0;
+package rustledger:ledger@3.0.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -387,7 +387,7 @@ interface ledger {
     queries: list<query-result>,
   }
 
-  /// The api-version string this component implements (e.g. "2.1"). The WIT
+  /// The api-version string this component implements (e.g. "3.0"). The WIT
   /// contract is itself the versioned wire shape; this exists for runtime
   /// negotiation, replacing the `api_version` field formerly stamped onto every
   /// JSON-RPC response.
@@ -395,7 +395,11 @@ interface ledger {
 
   /// Parse + book a ledger from source text. `filename` is recorded as the
   /// directives' source location (e.g. `<string>`); pass `<stdin>` if unknown.
-  load: func(source: string, filename: string) -> load-result;
+  /// When `expand-pads` is `true`, `pad` directives are materialized into
+  /// synthesized `Padding` transactions in the returned entries (sorted by
+  /// date, no source location) — balance-computing consumers want this; the
+  /// `false`/default keeps the source-faithful stream (#1628).
+  load: func(source: string, filename: string, expand-pads: bool) -> load-result;
   /// Like `load`, but from a file path (the host grants filesystem access).
   /// By default the include graph is confined to the entry file's directory
   /// tree (path-traversal protection); set `allow-unrestricted-includes` to
@@ -407,8 +411,10 @@ interface ledger {
   /// name with no config. The ledger's own `plugin "name" "config"` directives
   /// already run (with their config) during the load — a plugin that needs
   /// configuration must be declared in the ledger, since this list carries only
-  /// names.
-  load-file: func(path: string, allow-unrestricted-includes: bool, plugins: list<string>) -> load-result;
+  /// names. `expand-pads` materializes `pad` directives into synthesized
+  /// `Padding` transactions in the returned entries (see `load`); default
+  /// `false` keeps the source-faithful stream (#1628).
+  load-file: func(path: string, allow-unrestricted-includes: bool, plugins: list<string>, expand-pads: bool) -> load-result;
 
   /// Validate source text (parse + semantic checks).
   validate: func(source: string) -> validate-result;

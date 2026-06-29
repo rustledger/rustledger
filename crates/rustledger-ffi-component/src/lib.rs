@@ -41,9 +41,9 @@ use exports::rustledger::ledger::ledger::{
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. Mirrors
-/// `rustledger-ffi-wasi`'s `API_VERSION` (additive 2.1 — per-position cost).
-const API_VERSION: &str = "2.1";
+/// The Component-Model api-version this build implements. Bumped to 3.0 for the
+/// breaking `expand-pads` parameter added to `load`/`load-file` (#1628).
+const API_VERSION: &str = "3.0";
 
 struct Component;
 
@@ -53,15 +53,16 @@ impl LedgerGuest for Component {
     fn version() -> String {
         API_VERSION.to_string()
     }
-    fn load(source: String, filename: String) -> LoadResult {
-        convert::load(&source, &filename)
+    fn load(source: String, filename: String, expand_pads: bool) -> LoadResult {
+        convert::load(&source, &filename, expand_pads)
     }
     fn load_file(
         path: String,
         allow_unrestricted_includes: bool,
         plugins: Vec<String>,
+        expand_pads: bool,
     ) -> LoadResult {
-        convert::load_file(&path, allow_unrestricted_includes, &plugins)
+        convert::load_file(&path, allow_unrestricted_includes, &plugins, expand_pads)
     }
     fn validate(source: String) -> ValidateResult {
         convert::validate(&source)

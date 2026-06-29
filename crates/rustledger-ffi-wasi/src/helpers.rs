@@ -307,6 +307,31 @@ pub struct FileLoad {
     pub loaded_files: Vec<String>,
 }
 
+/// Expand `pad` directives into synthesized `Padding` transactions for
+/// balance-computing consumers, preserving each directive's parallel tag
+/// (line, or line+file).
+///
+/// Mirrors `Ledger::balance_view`: prepend the synthesized transactions —
+/// which have no source location, so they take `synth_tag` — then stable-sort
+/// the whole stream by date. Source-faithful callers skip this; only the
+/// `load`/`load-file` consumers that opt in (#1628) expand. The input must not
+/// already contain synth pad transactions (it is the raw load stream).
+#[must_use]
+pub fn expand_pads<T: Clone>(
+    directives: Vec<Directive>,
+    tags: Vec<T>,
+    synth_tag: &T,
+) -> (Vec<Directive>, Vec<T>) {
+    let pads = rustledger_booking::process_pads(&directives).padding_transactions;
+    let mut pairs: Vec<(Directive, T)> = Vec::with_capacity(directives.len() + pads.len());
+    for txn in pads {
+        pairs.push((Directive::Transaction(txn), synth_tag.clone()));
+    }
+    pairs.extend(directives.into_iter().zip(tags));
+    pairs.sort_by_key(|(d, _)| d.date());
+    pairs.into_iter().unzip()
+}
+
 /// Load a ledger from a file path, resolving `include` directives and booking
 /// transactions. Shared by the JSON-RPC `ledger.loadFile` handler and the WIT
 /// component (#1384).
@@ -524,3 +549,38 @@ pub fn apply_plugins(
 // call sites (`util.types`, `util.getAccountType`) that already reference
 // `helpers::{ACCOUNT_TYPES, account_type}`.
 pub use rustledger_core::{ACCOUNT_TYPES, account_type};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A ledger whose balance depends on pad expansion (#1628 repro).
+    const PAD_LEDGER: &str = "\
+option \"operating_currency\" \"USD\"
+2020-01-01 open Assets:SomeName USD
+2020-01-01 open Equity:Opening-balances
+2024-01-20 pad Assets:SomeName Equity:Opening-balances
+2024-01-21 balance Assets:SomeName 42 USD
+";
+
+    #[test]
+    fn expand_pads_materializes_padding_transaction() {
+        let load = load_source(PAD_LEDGER);
+        // The source-faithful load stream has no synthesized padding transaction.
+        assert!(!load.directives.iter().any(|d| matches!(
+            d,
+            Directive::Transaction(t) if rustledger_booking::is_synthesized_pad(t)
+        )));
+        let raw_len = load.directives.len();
+
+        let (expanded, lines) = expand_pads(load.directives, load.directive_lines, &0u32);
+        // Exactly one synthesized Padding transaction is inserted, tags aligned.
+        assert_eq!(expanded.len(), raw_len + 1);
+        assert_eq!(expanded.len(), lines.len());
+        let synth = expanded
+            .iter()
+            .filter(|d| matches!(d, Directive::Transaction(t) if rustledger_booking::is_synthesized_pad(t)))
+            .count();
+        assert_eq!(synth, 1, "expected exactly one synthesized Padding txn");
+    }
+}

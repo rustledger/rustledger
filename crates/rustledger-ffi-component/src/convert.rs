@@ -305,17 +305,29 @@ fn options(o: ffi::LedgerOptions) -> wit::LedgerOptions {
 }
 
 /// `ledger.load` — parse + book `source`, returning a typed load result.
-pub fn load(source: &str, filename: &str) -> out::LoadResult {
-    load_result(ffi::helpers::load_source(source), filename)
+/// `expand_pads` materializes `pad` directives into synthesized `Padding`
+/// transactions (balance consumers opt in); default-off is source-faithful (#1628).
+pub fn load(source: &str, filename: &str, expand_pads: bool) -> out::LoadResult {
+    load_result(ffi::helpers::load_source(source), filename, expand_pads)
 }
 
 /// Build a WIT load-result from a consumed `ffi-wasi` load result (shared by
-/// `load` and `batch`).
-fn load_result(loaded: ffi::helpers::LoadResult, filename: &str) -> out::LoadResult {
-    let entries = loaded
-        .directives
+/// `load` and `batch`). `batch` always passes `expand_pads = false` — its load
+/// section is source-faithful and its queries pad-expand separately.
+fn load_result(
+    loaded: ffi::helpers::LoadResult,
+    filename: &str,
+    expand_pads: bool,
+) -> out::LoadResult {
+    // Synthesized pad transactions have no source line (tagged 0).
+    let (directives, directive_lines) = if expand_pads {
+        ffi::helpers::expand_pads(loaded.directives, loaded.directive_lines, &0u32)
+    } else {
+        (loaded.directives, loaded.directive_lines)
+    };
+    let entries = directives
         .iter()
-        .zip(loaded.directive_lines.iter())
+        .zip(directive_lines.iter())
         .map(|(d, &line)| directive(ffi::convert::directive_to_json(d, line, filename)))
         .collect();
     out::LoadResult {
@@ -538,7 +550,7 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
             .collect()
     };
     out::BatchResult {
-        load: load_result(loaded, "<stdin>"),
+        load: load_result(loaded, "<stdin>", false),
         queries: query_results,
     }
 }
@@ -560,6 +572,7 @@ pub fn load_file(
     path: &str,
     allow_unrestricted_includes: bool,
     plugins: &[String],
+    expand_pads: bool,
 ) -> out::LoadResult {
     // The loader takes `path_security` (true = confine includes); the WIT flag
     // is inverted so the safe state is the `false`/zero default.
@@ -580,6 +593,21 @@ pub fn load_file(
                 &mut errors,
                 &opts,
             );
+            // Opt-in pad expansion for balance consumers (#1628); synthesized
+            // transactions have no source location.
+            let (directives, directive_lines, directive_files) = if expand_pads {
+                let tags: Vec<(u32, String)> =
+                    directive_lines.into_iter().zip(directive_files).collect();
+                let (directives, tags) = ffi::helpers::expand_pads(
+                    directives,
+                    tags,
+                    &(0u32, "<synthesized>".to_string()),
+                );
+                let (lines, files): (Vec<u32>, Vec<String>) = tags.into_iter().unzip();
+                (directives, lines, files)
+            } else {
+                (directives, directive_lines, directive_files)
+            };
             let entries = directives
                 .iter()
                 .enumerate()

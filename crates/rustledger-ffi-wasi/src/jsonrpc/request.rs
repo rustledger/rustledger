@@ -136,6 +136,11 @@ pub struct LoadParams {
     /// Optional filename for error messages.
     #[serde(default)]
     pub filename: Option<String>,
+    /// Expand `pad` directives into synthesized `Padding` transactions in the
+    /// returned entry stream (default `false` = source-faithful). Balance-
+    /// computing consumers (e.g. fava) set this; see #1628.
+    #[serde(default)]
+    pub expand_pads: bool,
 }
 
 /// Parameters for ledger.loadFile method.
@@ -155,6 +160,11 @@ pub struct LoadFileParams {
     /// argument.
     #[serde(default = "default_true")]
     pub path_security: bool,
+    /// Expand `pad` directives into synthesized `Padding` transactions in the
+    /// returned entry stream (default `false` = source-faithful). Balance-
+    /// computing consumers (e.g. fava) set this; see #1628.
+    #[serde(default)]
+    pub expand_pads: bool,
 }
 
 const fn default_true() -> bool {

@@ -82,6 +82,13 @@ pub use types::input_entry_to_directive;
 ///
 /// # Version history
 ///
+/// * **2.2** — `ledger.load`/`ledger.loadFile` accept an optional
+///   `expand_pads` request field; when `true`, `pad` directives are
+///   materialized into synthesized `Padding` transactions in the returned
+///   entries (balance-computing consumers opt in). Additive and backward
+///   compatible — the field defaults to `false` (source-faithful) — hence a
+///   minor bump per the policy above (#1628). (The WIT component delivers the
+///   same capability via a *breaking* parameter, so it bumps to 3.0.)
 /// * **2.1** — `Inventory`/`Position` query values now include an optional
 ///   `cost` object per position when the holding was booked at cost, using the
 ///   same wire shape as a directive `PostingCost` (`number` is a tagged
@@ -99,4 +106,4 @@ pub use types::input_entry_to_directive;
 ///   should refuse to talk to a v2.x server. See `README.md` for the
 ///   migration recipe.
 /// * **1.0** — initial API.
-pub const API_VERSION: &str = "2.1";
+pub const API_VERSION: &str = "2.2";

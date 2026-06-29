@@ -380,7 +380,7 @@ echo '[
 
 Instead of a hand-rolled JSON-RPC wire shape, this surface exposes a generated
 **WIT contract** (`crates/rustledger-ffi-component/wit/world.wit`, versioned
-package `rustledger:ledger@2.1.0`). The same operations — `load` / `validate` /
+package `rustledger:ledger@3.0.0`). The same operations — `load` / `validate` /
 `query` / `batch` (+ `-file` variants), entry `create` / `filter` / `clamp`,
 `util`, and `format` — are strongly-typed component functions with no JSON
 envelope. The contract itself is the versioned wire shape; a `version()` func

@@ -96,10 +96,16 @@ fn handle_load(params: &serde_json::Value) -> Result<serde_json::Value, RpcError
     let filename = params.filename.as_deref().unwrap_or("<stdin>");
     let load = load_source(&params.source);
 
-    let entries: Vec<DirectiveJson> = load
-        .directives
+    // Source-faithful by default; opt into pad-expansion for balance consumers
+    // (#1628). Synthesized transactions have no source line (tagged 0).
+    let (directives, directive_lines) = if params.expand_pads {
+        crate::helpers::expand_pads(load.directives, load.directive_lines, &0u32)
+    } else {
+        (load.directives, load.directive_lines)
+    };
+    let entries: Vec<DirectiveJson> = directives
         .iter()
-        .zip(load.directive_lines.iter())
+        .zip(directive_lines.iter())
         .map(|(d, &line)| directive_to_json(d, line, filename))
         .collect();
 
@@ -143,6 +149,18 @@ fn handle_load_file(params: &serde_json::Value) -> Result<serde_json::Value, Rpc
     );
 
     // `options`, `plugins`, `loaded_files` come from `helpers::load_file` above.
+
+    // Source-faithful by default; opt into pad-expansion for balance consumers
+    // (#1628). Synthesized transactions have no source location.
+    let (directives, directive_lines, directive_files) = if params.expand_pads {
+        let tags: Vec<(u32, String)> = directive_lines.into_iter().zip(directive_files).collect();
+        let (directives, tags) =
+            crate::helpers::expand_pads(directives, tags, &(0u32, "<synthesized>".to_string()));
+        let (lines, files): (Vec<u32>, Vec<String>) = tags.into_iter().unzip();
+        (directives, lines, files)
+    } else {
+        (directives, directive_lines, directive_files)
+    };
 
     // Build entries
     let entries: Vec<DirectiveJson> = directives
@@ -674,3 +692,30 @@ fn handle_get_account_type(params: &serde_json::Value) -> Result<serde_json::Val
 
 // `build_ledger_options` moved to `crate::helpers` so the WIT component
 // crate (#1384) can reuse it via `helpers::load_file`.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PAD_LEDGER: &str = "\
+option \"operating_currency\" \"USD\"
+2020-01-01 open Assets:SomeName USD
+2020-01-01 open Equity:Opening-balances
+2024-01-20 pad Assets:SomeName Equity:Opening-balances
+2024-01-21 balance Assets:SomeName 42 USD
+";
+
+    fn entry_count(v: &serde_json::Value) -> usize {
+        v["entries"].as_array().map_or(0, Vec::len)
+    }
+
+    #[test]
+    fn load_expand_pads_flag_adds_padding_entry() {
+        // Source-faithful by default; `expand_pads: true` adds the synthesized
+        // Padding transaction to the returned entry stream (#1628).
+        let raw = handle_load(&serde_json::json!({ "source": PAD_LEDGER })).unwrap();
+        let expanded =
+            handle_load(&serde_json::json!({ "source": PAD_LEDGER, "expand_pads": true })).unwrap();
+        assert_eq!(entry_count(&expanded), entry_count(&raw) + 1);
+    }
+}

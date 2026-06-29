@@ -692,7 +692,7 @@ version = "1.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.pprof]]
-version = "0.14.1"
+version = "0.15.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ppv-lite86]]

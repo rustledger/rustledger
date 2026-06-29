@@ -302,7 +302,7 @@ WASM importers implement the same `Importer` trait as the built-ins via the [`wa
 | [`rustledger-ops`](https://crates.io/crates/rustledger-ops) | Pure operations — ML categorization, LLM prompts, dedup, transfer detection, balance reconciliation, merchant dictionary |
 | [`rustledger-lsp`](https://crates.io/crates/rustledger-lsp) | Language Server Protocol for editor integration |
 | [`rustledger-wasm`](https://crates.io/crates/rustledger-wasm) | WebAssembly bindings for JavaScript/TypeScript |
-| [`rustledger-ffi-component`](crates/rustledger-ffi-component) | Primary embedding surface — FFI via WASI Preview 2 / Component Model (typed WIT contract) |
+| [`rustledger-ffi-component`](https://github.com/rustledger/rustledger/tree/main/crates/rustledger-ffi-component) | Primary embedding surface — FFI via WASI Preview 2 / Component Model (typed WIT contract) |
 | [`rustledger-ffi-wasi`](https://crates.io/crates/rustledger-ffi-wasi) | Legacy WASI (wasip1) JSON-RPC FFI for embedding — slated for removal |
 
 <details>

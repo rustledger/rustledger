@@ -123,6 +123,9 @@ rledger query ledger.beancount "SELECT account, SUM(position) GROUP BY account"
 | `rledger doctor` | Debugging tools for ledger issues |
 | `rledger extract` | Import transactions from CSV/OFX bank statements with auto-detection, dedup, and categorization |
 | `rledger price` | Fetch commodity prices from online sources |
+| `rledger lint` | Non-fatal advisory passes (e.g., detect inter-account transfer pairs) |
+| `rledger config` | Manage rustledger configuration (alias: `cfg`) |
+| `rledger completions` | Generate shell completions |
 | `rledger-lsp` | Language Server Protocol for editor integration |
 
 Python beancount users can install `bean-check`, `bean-query`, etc. wrapper scripts via `rledger compat install`.
@@ -252,8 +255,8 @@ Config is searched in: current directory, `~/.config/rledger/importers.toml`, or
 A 3-tier pipeline automatically categorizes transactions:
 
 1. **Rules engine** — substring, regex, and exact match patterns from `importers.toml`
-2. **Merchant dictionary** — ~150 built-in patterns across 10 categories (grocery, dining, transport, subscriptions, etc.)
-3. **ML categorization** — TF-IDF + Naive Bayes classification via `linfa`
+1. **Merchant dictionary** — ~75 built-in patterns across 10 categories (groceries, dining, transport, subscriptions, etc.)
+1. **ML categorization** — TF-IDF + Naive Bayes classification via `linfa`
 
 ### Transfer Detection
 
@@ -285,20 +288,22 @@ WASM importers implement the same `Importer` trait as the built-ins via the [`wa
 
 | Crate | Description |
 |-------|-------------|
-| `rustledger` | CLI tool (`rledger check`, `rledger query`, etc.) |
-| `rustledger-core` | Core types: Amount, Position, Inventory |
-| `rustledger-parser` | Lexer and parser with error recovery |
-| `rustledger-loader` | File loading and includes |
-| `rustledger-booking` | Interpolation and 7 booking methods |
-| `rustledger-validate` | 26 validation error codes |
-| `rustledger-query` | BQL query engine |
-| `rustledger-plugin` | 31 built-in plugins + Python plugin support |
-| `rustledger-plugin-types` | Shared plugin type definitions |
-| `rustledger-importer` | Import framework: built-in CSV/OFX, plus a `WasmImporter` host loader for third-party `.wasm` importers |
-| `rustledger-ops` | Pure operations — ML categorization, LLM prompts, dedup, transfer detection, balance reconciliation, merchant dictionary |
-| `rustledger-lsp` | Language Server Protocol for editor integration |
-| `rustledger-wasm` | WebAssembly bindings for JavaScript/TypeScript |
-| `rustledger-ffi-wasi` | FFI via WASI for embedding in any language |
+| [`rustledger`](https://crates.io/crates/rustledger) | CLI tool (`rledger check`, `rledger query`, etc.) |
+| [`rustledger-core`](https://crates.io/crates/rustledger-core) | Core types: Amount, Position, Inventory |
+| [`rustledger-parser`](https://crates.io/crates/rustledger-parser) | Lexer and parser with error recovery |
+| [`rustledger-loader`](https://crates.io/crates/rustledger-loader) | File loading and includes |
+| [`rustledger-booking`](https://crates.io/crates/rustledger-booking) | Interpolation and 7 booking methods |
+| [`rustledger-validate`](https://crates.io/crates/rustledger-validate) | Validation error codes |
+| [`rustledger-query`](https://crates.io/crates/rustledger-query) | BQL query engine |
+| [`rustledger-completion`](https://crates.io/crates/rustledger-completion) | Editor-agnostic completion logic (shared by LSP + WASM) |
+| [`rustledger-plugin`](https://crates.io/crates/rustledger-plugin) | 31 built-in plugins + Python plugin support |
+| [`rustledger-plugin-types`](https://crates.io/crates/rustledger-plugin-types) | Shared plugin type definitions |
+| [`rustledger-importer`](https://crates.io/crates/rustledger-importer) | Import framework: built-in CSV/OFX, plus a `WasmImporter` host loader for third-party `.wasm` importers |
+| [`rustledger-ops`](https://crates.io/crates/rustledger-ops) | Pure operations — ML categorization, LLM prompts, dedup, transfer detection, balance reconciliation, merchant dictionary |
+| [`rustledger-lsp`](https://crates.io/crates/rustledger-lsp) | Language Server Protocol for editor integration |
+| [`rustledger-wasm`](https://crates.io/crates/rustledger-wasm) | WebAssembly bindings for JavaScript/TypeScript |
+| [`rustledger-ffi-component`](crates/rustledger-ffi-component) | Primary embedding surface — FFI via WASI Preview 2 / Component Model (typed WIT contract) |
+| [`rustledger-ffi-wasi`](https://crates.io/crates/rustledger-ffi-wasi) | Legacy WASI (wasip1) JSON-RPC FFI for embedding — slated for removal |
 
 <details>
 <summary><strong>Booking methods (7)</strong></summary>

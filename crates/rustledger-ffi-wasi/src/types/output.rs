@@ -351,49 +351,6 @@ pub struct Include {
     pub lineno: u32,
 }
 
-#[derive(Serialize)]
-pub struct LoadOutput {
-    pub api_version: &'static str,
-    pub entries: Vec<DirectiveJson>,
-    pub errors: Vec<Error>,
-    pub options: LedgerOptions,
-    pub plugins: Vec<Plugin>,
-    pub includes: Vec<Include>,
-}
-
-#[derive(Serialize)]
-pub struct ValidateOutput {
-    pub api_version: &'static str,
-    pub valid: bool,
-    pub errors: Vec<Error>,
-    /// Number of parse-phase errors (syntactic)
-    pub parse_error_count: usize,
-    /// Number of validate-phase errors (semantic)
-    pub validate_error_count: usize,
-}
-
-#[derive(Serialize)]
-pub struct ColumnInfo {
-    pub name: String,
-    pub datatype: String,
-}
-
-#[derive(Serialize)]
-pub struct QueryOutput {
-    pub api_version: &'static str,
-    pub columns: Vec<ColumnInfo>,
-    pub rows: Vec<Vec<serde_json::Value>>,
-    pub errors: Vec<Error>,
-}
-
-/// Output for batch command: load + multiple queries in one parse.
-#[derive(Serialize)]
-pub struct BatchOutput {
-    pub api_version: &'static str,
-    pub load: LoadOutput,
-    pub queries: Vec<QueryOutput>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,22 +437,5 @@ mod tests {
         let err = Error::new("test").validate_phase();
         let json = serde_json::to_value(&err).unwrap();
         assert_eq!(json["phase"], "validate");
-    }
-
-    #[test]
-    fn test_validate_output_includes_phase_counts() {
-        let output = ValidateOutput {
-            api_version: "1",
-            valid: false,
-            errors: vec![
-                Error::new("parse err"),
-                Error::new("validate err").validate_phase(),
-            ],
-            parse_error_count: 1,
-            validate_error_count: 1,
-        };
-        let json = serde_json::to_value(&output).unwrap();
-        assert_eq!(json["parse_error_count"], 1);
-        assert_eq!(json["validate_error_count"], 1);
     }
 }

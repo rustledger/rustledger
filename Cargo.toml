@@ -18,7 +18,6 @@ members = [
   "crates/rustledger-ffi-component",
   "crates/rustledger-ffi-component-tests",
   "crates/rustledger-lsp",
-  "crates/rustledger-wire-format-tests",
 ]
 # Exclude wasm from default builds (requires wasm32 target)
 default-members = [
@@ -35,7 +34,6 @@ default-members = [
   "crates/rustledger-ops",
   "crates/rustledger",
   "crates/rustledger-lsp",
-  "crates/rustledger-wire-format-tests",
 ]
 
 [workspace.package]

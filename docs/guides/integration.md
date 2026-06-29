@@ -16,7 +16,7 @@ rustledger provides multiple integration paths:
 | [Rust Crates](#rust-crates) | Rust applications | Rust |
 | [WASM Library](#webassembly-library) | Browsers, Node.js | JavaScript, TypeScript |
 | [Component Model (WIT)](#component-model-wit) | **Recommended** typed embedding on wasip2 hosts (primary embedding path) | Any wasip2 host |
-| [WASI FFI](#wasi-ffi-json-rpc) | Embedding via JSON-RPC (legacy — deprecated, slated for Phase 5 removal) | Python, Ruby, Go, etc. |
+| [WASI FFI](#wasi-ffi-json-rpc--removed) | JSON-RPC embedding — **removed** in Phase 5 (use Component Model) | — |
 | [LSP](#language-server-protocol) | Editor integrations | Any LSP client |
 
 ## Command-Line Interface
@@ -221,152 +221,14 @@ ledger.free();
 | `validateMultiFile()` | Validate across multiple files |
 | `queryMultiFile()` | Query across multiple files |
 
-## WASI FFI (JSON-RPC)
+## WASI FFI (JSON-RPC) — removed
 
-> **Legacy / deprecated.** This wasip1 JSON-RPC surface
-> (`rustledger-ffi-wasi`) is the older embedding path. New integrations should
-> prefer the typed [Component Model (WIT)](#component-model-wit) surface, which
-> is now the primary, default embedding path (the default backend in rustfava).
-> The JSON-RPC surface is slated for removal in Phase 5
-> ([#1419](https://github.com/rustledger/rustledger/issues/1419)). The reference
-> below remains accurate for as long as it ships.
-
-The WASI FFI module exposes a JSON-RPC 2.0 API that can be embedded in any language with a WASI runtime. This is ideal for building an API server or embedding in Python, Ruby, Go, etc.
-
-### Quick Start
-
-Build or download the WASM module, then run with wasmtime:
-
-```bash
-# Build from source
-cargo build -p rustledger-ffi-wasi --target wasm32-wasip1 --release
-
-# Run with wasmtime
-echo '{"jsonrpc":"2.0","method":"ledger.validate","params":{"source":"2024-01-01 open Assets:Bank USD"},"id":1}' | \
-    wasmtime target/wasm32-wasip1/release/rustledger-ffi-wasi.wasm
-```
-
-### Available Methods
-
-#### Ledger Operations
-
-| Method | Description |
-|--------|-------------|
-| `ledger.load` | Parse beancount source and return structured data |
-| `ledger.loadFile` | Load and process a beancount file (with includes, booking, plugins) |
-| `ledger.validate` | Validate beancount source and return errors |
-| `ledger.validateFile` | Validate a beancount file |
-
-#### Query Operations
-
-| Method | Description |
-|--------|-------------|
-| `query.execute` | Execute a BQL query on source |
-| `query.executeFile` | Execute a BQL query on a file |
-| `query.batch` | Execute multiple queries on source |
-| `query.batchFile` | Execute multiple queries on a file |
-
-#### Format Operations
-
-| Method | Description |
-|--------|-------------|
-| `format.source` | Format beancount source code |
-| `format.file` | Format a beancount file |
-| `format.entry` | Format a single entry from JSON |
-| `format.entries` | Format multiple entries from JSON |
-
-#### Entry Operations
-
-| Method | Description |
-|--------|-------------|
-| `entry.create` | Create an entry from JSON |
-| `entry.createBatch` | Create multiple entries from JSON |
-| `entry.filter` | Filter entries by date range |
-| `entry.clamp` | Clamp entries to date range |
-
-#### Utility Operations
-
-| Method | Description |
-|--------|-------------|
-| `util.version` | Get API and package version |
-| `util.types` | Get supported directive types, booking methods |
-
-### Example: Python with wasmtime-py
-
-```python
-import subprocess
-import json
-
-def call_rpc(method, params, wasm_path="rustledger-ffi-wasi.wasm"):
-    """Call a JSON-RPC method on the rustledger WASI module."""
-    request = json.dumps({
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": params,
-        "id": 1
-    })
-
-    proc = subprocess.run(
-        ["wasmtime", wasm_path],
-        input=request,
-        capture_output=True,
-        text=True
-    )
-
-    if proc.returncode != 0:
-        raise RuntimeError(f"WASI module failed: {proc.stderr}")
-
-    response = json.loads(proc.stdout)
-    if "error" in response:
-        raise RuntimeError(f"JSON-RPC error: {response['error']}")
-
-    return response.get("result")
-
-# Validate a ledger
-result = call_rpc("ledger.validate", {
-    "source": "2024-01-01 open Assets:Bank USD"
-})
-print(f"Valid: {result['valid']}")
-
-# Run a query
-balances = call_rpc("query.execute", {
-    "source": "2024-01-01 open Assets:Bank USD\n2024-01-15 * \"Test\"\n  Assets:Bank 100 USD\n  Income:Test",
-    "query": "BALANCES"
-})
-print(balances)
-```
-
-### Error Codes
-
-Standard JSON-RPC errors:
-
-| Code | Message |
-|------|---------|
-| -32700 | Parse error (invalid JSON) |
-| -32600 | Invalid Request |
-| -32601 | Method not found |
-| -32602 | Invalid params |
-| -32603 | Internal error |
-
-Beancount-specific errors:
-
-| Code | Message |
-|------|---------|
-| -32000 | Beancount parse error |
-| -32001 | Beancount validation error |
-| -32002 | BQL query error |
-| -32003 | File I/O error |
-
-### Batch Requests
-
-Send multiple requests in a single call:
-
-```bash
-echo '[
-  {"jsonrpc":"2.0","method":"util.version","id":1},
-  {"jsonrpc":"2.0","method":"ledger.validate","params":{"source":"..."},"id":2}
-]' | wasmtime rustledger-ffi-wasi.wasm
-```
+> **Removed in Phase 5 ([#1419](https://github.com/rustledger/rustledger/issues/1419)).**
+> The wasip1 JSON-RPC 2.0 embedding surface (the `rustledger-ffi-wasi` server
+> binary + `rustledger-ffi-wasi-*.wasm` release artifact) no longer exists. Use
+> the typed [Component Model (WIT)](#component-model-wit) embedding below — the
+> primary, default embedding path (and the default backend in rustfava). It
+> runs on any wasip2 host, including Windows.
 
 ## Component Model (WIT)
 
@@ -374,9 +236,9 @@ echo '[
 > (`rustledger-ffi-component`, [#1384](https://github.com/rustledger/rustledger/issues/1384))
 > is the primary, default embedding path. It is the default backend in rustfava
 > as of #1384 Phase 4 (rustfava [#183](https://github.com/rustledger/rustfava/pull/183))
-> and ships as a prebuilt wasip2 component artifact. The legacy JSON-RPC WASI FFI
-> above remains available but is slated for removal in Phase 5
-> ([#1419](https://github.com/rustledger/rustledger/issues/1419)).
+> and ships as a prebuilt wasip2 component artifact. (The legacy JSON-RPC WASI
+> FFI was removed in Phase 5
+> ([#1419](https://github.com/rustledger/rustledger/issues/1419)).)
 
 Instead of a hand-rolled JSON-RPC wire shape, this surface exposes a generated
 **WIT contract** (`crates/rustledger-ffi-component/wit/world.wit`, versioned
@@ -446,29 +308,26 @@ See [Editor Integration](editor-integration.md) for setup instructions.
 
 ## Comparison
 
-The embedding columns below cover both surfaces: **Component** is the
-recommended Component Model (WIT) path, and **WASI FFI** is the legacy JSON-RPC
-surface (slated for Phase 5 removal). They expose the same operations.
+The **Component** column is the recommended Component Model (WIT) embedding path.
+(The legacy JSON-RPC WASI FFI surface was removed in Phase 5.)
 
-| Feature | CLI | Rust | WASM | Component | WASI FFI | LSP |
-|---------|-----|------|------|-----------|----------|-----|
-| Parse ledger | Y | Y | Y | Y | Y | - |
-| Validate | Y | Y | Y | Y | Y | Y |
-| BQL queries | Y | Y | Y | Y | Y | - |
-| Format | Y | Y | Y | Y | Y | Y |
-| File access | Y | Y | - | Y | Y | Y |
-| Plugins | Y | Y | Y | Y | Y | Y |
-| Editor features | - | - | Y | - | - | Y |
-| Streaming | - | Y | - | - | - | - |
+| Feature | CLI | Rust | WASM | Component | LSP |
+|---------|-----|------|------|-----------|-----|
+| Parse ledger | Y | Y | Y | Y | - |
+| Validate | Y | Y | Y | Y | Y |
+| BQL queries | Y | Y | Y | Y | - |
+| Format | Y | Y | Y | Y | Y |
+| File access | Y | Y | - | Y | Y |
+| Plugins | Y | Y | Y | Y | Y |
+| Editor features | - | - | Y | - | Y |
+| Streaming | - | Y | - | - | - |
 
 ## Which Should I Use?
 
 - **Building a web app?** Use WASM
 - **Building a desktop app in Rust?** Use the crates directly
 - **Embedding in another language / host?** Use the **Component Model (WIT)**
-  surface — it is the recommended, default embedding path. (The legacy JSON-RPC
-  WASI FFI remains available as a transitional option, but is being retired in
-  Phase 5.)
+  surface — it is the recommended, default embedding path.
 - **Writing shell scripts?** Use CLI with `--format json`
 - **Building an editor plugin?** Use LSP
 - **Need maximum performance?** Use Rust crates or the Component Model surface

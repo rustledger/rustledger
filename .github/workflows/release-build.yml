@@ -353,33 +353,6 @@ jobs:
         with:
           name: wasm-package
           path: crates/rustledger-wasm/pkg/
-  build-ffi-wasi:
-    name: Build FFI-WASI
-    needs: validate-version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
-        with:
-          toolchain: stable
-          targets: wasm32-wasip1
-      - name: Build FFI-WASI binary
-        run: cargo build --release --target wasm32-wasip1 -p rustledger-ffi-wasi
-      - name: Package FFI-WASI
-        run: |
-          VERSION=$RELEASE_TAG
-          cp target/wasm32-wasip1/release/rustledger-ffi-wasi.wasm "rustledger-ffi-wasi-${VERSION}.wasm"
-          shasum -a 256 "rustledger-ffi-wasi-${VERSION}.wasm" > "rustledger-ffi-wasi-${VERSION}.wasm.sha256"
-      - name: Upload FFI-WASI artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ffi-wasi-package
-          path: |
-            rustledger-ffi-wasi-*.wasm
-            rustledger-ffi-wasi-*.sha256
   build-ffi-component:
     name: Build FFI-Component
     needs: validate-version
@@ -443,7 +416,7 @@ jobs:
             packages/vscode/rustledger-vscode.vsix.sha256
   release:
     name: Create Release
-    needs: [build, build-wasm, build-ffi-wasi, build-ffi-component, build-vscode]
+    needs: [build, build-wasm, build-ffi-component, build-vscode]
     runs-on: ubuntu-latest
     steps:
       - name: Generate GitHub App token

@@ -1,6 +1,6 @@
 [package]
 name = "rustledger-ffi-wasi"
-description = "Rustledger FFI via WASI - JSON API for embedding in any language"
+description = "Shared loader/conversion helpers reused by the rustledger WASI component FFI (the wasip1 JSON-RPC embedding surface was removed in #1419)"
 version = "0.16.5"
 edition.workspace = true
 rust-version.workspace = true
@@ -11,10 +11,6 @@ keywords.workspace = true
 categories.workspace = true
 authors.workspace = true
 readme = "README.md"
-
-[[bin]]
-name = "rustledger-ffi-wasi"
-path = "src/main.rs"
 
 [dependencies]
 rustledger-core.workspace = true

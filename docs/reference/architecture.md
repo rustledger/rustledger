@@ -62,16 +62,17 @@ This document describes rustledger's crate structure and data flow.
               └──► plugin-types only
 ```
 
-> The two FFI/embedding surfaces — `rustledger-ffi-component` (wasip2 Component
-> Model, typed WIT) and `rustledger-ffi-wasi` (wasip1 JSON-RPC) — coexist during
-> the [#1384](https://github.com/rustledger/rustledger/issues/1384) dual-ship
-> window. The Component Model surface is now the **primary/default embedding
-> path**: it is the default backend in the rustfava embedder as of Phase 4
-> (rustfava [#183](https://github.com/rustledger/rustfava/pull/183)). The JSON-RPC
-> surface is **legacy**, pending removal in Phase 5
-> ([#1419](https://github.com/rustledger/rustledger/issues/1419), deferred). The
-> component currently reuses `ffi-wasi`'s loader/conversion logic; that shared
-> code moves to a neutral home when the JSON-RPC surface is retired.
+> The embedding surface is `rustledger-ffi-component` (wasip2 Component Model,
+> typed WIT) — the **primary/default embedding path**, the default backend in the
+> rustfava embedder as of Phase 4 (rustfava
+> [#183](https://github.com/rustledger/rustfava/pull/183)). The older **wasip1
+> JSON-RPC** surface was removed in Phase 5
+> ([#1419](https://github.com/rustledger/rustledger/issues/1419)): the router,
+> the server binary, the wire-format tests, and the `rustledger-ffi-wasi-*.wasm`
+> release artifact are gone. `rustledger-ffi-wasi` now exists only as the shared
+> loader/conversion helpers the component reuses; the remaining Phase 5 stages
+> retire its DTO layer (the component converts core→WIT directly) and move the
+> shared code to its final home.
 
 ## Crate Descriptions
 
@@ -107,7 +108,7 @@ This document describes rustledger's crate structure and data flow.
 |-------|---------|
 | `rustledger` | CLI binary (`rledger`, `bean-*` commands) |
 | `rustledger-wasm` | WebAssembly bindings for JS/TS |
-| `rustledger-ffi-wasi` | FFI via WASI (wasip1) JSON-RPC for embedding — legacy, slated for removal in Phase 5 ([#1419](https://github.com/rustledger/rustledger/issues/1419)) |
+| `rustledger-ffi-wasi` | Shared loader/conversion helpers reused by `rustledger-ffi-component`. The wasip1 JSON-RPC embedding surface was removed in Phase 5 ([#1419](https://github.com/rustledger/rustledger/issues/1419)); remaining stages retire the DTO layer and relocate the shared code. |
 | `rustledger-ffi-component` | FFI via WASI Preview 2 / Component Model (typed WIT contract, `rustledger:ledger@3.0.0`) — primary embedding surface, default in the rustfava embedder ([#1384](https://github.com/rustledger/rustledger/issues/1384) Phase 4) |
 
 ## Data Flow

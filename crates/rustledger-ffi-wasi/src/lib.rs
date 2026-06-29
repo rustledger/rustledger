@@ -6,44 +6,26 @@
 // rust-side type docs as authoritative for shape only.
 #![allow(missing_docs)]
 
-//! Library surface for the rustledger FFI-WASI binding.
+//! Shared loader/conversion helpers for the rustledger WASI component FFI.
 //!
-//! # Legacy/fallback surface
+//! # The wasip1 JSON-RPC surface was removed (Phase 5, #1419)
 //!
-//! This is the **legacy/fallback** wasip1 JSON-RPC FFI. The typed
-//! WASI Preview 2 / Component Model binding,
+//! This crate used to expose a wasip1 JSON-RPC 2.0 embedding API (a server
+//! binary in `main.rs` + a `jsonrpc` router). That surface was retired in
+//! Phase 5 ([#1419](https://github.com/rustledger/rustledger/issues/1419)) now
+//! that the typed WASI Preview 2 / Component Model binding,
 //! [`rustledger-ffi-component`](https://github.com/rustledger/rustledger/issues/1384)
-//! (#1384), is now the **default** embedding path (it ships a generated
-//! WIT contract instead of this hand-rolled JSON-RPC wire shape, and is
-//! the default in rustfava as of Phase 4). This JSON-RPC surface is
-//! slated for deprecation and removal in Phase 5
-//! ([#1419](https://github.com/rustledger/rustledger/issues/1419)). **New
-//! integrators should target the component**; this crate remains only as
-//! a fallback for runtimes that cannot yet host a wasip2 component.
+//! (#1384), is the default embedding path (default in rustfava as of Phase 4).
+//! The router, the server binary, the round-trip wire-format tests, and the
+//! `rustledger-ffi-wasi-*.wasm` release artifact are gone.
 //!
-//! Most consumers run this crate as a WASI module (see `main.rs` and
-//! the JSON-RPC API doc on the binary). But the `Directive → JSON`
-//! conversion functions and DTO types are also useful as a library
-//! — primarily for cross-binding equivalence tests (issue #1200) that
-//! need to compare this binding's wire format against
-//! `rustledger-wasm`'s.
-//!
-//! The binary in `main.rs` consumes these modules through this lib
-//! rather than re-`mod`-ing them, so there's a single source of truth.
-//!
-//! ## Visibility
-//!
-//! Two `pub` modules: [`convert`] (for `directive_to_json` and the
-//! related conversion functions used by cross-binding equivalence
-//! tests) and [`jsonrpc`] (for the binary shim). DTO types are
-//! re-exported at the crate root when they're part of the conversion
-//! surface; the rest of the internal `types`, `commands`, and
-//! `helpers` modules are `pub(crate)`.
+//! What remains is a **library only**: the loader orchestration ([`helpers`])
+//! and the `Directive → JSON` DTO conversion ([`convert`]) that
+//! `rustledger-ffi-component` still reuses. The remaining Phase 5 stages retire
+//! the DTO layer (the component will convert core→WIT directly) and relocate
+//! this shared code to its final home — at which point this crate is removed.
 
 pub mod convert;
-pub mod jsonrpc;
-
-pub mod commands;
 // `helpers` is `pub` so the WIT/Component-Model crate
 // (`rustledger-ffi-component`, #1384) can reuse the loader orchestration
 // (`load_source`) instead of duplicating it.

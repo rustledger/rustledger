@@ -101,7 +101,7 @@ The project is a Cargo workspace with 16 crates plus editor extensions:
 | `rustledger` | CLI tool (`rledger check`, `rledger query`, etc.) |
 | `rustledger-wasm` | WebAssembly library target |
 | `rustledger-lsp` | Language Server Protocol implementation |
-| `rustledger-ffi-wasi` | FFI via WASI (wasip1) JSON-RPC for embedding — legacy, slated for removal in Phase 5 (#1419) |
+| `rustledger-ffi-wasi` | Shared loader/conversion helpers reused by `rustledger-ffi-component`. The wasip1 JSON-RPC embedding surface (router + server binary + wire tests) was removed in Phase 5 (#1419); the DTO layer + crate's final home are being finished in the remaining Phase 5 stages. |
 | `rustledger-ffi-component` | FFI via WASI Preview 2 / Component Model (typed WIT contract, `rustledger:ledger@3.0.0`) — primary embedding surface, default in the rustfava embedder (#1384 Phase 4) |
 
 | Package | Purpose |

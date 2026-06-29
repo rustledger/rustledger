@@ -349,6 +349,24 @@ impl CsvImporter {
             txn = txn.with_payee(p);
         }
 
+        // Preserve a second date column (e.g. a value date alongside the
+        // booking date) as transaction metadata so the timestamp isn't dropped
+        // (#1623). A missing/unparseable secondary value is skipped silently
+        // rather than failing the row — it is supplementary, not the txn date.
+        if let Some(sd) = &csv_config.secondary_date
+            && let Ok(raw) = self.get_column(record, &sd.column, header_map)
+        {
+            let raw = raw.trim();
+            if !raw.is_empty()
+                && let Some(d) = jiff::fmt::strtime::parse(&sd.format, raw)
+                    .ok()
+                    .and_then(|tm| tm.to_date().ok())
+            {
+                txn.meta
+                    .insert(sd.meta_key.clone(), rustledger_core::MetaValue::Date(d));
+            }
+        }
+
         Ok(Some(txn))
     }
 
@@ -511,6 +529,37 @@ mod tests {
         let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 3);
         assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_csv_import_preserves_secondary_date() {
+        // A statement with both a booking date and a value date: the booking
+        // date is the directive date, the value date is preserved as metadata
+        // instead of being silently dropped (#1623).
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank:Checking")
+            .currency("USD")
+            .date_column("Booking Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .date_format("%Y-%m-%d")
+            .secondary_date("Value Date", "%Y-%m-%d", "value_date")
+            .build()
+            .unwrap();
+
+        let csv_content = r"Booking Date,Description,Value Date,Amount
+2024-01-15,Coffee Shop,2024-01-17,-4.50
+";
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
+        assert_eq!(result.directives.len(), 1);
+        let Directive::Transaction(txn) = &result.directives[0] else {
+            panic!("expected a transaction");
+        };
+        assert_eq!(txn.date.to_string(), "2024-01-15");
+        match txn.meta.get("value_date") {
+            Some(rustledger_core::MetaValue::Date(d)) => assert_eq!(d.to_string(), "2024-01-17"),
+            other => panic!("expected value_date metadata, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1166,6 +1215,7 @@ not-a-date,Coffee,-5.00
             regex_mappings: Vec::new(),
             use_merchant_dict: false,
             skip_zero_amounts: true,
+            secondary_date: None,
         };
 
         let importer = CsvImporter;

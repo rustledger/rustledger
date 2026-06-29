@@ -1063,6 +1063,9 @@ narration_column = 1
             currency_column: None,
             debit_column: None,
             credit_column: None,
+            secondary_date_column: None,
+            secondary_date_format: None,
+            secondary_date_key: None,
             amount_locale: None,
             amount_format: None,
             delimiter: None,
@@ -1099,6 +1102,9 @@ narration_column = 1
             currency_column: None,
             debit_column: None,
             credit_column: None,
+            secondary_date_column: None,
+            secondary_date_format: None,
+            secondary_date_key: None,
             amount_locale: None,
             amount_format: None,
             delimiter: None,
@@ -1134,6 +1140,9 @@ narration_column = 1
             currency_column: None,
             debit_column: None,
             credit_column: None,
+            secondary_date_column: None,
+            secondary_date_format: None,
+            secondary_date_key: None,
             amount_locale: None,
             amount_format: None,
             delimiter: None,
@@ -1170,6 +1179,9 @@ narration_column = 1
             currency_column: None,
             debit_column: Some(toml::Value::String("Debit".to_string())),
             credit_column: Some(toml::Value::String("Credit".to_string())),
+            secondary_date_column: Some("Settle Date".to_string()),
+            secondary_date_format: None,
+            secondary_date_key: None,
             amount_locale: None,
             amount_format: None,
             delimiter: Some(";".to_string()),
@@ -1190,6 +1202,13 @@ narration_column = 1
         assert_eq!(csv_config.skip_rows, 2);
         assert!(!csv_config.has_header); // skip_header=true → has_header=false
         assert!(csv_config.invert_sign);
+        // Secondary date: format defaults to date_format, key to a column slug.
+        let sd = csv_config
+            .secondary_date
+            .as_ref()
+            .expect("secondary_date_column should produce a secondary date");
+        assert_eq!(sd.format, "%d/%m/%Y");
+        assert_eq!(sd.meta_key, "settle_date");
     }
 
     #[test]

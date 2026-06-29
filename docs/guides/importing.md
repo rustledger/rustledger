@@ -69,6 +69,40 @@ The `importers.toml` file is searched for automatically in these locations (firs
 1. `importers.toml` in the current directory
 1. `~/.config/rledger/importers.toml`
 
+### Preserving a second date column
+
+Bank statements often carry **two** dates per row — a booking/posted date and a
+value/settlement date. `date_column` becomes the transaction date; rather than
+dropping the other one, rledger preserves it as transaction **metadata** (#1623).
+
+Auto-detect mode does this automatically: when a CSV has a second date-named
+column (e.g. `Value Date` next to `Booking Date`), it is preserved under a key
+slugified from its header (`value_date`):
+
+```beancount
+2024-01-15 * "Coffee Shop"
+  value_date: 2024-01-17
+  Assets:Bank:Checking  -4.50 USD
+  Expenses:Unknown        4.50 USD
+```
+
+For explicit `importers.toml` configs, name the column:
+
+```toml
+[[importers]]
+name = "mybank"
+date_column = "Booking Date"
+date_format = "%Y-%m-%d"
+
+# Preserve the value date as `value_date:` metadata
+secondary_date_column = "Value Date"
+# secondary_date_format = "%Y-%m-%d"   # optional, defaults to date_format
+# secondary_date_key    = "value_date" # optional, defaults to a slug of the column
+```
+
+The value is stored as a typed `date` metadatum, so it round-trips through the
+ledger and is queryable in BQL via `meta("value_date")`.
+
 ### Account Mapping
 
 Map transaction descriptions to accounts automatically:

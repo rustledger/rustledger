@@ -100,6 +100,14 @@ pub(super) struct ImporterEntry {
     pub(super) debit_column: Option<toml::Value>,
     /// Credit column name or index.
     pub(super) credit_column: Option<toml::Value>,
+    /// A second date column (header name) to preserve as transaction metadata
+    /// — e.g. a value date alongside the booking `date_column` (#1623).
+    pub(super) secondary_date_column: Option<String>,
+    /// strftime-style format for `secondary_date_column` (default: `date_format`).
+    pub(super) secondary_date_format: Option<String>,
+    /// Metadata key the secondary date is stored under (default: a slug of the
+    /// column name, e.g. `value_date`).
+    pub(super) secondary_date_key: Option<String>,
     /// Amount locale for number parsing (e.g. `de_DE` so `21,12` reads as
     /// 21.12). Mirrors the `--amount-locale` CLI flag.
     pub(super) amount_locale: Option<String>,
@@ -213,6 +221,21 @@ pub(super) fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterC
     }
     if let Some(ref fmt) = entry.date_format {
         builder = builder.date_format(fmt);
+    }
+    if let Some(ref col) = entry.secondary_date_column {
+        // Format defaults to the primary date format; key defaults to a slug of
+        // the column name (e.g. "Value Date" -> "value_date").
+        let fmt = entry
+            .secondary_date_format
+            .clone()
+            .or_else(|| entry.date_format.clone())
+            .unwrap_or_else(|| "%Y-%m-%d".to_string());
+        let key = entry.secondary_date_key.clone().unwrap_or_else(|| {
+            col.trim()
+                .to_lowercase()
+                .replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+        });
+        builder = builder.secondary_date(col, fmt, key);
     }
     if let Some(ref val) = entry.narration_column
         && let Some(col) = parse_column_value(val)

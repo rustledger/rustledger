@@ -12,7 +12,7 @@
 
 use format_num_pattern::Locale;
 
-use crate::config::{ColumnSpec, CsvConfig};
+use crate::config::{ColumnSpec, CsvConfig, SecondaryDate};
 
 /// Result of CSV format inference.
 ///
@@ -45,6 +45,9 @@ pub struct InferredCsvConfig {
     pub payee_column: Option<ColumnSpec>,
     /// Per-row currency column (detected from a header like "Currency"/"Ccy").
     pub currency_column: Option<ColumnSpec>,
+    /// A second date column (e.g. a value date alongside the booking date),
+    /// preserved as transaction metadata rather than discarded (#1623).
+    pub secondary_date: Option<SecondaryDate>,
     /// Inferred amount locale (decimal/grouping separators). `Some(de_DE)` when
     /// the amounts look comma-decimal (e.g. `-54,23`, `2.500,00`); `None` when
     /// they look period-decimal or carry no signal (the parser defaults to
@@ -70,6 +73,7 @@ impl InferredCsvConfig {
             amount_locale: self.amount_locale.or(Some(Locale::POSIX)),
             has_header: self.has_header,
             delimiter: self.delimiter,
+            secondary_date: self.secondary_date.clone(),
             ..CsvConfig::default()
         }
     }
@@ -150,6 +154,23 @@ pub fn infer_csv_config(content: &str) -> Option<InferredCsvConfig> {
         None => return None, // Can't do anything without a date
     };
 
+    // Preserve a second date column (e.g. a value date alongside the booking
+    // date) as metadata instead of dropping it (#1623). Only when there is a
+    // header, so the metadata key can be derived from the column name.
+    let secondary_date = if has_header {
+        date_col_idx.and_then(|primary| {
+            find_secondary_date_column(&headers, &sample, num_cols, primary).map(|(i, fmt)| {
+                SecondaryDate {
+                    column: ColumnSpec::Name(headers[i].to_string()),
+                    format: fmt,
+                    meta_key: header_to_meta_key(headers[i]),
+                }
+            })
+        })
+    } else {
+        None
+    };
+
     let amount_column = amount_col.map(|i| {
         confidence += 0.3;
         if has_header && i < headers.len() {
@@ -226,6 +247,7 @@ pub fn infer_csv_config(content: &str) -> Option<InferredCsvConfig> {
         narration_column,
         payee_column,
         currency_column,
+        secondary_date,
         amount_locale,
         confidence: f64::min(confidence, 1.0),
     })
@@ -553,6 +575,75 @@ fn find_date_column(
     None
 }
 
+/// Find a SECOND header-named date column (distinct from `primary_idx`) whose
+/// values parse as dates — e.g. a "Value Date" alongside a "Booking Date".
+/// Only header-keyword-matched columns are considered, so a stray date-shaped
+/// column isn't spuriously preserved. Returns `(column index, detected format)`.
+/// See #1623: without this, the second date column is silently dropped.
+fn find_secondary_date_column(
+    headers: &[&str],
+    sample: &[&Vec<String>],
+    num_cols: usize,
+    primary_idx: usize,
+) -> Option<(usize, String)> {
+    let date_keywords = [
+        "date",
+        "posted",
+        "transaction date",
+        "value date",
+        "booking",
+    ];
+    for (i, header) in headers.iter().enumerate() {
+        if i == primary_idx || i >= num_cols {
+            continue;
+        }
+        if !header_matches(&header.to_lowercase(), &date_keywords) {
+            continue;
+        }
+        let values: Vec<&str> = sample
+            .iter()
+            .filter_map(|row| row.get(i).map(String::as_str))
+            .filter(|v| !v.trim().is_empty())
+            .collect();
+        if values.is_empty() {
+            continue;
+        }
+        for &fmt in DATE_FORMATS {
+            let parse_count = values
+                .iter()
+                .filter(|v| jiff::fmt::strtime::parse(fmt, v.trim()).is_ok())
+                .count();
+            if parse_count > 0 && parse_count * 5 >= values.len() * 4 {
+                return Some((i, fmt.to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Slugify a CSV header into a beancount metadata key: lowercase, runs of
+/// non-alphanumeric become a single `_`, trimmed, and prefixed if it doesn't
+/// start with a letter. E.g. "Value Date" -> `value_date`, "Posted" -> `posted`.
+fn header_to_meta_key(header: &str) -> String {
+    let mut key = String::new();
+    let mut last_underscore = false;
+    for c in header.trim().to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            key.push(c);
+            last_underscore = false;
+        } else if !last_underscore {
+            key.push('_');
+            last_underscore = true;
+        }
+    }
+    let key = key.trim_matches('_').to_string();
+    if key.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+        key
+    } else {
+        format!("date_{key}").trim_end_matches('_').to_string()
+    }
+}
+
 /// Find amount column(s). Returns `(single_amount, debit, credit)`.
 ///
 /// `date_col` is the already-detected date column index, which is skipped
@@ -853,6 +944,50 @@ Date,Description,Debit,Credit
         assert!(config.debit_column.is_some());
         assert!(config.credit_column.is_some());
         assert!(config.amount_column.is_none());
+    }
+
+    #[test]
+    fn infer_preserves_secondary_date_column() {
+        // Booking Date is the primary (directive) date; Value Date is the second
+        // date column and must be preserved rather than silently dropped (#1623).
+        let csv = "\
+Booking Date,Description,Value Date,Amount
+2024-01-15,Coffee,2024-01-17,-5.00
+2024-01-16,Salary,2024-01-16,3000.00
+";
+        let config = infer_csv_config(csv).expect("should infer config");
+        assert!(
+            matches!(config.date_column, ColumnSpec::Name(ref n) if n == "Booking Date"),
+            "primary date should be Booking Date, got {:?}",
+            config.date_column
+        );
+        let sd = config
+            .secondary_date
+            .as_ref()
+            .expect("Value Date should be preserved as a secondary date");
+        assert!(matches!(sd.column, ColumnSpec::Name(ref n) if n == "Value Date"));
+        assert_eq!(sd.meta_key, "value_date");
+    }
+
+    #[test]
+    fn single_date_column_has_no_secondary() {
+        let csv = "\
+Date,Description,Amount
+2024-01-15,Coffee,-5.00
+2024-01-16,Salary,3000.00
+";
+        let config = infer_csv_config(csv).expect("should infer config");
+        assert!(config.secondary_date.is_none());
+    }
+
+    #[test]
+    fn header_to_meta_key_slugifies() {
+        assert_eq!(header_to_meta_key("Value Date"), "value_date");
+        assert_eq!(header_to_meta_key("Booking Date"), "booking_date");
+        assert_eq!(header_to_meta_key("Posted"), "posted");
+        assert_eq!(header_to_meta_key("Settlement / Value"), "settlement_value");
+        // Leading non-letter gets a `date_` prefix so the key stays valid.
+        assert_eq!(header_to_meta_key("2nd date"), "date_2nd_date");
     }
 
     #[test]

@@ -91,6 +91,27 @@ pub struct CsvConfig {
     /// preserve every source row (matches the user's expectation when
     /// auditing migrated data — see issue #972).
     pub skip_zero_amounts: bool,
+    /// A second date column to preserve as metadata (e.g. when a statement has
+    /// both a posted/booking date and a value date). The primary `date_column`
+    /// stays the directive date; this column's value is attached as metadata so
+    /// it isn't silently discarded (#1623).
+    pub secondary_date: Option<SecondaryDate>,
+}
+
+/// A secondary date column preserved as directive metadata.
+///
+/// For example a value date alongside the booking date. The importer reads
+/// `column` with `format` and attaches the parsed date under `meta_key` on the
+/// imported transaction.
+#[derive(Debug, Clone)]
+pub struct SecondaryDate {
+    /// The CSV column holding the secondary date.
+    pub column: ColumnSpec,
+    /// strftime-style format used to parse the column.
+    pub format: String,
+    /// Metadata key the parsed date is stored under (derived from the column
+    /// header, e.g. `value_date`).
+    pub meta_key: String,
 }
 
 impl Default for CsvConfig {
@@ -116,6 +137,7 @@ impl Default for CsvConfig {
             regex_mappings: Vec::new(),
             use_merchant_dict: false,
             skip_zero_amounts: true,
+            secondary_date: None,
         }
     }
 }
@@ -356,6 +378,24 @@ impl CsvConfigBuilder {
     /// Set the date format (strftime-style).
     pub fn date_format(mut self, format: impl Into<String>) -> Self {
         self.config.date_format = format.into();
+        self
+    }
+
+    /// Preserve a second date column (e.g. a value date alongside the booking
+    /// date) as transaction metadata under `meta_key`, parsed with `format`.
+    /// Without this the column is silently dropped (#1623).
+    #[must_use]
+    pub fn secondary_date(
+        mut self,
+        column: impl Into<String>,
+        format: impl Into<String>,
+        meta_key: impl Into<String>,
+    ) -> Self {
+        self.config.secondary_date = Some(SecondaryDate {
+            column: ColumnSpec::Name(column.into()),
+            format: format.into(),
+            meta_key: meta_key.into(),
+        });
         self
     }
 

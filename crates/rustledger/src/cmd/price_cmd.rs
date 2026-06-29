@@ -52,6 +52,14 @@ pub struct PriceArgs {
     #[arg(short = 'b', long)]
     pub beancount: bool,
 
+    /// With `--beancount`, also record which source produced each quote as a
+    /// `source:` metadata line on the generated price directive (opt-in
+    /// provenance). Off by default to keep the bare, dedup-friendly bean-price
+    /// line shape; the source is normally knowable from the commodity's
+    /// `price:` declaration.
+    #[arg(long, requires = "beancount")]
+    pub source_meta: bool,
+
     /// Show verbose output.
     #[arg(short, long)]
     pub verbose: bool,
@@ -414,7 +422,7 @@ pub fn run_with_writer<W: Write>(
                 if args.verbose {
                     eprintln!("{symbol}: cached (source: {})", cached.source);
                 }
-                write_price(out, symbol, &cached, args.beancount)?;
+                write_price(out, symbol, &cached, args.beancount, args.source_meta)?;
                 continue;
             }
 
@@ -482,7 +490,7 @@ pub fn run_with_writer<W: Write>(
                         }
                         continue;
                     }
-                    write_price(out, symbol, &response, args.beancount)?;
+                    write_price(out, symbol, &response, args.beancount, args.source_meta)?;
                 }
                 Err(e) => {
                     if args.verbose {
@@ -753,6 +761,7 @@ fn write_price(
     symbol: &str,
     response: &crate::cmd::price::PriceResponse,
     beancount: bool,
+    source_meta: bool,
 ) -> Result<()> {
     if beancount {
         let date_str = response.date.to_string();
@@ -761,6 +770,12 @@ fn write_price(
             "{date_str} price {symbol} {} {}",
             response.price, response.currency
         )?;
+        // Opt-in provenance (see PriceArgs::source_meta): record the fetching
+        // source as beancount metadata on the directive. Off by default so the
+        // bare bean-price line shape is preserved.
+        if source_meta {
+            writeln!(handle, "  source: \"{}\"", response.source)?;
+        }
     } else {
         writeln!(handle, "{symbol}: {} {}", response.price, response.currency)?;
     }
@@ -871,16 +886,7 @@ fn run_with_external_command<W: Write>(
                         }
                         continue;
                     }
-                    if args.beancount {
-                        let date_str = response.date.to_string();
-                        writeln!(
-                            handle,
-                            "{date_str} price {symbol} {} {}",
-                            response.price, response.currency
-                        )?;
-                    } else {
-                        writeln!(handle, "{symbol}: {} {}", response.price, response.currency)?;
-                    }
+                    write_price(handle, symbol, &response, args.beancount, args.source_meta)?;
                 }
                 Err(e) => {
                     if args.verbose {
@@ -1386,6 +1392,42 @@ mod tests {
         let mut argv = vec!["price"];
         argv.extend_from_slice(extra);
         Args::parse_from(argv).price_args
+    }
+
+    #[test]
+    fn write_price_source_meta_is_opt_in() {
+        let resp = crate::cmd::price::PriceResponse {
+            price: "1.0856".parse().unwrap(),
+            currency: "USD".to_string(),
+            date: "2024-05-02".parse::<NaiveDate>().unwrap(),
+            source: "ecb".to_string(),
+        };
+
+        // Default beancount output is bare (no source metadata).
+        let mut out = Vec::new();
+        write_price(&mut out, "EURUSD", &resp, true, false).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("2024-05-02 price EURUSD 1.0856 USD"));
+        assert!(!s.contains("source:"));
+
+        // --source-meta appends a `source:` metadata line.
+        let mut out = Vec::new();
+        write_price(&mut out, "EURUSD", &resp, true, true).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("2024-05-02 price EURUSD 1.0856 USD"));
+        assert!(s.contains("  source: \"ecb\""));
+
+        // Non-beancount output never emits metadata, even with source_meta.
+        let mut out = Vec::new();
+        write_price(&mut out, "EURUSD", &resp, false, true).unwrap();
+        assert!(!String::from_utf8(out).unwrap().contains("source:"));
+    }
+
+    #[test]
+    fn source_meta_requires_beancount() {
+        // --source-meta without -b is rejected by clap (requires = "beancount").
+        assert!(Args::try_parse_from(["price", "AAPL", "--source-meta"]).is_err());
+        assert!(Args::try_parse_from(["price", "AAPL", "-b", "--source-meta"]).is_ok());
     }
 
     /// Multi-quote `price:` metadata produces one dry-run row per declared

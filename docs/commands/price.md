@@ -26,6 +26,7 @@ rledger price [OPTIONS] [SYMBOL]...
 | `-c, --currency <CURRENCY>` | Base currency for price quotes [default: USD] |
 | `-d, --date <DATE>` | Date for prices (YYYY-MM-DD, defaults to today) |
 | `-b, --beancount` | Output as beancount price directives |
+| `--source-meta` | With `-b`, also write a `source:` metadata line on each price directive recording which provider produced the quote (opt-in provenance — see note below). Requires `-b`. |
 | `-s, --source <SOURCE>` | Use specific source (overrides mapping) |
 | `--source-cmd <CMD>` | Use ad-hoc external command as source |
 | `-m, --mapping <MAPPING>` | Symbol mapping (e.g., `VTI:VTI,BTC:BTC-USD`) |
@@ -37,6 +38,26 @@ rledger price [OPTIONS] [SYMBOL]...
 | `--no-cache` | Disable the price cache for this run |
 | `--clear-cache` | Clear the price cache before fetching |
 | `-v, --verbose` | Show verbose output |
+
+## Recording the price source (`--source-meta`)
+
+By default — like `bean-price` — generated `price` directives are bare:
+
+```beancount
+2024-05-02 price AAPL 150.00 USD
+```
+
+The provider isn't repeated on every line because it's normally knowable from the commodity's `price:` declaration (e.g. `price: "USD:yahoo/AAPL"`), which is the single source of truth for where a commodity's prices come from. Keeping the line bare also matches `bean-price` and keeps the output easy to diff, dedup, and `--clobber`.
+
+Pass `--source-meta` (with `-b`) when you want **per-price provenance** — useful when prices for the same commodity can come from different providers (an ad-hoc `--source`/`--source-cmd` run, manual entries, or mixed sources), or for audit ("which feed gave us this rate?"):
+
+```console
+$ rledger price -b --source-meta -s ecb EURUSD
+2024-05-02 price EURUSD 1.0856 USD
+  source: "ecb"
+```
+
+The `source:` value is plain metadata, so it round-trips through the ledger and is queryable in BQL via `meta("source")`.
 
 ## Discovering Symbols from a Ledger
 

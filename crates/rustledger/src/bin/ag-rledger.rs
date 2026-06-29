@@ -808,6 +808,7 @@ fn build_price_args(
         currency: string_flag(req, "currency", Some("c")).unwrap_or_else(|| "USD".to_string()),
         date: string_flag(req, "date", Some("d")),
         beancount: bool_flag(req, "beancount", Some("b")),
+        source_meta: bool_flag(req, "source-meta", None),
         verbose: bool_flag(req, "verbose", Some("v")),
         mapping: flag_values(req, "mapping", Some("m")),
         source: string_flag(req, "source", Some("s")),

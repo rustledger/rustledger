@@ -70,12 +70,12 @@ pub struct PriceResponse {
 /// - **Integer** numbers parse exactly.
 /// - **Float** numbers are bounded by `f64` (~15–17 significant digits): a JSON
 ///   float has already been parsed into an `f64` by the time it reaches a
-///   `serde_json::Value` (serde_json is built without `arbitrary_precision`), so
+///   `serde_json::Value` (`serde_json` is built without `arbitrary_precision`), so
 ///   the most we can recover is its shortest round-trippable string. That is
 ///   exact for every human-scale quote (FX / equities / crypto) and only loses
 ///   precision past ~15 significant digits — far beyond any real price.
 ///
-/// We deliberately do not enable serde_json's `arbitrary_precision` feature: it
+/// We deliberately do not enable `serde_json`'s `arbitrary_precision` feature: it
 /// is global and breaks the workspace's `#[serde(untagged)]` / `flatten` enums.
 /// A per-field `RawValue` rewrite of every network source was judged
 /// disproportionate for the negligible gain (see #1621).

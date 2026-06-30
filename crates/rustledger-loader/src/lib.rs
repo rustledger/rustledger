@@ -66,6 +66,10 @@ pub use source_map::{SourceFile, SourceMap};
 pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
 
 // Re-export processing API when features are enabled
+/// Shared loader-options → validation-options mapping (single source of truth,
+/// so the LSP/MCP diagnostics cannot drift from `check` — issue #1648).
+#[cfg(feature = "validation")]
+pub use process::validation_options_from_options;
 #[cfg(any(feature = "booking", feature = "plugins", feature = "validation"))]
 pub use process::{
     ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger, LedgerError, LoadOptions, ProcessError,

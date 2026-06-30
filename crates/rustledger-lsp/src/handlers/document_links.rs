@@ -69,21 +69,62 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
         // Resolve the path
         let resolved_path = resolve_full_path(path, &base_dir);
 
-        // Check if file exists
-        let exists = resolved_path
-            .as_ref()
-            .map(|p| Path::new(p).exists())
-            .unwrap_or(false);
+        // A glob `include` (e.g. `transactions/*.bean`) is valid — the loader
+        // expands it on load — so a literal path-exists check wrongly reports
+        // "File not found" for the pattern (issue #1647). Detect glob
+        // metacharacters and expand the pattern instead, treating ≥1 match as
+        // existing. (Mirrors the loader's `has_glob` check in `loader/src/lib.rs`.)
+        let is_glob = path.contains('*') || path.contains('?') || path.contains('[');
 
-        // Set target URI
-        if let Some(ref full_path) = resolved_path
+        let glob_matches: Vec<String> = if is_glob {
+            resolved_path
+                .as_ref()
+                .and_then(|p| glob::glob(p).ok())
+                .map(|paths| {
+                    paths
+                        .filter_map(Result::ok)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let exists = if is_glob {
+            !glob_matches.is_empty()
+        } else {
+            resolved_path
+                .as_ref()
+                .map(|p| Path::new(p).exists())
+                .unwrap_or(false)
+        };
+
+        // Set target URI. For a glob, point at the first matched file so the
+        // link is still clickable; otherwise the resolved path itself.
+        let target_path = if is_glob {
+            glob_matches.first().cloned()
+        } else {
+            resolved_path.clone()
+        };
+        if let Some(ref full_path) = target_path
             && let Ok(uri) = format!("file://{}", full_path).parse::<Uri>()
         {
             resolved.target = Some(uri);
         }
 
         // Set tooltip based on existence
-        let tooltip = if exists {
+        let tooltip = if is_glob {
+            if exists {
+                format!(
+                    "Open {} included file(s) matching: {}",
+                    glob_matches.len(),
+                    path
+                )
+            } else {
+                format!("⚠ No files match include pattern: {}", path)
+            }
+        } else if exists {
             match kind {
                 "include" => format!("Open included file: {}", path),
                 "document" => format!("Open document: {}", path),
@@ -307,6 +348,64 @@ mod tests {
         assert!(resolved.tooltip.is_some());
         let tooltip = resolved.tooltip.unwrap();
         assert!(tooltip.contains("not found") || tooltip.contains("Open"));
+    }
+
+    #[test]
+    fn test_document_link_resolve_glob_include() {
+        // #1647: a glob include must not show "File not found" — the loader
+        // expands it on load. With matching files present, the resolved link
+        // reports the match count and stays clickable.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.bean"), "").unwrap();
+        std::fs::write(dir.path().join("b.bean"), "").unwrap();
+
+        let link = DocumentLink {
+            range: Range {
+                start: Position::new(0, 9),
+                end: Position::new(0, 20),
+            },
+            target: None,
+            tooltip: None,
+            data: Some(serde_json::json!({
+                "path": "*.bean",
+                "base_dir": dir.path().to_string_lossy(),
+                "kind": "include",
+            })),
+        };
+
+        let resolved = handle_document_link_resolve(link);
+        let tooltip = resolved.tooltip.unwrap();
+        assert!(
+            !tooltip.contains("not found"),
+            "glob include wrongly reported missing: {tooltip}"
+        );
+        assert!(tooltip.contains("matching"), "tooltip: {tooltip}");
+        assert!(
+            resolved.target.is_some(),
+            "glob link should still be clickable"
+        );
+    }
+
+    #[test]
+    fn test_document_link_resolve_glob_no_match() {
+        // A glob that matches nothing is the one case that *should* warn.
+        let dir = tempfile::tempdir().unwrap();
+        let link = DocumentLink {
+            range: Range {
+                start: Position::new(0, 9),
+                end: Position::new(0, 20),
+            },
+            target: None,
+            tooltip: None,
+            data: Some(serde_json::json!({
+                "path": "*.bean",
+                "base_dir": dir.path().to_string_lossy(),
+                "kind": "include",
+            })),
+        };
+        let resolved = handle_document_link_resolve(link);
+        let tooltip = resolved.tooltip.unwrap();
+        assert!(tooltip.contains("No files match"), "tooltip: {tooltip}");
     }
 
     #[test]

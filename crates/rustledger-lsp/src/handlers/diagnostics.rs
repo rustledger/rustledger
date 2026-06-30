@@ -13,15 +13,19 @@ use rustledger_validate::{Severity, ValidationError, ValidationOptions, Validati
 use super::utils::{LineIndex, PositionEncoding};
 use crate::ledger_state::LedgerState;
 
-/// Build `ValidationOptions` with custom account type names from loader options.
+/// Build `ValidationOptions` from the loaded ledger's merged loader options.
 ///
-/// Uses the already-merged account type names from the loader's `Options`,
-/// which handles multi-file ledgers where `name_*` options may be in included files.
+/// The option-derived settings — `name_*` account types **and** the tolerance
+/// options (`inferred_tolerance_default`, `inferred_tolerance_multiplier`,
+/// `infer_tolerance_from_cost`) — come from the loader's single source of truth,
+/// [`rustledger_loader::validation_options_from_options`], so LSP diagnostics
+/// stay in lockstep with `rledger check`. Issue #1648 was exactly the drift from
+/// a hand-maintained copy that dropped the tolerance options.
 ///
-/// Relative document directories are resolved against `base_dir` to ensure
-/// consistent path resolution with the loader's `run_plugins` behavior.
+/// Relative document directories are resolved against `base_dir` to match the
+/// loader's `run_plugins` behavior.
 ///
-/// See issue #572: <https://github.com/rustledger/rustledger/issues/572>
+/// See issues #572 and #1648.
 fn build_validation_options_from_loader(
     loader_options: &LoaderOptions,
     base_dir: &std::path::Path,
@@ -39,78 +43,54 @@ fn build_validation_options_from_loader(
         })
         .collect();
 
-    ValidationOptions::default()
-        .with_account_types(
-            loader_options
-                .account_types()
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
-        )
+    rustledger_loader::validation_options_from_options(loader_options)
         .with_document_dirs(document_dirs)
 }
 
-/// Build `ValidationOptions` with custom account type names from parsed file options.
+/// Build `ValidationOptions` for single-file validation (no loaded ledger).
 ///
-/// Extracts `name_assets`, `name_liabilities`, `name_equity`, `name_income`, and
-/// `name_expenses` options to support custom (including Unicode) account type names.
-/// Other `ValidationOptions` fields are left at their default values.
+/// Replays the file's parsed `option` directives into a loader [`LoaderOptions`]
+/// and runs them through the shared
+/// [`rustledger_loader::validation_options_from_options`], so a standalone buffer
+/// honors the same options as `check` — the `name_*` account-type overrides and
+/// the tolerance options (`inferred_tolerance_default`, …) alike — instead of a
+/// hand-maintained subset (issue #1648).
 ///
-/// Relative document directories are resolved against `base_dir` if provided.
-/// When `base_dir` is `None`, relative paths are kept as-is (fallback for
-/// single-file validation where no source map is available).
+/// Relative `documents` directories are resolved against `base_dir` when
+/// provided; when `None`, they are kept as-is (tests and single-file buffers
+/// without an on-disk path rely on this fallback).
 ///
-/// Used when no ledger is loaded (single-file validation).
-///
-/// When `base_dir` is `Some`, relative document directory paths are resolved
-/// against it; when `None`, they are kept as-is (tests and single-file
-/// buffers without an on-disk path rely on this fallback).
-///
-/// See issue #572: <https://github.com/rustledger/rustledger/issues/572>
+/// See issues #572 and #1648.
 fn build_validation_options_from_file(
     file_options: &[(String, String, Span)],
     base_dir: Option<&std::path::Path>,
 ) -> ValidationOptions {
-    let opts = ValidationOptions::default();
-
-    // Start with validator defaults, override with file options.
-    // This avoids duplicating the canonical default account type names.
-    let mut account_types = opts.account_types.clone();
-    let mut document_dirs = Vec::new();
-
+    // Replay the file's parsed `option` directives into a loader `Options` (the
+    // same type the multi-file path uses), then run them through the shared
+    // converter — so a standalone buffer honors the same options as `check`,
+    // including `inferred_tolerance_default` and the `name_*` account-type
+    // overrides, instead of a hand-maintained subset (issue #1648).
+    let mut options = LoaderOptions::new();
     for (key, value, _span) in file_options {
-        match key.as_str() {
-            "name_assets" if !account_types.is_empty() => {
-                account_types[0] = value.clone();
-            }
-            "name_liabilities" if account_types.len() > 1 => {
-                account_types[1] = value.clone();
-            }
-            "name_equity" if account_types.len() > 2 => {
-                account_types[2] = value.clone();
-            }
-            "name_income" if account_types.len() > 3 => {
-                account_types[3] = value.clone();
-            }
-            "name_expenses" if account_types.len() > 4 => {
-                account_types[4] = value.clone();
-            }
-            "documents" => {
-                let path = std::path::Path::new(value);
-                if path.is_absolute() {
-                    document_dirs.push(path.to_path_buf());
-                } else if let Some(base) = base_dir {
-                    document_dirs.push(base.join(path));
-                } else {
-                    document_dirs.push(path.to_path_buf());
-                }
-            }
-            _ => {}
-        }
+        options.set(key, value);
     }
 
-    opts.with_account_types(account_types)
-        .with_document_dirs(document_dirs)
+    let document_dirs: Vec<std::path::PathBuf> = options
+        .documents
+        .iter()
+        .map(|d| {
+            let path = std::path::Path::new(d);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else if let Some(base) = base_dir {
+                base.join(path)
+            } else {
+                path.to_path_buf()
+            }
+        })
+        .collect();
+
+    rustledger_loader::validation_options_from_options(&options).with_document_dirs(document_dirs)
 }
 
 /// Convert parse errors to LSP diagnostics.
@@ -830,6 +810,35 @@ pub fn all_diagnostics(
 mod tests {
     use super::*;
     use rustledger_parser::parse;
+
+    /// #1648: the multi-file path must apply the ledger's `inferred_tolerance_default`,
+    /// not just `name_*` — otherwise the LSP reports residual errors `check` does not.
+    #[test]
+    fn from_loader_carries_inferred_tolerance_default() {
+        let mut opts = LoaderOptions::new();
+        opts.set("inferred_tolerance_default", "CLP:0.5");
+        let vo = build_validation_options_from_loader(&opts, std::path::Path::new("/tmp"));
+        assert_eq!(
+            vo.inferred_tolerance_default.get("CLP"),
+            Some(&rust_decimal::Decimal::new(5, 1))
+        );
+    }
+
+    /// #1648 single-file path: a standalone buffer's tolerance option applies too
+    /// (the user reported copying it into sub-files made no difference).
+    #[test]
+    fn from_file_carries_inferred_tolerance_default() {
+        let file_options = vec![(
+            "inferred_tolerance_default".to_string(),
+            "CLP:0.5".to_string(),
+            Span::ZERO,
+        )];
+        let vo = build_validation_options_from_file(&file_options, None);
+        assert_eq!(
+            vo.inferred_tolerance_default.get("CLP"),
+            Some(&rust_decimal::Decimal::new(5, 1))
+        );
+    }
 
     /// Helper to extract the code string from a diagnostic.
     fn get_code(d: &Diagnostic) -> String {

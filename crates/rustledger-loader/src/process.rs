@@ -1247,20 +1247,50 @@ fn sanitize_inner_posting_spans(directive: &mut Directive, source_map: &SourceMa
     }
 }
 
+/// Map loader [`Options`] to [`rustledger_validate::ValidationOptions`].
+///
+/// The single source of truth for the *option-derived* validation settings:
+/// custom account-type names (`name_*`) and the tolerance options
+/// (`inferred_tolerance_default`, `inferred_tolerance_multiplier`,
+/// `infer_tolerance_from_cost`). Path-relative settings (document directories)
+/// and the effective booking method are layered on by callers that hold the
+/// necessary context — see [`build_validation_options`].
+///
+/// Both `rledger check` (via [`build_validation_options`]) and the LSP/MCP
+/// diagnostics path call this, so the two cannot drift. Issue #1648 was exactly
+/// that drift: the LSP built its own `ValidationOptions` that dropped the
+/// tolerance options, so it reported residual errors `check` did not.
+#[cfg(feature = "validation")]
+#[must_use]
+pub fn validation_options_from_options(
+    options: &Options,
+) -> rustledger_validate::ValidationOptions {
+    rustledger_validate::ValidationOptions::default()
+        .with_account_types(
+            options
+                .account_types()
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        )
+        .with_infer_tolerance_from_cost(options.infer_tolerance_from_cost)
+        .with_tolerance_multiplier(options.inferred_tolerance_multiplier)
+        .with_inferred_tolerance_default(options.inferred_tolerance_default.clone())
+}
+
 /// Build a [`ValidationOptions`] from loader-level file options.
 ///
-/// Factored out of the old `run_validation` so both the early and
-/// late phases in `process()` can share the same `ValidationSession`
-/// configuration. Document-dir resolution is relative to the main
-/// file's parent directory.
+/// Layers the path-relative document directories and the effective booking
+/// method onto [`validation_options_from_options`] (the shared option-derived
+/// core). Factored out of the old `run_validation` so both the early and late
+/// phases in `process()` share the same `ValidationSession` configuration.
+/// Document-dir resolution is relative to the main file's parent directory.
 #[cfg(feature = "validation")]
 fn build_validation_options(
     file_options: &Options,
     source_map: &SourceMap,
     default_booking_method: BookingMethod,
 ) -> rustledger_validate::ValidationOptions {
-    use rustledger_validate::ValidationOptions;
-
     // Resolve document directories relative to the main file's
     // directory. Absolute paths pass through; relative paths are
     // joined onto the source map's first file's parent. Matches the
@@ -1284,12 +1314,6 @@ fn build_validation_options(
         })
         .collect();
 
-    let account_types: Vec<String> = file_options
-        .account_types()
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-
     // Per-`file_id` source-file directories, so the validator can resolve a
     // relative `document` path against its own directive's file (matching
     // Beancount and `include`) instead of the process CWD. `file_id` indexes
@@ -1305,13 +1329,9 @@ fn build_validation_options(
         })
         .collect();
 
-    ValidationOptions::default()
-        .with_account_types(account_types)
+    validation_options_from_options(file_options)
         .with_document_dirs(resolved_document_dirs)
         .with_document_source_dirs(document_source_dirs)
-        .with_infer_tolerance_from_cost(file_options.infer_tolerance_from_cost)
-        .with_tolerance_multiplier(file_options.inferred_tolerance_multiplier)
-        .with_inferred_tolerance_default(file_options.inferred_tolerance_default.clone())
         .with_default_booking_method(default_booking_method)
 }
 
@@ -1478,6 +1498,30 @@ fn run_error_to_ledger(e: &rustledger_plugin::PluginRunError) -> LedgerError {
         Rn::PythonFailed { message } => {
             LedgerError::error("E8002", message.clone()).with_phase("plugin")
         }
+    }
+}
+
+#[cfg(all(test, feature = "validation"))]
+mod validation_options_tests {
+    use super::validation_options_from_options;
+    use crate::Options;
+    use rust_decimal_macros::dec;
+
+    /// The shared converter must carry the per-currency tolerance override
+    /// (`inferred_tolerance_default`) and `name_*` account types. This is the
+    /// single source of truth both `check` and the LSP/MCP go through, so they
+    /// cannot drift — issue #1648, where the LSP dropped the tolerance options
+    /// and reported residual errors `check` did not.
+    #[test]
+    fn maps_inferred_tolerance_default_and_account_types() {
+        let mut opts = Options::new();
+        opts.set("inferred_tolerance_default", "CLP:0.5");
+        opts.set("name_assets", "Activos");
+
+        let vo = validation_options_from_options(&opts);
+
+        assert_eq!(vo.inferred_tolerance_default.get("CLP"), Some(&dec!(0.5)));
+        assert_eq!(vo.account_types[0], "Activos");
     }
 }
 

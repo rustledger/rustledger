@@ -29,7 +29,7 @@ parking_lot.workspace = true
 rustledger-parser.workspace = true
 rustledger-core.workspace = true
 rustledger-completion.workspace = true
-rustledger-loader = { workspace = true, features = ["plugins"] }
+rustledger-loader = { workspace = true, features = ["plugins", "validation"] }
 rustledger-booking.workspace = true
 rustledger-validate.workspace = true
 rustledger-plugin.workspace = true
@@ -41,6 +41,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true
 jiff.workspace = true
+# Glob-aware `include` document links (issue #1647): match the loader's
+# glob-expanding include resolution instead of a literal path-exists check.
+glob.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

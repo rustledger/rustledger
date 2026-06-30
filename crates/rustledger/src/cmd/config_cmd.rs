@@ -196,6 +196,10 @@ fn run_path<W: Write>(out: &mut W) -> Result<()> {
 
     writeln!(out)?;
     writeln!(out, "Environment variables:")?;
+    writeln!(
+        out,
+        "  RLEDGER_CONFIG   Path to the config file (overrides the default location)"
+    )?;
     writeln!(out, "  RLEDGER_FILE     Default beancount file")?;
     writeln!(out, "  RLEDGER_FORMAT   Output format (text, csv, json)")?;
     writeln!(out, "  RLEDGER_PROFILE  Active profile name")?;

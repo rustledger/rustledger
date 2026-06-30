@@ -542,7 +542,11 @@ jobs:
           commit_message: "Update to ${{ env.RELEASE_TAG }}"
   update-aur-bin:
     name: Update AUR (rustledger-bin)
-    needs: wait-for-assets
+    # Serialize after the source package so the two jobs don't clone/push
+    # aur.archlinux.org simultaneously. Parallel access caused a transient
+    # `SSL_read: unexpected eof` failure cloning the AUR repo during the v0.17.0
+    # release; running them back-to-back removes that contention.
+    needs: [wait-for-assets, update-aur-source]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

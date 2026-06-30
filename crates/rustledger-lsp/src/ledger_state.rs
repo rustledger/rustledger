@@ -131,7 +131,15 @@ impl LedgerState {
     pub fn load(&mut self, journal_path: &Path) -> Result<HashSet<PathBuf>, String> {
         tracing::info!("Loading journal file: {}", journal_path.display());
 
-        let options = LoadOptions::default();
+        // The LSP runs its own validation in `all_diagnostics` over the open-buffer
+        // overlay and discards `ledger.errors`, so skip the loader's in-process
+        // validation pass — otherwise (now that the `validation` feature is enabled
+        // for the shared converter) every load/file-watch refresh would validate
+        // the whole ledger twice. See diagnostics::all_diagnostics.
+        let options = LoadOptions {
+            validate: false,
+            ..LoadOptions::default()
+        };
         match load(journal_path, &options) {
             Ok(ledger) => {
                 // Extract included files from source map. Canonicalize

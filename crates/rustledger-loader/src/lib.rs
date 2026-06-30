@@ -66,10 +66,20 @@ pub use source_map::{SourceFile, SourceMap};
 pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
 
 // Re-export processing API when features are enabled
-/// Shared loader-options → validation-options mapping (single source of truth,
-/// so the LSP/MCP diagnostics cannot drift from `check` — issue #1648).
+/// Shared option→validation mapping and document-dir resolution — single source
+/// of truth so the LSP/MCP diagnostics cannot drift from `check` (issue #1648).
 #[cfg(feature = "validation")]
-pub use process::validation_options_from_options;
+pub use process::{document_source_dirs, resolve_document_dirs, validation_options_from_options};
+
+/// Whether an `include`/glob path contains glob metacharacters (`*`, `?`, `[`).
+///
+/// Single source of truth shared with the LSP's document-link resolver so the
+/// two agree on what counts as a glob — a literal-path existence check on a glob
+/// wrongly reports "File not found" (issue #1647).
+#[must_use]
+pub fn is_glob_pattern(path: &str) -> bool {
+    path.contains(['*', '?', '['])
+}
 #[cfg(any(feature = "booking", feature = "plugins", feature = "validation"))]
 pub use process::{
     ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger, LedgerError, LoadOptions, ProcessError,
@@ -530,9 +540,7 @@ impl Loader {
         for (include_path, _span) in &result.includes {
             // Check if the include path contains glob metacharacters
             // (check on include_path, not full_path, to avoid false positives from directory names)
-            let has_glob = include_path.contains('*')
-                || include_path.contains('?')
-                || include_path.contains('[');
+            let has_glob = is_glob_pattern(include_path);
 
             let full_path = base_dir.join(include_path);
 

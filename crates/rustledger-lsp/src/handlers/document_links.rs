@@ -71,28 +71,39 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
 
         // A glob `include` (e.g. `transactions/*.bean`) is valid — the loader
         // expands it on load — so a literal path-exists check wrongly reports
-        // "File not found" for the pattern (issue #1647). Detect glob
-        // metacharacters and expand the pattern instead, treating ≥1 match as
-        // existing. (Mirrors the loader's `has_glob` check in `loader/src/lib.rs`.)
-        let is_glob = path.contains('*') || path.contains('?') || path.contains('[');
+        // "File not found" for the pattern (issue #1647). Only `include` paths
+        // are glob-expanded by the loader; `document` paths are always literal
+        // and may legitimately contain `[`/`*`/`?` in real filenames, so never
+        // glob-detect those. `is_glob_pattern` is the loader's own detector,
+        // shared so the two cannot disagree.
+        let is_glob = kind == "include" && rustledger_loader::is_glob_pattern(path);
 
-        let glob_matches: Vec<String> = if is_glob {
-            resolved_path
-                .as_ref()
-                .and_then(|p| glob::glob(p).ok())
-                .map(|paths| {
-                    paths
-                        .filter_map(Result::ok)
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .collect()
-                })
-                .unwrap_or_default()
+        // For a glob, enumerate matches once: keep only the FIRST match as an
+        // owned String (the clickable target) plus a count — no String-per-match
+        // allocation. `pattern_ok` distinguishes a syntactically invalid pattern
+        // (the loader reports a distinct error) from one that matches nothing.
+        let (glob_first, glob_count, pattern_ok) = if is_glob {
+            match resolved_path.as_ref().map(|p| glob::glob(p)) {
+                Some(Ok(paths)) => {
+                    let mut first = None;
+                    let mut count = 0usize;
+                    for entry in paths.flatten() {
+                        if first.is_none() {
+                            first = Some(entry.to_string_lossy().into_owned());
+                        }
+                        count += 1;
+                    }
+                    (first, count, true)
+                }
+                Some(Err(_)) => (None, 0, false),
+                None => (None, 0, true),
+            }
         } else {
-            Vec::new()
+            (None, 0, true)
         };
 
         let exists = if is_glob {
-            !glob_matches.is_empty()
+            glob_count > 0
         } else {
             resolved_path
                 .as_ref()
@@ -103,7 +114,7 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
         // Set target URI. For a glob, point at the first matched file so the
         // link is still clickable; otherwise the resolved path itself.
         let target_path = if is_glob {
-            glob_matches.first().cloned()
+            glob_first
         } else {
             resolved_path.clone()
         };
@@ -115,12 +126,10 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
 
         // Set tooltip based on existence
         let tooltip = if is_glob {
-            if exists {
-                format!(
-                    "Open {} included file(s) matching: {}",
-                    glob_matches.len(),
-                    path
-                )
+            if !pattern_ok {
+                format!("⚠ Invalid include pattern: {}", path)
+            } else if exists {
+                format!("Open {} included file(s) matching: {}", glob_count, path)
             } else {
                 format!("⚠ No files match include pattern: {}", path)
             }
@@ -406,6 +415,66 @@ mod tests {
         let resolved = handle_document_link_resolve(link);
         let tooltip = resolved.tooltip.unwrap();
         assert!(tooltip.contains("No files match"), "tooltip: {tooltip}");
+    }
+
+    #[test]
+    fn test_document_link_resolve_document_with_glob_char_is_literal() {
+        // #1651 review: a `document` whose real filename contains a glob
+        // metacharacter (legal on Linux/macOS) must be treated literally, never
+        // glob-expanded — otherwise an existing document link falsely 404s.
+        let dir = tempfile::tempdir().unwrap();
+        let fname = "Statement[2024-01].pdf";
+        std::fs::write(dir.path().join(fname), "").unwrap();
+
+        let link = DocumentLink {
+            range: Range {
+                start: Position::new(0, 9),
+                end: Position::new(0, 30),
+            },
+            target: None,
+            tooltip: None,
+            data: Some(serde_json::json!({
+                "path": fname,
+                "base_dir": dir.path().to_string_lossy(),
+                "kind": "document",
+            })),
+        };
+        let resolved = handle_document_link_resolve(link);
+        let tooltip = resolved.tooltip.unwrap();
+        // The key assertion: a literal document is NOT glob-detected, so it
+        // resolves as an existing document rather than "no files match". (The
+        // bracketed path won't round-trip through a `file://` URI — a separate,
+        // pre-existing encoding limitation — so we don't assert on `target`.)
+        assert!(
+            tooltip.contains("Open document"),
+            "document with [] in name must resolve literally: {tooltip}"
+        );
+    }
+
+    #[test]
+    fn test_document_link_resolve_invalid_glob_pattern() {
+        // An unbalanced `[` is syntactically invalid — reported as such, not as a
+        // misleading "no files match".
+        let dir = tempfile::tempdir().unwrap();
+        let link = DocumentLink {
+            range: Range {
+                start: Position::new(0, 9),
+                end: Position::new(0, 20),
+            },
+            target: None,
+            tooltip: None,
+            data: Some(serde_json::json!({
+                "path": "foo[.bean",
+                "base_dir": dir.path().to_string_lossy(),
+                "kind": "include",
+            })),
+        };
+        let resolved = handle_document_link_resolve(link);
+        let tooltip = resolved.tooltip.unwrap();
+        assert!(
+            tooltip.contains("Invalid include pattern"),
+            "tooltip: {tooltip}"
+        );
     }
 
     #[test]

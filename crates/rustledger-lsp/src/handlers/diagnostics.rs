@@ -28,23 +28,15 @@ use crate::ledger_state::LedgerState;
 /// See issues #572 and #1648.
 fn build_validation_options_from_loader(
     loader_options: &LoaderOptions,
+    source_map: &SourceMap,
     base_dir: &std::path::Path,
 ) -> ValidationOptions {
-    let document_dirs: Vec<std::path::PathBuf> = loader_options
-        .documents
-        .iter()
-        .map(|d| {
-            let path = std::path::Path::new(d);
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                base_dir.join(path)
-            }
-        })
-        .collect();
-
     rustledger_loader::validation_options_from_options(loader_options)
-        .with_document_dirs(document_dirs)
+        .with_document_dirs(rustledger_loader::resolve_document_dirs(
+            &loader_options.documents,
+            Some(base_dir),
+        ))
+        .with_document_source_dirs(rustledger_loader::document_source_dirs(source_map))
 }
 
 /// Build `ValidationOptions` for single-file validation (no loaded ledger).
@@ -75,22 +67,9 @@ fn build_validation_options_from_file(
         options.set(key, value);
     }
 
-    let document_dirs: Vec<std::path::PathBuf> = options
-        .documents
-        .iter()
-        .map(|d| {
-            let path = std::path::Path::new(d);
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else if let Some(base) = base_dir {
-                base.join(path)
-            } else {
-                path.to_path_buf()
-            }
-        })
-        .collect();
-
-    rustledger_loader::validation_options_from_options(&options).with_document_dirs(document_dirs)
+    rustledger_loader::validation_options_from_options(&options).with_document_dirs(
+        rustledger_loader::resolve_document_dirs(&options.documents, base_dir),
+    )
 }
 
 /// Convert parse errors to LSP diagnostics.
@@ -633,7 +612,7 @@ pub fn all_diagnostics(
                 .first()
                 .and_then(|f| f.path.parent())
                 .unwrap_or_else(|| std::path::Path::new("."));
-            build_validation_options_from_loader(&ledger.options, base_dir)
+            build_validation_options_from_loader(&ledger.options, &ledger.source_map, base_dir)
         } else {
             // Single-file: resolve relative document dirs against the
             // current file's parent directory so they don't end up being
@@ -817,11 +796,35 @@ mod tests {
     fn from_loader_carries_inferred_tolerance_default() {
         let mut opts = LoaderOptions::new();
         opts.set("inferred_tolerance_default", "CLP:0.5");
-        let vo = build_validation_options_from_loader(&opts, std::path::Path::new("/tmp"));
+        let vo = build_validation_options_from_loader(
+            &opts,
+            &SourceMap::new(),
+            std::path::Path::new("/tmp"),
+        );
         assert_eq!(
             vo.inferred_tolerance_default.get("CLP"),
             Some(&rust_decimal::Decimal::new(5, 1))
         );
+    }
+
+    /// Both LSP builders carry the file-level `option "booking_method"` (via the
+    /// shared converter), so booking-sensitive diagnostics align with `check`.
+    #[test]
+    fn builders_carry_booking_method() {
+        use rustledger_core::BookingMethod;
+
+        let mut opts = LoaderOptions::new();
+        opts.set("booking_method", "FIFO");
+        let vo = build_validation_options_from_loader(
+            &opts,
+            &SourceMap::new(),
+            std::path::Path::new("/"),
+        );
+        assert_eq!(vo.default_booking_method, BookingMethod::Fifo);
+
+        let file_options = vec![("booking_method".to_string(), "FIFO".to_string(), Span::ZERO)];
+        let vo = build_validation_options_from_file(&file_options, None);
+        assert_eq!(vo.default_booking_method, BookingMethod::Fifo);
     }
 
     /// #1648 single-file path: a standalone buffer's tolerance option applies too

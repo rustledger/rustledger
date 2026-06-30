@@ -645,3 +645,51 @@ fn query_entries_matches_source_query() -> Result<()> {
     );
     Ok(())
 }
+
+/// `@@` (total price) must surface through the component as a **per-unit** price,
+/// exactly as `rledger check` reports it. The `@@`→`@` conversion lives in the
+/// loader's shared `finalize` phase, so the FFI surface and the CLI cannot
+/// disagree.
+///
+/// Regression guard for the v0.17.0 bug: the FFI path exposed the raw `@@` total
+/// (`7 USD @@ 10 EUR` → price `10`) instead of the per-unit price (`10/7 ≈
+/// 1.4286`), because the normalization had lived only in the CLI `check` path
+/// and was lost when the FFI surface moved onto the shared pipeline (#1462).
+#[test]
+fn total_price_at_at_normalized_to_per_unit() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    use rustledger::ledger::types::Directive;
+    let (mut store, inst) = instantiate()?;
+    let ledger = "\
+2024-01-01 open Assets:Cash USD
+2024-01-01 open Assets:Other EUR
+2024-01-02 * \"total price\"
+  Assets:Cash   7 USD @@ 10 EUR
+  Assets:Other  -10 EUR
+";
+    let loaded = inst
+        .rustledger_ledger_ledger()
+        .call_load(&mut store, ledger, "<stdin>", false)?;
+    let (number, currency) = loaded
+        .entries
+        .iter()
+        .find_map(|d| match d {
+            Directive::Transaction(t) => t.postings.iter().find_map(|p| {
+                p.price
+                    .as_ref()
+                    .map(|a| (a.number.clone(), a.currency.clone()))
+            }),
+            _ => None,
+        })
+        .expect("the `@@` posting should carry a price");
+    assert_eq!(currency, "EUR");
+    // 10 EUR / 7 USD = 1.4285714… per unit — NOT the raw total `10`.
+    assert!(
+        number.starts_with("1.42857"),
+        "`@@` total must be normalized to per-unit, got `{number}` {currency}",
+    );
+    Ok(())
+}

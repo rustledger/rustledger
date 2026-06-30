@@ -744,6 +744,26 @@ impl crate::Directives<crate::LateValidated> {
         let mut v = std::mem::take(self.as_vec_mut());
         v.extend(failed.into_inner());
         v.sort_by_key(canonical_sort_key);
+
+        // Normalize `@@` total prices to per-unit (`@`) as the final pipeline
+        // step. This runs AFTER Late validation, so exact totals still survived
+        // for the precise balance-residual check (#1240) — which is the entire
+        // reason normalization is deferred rather than done during booking.
+        //
+        // Doing it HERE, in the one transition that produces `Finalized` (the
+        // only publicly-exposed phase), makes "prices are normalized" an
+        // invariant of every loaded `Ledger`: `rledger check`, the FFI/MCP
+        // component, and BQL all get it by construction, and none can drift by
+        // forgetting to normalize. It was previously bolted onto the CLI `check`
+        // path only, so the FFI surface silently regressed to exposing raw `@@`
+        // totals when it moved onto this shared pipeline (#1462).
+        #[cfg(feature = "booking")]
+        for spanned in &mut v {
+            if let Directive::Transaction(txn) = &mut spanned.value {
+                rustledger_booking::normalize_prices(txn);
+            }
+        }
+
         crate::Directives::new_unchecked(v)
     }
 }
@@ -1526,6 +1546,59 @@ fn run_error_to_ledger(e: &rustledger_plugin::PluginRunError) -> LedgerError {
         Rn::PythonFailed { message } => {
             LedgerError::error("E8002", message.clone()).with_phase("plugin")
         }
+    }
+}
+
+#[cfg(all(test, feature = "booking", feature = "validation"))]
+mod finalize_price_tests {
+    use rustledger_core::{Directive, PriceKind};
+
+    /// `finalize` normalizes `@@` (total) prices to per-unit (`@`), so every
+    /// loaded `Ledger` carries normalized prices by construction — the FFI
+    /// component and `rledger check` cannot disagree. Regression guard for #1462,
+    /// where the FFI surface lost the normalization that lived only in the CLI
+    /// `check` path and so exposed the raw `@@` total.
+    #[test]
+    fn finalize_normalizes_total_at_at_price_to_per_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        std::fs::write(
+            &path,
+            "2024-01-01 open Assets:Cash USD\n\
+             2024-01-01 open Assets:Other EUR\n\
+             2024-01-02 * \"total price\"\n  \
+               Assets:Cash   7 USD @@ 10 EUR\n  \
+               Assets:Other  -10 EUR\n",
+        )
+        .unwrap();
+
+        let ledger =
+            super::load(&path, &super::LoadOptions::default()).expect("ledger should load");
+        let price = ledger
+            .directives
+            .iter()
+            .find_map(|s| match &s.value {
+                Directive::Transaction(t) => t.postings.iter().find_map(|p| p.price.as_ref()),
+                _ => None,
+            })
+            .expect("the `@@` posting should carry a price");
+
+        assert_eq!(
+            price.kind,
+            PriceKind::Unit,
+            "`@@` must be normalized to a per-unit price, not left as a total"
+        );
+        let amount = price
+            .amount
+            .as_ref()
+            .and_then(|a| a.as_amount())
+            .expect("normalized per-unit amount present");
+        // 10 EUR / 7 USD = 1.4285714… per unit — NOT the raw total `10`.
+        assert!(
+            amount.number.to_string().starts_with("1.42857"),
+            "per-unit price should be 10/7, got {}",
+            amount.number
+        );
     }
 }
 

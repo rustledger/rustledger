@@ -4,7 +4,6 @@ use crate::cmd::completions::ShellType;
 use crate::report::{self, SourceCache};
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use rustledger_core::Directive;
 use rustledger_loader::LoadError;
 #[cfg(feature = "python-plugin-wasm")]
 use rustledger_plugin::PluginManager;
@@ -542,14 +541,10 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     let ledger = rustledger_loader::process(process_input, &load_options)
         .with_context(|| "processing pipeline failed")?;
 
-    // Normalize total prices (@@→@) AFTER validation to preserve exact totals for
-    // precise residual calculation.
-    let mut spanned_directives = ledger.directives;
-    for spanned in &mut spanned_directives {
-        if let Directive::Transaction(txn) = &mut spanned.value {
-            rustledger_booking::normalize_prices(txn);
-        }
-    }
+    // `@@`→`@` price normalization is done in the loader's `finalize` phase (the
+    // shared pipeline), so `ledger.directives` is already normalized — every
+    // consumer gets it by construction. See `process::finalize`.
+    let spanned_directives = ledger.directives;
 
     let source_map = &ledger.source_map;
     // One renderer per invocation: amortizes GraphicalReportHandler setup

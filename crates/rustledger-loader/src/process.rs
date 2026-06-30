@@ -1254,9 +1254,9 @@ fn sanitize_inner_posting_spans(directive: &mut Directive, source_map: &SourceMa
 /// (`inferred_tolerance_default`, `inferred_tolerance_multiplier`,
 /// `infer_tolerance_from_cost`). Path-relative settings (document directories)
 /// and the effective booking method are layered on by callers that hold the
-/// necessary context — see [`build_validation_options`].
+/// necessary context — see `build_validation_options`.
 ///
-/// Both `rledger check` (via [`build_validation_options`]) and the LSP/MCP
+/// Both `rledger check` (via `build_validation_options`) and the LSP/MCP
 /// diagnostics path call this, so the two cannot drift. Issue #1648 was exactly
 /// that drift: the LSP built its own `ValidationOptions` that dropped the
 /// tolerance options, so it reported residual errors `check` did not.

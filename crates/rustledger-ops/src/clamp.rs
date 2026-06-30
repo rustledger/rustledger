@@ -103,31 +103,40 @@ fn synthetic_transaction(date: NaiveDate, postings: Vec<Spanned<Posting>>) -> Di
     })
 }
 
+/// The cost spec to carry on a synthesized opening-balance posting for a held
+/// lot, or `None` for a plain-currency position.
+fn position_cost_spec(position: &Position) -> Option<CostSpec> {
+    position.cost.as_ref().map(|c| CostSpec {
+        number: Some(CostNumber::PerUnit { value: c.number }),
+        currency: Some(c.currency.clone()),
+        date: c.date,
+        label: c.label.clone(),
+        merge: false,
+    })
+}
+
 /// One opening-balance transaction for an account's inventory.
 fn summary_transaction(account: &str, inventory: &Inventory, date: NaiveDate) -> Directive {
     let mut postings = Vec::new();
     for position in inventory.positions() {
-        let cost = position.cost.as_ref().map(|c| CostSpec {
-            number: Some(CostNumber::PerUnit { value: c.number }),
-            currency: Some(c.currency.clone()),
-            date: c.date,
-            label: c.label.clone(),
-            merge: false,
-        });
         postings.push(synthetic_posting(
             account,
             position.units.number,
             &position.units.currency,
-            cost,
+            position_cost_spec(position),
         ));
     }
-    // Balancing Equity:Opening-Balances posting per position.
+    // Balancing Equity:Opening-Balances posting per position. A held-at-cost lot
+    // MUST carry the same cost here so the opening transaction balances by weight
+    // (#1656): the asset leg's weight is `N * cost` in the cost currency, so a
+    // bare-units contra leaves that weight unoffset and any at-cost view of the
+    // clamped ledger stops summing to zero.
     for position in inventory.positions() {
         postings.push(synthetic_posting(
             "Equity:Opening-Balances",
             -position.units.number,
             &position.units.currency,
-            None,
+            position_cost_spec(position),
         ));
     }
     synthetic_transaction(date, postings)
@@ -391,6 +400,52 @@ mod tests {
             out.iter()
                 .any(|dir| mentions(dir, "Equity:Earnings:Previous")),
             "expected an earnings roll-up posting",
+        );
+    }
+
+    #[test]
+    fn held_at_cost_opening_contra_keeps_its_cost() {
+        // #1656: a held-at-cost lot summarized into the opening balance must keep
+        // its cost on the Equity:Opening-Balances contra leg, or the opening
+        // transaction does not balance by weight — the asset leg's weight is
+        // `N * cost` in the cost currency, so a bare-units contra leaves it
+        // unoffset and any at-cost view of the clamped ledger stops summing to 0.
+        let input = dirs(
+            "2000-01-01 open Assets:MC\n\
+             2000-01-01 open Equity:Open\n\
+             2000-01-02 * \"seed\"\n  Assets:MC   100 USD\n  Equity:Open  -100 USD\n\
+             2000-01-03 * \"buy\"\n  Assets:MC    1 XYZ {50 USD}\n  Assets:MC  -50 USD\n",
+        );
+        // Clamp to a window AFTER all entries: everything becomes opening balance.
+        let out = clamp(&input, d(2014, 1, 1), d(2015, 1, 1));
+
+        let opening = out
+            .iter()
+            .find_map(|dir| match dir {
+                Directive::Transaction(t)
+                    if t.flag == 'S' && t.narration.to_string() == "Opening balance" =>
+                {
+                    Some(t)
+                }
+                _ => None,
+            })
+            .expect("an Opening balance summary is synthesized");
+
+        let xyz_contra = opening
+            .postings
+            .iter()
+            .find(|p| {
+                p.value.account.to_string() == "Equity:Opening-Balances"
+                    && p.value
+                        .units
+                        .as_ref()
+                        .and_then(IncompleteAmount::as_amount)
+                        .is_some_and(|a| a.currency.to_string() == "XYZ")
+            })
+            .expect("an Equity:Opening-Balances contra for the XYZ lot");
+        assert!(
+            xyz_contra.value.cost.is_some(),
+            "held-at-cost contra must keep its cost (#1656), got bare units",
         );
     }
 }

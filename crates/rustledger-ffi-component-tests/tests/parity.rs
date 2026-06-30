@@ -612,6 +612,58 @@ fn session_clamp_preserves_cost_basis() -> Result<()> {
     Ok(())
 }
 
+/// #1656: a held-at-cost lot summarized into the clamp opening balance must keep
+/// its cost on the `Equity:Opening-Balances` contra, so the opening transaction
+/// balances by weight. The component's `clamp` is what rustfava uses for time
+/// filtering; a bare-units contra breaks any at-cost view of the clamped ledger.
+#[test]
+fn clamp_opening_balance_contra_keeps_cost() -> Result<()> {
+    use rustledger::ledger::types::Directive;
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    let comp = inst.rustledger_ledger_ledger();
+    let session = comp.session();
+    let src = "\
+2000-01-01 open Assets:MC
+2000-01-01 open Equity:Open
+2000-01-02 * \"seed\"
+  Assets:MC   100 USD
+  Equity:Open  -100 USD
+2000-01-03 * \"buy\"
+  Assets:MC    1 XYZ {50 USD}
+  Assets:MC  -50 USD
+";
+    let handle = session.call_constructor(&mut store, src)?;
+    // Clamp to a window AFTER all entries: everything becomes opening balance.
+    let clamped = session.call_clamp(&mut store, handle, "2014-01-01", "2015-01-01")?;
+    let opening = clamped
+        .iter()
+        .find_map(|d| match d {
+            Directive::Transaction(t) if t.narration.as_deref() == Some("Opening balance") => {
+                Some(t)
+            }
+            _ => None,
+        })
+        .expect("an Opening balance transaction is synthesized");
+    let xyz_contra = opening
+        .postings
+        .iter()
+        .find(|p| {
+            p.account == "Equity:Opening-Balances"
+                && p.units.as_ref().is_some_and(|u| u.currency == "XYZ")
+        })
+        .expect("an Equity:Opening-Balances contra for the XYZ lot");
+    assert!(
+        xyz_contra.cost.is_some(),
+        "held-at-cost contra must keep its cost through the component clamp (#1656)",
+    );
+    handle.resource_drop(&mut store)?;
+    Ok(())
+}
+
 /// `builder.query-entries` (rustfava#173): query an already-loaded directive
 /// set directly, matching the source-based `query` — the typed alternative to
 /// re-rendering entries to source.

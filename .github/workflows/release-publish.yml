@@ -257,6 +257,17 @@ jobs:
           done
           echo "Package not available after 6 minutes"
           exit 1
+      - name: Sync package version to the release tag
+        run: |
+          # The MCP server is a standalone npm package whose version is NOT
+          # derived from any Cargo.toml (unlike @rustledger/wasm), so the
+          # `cargo set-version` run during the release cut never touches it.
+          # Force it to the release tag here so a forgotten manual bump of
+          # packages/mcp-server/package.json can't publish the wrong version —
+          # the v0.17.0 channel-test failure was exactly that (package.json was
+          # still 0.16.5, so @rustledger/mcp-server@0.17.0 was never published).
+          cd packages/mcp-server
+          npm version "${RELEASE_TAG#v}" --no-git-tag-version --allow-same-version
       - name: Install dependencies
         run: |
           cd packages/mcp-server

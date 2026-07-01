@@ -9,6 +9,7 @@ pub mod compat;
 pub mod completions;
 pub mod config_cmd;
 pub mod doctor;
+pub mod explain;
 pub mod extract_cmd;
 pub mod format;
 pub mod lint;

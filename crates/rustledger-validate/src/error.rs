@@ -189,6 +189,227 @@ impl ErrorCode {
         matches!(self, Self::AccountCloseNotEmpty)
     }
 
+    /// Parse a user-supplied code string (`"E2001"`, `"e2001"`, or bare
+    /// `"2001"`) into its variant. Backs `rledger explain`.
+    #[must_use]
+    pub fn from_code(code: &str) -> Option<Self> {
+        let digits = code
+            .trim()
+            .strip_prefix(['E', 'e'])
+            .unwrap_or_else(|| code.trim());
+        let normalized = format!("E{digits}");
+        Self::ALL.iter().find(|c| c.code() == normalized).copied()
+    }
+
+    /// A short human title for the code (one line). Backs `rledger explain`.
+    #[must_use]
+    pub const fn title(&self) -> &'static str {
+        match self {
+            Self::AccountNotOpen => "Account used before it was opened",
+            Self::AccountAlreadyOpen => "Duplicate open directive for an account",
+            Self::AccountClosed => "Account used after it was closed",
+            Self::AccountCloseNotEmpty => "Account closed with a non-zero balance",
+            Self::InvalidAccountName => "Invalid account name",
+            Self::BalanceAssertionFailed => "Balance assertion failed",
+            Self::BalanceToleranceExceeded => "Balance exceeds explicit tolerance",
+            Self::PadWithoutBalance => "Pad without a subsequent balance assertion",
+            Self::MultiplePadForBalance => "Multiple pads for the same balance assertion",
+            Self::TransactionUnbalanced => "Transaction does not balance",
+            Self::MultipleInterpolation => "Multiple postings missing amounts for one currency",
+            Self::NoPostings => "Transaction has no postings",
+            Self::SinglePosting => "Transaction has a single posting",
+            Self::NoMatchingLot => "No matching lot for reduction",
+            Self::InsufficientUnits => "Not enough units in matching lots",
+            Self::AmbiguousLotMatch => "Ambiguous lot match under STRICT booking",
+            Self::NegativeCost => "Negative cost",
+            Self::UndeclaredCurrency => "Currency used without a commodity declaration",
+            Self::CurrencyNotAllowed => "Currency not allowed in this account",
+            Self::InvalidPrecisionMetadata => "Invalid precision metadata on commodity",
+            Self::UnknownOption => "Unknown option name",
+            Self::InvalidOptionValue => "Invalid option value",
+            Self::DuplicateOption => "Non-repeatable option given more than once",
+            Self::DocumentNotFound => "Document file not found",
+            Self::DateOutOfOrder => "Directive date out of order",
+            Self::FutureDate => "Directive dated in the future",
+        }
+    }
+
+    /// A detailed explanation of the code — what it means, its common cause,
+    /// and how to fix it. Backs `rledger explain`, mirroring
+    /// `rustc --explain`.
+    ///
+    /// Kept as code constants (not `include_str!` from `spec/core/`) so the
+    /// binary is self-contained: published crates don't package `spec/`, and
+    /// the Nix flake's source filter strips it. The exhaustive match means
+    /// adding a variant forces adding its explanation, and the
+    /// `error_codes_documented_in_spec` test guards that every code is also
+    /// documented in the spec.
+    #[must_use]
+    pub const fn explanation(&self) -> &'static str {
+        match self {
+            Self::AccountNotOpen => {
+                "A posting or directive references an account with no prior `open` \
+                 directive.\n\nEvery account must be opened on or before the date it is \
+                 first used:\n\n    2024-01-01 open Assets:Bank:Checking USD\n\nFix: add \
+                 an `open` directive dated on or before the first use, or correct a \
+                 misspelled account name."
+            }
+            Self::AccountAlreadyOpen => {
+                "An `open` directive targets an account that is already open.\n\nThis \
+                 is usually a duplicated line — often the same `open` appearing in both \
+                 a main file and an `include`d file.\n\nFix: remove the duplicate \
+                 `open` (keep the earliest one)."
+            }
+            Self::AccountClosed => {
+                "A posting or directive references an account after its `close` \
+                 directive.\n\nFix: move the transaction before the close date, remove \
+                 the `close`, or use a different account."
+            }
+            Self::AccountCloseNotEmpty => {
+                "A `close` directive targets an account that still holds a non-zero \
+                 balance.\n\nAdvisory only: `check` stays silent to match `bean-check`; \
+                 surface it on demand with `rledger lint closed-nonempty`.\n\nFix: zero \
+                 the account (transfer the residual) before closing it."
+            }
+            Self::InvalidAccountName => {
+                "An account name does not match the required pattern.\n\nAccount names \
+                 are colon-separated capitalized components rooted at one of the five \
+                 account types (Assets, Liabilities, Equity, Income, Expenses — \
+                 renameable via `option \"name_assets\"` etc.), e.g. \
+                 `Assets:Bank:Checking`.\n\nFix: rename the account to match the \
+                 pattern."
+            }
+            Self::BalanceAssertionFailed => {
+                "A `balance` assertion does not match the computed balance of the \
+                 account (including its sub-accounts) at that date.\n\nThe comparison \
+                 uses a tolerance inferred from the asserted amount's precision.\n\n\
+                 Fix: correct the asserted amount, add the missing transactions, or \
+                 insert a `pad` directive to absorb the difference. The reported \
+                 difference is the exact discrepancy."
+            }
+            Self::BalanceToleranceExceeded => {
+                "A `balance` assertion with an explicit tolerance, e.g. \
+                 `balance Assets:Cash 100.00 ~ 0.05 USD`, differs from the computed \
+                 balance by more than that tolerance.\n\nFix: correct the amount, \
+                 widen the explicit tolerance, or add the missing transactions."
+            }
+            Self::PadWithoutBalance => {
+                "A `pad` directive is never consumed by a later `balance` assertion \
+                 for that account and currency.\n\nA pad means \"insert whatever \
+                 amount makes the NEXT balance assertion true\" — without that \
+                 balance it does nothing.\n\nFix: add the `balance` assertion after \
+                 the pad, or delete the pad."
+            }
+            Self::MultiplePadForBalance => {
+                "More than one `pad` directive is pending for the same account and \
+                 currency before a single `balance` assertion — it is ambiguous which \
+                 pad should absorb the difference.\n\nFix: keep one pad per \
+                 account/currency between consecutive balance assertions."
+            }
+            Self::TransactionUnbalanced => {
+                "The weights of a transaction's postings do not sum to zero per \
+                 currency (beyond the inferred tolerance).\n\nA posting's weight is \
+                 its amount, converted through its cost (`{...}`) or price \
+                 (`@`/`@@`) when present.\n\nFix: correct the amounts, or leave \
+                 exactly one posting's amount blank and rustledger will interpolate \
+                 it. The reported residual is the exact imbalance."
+            }
+            Self::MultipleInterpolation => {
+                "More than one posting in the same currency has no amount — only one \
+                 blank posting per currency can be interpolated from the others.\n\n\
+                 Fix: fill in amounts so at most one posting per currency is elided."
+            }
+            Self::NoPostings => {
+                "Reserved for a transaction with zero postings.\n\nNever emitted in \
+                 practice: rustledger (like Python beancount) treats a posting-less \
+                 transaction as a structurally-valid no-op."
+            }
+            Self::SinglePosting => {
+                "A transaction has exactly one posting, which cannot balance on its \
+                 own (warning).\n\nFix: add the offsetting posting(s), or elide the \
+                 second amount to interpolate it."
+            }
+            Self::NoMatchingLot => {
+                "A cost reduction (e.g. a sale, `Assets:Stock -5 X {...}`) specifies \
+                 a cost, date, or label that matches no lot held in the account's \
+                 inventory.\n\nFix: check the cost spec against the actual holdings; \
+                 `rledger query` with `cost_label`/`cost_date` columns shows the \
+                 lots."
+            }
+            Self::InsufficientUnits => {
+                "A reduction requests more units than the matching lots hold (e.g. \
+                 selling 10 when 5 are held).\n\nA failed reduction leaves the \
+                 inventory untouched.\n\nFix: reduce the sold quantity, or check for \
+                 a missing purchase transaction."
+            }
+            Self::AmbiguousLotMatch => {
+                "Under STRICT booking (the default), a reduction's cost spec matches \
+                 more than one lot, and rustledger refuses to guess.\n\nFix: \
+                 disambiguate with the lot's cost `{10.00 USD}`, date `{2024-01-02}`, \
+                 or label `{\"lot-a\"}` — or open the account with a non-strict \
+                 method: `2024-01-01 open Assets:Stock \"FIFO\"`."
+            }
+            Self::NegativeCost => {
+                "A posting's cost amount is negative — a cost basis must be \
+                 non-negative.\n\nFix: check the sign of the cost (the units carry \
+                 the sign of a sale, not the cost)."
+            }
+            Self::UndeclaredCurrency => {
+                "A currency is used but never declared with a `commodity` directive, \
+                 and commodity declarations are required (strict commodity mode).\n\n\
+                 Fix: add `YYYY-MM-DD commodity CUR`, or disable the strict \
+                 requirement."
+            }
+            Self::CurrencyNotAllowed => {
+                "A posting or `balance` assertion uses a currency outside the list \
+                 the account was opened with (`open Assets:Cash USD` constrains the \
+                 account to USD).\n\nFix: use an allowed currency, or extend the \
+                 currency list on the `open` directive. An `open` with no currencies \
+                 allows all."
+            }
+            Self::InvalidPrecisionMetadata => {
+                "A `commodity` directive carries a `precision:` metadata value that \
+                 does not parse as a non-negative integer (warning). The declaration \
+                 is ignored; display precision falls back to \
+                 `option \"display_precision\"`, then to inference.\n\nFix: use e.g. \
+                 `precision: 2`."
+            }
+            Self::UnknownOption => {
+                "An `option` directive names an option rustledger does not recognize \
+                 (warning; the option is ignored).\n\nFix: check the option name \
+                 against the options documentation — it may be misspelled or \
+                 unsupported."
+            }
+            Self::InvalidOptionValue => {
+                "An `option` directive has a value that does not parse for that \
+                 option's type (e.g. a non-numeric \
+                 `inferred_tolerance_multiplier`).\n\nFix: correct the value per the \
+                 options documentation."
+            }
+            Self::DuplicateOption => {
+                "A non-repeatable option is specified more than once (warning; the \
+                 last value wins).\n\nFix: keep a single occurrence."
+            }
+            Self::DocumentNotFound => {
+                "A `document` directive references a file that does not exist. \
+                 Relative paths resolve against the directory of the source file \
+                 containing the directive (matching `include`).\n\nFix: correct the \
+                 path, or remove the directive."
+            }
+            Self::DateOutOfOrder => {
+                "A directive's date is earlier than the preceding directive's date \
+                 in the same file (informational only — directives are sorted before \
+                 processing, so this never changes results).\n\nFix: reorder the \
+                 file chronologically if you care about source order."
+            }
+            Self::FutureDate => {
+                "A directive is dated in the future relative to today (warning).\n\n\
+                 Fix: correct the date — or ignore the warning if the future dating \
+                 is intentional (e.g. scheduled entries)."
+            }
+        }
+    }
+
     /// Get the severity level.
     #[must_use]
     pub const fn severity(&self) -> Severity {

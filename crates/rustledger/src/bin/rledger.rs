@@ -141,6 +141,12 @@ enum Commands {
         action: CompatAction,
     },
 
+    /// Explain a validation error code (e.g. E2001), or list all codes
+    Explain {
+        #[command(flatten)]
+        args: rustledger::cmd::explain::Args,
+    },
+
     /// Non-fatal advisory passes — e.g., detect inter-account transfer pairs
     Lint {
         #[command(flatten)]
@@ -482,6 +488,13 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Commands::Explain { args } => match rustledger::cmd::explain::run(&args) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::from(1)
+            }
+        },
         Commands::Lint { args } => match rustledger::cmd::lint::run(&args) {
             Ok(code) => code,
             Err(e) => {

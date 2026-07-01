@@ -253,6 +253,12 @@ jobs:
               python_error_types: list = field(default_factory=list)
               rust_error_types: list = field(default_factory=list)
               error_presence_match: bool = False
+              # Exact error-COUNT agreement, compared only when BOTH tools
+              # flag errors (default True = not applicable). Verdict/presence
+              # comparison is blind to a duplicated diagnostic on one side or
+              # a missing dedicated diagnostic on the other (both fail ->
+              # verdicts agree) — the two #1668 classes.
+              error_count_match: bool = True
               # Directive counts
               python_directives: dict = field(default_factory=dict)
               rust_directives: dict = field(default_factory=dict)
@@ -364,6 +370,12 @@ jobs:
               # Check match (both pass or both fail)
               result.check_match = (result.python_ok == result.rust_ok)
               result.error_presence_match = ((result.python_error_count > 0) == (result.rust_error_count > 0))
+              # Diagnostic-level agreement on files BOTH tools reject: exact
+              # error counts. Catches duplicated errors (#1668 oversell) and
+              # missing dedicated diagnostics (#1668 balance currency) that
+              # check_match/error_presence_match cannot see.
+              if result.python_error_count > 0 and result.rust_error_count > 0:
+                  result.error_count_match = (result.python_error_count == result.rust_error_count)
 
               # === Rust accounts via BQL ===
               rust_accounts = set()
@@ -470,6 +482,11 @@ jobs:
           accounts_match = sum(1 for r in results if r.accounts_match)
           posting_match = sum(1 for r in results if r.posting_count_match)
           error_match = sum(1 for r in results if r.error_presence_match)
+          # Diagnostic-level metric over files BOTH tools reject.
+          both_fail = [r for r in results if r.python_error_count > 0 and r.rust_error_count > 0]
+          error_count_files = len(both_fail)
+          error_count_matches = sum(1 for r in both_fail if r.error_count_match)
+          error_count_pct = error_count_matches * 100 // error_count_files if error_count_files > 0 else 100
           full_match = sum(1 for r in results if r.full_match)
 
           # Percentages
@@ -547,6 +564,17 @@ jobs:
                       print(f"  - {r.file}")
                       print(f"    Rust error count: {r.rust_error_count}, types: {r.rust_error_types[:5]}")
 
+          # Diagnostic-count mismatches on files both tools reject — the
+          # duplicate/missing-diagnostic class. Report-only for now (tracked
+          # via error_count_pct); promote to a gate once the metric is clean.
+          count_mismatches = [r for r in both_fail if not r.error_count_match]
+          if count_mismatches:
+              print(f"\n=== Error-count mismatches on both-fail files ({len(count_mismatches)}/{error_count_files}) ===")
+              for r in count_mismatches[:10]:
+                  print(f"  - {r.file}: python {r.python_error_count} vs rust {r.rust_error_count}")
+              if len(count_mismatches) > 10:
+                  print(f"  ... and {len(count_mismatches) - 10} more")
+
           print(f"Regressions: {len(regressions)}")
           print(f"JSON parse failures: {len(json_parse_failures)}")
 
@@ -590,6 +618,9 @@ jobs:
               f.write(f"posting_match={posting_match}\n")
               f.write(f"posting_pct={posting_pct}\n")
               f.write(f"error_match={error_match}\n")
+              f.write(f"error_count_files={error_count_files}\n")
+              f.write(f"error_count_matches={error_count_matches}\n")
+              f.write(f"error_count_pct={error_count_pct}\n")
               f.write(f"error_pct={error_pct}\n")
               f.write(f"full_match={full_match}\n")
               f.write(f"full_pct={full_pct}\n")
@@ -1081,3 +1112,17 @@ jobs:
           git add .github/badges/
           git diff --staged --quiet || git commit -m "chore: update compatibility results"
           git push origin compatibility
+
+      # Gate on check regressions, mirroring the BQL step's `--baseline`
+      # (which exits non-zero on a BQL regression). Previously check
+      # regressions were only printed and written to compat-regressions.txt —
+      # a file that matched on the previous run and mismatches now scrolled
+      # by silently. Runs LAST so the BQL step, charts, PR comment, and the
+      # compatibility-branch commit still happen (a one-shot red alert; the
+      # committed baseline advances, and the regression details live in
+      # compat-regressions.txt on the compatibility branch).
+      - name: Gate on check regressions
+        if: steps.compat_test.outputs.regression_count != '0'
+        run: |
+          echo "::error::${{ steps.compat_test.outputs.regression_count }} check regression(s) vs the previous run — files that matched before and mismatch now. See the 'Run comprehensive compatibility test' log and compat-regressions.txt."
+          exit 1

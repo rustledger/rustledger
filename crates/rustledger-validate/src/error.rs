@@ -345,7 +345,20 @@ mod tests {
         // strict equality.) Codes are backtick-wrapped in the spec (`**Code:**
         // `E1001``), so the backtick delimiters keep `E1001` from matching
         // inside `E10001`.
-        let spec = include_str!("../../../spec/core/validation.md");
+        // The spec lives at the workspace root (`spec/core/validation.md`),
+        // OUTSIDE this crate, so it is not packaged to crates.io. Read it at
+        // runtime relative to `CARGO_MANIFEST_DIR` and skip when it is absent —
+        // e.g. `cargo test` on the published crate, which the Nix release channel
+        // runs — rather than `include_str!`-ing it at compile time, which would
+        // fail to build the published crate's tests (broke the Nix release
+        // channel on 0.17.x).
+        let spec_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/core/validation.md");
+        let Ok(spec) = std::fs::read_to_string(spec_path) else {
+            eprintln!(
+                "skipping error_codes_documented_in_spec: {spec_path} not present (published-crate build)"
+            );
+            return;
+        };
         let missing: Vec<&str> = ErrorCode::ALL
             .iter()
             .map(ErrorCode::code)

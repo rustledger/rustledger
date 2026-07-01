@@ -326,8 +326,24 @@ fn semantic_validation_errors(
     // the session.
     let actuals = session.balance_actuals().to_vec();
     verrs.extend(session.finalize());
+    // `load_source` already ran booking, which reports reduction failures
+    // (insufficient units / no-matching-lot / ambiguous match) WITH transaction
+    // context. The validation session re-derives the same failures context-free
+    // (its reduce-check is a standalone-validation safety net), so a fresh error
+    // here would duplicate the one already in `loaded.errors` — once with
+    // context, once without (#1668). Drop a session error when a load error is
+    // identical or is that message followed by booking's ` (date, "narration")`
+    // suffix.
+    let load_msgs: Vec<&str> = loaded.errors.iter().map(|e| e.message.as_str()).collect();
+    let is_dup_of_booking = |msg: &str| {
+        let with_ctx = format!("{msg} (");
+        load_msgs
+            .iter()
+            .any(|lm| *lm == msg || lm.starts_with(&with_ctx))
+    };
     let errors = verrs
         .into_iter()
+        .filter(|err| !is_dup_of_booking(&err.message))
         .map(|err| {
             let mut e = ffi::Error::new(&err.message).validate_phase();
             if let Some(span) = err.span {

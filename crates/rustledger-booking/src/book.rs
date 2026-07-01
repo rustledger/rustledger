@@ -294,14 +294,23 @@ impl BookingEngine {
                                                 .and_then(|c| c.date),
                                         );
 
-                                // Update posting with filled cost
+                                // Update posting with filled cost. Carry the
+                                // matched lot's label (as the date already is) so
+                                // the reduction shares lot identity with its
+                                // augmenting lot and nets against it — otherwise a
+                                // labeled reduction leaves a phantom unlabeled
+                                // negative lot in the holdings view (#1666).
                                 result.postings[idx].cost = Some(CostSpec {
                                     number: Some(rustledger_core::CostNumber::PerUnit {
                                         value: matched_cost.number,
                                     }),
                                     currency: Some(matched_cost.currency.clone()),
                                     date: matched_cost.date,
-                                    label: None,
+                                    label: booking_result
+                                        .matched
+                                        .first()
+                                        .and_then(|p| p.cost.as_ref())
+                                        .and_then(|c| c.label.clone()),
                                     merge: false,
                                 });
                                 booked_indices.insert(idx);
@@ -685,6 +694,55 @@ mod tests {
         // Check inventory
         let inv = engine.inventory(&"Assets:Stock".into()).unwrap();
         assert_eq!(inv.units("AAPL"), dec!(10));
+    }
+
+    #[test]
+    fn test_reduction_carries_matched_lot_label() {
+        // #1666: reducing a labeled lot must carry that lot's label onto the
+        // reduction posting so it nets against the augmenting lot, instead of
+        // leaving a phantom unlabeled negative lot in the holdings view.
+        let mut engine = BookingEngine::new();
+
+        let buy = |label: &str| {
+            let mut cost = CostSpec::empty()
+                .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(10) })
+                .with_currency("USD");
+            cost.label = Some(label.to_string());
+            Transaction::new(date(2020, 2, 1), "buy")
+                .with_synthesized_posting(
+                    Posting::new("Assets:S", Amount::new(dec!(10), "X")).with_cost(cost),
+                )
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-100), "USD"),
+                ))
+        };
+        engine.apply(&buy("lot-a"));
+        engine.apply(&buy("lot-b"));
+
+        // Sell 5 X explicitly from lot-b.
+        let mut sell_cost = CostSpec::empty()
+            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(10) })
+            .with_currency("USD");
+        sell_cost.label = Some("lot-b".to_string());
+        let sell = Transaction::new(date(2020, 4, 1), "sell from lot-b")
+            .with_synthesized_posting(
+                Posting::new("Assets:S", Amount::new(dec!(-5), "X")).with_cost(sell_cost),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(50), "USD")));
+
+        let result = engine
+            .book_and_interpolate(&sell)
+            .expect("sell should book against lot-b");
+        let label = result.transaction.postings[0]
+            .cost
+            .as_ref()
+            .and_then(|c| c.label.clone());
+        assert_eq!(
+            label.as_deref(),
+            Some("lot-b"),
+            "reduction posting must carry the matched lot's label (#1666)"
+        );
     }
 
     #[test]

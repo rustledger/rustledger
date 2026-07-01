@@ -99,6 +99,34 @@ pub fn validate_balance_early(
     errors: &mut Vec<ValidationError>,
 ) {
     require_account_open(state, &bal.account, bal.date, "Account", errors);
+
+    // Flag a balance asserted in a currency the account doesn't allow. Without
+    // this, the only signal is a confusing "Balance failed ... got 0 EUR" (the
+    // account simply holds no EUR); beancount emits a dedicated "invalid
+    // currency for Balance" diagnostic. Only when the account constrains its
+    // currencies (empty set = any currency allowed), matching the transaction
+    // currency check — #1668.
+    if let Some(account_state) = state.accounts.get(&bal.account)
+        && !account_state.currencies.is_empty()
+        && !account_state.currencies.contains(&bal.amount.currency)
+    {
+        let mut allowed: Vec<String> = account_state
+            .currencies
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        allowed.sort();
+        errors.push(ValidationError::new(
+            ErrorCode::CurrencyNotAllowed,
+            format!(
+                "Invalid currency {} for Balance directive on {} (account holds {})",
+                bal.amount.currency,
+                bal.account,
+                allowed.join(", ")
+            ),
+            bal.date,
+        ));
+    }
 }
 
 /// Late-phase balance validation — runs after booking + plugins.

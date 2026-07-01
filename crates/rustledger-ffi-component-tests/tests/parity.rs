@@ -800,3 +800,45 @@ fn load_reports_balance_assertion_failure() -> Result<()> {
     );
     Ok(())
 }
+
+/// #1668: an oversell reports the "Not enough units" error exactly ONCE via
+/// `load`. Booking (run inside `load_source`) already reports it with
+/// transaction context; the validation session's context-free reduce-check
+/// (a standalone-validation safety net) must not duplicate it.
+#[test]
+fn load_oversell_reports_single_error() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    let src = "\
+2020-01-01 open Assets:S
+2020-01-01 open Assets:Cash
+2020-02-01 * \"buy\"
+  Assets:S   5 X {10 USD}
+  Assets:Cash
+2020-03-01 * \"oversell\"
+  Assets:S   -10 X {10 USD}
+  Assets:Cash   100 USD
+";
+    let loaded = inst
+        .rustledger_ledger_ledger()
+        .call_load(&mut store, src, "<stdin>", false)?;
+    let n = loaded
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("Not enough units"))
+        .count();
+    assert_eq!(
+        n,
+        1,
+        "oversell must report 'Not enough units' exactly once (#1668); got {n}: {:?}",
+        loaded
+            .errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}

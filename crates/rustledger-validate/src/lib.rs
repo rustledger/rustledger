@@ -1494,6 +1494,53 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_balance_wrong_currency() {
+        // #1668: a balance asserted in a currency the account doesn't allow is
+        // flagged with a dedicated diagnostic (not only "Balance failed").
+        let directives = vec![
+            Directive::Open(
+                Open::new(date(2024, 1, 1), "Assets:Cash").with_currencies(vec!["USD".into()]),
+            ),
+            Directive::Balance(Balance::new(
+                date(2024, 3, 1),
+                "Assets:Cash",
+                Amount::new(dec!(100), "EUR"),
+            )),
+        ];
+        let errors = validate(&directives);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.code == ErrorCode::CurrencyNotAllowed
+                    && e.message.contains("for Balance directive")),
+            "balance in a non-allowed currency should be flagged (#1668); got: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_validate_balance_currency_allowed_when_unconstrained() {
+        // An account opened without a currency constraint allows any balance
+        // currency — no false positive (#1668).
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+            Directive::Balance(Balance::new(
+                date(2024, 3, 1),
+                "Assets:Cash",
+                Amount::new(dec!(0), "EUR"),
+            )),
+        ];
+        let errors = validate(&directives);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.code == ErrorCode::CurrencyNotAllowed),
+            "unconstrained account must not flag balance currency (#1668); got: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn test_validate_future_date_warning() {
         // Anchor "today" so this test isn't time-dependent. The
         // directive is 30 days after the anchor — unambiguously in

@@ -594,6 +594,21 @@ impl Inventory {
 
         let indices: Vec<usize> = matching.into_iter().map(|(i, _)| i).collect();
 
+        // Check sufficiency BEFORE mutating any lot: a failed reduction must
+        // leave the inventory untouched (same invariant as `reduce_ordered`;
+        // see the comment there and `booking_properties.rs`).
+        let available: Decimal = indices
+            .iter()
+            .map(|&i| self.positions[i].units.number.abs())
+            .sum();
+        if available < remaining {
+            return Err(BookingError::InsufficientUnits {
+                currency: units.currency.clone(),
+                requested: remaining,
+                available,
+            });
+        }
+
         for idx in indices {
             if remaining.is_zero() {
                 break;
@@ -627,15 +642,6 @@ impl Inventory {
             self.positions[idx] = new_pos;
 
             remaining -= take;
-        }
-
-        if !remaining.is_zero() {
-            let available = units.number.abs() - remaining;
-            return Err(BookingError::InsufficientUnits {
-                currency: units.currency.clone(),
-                requested: units.number.abs(),
-                available,
-            });
         }
 
         // Clean up empty positions
@@ -696,6 +702,24 @@ impl Inventory {
             cost_currency = Some(cost.currency.clone());
         }
 
+        // Check sufficiency BEFORE mutating any lot: a failed reduction must
+        // leave the inventory untouched. The validator reduces against the
+        // live `LedgerState` inventories, so a partial drain on the error
+        // path would corrupt every later balance assertion on the account
+        // (found by the failed-reduce-must-not-mutate property in
+        // `rustledger-booking/tests/booking_properties.rs`).
+        let available: Decimal = indices
+            .iter()
+            .map(|&i| self.positions[i].units.number.abs())
+            .sum();
+        if available < remaining {
+            return Err(BookingError::InsufficientUnits {
+                currency: units.currency.clone(),
+                requested: remaining,
+                available,
+            });
+        }
+
         for idx in indices {
             if remaining.is_zero() {
                 break;
@@ -723,15 +747,6 @@ impl Inventory {
             pos.units.number += reduction;
 
             remaining -= take;
-        }
-
-        if !remaining.is_zero() {
-            let available = units.number.abs() - remaining;
-            return Err(BookingError::InsufficientUnits {
-                currency: units.currency.clone(),
-                requested: units.number.abs(),
-                available,
-            });
         }
 
         // Clean up empty positions

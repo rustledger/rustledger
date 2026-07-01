@@ -1,0 +1,98 @@
+# Downstream integration: build the wasip2 component from THIS PR and run
+# rustfava's Python test suite against it (rustfava resolves the component via
+# the RUSTLEDGER_COMPONENT_WASM env override; its tests otherwise exercise the
+# released wasm).
+#
+# Why: every FFI bug in the v0.17–v0.19 arc (#1462 `@@` price, #1656 clamp,
+# #1663 load-vs-validate, #1666 lot label, #1667 decryption, #1668 diagnostics)
+# was found by rustfava AFTER a release shipped. The in-repo parity tests catch
+# conversion drift, but only the real embedder catches contract/behavior drift.
+# This job moves that discovery from post-release to pre-merge.
+#
+# ADVISORY, deliberately not part of the required `build` gate:
+# - An INTENTIONAL WIT contract break (e.g. 3.1.0 → 3.2.0 adding the
+#   `host.decrypt` import) legitimately fails here until rustfava@main adopts
+#   the new contract — red is the correct, informative signal, but it must not
+#   block the rustledger PR that introduces the break.
+# - Conversely, a green run on an engine PR is strong evidence rustfava won't
+#   need an emergency patch release.
+# Treat a red run as "check whether this is an intentional break or a real
+# regression" — the rustfava test log names the mismatch.
+
+name: Downstream (rustfava)
+
+on:
+  pull_request:
+    paths:
+      # The embedding surface itself...
+      - "crates/rustledger-ffi-component/**"
+      - "crates/rustledger-ffi-wasi/**"
+      # ...and the engine crates whose behavior it exposes (the v0.17.x bugs
+      # lived in loader/booking/validate, not in the FFI glue).
+      - "crates/rustledger-core/**"
+      - "crates/rustledger-parser/**"
+      - "crates/rustledger-loader/**"
+      - "crates/rustledger-booking/**"
+      - "crates/rustledger-validate/**"
+      - "crates/rustledger-query/**"
+      - ".github/workflows/downstream.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: downstream-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rustfava-component-tests:
+    name: rustfava tests against PR component
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-wasip2
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+
+      - name: Build the wasip2 component from this PR
+        run: cargo build -p rustledger-ffi-component --target wasm32-wasip2
+
+      - name: Check out rustfava@main
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: rustledger/rustfava
+          path: rustfava
+          persist-credentials: false
+
+      # Mirror rustfava's own test-py job setup (.github/workflows/test.yml).
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "rustfava/uv.lock"
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - name: Install wasmtime
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+
+      - name: Run rustfava's Python tests against the PR component
+        working-directory: rustfava
+        env:
+          # rustfava's component engine resolves the wasm from this override
+          # (src/rustfava/rustledger/component_engine.py) — point it at the
+          # component built from THIS PR instead of the released artifact.
+          RUSTLEDGER_COMPONENT_WASM: ${{ github.workspace }}/target/wasm32-wasip2/debug/rustledger_ffi_component.wasm
+        run: |
+          # rustfava's test-py expects the frontend bundle to exist; its own
+          # CI touches the file rather than building the JS.
+          touch src/rustfava/static/app.js
+          just test-py

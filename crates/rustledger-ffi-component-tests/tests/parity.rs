@@ -745,3 +745,58 @@ fn total_price_at_at_normalized_to_per_unit() -> Result<()> {
     );
     Ok(())
 }
+
+/// #1663: `load` (not only `validate`) must report balance-assertion failures,
+/// so an embedder that loads via `load` (rustfava) sees a failing `balance`
+/// instead of a silent green. Load-vs-validate parity for the balance check.
+#[test]
+fn load_reports_balance_assertion_failure() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    // Real balance of Assets:Cash is -5 USD, but the ledger asserts 999 USD.
+    let src = "\
+2024-01-01 open Assets:Cash USD
+2024-01-01 open Expenses:X USD
+2024-01-02 * \"t\"
+  Expenses:X   5 USD
+  Assets:Cash
+2024-01-03 balance Assets:Cash   999 USD
+";
+    let loaded = inst
+        .rustledger_ledger_ledger()
+        .call_load(&mut store, src, "<stdin>", false)?;
+    let has_balance_err = loaded
+        .errors
+        .iter()
+        .any(|e| e.message.contains("Balance failed") && e.message.contains("Assets:Cash"));
+    assert!(
+        has_balance_err,
+        "`load` must surface the failing balance assertion (#1663); got errors: {:?}",
+        loaded
+            .errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // #1663 Part 2: the balance directive carries the computed diff (WIT 3.1.0),
+    // so UIs render pass/fail without re-deriving. computed(-5) − asserted(999).
+    let bal_diff = loaded
+        .entries
+        .iter()
+        .find_map(|d| match d {
+            rustledger::ledger::types::Directive::Balance(b) => b.diff.clone(),
+            _ => None,
+        })
+        .expect("the balance directive should carry a diff (#1663 Part 2)");
+    assert_eq!(bal_diff.currency, "USD");
+    assert!(
+        bal_diff.number.starts_with("-1004"),
+        "diff should be computed − asserted = -1004, got `{}`",
+        bal_diff.number
+    );
+    Ok(())
+}

@@ -295,6 +295,25 @@ struct PendingPad {
     location: Option<(rustledger_parser::Span, u16)>,
 }
 
+/// The computed result of a `balance` assertion, recorded during Late
+/// validation (#1663).
+///
+/// `diff` is `computed − asserted` in the asserted currency — zero means the
+/// assertion matched exactly. Exposed via [`ValidationSession::balance_actuals`]
+/// so the FFI `load` surface (and any consumer) can render per-assertion
+/// pass/fail without re-deriving the balance from scratch.
+#[derive(Debug, Clone)]
+pub struct BalanceActual {
+    /// The `balance` directive's date.
+    pub date: NaiveDate,
+    /// The asserted account.
+    pub account: Account,
+    /// The asserted currency.
+    pub currency: rustledger_core::Currency,
+    /// `computed − asserted` in `currency` (zero = exact match).
+    pub diff: rustledger_core::Decimal,
+}
+
 /// Ledger state for validation.
 #[derive(Debug, Default)]
 pub struct LedgerState {
@@ -340,6 +359,10 @@ pub struct LedgerState {
     /// keyed by source identity so a different posting that merely shares an
     /// account/date is still reported.
     pub(crate) account_not_open_early: FxHashSet<(u16, rustledger_core::Span)>,
+    /// Per-`balance`-assertion computed result recorded during Late validation:
+    /// `diff = computed − asserted`. Lets consumers render per-assertion pass/fail
+    /// without re-deriving the balance (#1663).
+    pub(crate) balance_actuals: Vec<BalanceActual>,
 }
 
 impl LedgerState {
@@ -944,6 +967,18 @@ pub use phase::{EarlyDone, LateDone, Pending, SessionPhase};
 pub struct ValidationSession<P: SessionPhase = Pending> {
     state: LedgerState,
     _phase: std::marker::PhantomData<P>,
+}
+
+impl<P: SessionPhase> ValidationSession<P> {
+    /// The per-`balance`-assertion computed results recorded during Late
+    /// validation (`diff = computed − asserted`). Populated by the Late balance
+    /// check; call after `run_late`/`run_late_spanned`. Lets consumers (the FFI
+    /// `load` surface) render per-assertion pass/fail without re-deriving the
+    /// balance — #1663.
+    #[must_use]
+    pub fn balance_actuals(&self) -> &[BalanceActual] {
+        &self.state.balance_actuals
+    }
 }
 
 impl ValidationSession<Pending> {

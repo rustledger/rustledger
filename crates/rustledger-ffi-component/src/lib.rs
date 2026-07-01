@@ -44,9 +44,11 @@ use exports::rustledger::ledger::ledger::{
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. Bumped to 3.0 for the
-/// breaking `expand-pads` parameter added to `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.0";
+/// The Component-Model api-version this build implements. 3.1 adds the `diff`
+/// field on `balance-dir` (computed − asserted) so consumers can render
+/// per-assertion pass/fail (#1663); 3.0 was the breaking `expand-pads` parameter
+/// added to `load`/`load-file` (#1628).
+const API_VERSION: &str = "3.1";
 
 struct Component;
 

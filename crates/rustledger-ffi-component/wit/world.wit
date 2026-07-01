@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.0.0;
+package rustledger:ledger@3.1.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -114,6 +114,12 @@ interface types {
     account: string,
     amount: amount,
     tolerance: option<string>,
+    // `computed - asserted` in the asserted currency, when the assertion was
+    // checked (present on `load`/`load-file` and `validate`; `none` if load had
+    // parse errors or the account is unknown). Zero means the assertion matched
+    // exactly; non-zero means it failed. Lets UIs render per-assertion pass/fail
+    // without re-deriving the balance. Added in 3.1.0 (#1663).
+    diff: option<amount>,
     meta: meta,
   }
   record pad-dir {

@@ -170,6 +170,9 @@ fn directive_from_core(d: &Directive, line: u32, filename: &str) -> wit::Directi
             account: b.account.to_string(),
             amount: amount_from_core(&b.amount),
             tolerance: b.tolerance.map(|t| t.to_string()),
+            // Filled in by `attach_balance_diffs` after validation runs (#1663);
+            // `directive_from_core` has no ledger-wide context on its own.
+            diff: None,
             meta: meta(&b.meta),
         }),
         Directive::Pad(p) => wit::Directive::Pad(wit::PadDir {
@@ -297,6 +300,82 @@ pub fn load(source: &str, filename: &str, expand_pads: bool) -> out::LoadResult 
     load_result(ffi::helpers::load_source(source), filename, expand_pads)
 }
 
+/// Run the semantic validation session over a loaded result and return its
+/// validation-phase errors. Empty when the input has parse errors (validation
+/// only runs on syntactically-valid input, matching `validate`).
+///
+/// Shared by `validate` and the `load`/`load_file` path so the primary load
+/// surface reports balance-assertion failures (and the other Late checks) like
+/// beancount's `loader.load_file` — not only `validate`. Embedders that load via
+/// `load` (rustfava) would otherwise see a failing `balance` as `errors: []`
+/// (#1663).
+fn semantic_validation_errors(
+    loaded: &ffi::helpers::LoadResult,
+) -> (Vec<ffi::Error>, Vec<rustledger_validate::BalanceActual>) {
+    if loaded.errors.iter().any(|e| e.phase == "parse") {
+        return (Vec::new(), Vec::new());
+    }
+    let today = jiff::Zoned::now().date();
+    let session = rustledger_validate::ValidationSession::new(
+        rustledger_validate::ValidationOptions::default(),
+    );
+    let (session, mut verrs) = session.run_early_spanned(&loaded.spanned_directives, today);
+    let (session, late) = session.run_late_spanned(&loaded.spanned_directives, today);
+    verrs.extend(late);
+    // Capture the per-balance computed results (#1663) before `finalize` consumes
+    // the session.
+    let actuals = session.balance_actuals().to_vec();
+    verrs.extend(session.finalize());
+    let errors = verrs
+        .into_iter()
+        .map(|err| {
+            let mut e = ffi::Error::new(&err.message).validate_phase();
+            if let Some(span) = err.span {
+                e = e.with_line(loaded.line_lookup.byte_to_line(span.start));
+            }
+            e
+        })
+        .collect();
+    (errors, actuals)
+}
+
+/// Attach the computed `diff` (`computed − asserted`) to each `balance` directive
+/// entry from the validator's recorded results (#1663), keyed by
+/// `(date, account, currency)`.
+fn attach_balance_diffs(
+    entries: &mut [wit::Directive],
+    actuals: &[rustledger_validate::BalanceActual],
+) {
+    if actuals.is_empty() {
+        return;
+    }
+    let map: std::collections::HashMap<(String, String, String), rustledger_core::Decimal> =
+        actuals
+            .iter()
+            .map(|a| {
+                (
+                    (
+                        a.date.to_string(),
+                        a.account.to_string(),
+                        a.currency.to_string(),
+                    ),
+                    a.diff,
+                )
+            })
+            .collect();
+    for entry in entries.iter_mut() {
+        if let wit::Directive::Balance(b) = entry {
+            let key = (b.date.clone(), b.account.clone(), b.amount.currency.clone());
+            if let Some(diff) = map.get(&key) {
+                b.diff = Some(wit::Amount {
+                    number: diff.to_string(),
+                    currency: b.amount.currency.clone(),
+                });
+            }
+        }
+    }
+}
+
 /// Build a WIT load-result from a consumed `ffi-wasi` load result (shared by
 /// `load` and `batch`). `batch` always passes `expand_pads = false` — its load
 /// section is source-faithful and its queries pad-expand separately.
@@ -305,20 +384,30 @@ fn load_result(
     filename: &str,
     expand_pads: bool,
 ) -> out::LoadResult {
+    // #1663: run semantic validation (balance assertions and the other Late
+    // checks) so `load`/`load_file` report them like beancount's
+    // `loader.load_file` — not only `validate`. Computed before `loaded` is
+    // consumed below.
+    let (validation_errs, balance_actuals) = semantic_validation_errors(&loaded);
+
     // Synthesized pad transactions have no source line (tagged 0).
     let (directives, directive_lines) = if expand_pads {
         ffi::helpers::expand_pads(loaded.directives, loaded.directive_lines, &0u32)
     } else {
         (loaded.directives, loaded.directive_lines)
     };
-    let entries = directives
+    let mut entries: Vec<wit::Directive> = directives
         .iter()
         .zip(directive_lines.iter())
         .map(|(d, &line)| directive_from_core(d, line, filename))
         .collect();
+    // #1663 (Part 2): stamp each `balance` directive with `computed − asserted`.
+    attach_balance_diffs(&mut entries, &balance_actuals);
+    let mut errors = loaded.errors;
+    errors.extend(validation_errs);
     out::LoadResult {
         entries,
-        errors: loaded.errors.into_iter().map(error).collect(),
+        errors: errors.into_iter().map(error).collect(),
         options: options(loaded.options),
         plugins: loaded
             .plugins
@@ -506,26 +595,9 @@ fn simple_error(message: String) -> wit::Error {
 pub fn validate(source: &str) -> out::ValidateResult {
     let load = ffi::helpers::load_source(source);
     let parse_error_count = load.errors.iter().filter(|e| e.phase == "parse").count();
+    let (validation_errs, _actuals) = semantic_validation_errors(&load);
     let mut errors = load.errors;
-
-    // Only run semantic validation when there are no syntactic errors.
-    if parse_error_count == 0 {
-        let today = jiff::Zoned::now().date();
-        let session = rustledger_validate::ValidationSession::new(
-            rustledger_validate::ValidationOptions::default(),
-        );
-        let (session, mut verrs) = session.run_early_spanned(&load.spanned_directives, today);
-        let (session, late) = session.run_late_spanned(&load.spanned_directives, today);
-        verrs.extend(late);
-        verrs.extend(session.finalize());
-        for err in verrs {
-            let mut e = ffi::Error::new(&err.message).validate_phase();
-            if let Some(span) = err.span {
-                e = e.with_line(load.line_lookup.byte_to_line(span.start));
-            }
-            errors.push(e);
-        }
-    }
+    errors.extend(validation_errs);
 
     let validate_error_count = errors.iter().filter(|e| e.phase == "validate").count();
     out::ValidateResult {
@@ -1490,8 +1562,7 @@ mod tests {
         m.user
             .iter()
             .find(|(k, _)| k == key)
-            .map(|(_, v)| v)
-            .unwrap_or_else(|| panic!("missing meta key {key}"))
+            .map_or_else(|| panic!("missing meta key {key}"), |(_, v)| v)
     }
 
     fn load() -> (Vec<Directive>, Vec<u32>) {

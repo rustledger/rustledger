@@ -39,6 +39,22 @@ impl WasiView for Host {
     }
 }
 
+/// A fixed "decrypted" ledger the test host returns for any ciphertext — this
+/// exercises the `host.decrypt` import plumbing (#1667) without depending on a
+/// real gpg binary or keyring in the test environment.
+const DECRYPTED_LEDGER: &str = "\
+2024-01-01 open Assets:Secret USD
+2024-01-02 * \"decrypted-by-host\"
+  Assets:Secret  42 USD
+  Equity:Opening-Balances
+";
+
+impl rustledger::ledger::host::Host for Host {
+    fn decrypt(&mut self, _ciphertext: Vec<u8>) -> Result<String, String> {
+        Ok(DECRYPTED_LEDGER.to_string())
+    }
+}
+
 fn component_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/wasm32-wasip2/debug/rustledger_ffi_component.wasm")
@@ -49,6 +65,10 @@ fn instantiate() -> Result<(Store<Host>, Rustledger)> {
     let component = Component::from_file(&engine, component_path())?;
     let mut linker = Linker::<Host>::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+    rustledger::ledger::host::add_to_linker::<_, wasmtime::component::HasSelf<Host>>(
+        &mut linker,
+        |h| h,
+    )?;
     let mut store = Store::new(
         &engine,
         Host {
@@ -67,6 +87,10 @@ fn instantiate_in(host_dir: &std::path::Path) -> Result<(Store<Host>, Rustledger
     let component = Component::from_file(&engine, component_path())?;
     let mut linker = Linker::<Host>::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+    rustledger::ledger::host::add_to_linker::<_, wasmtime::component::HasSelf<Host>>(
+        &mut linker,
+        |h| h,
+    )?;
     let wasi = WasiCtxBuilder::new()
         .preopened_dir(host_dir, "/work", DirPerms::READ, FilePerms::READ)?
         .build();
@@ -834,6 +858,52 @@ fn load_oversell_reports_single_error() -> Result<()> {
         n,
         1,
         "oversell must report 'Not enough units' exactly once (#1668); got {n}: {:?}",
+        loaded
+            .errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+/// #1667: an encrypted (`.gpg`) ledger loads through the component by delegating
+/// decryption to the `host.decrypt` import — the WASI sandbox can neither spawn
+/// `gpg` nor reach the keyring. The test host returns `DECRYPTED_LEDGER` for any
+/// ciphertext; we assert that plaintext is what gets parsed.
+#[test]
+fn load_file_decrypts_via_host_import() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let dir = tempfile::tempdir()?;
+    // Content is irrelevant — the `.gpg` extension marks the file as encrypted,
+    // and the test host returns a fixed plaintext for any bytes.
+    std::fs::write(
+        dir.path().join("ledger.beancount.gpg"),
+        b"not-really-gpg-ciphertext",
+    )?;
+    let (mut store, inst) = instantiate_in(dir.path())?;
+    let loaded = inst.rustledger_ledger_ledger().call_load_file(
+        &mut store,
+        "/work/ledger.beancount.gpg",
+        false,
+        &[],
+        false,
+    )?;
+    // The host-decrypted ledger opens Assets:Secret — proof the plaintext from
+    // `host.decrypt` is what got parsed (versus the old `failed to decrypt`).
+    let has_secret = loaded.entries.iter().any(|d| {
+        matches!(
+            d,
+            rustledger::ledger::types::Directive::Open(o) if o.account == "Assets:Secret"
+        )
+    });
+    assert!(
+        has_secret,
+        "encrypted ledger must load via host.decrypt (#1667); {} entries, errors: {:?}",
+        loaded.entries.len(),
         loaded
             .errors
             .iter()

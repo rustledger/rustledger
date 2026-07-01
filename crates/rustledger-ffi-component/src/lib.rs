@@ -44,11 +44,12 @@ use exports::rustledger::ledger::ledger::{
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. 3.1 adds the `diff`
-/// field on `balance-dir` (computed − asserted) so consumers can render
-/// per-assertion pass/fail (#1663); 3.0 was the breaking `expand-pads` parameter
-/// added to `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.1";
+/// The Component-Model api-version this build implements. 3.2 adds the
+/// `host.decrypt` import so encrypted (`.gpg`/`.asc`) ledgers can be decrypted by
+/// the host — a WASI guest can't reach the keyring (#1667). 3.1 added the `diff`
+/// field on `balance-dir` (#1663); 3.0 was the breaking `expand-pads` parameter
+/// on `load`/`load-file` (#1628).
+const API_VERSION: &str = "3.2";
 
 struct Component;
 

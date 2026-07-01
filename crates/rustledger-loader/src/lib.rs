@@ -83,7 +83,7 @@ pub fn is_glob_pattern(path: &str) -> bool {
 #[cfg(any(feature = "booking", feature = "plugins", feature = "validation"))]
 pub use process::{
     ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger, LedgerError, LoadOptions, ProcessError,
-    load, load_raw, process,
+    load, load_raw, load_with_fs, process,
 };
 #[cfg(feature = "plugins")]
 pub use process::{PluginPass, run_plugins};
@@ -244,7 +244,7 @@ pub struct Plugin {
 ///
 /// This uses `gpg --batch --decrypt` which will use the user's
 /// GPG keyring and gpg-agent for passphrase handling.
-fn decrypt_gpg_file(path: &Path) -> Result<String, LoadError> {
+pub(crate) fn decrypt_gpg_file(path: &Path) -> Result<String, LoadError> {
     let output = Command::new("gpg")
         .args(["--batch", "--decrypt"])
         .arg(path)
@@ -480,7 +480,10 @@ impl Loader {
             pre
         } else {
             let src: std::sync::Arc<str> = if self.fs.is_encrypted(path) {
-                decrypt_gpg_file(path)?.into()
+                // Route decryption through the filesystem so a sandboxed fs (the
+                // WASI component) can delegate to a host capability (#1667); the
+                // default impl shells out to gpg.
+                self.fs.decrypt(path)?
             } else {
                 self.fs.read(path)?
             };

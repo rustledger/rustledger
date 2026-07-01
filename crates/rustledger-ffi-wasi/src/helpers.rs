@@ -340,6 +340,25 @@ pub fn expand_pads<T: Clone>(
 ///
 /// Returns the loader error string if the entry file cannot be read/parsed.
 pub fn load_file(path: &std::path::Path, path_security: bool) -> Result<FileLoad, String> {
+    load_file_with_fs(path, path_security, None)
+}
+
+/// Like [`load_file`], but with an optional caller-provided
+/// [`FileSystem`](rustledger_loader::FileSystem).
+///
+/// The WASI component passes a filesystem whose `decrypt` delegates to a host
+/// capability, so GPG-encrypted ledgers load in the sandbox (the guest can
+/// neither spawn `gpg` nor reach the keyring) — #1667. `None` uses the default
+/// on-disk filesystem (gpg via subprocess), matching the native path.
+///
+/// # Errors
+///
+/// Returns a message if loading fails.
+pub fn load_file_with_fs(
+    path: &std::path::Path,
+    path_security: bool,
+    fs: Option<Box<dyn rustledger_loader::FileSystem>>,
+) -> Result<FileLoad, String> {
     // Route through the single canonical pipeline (`process::load`:
     // sort → synth → book → regular → finalize) rather than re-implementing a
     // partial loader here. This keeps the FFI surface in lock-step with the
@@ -356,8 +375,11 @@ pub fn load_file(path: &std::path::Path, path_security: bool) -> Result<FileLoad
         validate: false,
         ..Default::default()
     };
-    let ledger =
-        rustledger_loader::load(path, &options).map_err(|e| format!("Failed to load file: {e}"))?;
+    let ledger = match fs {
+        Some(fs) => rustledger_loader::load_with_fs(path, &options, fs),
+        None => rustledger_loader::load(path, &options),
+    }
+    .map_err(|e| format!("Failed to load file: {e}"))?;
 
     // Directives + their line numbers / originating files (multi-file).
     // Synth-generated directives carry a `file_id` absent from the source map,

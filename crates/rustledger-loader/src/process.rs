@@ -1465,6 +1465,31 @@ pub fn load(path: &Path, options: &LoadOptions) -> Result<Ledger, ProcessError> 
     process(raw, options)
 }
 
+/// Like [`load`], but with a caller-provided [`FileSystem`](crate::FileSystem).
+///
+/// Lets the WASI component inject a filesystem whose
+/// [`decrypt`](crate::FileSystem::decrypt) delegates to a host capability, so
+/// GPG-encrypted ledgers load in the sandbox (a WASI guest can neither spawn
+/// `gpg` nor reach the keyring) — #1667.
+///
+/// # Errors
+///
+/// Returns a [`ProcessError`] if loading or processing fails.
+pub fn load_with_fs(
+    path: &Path,
+    options: &LoadOptions,
+    fs: Box<dyn crate::FileSystem>,
+) -> Result<Ledger, ProcessError> {
+    let mut loader = crate::Loader::new().with_filesystem(fs);
+
+    if options.path_security {
+        loader = loader.with_path_security(true);
+    }
+
+    let raw = loader.load(path)?;
+    process(raw, options)
+}
+
 /// Load a beancount file without processing.
 ///
 /// This returns raw directives without sorting, booking, or plugins.

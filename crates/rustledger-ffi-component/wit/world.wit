@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.1.0;
+package rustledger:ledger@3.2.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -542,8 +542,23 @@ interface format {
   format-entries: func(entries: list<input-directive>) -> result<string, string>;
 }
 
+/// Capabilities the host provides to the component.
+interface host {
+  /// Decrypt an encrypted ledger file on the host — e.g. via the user's GPG
+  /// keyring. A WASI guest can neither spawn `gpg` nor reach the keyring, so
+  /// decryption of `.gpg`/`.asc` inputs is delegated to the host (#1667). Given
+  /// the file's ciphertext bytes, returns the decrypted UTF-8 text, or an error
+  /// message on failure. Added in 3.2.0.
+  ///
+  /// A host that does not support encrypted ledgers may return an error; the
+  /// component only calls this when loading a file it detects as encrypted.
+  decrypt: func(ciphertext: list<u8>) -> result<string, string>;
+}
+
 /// The component a host instantiates.
 world rustledger {
+  import host;
+
   export ledger;
   export builder;
   export util;

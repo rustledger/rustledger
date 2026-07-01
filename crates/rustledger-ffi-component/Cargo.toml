@@ -26,6 +26,7 @@ serde_json.workspace = true
 jiff.workspace = true
 rustledger-booking.workspace = true
 rustledger-core.workspace = true
+rustledger-loader.workspace = true
 rustledger-ops.workspace = true
 rustledger-parser.workspace = true
 rustledger-query.workspace = true

@@ -56,6 +56,22 @@ pub trait FileSystem: Send + Sync + std::fmt::Debug {
         let _ = pattern;
         Err("glob is not supported by this filesystem".to_string())
     }
+
+    /// Decrypt an encrypted file at `path`, returning its plaintext.
+    ///
+    /// The default implementation shells out to `gpg --batch --decrypt` — the
+    /// native path, which uses the user's keyring and gpg-agent. Sandboxed
+    /// filesystems (the WASI component) override this to delegate to a host
+    /// capability, since a WASI guest can neither spawn `gpg` nor reach the
+    /// keyring (#1667). Only called when [`is_encrypted`](Self::is_encrypted)
+    /// returned `true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::Decryption`] if decryption fails.
+    fn decrypt(&self, path: &Path) -> Result<Arc<str>, LoadError> {
+        crate::decrypt_gpg_file(path).map(Arc::from)
+    }
 }
 
 /// Default filesystem that reads from disk.

@@ -738,6 +738,66 @@ fn read_file(path: &str) -> Result<String, String> {
 /// `allow_unrestricted_includes == true` lifts that path-traversal protection
 /// (so the safe state is the `false`/zero default). The flag is negated into
 /// the loader's `path_security` at the boundary.
+/// A filesystem that reads from the WASI-preopened disk but delegates GPG
+/// decryption to the **host** via the `host.decrypt` import.
+///
+/// A WASI guest can neither spawn `gpg` nor reach the user's keyring, so
+/// `.gpg`/`.asc` inputs can't be decrypted in the sandbox. The embedder (which
+/// runs natively and holds that authority) satisfies the import — the
+/// capability-passing pattern the WASI/component model is built around (#1667).
+#[derive(Debug)]
+struct HostDecryptFs(rustledger_loader::DiskFileSystem);
+
+impl rustledger_loader::FileSystem for HostDecryptFs {
+    fn read(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<std::sync::Arc<str>, rustledger_loader::LoadError> {
+        self.0.read(path)
+    }
+
+    fn exists(&self, path: &std::path::Path) -> bool {
+        self.0.exists(path)
+    }
+
+    fn is_encrypted(&self, path: &std::path::Path) -> bool {
+        self.0.is_encrypted(path)
+    }
+
+    fn normalize(&self, path: &std::path::Path) -> std::path::PathBuf {
+        self.0.normalize(path)
+    }
+
+    fn supports_parallel_read(&self) -> bool {
+        self.0.supports_parallel_read()
+    }
+
+    fn glob(&self, pattern: &str) -> Result<Vec<std::path::PathBuf>, String> {
+        self.0.glob(pattern)
+    }
+
+    fn decrypt(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<std::sync::Arc<str>, rustledger_loader::LoadError> {
+        // Read the ciphertext from the sandbox, then hand it to the host to
+        // decrypt with its keyring (the guest cannot) — #1667.
+        let ciphertext =
+            std::fs::read(path).map_err(|e| rustledger_loader::LoadError::Decryption {
+                path: path.to_path_buf(),
+                message: format!("failed to read encrypted file: {e}"),
+            })?;
+        let plaintext =
+            crate::rustledger::ledger::host::decrypt(&ciphertext).map_err(|message| {
+                rustledger_loader::LoadError::Decryption {
+                    path: path.to_path_buf(),
+                    message,
+                }
+            })?;
+        Ok(std::sync::Arc::from(plaintext))
+    }
+}
+
 pub fn load_file(
     path: &str,
     allow_unrestricted_includes: bool,
@@ -747,7 +807,10 @@ pub fn load_file(
     // The loader takes `path_security` (true = confine includes); the WIT flag
     // is inverted so the safe state is the `false`/zero default.
     let path_security = !allow_unrestricted_includes;
-    match ffi::helpers::load_file(std::path::Path::new(path), path_security) {
+    // Inject a filesystem that routes GPG decryption to the `host.decrypt`
+    // import — the sandbox can't run gpg or read the keyring (#1667).
+    let fs = Box::new(HostDecryptFs(rustledger_loader::DiskFileSystem));
+    match ffi::helpers::load_file_with_fs(std::path::Path::new(path), path_security, Some(fs)) {
         Ok(fl) => {
             let mut errors = fl.errors;
             let opts = fl.options;

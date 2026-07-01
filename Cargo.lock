@@ -3475,6 +3475,7 @@ dependencies = [
  "rustledger-booking",
  "rustledger-core",
  "rustledger-ffi-wasi",
+ "rustledger-loader",
  "rustledger-ops",
  "rustledger-parser",
  "rustledger-query",

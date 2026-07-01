@@ -3489,6 +3489,7 @@ name = "rustledger-ffi-component-tests"
 version = "0.18.0"
 dependencies = [
  "anyhow",
+ "rustledger-core",
  "rustledger-ffi-wasi",
  "tempfile",
  "wasmtime",

@@ -14,6 +14,7 @@ wasmtime = { version = "46", features = ["component-model"] }
 wasmtime-wasi = "46"
 anyhow = "1"
 tempfile.workspace = true
+rustledger-core.workspace = true
 rustledger-ffi-wasi.workspace = true
 
 [lints]

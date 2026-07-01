@@ -661,7 +661,7 @@ jobs:
     name: Test AUR (rustledger from source)
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 45 # Rust compilation can take 15-30 minutes
+    timeout-minutes: 90 # Cold from-source workspace build in the Arch container now exceeds 45m (timed out on v0.18.0 AND v0.19.0 channel runs; the job was cancelled, not failed)
     container: archlinux:latest
     env:
       VERSION: ${{ needs.prepare.outputs.version }}

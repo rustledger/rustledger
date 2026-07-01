@@ -143,6 +143,14 @@
             // {
               inherit cargoArtifacts;
               meta.mainProgram = "rledger";
+              # Build the binary WITHOUT running the test suite. crane's
+              # `srcFilter` strips test fixtures (`.bin` fuzz corpora,
+              # `spec/*.md`, importer stubs) for caching, so `cargo test` fails
+              # to compile fixture-dependent tests — repeatedly breaking the Nix
+              # release channel one fixture at a time. Tests run in CI on the
+              # full, unfiltered repo; the Nix release-channel check only needs
+              # the binary to build and run (`nix run … -- --version`).
+              doCheck = false;
             }
           );
 

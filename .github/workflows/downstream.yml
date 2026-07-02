@@ -82,7 +82,7 @@ jobs:
           cache-dependency-glob: "rustfava/uv.lock"
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Install wasmtime
-        uses: bytecodealliance/actions/wasmtime/setup@v1
+        uses: bytecodealliance/actions/wasmtime/setup@9152e710e9f7182e4c29ad218e4f335a7b203613 # v1
 
       - name: Run rustfava's Python tests against the PR component
         working-directory: rustfava

@@ -51,9 +51,19 @@ fn average_cost_from_positions(
 impl Inventory {
     /// Try reducing positions without modifying the inventory.
     ///
-    /// This is a read-only version of `reduce()` that returns what would be matched
-    /// without actually modifying the inventory. Useful for previewing booking results
-    /// before committing.
+    /// The read-only preview of [`Self::reduce`]: returns exactly what
+    /// `reduce` would return — the same matched lots and cost basis on
+    /// success, the same error otherwise — without mutating `self`.
+    ///
+    /// Implemented as `reduce` on a clone, so it is equivalent BY
+    /// CONSTRUCTION. It previously re-implemented every booking method's
+    /// selection logic in a parallel `try_*` tree, which drifted from the
+    /// mutating path in three places (STRICT ambiguity, NONE shorting, `{*}`
+    /// merge dispatch) — the recurring one-logic-two-paths class (#1648,
+    /// #1663, #1686). The clone is cheap: `positions` is an
+    /// `imbl::Vector`, so cloning is O(1) structural sharing and `reduce`'s
+    /// copy-on-write rebuild touches only the clone. The
+    /// `try_reduce_predicts_reduce` property test pins the equivalence.
     ///
     /// # Arguments
     ///
@@ -61,320 +71,18 @@ impl Inventory {
     /// * `cost_spec` - Optional cost specification for matching lots
     /// * `method` - The booking method to use
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// Returns a `BookingResult` with the positions that would be matched and cost basis,
-    /// or a `BookingError` if the reduction cannot be performed.
+    /// Exactly the errors [`Self::reduce`] would return for the same input.
     pub fn try_reduce(
         &self,
         units: &Amount,
         cost_spec: Option<&CostSpec>,
         method: BookingMethod,
     ) -> Result<BookingResult, BookingError> {
-        let spec = cost_spec.cloned().unwrap_or_default();
-
-        // {*} merge operator: use average-cost semantics (read-only preview)
-        if spec.merge {
-            return self.try_reduce_average(units);
-        }
-
-        match method {
-            BookingMethod::Strict | BookingMethod::StrictWithSize => {
-                self.try_reduce_strict(units, &spec, method == BookingMethod::StrictWithSize)
-            }
-            BookingMethod::Fifo => self.try_reduce_ordered(units, &spec, false),
-            BookingMethod::Lifo => self.try_reduce_ordered(units, &spec, true),
-            BookingMethod::Hifo => self.try_reduce_hifo(units, &spec),
-            BookingMethod::Average => self.try_reduce_average(units),
-            BookingMethod::None => self.try_reduce_ordered(units, &CostSpec::default(), false),
-        }
+        self.clone().reduce(units, cost_spec, method)
     }
 
-    /// Try `STRICT`/`STRICT_WITH_SIZE` booking without modifying inventory.
-    fn try_reduce_strict(
-        &self,
-        units: &Amount,
-        spec: &CostSpec,
-        with_size: bool,
-    ) -> Result<BookingResult, BookingError> {
-        let matching_indices: Vec<usize> = self
-            .positions
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                p.units.currency == units.currency
-                    && !p.is_empty()
-                    && p.can_reduce(units)
-                    && p.matches_cost_spec(spec)
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        match matching_indices.len() {
-            0 => Err(BookingError::NoMatchingLot {
-                currency: units.currency.clone(),
-                cost_spec: spec.clone(),
-            }),
-            1 => {
-                let idx = matching_indices[0];
-                self.try_reduce_from_lot(idx, units)
-            }
-            n => {
-                if with_size {
-                    // Check for exact-size match with any lot
-                    let exact_matches: Vec<usize> = matching_indices
-                        .iter()
-                        .filter(|&&i| self.positions[i].units.number.abs() == units.number.abs())
-                        .copied()
-                        .collect();
-
-                    if exact_matches.is_empty() {
-                        // Total match exception
-                        let total_units: Decimal = matching_indices
-                            .iter()
-                            .map(|&i| self.positions[i].units.number.abs())
-                            .sum();
-                        if total_units == units.number.abs() {
-                            self.try_reduce_ordered(units, spec, false)
-                        } else {
-                            Err(BookingError::AmbiguousMatch {
-                                num_matches: n,
-                                currency: units.currency.clone(),
-                            })
-                        }
-                    } else {
-                        let idx = exact_matches[0];
-                        self.try_reduce_from_lot(idx, units)
-                    }
-                } else {
-                    // STRICT: fall back to FIFO when multiple match
-                    self.try_reduce_ordered(units, spec, false)
-                }
-            }
-        }
-    }
-
-    /// Try ordered (FIFO/LIFO) booking without modifying inventory.
-    fn try_reduce_ordered(
-        &self,
-        units: &Amount,
-        spec: &CostSpec,
-        reverse: bool,
-    ) -> Result<BookingResult, BookingError> {
-        let mut remaining = units.number.abs();
-        let mut matched: MatchedLots = SmallVec::new();
-        let mut cost_basis = Decimal::ZERO;
-        let mut cost_currency = None;
-
-        // Get indices of matching positions
-        let mut indices: Vec<usize> = self
-            .positions
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                p.units.currency == units.currency
-                    && !p.is_empty()
-                    && p.units.number.signum() != units.number.signum()
-                    && p.matches_cost_spec(spec)
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        // Sort by date for correct FIFO/LIFO ordering
-        indices.sort_by_key(|&i| self.positions[i].cost.as_ref().and_then(|c| c.date));
-
-        if reverse {
-            indices.reverse();
-        }
-
-        if indices.is_empty() {
-            return Err(BookingError::NoMatchingLot {
-                currency: units.currency.clone(),
-                cost_spec: spec.clone(),
-            });
-        }
-
-        for idx in indices {
-            if remaining.is_zero() {
-                break;
-            }
-
-            let pos = &self.positions[idx];
-            let available = pos.units.number.abs();
-            let take = remaining.min(available);
-
-            // Calculate cost basis for this portion
-            if let Some(cost) = &pos.cost {
-                cost_basis += take * cost.number;
-                cost_currency = Some(cost.currency.clone());
-            }
-
-            // Record what we would match (using split which is read-only)
-            let (taken, _) = pos.split(take * pos.units.number.signum());
-            matched.push(taken);
-
-            remaining -= take;
-        }
-
-        if !remaining.is_zero() {
-            let available = units.number.abs() - remaining;
-            return Err(BookingError::InsufficientUnits {
-                currency: units.currency.clone(),
-                requested: units.number.abs(),
-                available,
-            });
-        }
-
-        Ok(BookingResult {
-            matched,
-            cost_basis: cost_currency.map(|c| Amount::new(cost_basis, c)),
-        })
-    }
-
-    /// Try HIFO booking without modifying inventory.
-    fn try_reduce_hifo(
-        &self,
-        units: &Amount,
-        spec: &CostSpec,
-    ) -> Result<BookingResult, BookingError> {
-        let mut remaining = units.number.abs();
-        let mut matched: MatchedLots = SmallVec::new();
-        let mut cost_basis = Decimal::ZERO;
-        let mut cost_currency = None;
-
-        // Get matching positions with their costs
-        let mut matching: Vec<(usize, Decimal)> = self
-            .positions
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| {
-                p.units.currency == units.currency
-                    && !p.is_empty()
-                    && p.units.number.signum() != units.number.signum()
-                    && p.matches_cost_spec(spec)
-            })
-            .map(|(i, p)| {
-                let cost = p.cost.as_ref().map_or(Decimal::ZERO, |c| c.number);
-                (i, cost)
-            })
-            .collect();
-
-        if matching.is_empty() {
-            return Err(BookingError::NoMatchingLot {
-                currency: units.currency.clone(),
-                cost_spec: spec.clone(),
-            });
-        }
-
-        // Sort by cost descending (highest first)
-        matching.sort_by_key(|(_, cost)| std::cmp::Reverse(*cost));
-
-        let indices: Vec<usize> = matching.into_iter().map(|(i, _)| i).collect();
-
-        for idx in indices {
-            if remaining.is_zero() {
-                break;
-            }
-
-            let pos = &self.positions[idx];
-            let available = pos.units.number.abs();
-            let take = remaining.min(available);
-
-            // Calculate cost basis for this portion
-            if let Some(cost) = &pos.cost {
-                cost_basis += take * cost.number;
-                cost_currency = Some(cost.currency.clone());
-            }
-
-            // Record what we would match
-            let (taken, _) = pos.split(take * pos.units.number.signum());
-            matched.push(taken);
-
-            remaining -= take;
-        }
-
-        if !remaining.is_zero() {
-            let available = units.number.abs() - remaining;
-            return Err(BookingError::InsufficientUnits {
-                currency: units.currency.clone(),
-                requested: units.number.abs(),
-                available,
-            });
-        }
-
-        Ok(BookingResult {
-            matched,
-            cost_basis: cost_currency.map(|c| Amount::new(cost_basis, c)),
-        })
-    }
-
-    /// Try AVERAGE booking without modifying inventory.
-    fn try_reduce_average(&self, units: &Amount) -> Result<BookingResult, BookingError> {
-        let matching: Vec<&Position> = self
-            .positions
-            .iter()
-            .filter(|p| p.units.currency == units.currency && !p.is_empty())
-            .collect();
-
-        let total_units: Decimal = matching.iter().map(|p| p.units.number).sum();
-
-        if total_units.is_zero() {
-            return Err(BookingError::InsufficientUnits {
-                currency: units.currency.clone(),
-                requested: units.number.abs(),
-                available: Decimal::ZERO,
-            });
-        }
-
-        let reduction = units.number.abs();
-        if reduction > total_units.abs() {
-            return Err(BookingError::InsufficientUnits {
-                currency: units.currency.clone(),
-                requested: reduction,
-                available: total_units.abs(),
-            });
-        }
-
-        let cost_basis = average_cost_from_positions(&matching, total_units)?
-            .map(|(avg_cost, currency)| Amount::new(reduction * avg_cost, currency));
-
-        let matched: MatchedLots = matching.into_iter().cloned().collect();
-
-        Ok(BookingResult {
-            matched,
-            cost_basis,
-        })
-    }
-
-    /// Try reducing from a specific lot without modifying inventory.
-    fn try_reduce_from_lot(
-        &self,
-        idx: usize,
-        units: &Amount,
-    ) -> Result<BookingResult, BookingError> {
-        let pos = &self.positions[idx];
-        let available = pos.units.number.abs();
-        let requested = units.number.abs();
-
-        if requested > available {
-            return Err(BookingError::InsufficientUnits {
-                currency: units.currency.clone(),
-                requested,
-                available,
-            });
-        }
-
-        let cost_basis = pos.cost.as_ref().map(|c| c.total_cost(requested));
-        let (matched, _) = pos.split(requested * pos.units.number.signum());
-
-        Ok(BookingResult {
-            matched: smallvec![matched],
-            cost_basis,
-        })
-    }
-}
-
-impl Inventory {
     /// STRICT booking: require exactly one matching lot, unless either:
     ///
     /// - all matching lots are identical in cost, in which case the choice

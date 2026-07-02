@@ -36,6 +36,37 @@ fn position_strategy(currency: &'static str) -> impl Strategy<Value = Position> 
         .prop_map(|(amount, cost)| Position::with_cost(amount, cost))
 }
 
+/// An order-independent snapshot of every lot in the inventory:
+/// (units currency, units, cost number, cost currency, cost date, label).
+///
+/// Used to assert the refinement obligation that a failed operation is a
+/// *stutter*: a TLA+ action whose guard is disabled produces no transition,
+/// so the implementation's `Err` must leave the state bit-identical — a
+/// property the atomic-action specs cannot express and TLC can never check
+/// (see `RUST_MAPPING.md`, "Refinement obligations").
+type LotSnapshot = Vec<(
+    String,
+    Decimal,
+    Option<(Decimal, String, Option<NaiveDate>, Option<String>)>,
+)>;
+
+fn inventory_snapshot(inv: &Inventory) -> LotSnapshot {
+    let mut lots: LotSnapshot = inv
+        .positions()
+        .map(|p| {
+            (
+                p.units.currency.to_string(),
+                p.units.number,
+                p.cost
+                    .as_ref()
+                    .map(|c| (c.number, c.currency.to_string(), c.date, c.label.clone())),
+            )
+        })
+        .collect();
+    lots.sort();
+    lots
+}
+
 // ============================================================================
 // Conservation Invariant Tests (from Conservation.tla)
 // ============================================================================
@@ -46,11 +77,19 @@ proptest! {
     /// TLA+ ConservationInvariant:
     /// inventory + totalReduced = totalAdded
     ///
-    /// After any sequence of add/reduce operations, the units must be conserved.
+    /// After any sequence of add/reduce operations, the units must be
+    /// conserved — INCLUDING sequences containing failed reductions.
+    ///
+    /// The generator deliberately produces reduce amounts that may exceed the
+    /// holdings, and a failed reduce is asserted to be a stutter (state
+    /// unchanged) before conservation is re-checked. The previous version
+    /// clamped every reduction to `min(current)` and skipped `Err` with
+    /// `if let Ok(..)`, which made the error path unreachable — exactly where
+    /// the partial-drain bug fixed in #1677 lived.
     #[test]
     fn prop_conservation_invariant(
         positions in prop::collection::vec(position_strategy("AAPL"), 1..5),
-        reduce_count in 0usize..3,
+        reduce_amounts in prop::collection::vec(1i64..200, 0..4),
     ) {
         let mut inv = Inventory::new();
         let mut total_added = Decimal::ZERO;
@@ -61,38 +100,49 @@ proptest! {
             inv.add(pos.clone());
         }
 
-        // Reduce some
+        // Reduce by arbitrary amounts — possibly more than is held.
         let mut total_reduced = Decimal::ZERO;
-        for _ in 0..reduce_count {
-            let current = inv.units("AAPL");
-            if current > Decimal::ZERO {
-                let to_reduce = (current / Decimal::from(2)).max(Decimal::ONE).min(current);
-                if let Ok(result) = inv.reduce(
-                    &Amount::new(-to_reduce, "AAPL"),
-                    None,
-                    BookingMethod::Fifo,
-                ) {
+        for amount in reduce_amounts {
+            let to_reduce = Decimal::from(amount);
+            let before = inventory_snapshot(&inv);
+            match inv.reduce(&Amount::new(-to_reduce, "AAPL"), None, BookingMethod::Fifo) {
+                Ok(result) => {
                     // Sum units from all matched positions
                     let matched_units: Decimal = result.matched.iter()
                         .map(|p| p.units.number.abs())
                         .sum();
                     total_reduced += matched_units;
                 }
+                Err(_) => {
+                    // A failed reduce refines a guard-disabled TLA action:
+                    // no transition happened, so the state must be untouched.
+                    prop_assert_eq!(
+                        &before,
+                        &inventory_snapshot(&inv),
+                        "failed reduce mutated the inventory",
+                    );
+                }
             }
-        }
 
-        // Conservation: inventory + reduced = added
-        let inventory = inv.units("AAPL");
-        prop_assert_eq!(
-            inventory + total_reduced,
-            total_added,
-            "Conservation violated: {} + {} != {}",
-            inventory, total_reduced, total_added
-        );
+            // Conservation must hold after EVERY step, not just at the end.
+            let inventory = inv.units("AAPL");
+            prop_assert_eq!(
+                inventory + total_reduced,
+                total_added,
+                "Conservation violated: {} + {} != {}",
+                inventory, total_reduced, total_added
+            );
+        }
     }
 
     /// TLA+ NonNegativeInventory:
     /// inventory >= 0 (for non-NONE booking methods)
+    ///
+    /// Overselling MUST fail — and per the refinement obligation, the failed
+    /// reduce must leave the inventory exactly as it was. (The previous
+    /// version only checked non-negativity `if result.is_ok()`, asserting
+    /// nothing at all on the `Err` branch — it generated the precise failing
+    /// input of the #1677 partial-drain bug and could not see it.)
     #[test]
     fn prop_non_negative_inventory(
         positions in prop::collection::vec(position_strategy("AAPL"), 1..5),
@@ -103,9 +153,10 @@ proptest! {
             inv.add(pos.clone());
         }
 
-        // Try to reduce more than available - should fail
+        // Try to reduce more than available — must fail, untouched.
         let current = inv.units("AAPL");
         let over_reduce = current + Decimal::ONE;
+        let before = inventory_snapshot(&inv);
 
         let result = inv.reduce(
             &Amount::new(-over_reduce, "AAPL"),
@@ -113,14 +164,21 @@ proptest! {
             BookingMethod::Fifo,
         );
 
-        // Either fails OR inventory stays non-negative
-        if result.is_ok() {
-            prop_assert!(
-                inv.units("AAPL") >= Decimal::ZERO,
-                "Inventory went negative: {}",
-                inv.units("AAPL")
-            );
-        }
+        prop_assert!(
+            result.is_err(),
+            "overselling {} of {} held must fail under FIFO",
+            over_reduce, current
+        );
+        prop_assert_eq!(
+            &before,
+            &inventory_snapshot(&inv),
+            "failed oversell mutated the inventory",
+        );
+        prop_assert!(
+            inv.units("AAPL") >= Decimal::ZERO,
+            "Inventory went negative: {}",
+            inv.units("AAPL")
+        );
     }
 }
 
@@ -889,5 +947,90 @@ proptest! {
                 reduce, lot_size, result
             );
         }
+    }
+}
+
+// ============================================================================
+// Refinement obligation: guard-disabled actions are stutters
+// ============================================================================
+//
+// TLA+ actions are ATOMIC: when an action's guard (e.g. Conservation.tla's
+// `ReduceBound`) is false, the action is simply disabled — the language cannot
+// even express "mutate halfway, then fail". The Rust implementation is not
+// atomic, so this becomes a proof obligation the models can't carry:
+//
+//     every `Err` return must be a stutter step — the observable state
+//     after a failed operation is identical to the state before it.
+//
+// TLC was green while exactly this was violated (#1677: FIFO/LIFO/HIFO
+// oversells drained lots before erroring, corrupting later balance checks) —
+// the gap was at the refinement boundary, not in the specs. This section
+// checks the obligation for every booking method against every error class
+// `reduce` can produce.
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    /// For every booking method and any (possibly unsatisfiable) reduction —
+    /// oversell, wrong currency, unknown label, ambiguous match — a failed
+    /// `reduce` leaves the inventory exactly as it was.
+    #[test]
+    fn prop_failed_reduce_is_a_stutter(
+        positions in prop::collection::vec(position_strategy("AAPL"), 1..5),
+        method_idx in 0usize..7,
+        amount in 1i64..300,
+        error_kind in 0usize..4,
+    ) {
+        let method = [
+            BookingMethod::Strict,
+            BookingMethod::StrictWithSize,
+            BookingMethod::Fifo,
+            BookingMethod::Lifo,
+            BookingMethod::Hifo,
+            BookingMethod::Average,
+            BookingMethod::None,
+        ][method_idx];
+
+        let mut inv = Inventory::new();
+        for pos in &positions {
+            inv.add(pos.clone());
+        }
+
+        // Build a reduction that may be unsatisfiable in one of several ways.
+        let (currency, spec) = match error_kind {
+            // Plain (possibly over-) reduction with an empty spec — under
+            // STRICT this is also the ambiguous-match case when >1 lot.
+            0 => ("AAPL", CostSpec::default()),
+            // Currency held nowhere in the inventory.
+            1 => ("MSFT", CostSpec::default()),
+            // Label no lot carries.
+            2 => (
+                "AAPL",
+                CostSpec {
+                    label: Some("no-such-lot".to_string()),
+                    ..CostSpec::default()
+                },
+            ),
+            // Cost number no lot was purchased at (cost_strategy caps at 500).
+            _ => ("AAPL", {
+                CostSpec::default().with_number(rustledger_core::CostNumber::PerUnit {
+                    value: dec!(9999),
+                })
+            }),
+        };
+
+        let before = inventory_snapshot(&inv);
+        let result = inv.reduce(&Amount::new(Decimal::from(-amount), currency), Some(&spec), method);
+
+        if let Err(err) = result {
+            prop_assert_eq!(
+                &before,
+                &inventory_snapshot(&inv),
+                "failed reduce ({:?} under {:?}) mutated the inventory",
+                err, method
+            );
+        }
+        // Ok outcomes are covered by the conservation / per-method properties
+        // above; this obligation is specifically about the error path.
     }
 }

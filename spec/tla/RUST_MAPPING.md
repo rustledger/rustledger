@@ -11,6 +11,33 @@ rustledger uses a **multi-layered verification approach**:
 1. **Property-Based Tests** (`crates/*/tests/tla_proptest.rs`) - Verifies implementation with real types
 1. **Unit Tests** - Verifies specific behaviors
 
+## Refinement Obligations
+
+The specs model **atomic** actions: when a guard (e.g. `Conservation.tla`'s
+`ReduceBound`) is false, the action is simply *disabled* — TLA+ cannot express
+"mutate halfway, then fail", so TLC can never detect it. The Rust
+implementation is not atomic, which leaves a proof obligation the models
+cannot carry:
+
+> **Every `Err` return must refine a stutter step** — the observable state
+> after a failed operation is identical to the state before it.
+
+This is checked at the implementation level, not the model level:
+
+| Obligation | Where checked |
+|------------|---------------|
+| Failed `Inventory::reduce` leaves the inventory untouched (all 7 methods × oversell / wrong currency / unknown label / unmatched cost / ambiguous) | `tla_proptest.rs::prop_failed_reduce_is_a_stutter` |
+| Failed reductions inside randomized op sequences (engine level) | `rustledger-booking/tests/booking_properties.rs` |
+| Conservation holds across sequences **containing** failed reduces | `tla_proptest.rs::prop_conservation_invariant` |
+
+Why this section exists: TLC was green while `reduce_ordered`/`reduce_hifo`
+drained lots before erroring (#1677) — an oversell error corrupted every later
+balance assertion on the account. The bug was at the refinement boundary, and
+the then-current conformance tests clamped their generators to in-bounds
+amounts and skipped `Err` branches, so the state was unreachable. When adding
+a conformance test for a new spec, always (1) generate inputs that violate the
+guards, and (2) assert state equality on `Err` — never `if let Ok(..)`-skip.
+
 ## Specification Mapping
 
 ### Conservation.tla

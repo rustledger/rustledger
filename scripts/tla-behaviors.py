@@ -293,17 +293,21 @@ def _derive_strict(src: dict, dst: dict) -> list:
 
 
 def _derive_average(src: dict, dst: dict) -> list:
+    """AVERAGECorrect models the pool value as an EXACT rational
+    valueNum/valueDen, so the replay checks value conformance (within the
+    implementation's Decimal-rounding tolerance), not just units."""
     du = dst["totalUnits"] - src["totalUnits"]
-    dc = dst["totalCostValue"] - src["totalCostValue"]
-    # NOTE: the model computes the average cost with INTEGER division
-    # (`\\div`), while the implementation divides exactly — the replay
-    # therefore checks the units abstraction only; cost values are carried
-    # for transparency, not asserted.
-    state = {"units": dst["totalUnits"], "cost_value": dst["totalCostValue"]}
+    state = {
+        "units": dst["totalUnits"],
+        "value_num": dst["valueNum"],
+        "value_den": dst["valueDen"],
+    }
     if du > 0:
-        if dc % du != 0:
-            raise SystemExit(f"AVERAGE: non-integral add cost {src} -> {dst}")
-        return ["AddUnits", {"units": du, "cost": dc // du}, state]
+        # Adds keep the (normalized) denominator: cost recovers exactly.
+        dn = dst["valueNum"] - src["valueNum"]
+        if dst["valueDen"] != src["valueDen"] or dn % (du * src["valueDen"]) != 0:
+            raise SystemExit(f"AVERAGE: non-integral add {src} -> {dst}")
+        return ["AddUnits", {"units": du, "cost": dn // (du * src["valueDen"])}, state]
     if du < 0:
         return ["Reduce", {"units": -du}, state]
     raise SystemExit(f"AVERAGE: underivable delta {src} -> {dst}")
@@ -351,7 +355,7 @@ SPECS = {
         "step_format": ["action", "params", "state"],
     },
     "AVERAGECorrect": {
-        "required": ("totalUnits", "totalCostValue"),
+        "required": ("totalUnits", "valueNum", "valueDen"),
         "derive": _derive_average,
         "step_format": ["action", "params", "state"],
     },

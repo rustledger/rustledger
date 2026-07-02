@@ -20,9 +20,11 @@
 //! hermetic (no Java/TLC); the TLA+ CI workflow regenerates each from its
 //! spec and fails on drift, keeping model and corpus in lockstep.
 //!
-//! Known model-precision caveat: `AVERAGECorrect.tla` computes the average
-//! cost with INTEGER division (`\div`) while the implementation divides
-//! exactly, so the AVERAGE replay asserts the units abstraction only.
+//! `AVERAGECorrect.tla` models the pool value as an EXACT rational
+//! (`valueNum / valueDen`), so the AVERAGE replay checks value conformance
+//! too. The implementation divides in 28-digit `Decimal`, so pool values are
+//! compared within a rounding tolerance that is many orders of magnitude
+//! below any genuine conformance bug at the model bounds.
 
 use rust_decimal::Decimal;
 use rustledger_core::{Amount, BookingError, BookingMethod, Cost, Inventory, Position};
@@ -332,13 +334,29 @@ fn replay_every_average_behavior() {
                 }
                 other => panic!("AVERAGECorrect: unknown action {other:?}"),
             }
-            // Units abstraction only: the model computes the average cost with
-            // integer division (`\div`), the implementation divides exactly —
-            // cost values legitimately differ (see the module docs).
             assert_eq!(
                 inv.units(CURRENCY),
                 dec(&state["units"]),
                 "AVERAGECorrect behavior {bi} step {si} ({action}): units diverged"
+            );
+            // Value conformance against the model's EXACT rational
+            // valueNum/valueDen: compare value*den to num. The implementation
+            // divides in 28-digit Decimal, so allow its rounding — 1e-12 is
+            // ~17 orders above accumulated Decimal error and ~7 below the
+            // smallest genuine conformance discrepancy at these bounds
+            // (>= 1/(den*den')).
+            let pool_value: Decimal = inv
+                .positions()
+                .filter(|p| p.units.currency.as_ref() == CURRENCY)
+                .map(|p| p.units.number * p.cost.as_ref().map(|c| c.number).unwrap_or_default())
+                .sum();
+            let num = dec(&state["value_num"]);
+            let den = dec(&state["value_den"]);
+            let diff = (pool_value * den - num).abs();
+            assert!(
+                diff <= Decimal::new(1, 12),
+                "AVERAGECorrect behavior {bi} step {si} ({action}): pool value \
+                 diverged — impl {pool_value} vs model {num}/{den} (diff*den = {diff})"
             );
         }
     }

@@ -40,7 +40,7 @@ Covered specs (≈4,000 behaviors total, all replayed in <1s of `cargo test`):
 | FIFOCorrect / LIFOCorrect | 422 each | per-date unit totals; the matched lot's DATE equals the model's selection |
 | HIFOCorrect | 422 | per-cost unit totals; matched lot's COST equals the model's selection |
 | STRICTCorrect | 136 | per-currency totals; model `success`/`no_match`/`ambiguous` ↔ impl `Ok`/`NoMatchingLot`/`AmbiguousMatch` |
-| AVERAGECorrect | 1,500 | units abstraction only — the model computes the average with integer `\div`, the implementation divides exactly (documented model-precision caveat) |
+| AVERAGECorrect | 3,584 | units exactly, AND pool value against the model's exact rational `valueNum/valueDen` (compared within the implementation's 28-digit Decimal rounding tolerance); the model also proves `ZeroUnitsZeroValue` — full liquidation empties the pool exactly |
 | NONECorrect | 396 | balance (shorts allowed) + totals abstraction |
 
 The abstraction deliberately collapses the specs' lot SEQUENCES to per-key

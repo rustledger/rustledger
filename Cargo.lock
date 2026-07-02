@@ -3676,6 +3676,7 @@ dependencies = [
  "rustledger-core",
  "rustledger-loader",
  "rustledger-parser",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -3694,6 +3695,7 @@ dependencies = [
  "rustledger-booking",
  "rustledger-core",
  "rustledger-parser",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
 ]

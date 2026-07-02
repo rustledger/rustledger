@@ -47,6 +47,11 @@ ESCALATED: dict[str, dict[str, int]] = {
     # MaxUnits/MaxCurrency deliberately NOT escalated (see module docs).
     "STRICTCorrect": {"MaxLots": 5},
     "AVERAGECorrect": {"MaxLots": 4, "MaxUnits": 3, "MaxCost": 4, "MaxOperations": 7},
+    # Currency/account SETS stay at committed values (string constants; the
+    # derives are domain-agnostic but cfg rewriting handles ints only).
+    "MultiCurrency": {"MaxUnits": 5, "MaxOperations": 8},
+    "AccountStateMachine": {"MaxBalance": 15},
+    "PriceDB": {"MaxPrice": 5},
 }
 
 

@@ -33,6 +33,7 @@ rayon.workspace = true
 rustc-hash.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 rust_decimal_macros = "1.40"
 criterion.workspace = true
 proptest.workspace = true

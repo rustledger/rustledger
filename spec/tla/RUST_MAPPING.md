@@ -42,6 +42,19 @@ Covered specs (≈4,000 behaviors total, all replayed in <1s of `cargo test`):
 | STRICTCorrect | 136 | per-currency totals; model `success`/`no_match`/`ambiguous` ↔ impl `Ok`/`NoMatchingLot`/`AmbiguousMatch` |
 | AVERAGECorrect | 3,584 | units exactly, AND pool value against the model's exact rational `valueNum/valueDen` (compared within the implementation's 28-digit Decimal rounding tolerance); the model also proves `ZeroUnitsZeroValue` — full liquidation empties the pool exactly |
 | NONECorrect | 396 | balance (shorts allowed) + totals abstraction |
+| MultiCurrency | 10,116 | per-currency inventory over a multi-commodity `Inventory` — every currency asserted after every step, so cross-commodity unit leaks fail |
+| AccountStateMachine | 16,222 | validator lifecycle (in `rustledger-validate/tests/`): each model-legal open/close/post/transfer sequence, converted to directives, must `validate()` with zero errors (the E1001/E1002/E1003 state machine) |
+| PriceDB | 690 | `PriceDatabase` (in `rustledger-query/tests/`): every model-set `(base, quote)` reads back via `get_latest_price`; model-unset entries not asserted (the implementation legitimately derives inverse rates) |
+
+Two specs are deliberately NOT replayed:
+
+- **DoubleEntry** — its balance invariant holds *by construction* in the
+  model (each `AddTransaction` appends a balanced record), so a replay would
+  only re-verify what the type system and residual property tests already
+  rule out; below the machinery's catch-a-real-bug-class bar.
+- **Interpolation** — mappable in principle (posting records with holes →
+  `rustledger_booking::interpolate`), but the highest-effort mapping of the
+  family; deferred until the interpolator next changes materially.
 
 The abstraction deliberately collapses the specs' lot SEQUENCES to per-key
 unit totals: the implementation merges identical (cost, date) lots on add, so

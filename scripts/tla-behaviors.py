@@ -328,6 +328,73 @@ def _derive_none(src: dict, dst: dict) -> list:
     raise SystemExit(f"NONE: underivable delta {src} -> {dst}")
 
 
+def _sorted_items(d: dict) -> list:
+    return [[k, d[k]] for k in sorted(d)]
+
+
+def _derive_multi_currency(src: dict, dst: dict) -> list:
+    """Per-currency Conservation: function-valued inventory/totals."""
+    state = {
+        "inventory": _sorted_items(dst["inventory"]),
+        "added": _sorted_items(dst["totalAdded"]),
+        "reduced": _sorted_items(dst["totalReduced"]),
+    }
+    for c in sorted(dst["totalAdded"]):
+        da = dst["totalAdded"][c] - src["totalAdded"][c]
+        dr = dst["totalReduced"][c] - src["totalReduced"][c]
+        if da > 0 and dr == 0:
+            return ["Add", {"currency": c, "units": da}, state]
+        if dr > 0 and da == 0:
+            return ["Reduce", {"currency": c, "units": dr}, state]
+    raise SystemExit(f"MultiCurrency: underivable delta {src} -> {dst}")
+
+
+def _derive_account_state_machine(src: dict, dst: dict) -> list:
+    """Account lifecycle: Open/Close (state delta) and Post/Transfer
+    (balance delta), derived from the changed accounts."""
+    state = {
+        "state": _sorted_items(dst["state"]),
+        "balance": _sorted_items(dst["balance"]),
+    }
+    state_changed = [a for a in dst["state"] if dst["state"][a] != src["state"][a]]
+    bal_changed = [a for a in dst["balance"] if dst["balance"][a] != src["balance"][a]]
+    if len(state_changed) == 1 and not bal_changed:
+        a = state_changed[0]
+        action = "Open" if dst["state"][a] == "open" else "Close"
+        return [action, {"account": a}, state]
+    if not state_changed and len(bal_changed) == 1:
+        a = bal_changed[0]
+        return ["Post", {"account": a, "amount": dst["balance"][a] - src["balance"][a]}, state]
+    if not state_changed and len(bal_changed) == 2:
+        frm = next(a for a in bal_changed if dst["balance"][a] < src["balance"][a])
+        to = next(a for a in bal_changed if dst["balance"][a] > src["balance"][a])
+        amount = dst["balance"][to] - src["balance"][to]
+        return ["Transfer", {"from": frm, "to": to, "amount": amount}, state]
+    raise SystemExit(f"AccountStateMachine: underivable delta {src} -> {dst}")
+
+
+def _derive_price_db(src: dict, dst: dict) -> list:
+    """Price database: the single changed [base][quote] entry."""
+    nonzero = sorted(
+        [b, q, dst["prices"][b][q]]
+        for b in dst["prices"]
+        for q in dst["prices"][b]
+        if dst["prices"][b][q] != 0
+    )
+    state = {"prices": nonzero}
+    for b in sorted(dst["prices"]):
+        for q in sorted(dst["prices"][b]):
+            if dst["prices"][b][q] != src["prices"][b][q]:
+                return ["SetPrice", {"base": b, "quote": q, "price": dst["prices"][b][q]}, state]
+    # Same-value overwrite: SetPrice re-setting an existing entry leaves
+    # `prices` unchanged (only opCount moves). Any nonzero entry replays
+    # identically; pick the smallest for determinism.
+    if nonzero:
+        b, q, price = nonzero[0]
+        return ["SetPrice", {"base": b, "quote": q, "price": price}, state]
+    raise SystemExit(f"PriceDB: underivable delta {src} -> {dst}")
+
+
 SPECS = {
     "Conservation": {
         "required": ("inventory", "totalAdded", "totalReduced"),
@@ -362,6 +429,21 @@ SPECS = {
     "NONECorrect": {
         "required": ("balance", "totalAdded", "totalReduced"),
         "derive": _derive_none,
+        "step_format": ["action", "params", "state"],
+    },
+    "MultiCurrency": {
+        "required": ("inventory", "totalAdded", "totalReduced"),
+        "derive": _derive_multi_currency,
+        "step_format": ["action", "params", "state"],
+    },
+    "AccountStateMachine": {
+        "required": ("state", "balance"),
+        "derive": _derive_account_state_machine,
+        "step_format": ["action", "params", "state"],
+    },
+    "PriceDB": {
+        "required": ("prices",),
+        "derive": _derive_price_db,
         "step_format": ["action", "params", "state"],
     },
 }

@@ -29,6 +29,7 @@ rayon.workspace = true
 parking_lot.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 rust_decimal_macros.workspace = true
 insta.workspace = true
 criterion.workspace = true

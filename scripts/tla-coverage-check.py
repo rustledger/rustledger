@@ -5,7 +5,7 @@ The formal-verification stack has four layers that reference each other by
 name: the specs (`spec/tla/*.tla` + `.cfg`), the CI model-check loop
 (`.github/workflows/tla.yml`), the behavior corpora
 (`spec/tla/behaviors/*.json` + their replay interpreters in
-`crates/rustledger-core/tests/tla_behavior_replay.rs`), and the mapping doc
+`crates/*/tests/tla_behavior_replay.rs`), and the mapping doc
 (`spec/tla/RUST_MAPPING.md`). History shows the links rot silently: the
 counterexample converter vanished in a cleanup leaving a dead workflow step,
 `InductiveInvariants.cfg` outlived its module, and a stale trigger path
@@ -33,7 +33,14 @@ REPO = Path(__file__).resolve().parent.parent
 TLA_DIR = REPO / "spec" / "tla"
 BEHAVIORS = TLA_DIR / "behaviors"
 WORKFLOW = REPO / ".github" / "workflows" / "tla.yml"
-REPLAY = REPO / "crates" / "rustledger-core" / "tests" / "tla_behavior_replay.rs"
+# Replay interpreters are distributed by abstraction target (core inventory,
+# validator lifecycle, query price DB) — a corpus counts as replayed if ANY
+# of these loads it.
+REPLAY_FILES = [
+    REPO / "crates" / "rustledger-core" / "tests" / "tla_behavior_replay.rs",
+    REPO / "crates" / "rustledger-validate" / "tests" / "tla_behavior_replay.rs",
+    REPO / "crates" / "rustledger-query" / "tests" / "tla_behavior_replay.rs",
+]
 MAPPING = TLA_DIR / "RUST_MAPPING.md"
 GENERATOR = REPO / "scripts" / "tla-behaviors.py"
 
@@ -55,7 +62,7 @@ def main() -> int:
     tla_specs = {p.stem for p in TLA_DIR.glob("*.tla")}
     cfg_specs = {p.stem for p in TLA_DIR.glob("*.cfg")}
     workflow_text = WORKFLOW.read_text()
-    replay_text = REPLAY.read_text()
+    replay_text = "\n".join(f.read_text() for f in REPLAY_FILES if f.exists())
     mapping_text = MAPPING.read_text()
     generator_text = GENERATOR.read_text()
 

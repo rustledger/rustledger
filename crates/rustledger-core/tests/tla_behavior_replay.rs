@@ -518,3 +518,49 @@ fn replay_every_conservation_behavior() {
 
     println!("Conservation: replayed {} behaviors", behaviors.len());
 }
+
+/// `MultiCurrency.tla` — per-currency Conservation over a multi-commodity
+/// inventory: `inventory[c] + totalReduced[c] = totalAdded[c]` for every
+/// currency independently, catching currency-mixing bugs where units leak
+/// across commodities.
+#[test]
+fn replay_every_multi_currency_behavior() {
+    let Some(corpus) = load_corpus("MultiCurrency") else {
+        eprintln!("skipping: MultiCurrency corpus not available");
+        return;
+    };
+    let behaviors = corpus["behaviors"].as_array().expect("behaviors");
+
+    for (bi, behavior) in behaviors.iter().enumerate() {
+        let mut inv = Inventory::new();
+        for (si, step) in behavior.as_array().expect("steps").iter().enumerate() {
+            let (action, params, state) = (step[0].as_str().expect("action"), &step[1], &step[2]);
+            let currency = params["currency"].as_str().expect("currency");
+            let units = dec(&params["units"]);
+            match action {
+                "Add" => inv.add(Position::simple(Amount::new(units, currency))),
+                "Reduce" => {
+                    inv.reduce(&Amount::new(-units, currency), None, BookingMethod::Fifo)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "MultiCurrency behavior {bi} step {si}: model-enabled \
+                                 Reduce({currency}) failed: {e}"
+                            )
+                        });
+                }
+                other => panic!("MultiCurrency: unknown action {other:?}"),
+            }
+            // Per-currency inventory abstraction — including currencies the
+            // step didn't touch (cross-commodity leaks fail here).
+            for entry in state["inventory"].as_array().expect("inventory") {
+                let (c, u) = (entry[0].as_str().expect("currency"), dec(&entry[1]));
+                assert_eq!(
+                    inv.units(c),
+                    u,
+                    "MultiCurrency behavior {bi} step {si} ({action}): {c} diverged"
+                );
+            }
+        }
+    }
+    println!("MultiCurrency: replayed {} behaviors", behaviors.len());
+}

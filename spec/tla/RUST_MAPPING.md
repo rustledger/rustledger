@@ -53,6 +53,22 @@ Extending to another spec = a `derive` entry in `scripts/tla-behaviors.py`'s
 SPECS registry + a replay interpreter in `tla_behavior_replay.rs` + the
 corpus file, all guarded by the CI lockstep check.
 
+## Dual-Direction Trace Validation
+
+The behavior replay above checks **model → implementation** exhaustively. The
+dual direction — **implementation → model**, i.e. the implementation never
+takes a transition the model forbids — is checked by trace validation:
+`crates/rustledger-core/examples/conservation_trace_gen.rs` drives the real
+`Inventory` through seeded-random Add/Reduce sequences and records the
+abstract state after every operation; `scripts/tla-trace-validate.py` turns
+each trace into a trace-following TLA+ spec and has TLC verify the
+`[][Conservation!Next]_vars` action property over it. The TLA+ CI workflow
+runs this on every triggering change with a fresh seed (printed for exact
+reproduction), after a self-test that proves the harness rejects a corrupted
+trace. Together the two directions give two-sided refinement checking —
+exhaustive on the model side, continuously sampled on the implementation
+side.
+
 ## Refinement Obligations
 
 The specs model **atomic** actions: when a guard (e.g. `Conservation.tla`'s

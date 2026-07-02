@@ -661,7 +661,7 @@ jobs:
     name: Test AUR (rustledger from source)
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 90 # Cold from-source workspace build in the Arch container now exceeds 45m (timed out on v0.18.0 AND v0.19.0 channel runs; the job was cancelled, not failed)
+    timeout-minutes: 90 # Safety margin; with --nocheck + CU=16 (see install step) the build fits well inside this — unmodified it exceeds even 90m
     container: archlinux:latest
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -697,8 +697,20 @@ jobs:
           done
           echo "Warning: AUR may not be updated, proceeding anyway..."
       - name: Install rustledger (from source)
+        # This smoke test verifies the AUR source package BUILDS AND RUNS —
+        # not the full optimization pipeline or the test suite. Unmodified,
+        # the PKGBUILD build (codegen-units=1 across the whole workspace) plus
+        # its check() (the entire release-mode test suite) exceeds 90 minutes
+        # on a 2-core runner: the job timed out on the v0.18.0 and v0.19.0
+        # channel runs at 45m AND on the v0.19.0 rerun at 90m. So, for CI
+        # only (real AUR users build with the PKGBUILD's full settings):
+        #  - --mflags --nocheck skips check() — the test suite already runs
+        #    in repo CI on every PR (same reasoning as the Nix doCheck=false
+        #    fix, #1661);
+        #  - CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 parallelizes codegen
+        #    (profile `release` keeps its thin LTO).
         run: |
-          su - builder -c 'yay -S --noconfirm rustledger'
+          su - builder -c 'export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16; yay -S --noconfirm --mflags "--nocheck" rustledger'
       - name: Verify version
         run: |
           INSTALLED=$(rledger --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?' | head -1)

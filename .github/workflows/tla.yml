@@ -11,6 +11,7 @@ on:
       - 'crates/rustledger-booking/src/**'
       - 'scripts/tla-trace-to-test.py'
       - 'scripts/tla-behaviors.py'
+      - 'scripts/tla-coverage-check.py'
       - 'scripts/tla-trace-validate.py'
       - 'crates/rustledger-core/examples/conservation_trace_gen.rs'
       - 'spec/tla/behaviors/**'
@@ -25,6 +26,7 @@ on:
       - 'crates/rustledger-booking/src/**'
       - 'scripts/tla-trace-to-test.py'
       - 'scripts/tla-behaviors.py'
+      - 'scripts/tla-coverage-check.py'
       - 'scripts/tla-trace-validate.py'
       - 'crates/rustledger-core/examples/conservation_trace_gen.rs'
       - 'spec/tla/behaviors/**'
@@ -69,6 +71,10 @@ jobs:
       # an earlier one fails (previously fail-fast masked later spec failures),
       # and each TLC output is teed to tlc-logs/<Spec>.log so counterexamples
       # can be converted into Rust regression-test skeletons below.
+      # Fails on spec <-> CI <-> corpus <-> docs drift (orphan configs, specs
+      # missing from the loop below, corpora without replay interpreters, ...).
+      - name: TLA+ coverage lint
+        run: python3 scripts/tla-coverage-check.py
       - name: Model check all specs
         run: |
           SPECS="Conservation DoubleEntry AccountStateMachine Interpolation \

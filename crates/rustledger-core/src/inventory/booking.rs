@@ -993,11 +993,22 @@ impl Inventory {
         let requested = units.number.abs();
 
         if requested > available {
-            return Err(BookingError::InsufficientUnits {
-                currency: units.currency.clone(),
-                requested,
-                available,
-            });
+            // NONE performs no booking, so shorts are always allowed —
+            // matching beancount's NONE semantics and NONECorrect.tla. This
+            // arm previously returned InsufficientUnits, which made the
+            // outcome depend on whether zero was crossed in one step (0 → -2
+            // was allowed above; +1 → -1 was rejected here). Found by the
+            // TLA+ behavior-replay suite (#1686): consume everything
+            // available, then carry the remainder as a negative (short)
+            // simple position.
+            let sign = units.number.signum();
+            let consumed = Amount::new(available * sign, units.currency.clone());
+            let result = self.reduce_ordered(&consumed, &CostSpec::default(), false)?;
+            self.add(Position::simple(Amount::new(
+                (requested - available) * sign,
+                units.currency.clone(),
+            )));
+            return Ok(result);
         }
 
         // Reduce positions proportionally (simplified: just reduce first matching)
@@ -1655,19 +1666,24 @@ mod reduction_tests {
     }
 
     #[test]
-    fn reduce_none_exact_succeeds_over_reduction_errors() {
+    fn reduce_none_exact_succeeds_over_reduction_shorts() {
         let mut inv = Inventory::new();
         inv.add(Position::simple(Amount::new(dec!(10), "STK")));
         assert!(
             inv.reduce(&sell_stk(10), None, BookingMethod::None).is_ok(),
             "exact NONE reduction should succeed"
         );
+        // NONE performs no booking, so over-reduction shorts past zero
+        // instead of erroring (#1686 — previously InsufficientUnits, which
+        // made the outcome depend on whether zero was crossed in one step).
         let mut inv2 = Inventory::new();
         inv2.add(Position::simple(Amount::new(dec!(10), "STK")));
-        let err = inv2
-            .reduce(&sell_stk(15), None, BookingMethod::None)
-            .unwrap_err();
-        assert!(matches!(err, super::BookingError::InsufficientUnits { .. }));
+        assert!(
+            inv2.reduce(&sell_stk(15), None, BookingMethod::None)
+                .is_ok(),
+            "NONE over-reduction must short, not error (#1686)"
+        );
+        assert_eq!(inv2.units("STK"), dec!(-5));
     }
 
     #[test]

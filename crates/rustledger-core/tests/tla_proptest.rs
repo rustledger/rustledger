@@ -457,7 +457,10 @@ proptest! {
     #[test]
     fn prop_none_allows_any_reduction(
         units in 10i64..100,
-        reduce in 1i64..10,
+        // Deliberately exceeds the holdings range: NONE performs no booking,
+        // so shorting past zero from ANY balance must succeed (#1686 — found
+        // by the behavior-replay suite; the +N -> negative case was rejected).
+        reduce in 1i64..200,
     ) {
         let mut inv = Inventory::new();
         let date = rustledger_core::naive_date(2024, 1, 1).unwrap();
@@ -478,6 +481,13 @@ proptest! {
             result.is_ok(),
             "NONE should allow reduction, but got: {:?}",
             result
+        );
+        // Balance arithmetic must hold even through a short (#1686).
+        prop_assert_eq!(
+            inv.units("AAPL"),
+            Decimal::from(units - reduce),
+            "NONE balance after reducing {} of {}",
+            reduce, units
         );
     }
 

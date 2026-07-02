@@ -1294,16 +1294,17 @@ mod tests {
     }
 
     #[test]
-    fn test_none_booking_insufficient() {
+    fn test_none_booking_shorts_past_zero() {
         let mut inv = Inventory::new();
         inv.add(Position::simple(Amount::new(dec!(100), "USD")));
 
+        // NONE performs no booking: reducing past the balance shorts instead
+        // of erroring (#1686 — previously InsufficientUnits, inconsistent
+        // with the zero-balance case, NONECorrect.tla, and beancount NONE).
         let result = inv.reduce(&Amount::new(dec!(-150), "USD"), None, BookingMethod::None);
 
-        assert!(matches!(
-            result,
-            Err(BookingError::InsufficientUnits { .. })
-        ));
+        assert!(result.is_ok(), "NONE must allow shorting: {result:?}");
+        assert_eq!(inv.units("USD"), dec!(-50));
     }
 
     #[test]

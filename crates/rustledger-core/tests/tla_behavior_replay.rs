@@ -353,8 +353,7 @@ fn replay_every_none_behavior() {
     let Some(corpus) = load_corpus("NONECorrect") else {
         return;
     };
-    let mut pinned_divergences = 0usize;
-    'behaviors: for (bi, behavior) in corpus["behaviors"]
+    for (bi, behavior) in corpus["behaviors"]
         .as_array()
         .expect("array")
         .iter()
@@ -375,31 +374,16 @@ fn replay_every_none_behavior() {
                 }
                 "Reduce" => {
                     let units = dec(&params["units"]);
-                    let balance = inv.units(CURRENCY);
-                    let result =
-                        inv.reduce(&Amount::new(-units, CURRENCY), None, BookingMethod::None);
-                    // KNOWN DIVERGENCE (#1686): the model (and beancount NONE)
-                    // always allow the reduction — balance may go negative —
-                    // but `reduce_none` refuses to short from a POSITIVE
-                    // balance (while allowing it from zero/negative). Pin the
-                    // divergent outcome exactly and stop this behavior (the
-                    // model and implementation states have forked). Once
-                    // #1686 is adjudicated this pin flips.
-                    if balance > Decimal::ZERO && units > balance {
-                        assert!(
-                            matches!(result, Err(BookingError::InsufficientUnits { .. })),
-                            "NONECorrect behavior {bi} step {si}: expected the \
-                             #1686-pinned InsufficientUnits, got {result:?}"
-                        );
-                        pinned_divergences += 1;
-                        continue 'behaviors;
-                    }
-                    result.unwrap_or_else(|e| {
-                        panic!(
-                            "NONECorrect behavior {bi} step {si}: model-enabled \
-                             Reduce failed: {e}"
-                        )
-                    });
+                    // NONE performs no booking: always enabled, shorts allowed
+                    // from ANY balance (the +N → negative case was rejected
+                    // until #1686 — found by this suite's first run).
+                    inv.reduce(&Amount::new(-units, CURRENCY), None, BookingMethod::None)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "NONECorrect behavior {bi} step {si}: model-enabled \
+                                 Reduce failed: {e}"
+                            )
+                        });
                     reduced += units;
                 }
                 other => panic!("NONECorrect: unknown action {other:?}"),
@@ -422,13 +406,8 @@ fn replay_every_none_behavior() {
         }
     }
     println!(
-        "NONECorrect: replayed {} behaviors ({pinned_divergences} pinned to the #1686 divergence)",
+        "NONECorrect: replayed {} behaviors",
         corpus["behaviors"].as_array().expect("array").len()
-    );
-    assert!(
-        pinned_divergences > 0,
-        "the #1686 pin never fired — if the divergence was fixed, remove the pin \
-         and replay the full corpus"
     );
 }
 

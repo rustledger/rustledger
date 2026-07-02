@@ -33,8 +33,15 @@ use serde_json::Value;
 const CURRENCY: &str = "AAPL";
 
 fn load_corpus(spec: &str) -> Option<Value> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../../spec/tla/behaviors/{spec}.json"));
+    // RUSTLEDGER_TLA_BEHAVIORS_DIR points the replay at an alternative corpus
+    // directory — used by the scheduled bounds-escalation workflow, which
+    // regenerates corpora at larger model bounds and replays them without
+    // committing the (much larger) files.
+    let path = match std::env::var("RUSTLEDGER_TLA_BEHAVIORS_DIR") {
+        Ok(dir) => std::path::PathBuf::from(dir).join(format!("{spec}.json")),
+        Err(_) => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../spec/tla/behaviors/{spec}.json")),
+    };
     // Graceful skip when spec/ isn't packaged (published-crate builds strip
     // it, and the Nix flake's source filter does too — the #1659 lesson).
     let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -49,13 +56,18 @@ fn load_corpus(spec: &str) -> Option<Value> {
         .as_array()
         .expect("behaviors array")
         .len() as u64;
-    let transitions = corpus["coverage"]["transitions"]
+    let declared = corpus["coverage"]["behaviors"]
         .as_u64()
-        .expect("transitions");
-    // Guard against a truncated corpus silently weakening the guarantee.
+        .expect("coverage.behaviors");
+    // Guard against a vacuous or internally-inconsistent corpus. (An earlier
+    // version compared behaviors against coverage.transitions with a 90%
+    // heuristic, but the generator's canonical dedup legitimately collapses
+    // more transitions at larger bounds — e.g. STRICTCorrect's derived
+    // smallest-qualifying-currency steps — so the real invariant is exact
+    // agreement with the corpus's own declared count, non-zero.)
     assert!(
-        behaviors > 0 && behaviors >= transitions * 9 / 10,
-        "{spec}: corpus covers {behaviors} behaviors for {transitions} transitions — \
+        behaviors > 0 && behaviors == declared,
+        "{spec}: corpus has {behaviors} behaviors but declares {declared} — \
          regenerate with scripts/tla-behaviors.py"
     );
     Some(corpus)

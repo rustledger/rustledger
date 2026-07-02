@@ -1,0 +1,70 @@
+# Weekly bounds-escalated behavior replay.
+#
+# The committed corpora (spec/tla/behaviors/*.json) cover each spec's small
+# CI bounds exhaustively. This workflow regenerates every corpus at LARGER
+# bounds (scripts/tla-escalated-replay.py's ESCALATED table) and replays the
+# result — orders of magnitude more behaviors, catching bound-sensitive
+# conformance issues the committed corpora cannot reach, without committing
+# the large files.
+#
+# Scheduled weekly (state spaces at escalated bounds take minutes, not
+# seconds) + manual dispatch for on-demand runs.
+
+name: TLA+ Escalated Replay
+
+on:
+  schedule:
+    # Sunday 04:30 UTC — off-peak, after the nightly jobs.
+    - cron: '30 4 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TLA_VERSION: "1.8.0"
+
+jobs:
+  escalated-replay:
+    name: Escalated corpus replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Java
+        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - name: Cache TLA+ Tools
+        id: cache-tla
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/tla2tools.jar
+          key: tla-tools-${{ env.TLA_VERSION }}
+      - name: Download TLA+ Tools
+        if: steps.cache-tla.outputs.cache-hit != 'true'
+        run: |
+          wget -q https://github.com/tlaplus/tlaplus/releases/download/v${{ env.TLA_VERSION }}/tla2tools.jar \
+            -O ~/tla2tools.jar
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      - name: Generate escalated corpora
+        env:
+          TLC_CMD: java -XX:+UseParallelGC -Xmx4g -jar /home/runner/tla2tools.jar
+        run: python3 scripts/tla-escalated-replay.py --out /tmp/escalated
+      - name: Replay escalated corpora
+        env:
+          RUSTLEDGER_TLA_BEHAVIORS_DIR: /tmp/escalated
+        run: cargo test -p rustledger-core --test tla_behavior_replay -- --nocapture
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Escalated replay" >> $GITHUB_STEP_SUMMARY
+          for f in /tmp/escalated/*.json; do
+            python3 -c "import json,sys; d=json.load(open('$f')); print(f\"- {d['spec']}: {d['coverage']['behaviors']} behaviors ({d['coverage']['states']} states)\")" >> $GITHUB_STEP_SUMMARY
+          done

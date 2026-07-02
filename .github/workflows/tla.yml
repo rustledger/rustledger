@@ -10,6 +10,8 @@ on:
       - 'crates/rustledger-core/src/inventory/**'
       - 'crates/rustledger-booking/src/**'
       - 'scripts/tla-trace-to-test.py'
+      - 'scripts/tla-behaviors.py'
+      - 'spec/tla/behaviors/**'
       - '.github/workflows/tla.yml'
   pull_request:
     paths:
@@ -20,6 +22,8 @@ on:
       - 'crates/rustledger-core/src/inventory/**'
       - 'crates/rustledger-booking/src/**'
       - 'scripts/tla-trace-to-test.py'
+      - 'scripts/tla-behaviors.py'
+      - 'spec/tla/behaviors/**'
       - '.github/workflows/tla.yml'
 permissions:
   contents: read
@@ -77,6 +81,30 @@ jobs:
           done
           if [ -n "$FAILED" ]; then
             echo "::error::TLC found violations in:${FAILED}"
+            exit 1
+          fi
+      # Model-based-testing lockstep: the committed behavior corpus
+      # (spec/tla/behaviors/*.json, replayed exhaustively by
+      # crates/rustledger-core/tests/tla_behavior_replay.rs in plain `cargo
+      # test`) must be regenerable byte-for-byte from the spec. A drift means
+      # the spec changed without regenerating the corpus — the replay test
+      # would silently keep certifying conformance against the OLD model.
+      - name: Verify behavior corpus is in lockstep with the spec
+        run: |
+          python3 scripts/tla-behaviors.py --self-test
+          mkdir -p /tmp/behaviors-check
+          java -XX:+UseParallelGC -Xmx2g \
+            -jar ~/tla2tools.jar \
+            -config spec/tla/Conservation.cfg \
+            -workers auto \
+            -deadlock \
+            -dump dot,actionlabels /tmp/behaviors-check/states \
+            spec/tla/Conservation.tla > /dev/null
+          python3 scripts/tla-behaviors.py --spec Conservation \
+            < /tmp/behaviors-check/states.dot \
+            > /tmp/behaviors-check/Conservation.json
+          if ! diff -u spec/tla/behaviors/Conservation.json /tmp/behaviors-check/Conservation.json; then
+            echo "::error::spec/tla/behaviors/Conservation.json is stale — regenerate it (see scripts/tla-behaviors.py docstring)"
             exit 1
           fi
       # The counterexample-driven workflow from the formal-verification

@@ -11,6 +11,31 @@ rustledger uses a **multi-layered verification approach**:
 1. **Property-Based Tests** (`crates/*/tests/tla_proptest.rs`) - Verifies implementation with real types
 1. **Unit Tests** - Verifies specific behaviors
 
+## Behavior-Replay Conformance (model-based testing)
+
+The specs' bounds are tiny (Conservation.cfg: MaxUnits=3, MaxOperations=6 →
+207 states / 678 transitions), so TLC can enumerate the COMPLETE state graph.
+`scripts/tla-behaviors.py` turns that graph into an edge-coverage behavior
+corpus (`spec/tla/behaviors/<Spec>.json`, one behavior per transition), and
+`crates/rustledger-core/tests/tla_behavior_replay.rs` replays every behavior
+against the real `Inventory`, asserting after each step:
+
+- **Abstraction**: `inv.units(..) == inventory`, harness accumulators equal
+  `totalAdded`/`totalReduced`.
+- **Enabledness**: an action the model says is enabled must succeed in the
+  implementation (a spec-legal `Reduce` may not `Err`).
+
+This is exhaustive conformance **up to the model bound** — strictly stronger
+than the sampled properties above, one notch below a refinement proof. The
+corpus is committed so the replay runs in plain `cargo test` (no Java); the
+TLA+ CI workflow regenerates it from the spec and fails on drift, so model
+and corpus cannot silently diverge. The generator output is canonical
+(content-derived ordering, no node ids), so regeneration is byte-stable.
+
+Extending to another spec = adding its action→implementation mapping to the
+replay test and a corpus entry; prefer specs whose state maps onto one
+implementation structure (the booking-method family is next in line).
+
 ## Refinement Obligations
 
 The specs model **atomic** actions: when a guard (e.g. `Conservation.tla`'s

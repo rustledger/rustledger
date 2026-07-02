@@ -40,7 +40,7 @@ import sys
 from collections import deque
 
 NODE_RE = re.compile(r'^(-?\d+)\s+\[label="(.*)"(,style = filled)?\]')
-EDGE_RE = re.compile(r'^(-?\d+)\s+->\s+(-?\d+)\s+\[label="(\w+)"')
+EDGE_RE = re.compile(r'^(-?\d+)\s*->\s*(-?\d+)\s*(?:\[label="(\w+)")?')
 VAR_RE = re.compile(r"/\\\\ (\w+) = (-?\d+)")
 
 # The state variables that define a spec state, in canonical order. opCount is
@@ -75,62 +75,70 @@ def parse_dot(text: str):
     return states, init_ids, edges
 
 
-def action_units(action: str, src: tuple, dst: tuple) -> int:
-    """Recover the action parameter from the state delta."""
-    inv_s, add_s, red_s = src
-    inv_d, add_d, red_d = dst
-    if action == "Add":
-        return add_d - add_s
-    # Reduce / ReduceShort
-    return red_d - red_s
+def derive_action(src: tuple, dst: tuple) -> tuple[str, int]:
+    """Derive (action, units) from the state delta.
+
+    TLC's dot edge syntax and action labelling vary across versions (the CI
+    jar emitted edges the 1.7.4-tuned label regex didn't match, yielding an
+    empty corpus), so semantics NEVER depend on the label: totalAdded grew →
+    Add, totalReduced grew → Reduce.
+    """
+    _, add_s, red_s = src
+    _, add_d, red_d = dst
+    if add_d > add_s and red_d == red_s:
+        return "Add", add_d - add_s
+    if red_d > red_s and add_d == add_s:
+        return "Reduce", red_d - red_s
+    raise SystemExit(f"cannot derive action for delta {src} -> {dst}")
 
 
-def step(action: str, src: tuple, dst: tuple) -> list:
+def step(src: tuple, dst: tuple) -> list:
     """Compact step encoding: [action, units, inventory', totalAdded', totalReduced']."""
-    return [action, action_units(action, src, dst), *dst]
+    action, units = derive_action(src, dst)
+    return [action, units, *dst]
 
 
 def build_behaviors(states, init_ids, edges):
     """One behavior per transition: shortest canonical path to src, then the edge."""
-    # Canonical adjacency: successors sorted by (action, units, dst state).
-    adjacency: dict[str, list[tuple[str, str]]] = {}
-    for src, dst, action in edges:
-        if src in states and dst in states:
-            adjacency.setdefault(src, []).append((dst, action))
+    # Canonical adjacency: successors sorted by derived (action, units, dst).
+    # Self-loops are stutter steps (some TLC versions emit them) — no-ops by
+    # definition, skipped rather than fed to derive_action.
+    adjacency: dict[str, list[str]] = {}
+    for src, dst, _label in edges:
+        if src != dst and src in states and dst in states:
+            adjacency.setdefault(src, []).append(dst)
     for src in adjacency:
-        adjacency[src].sort(
-            key=lambda e: (e[1], action_units(e[1], states[src], states[e[0]]), states[e[0]])
-        )
+        adjacency[src].sort(key=lambda d: (*derive_action(states[src], states[d]), states[d]))
 
     # BFS shortest paths from the initial state(s), canonical tie-break by
     # visiting successors in the sorted adjacency order.
-    parent: dict[str, tuple[str, str] | None] = {}
+    parent: dict[str, str | None] = {}
     queue: deque[str] = deque()
     for init in sorted(init_ids, key=lambda i: states[i]):
         parent[init] = None
         queue.append(init)
     while queue:
         node = queue.popleft()
-        for dst, action in adjacency.get(node, []):
+        for dst in adjacency.get(node, []):
             if dst not in parent:
-                parent[dst] = (node, action)
+                parent[dst] = node
                 queue.append(dst)
 
     def path_to(node: str) -> list:
         rev = []
         cur = node
         while parent[cur] is not None:
-            prev, action = parent[cur]
-            rev.append(step(action, states[prev], states[cur]))
+            prev = parent[cur]
+            rev.append(step(states[prev], states[cur]))
             cur = prev
         rev.reverse()
         return rev
 
     behaviors = []
-    for src, dst, action in edges:
-        if src not in parent or dst not in states:
-            continue  # unreachable or unparsed
-        behaviors.append(path_to(src) + [step(action, states[src], states[dst])])
+    for src, dst, _label in edges:
+        if src == dst or src not in parent or dst not in states:
+            continue  # stutter self-loop, unreachable, or unparsed
+        behaviors.append(path_to(src) + [step(states[src], states[dst])])
     # Canonical order + dedup (distinct edges can yield identical behaviors
     # when several graph edges share the same semantic step sequence).
     unique = sorted({json.dumps(b, separators=(",", ":")) for b in behaviors})
@@ -142,13 +150,25 @@ def generate(text: str, spec: str) -> dict:
     if not states or not init_ids:
         raise SystemExit("no states / no initial state found in the dot dump")
     behaviors = build_behaviors(states, init_ids, edges)
+    if len(states) > 1 and not behaviors:
+        raise SystemExit(
+            "parsed states but ZERO transitions/behaviors — the dot edge "
+            "syntax of this TLC version doesn't match the parser; refusing "
+            "to emit a vacuous corpus"
+        )
+    # Count only semantic transitions (no stutter self-loops, both endpoints
+    # parsed) so the byte-diff lockstep check is stable across TLC versions
+    # that do/don't emit self-loop edges.
+    transitions = sum(
+        1 for src, dst, _label in edges if src != dst and src in states and dst in states
+    )
     return {
         "spec": spec,
         "state_vars": list(STATE_VARS),
         "step_format": ["action", "units", *STATE_VARS],
         "coverage": {
             "states": len(states),
-            "transitions": len(edges),
+            "transitions": transitions,
             "behaviors": len(behaviors),
         },
         "behaviors": behaviors,
@@ -186,6 +206,15 @@ def self_test() -> int:
     assert json.dumps(generate(reordered, "Mini"), sort_keys=True) == json.dumps(
         out, sort_keys=True
     ), "output must be canonical under dump reordering"
+    # Version-agnosticism: stripping the action labels entirely (as other
+    # TLC versions' dot dumps do) must yield the identical corpus, because
+    # semantics are derived from state deltas, never from labels.
+    import re as _re
+    unlabeled = _re.sub(r'\[label="\w+",?', "[", SELF_TEST_DOT)
+    assert json.dumps(generate(unlabeled, "Mini"), sort_keys=True) == json.dumps(
+        out, sort_keys=True
+    ), "unlabeled edges must produce the identical corpus"
+
     print("self-test: OK")
     return 0
 

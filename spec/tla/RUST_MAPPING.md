@@ -44,6 +44,7 @@ Covered specs (≈4,000 behaviors total, all replayed in <1s of `cargo test`):
 | NONECorrect | 396 | balance (shorts allowed) + totals abstraction |
 | MultiCurrency | 10,116 | per-currency inventory over a multi-commodity `Inventory` — every currency asserted after every step, so cross-commodity unit leaks fail |
 | AccountStateMachine | 16,222 | validator lifecycle (in `rustledger-validate/tests/`): each model-legal open/close/post/transfer sequence, converted to directives, must `validate()` with zero errors (the E1001/E1002/E1003 state machine) |
+| PadCorrect | 1,044 | pad engine (in `rustledger-booking/tests/`): model-legal pad/txn/balance sequences run through `process_pads` — zero errors, synthesized pad amounts exactly `asserted − actual`, final balance matches; sub-account summing out of model scope (integration-tested) |
 | PriceDB | 690 | `PriceDatabase` (in `rustledger-query/tests/`): every model-set `(base, quote)` reads back via `get_latest_price`; model-unset entries not asserted (the implementation legitimately derives inverse rates) |
 
 Two specs are deliberately NOT replayed:

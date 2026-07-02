@@ -77,7 +77,7 @@ jobs:
         run: python3 scripts/tla-coverage-check.py
       - name: Model check all specs
         run: |
-          SPECS="Conservation DoubleEntry AccountStateMachine Interpolation \
+          SPECS="Conservation DoubleEntry AccountStateMachine Interpolation PadCorrect \
                  FIFOCorrect LIFOCorrect HIFOCorrect MultiCurrency PriceDB \
                  STRICTCorrect AVERAGECorrect NONECorrect ValidationCorrect \
                  PluginCorrect ConcurrentAccess QueryExecution"

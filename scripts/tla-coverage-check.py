@@ -40,6 +40,7 @@ REPLAY_FILES = [
     REPO / "crates" / "rustledger-core" / "tests" / "tla_behavior_replay.rs",
     REPO / "crates" / "rustledger-validate" / "tests" / "tla_behavior_replay.rs",
     REPO / "crates" / "rustledger-query" / "tests" / "tla_behavior_replay.rs",
+    REPO / "crates" / "rustledger-booking" / "tests" / "tla_behavior_replay.rs",
 ]
 MAPPING = TLA_DIR / "RUST_MAPPING.md"
 GENERATOR = REPO / "scripts" / "tla-behaviors.py"

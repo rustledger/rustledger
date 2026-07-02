@@ -395,6 +395,31 @@ def _derive_price_db(src: dict, dst: dict) -> list:
     raise SystemExit(f"PriceDB: underivable delta {src} -> {dst}")
 
 
+def _derive_pad(src: dict, dst: dict) -> list:
+    """Pad lifecycle: AddTxn (actual moves, pad unchanged), AddPad (pad arms),
+    AddBalance (pad disarms; actual jumps to the asserted value).
+
+    TLA booleans parse as the strings "TRUE"/"FALSE" — normalize before any
+    truthiness check ("FALSE" is truthy in Python)."""
+    src_pad = src["padPending"] == "TRUE"
+    dst_pad = dst["padPending"] == "TRUE"
+    state = {"actual": dst["actual"], "padPending": dst_pad}
+    if dst_pad and not src_pad and dst["actual"] == src["actual"]:
+        return ["AddPad", {}, state]
+    if not dst_pad and src_pad:
+        return ["AddBalance", {"asserted": dst["actual"]}, state]
+    if dst_pad == src_pad and dst["actual"] != src["actual"]:
+        # A transaction; a pending pad (if any) stays armed.
+        return ["AddTxn", {"amount": dst["actual"] - src["actual"]}, state]
+    if not dst_pad and not src_pad and dst["actual"] == src["actual"]:
+        # Self-loop: a no-pad balance assertion of the current value.
+        return ["AddBalance", {"asserted": dst["actual"]}, state]
+    # Remaining self-loop: pad armed while already armed (replacement).
+    if dst_pad and src_pad and dst["actual"] == src["actual"]:
+        return ["AddPad", {}, state]
+    raise SystemExit(f"PadCorrect: underivable delta {src} -> {dst}")
+
+
 SPECS = {
     "Conservation": {
         "required": ("inventory", "totalAdded", "totalReduced"),
@@ -444,6 +469,11 @@ SPECS = {
     "PriceDB": {
         "required": ("prices",),
         "derive": _derive_price_db,
+        "step_format": ["action", "params", "state"],
+    },
+    "PadCorrect": {
+        "required": ("actual", "padPending"),
+        "derive": _derive_pad,
         "step_format": ["action", "params", "state"],
     },
 }

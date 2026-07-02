@@ -52,6 +52,7 @@ ESCALATED: dict[str, dict[str, int]] = {
     "MultiCurrency": {"MaxUnits": 5, "MaxOperations": 8},
     "AccountStateMachine": {"MaxBalance": 15},
     "PriceDB": {"MaxPrice": 5},
+    "PadCorrect": {"MaxAmount": 5, "MaxOperations": 6},
 }
 
 

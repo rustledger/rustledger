@@ -3442,6 +3442,7 @@ dependencies = [
  "rust_decimal_macros",
  "rustc-hash 2.1.2",
  "rustledger-core",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

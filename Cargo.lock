@@ -3391,7 +3391,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "agcli",
  "anyhow",
@@ -3434,7 +3434,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-booking"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "bigdecimal",
  "proptest",
@@ -3448,11 +3448,11 @@ dependencies = [
 
 [[package]]
 name = "rustledger-completion"
-version = "0.19.0"
+version = "0.19.1"
 
 [[package]]
 name = "rustledger-core"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "criterion",
  "imbl",
@@ -3470,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-ffi-component"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "jiff",
  "rustledger-booking",
@@ -3487,7 +3487,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-ffi-component-tests"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "anyhow",
  "rustledger-core",
@@ -3499,7 +3499,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-ffi-wasi"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "jiff",
  "rustc-hash 2.1.2",
@@ -3519,7 +3519,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-importer"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "anyhow",
  "csv",
@@ -3543,7 +3543,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-loader"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "blake3",
  "glob",
@@ -3565,7 +3565,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-lsp"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "crossbeam-channel",
  "glob",
@@ -3592,7 +3592,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-ops"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "blake3",
  "jiff",
@@ -3606,7 +3606,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-parser"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "blake3",
  "criterion",
@@ -3625,7 +3625,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-plugin"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -3652,7 +3652,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-plugin-types"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "rmp-serde",
  "serde",
@@ -3661,7 +3661,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-query"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "chumsky",
  "criterion",
@@ -3683,7 +3683,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-validate"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "bigdecimal",
  "criterion",
@@ -3703,7 +3703,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-wasm"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.2.17",

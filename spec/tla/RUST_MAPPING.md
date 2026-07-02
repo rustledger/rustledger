@@ -32,9 +32,26 @@ TLA+ CI workflow regenerates it from the spec and fails on drift, so model
 and corpus cannot silently diverge. The generator output is canonical
 (content-derived ordering, no node ids), so regeneration is byte-stable.
 
-Extending to another spec = adding its action→implementation mapping to the
-replay test and a corpus entry; prefer specs whose state maps onto one
-implementation structure (the booking-method family is next in line).
+Covered specs (≈4,000 behaviors total, all replayed in <1s of `cargo test`):
+
+| Corpus | Behaviors | Replay checks |
+|--------|-----------|---------------|
+| Conservation | 678 | units + totalAdded/totalReduced abstraction, enabledness |
+| FIFOCorrect / LIFOCorrect | 422 each | per-date unit totals; the matched lot's DATE equals the model's selection |
+| HIFOCorrect | 422 | per-cost unit totals; matched lot's COST equals the model's selection |
+| STRICTCorrect | 136 | per-currency totals; model `success`/`no_match`/`ambiguous` ↔ impl `Ok`/`NoMatchingLot`/`AmbiguousMatch` |
+| AVERAGECorrect | 1,500 | units abstraction only — the model computes the average with integer `\div`, the implementation divides exactly (documented model-precision caveat) |
+| NONECorrect | 396 | balance (shorts allowed) + totals abstraction |
+
+The abstraction deliberately collapses the specs' lot SEQUENCES to per-key
+unit totals: the implementation merges identical (cost, date) lots on add, so
+lot count is not preserved — per-key totals are. The STRICT replay gives each
+added lot a distinct acquisition date so the model's lot-count ambiguity is
+faithfully reproduced.
+
+Extending to another spec = a `derive` entry in `scripts/tla-behaviors.py`'s
+SPECS registry + a replay interpreter in `tla_behavior_replay.rs` + the
+corpus file, all guarded by the CI lockstep check.
 
 ## Refinement Obligations
 

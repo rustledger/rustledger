@@ -4,13 +4,23 @@ on:
     branches: [main]
     paths:
       - 'spec/tla/**'
-      - 'crates/rustledger-core/src/inventory.rs'
+      # NOTE: was 'crates/rustledger-core/src/inventory.rs' — stale since
+      # inventory became a directory, so inventory changes stopped triggering
+      # the models at all.
+      - 'crates/rustledger-core/src/inventory/**'
       - 'crates/rustledger-booking/src/**'
+      - 'scripts/tla-trace-to-test.py'
+      - '.github/workflows/tla.yml'
   pull_request:
     paths:
       - 'spec/tla/**'
-      - 'crates/rustledger-core/src/inventory.rs'
+      # NOTE: was 'crates/rustledger-core/src/inventory.rs' — stale since
+      # inventory became a directory, so inventory changes stopped triggering
+      # the models at all.
+      - 'crates/rustledger-core/src/inventory/**'
       - 'crates/rustledger-booking/src/**'
+      - 'scripts/tla-trace-to-test.py'
+      - '.github/workflows/tla.yml'
 permissions:
   contents: read
 env:
@@ -41,180 +51,64 @@ jobs:
             -O ~/tla2tools.jar
       - name: Verify TLA+ Tools
         run: java -jar ~/tla2tools.jar -help | head -5
-      - name: Model Check Conservation.tla
+      # One loop instead of 16 uniform steps: every spec is checked even when
+      # an earlier one fails (previously fail-fast masked later spec failures),
+      # and each TLC output is teed to tlc-logs/<Spec>.log so counterexamples
+      # can be converted into Rust regression-test skeletons below.
+      - name: Model check all specs
         run: |
-          echo "::group::Checking Conservation.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/Conservation.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/Conservation.tla
-          echo "::endgroup::"
-      - name: Model Check DoubleEntry.tla
+          SPECS="Conservation DoubleEntry AccountStateMachine Interpolation \
+                 FIFOCorrect LIFOCorrect HIFOCorrect MultiCurrency PriceDB \
+                 STRICTCorrect AVERAGECorrect NONECorrect ValidationCorrect \
+                 PluginCorrect ConcurrentAccess QueryExecution"
+          mkdir -p tlc-logs
+          FAILED=""
+          for spec in $SPECS; do
+            echo "::group::Checking ${spec}.tla"
+            if ! java -XX:+UseParallelGC -Xmx2g \
+                -jar ~/tla2tools.jar \
+                -config "spec/tla/${spec}.cfg" \
+                -workers auto \
+                -deadlock \
+                "spec/tla/${spec}.tla" 2>&1 | tee "tlc-logs/${spec}.log"; then
+              FAILED="$FAILED ${spec}"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$FAILED" ]; then
+            echo "::error::TLC found violations in:${FAILED}"
+            exit 1
+          fi
+      # The counterexample-driven workflow from the formal-verification
+      # roadmap: every TLC error trace becomes a pinned Rust regression-test
+      # skeleton (the process that produced tla_fifo_bug_test.rs). Skeletons
+      # land in the job summary and the artifact below.
+      - name: Convert counterexamples to Rust test skeletons
+        if: failure()
         run: |
-          echo "::group::Checking DoubleEntry.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/DoubleEntry.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/DoubleEntry.tla
-          echo "::endgroup::"
-      - name: Model Check AccountStateMachine.tla
-        run: |
-          echo "::group::Checking AccountStateMachine.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/AccountStateMachine.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/AccountStateMachine.tla
-          echo "::endgroup::"
-      - name: Model Check Interpolation.tla
-        run: |
-          echo "::group::Checking Interpolation.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/Interpolation.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/Interpolation.tla
-          echo "::endgroup::"
-      - name: Model Check FIFOCorrect.tla
-        run: |
-          echo "::group::Checking FIFOCorrect.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/FIFOCorrect.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/FIFOCorrect.tla
-          echo "::endgroup::"
-      - name: Model Check LIFOCorrect.tla
-        run: |
-          echo "::group::Checking LIFOCorrect.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/LIFOCorrect.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/LIFOCorrect.tla
-          echo "::endgroup::"
-      - name: Model Check HIFOCorrect.tla
-        run: |
-          echo "::group::Checking HIFOCorrect.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/HIFOCorrect.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/HIFOCorrect.tla
-          echo "::endgroup::"
-      - name: Model Check MultiCurrency.tla
-        run: |
-          echo "::group::Checking MultiCurrency.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/MultiCurrency.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/MultiCurrency.tla
-          echo "::endgroup::"
-      - name: Model Check PriceDB.tla
-        run: |
-          echo "::group::Checking PriceDB.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/PriceDB.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/PriceDB.tla
-          echo "::endgroup::"
-      - name: Model Check STRICTCorrect.tla
-        run: |
-          echo "::group::Checking STRICTCorrect.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/STRICTCorrect.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/STRICTCorrect.tla
-          echo "::endgroup::"
-      - name: Model Check AVERAGECorrect.tla
-        run: |
-          echo "::group::Checking AVERAGECorrect.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/AVERAGECorrect.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/AVERAGECorrect.tla
-          echo "::endgroup::"
-      - name: Model Check NONECorrect.tla
-        run: |
-          echo "::group::Checking NONECorrect.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/NONECorrect.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/NONECorrect.tla
-          echo "::endgroup::"
-      - name: Model Check ValidationCorrect.tla
-        run: |
-          echo "::group::Checking ValidationCorrect.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/ValidationCorrect.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/ValidationCorrect.tla
-          echo "::endgroup::"
-      - name: Model Check PluginCorrect.tla
-        run: |
-          echo "::group::Checking PluginCorrect.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/PluginCorrect.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/PluginCorrect.tla
-          echo "::endgroup::"
-      - name: Model Check ConcurrentAccess.tla
-        run: |
-          echo "::group::Checking ConcurrentAccess.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/ConcurrentAccess.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/ConcurrentAccess.tla
-          echo "::endgroup::"
-      - name: Model Check QueryExecution.tla
-        run: |
-          echo "::group::Checking QueryExecution.tla"
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/QueryExecution.cfg \
-            -workers auto \
-            -deadlock \
-            spec/tla/QueryExecution.tla
-          echo "::endgroup::"
-      # Note: `trace_to_rust_test.py` expects JSON input produced by a
-      # `tla_trace_to_json.py` converter that does not exist in this
-      # repo, so the previous "Generate Rust tests from traces" step
-      # was always silently failing. Removed pending someone porting
-      # that converter — the raw `.trace` files are still uploaded as
-      # the artifact below for offline analysis.
+          python3 scripts/tla-trace-to-test.py --self-test
+          for log in tlc-logs/*.log; do
+            spec=$(basename "$log" .log)
+            if grep -q '^Error:' "$log"; then
+              out="tlc-logs/tla_$(echo "$spec" | tr '[:upper:]' '[:lower:]')_bug_test.rs"
+              if python3 scripts/tla-trace-to-test.py --spec "$spec" < "$log" > "$out"; then
+                {
+                  echo "### ${spec}.tla counterexample → Rust test skeleton"
+                  echo '```rust'
+                  cat "$out"
+                  echo '```'
+                } >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+          done
       - name: Upload counterexample traces
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: tla-traces
           path: |
+            tlc-logs/
             *.trace
-            generated_test_*.rs
           if-no-files-found: ignore
       - name: Summary
         if: always()

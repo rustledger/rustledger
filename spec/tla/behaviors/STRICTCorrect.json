@@ -1,0 +1,9954 @@
+{
+ "spec": "STRICTCorrect",
+ "state_vars": [
+  "lots",
+  "lastResult"
+ ],
+ "step_format": [
+  "action",
+  "params",
+  "state"
+ ],
+ "coverage": {
+  "states": 55,
+  "transitions": 138,
+  "behaviors": 136
+ },
+ "behaviors": [
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": []
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": []
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": []
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": []
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": []
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": []
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": []
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": []
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       2,
+       3
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       2
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "ambiguous"
+    },
+    {
+     "result": "ambiguous",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ],
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       2
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": []
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "currency": 2,
+     "expect": "success"
+    },
+    {
+     "result": "success",
+     "totals": []
+    }
+   ]
+  ],
+  [
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "none",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": []
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 1,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       1,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": []
+    }
+   ],
+   [
+    "AddLot",
+    {
+     "currency": 2,
+     "units": 1
+    },
+    {
+     "result": "no_match",
+     "totals": [
+      [
+       2,
+       1
+      ]
+     ]
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "currency": 1,
+     "expect": "no_match"
+    },
+    {
+     "result": "no_match",
+     "totals": []
+    }
+   ]
+  ]
+ ]
+}

@@ -1,0 +1,15992 @@
+{
+ "spec": "NONECorrect",
+ "state_vars": [
+  "balance",
+  "totalAdded",
+  "totalReduced"
+ ],
+ "step_format": [
+  "action",
+  "params",
+  "state"
+ ],
+ "coverage": {
+  "states": 135,
+  "transitions": 396,
+  "behaviors": 396
+ },
+ "behaviors": [
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 7,
+     "balance": 7,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 7,
+     "balance": 7,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 8,
+     "balance": 8,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 7,
+     "balance": 7,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 8,
+     "balance": 8,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 9,
+     "balance": 9,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 5,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 5,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 7,
+     "balance": 7,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 8,
+     "balance": 8,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 7,
+     "balance": 7,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 9,
+     "balance": 9,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 7,
+     "balance": 7,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 10,
+     "balance": 10,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 7,
+     "balance": 7,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 7,
+     "balance": 6,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 7,
+     "balance": 7,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 7,
+     "balance": 5,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 7,
+     "balance": 7,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 7,
+     "balance": 4,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 7,
+     "balance": 7,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 5,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 7,
+     "balance": 6,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 0,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 7,
+     "balance": 5,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 0,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": -1,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 7,
+     "balance": 4,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 0,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": -1,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": -2,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -5,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 0,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -5,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -6,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": -1,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -5,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -6,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -7,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -5,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -5,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -5,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 4,
+     "balance": -2,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -5,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -6,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -5,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 1,
+     "balance": -7,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -5,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -8,
+     "reduced": 9
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -5,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 1,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 7,
+     "balance": 7,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 8,
+     "balance": 8,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 9,
+     "balance": 9,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 8,
+     "balance": 8,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 10,
+     "balance": 10,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 8,
+     "balance": 8,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 11,
+     "balance": 11,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 8,
+     "balance": 8,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 8,
+     "balance": 7,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 8,
+     "balance": 8,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 8,
+     "balance": 6,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 8,
+     "balance": 8,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 8,
+     "balance": 5,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 8,
+     "balance": 8,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 5,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 7,
+     "balance": 6,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 8,
+     "balance": 7,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 7,
+     "balance": 5,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 8,
+     "balance": 6,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 0,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 7,
+     "balance": 4,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 8,
+     "balance": 5,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 5,
+     "balance": 1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 0,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": -1,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 0,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -5,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": -1,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 0,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -5,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -6,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 4,
+     "balance": -2,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 5,
+     "balance": -1,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 2,
+     "balance": -5,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -6,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -7,
+     "reduced": 9
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 2,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 4,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 5,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 7,
+     "balance": 7,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 8,
+     "balance": 8,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 9,
+     "balance": 9,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 10,
+     "balance": 10,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 9,
+     "balance": 9,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 11,
+     "balance": 11,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 9,
+     "balance": 9,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 12,
+     "balance": 12,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 9,
+     "balance": 9,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 9,
+     "balance": 8,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 9,
+     "balance": 9,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 9,
+     "balance": 7,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 9,
+     "balance": 9,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 9,
+     "balance": 6,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 9,
+     "balance": 9,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 5,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 7,
+     "balance": 6,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 5,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 8,
+     "balance": 7,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 5,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 9,
+     "balance": 8,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 5,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 5,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 5,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 5,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 7,
+     "balance": 5,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 8,
+     "balance": 6,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 9,
+     "balance": 7,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 1,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 7,
+     "balance": 4,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 8,
+     "balance": 5,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 9,
+     "balance": 6,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 6,
+     "balance": 2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 6,
+     "balance": 1,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 0,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 6,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 3,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 4,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 5,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 0,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -4,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 2,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 3,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 4,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": -1,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 0,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 1,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": -4,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -5,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": 1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": 2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 3,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 4,
+     "balance": -2,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 5,
+     "balance": -1,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 6,
+     "balance": 0,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 3,
+     "balance": -4,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 3,
+     "balance": -5,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -6,
+     "reduced": 9
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 3,
+     "reduced": 0
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": 0,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 1,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 2,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -7,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -7,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -8,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -5,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -7,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -8,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -9,
+     "reduced": 9
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -3,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -2,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -1,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -7,
+     "reduced": 7
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -6,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -7,
+     "reduced": 7
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -5,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -7,
+     "reduced": 7
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -4,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -7,
+     "reduced": 7
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -8,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -7,
+     "reduced": 7
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -9,
+     "reduced": 9
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -7,
+     "reduced": 7
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -10,
+     "reduced": 10
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -7,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -1,
+     "reduced": 1
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": 0,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 1,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -4,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -3,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -2,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -7,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -8,
+     "reduced": 8
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -7,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -8,
+     "reduced": 8
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -6,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -8,
+     "reduced": 8
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -5,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -8,
+     "reduced": 8
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -9,
+     "reduced": 9
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -8,
+     "reduced": 8
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -10,
+     "reduced": 10
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -8,
+     "reduced": 8
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -11,
+     "reduced": 11
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -8,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -2,
+     "reduced": 2
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -2,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -1,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": 0,
+     "reduced": 3
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -4,
+     "reduced": 4
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -5,
+     "reduced": 5
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -5,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -4,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -3,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -7,
+     "reduced": 7
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -8,
+     "reduced": 8
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -9,
+     "reduced": 9
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 1
+    },
+    {
+     "added": 1,
+     "balance": -8,
+     "reduced": 9
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -9,
+     "reduced": 9
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 2
+    },
+    {
+     "added": 2,
+     "balance": -7,
+     "reduced": 9
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -9,
+     "reduced": 9
+    }
+   ],
+   [
+    "AddUnits",
+    {
+     "units": 3
+    },
+    {
+     "added": 3,
+     "balance": -6,
+     "reduced": 9
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -9,
+     "reduced": 9
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 1
+    },
+    {
+     "added": 0,
+     "balance": -10,
+     "reduced": 10
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -9,
+     "reduced": 9
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 2
+    },
+    {
+     "added": 0,
+     "balance": -11,
+     "reduced": 11
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -9,
+     "reduced": 9
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -12,
+     "reduced": 12
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -9,
+     "reduced": 9
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ],
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -6,
+     "reduced": 6
+    }
+   ]
+  ],
+  [
+   [
+    "Reduce",
+    {
+     "units": 3
+    },
+    {
+     "added": 0,
+     "balance": -3,
+     "reduced": 3
+    }
+   ]
+  ]
+ ]
+}

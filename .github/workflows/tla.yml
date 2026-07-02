@@ -89,22 +89,29 @@ jobs:
       # test`) must be regenerable byte-for-byte from the spec. A drift means
       # the spec changed without regenerating the corpus — the replay test
       # would silently keep certifying conformance against the OLD model.
-      - name: Verify behavior corpus is in lockstep with the spec
+      - name: Verify behavior corpora are in lockstep with the specs
         run: |
           python3 scripts/tla-behaviors.py --self-test
           mkdir -p /tmp/behaviors-check
-          java -XX:+UseParallelGC -Xmx2g \
-            -jar ~/tla2tools.jar \
-            -config spec/tla/Conservation.cfg \
-            -workers auto \
-            -deadlock \
-            -dump dot,actionlabels /tmp/behaviors-check/states \
-            spec/tla/Conservation.tla > /dev/null
-          python3 scripts/tla-behaviors.py --spec Conservation \
-            < /tmp/behaviors-check/states.dot \
-            > /tmp/behaviors-check/Conservation.json
-          if ! diff -u spec/tla/behaviors/Conservation.json /tmp/behaviors-check/Conservation.json; then
-            echo "::error::spec/tla/behaviors/Conservation.json is stale — regenerate it (see scripts/tla-behaviors.py docstring)"
+          STALE=""
+          for corpus in spec/tla/behaviors/*.json; do
+            spec=$(basename "$corpus" .json)
+            java -XX:+UseParallelGC -Xmx2g \
+              -jar ~/tla2tools.jar \
+              -config "spec/tla/${spec}.cfg" \
+              -workers auto \
+              -deadlock \
+              -dump dot,actionlabels "/tmp/behaviors-check/${spec}" \
+              "spec/tla/${spec}.tla" > /dev/null
+            python3 scripts/tla-behaviors.py --spec "$spec" \
+              < "/tmp/behaviors-check/${spec}.dot" \
+              > "/tmp/behaviors-check/${spec}.json"
+            if ! diff -u "$corpus" "/tmp/behaviors-check/${spec}.json"; then
+              STALE="$STALE ${spec}"
+            fi
+          done
+          if [ -n "$STALE" ]; then
+            echo "::error::stale behavior corpora:${STALE} — regenerate (see scripts/tla-behaviors.py docstring)"
             exit 1
           fi
       # The counterexample-driven workflow from the formal-verification

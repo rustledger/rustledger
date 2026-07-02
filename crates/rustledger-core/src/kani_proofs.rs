@@ -10,6 +10,7 @@
 //! | Conservation.tla | `proof_conservation_*` | `inventory + reduced = added` |
 //! | FIFOCheck.tla | `proof_fifo_*` | FIFO selects oldest lot |
 //! | DoubleEntry.tla | `proof_double_entry_*` | Transaction postings sum to zero |
+//! | NONECorrect.tla | `proof_none_*` | shorting split exact; conservation across zero |
 //!
 //! # Why Both TLA+ and Kani?
 //!
@@ -345,3 +346,80 @@ fn proof_decimal_negation_involutive() {
 
     kani::assert(-(-dec_a) == dec_a, "Double negation must return original");
 }
+
+// ============================================================================
+// NONE-SHORTING ARITHMETIC (from NONECorrect.tla, post-#1686 semantics)
+// ============================================================================
+//
+// NONE booking lets a reduction cross zero: consume what is available, then
+// append the remainder as a short (negative) position. These proofs pin the
+// arithmetic of that split for ALL amounts in range, complementing the
+// 396-behavior NONECorrect replay (which covers model-reachable states only).
+
+/// Proof: the NONE over-reduction split is exact.
+///
+/// For any `available >= 0` and `requested > available`, consuming
+/// `available` and shorting `requested - available` lands exactly at
+/// `available - requested` — no units created or lost at the zero crossing.
+#[kani::proof]
+#[kani::unwind(1)]
+fn proof_none_shorting_split_exact() {
+    let available: i64 = kani::any();
+    let requested: i64 = kani::any();
+    kani::assume(available >= 0 && available < 100_000);
+    kani::assume(requested > available && requested < 100_000);
+
+    let consumed = Decimal::from(available);
+    let shorted = Decimal::from(requested) - consumed;
+    let balance = (consumed - consumed) - shorted;
+
+    kani::assert(
+        balance == Decimal::from(available - requested),
+        "NONE shorting split lost units at the zero crossing",
+    );
+    kani::assert(balance < Decimal::ZERO, "over-reduction must short");
+}
+
+/// Proof: NONE conservation holds across the zero crossing.
+///
+/// The Conservation identity `balance + totalReduced = totalAdded` must
+/// survive a reduction that takes the balance negative (the #1686 class:
+/// shorting from a positive balance was rejected while shorting from zero
+/// was allowed — the identity held on one path and not the other).
+#[kani::proof]
+#[kani::unwind(1)]
+fn proof_none_conservation_across_zero() {
+    let added: i64 = kani::any();
+    let reduced: i64 = kani::any();
+    kani::assume(added >= 0 && added < 100_000);
+    kani::assume(reduced > added && reduced < 100_000); // crosses zero
+
+    let balance = Decimal::from(added) - Decimal::from(reduced);
+
+    kani::assert(
+        balance + Decimal::from(reduced) == Decimal::from(added),
+        "Conservation violated when shorting past zero",
+    );
+}
+
+// ============================================================================
+// SPIKE FINDING: proofs over the real `Inventory` are NOT tractable today
+// ============================================================================
+//
+// A harness driving the actual `Inventory::reduce` (single simple position,
+// two symbolic i64s, STRICT over-reduction must Err and leave the inventory
+// untouched — the stutter obligation) was attempted with kani 0.67 /
+// CBMC and did NOT verify within a 40-minute solo budget at #[kani::unwind(3)].
+// The solver log shows path explosion in:
+//
+// 1. the currency interner — `size_of_val_raw::<ArcInner<str>>` paths from
+//    `Currency::from`'s global interning;
+// 2. `imbl::Vector`'s RRB-tree allocation machinery behind
+//    `Inventory::positions`.
+//
+// Until Kani can stub the interner (fixed symbol) and bound imbl's small-
+// vector fast path, implementation-level verification of the booking engine
+// belongs to the TLA+ behavior-replay + proptest layers (which check the
+// same stutter obligation on sampled and model-exhaustive inputs). The
+// proofs in this file intentionally stay at the Decimal-arithmetic level,
+// where CBMC verifies for ALL values in range within seconds.

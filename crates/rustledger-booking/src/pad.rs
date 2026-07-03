@@ -319,13 +319,16 @@ fn create_padding_transaction(
 /// re-applies them against an inventory that already includes the prior
 /// synth. A `debug_assert!` guards against this in dev builds.
 pub fn merge_with_padding(directives: &[Directive]) -> Vec<Directive> {
-    debug_assert!(
-        !directives
-            .iter()
-            .any(|d| matches!(d, Directive::Transaction(t) if is_synthesized_pad(t))),
-        "merge_with_padding called on input that already contains synth pad transactions; \
-         re-running would double-count pad effects",
-    );
+    // Idempotence: input that already contains synth pad transactions has
+    // been merged before (e.g. an embedder queries entries it loaded via
+    // load-full, which merges pads — rustledger#1712). Re-running would
+    // double-count pad effects, so return the input unchanged instead.
+    if directives
+        .iter()
+        .any(|d| matches!(d, Directive::Transaction(t) if is_synthesized_pad(t)))
+    {
+        return directives.to_vec();
+    }
 
     let result = process_pads(directives);
 
@@ -704,13 +707,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "merge_with_padding called on input that already contains synth")]
-    fn test_merge_with_padding_double_apply_debug_asserts() {
-        // Calling merge_with_padding twice would double-count pad
-        // effects (original Pads survive in the output and would be
-        // re-applied against an inventory that already includes the
-        // prior synth). A debug_assert in dev builds guards against
-        // this caller mistake.
+    fn test_merge_with_padding_is_idempotent() {
+        // Re-merging already-merged input must be a no-op, not a
+        // double-count (and not an abort): embedders legitimately feed
+        // load-full output — which is already merged — back into
+        // query/window ops (rustledger#1712).
         let directives = vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
@@ -722,7 +723,8 @@ mod tests {
             )),
         ];
         let merged_once = merge_with_padding(&directives);
-        let _merged_twice = merge_with_padding(&merged_once); // should panic
+        let merged_twice = merge_with_padding(&merged_once);
+        assert_eq!(merged_once.len(), merged_twice.len());
     }
 
     #[test]

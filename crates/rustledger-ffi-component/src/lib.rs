@@ -49,7 +49,7 @@ use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 /// the host — a WASI guest can't reach the keyring (#1667). 3.1 added the `diff`
 /// field on `balance-dir` (#1663); 3.0 was the breaking `expand-pads` parameter
 /// on `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.2";
+const API_VERSION: &str = "3.3";
 
 struct Component;
 

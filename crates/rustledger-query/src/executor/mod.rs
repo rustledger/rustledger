@@ -1776,6 +1776,17 @@ impl<'a> Executor<'a> {
         explicit_currency: Option<&str>,
         at_date: Option<NaiveDate>,
     ) -> Result<Value, QueryError> {
+        // Column-type stability (#1701): the one-argument form infers the
+        // target currency PER ROW (cost currency, else executor default), so
+        // an Amount-vs-Inventory return that depends on the row's data makes
+        // the column type unstable — the FFI layer declares the type from one
+        // row and other rows then contradict it. The rule:
+        //   - explicit currency (two-arg form): target is constant across the
+        //     query -> Amount for every row (existing behavior, stable);
+        //   - one-arg form over an Inventory: ALWAYS return an Inventory
+        //     (beanquery parity: value(inventory) is inventory-typed), whether
+        //     or not a target currency could be inferred for this row.
+        let inventory_stays_inventory = explicit_currency.is_none();
         // Determine target currency:
         // 1. Explicit argument takes precedence
         // 2. Infer from position's cost currency (beancount compatibility)
@@ -1843,6 +1854,28 @@ impl<'a> Executor<'a> {
                 }
             }
             Value::Inventory(inv) => {
+                if inventory_stays_inventory {
+                    // Convert per position; a position with no available price
+                    // keeps its raw units (matching the Position/Amount arms
+                    // above and beanquery, which never drops positions).
+                    let mut out = rustledger_core::Inventory::new();
+                    for pos in inv.positions() {
+                        let units = if pos.units.currency == target_currency {
+                            pos.units.clone()
+                        } else if let Some(converted) = convert_one(&pos.units) {
+                            converted
+                        } else {
+                            pos.units.clone()
+                        };
+                        out.add(rustledger_core::Position::simple(units));
+                    }
+                    return Ok(Value::Inventory(Box::new(out)));
+                }
+                // Two-arg form: collapse to a single Amount in the explicit
+                // target currency. NOTE (pre-existing beanquery divergence,
+                // out of #1701's scope): positions with no available price are
+                // dropped from the total here; beanquery would keep them as
+                // their original units in an Inventory result.
                 let mut total = Decimal::ZERO;
                 for pos in inv.positions() {
                     if pos.units.currency == target_currency {

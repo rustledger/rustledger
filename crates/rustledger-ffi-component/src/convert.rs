@@ -659,24 +659,37 @@ pub fn run_query(directives: &[rustledger_core::Directive], query_str: &str) -> 
     let mut executor = Executor::new(directives);
     match executor.execute(&parsed) {
         Ok(result) => {
-            // Infer column datatypes from the first row (reusing value_datatype).
-            let columns = if let Some(first) = result.rows.first() {
-                result
-                    .columns
-                    .iter()
-                    .zip(first.iter())
-                    .map(|(name, value)| wit::ColumnInfo {
-                        name: name.clone(),
-                        datatype: value_datatype(value).to_string(),
-                    })
-                    .collect()
-            } else {
+            // Infer each column's datatype from its first NON-NULL value.
+            // First-row-only inference declared "null" for columns whose
+            // first row happened to be NULL, and baked in whichever shape row
+            // one carried for expressions that were type-unstable across rows
+            // (#1701) — the host trusts this declaration when deserializing
+            // every row.
+            let columns = if result.rows.is_empty() {
                 result
                     .columns
                     .iter()
                     .map(|name| wit::ColumnInfo {
                         name: name.clone(),
                         datatype: "str".to_string(),
+                    })
+                    .collect()
+            } else {
+                result
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| {
+                        let datatype = result
+                            .rows
+                            .iter()
+                            .map(|row| &row[i])
+                            .find(|v| !matches!(v, Value::Null))
+                            .map_or("null", value_datatype);
+                        wit::ColumnInfo {
+                            name: name.clone(),
+                            datatype: datatype.to_string(),
+                        }
                     })
                     .collect()
             };

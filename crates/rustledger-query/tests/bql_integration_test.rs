@@ -4768,6 +4768,51 @@ fn test_only_null_first_argument_propagates() {
     );
 }
 
+/// The one-argument `value()` form must be TYPE-STABLE over inventories:
+/// always Inventory, whether or not a per-row target currency (cost
+/// currency) could be inferred. Before #1701 costless groups returned the
+/// Inventory as-is while costed groups collapsed to Amount — the FFI layer
+/// declared the column from one row and other rows contradicted it.
+#[test]
+fn test_value_one_arg_inventory_is_type_stable() {
+    let directives = make_holdings_directives();
+    // Two groups: a costed one (Brokerage AAPL lots) and a costless one
+    // (Checking USD cash) — the pre-fix instability pair.
+    let result = execute_query(
+        r"SELECT value(sum(position)) as market_value GROUP BY currency",
+        &directives,
+    );
+
+    assert!(result.len() >= 2, "need both a costed and a costless group");
+    for (i, row) in result.rows.iter().enumerate() {
+        assert!(
+            matches!(&row[0], Value::Inventory(_)),
+            "row {i}: one-arg value() must be Inventory for every row, got {:?}",
+            row[0]
+        );
+    }
+}
+
+/// The two-argument form keeps its Amount contract (explicit target
+/// currency is constant across the query, so it was never unstable).
+#[test]
+fn test_value_two_arg_stays_amount() {
+    let directives = make_holdings_directives();
+    let result = execute_query(
+        r#"SELECT value(sum(position), "USD") as market_value GROUP BY currency"#,
+        &directives,
+    );
+
+    assert!(!result.is_empty());
+    for (i, row) in result.rows.iter().enumerate() {
+        assert!(
+            matches!(&row[0], Value::Amount(_)),
+            "row {i}: two-arg value() must stay Amount, got {:?}",
+            row[0]
+        );
+    }
+}
+
 #[test]
 fn test_filter_currency_function() {
     let directives = make_multi_currency_holdings();

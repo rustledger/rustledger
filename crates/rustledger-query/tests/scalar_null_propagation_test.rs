@@ -79,7 +79,7 @@ fn scalars_propagate_null() {
     assert_eq!(cell, Value::Boolean(true), "empty(NULL) is true by design");
 }
 
-/// The rustfava Holdings shape that motivated the fix: abs() over an
+/// The rustfava Holdings shape that motivated the fix: `abs()` over an
 /// aggregate that can be NULL.
 #[test]
 fn abs_over_null_aggregate_is_null_not_error() {

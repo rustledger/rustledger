@@ -1,0 +1,18 @@
+option "operating_currency" "EUR"
+option "booking_method" "STRICT"
+2024-01-01 open Assets:Broker
+2024-01-01 open Assets:Cash
+2024-01-01 open Income:PnL
+
+2024-01-02 * "b1"
+  Assets:Broker  100 USD {0.90 EUR}
+  Assets:Cash  -90 EUR
+
+2024-01-03 * "b2"
+  Assets:Broker  100 USD {0.95 EUR}
+  Assets:Cash  -95 EUR
+
+2024-01-05 * "sell"
+  Assets:Broker  -50 USD {}
+  Assets:Cash  46 EUR
+  Income:PnL

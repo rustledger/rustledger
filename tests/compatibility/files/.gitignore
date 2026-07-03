@@ -29,3 +29,11 @@
 !costs/**/
 !costs/**/*.beancount
 !costs/*.beancount
+
+# In-tree interpolation differential fixtures (#1705): empty-{} cost
+# solving edge matrix, cross-checked against bean-check 3.2.3. Same
+# recursion note as above.
+!interpolation/
+!interpolation/**/
+!interpolation/**/*.beancount
+!interpolation/*.beancount

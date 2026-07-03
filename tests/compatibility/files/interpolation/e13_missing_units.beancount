@@ -1,0 +1,13 @@
+option "operating_currency" "EUR"
+2024-01-01 open Assets:Broker
+2024-01-01 open Assets:Cash
+2024-01-01 open Expenses:Misc
+2024-01-01 open Income:PnL
+
+2024-01-02 * "buy"
+  Assets:Broker  1000 USD {0.90 EUR}
+  Assets:Cash  -900 EUR
+
+2024-01-05 * "sell all"
+  Assets:Broker
+  Assets:Cash  900 EUR

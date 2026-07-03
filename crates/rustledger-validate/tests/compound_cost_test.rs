@@ -124,3 +124,19 @@ fn compound_books_combined_per_unit() {
         "preserved total must be the combined 22.00, got {cost:?}"
     );
 }
+
+/// Reductions with compound specs (the case the FFI parity corpus caught):
+/// the spec normalizes to an effective per-unit for lot matching, WITHOUT
+/// injecting the sell date as a match filter, and `apply()` re-reduces from
+/// the booked posting cleanly.
+#[test]
+fn compound_reduction_matches_and_books() {
+    let src = format!(
+        "{HEADER}2024-01-10 * \"buy\"\n  Assets:B  2 VTI {{6.00 # 10.00 USD}}\n  Assets:Cash  -22.00 USD\n\n\
+         2024-02-10 * \"sell by resolved per-unit\"\n  Assets:B  -2 VTI {{11.00 USD}}\n  Assets:Cash  22.00 USD\n\n\
+         2024-03-10 * \"buy again\"\n  Assets:B  2 VTI {{5.00 # 0.00 USD}}\n  Assets:Cash  -10.00 USD\n\n\
+         2024-04-10 * \"sell filtering by compound spec\"\n  Assets:B  -2 VTI {{5.00 # 0.00 USD}}\n  Assets:Cash  10.00 USD\n"
+    );
+    let errors = balance_errors(&src);
+    assert!(errors.is_empty(), "{errors:?}");
+}

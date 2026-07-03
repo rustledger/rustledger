@@ -210,6 +210,48 @@ impl BookingEngine {
             if let Some(IncompleteAmount::Complete(units)) = &posting.units
                 && let Some(cost_spec) = &posting.cost
             {
+                // Normalize compound `{a # b}` up front (#1700): both the
+                // reduction path (which uses the spec as a lot-match filter
+                // via `per_unit()`) and apply() (which re-reduces from the
+                // BOOKED posting) need a resolved per-unit — the raw
+                // Compound form deliberately exposes neither component as
+                // an effective value. Combined total N*a + b is preserved
+                // exactly for residual math, same as the {{T}} conversion.
+                let normalized_compound: Option<CostSpec> = match cost_spec.number {
+                    Some(rustledger_core::CostNumber::Compound { per_unit, total })
+                        if !units.number.is_zero() =>
+                    {
+                        let combined = units.number.abs() * per_unit + total;
+                        Some(CostSpec {
+                            number: Some(rustledger_core::CostNumber::PerUnitFromTotal(
+                                rustledger_core::BookedCost::new(
+                                    combined / units.number.abs(),
+                                    combined,
+                                    units.number,
+                                ),
+                            )),
+                            currency: cost_spec.currency.clone(),
+                            // Date deliberately NOT defaulted to txn.date
+                            // here: on a REDUCTION the spec date is a lot
+                            // match FILTER (injecting the sell date would
+                            // match nothing); on an augmentation the lot's
+                            // acquisition date defaults via resolve()'s
+                            // date parameter as for plain {N} specs.
+                            date: cost_spec.date,
+                            label: cost_spec.label.clone(),
+                            merge: cost_spec.merge,
+                        })
+                    }
+                    _ => None,
+                };
+                let normalized_owned;
+                let cost_spec = if let Some(normalized) = normalized_compound {
+                    result.postings[idx].cost = Some(normalized.clone());
+                    normalized_owned = normalized;
+                    &normalized_owned
+                } else {
+                    cost_spec
+                };
                 // Check if this is a reduction (units have opposite sign of inventory)
                 // This handles both:
                 // - Selling long positions (negative units, positive inventory)
@@ -345,20 +387,8 @@ impl BookingEngine {
                     // If not a reduction: fall through to augmentation code below
                 }
 
-                // Compound `{a # b}` augmentation: combine into the whole
-                // total `N*a + b` first, then share the Total conversion
-                // below — the booked shape is identical (`PerUnitFromTotal`
-                // with the combined total preserved for exact residuals),
-                // so every post-booking consumer is agnostic to which
-                // written form produced it (#1700).
-                let effective_total = match cost_spec.number {
-                    Some(rustledger_core::CostNumber::Total { value }) => Some(value),
-                    Some(rustledger_core::CostNumber::Compound { per_unit, total }) => {
-                        Some(units.number.abs() * per_unit + total)
-                    }
-                    _ => None,
-                };
-                if let Some(total) = effective_total {
+                if let Some(rustledger_core::CostNumber::Total { value: total }) = cost_spec.number
+                {
                     // Augmentation with total cost — convert to the
                     // post-booking `PerUnitFromTotal` shape:
                     //   `1.763 VIIIX {{300.00 USD}}` → derived per-unit

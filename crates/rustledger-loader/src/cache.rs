@@ -325,6 +325,12 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     does NOT require a separate version bump. If a future rkyv
 ///     version changes that encoding, OR if `CostNumber` gains
 ///     additional fields, bump `CACHE_VERSION` to the next value.
+/// v13: `CostNumber` gained the `Compound { per_unit, total }` variant
+///     (#1700) and the parser now emits it for `{a # b}` cost specs —
+///     exactly the "gains additional fields" case the v12 note calls
+///     out. Without the bump, a cache written by a pre-#1700 binary
+///     serves the old mis-parse (`Total{b}` / `PerUnit{b}`) to fixed
+///     binaries, resurrecting the bug for any previously-loaded ledger.
 /// v9: `CachedOptions` gained a `set_options: Vec<String>` field
 ///     (#1340). It was previously dropped, so a cache hit lost the
 ///     record of which options the file explicitly set — making
@@ -343,7 +349,7 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     silently ignored `option "display_precision" "USD:0.0001"` (formatting
 ///     fell back to inferred precision) and the other two settings. New fields
 ///     change the archived layout, so old bytes must be regenerated.
-const CACHE_VERSION: u32 = 12;
+const CACHE_VERSION: u32 = 13;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1042,7 +1048,11 @@ mod tests {
         // v12 (`CachedOptions` field-parity) all bumped CACHE_VERSION without
         // touching the `CostNumber` archived layout these fixtures pin, so the
         // byte arrays below are still valid and only FIXTURE_VERSION moves.
-        const FIXTURE_VERSION: u32 = 12;
+        // v13 (#1700) ADDS `CostNumber::Compound` at the END of the enum:
+        // existing discriminants and payload encodings are unchanged (the
+        // arrays below still pin them), and a fixture for the new variant
+        // joins them.
+        const FIXTURE_VERSION: u32 = 13;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1057,6 +1067,17 @@ mod tests {
                 CostNumber::PerUnit { value: dec!(150) },
                 &[
                     0, 0, 0, 0, 0, 150, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+            (
+                "Compound { per_unit: 5, total: 10 }",
+                CostNumber::Compound {
+                    per_unit: dec!(5),
+                    total: dec!(10),
+                },
+                &[
+                    3, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0,
                 ],
             ),
@@ -1115,7 +1136,10 @@ mod tests {
 
         // Tripwire: regenerating the hash without bumping CACHE_VERSION leaves
         // users with rotten metadata caches.
-        const FIXTURE_VERSION: u32 = 12;
+        // v13 (#1700) added a CostNumber variant; MetaValue's archived
+        // layout is untouched, so per the tripwire contract only the
+        // fixture version moves.
+        const FIXTURE_VERSION: u32 = 13;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

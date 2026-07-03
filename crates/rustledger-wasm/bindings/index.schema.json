@@ -291,6 +291,25 @@
           "type": "object"
         },
         {
+          "description": "Compound cost as written (e.g. `{5.00 # 10.00 USD}`): per-unit\nAND lump total; costs `N * per_unit + total` (pre-booking only —\nbooking rewrites to `PerUnitFromTotal`).",
+          "properties": {
+            "kind": {
+              "const": "compound",
+              "type": "string"
+            },
+            "per_unit": {
+              "description": "Per-unit component (zero when omitted).",
+              "type": "string"
+            },
+            "total": {
+              "description": "Lump-total component (zero when omitted).",
+              "type": "string"
+            }
+          },
+          "required": ["kind", "per_unit", "total"],
+          "type": "object"
+        },
+        {
           "description": "Post-booking derived per-unit with preserved source total.",
           "properties": {
             "kind": {

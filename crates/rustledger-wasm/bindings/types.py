@@ -79,6 +79,18 @@ class CostNumberJson2(BaseModel):
 
 class CostNumberJson3(BaseModel):
     """
+    Compound cost as written (e.g. `{5.00 # 10.00 USD}`): per-unit
+    AND lump total; costs `N * per_unit + total` (pre-booking only —
+    booking rewrites to `PerUnitFromTotal`).
+    """
+
+    kind: Literal["compound"]
+    per_unit: str = Field(..., description="Per-unit component (zero when omitted).")
+    total: str = Field(..., description="Lump-total component (zero when omitted).")
+
+
+class CostNumberJson4(BaseModel):
+    """
     Post-booking derived per-unit with preserved source total.
     """
 
@@ -87,8 +99,10 @@ class CostNumberJson3(BaseModel):
     total: str = Field(..., description="Source total.")
 
 
-class CostNumberJson(RootModel[CostNumberJson1 | CostNumberJson2 | CostNumberJson3]):
-    root: CostNumberJson1 | CostNumberJson2 | CostNumberJson3 = Field(
+class CostNumberJson(
+    RootModel[CostNumberJson1 | CostNumberJson2 | CostNumberJson3 | CostNumberJson4]
+):
+    root: CostNumberJson1 | CostNumberJson2 | CostNumberJson3 | CostNumberJson4 = Field(
         ...,
         description="Wire-format of the numeric component of a [`PostingCostJson`].\n\nMirrors `rustledger_core::CostNumber` on the wire so JS consumers\nsee the same mutual exclusion the host enforces. Use the `kind`\nfield as the discriminator.",
     )

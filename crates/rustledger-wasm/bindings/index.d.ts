@@ -172,6 +172,17 @@ export type CostNumberJson =
       value: string;
     }
   | {
+      kind: "compound";
+      /**
+       * Per-unit component (zero when omitted).
+       */
+      per_unit: string;
+      /**
+       * Lump-total component (zero when omitted).
+       */
+      total: string;
+    }
+  | {
       kind: "per_unit_from_total";
       /**
        * Derived per-unit.

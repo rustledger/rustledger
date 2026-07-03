@@ -1115,6 +1115,59 @@ mod tests {
         assert!(results[1].is_ok());
     }
 
+    /// Issue #1705: an augmenting `{}` lot gets its cost inferred from the
+    /// residual, and a later `{}` reduction of that lot then books cleanly
+    /// (previously the reduction hit a spurious "2 unknowns" error because
+    /// the augmenting lot carried no cost basis to match).
+    #[test]
+    fn test_augmenting_empty_cost_then_reduce() {
+        // buy: 1000 USD {} against -900 EUR  → lot booked at 0.90 EUR/unit
+        let buy = Transaction::new(date(2024, 1, 2), "buy USD")
+            .with_synthesized_posting(
+                Posting::new("Assets:Broker", Amount::new(dec!(1000), "USD"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-900), "EUR")));
+
+        // sell: -100 USD {} + 95 EUR + PnL residual  → reduce at 0.90, PnL = -5 EUR
+        let sell = Transaction::new(date(2024, 1, 5), "sell part")
+            .with_synthesized_posting(
+                Posting::new("Assets:Broker", Amount::new(dec!(-100.00), "USD"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(Posting::new("Expenses:Misc", Amount::new(dec!(95), "EUR")))
+            .with_synthesized_posting(Posting::auto("Income:Trading:PnL"));
+
+        let results = book_transactions(&[buy, sell], BookingMethod::Fifo);
+        assert_eq!(results.len(), 2);
+
+        let buy_txn = &results[0].as_ref().expect("buy should book").transaction;
+        let buy_cost = buy_txn.postings[0].cost.as_ref().expect("cost present");
+        assert_eq!(
+            buy_cost
+                .number
+                .as_ref()
+                .and_then(rustledger_core::CostNumber::per_unit),
+            Some(dec!(0.90))
+        );
+        assert_eq!(buy_cost.currency.as_deref(), Some("EUR"));
+
+        // The `{}` reduction booked cleanly and the PnL residual solved to -5 EUR.
+        let sell_txn = &results[1].as_ref().expect("sell should book").transaction;
+        let pnl = sell_txn
+            .postings
+            .iter()
+            .find(|p| p.account.as_str() == "Income:Trading:PnL")
+            .expect("PnL posting present");
+        let pnl_amount = pnl
+            .units
+            .as_ref()
+            .and_then(|u| u.as_amount())
+            .expect("PnL filled");
+        assert_eq!(pnl_amount.number, dec!(-5));
+        assert_eq!(pnl_amount.currency.as_str(), "EUR");
+    }
+
     #[test]
     fn test_book_augmentation_not_reduction() {
         let mut engine = BookingEngine::new();

@@ -1047,6 +1047,12 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 2)?;
                 let currency = match &args[0] {
                     Value::String(s) => s.clone(),
+                    // NULL propagates (beanquery parity): `first(cost_currency)`
+                    // is NULL for groups without costs, and fava's Holdings
+                    // by_currency query feeds exactly that into only() — see
+                    // #1699. The second-argument match below already
+                    // propagates; the asymmetry was the bug.
+                    Value::Null => return Ok(Value::Null),
                     _ => {
                         return Err(QueryError::Type(
                             "ONLY: first argument must be a currency string".to_string(),

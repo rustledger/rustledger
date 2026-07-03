@@ -4746,6 +4746,28 @@ fn test_only_function_with_inventory() {
     }
 }
 
+/// `only()` must propagate NULL in its first argument (beanquery parity).
+/// `first(cost_currency)` is NULL for groups without costs — fava's Holdings
+/// `by_currency` query feeds that into `only()` on any ledger with a costless
+/// commodity group, which 500'd the page before #1699.
+#[test]
+fn test_only_null_first_argument_propagates() {
+    let directives = make_holdings_directives();
+    let result = execute_query(
+        r#"SELECT only(first(cost_currency), cost(sum(position))) as avg_cost_ccy
+           WHERE account ~ "Cash"
+           GROUP BY currency"#,
+        &directives,
+    );
+
+    assert_eq!(result.len(), 1);
+    assert!(
+        matches!(&result.rows[0][0], Value::Null),
+        "only(NULL, ...) must be NULL, got {:?}",
+        result.rows[0][0]
+    );
+}
+
 #[test]
 fn test_filter_currency_function() {
     let directives = make_multi_currency_holdings();

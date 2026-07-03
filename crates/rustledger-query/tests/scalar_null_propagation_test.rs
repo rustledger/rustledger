@@ -98,3 +98,13 @@ fn two_arg_scalars_propagate_null_second_arg() {
     let cell = first_cell("SELECT possign(position, payee) LIMIT 1");
     assert_eq!(cell, Value::Null, "possign(_, NULL) must be NULL");
 }
+
+/// Arithmetic operators propagate NULL (the Holdings expression tail:
+/// `safediv(NULL-yielding, x) * 100`).
+#[test]
+fn arithmetic_propagates_null() {
+    let cell = first_cell("SELECT upper(payee) * 100 LIMIT 1");
+    assert_eq!(cell, Value::Null, "NULL * 100 must be NULL");
+    let cell = first_cell("SELECT 100 + upper(payee) LIMIT 1");
+    assert_eq!(cell, Value::Null, "100 + NULL must be NULL");
+}

@@ -137,6 +137,9 @@ impl Executor<'_> {
             (Value::Integer(a), Value::Integer(b)) => (Decimal::from(*a), Decimal::from(*b)),
             (Value::Number(a), Value::Integer(b)) => (*a, Decimal::from(*b)),
             (Value::Integer(a), Value::Number(b)) => (Decimal::from(*a), *b),
+            // NULL propagates through arithmetic (SQL/beanquery semantics) —
+            // e.g. `safediv(...) * 100` where the division yielded NULL.
+            (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
             _ => {
                 return Err(QueryError::Type(
                     "arithmetic requires numeric values".to_string(),

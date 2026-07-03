@@ -4,7 +4,9 @@
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Signed;
-use rustledger_core::{Amount, Currency, IncompleteAmount, Transaction};
+use rustledger_core::{
+    Amount, BookedCost, CostNumber, CostSpec, Currency, IncompleteAmount, Transaction,
+};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -178,6 +180,15 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // interpolation rule allows.
     let mut cost_unknowns_by_currency: HashMap<Currency, usize> = HashMap::with_capacity(2);
 
+    // Augmenting `{}` postings whose per-unit cost beancount infers from the
+    // balance residual (issue #1705): `(posting index, cost currency, units)`.
+    // Only empty-`{}`, price-less postings qualify — a reduction's `{}` is
+    // already cost-filled by the booking pass (so it never reaches the empty
+    // branch below), and a priced `{}` defers to booking-time lot matching.
+    // Each is solved post-loop, but only when it is the SOLE unknown in its
+    // cost currency group (else the group already errored on the count rule).
+    let mut inferable_cost: Vec<(usize, Currency, Decimal)> = Vec::new();
+
     for (i, posting) in transaction.postings.iter().enumerate() {
         match &posting.units {
             Some(IncompleteAmount::Complete(amount)) => {
@@ -225,7 +236,14 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                         get_inferred_currency(&mut inferred_cost_currency)
                     });
                     if let Some(curr) = cost_currency {
-                        *cost_unknowns_by_currency.entry(curr).or_default() += 1;
+                        *cost_unknowns_by_currency.entry(curr.clone()).or_default() += 1;
+                        // An empty `{}` with NO price annotation reaching here is
+                        // an augmentation (a reduction's `{}` is filled by the
+                        // booking pass first). Beancount infers its per-unit cost
+                        // from the residual — record it for post-loop solving.
+                        if posting.price.is_none() {
+                            inferable_cost.push((i, curr, amount.number));
+                        }
                     }
                 } else if let Some(price) = &posting.price {
                     // Price annotation: converts units to price currency.
@@ -376,6 +394,51 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                 count: count + unassigned_missing.len(),
             });
         }
+    }
+
+    // Infer the per-unit cost of augmenting `{}` postings from the residual
+    // (issue #1705). Beancount books first, then interpolates the single
+    // remaining unknown; an augmenting lot written `1000 USD {}` with one
+    // balancing cash leg has its cost inferred from that leg (`-900 EUR` →
+    // 0.90 EUR/unit). rledger left such a lot with no cost basis, which also
+    // broke later reductions of it (the `{}` reduction could no longer match a
+    // cost-bearing lot, surfacing as a spurious "2 unknowns" error).
+    //
+    // Runs BEFORE missing-amount filling so a filled cost balances its
+    // currency before any elided amount absorbs that currency's residual. Each
+    // entry is guaranteed the sole unknown in its cost currency group: the
+    // count-rule check above rejected any group with >1 unknown, and the
+    // unassigned-missing check rejected any unassigned + cost-unknown combo.
+    for (idx, currency, units_number) in inferable_cost {
+        if units_number.is_zero() {
+            continue; // BookedCost is undefined for zero units.
+        }
+        let residual = residuals.get(&currency).copied().unwrap_or(Decimal::ZERO);
+        // The posting's cost weight must cancel the residual. For
+        // `PerUnitFromTotal` the weight is `total * signum(units)`, so pick
+        // `total = -residual * signum(units)` and `per_unit = total / |units|`.
+        let signum = units_number.signum();
+        let total = -residual * signum;
+        let per_unit = total / units_number.abs();
+
+        let existing = result.postings[idx]
+            .cost
+            .take()
+            .unwrap_or_else(CostSpec::empty);
+        result.postings[idx].cost = Some(CostSpec {
+            number: Some(CostNumber::PerUnitFromTotal(BookedCost::new(
+                per_unit,
+                total,
+                units_number,
+            ))),
+            currency: Some(currency.clone()),
+            date: existing.date.or(Some(transaction.date)),
+            label: existing.label,
+            merge: existing.merge,
+        });
+        // Fold the now-known cost weight into the residual so downstream
+        // missing-amount solving sees a balanced cost currency.
+        *residuals.entry(currency).or_default() += total * signum;
     }
 
     // Fill in known-currency missing postings
@@ -1479,6 +1542,45 @@ mod tests {
         assert!(
             matches!(result, Err(InterpolationError::MultipleMissing { .. })),
             "two empty cost specs in same currency should error; got {result:?}"
+        );
+    }
+
+    /// Issue #1705: an augmenting `{}` posting with one balancing leg has
+    /// its per-unit cost inferred from the residual (like beancount), not
+    /// left with an empty cost basis. `1000 USD {}` + `-900 EUR` → the lot
+    /// is booked at 0.90 EUR/unit.
+    #[test]
+    fn test_interpolate_augmenting_empty_cost_inferred_from_residual() {
+        use rustledger_core::{CostNumber, CostSpec};
+
+        let txn = Transaction::new(date(2024, 1, 2), "buy USD")
+            .with_synthesized_posting(
+                Posting::new("Assets:Broker", Amount::new(dec!(1000), "USD"))
+                    .with_cost(CostSpec::empty()), // augmenting `{}` — no price
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-900), "EUR")));
+
+        let result = interpolate(&txn).expect("augmenting `{}` should interpolate its cost");
+        let cost = result.transaction.postings[0]
+            .cost
+            .as_ref()
+            .expect("cost spec should be present");
+        assert_eq!(cost.currency.as_deref(), Some("EUR"));
+        match cost.number {
+            Some(CostNumber::PerUnitFromTotal(b)) => {
+                assert_eq!(b.per_unit, dec!(0.90), "per-unit cost");
+                assert_eq!(b.total, dec!(900), "preserved total");
+            }
+            other => panic!("expected PerUnitFromTotal, got {other:?}"),
+        }
+        // Cost currency now balances.
+        assert_eq!(
+            result
+                .residuals
+                .get("EUR")
+                .copied()
+                .unwrap_or(Decimal::ZERO),
+            Decimal::ZERO
         );
     }
 

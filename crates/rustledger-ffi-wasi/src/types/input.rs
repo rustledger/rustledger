@@ -53,6 +53,14 @@ pub enum InputCostNumber {
         /// Total value.
         value: String,
     },
+    /// `{per_unit # total USD}` — compound cost as written (beancount
+    /// `compound_amount`); the cost totals `N * per_unit + total`.
+    Compound {
+        /// Per-unit component (zero when omitted).
+        per_unit: String,
+        /// Lump-total component (zero when omitted).
+        total: String,
+    },
     /// Post-booking: derived per-unit and preserved source total.
     PerUnitFromTotal {
         /// Derived per-unit.
@@ -303,6 +311,13 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                                 Some(crate::types::input::InputCostNumber::Total { value }) => {
                                     Some(rustledger_core::CostNumber::Total { value: parse(value)? })
                                 }
+                                Some(crate::types::input::InputCostNumber::Compound {
+                                    per_unit,
+                                    total,
+                                }) => Some(rustledger_core::CostNumber::Compound {
+                                    per_unit: parse(per_unit)?,
+                                    total: parse(total)?,
+                                }),
                                 Some(crate::types::input::InputCostNumber::PerUnitFromTotal {
                                     per_unit,
                                     total,

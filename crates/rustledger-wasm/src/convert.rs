@@ -134,6 +134,12 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                                     total: b.total.to_string(),
                                 }
                             }
+                            rustledger_core::CostNumber::Compound { per_unit, total } => {
+                                CostNumberJson::Compound {
+                                    per_unit: per_unit.to_string(),
+                                    total: total.to_string(),
+                                }
+                            }
                         }),
                         currency: c.currency.as_ref().map(ToString::to_string),
                         date: c.date.map(|d| d.to_string()),

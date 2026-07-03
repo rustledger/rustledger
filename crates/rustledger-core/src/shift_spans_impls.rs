@@ -143,6 +143,10 @@ impl ShiftSpans for CostNumber {
         match self {
             Self::PerUnit { value } | Self::Total { value } => value.shift_spans(shift),
             Self::PerUnitFromTotal(booked) => booked.shift_spans(shift),
+            Self::Compound { per_unit, total } => {
+                per_unit.shift_spans(shift);
+                total.shift_spans(shift);
+            }
         }
     }
 }

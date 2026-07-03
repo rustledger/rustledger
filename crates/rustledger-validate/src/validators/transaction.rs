@@ -174,6 +174,9 @@ pub fn validate_transaction_structure(
             // copy this pattern to *build* a `BookedCost` — that would
             // bypass the consistency invariant enforced by
             // `BookedCost::new` / `try_new`.
+            // Compound carries two independently-signed components; take
+            // the first negative one (per-unit checked first) so the
+            // diagnostic names the offending part.
             let (label, value) = match cn {
                 rustledger_core::CostNumber::PerUnit { value } => ("per-unit", value),
                 rustledger_core::CostNumber::Total { value }
@@ -181,6 +184,13 @@ pub fn validate_transaction_structure(
                     total: value,
                     ..
                 }) => ("total", value),
+                rustledger_core::CostNumber::Compound { per_unit, total } => {
+                    if per_unit < Decimal::ZERO {
+                        ("per-unit", per_unit)
+                    } else {
+                        ("total", total)
+                    }
+                }
             };
             if value < Decimal::ZERO {
                 let units_str = posting.amount().map_or_else(

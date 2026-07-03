@@ -43,6 +43,9 @@ pub fn format_cost_spec(spec: &CostSpec) -> String {
             Some(crate::CostNumber::Total { value: num }) => {
                 parts.push(format!("{num} {curr}"));
             }
+            Some(crate::CostNumber::Compound { per_unit, total }) => {
+                parts.push(format!("{per_unit} # {total} {curr}"));
+            }
             None => {}
         }
     }

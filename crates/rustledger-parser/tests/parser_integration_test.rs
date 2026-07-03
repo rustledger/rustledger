@@ -1061,16 +1061,13 @@ fn test_reject_incomplete_final_directive_at_eof() {
     );
 }
 
-/// Regression: `{ N # T USD }` source carries both a per-unit and a
-/// total. The booker derives per-unit as `T / |units|`, so the
-/// user-written `N` is informationally redundant — Python beancount
-/// treats this form as semantically equivalent to `{{ T USD }}` and
-/// we follow suit. Pin the precedence so a future refactor can't
-/// silently flip it (e.g. by keeping `N` instead and dropping `T`,
-/// which would invert the post-booking value of every cost-basis
-/// read of this spec form).
+/// `{N # T CCY}` is beancount's `compound_amount`: per-unit `N` AND lump
+/// total `T`; the cost totals `units*N + T`. An earlier version of this
+/// test pinned the form to `Total{T}` — itself a partial fix (the parser
+/// once dropped `T` entirely) that baked in dropping `N` instead; #1700
+/// corrected the parse to carry both components as written.
 #[test]
-fn test_cost_spec_n_hash_t_uses_total() {
+fn test_cost_spec_n_hash_t_parses_compound() {
     use rust_decimal_macros::dec;
     use rustledger_core::CostNumber;
 
@@ -1098,8 +1095,12 @@ fn test_cost_spec_n_hash_t_uses_total() {
         .expect("cost spec present");
     assert_eq!(
         cost.number,
-        Some(CostNumber::Total { value: dec!(1500) }),
-        "the `#` form must store the post-`#` total, not the pre-`#` per-unit"
+        Some(CostNumber::Compound {
+            per_unit: dec!(50),
+            total: dec!(1500)
+        }),
+        "the `#` form must carry BOTH components as written (#1700): \
+         beancount's compound_amount weighs N*per_unit + total"
     );
     assert_eq!(
         cost.currency

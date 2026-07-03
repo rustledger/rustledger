@@ -1394,18 +1394,19 @@ fn convert_cost_spec(cs: &ast::CostSpec) -> CostSpec {
     let merge = cs.is_merge();
     let is_total = cs.is_total();
 
-    // `{N # T CCY}` form: the value AFTER the `#` is the total
-    // (per-unit `N` is informationally redundant and the booker
-    // derives it from `T / |units|`). Pin this here so the form
-    // is semantically equivalent to `{{T CCY}}` (matching Python
-    // beancount). Without this, the FIRST `NUMBER` would be
-    // surfaced as `PerUnit{N}` and the post-`#` total would be
-    // silently dropped - inverting the post-booking value of
-    // every cost-basis read of this spec form.
-    let post_hash_total = cost_total_after_hash(cs);
+    // Compound `{a # b}` form (beancount compound_amount): per-unit
+    // AND a lump total on top; the cost totals `N*a + b`. Surfaced as
+    // written — units may be interpolated later, so the combined total
+    // cannot be computed here; booking derives it (#1700). An omitted
+    // side is zero, which is arithmetically exact (`{# b}` ≡ `{{b}}`,
+    // `{a #}` ≡ `{a}`).
+    let compound = cost_compound_numbers(cs);
 
-    let cost_number = if let Some(total) = post_hash_total {
-        Some(CostNumber::Total { value: total })
+    let cost_number = if let Some((per_unit, total)) = compound {
+        Some(CostNumber::Compound {
+            per_unit: per_unit.unwrap_or_default(),
+            total: total.unwrap_or_default(),
+        })
     } else {
         let number = cs.number().and_then(|n| parse_decimal_token(n.text()));
         match (number, is_total) {
@@ -1428,31 +1429,39 @@ fn convert_cost_spec(cs: &ast::CostSpec) -> CostSpec {
     }
 }
 
-/// Detect the `{N # T CCY}` cost-spec shape (a `HASH` token
-/// between two `NUMBER` tokens at the cost-spec's depth) and
-/// return `T` as a `Decimal`. Returns `None` for every other
-/// shape - `{N CCY}`, `{{T CCY}}`, `{#}`, etc.
-fn cost_total_after_hash(cs: &ast::CostSpec) -> Option<Decimal> {
-    let mut seen_number = false;
+/// Detect the compound cost-spec shape — a `HASH` token at the
+/// cost-spec's depth — and return `(per_unit, total)` as written:
+/// `{a # b}` → `(Some(a), Some(b))`, `{# b}` → `(None, Some(b))`,
+/// `{a #}` → `(Some(a), None)`. Returns `None` when there is no
+/// `HASH` (plain `{N CCY}` / `{{T CCY}}` shapes).
+///
+/// Pre-#1700 this detector required a number BEFORE the hash and
+/// returned only the post-hash value, which the caller surfaced as
+/// `Total` — collapsing `{a # b}` to `{{b}}` (dropping `a`) and
+/// missing `{# b}` entirely (its first number then parsed as
+/// `PerUnit`). Beancount's `compound_amount` weighs `N*a + b`.
+fn cost_compound_numbers(cs: &ast::CostSpec) -> Option<(Option<Decimal>, Option<Decimal>)> {
+    let mut before: Option<Decimal> = None;
+    let mut after: Option<Decimal> = None;
+    // `{# 10.00 USD}` lexes its opener as a single L_BRACE_HASH token, so
+    // the hash can arrive fused with the brace rather than standalone.
     let mut past_hash = false;
     for el in cs.syntax().children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
             continue;
         };
         match t.kind() {
-            crate::SyntaxKind::NUMBER if !seen_number => {
-                seen_number = true;
+            crate::SyntaxKind::HASH | crate::SyntaxKind::L_BRACE_HASH => past_hash = true,
+            crate::SyntaxKind::NUMBER if !past_hash && before.is_none() => {
+                before = parse_decimal_token(t.text());
             }
-            crate::SyntaxKind::HASH if seen_number => {
-                past_hash = true;
-            }
-            crate::SyntaxKind::NUMBER if past_hash => {
-                return parse_decimal_token(t.text());
+            crate::SyntaxKind::NUMBER if past_hash && after.is_none() => {
+                after = parse_decimal_token(t.text());
             }
             _ => {}
         }
     }
-    None
+    past_hash.then_some((before, after))
 }
 
 fn convert_price_annotation(
@@ -3939,8 +3948,12 @@ mod tests {
     }
 
     #[test]
-    fn cost_spec_n_hash_t_uses_total_form() {
+    fn cost_spec_n_hash_t_parses_as_compound() {
         use rust_decimal_macros::dec;
+        // This test previously pinned `{N # T}` -> Total{T} — the #1700
+        // mis-parse (beancount's compound_amount weighs N*per + total,
+        // so dropping the per-unit silently mis-weighed every compound
+        // spec). It now pins the corrected as-written form.
         let src = "2024-01-01 open Assets:Stock\n\
                    2024-01-01 open Assets:Cash USD\n\
                    2024-01-15 *\n  \
@@ -3958,8 +3971,11 @@ mod tests {
             .expect("cost spec present");
         assert_eq!(
             cost.number,
-            Some(CostNumber::Total { value: dec!(1500) }),
-            "the `{{N # T CCY}}` form must store the post-`#` total"
+            Some(CostNumber::Compound {
+                per_unit: dec!(50),
+                total: dec!(1500)
+            }),
+            "the `{{N # T CCY}}` form must carry both components as written"
         );
     }
 

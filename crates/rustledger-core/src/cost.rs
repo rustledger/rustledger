@@ -261,6 +261,24 @@ pub enum CostNumber {
     /// so the booking-time invariant lives on a named type with
     /// constructor methods that enforce it.
     PerUnitFromTotal(BookedCost),
+    /// Compound cost as written: `{5.00 # 10.00 USD}` — per-unit AND a
+    /// lump total on top (beancount's `compound_amount`). On N units the
+    /// cost totals `N * per_unit + total`; booking rewrites this to
+    /// [`Self::PerUnitFromTotal`] with that combined total once units
+    /// are known. `{# 10.00 USD}` parses as `per_unit = 0` and `{5.00 #
+    /// USD}` as `total = 0` — arithmetically exact in both cases.
+    ///
+    /// Before #1700 the parser folded this form into [`Self::Total`]
+    /// with only the post-`#` value, silently mis-weighing every
+    /// compound spec (valid ledgers errored, invalid ones passed).
+    Compound {
+        /// Per-unit component (`a` in `{a # b}`); zero when omitted.
+        #[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))]
+        per_unit: Decimal,
+        /// Lump total component (`b` in `{a # b}`); zero when omitted.
+        #[cfg_attr(feature = "rkyv", rkyv(with = AsDecimal))]
+        total: Decimal,
+    },
 }
 
 /// Payload of [`CostNumber::PerUnitFromTotal`].
@@ -543,7 +561,9 @@ impl CostNumber {
         match self {
             Self::PerUnit { value } => Some(*value),
             Self::PerUnitFromTotal(b) => Some(b.per_unit),
-            Self::Total { .. } => None,
+            // The effective per-unit is (N*per_unit + total)/N — unknown
+            // until units are, same as Total.
+            Self::Total { .. } | Self::Compound { .. } => None,
         }
     }
 
@@ -557,7 +577,11 @@ impl CostNumber {
         match self {
             Self::Total { value } => Some(*value),
             Self::PerUnitFromTotal(b) => Some(b.total),
-            Self::PerUnit { .. } => None,
+            // Compound's `total` field is only the lump component; the
+            // whole total (N*per_unit + total) needs units. Exposing the
+            // lump here would mis-weigh callers that treat this as the
+            // full total — the exact bug class this variant fixes.
+            Self::PerUnit { .. } | Self::Compound { .. } => None,
         }
     }
 }
@@ -733,6 +757,14 @@ impl CostSpec {
                 }
                 total / units.abs()
             }
+            // Compound `{a # b}`: effective per-unit is (N*a + b)/N —
+            // beancount's compound_amount. Same zero-units guard as Total.
+            CostNumber::Compound { per_unit, total } => {
+                if units.is_zero() {
+                    return None;
+                }
+                per_unit + total / units.abs()
+            }
             // Already booked: `b.per_unit == b.total / |units|` by
             // `BookedCost::new`'s invariant, so this is identical to
             // the `Total` arm above but without the redivision.
@@ -758,6 +790,9 @@ impl fmt::Display for CostSpec {
             Some(CostNumber::PerUnit { value: n }) => parts.push(format!("{n}")),
             Some(CostNumber::PerUnitFromTotal(b)) => parts.push(format!("{}", b.per_unit)),
             Some(CostNumber::Total { value: n }) => parts.push(format!("# {n}")),
+            Some(CostNumber::Compound { per_unit, total }) => {
+                parts.push(format!("{per_unit} # {total}"));
+            }
             None => {}
         }
         if let Some(c) = &self.currency {

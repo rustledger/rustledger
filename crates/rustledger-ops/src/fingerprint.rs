@@ -151,6 +151,13 @@ fn hash_cost<H: Hasher>(cost: &CostData, hasher: &mut H) {
             2u8.hash(hasher);
             s.hash(hasher);
         }
+        Some(CostNumberData::Compound { per_unit, total }) => {
+            // Distinct tag: {5 # 10} must not collide with {5} or
+            // {{10}} or a booked PerUnitFromTotal(5, 10).
+            4u8.hash(hasher);
+            per_unit.hash(hasher);
+            total.hash(hasher);
+        }
         Some(CostNumberData::PerUnitFromTotal { per_unit, total }) => {
             // Post-booking state must hash distinctly from raw PerUnit
             // — two transactions with the same per_unit can have

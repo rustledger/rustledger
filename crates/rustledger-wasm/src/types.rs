@@ -489,6 +489,15 @@ pub enum CostNumberJson {
         /// Total value.
         value: String,
     },
+    /// Compound cost as written (e.g. `{5.00 # 10.00 USD}`): per-unit
+    /// AND lump total; costs `N * per_unit + total` (pre-booking only —
+    /// booking rewrites to `PerUnitFromTotal`).
+    Compound {
+        /// Per-unit component (zero when omitted).
+        per_unit: String,
+        /// Lump-total component (zero when omitted).
+        total: String,
+    },
     /// Post-booking derived per-unit with preserved source total.
     PerUnitFromTotal {
         /// Derived per-unit.

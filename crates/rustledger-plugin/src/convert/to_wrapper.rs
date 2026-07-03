@@ -102,6 +102,10 @@ pub(super) fn cost_to_data(cost: &CostSpec) -> CostData {
             rustledger_core::CostNumber::Total { value: d } => CostNumberData::Total {
                 value: d.to_string(),
             },
+            rustledger_core::CostNumber::Compound { per_unit, total } => CostNumberData::Compound {
+                per_unit: per_unit.to_string(),
+                total: total.to_string(),
+            },
         }),
         currency: cost.currency.as_ref().map(ToString::to_string),
         date: cost.date.map(|d| d.to_string()),

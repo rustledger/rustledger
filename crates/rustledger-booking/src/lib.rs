@@ -205,6 +205,14 @@ fn cost_weight<D: WeightNum>(
         Some(rustledger_core::CostNumber::PerUnit { value: per_unit }) => {
             D::from_decimal(units.number) * D::from_decimal(per_unit)
         }
+        // Compound `{a # b}` (beancount compound_amount): the cost totals
+        // `N*a + b`, so the weight is the per-unit product (sign embedded
+        // in `units`) plus the signed lump total (#1700).
+        Some(rustledger_core::CostNumber::Compound { per_unit, total }) => {
+            let mut w = D::from_decimal(units.number) * D::from_decimal(per_unit);
+            w += D::from_decimal(total) * D::from_decimal(signum);
+            w
+        }
         None => return None, // empty `{}`
     };
     let cost_curr = cost_currency_of(posting, infer_currency)?;

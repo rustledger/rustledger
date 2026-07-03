@@ -286,10 +286,11 @@ fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
                     first_number = parse_decimal_token(t.text());
                 }
             }
-            K::HASH => {
-                if seen_number {
-                    past_hash = true;
-                }
+            // Mirror red's compound detection (#1700): the hash arms the
+            // post-hash side unconditionally, and `{#` arrives as a fused
+            // L_BRACE_HASH opener.
+            K::HASH | K::L_BRACE_HASH => {
+                past_hash = true;
             }
             K::CURRENCY if currency.is_none() => {
                 currency = Some(Currency::new(t.text()));
@@ -305,8 +306,13 @@ fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
             _ => {}
         }
     }
-    let number = if let Some(total) = post_hash_total {
-        Some(CostNumber::Total { value: total })
+    let number = if past_hash {
+        // Compound `{a # b}` as written — mirrors red's
+        // `cost_compound_numbers` caller: omitted sides are zero.
+        Some(CostNumber::Compound {
+            per_unit: first_number.unwrap_or_default(),
+            total: post_hash_total.unwrap_or_default(),
+        })
     } else {
         match (first_number, is_total) {
             (Some(v), true) => Some(CostNumber::Total { value: v }),

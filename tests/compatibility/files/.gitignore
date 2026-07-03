@@ -21,3 +21,11 @@
 !plugins/
 !plugins/**/
 !plugins/**/*.beancount
+
+# In-tree cost-spec differential fixtures (#1700): compound `{a # b}`
+# costs, which the downloaded corpus does not cover (it exercises `@@`
+# total prices but not `#` total costs). Same recursion note as above.
+!costs/
+!costs/**/
+!costs/**/*.beancount
+!costs/*.beancount

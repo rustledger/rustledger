@@ -171,6 +171,12 @@ pub(super) fn data_to_cost(
         Some(CostNumberData::Total { value: s }) => {
             Some(rustledger_core::CostNumber::Total { value: parse(s)? })
         }
+        Some(CostNumberData::Compound { per_unit, total }) => {
+            Some(rustledger_core::CostNumber::Compound {
+                per_unit: parse(per_unit)?,
+                total: parse(total)?,
+            })
+        }
         Some(CostNumberData::PerUnitFromTotal { per_unit, total }) => {
             let per_unit_d = parse(per_unit)?;
             let total_d = parse(total)?;

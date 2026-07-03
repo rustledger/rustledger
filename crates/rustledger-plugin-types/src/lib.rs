@@ -599,6 +599,16 @@ pub enum CostNumberData {
         /// Total value.
         value: String,
     },
+    /// Compound cost as written: `{5.00 # 10.00 USD}` (beancount
+    /// `compound_amount`) — per-unit AND a lump total; the cost totals
+    /// `N * per_unit + total`. Plugins only see this pre-booking
+    /// (synth pass); booking rewrites it to `PerUnitFromTotal`.
+    Compound {
+        /// Per-unit component (zero when omitted).
+        per_unit: String,
+        /// Lump-total component (zero when omitted).
+        total: String,
+    },
     /// Post-booking derived per-unit with the original total preserved.
     /// `per_unit == total / |units|` by host construction; preferring
     /// `total` for cost-basis-style reads avoids the
@@ -622,7 +632,9 @@ impl CostNumberData {
             | Self::PerUnitFromTotal {
                 per_unit: value, ..
             } => Some(value),
-            Self::Total { .. } => None,
+            // Compound's effective per-unit is (N*per_unit + total)/N —
+            // not derivable without units; same contract as raw Total.
+            Self::Total { .. } | Self::Compound { .. } => None,
         }
     }
 
@@ -632,7 +644,10 @@ impl CostNumberData {
     pub fn total(&self) -> Option<&str> {
         match self {
             Self::Total { value } | Self::PerUnitFromTotal { total: value, .. } => Some(value),
-            Self::PerUnit { .. } => None,
+            // Compound's `total` field is only the lump component, not
+            // the whole cost — exposing it here would recreate the #1700
+            // mis-weighing in any consumer that treats it as the total.
+            Self::PerUnit { .. } | Self::Compound { .. } => None,
         }
     }
 }

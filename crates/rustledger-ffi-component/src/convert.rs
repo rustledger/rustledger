@@ -39,6 +39,9 @@ fn cost_number_from_core(n: rustledger_core::CostNumber) -> wit::CostNumber {
         rustledger_core::CostNumber::PerUnitFromTotal(b) => {
             wit::CostNumber::PerUnitFromTotal((b.per_unit.to_string(), b.total.to_string()))
         }
+        rustledger_core::CostNumber::Compound { per_unit, total } => {
+            wit::CostNumber::Compound((per_unit.to_string(), total.to_string()))
+        }
     }
 }
 
@@ -972,6 +975,10 @@ fn input_cost_number(n: &wit::CostNumber) -> ffi::InputCostNumber {
                 total: total.clone(),
             }
         }
+        wit::CostNumber::Compound((per_unit, total)) => ffi::InputCostNumber::Compound {
+            per_unit: per_unit.clone(),
+            total: total.clone(),
+        },
     }
 }
 

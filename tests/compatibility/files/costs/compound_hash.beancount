@@ -1,0 +1,28 @@
+; Differential fixture for compound `{a # b}` costs (#1700).
+; Beancount weighs `{a # b}` on N units as N*a + b; the booked per-unit
+; cost is (N*a + b)/N. The pre-existing corpus covered `@@` total PRICES
+; but not `#` total COSTS, which is how the mis-parse survived.
+; Cross-checked against bean-check: this file is VALID.
+
+2024-01-01 open Assets:Brokerage
+2024-01-01 open Assets:Cash
+
+; per-unit with explicit zero lump: weight 2*5.00 + 0.00 = 10.00
+2024-01-10 * "compound, zero total"
+  Assets:Brokerage  2 VTI {5.00 # 0.00 USD}
+  Assets:Cash  -10.00 USD
+
+; lump-only: weight 2*0 + 10.00 = 10.00
+2024-01-11 * "compound, total only"
+  Assets:Brokerage  2 VTI {# 10.00 USD}
+  Assets:Cash  -10.00 USD
+
+; both components: weight 2*5.00 + 10.00 = 20.00; books at 10.00/unit
+2024-01-12 * "compound, both components"
+  Assets:Brokerage  2 VTI {5.00 # 10.00 USD}
+  Assets:Cash  -20.00 USD
+
+; asymmetric case: books at (2*6.00 + 10.00)/2 = 11.00/unit
+2024-01-13 * "compound, asymmetric basis"
+  Assets:Brokerage  2 VTI {6.00 # 10.00 USD}
+  Assets:Cash  -22.00 USD

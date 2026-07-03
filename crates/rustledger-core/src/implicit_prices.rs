@@ -104,7 +104,12 @@ pub fn extract_per_unit_price<T>(
             Some(crate::CostNumber::Total { value: total }) if !units_number.is_zero() => {
                 return Some((total / units_number.abs(), currency));
             }
-            Some(crate::CostNumber::Total { value: _ }) | None => {}
+            // Compound `{a # b}`: effective per-unit is a + b/|N|.
+            Some(crate::CostNumber::Compound { per_unit, total }) if !units_number.is_zero() => {
+                return Some((per_unit + total / units_number.abs(), currency));
+            }
+            Some(crate::CostNumber::Total { value: _ } | crate::CostNumber::Compound { .. })
+            | None => {}
         }
     }
 

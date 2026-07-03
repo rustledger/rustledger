@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.2.0;
+package rustledger:ledger@3.3.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -35,6 +35,11 @@ interface types {
     total(string),
     /// Post-booking: (derived-per-unit, preserved-original-total).
     per-unit-from-total(tuple<string, string>),
+    /// Compound cost as written, e.g. `{5.00 # 10.00 USD}` — (per-unit,
+    /// lump-total); the cost totals `N * per-unit + lump-total`. Booking
+    /// rewrites this to `per-unit-from-total`, so it only crosses the
+    /// boundary on pre-booking egress (added in 3.3.0 for #1700).
+    compound(tuple<string, string>),
   }
 
   /// A cost: number + currency + optional acquisition date and lot label.

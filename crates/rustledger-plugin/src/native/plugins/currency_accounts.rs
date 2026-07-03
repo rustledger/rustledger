@@ -177,6 +177,21 @@ impl NativePlugin for CurrencyAccountsPlugin {
                                 total.abs()
                             }
                         }
+                        Some(rustledger_plugin_types::CostNumberData::Compound {
+                            per_unit,
+                            total,
+                        }) => {
+                            // `{a # b}`: N*a (sign embedded in units) plus
+                            // the lump total signed with the posting.
+                            let per = Decimal::from_str(per_unit).unwrap_or_default();
+                            let lump = Decimal::from_str(total).unwrap_or_default();
+                            let signed_lump = if units_num.is_sign_negative() {
+                                -lump.abs()
+                            } else {
+                                lump.abs()
+                            };
+                            units_num * per + signed_lump
+                        }
                         Some(rustledger_plugin_types::CostNumberData::PerUnitFromTotal {
                             total,
                             ..

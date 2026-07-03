@@ -345,8 +345,20 @@ impl BookingEngine {
                     // If not a reduction: fall through to augmentation code below
                 }
 
-                if let Some(rustledger_core::CostNumber::Total { value: total }) = cost_spec.number
-                {
+                // Compound `{a # b}` augmentation: combine into the whole
+                // total `N*a + b` first, then share the Total conversion
+                // below — the booked shape is identical (`PerUnitFromTotal`
+                // with the combined total preserved for exact residuals),
+                // so every post-booking consumer is agnostic to which
+                // written form produced it (#1700).
+                let effective_total = match cost_spec.number {
+                    Some(rustledger_core::CostNumber::Total { value }) => Some(value),
+                    Some(rustledger_core::CostNumber::Compound { per_unit, total }) => {
+                        Some(units.number.abs() * per_unit + total)
+                    }
+                    _ => None,
+                };
+                if let Some(total) = effective_total {
                     // Augmentation with total cost — convert to the
                     // post-booking `PerUnitFromTotal` shape:
                     //   `1.763 VIIIX {{300.00 USD}}` → derived per-unit

@@ -217,6 +217,35 @@ impl NativePlugin for ImplicitPricesPlugin {
                                 }
                             }
                         }
+                        Some(rustledger_plugin_types::CostNumberData::Compound {
+                            per_unit,
+                            total,
+                        }) => {
+                            let per_unit_d = match Decimal::from_str(per_unit) {
+                                Ok(d) => d,
+                                Err(_) => {
+                                    return Some(Err(format!(
+                                        "implicit_prices: posting on account {:?} has cost \
+                                         per_unit {per_unit:?} that doesn't parse as a decimal",
+                                        posting.account
+                                    )));
+                                }
+                            };
+                            let total_d = match Decimal::from_str(total) {
+                                Ok(d) => d,
+                                Err(_) => {
+                                    return Some(Err(format!(
+                                        "implicit_prices: posting on account {:?} has cost \
+                                         total {total:?} that doesn't parse as a decimal",
+                                        posting.account
+                                    )));
+                                }
+                            };
+                            Some(rustledger_core::CostNumber::Compound {
+                                per_unit: per_unit_d,
+                                total: total_d,
+                            })
+                        }
                         Some(rustledger_plugin_types::CostNumberData::PerUnitFromTotal {
                             per_unit,
                             total,

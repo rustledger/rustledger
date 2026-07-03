@@ -48,6 +48,7 @@ impl Executor<'_> {
                     Ok(r.to_i64().map_or(Value::Number(r), Value::Integer))
                 }
             }
+            Value::Null => Ok(Value::Null),
             _ => Err(QueryError::Type("ROUND expects a number".to_string())),
         }
     }

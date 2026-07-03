@@ -697,6 +697,7 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
                     Value::Date(d) => Ok(Value::Integer(d.year().into())),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type("YEAR expects a date".to_string())),
                 }
             }
@@ -704,6 +705,7 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
                     Value::Date(d) => Ok(Value::Integer(d.month().into())),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type("MONTH expects a date".to_string())),
                 }
             }
@@ -711,6 +713,7 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
                     Value::Date(d) => Ok(Value::Integer(d.day().into())),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type("DAY expects a date".to_string())),
                 }
             }
@@ -721,6 +724,7 @@ impl<'a> Executor<'a> {
                     // Count Unicode characters, not UTF-8 bytes (matches beanquery).
                     Value::String(s) => Ok(Value::Integer(s.chars().count() as i64)),
                     Value::StringSet(s) => Ok(Value::Integer(s.len() as i64)),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "LENGTH expects a string or set".to_string(),
                     )),
@@ -730,6 +734,7 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
                     Value::String(s) => Ok(Value::String(s.to_uppercase())),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type("UPPER expects a string".to_string())),
                 }
             }
@@ -737,6 +742,7 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
                     Value::String(s) => Ok(Value::String(s.to_lowercase())),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type("LOWER expects a string".to_string())),
                 }
             }
@@ -744,6 +750,7 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
                     Value::String(s) => Ok(Value::String(s.trim().to_string())),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type("TRIM expects a string".to_string())),
                 }
             }
@@ -753,6 +760,7 @@ impl<'a> Executor<'a> {
                 match &args[0] {
                     Value::Number(n) => Ok(Value::Number(n.abs())),
                     Value::Integer(i) => Ok(Value::Integer(i.abs())),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type("ABS expects a number".to_string())),
                 }
             }
@@ -953,6 +961,7 @@ impl<'a> Executor<'a> {
                     Value::Amount(a) => {
                         Ok(Value::Amount(Amount::new(-a.number, a.currency.clone())))
                     }
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "NEG expects a number or amount".to_string(),
                     )),
@@ -966,6 +975,7 @@ impl<'a> Executor<'a> {
                         let type_index = Self::account_type_index(s);
                         Ok(Value::String(format!("{type_index}-{s}")))
                     }
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "ACCOUNT_SORTKEY expects an account string".to_string(),
                     )),
@@ -981,6 +991,7 @@ impl<'a> Executor<'a> {
                             Ok(Value::Null)
                         }
                     }
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "PARENT expects an account string".to_string(),
                     )),
@@ -996,6 +1007,7 @@ impl<'a> Executor<'a> {
                             Ok(Value::String(s.clone()))
                         }
                     }
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "LEAF expects an account string".to_string(),
                     )),
@@ -1037,6 +1049,7 @@ impl<'a> Executor<'a> {
                             Ok(Value::String(parts[..n].join(":")))
                         }
                     }
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "ROOT expects an account string".to_string(),
                     )),
@@ -1143,6 +1156,7 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 2)?;
                 let currency = match &args[1] {
                     Value::String(s) => s.clone(),
+                    Value::Null => return Ok(Value::Null),
                     _ => {
                         return Err(QueryError::Type(
                             "FILTER_CURRENCY expects (inventory, string)".to_string(),
@@ -1172,6 +1186,7 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 2)?;
                 let account_str = match &args[1] {
                     Value::String(s) => s.clone(),
+                    Value::Null => return Ok(Value::Null),
                     _ => {
                         return Err(QueryError::Type(
                             "POSSIGN expects (amount, account_string)".to_string(),
@@ -1368,6 +1383,7 @@ impl<'a> Executor<'a> {
                         d.year(),
                         (d.month() - 1) / 3 + 1
                     ))),
+                    Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type("QUARTER expects a date".to_string())),
                 }
             }

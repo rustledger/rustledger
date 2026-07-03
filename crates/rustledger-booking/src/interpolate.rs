@@ -34,6 +34,31 @@ pub enum InterpolationError {
         /// booking-time lot matching.
         count: usize,
     },
+    /// The residual-solved cost for an empty `{}` augmentation came out
+    /// negative — beancount rejects this ("Cost is negative") rather than
+    /// booking a negative-cost lot (#1705 edge e14).
+    #[error(
+        "inferred cost for {currency} posting is negative ({per_unit} per unit); \
+         a lot cannot be acquired at a negative cost"
+    )]
+    NegativeInferredCost {
+        /// The cost currency the negative value was solved in.
+        currency: Currency,
+        /// The (negative) solved per-unit value.
+        per_unit: Decimal,
+    },
+    /// An empty `{}` cost spec names no currency and the transaction's
+    /// other postings span more than one currency, so the cost currency
+    /// (and therefore the residual to solve from) is ambiguous — beancount
+    /// rejects this ("Failed to categorize posting") (#1705 edge e15).
+    #[error(
+        "cannot infer the cost currency for the {{}} cost spec: candidates \
+         {candidates}; name it explicitly (e.g. {{EUR}})"
+    )]
+    AmbiguousInferredCostCurrency {
+        /// Comma-joined candidate currencies observed.
+        candidates: String,
+    },
 
     /// Cannot infer currency for a posting.
     #[error("cannot infer currency for posting to account {account}")]
@@ -237,13 +262,81 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                     });
                     if let Some(curr) = cost_currency {
                         *cost_unknowns_by_currency.entry(curr.clone()).or_default() += 1;
-                        // An empty `{}` with NO price annotation reaching here is
-                        // an augmentation (a reduction's `{}` is filled by the
-                        // booking pass first). Beancount infers its per-unit cost
-                        // from the residual — record it for post-loop solving.
-                        if posting.price.is_none() {
-                            inferable_cost.push((i, curr, amount.number));
+                        // An empty `{}` reaching here is an augmentation (a
+                        // reduction's `{}` is filled by the booking pass
+                        // first). Beancount infers its per-unit cost from the
+                        // residual — INCLUDING when a price annotation is
+                        // present, and even when the two disagree (verified
+                        // against bean-check 3.2.3: `{} @ 0.90` with a 0.95
+                        // residual books {0.95}; the price feeds implicit
+                        // price directives only). #1705 edges e07/e16.
+                        //
+                        // The cost currency must be unambiguous when the spec
+                        // does not name one: with candidates from more than
+                        // one non-cost posting, beancount fails to categorize
+                        // the posting (edge e15).
+                        if posting.cost.as_ref().is_some_and(|c| c.currency.is_none()) {
+                            // Candidates are currencies of COMPLETE cost-less
+                            // postings, excluding any currency that already
+                            // has its own missing-amount posting: that group
+                            // owns its unknown, so the {} cannot also belong
+                            // to it (the per-group at-most-one rule) — which
+                            // is what disambiguates "cost-unknown in USD +
+                            // missing amount in EUR" (fine, disjoint groups)
+                            // from two complete foreign currencies (e15,
+                            // beancount: "Failed to categorize").
+                            let mut complete: Vec<String> = Vec::new();
+                            let mut incomplete: Vec<String> = Vec::new();
+                            for p in &transaction.postings {
+                                if p.cost.is_some() {
+                                    continue;
+                                }
+                                let curr_of = crate::price_currency_of(p).or_else(|| {
+                                    p.units.as_ref().and_then(|u| match u {
+                                        IncompleteAmount::Complete(a) => Some(a.currency.clone()),
+                                        IncompleteAmount::CurrencyOnly(c) => Some(c.clone()),
+                                        IncompleteAmount::NumberOnly(_) => None,
+                                    })
+                                });
+                                let complete_units =
+                                    matches!(p.units.as_ref(), Some(IncompleteAmount::Complete(_)));
+                                if let Some(c) = curr_of {
+                                    if complete_units {
+                                        complete.push(c.as_str().to_owned());
+                                    } else {
+                                        incomplete.push(c.as_str().to_owned());
+                                    }
+                                }
+                            }
+                            // A fully-unassigned missing posting (no currency
+                            // context at all) makes the whole transaction
+                            // reject via the post-scan unassigned+cost-unknown
+                            // check with a more specific diagnosis — defer to
+                            // it rather than reporting ambiguity.
+                            let has_unassigned = transaction.postings.iter().any(|p| {
+                                p.cost.is_none()
+                                    && crate::price_currency_of(p).is_none()
+                                    && !matches!(
+                                        p.units.as_ref(),
+                                        Some(
+                                            IncompleteAmount::Complete(_)
+                                                | IncompleteAmount::CurrencyOnly(_)
+                                        )
+                                    )
+                            });
+                            let mut candidates: Vec<String> = complete
+                                .into_iter()
+                                .filter(|c| !incomplete.contains(c))
+                                .collect();
+                            candidates.sort_unstable();
+                            candidates.dedup();
+                            if !has_unassigned && candidates.len() > 1 {
+                                return Err(InterpolationError::AmbiguousInferredCostCurrency {
+                                    candidates: candidates.join(", "),
+                                });
+                            }
                         }
+                        inferable_cost.push((i, curr, amount.number));
                     }
                 } else if let Some(price) = &posting.price {
                     // Price annotation: converts units to price currency.
@@ -420,6 +513,11 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
         let signum = units_number.signum();
         let total = -residual * signum;
         let per_unit = total / units_number.abs();
+        if per_unit < Decimal::ZERO {
+            // Beancount: "Cost is negative" — a lot cannot be acquired at a
+            // negative cost (#1705 edge e14).
+            return Err(InterpolationError::NegativeInferredCost { currency, per_unit });
+        }
 
         let existing = result.postings[idx]
             .cost

@@ -44,10 +44,12 @@ fn first_cell(query_str: &str) -> Value {
 }
 
 /// Every typed scalar applied to a NULL argument yields NULL, not a type
-/// error. `payee` is NULL on the fixture's postings.
+/// error. `payee` is a transaction-level field that is NULL on the fixture's
+/// transaction (posting rows inherit it), so `payee` exercises the real
+/// column pipeline while the `NULL` literal pins the semantics directly.
 #[test]
 fn scalars_propagate_null() {
-    // string functions over NULL payee
+    // string functions over a NULL column (real pipeline path)
     for func in [
         "upper",
         "lower",
@@ -61,21 +63,14 @@ fn scalars_propagate_null() {
         let cell = first_cell(&format!("SELECT {func}(payee) LIMIT 1"));
         assert_eq!(cell, Value::Null, "{func}(NULL) must be NULL");
     }
-    // date functions over NULL (payee is not a date; use a NULL-yielding
-    // expression: first() over an empty-ish... simplest: year(date) is fine,
-    // so feed NULL via upper(payee) which is now NULL)
-    for func in ["year", "month", "day", "quarter"] {
-        let cell = first_cell(&format!("SELECT {func}(upper(payee)) LIMIT 1"));
-        assert_eq!(cell, Value::Null, "{func}(NULL) must be NULL");
-    }
-    // numeric functions
-    for func in ["abs", "neg"] {
-        let cell = first_cell(&format!("SELECT {func}(upper(payee)) LIMIT 1"));
+    // date and numeric functions over the NULL literal
+    for func in ["year", "month", "day", "quarter", "abs", "neg", "round"] {
+        let cell = first_cell(&format!("SELECT {func}(NULL) LIMIT 1"));
         assert_eq!(cell, Value::Null, "{func}(NULL) must be NULL");
     }
     // EMPTY deliberately treats NULL as an empty inventory (pre-existing
     // semantic; a missing inventory IS empty) rather than propagating.
-    let cell = first_cell("SELECT empty(upper(payee)) LIMIT 1");
+    let cell = first_cell("SELECT empty(NULL) LIMIT 1");
     assert_eq!(cell, Value::Boolean(true), "empty(NULL) is true by design");
 }
 

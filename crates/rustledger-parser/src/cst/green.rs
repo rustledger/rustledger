@@ -241,7 +241,7 @@ fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
 
 /// Convert a `COST_SPEC` green node into a `CostSpec` (forms `{N CCY}`,
 /// `{{T CCY}}`, `{N # T CCY}`, `{*}` merge, plus optional date + label). Mirrors
-/// `convert_cost_spec` / `cost_total_after_hash` in [`super::convert`]. Cost
+/// `convert_cost_spec` / `cost_compound_numbers` in [`super::convert`]. Cost
 /// numbers are plain `NUMBER` tokens (no arithmetic evaluation); an unparsable
 /// one yields `number: None` like red, which emits no diagnostic for cost
 /// numbers — so this needs no bail and always returns a `CostSpec`.
@@ -1277,9 +1277,10 @@ mod tests {
             // Regression (fuzz_green_eq_red cost-number): `{N # <X> T}` where the
             // first post-`#` token is a NUMBER that does NOT parse (here
             // `\u{06f6}`, an Arabic-Indic digit the lexer tokenizes as NUMBER but
-            // rust_decimal rejects). Green must latch that FIRST post-hash NUMBER
-            // (-> None -> PerUnit{N}, mirroring red's `cost_total_after_hash`),
-            // NOT scan on to the later parseable `0` and emit `Total{0}`.
+            // rust_decimal rejects). Both sides now RETRY past it to the later
+            // parseable `0` (red's `cost_compound_numbers` is_none() guards;
+            // green mirrors it since #1713) and agree on `Compound{7, 0}` —
+            // this entry pins that they keep agreeing.
             "7046/7/1D\n\tA:F{7#\u{06f6}>0",
             "\u{feff}2020-01-01 * \"p\"\n  A 1 USD\n  B\n", // BOM
             "2020-01-01 * \"é\" \"münts\"\n  Aaa 1 EUR\n  B\n", // multi-byte

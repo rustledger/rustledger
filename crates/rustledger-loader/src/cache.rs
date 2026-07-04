@@ -329,8 +329,12 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     (#1700) and the parser now emits it for `{a # b}` cost specs —
 ///     exactly the "gains additional fields" case the v12 note calls
 ///     out. Without the bump, a cache written by a pre-#1700 binary
-///     serves the old mis-parse (`Total{b}` / `PerUnit{b}`) to fixed
+///     serves the old misparse (`Total{b}` / `PerUnit{b}`) to fixed
 ///     binaries, resurrecting the bug for any previously-loaded ledger.
+/// v14: green compound-cost conversion now retries past unparsable
+///     pre-/post-hash NUMBER tokens like red (#1713); inputs with garbage
+///     around `{a # b}` parse to different `CostNumber` values than v13
+///     cached them as.
 /// v9: `CachedOptions` gained a `set_options: Vec<String>` field
 ///     (#1340). It was previously dropped, so a cache hit lost the
 ///     record of which options the file explicitly set — making
@@ -349,7 +353,7 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     silently ignored `option "display_precision" "USD:0.0001"` (formatting
 ///     fell back to inferred precision) and the other two settings. New fields
 ///     change the archived layout, so old bytes must be regenerated.
-const CACHE_VERSION: u32 = 13;
+const CACHE_VERSION: u32 = 14;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1052,7 +1056,7 @@ mod tests {
         // existing discriminants and payload encodings are unchanged (the
         // arrays below still pin them), and a fixture for the new variant
         // joins them.
-        const FIXTURE_VERSION: u32 = 13;
+        const FIXTURE_VERSION: u32 = 14;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1139,7 +1143,7 @@ mod tests {
         // v13 (#1700) added a CostNumber variant; MetaValue's archived
         // layout is untouched, so per the tripwire contract only the
         // fixture version moves.
-        const FIXTURE_VERSION: u32 = 13;
+        const FIXTURE_VERSION: u32 = 14;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(
@@ -1170,7 +1174,7 @@ mod tests {
         for mv in variants {
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(mv).unwrap();
             // Length-prefix so a byte moving across a variant boundary can't be
-            // masked by a compensating change in the neighbour.
+            // masked by a compensating change in the neighbor.
             hasher.update(&(bytes.len() as u64).to_le_bytes());
             hasher.update(&bytes);
         }

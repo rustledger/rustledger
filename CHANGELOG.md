@@ -1,3 +1,9 @@
+## [unreleased]
+
+### 🐛 Bug Fixes
+
+- *(parser)* Green compound-cost conversion retries unparsable numbers like red (#1714)
+- *(query)* Typed scalar functions propagate NULL (beanquery parity) (#1711)
 # Changelog
 
 Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadmap/index.md); completed items land here so the roadmaps stay forward-only.

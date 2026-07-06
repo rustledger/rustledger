@@ -646,9 +646,9 @@ dependencies = [
 
 [[package]]
 name = "clap_complete"
-version = "4.6.5"
+version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0a7a9bfdb35811f9e59832f0f05975114d2251b415fb534108e6f34060fd772"
+checksum = "db8b397918185f0161ff3d6fcaa9e4bfc09b8367caf6e1d4a2848e5477ed027b"
 dependencies = [
  "clap",
 ]
@@ -879,7 +879,7 @@ dependencies = [
  "postcard",
  "pulley-interpreter",
  "regalloc2",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde",
  "serde_derive",
  "sha2 0.10.9",
@@ -1527,7 +1527,7 @@ checksum = "25234f20a3ec0a962a61770cfe39ecf03cb529a6e474ad8cff025ed497eda557"
 dependencies = [
  "bitflags 2.13.0",
  "debugid",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde",
  "serde_derive",
  "serde_json",
@@ -2020,9 +2020,9 @@ dependencies = [
 
 [[package]]
 name = "jiff"
-version = "0.2.29"
+version = "0.2.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34f877a98676d2fb664698d74cc6a51ce6c484ce8c770f05d0108ec9090aeb46"
+checksum = "ccfe6121cbe750cf81efa362d85c0bde7ea298ec43092d3a193baca59cdbd634"
 dependencies = [
  "defmt",
  "jiff-static",
@@ -2038,9 +2038,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-static"
-version = "0.2.29"
+version = "0.2.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0666b5ab5ecaca213fc2a85b8c0083d9004e84ee2d5f9a7e0017aaf50986f25f"
+checksum = "e165e897f662d428f3cd3828a919dbe067c2d42bb1031eede74ef9d27ecdedd2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3116,7 +3116,7 @@ dependencies = [
  "bumpalo",
  "hashbrown 0.17.1",
  "log",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde",
  "smallvec",
 ]
@@ -3228,9 +3228,9 @@ dependencies = [
 
 [[package]]
 name = "rkyv"
-version = "0.8.16"
+version = "0.8.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73389e0c99e664f919275ab5b5b0471391fe9a8de61e1dff9b1eaf56a90f16e3"
+checksum = "815cc8a37159a463064825246cadb07961e25cd9885908606f6d08a98d8f8874"
 dependencies = [
  "bytecheck 0.8.2",
  "bytes",
@@ -3240,7 +3240,7 @@ dependencies = [
  "ptr_meta 0.3.1",
  "rancor",
  "rend 0.5.3",
- "rkyv_derive 0.8.16",
+ "rkyv_derive 0.8.17",
  "tinyvec",
  "uuid",
 ]
@@ -3258,9 +3258,9 @@ dependencies = [
 
 [[package]]
 name = "rkyv_derive"
-version = "0.8.16"
+version = "0.8.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d2ed0b54125315fb36bd021e82d314d1c126548f871634b483f46b31d13cac6"
+checksum = "c0ed1a78a1b19d184b0daa629dd9a024573173ec7d485b287cb369fb3607cc1c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3349,9 +3349,9 @@ checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustc-hash"
-version = "2.1.2"
+version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustix"
@@ -3440,7 +3440,7 @@ dependencies = [
  "proptest",
  "rust_decimal",
  "rust_decimal_macros",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "rustledger-core",
  "serde_json",
  "thiserror 2.0.18",
@@ -3458,10 +3458,10 @@ dependencies = [
  "imbl",
  "jiff",
  "proptest",
- "rkyv 0.8.16",
+ "rkyv 0.8.17",
  "rust_decimal",
  "rust_decimal_macros",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "serde",
  "serde_json",
  "smallvec",
@@ -3502,7 +3502,7 @@ name = "rustledger-ffi-wasi"
 version = "0.20.2"
 dependencies = [
  "jiff",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "rustledger-booking",
  "rustledger-core",
  "rustledger-loader",
@@ -3529,7 +3529,7 @@ dependencies = [
  "regex",
  "rmp-serde",
  "rust_decimal",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "rustledger-core",
  "rustledger-ops",
  "rustledger-plugin",
@@ -3549,10 +3549,10 @@ dependencies = [
  "glob",
  "jiff",
  "rayon",
- "rkyv 0.8.16",
+ "rkyv 0.8.17",
  "rust_decimal",
  "rust_decimal_macros",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "rustledger-booking",
  "rustledger-core",
  "rustledger-parser",
@@ -3614,7 +3614,7 @@ dependencies = [
  "logos",
  "num_enum",
  "proptest",
- "rkyv 0.8.16",
+ "rkyv 0.8.17",
  "rowan",
  "rust_decimal",
  "rust_decimal_macros",
@@ -3673,7 +3673,7 @@ dependencies = [
  "regex",
  "rust_decimal",
  "rust_decimal_macros",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "rustledger-core",
  "rustledger-loader",
  "rustledger-parser",
@@ -3692,7 +3692,7 @@ dependencies = [
  "rayon",
  "rust_decimal",
  "rust_decimal_macros",
- "rustc-hash 2.1.2",
+ "rustc-hash 2.1.3",
  "rustledger-booking",
  "rustledger-core",
  "rustledger-parser",
@@ -3710,7 +3710,7 @@ dependencies = [
  "getrandom 0.3.4",
  "jiff",
  "js-sys",
- "rkyv 0.8.16",
+ "rkyv 0.8.17",
  "rustledger-booking",
  "rustledger-completion",
  "rustledger-core",

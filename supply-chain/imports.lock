@@ -162,8 +162,8 @@ user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.clap_complete]]
-version = "4.6.5"
-when = "2026-05-11"
+version = "4.6.7"
+when = "2026-07-01"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
@@ -549,15 +549,15 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.jiff]]
-version = "0.2.29"
-when = "2026-06-21"
+version = "0.2.31"
+when = "2026-06-29"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
 
 [[publisher.jiff-static]]
-version = "0.2.29"
-when = "2026-06-21"
+version = "0.2.31"
+when = "2026-06-29"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"

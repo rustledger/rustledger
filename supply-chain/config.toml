@@ -632,7 +632,7 @@ version = "0.7.46"
 criteria = "safe-to-deploy"
 
 [[exemptions.rkyv]]
-version = "0.8.16"
+version = "0.8.17"
 criteria = "safe-to-deploy"
 
 [[exemptions.rkyv_derive]]
@@ -640,7 +640,7 @@ version = "0.7.46"
 criteria = "safe-to-deploy"
 
 [[exemptions.rkyv_derive]]
-version = "0.8.16"
+version = "0.8.17"
 criteria = "safe-to-deploy"
 
 [[exemptions.ropey]]
@@ -660,7 +660,7 @@ version = "1.40.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustc-hash]]
-version = "2.1.2"
+version = "2.1.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls]]

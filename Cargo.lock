@@ -1029,9 +1029,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "4279b0f31df31b4add8aeae57d40f3b5e53aad2b531e89b982bd75ed1898851d"
 dependencies = [
  "crossbeam-utils",
 ]

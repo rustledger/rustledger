@@ -25,15 +25,7 @@ pub(super) fn report_balances<W: Write>(
                 for posting in &txn.postings {
                     if let Some(amount) = posting.amount() {
                         let inv = balances.entry(posting.account.clone()).or_default();
-                        let position = if let Some(cost_spec) = &posting.cost {
-                            if let Some(cost) = cost_spec.resolve(amount.number, txn.date) {
-                                rustledger_core::Position::with_cost(amount.clone(), cost)
-                            } else {
-                                rustledger_core::Position::simple(amount.clone())
-                            }
-                        } else {
-                            rustledger_core::Position::simple(amount.clone())
-                        };
+                        let position = rustledger_core::Position::simple(amount.clone());
                         inv.add(position);
                     }
                 }

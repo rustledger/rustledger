@@ -271,7 +271,7 @@ impl Executor<'_> {
                 // from `build_postings_table`'s weight column. The two
                 // sites had drifted on `@@` sign handling, which was the
                 // root cause of issue #1052.
-                Ok(super::compute_posting_weight(posting, ctx.transaction.date))
+                Ok(super::compute_posting_weight(posting))
             }
             "balance" => {
                 // Cumulative running balance across WHERE-filtered postings —

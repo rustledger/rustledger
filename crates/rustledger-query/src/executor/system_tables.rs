@@ -688,7 +688,7 @@ impl Executor<'_> {
             // Weight delegates to `compute_posting_weight` so the `#postings`
             // table and the default-FROM `weight` accessor stay in lockstep
             // (issue #1052).
-            let weight_val = compute_posting_weight(posting, txn.date);
+            let weight_val = compute_posting_weight(posting);
 
             // The running balances come straight from the shared scan
             // (`needs_balance`/`needs_account_balance` both `true` above), so they

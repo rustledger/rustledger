@@ -7774,6 +7774,50 @@ fn test_postings_table_weight_column() {
 }
 
 #[test]
+fn test_postings_table_weight_uses_preserved_total() {
+    // A `{{100.00 USD}}` total-cost spec is rewritten by booking to
+    // `PerUnitFromTotal` with the ORIGINAL total preserved next to the
+    // derived per-unit. The weight must be that exact total (sign following
+    // units), not `units x per_unit` recomputed from the 28-digit division —
+    // for 100.00/3 that recomputation gives 99.99999999999999999999999999
+    // (#1106/#1113). Pinned here because the weight column delegates to
+    // `rustledger_booking::cost_number_weight`, the same arithmetic the
+    // balance validator's residual uses.
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 15), "Buy at total cost")
+                .with_synthesized_posting(
+                    Posting::new("Assets:Brokerage", Amount::new(dec!(3), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number(rustledger_core::CostNumber::PerUnitFromTotal(
+                                rustledger_core::BookedCost {
+                                    per_unit: dec!(100.00) / dec!(3),
+                                    total: dec!(100.00),
+                                },
+                            ))
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-100.00), "USD"),
+                )),
+        ),
+    ];
+    let result = execute_query(
+        "SELECT account, weight FROM #postings WHERE account = 'Assets:Brokerage'",
+        &directives,
+    );
+    assert_eq!(
+        result.rows[0][1],
+        Value::Amount(Amount::new(dec!(100.00), "USD")),
+        "weight must use the preserved {{{{total}}}}, not units x per_unit",
+    );
+}
+
+#[test]
 fn test_postings_table_weight_no_cost() {
     // Without cost, weight = units
     let directives = make_postings_test_directives();

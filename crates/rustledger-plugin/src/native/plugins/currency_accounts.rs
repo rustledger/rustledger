@@ -141,84 +141,68 @@ impl NativePlugin for CurrencyAccountsPlugin {
                 continue;
             }
 
-            // `weight(posting)` returns (amount, currency):
-            //   - Cost (PerUnit): (units * per_unit, cost.currency).
-            //   - Cost (Total / PerUnitFromTotal): preserved total
-            //     magnitude with sign following units.
-            //   - Price: (units * price, price.currency). For @@ (is_total),
-            //     weight magnitude is the total price, sign follows units.
+            // `weight(posting)` returns (amount, currency), delegating the
+            // arithmetic to the booking crate's single-source weight ladder
+            // (`cost_number_weight` / `price_weight` — the exact rule the
+            // balance validator's residual uses), after parsing this DTO's
+            // string numbers. The `CostNumberData` → `CostNumber` mapping is
+            // an exhaustive match, so future variant additions still
+            // compile-fail here, which is what we want.
+            //   - Cost: canonical cost weight in cost.currency (preserved
+            //     totals — no division-then-multiplication precision loss).
+            //   - Price: canonical price weight in price.currency (@@ sign
+            //     follows units).
             //   - Else: (units.amount, units.currency)
             let weight_of = |posting: &PostingData| -> Option<(Decimal, String)> {
+                use rustledger_core::{BookedCost, CostNumber, PriceKind};
+                use rustledger_plugin_types::CostNumberData;
                 let units = posting.units.as_ref()?;
                 let units_num = Decimal::from_str(&units.number).unwrap_or_default();
+                let parse = |s: &str| Decimal::from_str(s).unwrap_or_default();
                 if let Some(cost) = &posting.cost {
                     let currency = cost
                         .currency
                         .clone()
                         .unwrap_or_else(|| units.currency.clone());
-                    // Exhaustive variant match. The Total and
-                    // PerUnitFromTotal arms use the preserved total
-                    // (matching Python's `beancount.core.convert.get_cost`,
-                    // which uses the source total exactly and avoids
-                    // the division-then-multiplication precision
-                    // loss). PerUnit multiplies. Future variant
-                    // additions to `CostNumberData` will compile-fail
-                    // here, which is what we want.
-                    let amount = match &cost.number {
-                        Some(rustledger_plugin_types::CostNumberData::PerUnit { value }) => {
-                            let per = Decimal::from_str(value).unwrap_or_default();
-                            units_num * per
+                    let number = match &cost.number {
+                        Some(CostNumberData::PerUnit { value }) => Some(CostNumber::PerUnit {
+                            value: parse(value),
+                        }),
+                        Some(CostNumberData::Total { value }) => Some(CostNumber::Total {
+                            value: parse(value),
+                        }),
+                        Some(CostNumberData::Compound { per_unit, total }) => {
+                            Some(CostNumber::Compound {
+                                per_unit: parse(per_unit),
+                                total: parse(total),
+                            })
                         }
-                        Some(rustledger_plugin_types::CostNumberData::Total { value }) => {
-                            let total = Decimal::from_str(value).unwrap_or_default();
-                            if units_num.is_sign_negative() {
-                                -total.abs()
-                            } else {
-                                total.abs()
-                            }
+                        Some(CostNumberData::PerUnitFromTotal { per_unit, total }) => {
+                            Some(CostNumber::PerUnitFromTotal(BookedCost {
+                                per_unit: parse(per_unit),
+                                total: parse(total),
+                            }))
                         }
-                        Some(rustledger_plugin_types::CostNumberData::Compound {
-                            per_unit,
-                            total,
-                        }) => {
-                            // `{a # b}`: N*a (sign embedded in units) plus
-                            // the lump total signed with the posting.
-                            let per = Decimal::from_str(per_unit).unwrap_or_default();
-                            let lump = Decimal::from_str(total).unwrap_or_default();
-                            let signed_lump = if units_num.is_sign_negative() {
-                                -lump.abs()
-                            } else {
-                                lump.abs()
-                            };
-                            units_num * per + signed_lump
-                        }
-                        Some(rustledger_plugin_types::CostNumberData::PerUnitFromTotal {
-                            total,
-                            ..
-                        }) => {
-                            let total = Decimal::from_str(total).unwrap_or_default();
-                            if units_num.is_sign_negative() {
-                                -total.abs()
-                            } else {
-                                total.abs()
-                            }
-                        }
+                        None => None,
+                    };
+                    let amount = match &number {
+                        Some(n) => rustledger_booking::cost_number_weight(units_num, n),
+                        // Empty `{}` — no determinable cost number; fall back
+                        // to the units magnitude (pre-existing behavior; the
+                        // spec is resolved by booking before plugins run).
                         None => units_num,
                     };
                     Some((amount, currency))
                 } else if let Some(price) = &posting.price {
                     let price_amount = price.amount.as_ref()?;
-                    let price_num = Decimal::from_str(&price_amount.number).unwrap_or_default();
+                    let price_num = parse(&price_amount.number);
                     let currency = price_amount.currency.clone();
-                    let amount = if price.is_total {
-                        if units_num.is_sign_negative() {
-                            -price_num.abs()
-                        } else {
-                            price_num.abs()
-                        }
+                    let kind = if price.is_total {
+                        PriceKind::Total
                     } else {
-                        units_num * price_num
+                        PriceKind::Unit
                     };
+                    let amount = rustledger_booking::price_weight(units_num, price_num, kind);
                     Some((amount, currency))
                 } else {
                     Some((units_num, units.currency.clone()))

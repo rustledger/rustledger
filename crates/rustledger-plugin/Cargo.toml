@@ -26,6 +26,7 @@ python-plugins = [
 ]
 
 [dependencies]
+rustledger-booking.workspace = true
 rustledger-core.workspace = true
 rustledger-ops.workspace = true
 rustledger-plugin-types.workspace = true

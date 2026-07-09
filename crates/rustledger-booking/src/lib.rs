@@ -189,34 +189,103 @@ fn cost_weight<D: WeightNum>(
     infer_currency: impl FnOnce() -> Option<Currency>,
 ) -> Option<(Currency, D)> {
     let cost_spec = posting.cost.as_ref()?;
-    let signum = units.number.signum();
+    // Match the number FIRST so an empty `{}` spec short-circuits without
+    // resolving (and possibly inferring) the cost currency.
+    let number = cost_spec.number.as_ref()?;
+    let weight = cost_number_weight_generic::<D>(units.number, number);
+    let cost_curr = cost_currency_of(posting, infer_currency)?;
+    Some((cost_curr, weight))
+}
+
+/// The `CostNumber`-variant weight arithmetic, generic over the numeric
+/// backend — the single implementation behind [`cost_number_weight`] and
+/// [`cost_weight`]. A new `CostNumber` variant forces a change HERE and
+/// nowhere else.
+fn cost_number_weight_generic<D: WeightNum>(
+    units_number: Decimal,
+    number: &rustledger_core::CostNumber,
+) -> D {
+    let signum = units_number.signum();
     // `PerUnitFromTotal` and `Total` both carry a preserved total — using it
     // avoids the division-then-multiplication precision loss of recomputing from
-    // `per_unit`. `PerUnit` goes through multiplication. Match the number FIRST
-    // so an empty `{}` spec short-circuits without resolving (and possibly
-    // inferring) the cost currency.
-    let weight = match cost_spec.number {
-        Some(rustledger_core::CostNumber::Total { value: total }) => {
+    // `per_unit`. `PerUnit` goes through multiplication.
+    match *number {
+        rustledger_core::CostNumber::Total { value: total } => {
             D::from_decimal(total) * D::from_decimal(signum)
         }
-        Some(rustledger_core::CostNumber::PerUnitFromTotal(b)) => {
+        rustledger_core::CostNumber::PerUnitFromTotal(b) => {
             D::from_decimal(b.total) * D::from_decimal(signum)
         }
-        Some(rustledger_core::CostNumber::PerUnit { value: per_unit }) => {
-            D::from_decimal(units.number) * D::from_decimal(per_unit)
+        rustledger_core::CostNumber::PerUnit { value: per_unit } => {
+            D::from_decimal(units_number) * D::from_decimal(per_unit)
         }
         // Compound `{a # b}` (beancount compound_amount): the cost totals
         // `N*a + b`, so the weight is the per-unit product (sign embedded
         // in `units`) plus the signed lump total (#1700).
-        Some(rustledger_core::CostNumber::Compound { per_unit, total }) => {
-            let mut w = D::from_decimal(units.number) * D::from_decimal(per_unit);
+        rustledger_core::CostNumber::Compound { per_unit, total } => {
+            let mut w = D::from_decimal(units_number) * D::from_decimal(per_unit);
             w += D::from_decimal(total) * D::from_decimal(signum);
             w
         }
-        None => return None, // empty `{}`
-    };
-    let cost_curr = cost_currency_of(posting, infer_currency)?;
-    Some((cost_curr, weight))
+    }
+}
+
+/// The canonical weight of a cost number: what `units_number` of a posting
+/// with this cost spec contributes to the transaction balance, in the cost
+/// currency (Beancount's "weight" of a costed posting).
+///
+/// This is the exact arithmetic the balance validator's residual uses —
+/// `Total`/`PerUnitFromTotal` take the preserved total (sign following
+/// units), avoiding the division-then-multiplication precision loss of
+/// recomputing from `per_unit` (#1106/#1113); `Compound {a # b}` totals
+/// `N·a + b` (#1700). Consumers surfacing a per-posting weight (BQL `weight`
+/// column, `currency_accounts` grouping) MUST use this rather than re-derive
+/// the ladder, or they drift from `rledger check` on those shapes.
+#[must_use]
+pub fn cost_number_weight(units_number: Decimal, number: &rustledger_core::CostNumber) -> Decimal {
+    cost_number_weight_generic::<Decimal>(units_number, number)
+}
+
+/// The canonical weight of a price annotation: what `units_number` of a
+/// posting priced `@`/`@@` contributes to the transaction balance, in the
+/// price currency.
+///
+/// `@` (per-unit): `|units| × price × sign(units)`. `@@` (total): the price
+/// is a positive magnitude in the source, so the weight is
+/// `price × sign(units)` — credit-side postings flip to `−price`
+/// (issue #1052). Zero units weigh zero for both kinds. Same single-source
+/// rule as [`cost_number_weight`].
+#[must_use]
+pub fn price_weight(
+    units_number: Decimal,
+    price_number: Decimal,
+    kind: rustledger_core::PriceKind,
+) -> Decimal {
+    price_weight_generic::<Decimal>(units_number, price_number, kind)
+}
+
+/// The price-annotation weight arithmetic, generic over the numeric backend —
+/// the single implementation behind [`price_weight`] and [`residual_weight`].
+///
+/// The expanded `abs * price * signum` form (rather than `units * price`) is
+/// kept so `D = Decimal` and `D = BigDecimal` reproduce the pre-refactor
+/// residual arithmetic exactly.
+fn price_weight_generic<D: WeightNum>(
+    units_number: Decimal,
+    price_number: Decimal,
+    kind: rustledger_core::PriceKind,
+) -> D {
+    let signum = units_number.signum();
+    match kind {
+        rustledger_core::PriceKind::Unit => {
+            D::from_decimal(units_number.abs())
+                * D::from_decimal(price_number)
+                * D::from_decimal(signum)
+        }
+        rustledger_core::PriceKind::Total => {
+            D::from_decimal(price_number) * D::from_decimal(signum)
+        }
+    }
 }
 
 /// The canonical per-posting balance weight, summed per currency, generic over
@@ -244,7 +313,6 @@ fn residual_weight<D: WeightNum>(transaction: &Transaction) -> FxHashMap<Currenc
         let Some(IncompleteAmount::Complete(units)) = &posting.units else {
             continue;
         };
-        let signum = units.number.signum();
 
         // Determine the "weight" of this posting for balance purposes.
         let cost_contribution = cost_weight::<D>(posting, units, || {
@@ -267,21 +335,7 @@ fn residual_weight<D: WeightNum>(transaction: &Transaction) -> FxHashMap<Currenc
         } else if let Some(price) = &posting.price {
             // Price annotation: converts units to the price currency.
             if let Some(amt) = price.amount.as_ref().and_then(IncompleteAmount::as_amount) {
-                // `kind = Unit` ⇒ `|units| * price * sign(units)`;
-                // `kind = Total` ⇒ `price * sign(units)`. The expanded
-                // `abs * price * signum` form (rather than `units * price`) is
-                // kept so `D = Decimal` and `D = BigDecimal` reproduce the
-                // pre-refactor arithmetic exactly.
-                let signed = match price.kind {
-                    rustledger_core::PriceKind::Unit => {
-                        D::from_decimal(units.number.abs())
-                            * D::from_decimal(amt.number)
-                            * D::from_decimal(signum)
-                    }
-                    rustledger_core::PriceKind::Total => {
-                        D::from_decimal(amt.number) * D::from_decimal(signum)
-                    }
-                };
+                let signed = price_weight_generic::<D>(units.number, amt.number, price.kind);
                 *residuals.entry(amt.currency.clone()).or_default() += signed;
             } else {
                 // Incomplete or bare-sigil price annotation — can't
@@ -409,6 +463,83 @@ mod tests {
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         rustledger_core::naive_date(year, month, day).unwrap()
+    }
+
+    // =========================================================================
+    // cost_number_weight / price_weight — the public single-source arithmetic
+    // =========================================================================
+
+    #[test]
+    fn cost_number_weight_covers_all_variants() {
+        use rustledger_core::{BookedCost, CostNumber};
+        // PerUnit: units × per_unit.
+        assert_eq!(
+            cost_number_weight(dec!(10), &CostNumber::PerUnit { value: dec!(5.00) }),
+            dec!(50.00),
+        );
+        // Total: preserved total, sign following units.
+        assert_eq!(
+            cost_number_weight(
+                dec!(3),
+                &CostNumber::Total {
+                    value: dec!(100.00)
+                }
+            ),
+            dec!(100.00),
+        );
+        assert_eq!(
+            cost_number_weight(
+                dec!(-3),
+                &CostNumber::Total {
+                    value: dec!(100.00)
+                }
+            ),
+            dec!(-100.00),
+        );
+        // PerUnitFromTotal: the preserved total EXACTLY — not per_unit × units,
+        // which for 100/3 would give 99.99999... at the 28-digit ceiling.
+        let booked = CostNumber::PerUnitFromTotal(BookedCost {
+            per_unit: dec!(100.00) / dec!(3),
+            total: dec!(100.00),
+        });
+        assert_eq!(cost_number_weight(dec!(3), &booked), dec!(100.00));
+        assert_eq!(cost_number_weight(dec!(-3), &booked), dec!(-100.00));
+        // Compound {a # b}: N·a + b, lump signed with units (#1700).
+        let compound = CostNumber::Compound {
+            per_unit: dec!(5.00),
+            total: dec!(10.00),
+        };
+        assert_eq!(cost_number_weight(dec!(10), &compound), dec!(60.00));
+        assert_eq!(cost_number_weight(dec!(-10), &compound), dec!(-60.00));
+    }
+
+    #[test]
+    fn price_weight_unit_and_total_signs() {
+        use rustledger_core::PriceKind;
+        // `@` per-unit: units × price, sign through units.
+        assert_eq!(
+            price_weight(dec!(10), dec!(1.50), PriceKind::Unit),
+            dec!(15.00),
+        );
+        assert_eq!(
+            price_weight(dec!(-10), dec!(1.50), PriceKind::Unit),
+            dec!(-15.00),
+        );
+        // `@@` total: positive magnitude in source, sign follows units —
+        // the #1052 credit-side flip.
+        assert_eq!(
+            price_weight(dec!(10), dec!(15.00), PriceKind::Total),
+            dec!(15.00),
+        );
+        assert_eq!(
+            price_weight(dec!(-10), dec!(15.00), PriceKind::Total),
+            dec!(-15.00),
+        );
+        // Zero units weigh zero for both kinds.
+        assert_eq!(
+            price_weight(dec!(0), dec!(15.00), PriceKind::Total),
+            dec!(0)
+        );
     }
 
     // =========================================================================

@@ -30,54 +30,45 @@ use crate::error::QueryError;
 /// Compute a posting's `weight` — the cost-converted amount used for
 /// transaction balancing.
 ///
-/// Rules (matching Beancount):
-/// - Cost annotation present and resolvable: `units × cost_per_unit` in
-///   the cost currency. `CostSpec::resolve` handles `{{total ...}}` by
-///   dividing the total by `|units|`, so callers don't need to special-case
-///   that shape.
-/// - `@` per-unit price: `units × price` in the price currency. Sign
-///   carries through `units` naturally.
-/// - `@@` total price: `sign(units) × total` in the price currency. The
-///   `@@` amount is written as a positive magnitude in the source, so
-///   credit-side postings need an explicit sign flip — without it,
-///   `weight` returns `+T` where bean-query returns `−T` and the
-///   transaction can't balance against the matching cash side
-///   (issue #1052).
-/// - Otherwise (or if a cost spec was present but couldn't resolve and
-///   no usable price annotation either): `units` as-is.
+/// The arithmetic delegates to the booking crate's single-source weight
+/// ladder ([`rustledger_booking::cost_number_weight`] /
+/// [`rustledger_booking::price_weight`]) — the exact rule the balance
+/// validator's residual uses — so the `weight` column cannot drift from
+/// `rledger check`. Notably `{{total}}`/`PerUnitFromTotal` specs take the
+/// preserved total (sign following units) rather than recomputing
+/// `units × per_unit`, which for a non-terminating per-unit division would
+/// be off in the last of `rust_decimal`'s 28 digits (#1106/#1113), and
+/// `@@` credit-side postings flip sign (issue #1052).
+///
+/// Fallback order (matching Beancount, cost beats price):
+/// - Cost spec with a number and an explicit currency: cost weight.
+/// - Else a complete price annotation: price weight.
+/// - Else: `units` as-is.
 ///
 /// Returns `Value::Null` for postings without resolved units. Used by
 /// both [`Executor::build_postings_table`] (the `#postings` table
 /// builder) and [`Executor::evaluate_column`] (the default-FROM column
 /// accessor) so the two paths can't drift again.
-pub(super) fn compute_posting_weight(
-    posting: &rustledger_core::Posting,
-    txn_date: NaiveDate,
-) -> Value {
+pub(super) fn compute_posting_weight(posting: &rustledger_core::Posting) -> Value {
     let Some(units) = posting.amount() else {
         return Value::Null;
     };
     if let Some(cost_spec) = &posting.cost
-        && let Some(cost) = cost_spec.resolve(units.number, txn_date)
+        && let Some(number) = &cost_spec.number
+        && let Some(currency) = cost_spec.currency.clone()
     {
-        return Value::Amount(Amount::new(units.number * cost.number, cost.currency));
+        return Value::Amount(Amount::new(
+            rustledger_booking::cost_number_weight(units.number, number),
+            currency,
+        ));
     }
     if let Some(price_ann) = &posting.price
         && let Some(price_amt) = price_ann.amount()
     {
-        return if price_ann.is_unit() {
-            Value::Amount(Amount::new(
-                units.number * price_amt.number,
-                price_amt.currency.clone(),
-            ))
-        } else {
-            let signed = if units.number.is_sign_negative() {
-                -price_amt.number
-            } else {
-                price_amt.number
-            };
-            Value::Amount(Amount::new(signed, price_amt.currency.clone()))
-        };
+        return Value::Amount(Amount::new(
+            rustledger_booking::price_weight(units.number, price_amt.number, price_ann.kind),
+            price_amt.currency.clone(),
+        ));
     }
     Value::Amount(units.clone())
 }

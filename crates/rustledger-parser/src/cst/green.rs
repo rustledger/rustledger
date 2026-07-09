@@ -18,11 +18,12 @@
 
 use super::ast::AstNode as _; // brings `Directive::can_cast` into scope
 use super::convert::{
-    DescendantsWalkResult, TopLevelWalkResult, classify_recovery_error, decode_string_token,
-    is_comment_kind, is_trivia_kind, number_meta_value, parse_date_token, parse_decimal_token,
+    DescendantsWalkResult, TopLevelWalkResult, classify_recovery_error, cost_spec_from_tokens,
+    decode_string_token, is_comment_kind, is_trivia_kind, meta_value_from_tokens, parse_date_token,
+    parse_decimal_token,
 };
 use rowan::{Language, NodeOrToken};
-use rustledger_core::cost::{CostNumber, CostSpec};
+use rustledger_core::cost::CostSpec;
 use rustledger_core::directive::{PriceAnnotation, PriceKind};
 use rustledger_core::{
     Account, Amount, Currency, IncompleteAmount, InternedStr, Link, MetaValue, Metadata, NaiveDate,
@@ -239,124 +240,14 @@ fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
     }
 }
 
-/// Convert a `COST_SPEC` green node into a `CostSpec` (forms `{N CCY}`,
-/// `{{T CCY}}`, `{N # T CCY}`, `{*}` merge, plus optional date + label). Mirrors
-/// `convert_cost_spec` / `cost_compound_numbers` in [`super::convert`]. Cost
-/// numbers are plain `NUMBER` tokens (no arithmetic evaluation); an unparsable
-/// one yields `number: None` like red, which emits no diagnostic for cost
-/// numbers — so this needs no bail and always returns a `CostSpec`.
+/// Convert a `COST_SPEC` green node into a `CostSpec`. Delegates to the
+/// shared token-level [`cost_spec_from_tokens`] — the SAME implementation the
+/// red walker uses, so the dual number semantics (#1713), the compound-`#`
+/// rules (#1700/#1704), and the positional `{*}` merge flag cannot drift
+/// between the walkers again. Red emits no diagnostic for unparsable cost
+/// numbers, so this needs no bail and always returns a `CostSpec`.
 fn convert_cost_spec(node: &rowan::GreenNodeData) -> CostSpec {
-    use crate::SyntaxKind as K;
-    let mut is_total = false;
-    // Red has TWO number semantics and green must carry both (#1713):
-    // - the compound `{a # b}` path (`cost_compound_numbers`) retries past
-    //   UNPARSABLE number tokens on each side of the hash (`is_none()`
-    //   guards re-arm when the parse fails);
-    // - the plain path uses `cs.number()` — the first NUMBER *token*,
-    //   parsed or not (a latch).
-    // Green's old single latched tracker satisfied only the plain path:
-    // on `{<garbage-number> 2 # ...}` red retried to 2 while green kept
-    // None → per_unit 0 (the fuzz_green_eq_red divergence).
-    let mut first_number: Option<rust_decimal::Decimal> = None; // latched (plain path)
-    let mut seen_number = false;
-    let mut pre_hash: Option<rust_decimal::Decimal> = None; // retried (compound path)
-    let mut past_hash = false;
-    let mut post_hash_total: Option<rust_decimal::Decimal> = None; // retried (compound path)
-    let mut currency: Option<Currency> = None;
-    let mut date: Option<NaiveDate> = None;
-    let mut date_seen = false;
-    let mut label: Option<String> = None;
-    let mut label_seen = false;
-    for child in node.children() {
-        let NodeOrToken::Token(t) = child else {
-            continue;
-        };
-        match crate::BeancountLanguage::kind_from_raw(t.kind()) {
-            // `is_total` = any `{{` present anywhere — mirrors red `is_total()`
-            // (`first_token(.., L_DOUBLE_BRACE).is_some()`). The merge flag is
-            // computed separately in `cost_is_merge` (see its note).
-            K::L_DOUBLE_BRACE => is_total = true,
-            K::NUMBER => {
-                if past_hash {
-                    if post_hash_total.is_none() {
-                        post_hash_total = parse_decimal_token(t.text());
-                    }
-                } else {
-                    if pre_hash.is_none() {
-                        pre_hash = parse_decimal_token(t.text());
-                    }
-                    if !seen_number {
-                        seen_number = true;
-                        first_number = parse_decimal_token(t.text());
-                    }
-                }
-            }
-            // Mirror red's compound detection (#1700): the hash arms the
-            // post-hash side unconditionally, and `{#` arrives as a fused
-            // L_BRACE_HASH opener.
-            K::HASH | K::L_BRACE_HASH => {
-                past_hash = true;
-            }
-            K::CURRENCY if currency.is_none() => {
-                currency = Some(Currency::new(t.text()));
-            }
-            K::DATE if !date_seen => {
-                date_seen = true;
-                date = parse_date_token(t.text());
-            }
-            K::STRING if !label_seen => {
-                label_seen = true;
-                label = decode_string_token(t.text());
-            }
-            _ => {}
-        }
-    }
-    let number = if past_hash {
-        // Compound `{a # b}` as written — mirrors red's
-        // `cost_compound_numbers` caller: omitted sides are zero.
-        Some(CostNumber::Compound {
-            per_unit: pre_hash.unwrap_or_default(),
-            total: post_hash_total.unwrap_or_default(),
-        })
-    } else {
-        match (first_number, is_total) {
-            (Some(v), true) => Some(CostNumber::Total { value: v }),
-            (Some(v), false) => Some(CostNumber::PerUnit { value: v }),
-            (None, _) => None,
-        }
-    };
-    CostSpec {
-        number,
-        currency,
-        date,
-        label,
-        merge: cost_is_merge(node),
-    }
-}
-
-/// Whether a cost spec is a merge cost (`{*}`). Exact mirror of red
-/// [`super::ast`]'s `CostSpec::is_merge`: only the first non-whitespace token
-/// after the opener decides (`*` → merge, anything else → not), and it stops
-/// there. The previous scan-everything pass kept re-arming on later openers, so
-/// a malformed cost containing a stray `{*}`-shaped run flipped the flag where
-/// red did not — the divergence `fuzz_green_eq_red` caught. Keep byte-for-byte
-/// with red.
-fn cost_is_merge(node: &rowan::GreenNodeData) -> bool {
-    use crate::SyntaxKind as K;
-    let mut past_opener = false;
-    for child in node.children() {
-        let NodeOrToken::Token(t) = child else {
-            continue;
-        };
-        match crate::BeancountLanguage::kind_from_raw(t.kind()) {
-            K::L_BRACE | K::L_DOUBLE_BRACE | K::L_BRACE_HASH => past_opener = true,
-            K::WHITESPACE if past_opener => {}
-            K::STAR if past_opener => return true,
-            _ if past_opener => return false,
-            _ => {}
-        }
-    }
-    false
+    cost_spec_from_tokens(node.children().filter_map(NodeOrToken::into_token))
 }
 
 /// Convert a `PRICE_ANNOTATION` green node into a `PriceAnnotation`: `@@`→Total,
@@ -397,97 +288,12 @@ fn convert_price_annotation(node: &rowan::GreenNodeData) -> Option<PriceAnnotati
     })
 }
 
-/// Derive the typed [`MetaValue`] of a `META_ENTRY` green node. Mirrors
-/// `meta_value_from_entry` in [`super::convert`] exactly: priority is string >
-/// number/amount > date > account > currency > bool > tag/link > none, and a
-/// type that's present-but-unparsable (e.g. a malformed string, an
-/// over-precision number, a bad date) falls through to the next, matching red.
+/// Derive the typed [`MetaValue`] of a `META_ENTRY` green node. Delegates to
+/// the shared token-level [`meta_value_from_tokens`] — the same implementation
+/// the red walker uses (priority ladder, minus detection, first-of-kind
+/// latches), so the two cannot drift.
 fn meta_value(entry: &rowan::GreenNodeData) -> MetaValue {
-    use crate::SyntaxKind as K;
-    let mut string_t: Option<String> = None;
-    let mut number_t: Option<String> = None;
-    let mut currency_t: Option<String> = None;
-    let mut date_t: Option<String> = None;
-    let mut account_t: Option<String> = None;
-    let mut bool_v: Option<bool> = None;
-    let mut tag_link: Option<MetaValue> = None;
-    // Minus sign negating the number: a MINUS token AFTER the key and BEFORE the
-    // first NUMBER (mirrors `meta_entry_has_minus_sign`).
-    let mut past_key = false;
-    let mut minus = false;
-    let mut minus_decided = false;
-
-    for child in entry.children() {
-        let NodeOrToken::Token(t) = child else {
-            continue;
-        };
-        let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
-        // First-of-kind value tokens (matches red's `first_token` accessors).
-        match kind {
-            K::STRING if string_t.is_none() => string_t = Some(t.text().to_string()),
-            K::NUMBER if number_t.is_none() => number_t = Some(t.text().to_string()),
-            K::CURRENCY if currency_t.is_none() => currency_t = Some(t.text().to_string()),
-            K::DATE if date_t.is_none() => date_t = Some(t.text().to_string()),
-            K::ACCOUNT if account_t.is_none() => account_t = Some(t.text().to_string()),
-            K::BOOL_TRUE if bool_v.is_none() => bool_v = Some(true),
-            K::BOOL_FALSE if bool_v.is_none() => bool_v = Some(false),
-            K::TAG if tag_link.is_none() => {
-                tag_link = Some(MetaValue::Tag(Tag::new(t.text().trim_start_matches('#'))));
-            }
-            K::LINK if tag_link.is_none() => {
-                tag_link = Some(MetaValue::Link(Link::new(t.text().trim_start_matches('^'))));
-            }
-            _ => {}
-        }
-        if past_key && !minus_decided {
-            match kind {
-                K::MINUS => {
-                    minus = true;
-                    minus_decided = true;
-                }
-                K::NUMBER => minus_decided = true,
-                _ => {}
-            }
-        }
-        if kind == K::META_KEY {
-            past_key = true;
-        }
-    }
-
-    if let Some(s) = string_t
-        && let Some(decoded) = decode_string_token(&s)
-    {
-        return MetaValue::String(decoded);
-    }
-    if let Some(nt) = number_t
-        && let Some(mut dec) = parse_decimal_token(&nt)
-    {
-        if minus {
-            dec = -dec;
-        }
-        if let Some(c) = currency_t {
-            return MetaValue::Amount(Amount::new(dec, Currency::new(&c)));
-        }
-        return number_meta_value(&nt, dec);
-    }
-    if let Some(dt) = date_t
-        && let Some(date) = parse_date_token(&dt)
-    {
-        return MetaValue::Date(date);
-    }
-    if let Some(a) = account_t {
-        return MetaValue::Account(Account::new(&a));
-    }
-    if let Some(c) = currency_t {
-        return MetaValue::Currency(Currency::new(&c));
-    }
-    if let Some(b) = bool_v {
-        return MetaValue::Bool(b);
-    }
-    if let Some(tl) = tag_link {
-        return tl;
-    }
-    MetaValue::None
+    meta_value_from_tokens(entry.children().filter_map(NodeOrToken::into_token))
 }
 
 /// Key + typed value for a single `META_ENTRY` green node (key = first

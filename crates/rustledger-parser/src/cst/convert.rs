@@ -1391,77 +1391,157 @@ fn parse_arith_primary(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Opt
 }
 
 fn convert_cost_spec(cs: &ast::CostSpec) -> CostSpec {
-    let merge = cs.is_merge();
-    let is_total = cs.is_total();
+    cost_spec_from_tokens(
+        cs.syntax()
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token),
+    )
+}
 
-    // Compound `{a # b}` form (beancount compound_amount): per-unit
-    // AND a lump total on top; the cost totals `N*a + b`. Surfaced as
-    // written — units may be interpolated later, so the combined total
-    // cannot be computed here; booking derives it (#1700). An omitted
-    // side is zero, which is arithmetically exact (`{# b}` ≡ `{{b}}`,
-    // `{a #}` ≡ `{a}`).
-    let compound = cost_compound_numbers(cs);
+/// Minimal view of a lexed token — kind + text — implemented by both tree
+/// walkers (red `SyntaxToken`, green `&GreenTokenData`) so the token-level
+/// semantic helpers ([`cost_spec_from_tokens`], [`meta_value_from_tokens`])
+/// are SHARED rather than hand-mirrored. Every historical green/red fuzz
+/// divergence (#1704, #1713, the `{*}` merge flag) landed in a hand-mirrored
+/// copy of these semantics; with one implementation the class is gone.
+pub(super) trait TokenView {
+    /// The token's [`crate::SyntaxKind`].
+    fn kind(&self) -> crate::SyntaxKind;
+    /// The token's source text.
+    fn text(&self) -> &str;
+}
 
-    let cost_number = if let Some((per_unit, total)) = compound {
+impl TokenView for rowan::SyntaxToken<crate::BeancountLanguage> {
+    fn kind(&self) -> crate::SyntaxKind {
+        Self::kind(self)
+    }
+    fn text(&self) -> &str {
+        Self::text(self)
+    }
+}
+
+impl TokenView for &rowan::GreenTokenData {
+    fn kind(&self) -> crate::SyntaxKind {
+        <crate::BeancountLanguage as rowan::Language>::kind_from_raw((*self).kind())
+    }
+    fn text(&self) -> &str {
+        (*self).text()
+    }
+}
+
+/// Convert the direct child tokens of a `COST_SPEC` node into a [`CostSpec`]
+/// (forms `{N CCY}`, `{{T CCY}}`, `{N # T CCY}`, `{*}` merge, plus optional
+/// date + label). The single source of truth for BOTH walkers (red
+/// `convert_cost_spec`, green `convert_cost_spec`).
+///
+/// Cost numbers are plain `NUMBER` tokens (no arithmetic evaluation); an
+/// unparsable one yields `number: None` with no diagnostic, so this needs no
+/// bail and always returns a `CostSpec`.
+///
+/// There are TWO number semantics and both must be carried (#1713):
+/// - the compound `{a # b}` path retries past UNPARSABLE number tokens on
+///   each side of the hash (`is_none()` guards re-arm when the parse fails);
+/// - the plain path uses the first NUMBER *token*, parsed or not (a latch).
+///
+/// A single latched tracker satisfies only the plain path: on
+/// `{<garbage-number> 2 # ...}` the compound side must retry to `2` while
+/// the latch keeps `None` (the historical `fuzz_green_eq_red` divergence).
+///
+/// Compound `{a # b}` (beancount `compound_amount`): per-unit AND a lump
+/// total on top; the cost totals `N*a + b`. Surfaced as written — units may
+/// be interpolated later, so the combined total cannot be computed here;
+/// booking derives it (#1700). An omitted side is zero, which is
+/// arithmetically exact (`{# b}` ≡ `{{b}}`, `{a #}` ≡ `{a}`). The hash can
+/// arrive fused with the brace as a single `L_BRACE_HASH` opener.
+///
+/// `is_total` = any `{{` present anywhere. The `{*}` merge flag is decided
+/// by the first non-whitespace, non-opener token after an opener (`*` →
+/// merge, anything else → not — a STAR elsewhere is the multiplication
+/// operator, e.g. `{500 * 2 USD}`); a scan-everything pass that re-arms on
+/// later openers flips the flag on malformed inputs where it must not
+/// (another historical divergence).
+pub(super) fn cost_spec_from_tokens(tokens: impl Iterator<Item = impl TokenView>) -> CostSpec {
+    use crate::SyntaxKind as K;
+    let mut is_total = false;
+    let mut first_number: Option<Decimal> = None; // latched (plain path)
+    let mut seen_number = false;
+    let mut pre_hash: Option<Decimal> = None; // retried (compound path)
+    let mut past_hash = false;
+    let mut post_hash_total: Option<Decimal> = None; // retried (compound path)
+    let mut currency: Option<Currency> = None;
+    let mut date: Option<NaiveDate> = None;
+    let mut date_seen = false;
+    let mut label: Option<String> = None;
+    let mut label_seen = false;
+    let mut merge = false;
+    let mut merge_decided = false;
+    let mut past_opener = false;
+    for t in tokens {
+        let kind = t.kind();
+        // Merge-flag machine (runs alongside the value machine below; openers
+        // and whitespace never decide, the first other token after an opener
+        // does).
+        if !merge_decided {
+            match kind {
+                K::L_BRACE | K::L_DOUBLE_BRACE | K::L_BRACE_HASH => past_opener = true,
+                K::WHITESPACE => {}
+                K::STAR if past_opener => {
+                    merge = true;
+                    merge_decided = true;
+                }
+                _ if past_opener => merge_decided = true,
+                _ => {}
+            }
+        }
+        match kind {
+            K::L_DOUBLE_BRACE => is_total = true,
+            K::NUMBER => {
+                if past_hash {
+                    if post_hash_total.is_none() {
+                        post_hash_total = parse_decimal_token(t.text());
+                    }
+                } else {
+                    if pre_hash.is_none() {
+                        pre_hash = parse_decimal_token(t.text());
+                    }
+                    if !seen_number {
+                        seen_number = true;
+                        first_number = parse_decimal_token(t.text());
+                    }
+                }
+            }
+            K::HASH | K::L_BRACE_HASH => past_hash = true,
+            K::CURRENCY if currency.is_none() => currency = Some(Currency::new(t.text())),
+            K::DATE if !date_seen => {
+                date_seen = true;
+                date = parse_date_token(t.text());
+            }
+            K::STRING if !label_seen => {
+                label_seen = true;
+                label = decode_string_token(t.text());
+            }
+            _ => {}
+        }
+    }
+    let number = if past_hash {
         Some(CostNumber::Compound {
-            per_unit: per_unit.unwrap_or_default(),
-            total: total.unwrap_or_default(),
+            per_unit: pre_hash.unwrap_or_default(),
+            total: post_hash_total.unwrap_or_default(),
         })
     } else {
-        let number = cs.number().and_then(|n| parse_decimal_token(n.text()));
-        match (number, is_total) {
+        match (first_number, is_total) {
             (Some(v), true) => Some(CostNumber::Total { value: v }),
             (Some(v), false) => Some(CostNumber::PerUnit { value: v }),
             (None, _) => None,
         }
     };
-
-    let currency = cs.currency().map(|c| Currency::new(c.text()));
-    let date = cs.date().and_then(|d| parse_date_token(d.text()));
-    let label = cs.label().and_then(|s| s.text_decoded());
-
     CostSpec {
-        number: cost_number,
+        number,
         currency,
         date,
         label,
         merge,
     }
-}
-
-/// Detect the compound cost-spec shape — a `HASH` token at the
-/// cost-spec's depth — and return `(per_unit, total)` as written:
-/// `{a # b}` → `(Some(a), Some(b))`, `{# b}` → `(None, Some(b))`,
-/// `{a #}` → `(Some(a), None)`. Returns `None` when there is no
-/// `HASH` (plain `{N CCY}` / `{{T CCY}}` shapes).
-///
-/// Pre-#1700 this detector required a number BEFORE the hash and
-/// returned only the post-hash value, which the caller surfaced as
-/// `Total` — collapsing `{a # b}` to `{{b}}` (dropping `a`) and
-/// missing `{# b}` entirely (its first number then parsed as
-/// `PerUnit`). Beancount's `compound_amount` weighs `N*a + b`.
-fn cost_compound_numbers(cs: &ast::CostSpec) -> Option<(Option<Decimal>, Option<Decimal>)> {
-    let mut before: Option<Decimal> = None;
-    let mut after: Option<Decimal> = None;
-    // `{# 10.00 USD}` lexes its opener as a single L_BRACE_HASH token, so
-    // the hash can arrive fused with the brace rather than standalone.
-    let mut past_hash = false;
-    for el in cs.syntax().children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
-            continue;
-        };
-        match t.kind() {
-            crate::SyntaxKind::HASH | crate::SyntaxKind::L_BRACE_HASH => past_hash = true,
-            crate::SyntaxKind::NUMBER if !past_hash && before.is_none() => {
-                before = parse_decimal_token(t.text());
-            }
-            crate::SyntaxKind::NUMBER if past_hash && after.is_none() => {
-                after = parse_decimal_token(t.text());
-            }
-            _ => {}
-        }
-    }
-    past_hash.then_some((before, after))
 }
 
 fn convert_price_annotation(
@@ -1508,31 +1588,6 @@ fn node_has_minus_before_number(node: &crate::SyntaxNode) -> bool {
         let rowan::NodeOrToken::Token(t) = el else {
             continue;
         };
-        match t.kind() {
-            crate::SyntaxKind::MINUS => return true,
-            crate::SyntaxKind::NUMBER => return false,
-            _ => {}
-        }
-    }
-    false
-}
-
-/// Returns true if a `META_ENTRY`'s value tokens contain a `MINUS`
-/// before the first `NUMBER`. Used by `meta_value_from_entry` to
-/// detect signed-number values like `precision: -1` which the
-/// legacy parser handles via `parse_signed_number`.
-fn meta_entry_has_minus_sign(entry: &MetaEntry) -> bool {
-    let mut past_key = false;
-    for el in entry.syntax().children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
-            continue;
-        };
-        if !past_key {
-            if t.kind() == crate::SyntaxKind::META_KEY {
-                past_key = true;
-            }
-            continue;
-        }
         match t.kind() {
             crate::SyntaxKind::MINUS => return true,
             crate::SyntaxKind::NUMBER => return false,
@@ -1604,67 +1659,111 @@ fn value_tokens_to_meta(
     }
 }
 
-/// Discriminate the value tokens under a `META_ENTRY` into a
-/// typed [`MetaValue`]. Matches the legacy parser's preference
-/// order: string > number > date > account > currency > tag >
-/// link > bool > none. The raw-token sibling is [`value_tokens_to_meta`];
-/// keep the two in sync (this one additionally escape-decodes strings).
+/// Discriminate the value tokens under a `META_ENTRY` into a typed
+/// [`MetaValue`] — thin wrapper over the shared [`meta_value_from_tokens`].
+/// The raw-token sibling is [`value_tokens_to_meta`]; keep the two in sync.
 fn meta_value_from_entry(entry: &MetaEntry) -> MetaValue {
-    if let Some(s) = entry.value_string()
-        && let Some(text) = s.text_decoded()
-    {
-        return MetaValue::String(text);
-    }
-    if let Some(n) = entry.value_number()
-        && let Some(mut decimal) = parse_decimal_token(n.text())
-    {
-        // A MINUS direct-child token (signed value) negates the
-        // number. Legacy parses `precision: -1` as Number(-1);
-        // we need the same.
-        if meta_entry_has_minus_sign(entry) {
-            decimal = -decimal;
-        }
-        // `0.50 USD` style: NUMBER + CURRENCY together → Amount.
-        // Plain NUMBER without CURRENCY → Number. Matches legacy
-        // parser priority where parse_amount runs before
-        // parse_signed_number.
-        if let Some(c) = entry.value_currency() {
-            return MetaValue::Amount(Amount::new(decimal, Currency::new(c.text())));
-        }
-        return number_meta_value(n.text(), decimal);
-    }
-    if let Some(d) = entry.value_date()
-        && let Some(date) = parse_date_token(d.text())
-    {
-        return MetaValue::Date(date);
-    }
-    if let Some(a) = entry.value_account() {
-        return MetaValue::Account(Account::new(a.text()));
-    }
-    if let Some(c) = entry.value_currency() {
-        return MetaValue::Currency(Currency::new(c.text()));
-    }
-    if let Some(b) = entry.value_bool() {
-        return MetaValue::Bool(b);
-    }
-    // Tags and Links inside meta entries: walk raw tokens. The
-    // typed-AST surface doesn't (yet) expose dedicated accessors,
-    // so we scan direct token children.
-    for tok in entry.syntax().children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = tok else {
-            continue;
-        };
-        match t.kind() {
-            crate::SyntaxKind::TAG => {
-                let stripped = t.text().trim_start_matches('#');
-                return MetaValue::Tag(Tag::new(stripped));
+    meta_value_from_tokens(
+        entry
+            .syntax()
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token),
+    )
+}
+
+/// Derive the typed [`MetaValue`] from a `META_ENTRY` node's direct child
+/// tokens. The single source of truth for BOTH walkers (red
+/// [`meta_value_from_entry`], green `meta_value`).
+///
+/// Matches the legacy parser's preference order: string > number/amount >
+/// date > account > currency > bool > tag/link > none, where each candidate
+/// is the FIRST token of its kind and a type that's present-but-unparsable
+/// (a malformed string, an over-precision number, a bad date) falls through
+/// to the next.
+///
+/// A `MINUS` token after the `META_KEY` and before the first `NUMBER`
+/// negates the number (legacy `parse_signed_number`, e.g. `precision: -1`);
+/// a first `CURRENCY` anywhere alongside the number makes it an `Amount`
+/// (legacy priority where `parse_amount` runs before `parse_signed_number`).
+pub(super) fn meta_value_from_tokens(tokens: impl Iterator<Item = impl TokenView>) -> MetaValue {
+    use crate::SyntaxKind as K;
+    let mut string_t: Option<String> = None;
+    let mut number_t: Option<String> = None;
+    let mut currency_t: Option<String> = None;
+    let mut date_t: Option<String> = None;
+    let mut account_t: Option<String> = None;
+    let mut bool_v: Option<bool> = None;
+    let mut tag_link: Option<MetaValue> = None;
+    let mut past_key = false;
+    let mut minus = false;
+    let mut minus_decided = false;
+
+    for t in tokens {
+        let kind = t.kind();
+        // First-of-kind value tokens (the `first_token` accessor semantics).
+        match kind {
+            K::STRING if string_t.is_none() => string_t = Some(t.text().to_string()),
+            K::NUMBER if number_t.is_none() => number_t = Some(t.text().to_string()),
+            K::CURRENCY if currency_t.is_none() => currency_t = Some(t.text().to_string()),
+            K::DATE if date_t.is_none() => date_t = Some(t.text().to_string()),
+            K::ACCOUNT if account_t.is_none() => account_t = Some(t.text().to_string()),
+            K::BOOL_TRUE if bool_v.is_none() => bool_v = Some(true),
+            K::BOOL_FALSE if bool_v.is_none() => bool_v = Some(false),
+            K::TAG if tag_link.is_none() => {
+                tag_link = Some(MetaValue::Tag(Tag::new(t.text().trim_start_matches('#'))));
             }
-            crate::SyntaxKind::LINK => {
-                let stripped = t.text().trim_start_matches('^');
-                return MetaValue::Link(Link::new(stripped));
+            K::LINK if tag_link.is_none() => {
+                tag_link = Some(MetaValue::Link(Link::new(t.text().trim_start_matches('^'))));
             }
             _ => {}
         }
+        if past_key && !minus_decided {
+            match kind {
+                K::MINUS => {
+                    minus = true;
+                    minus_decided = true;
+                }
+                K::NUMBER => minus_decided = true,
+                _ => {}
+            }
+        }
+        if kind == K::META_KEY {
+            past_key = true;
+        }
+    }
+
+    if let Some(s) = string_t
+        && let Some(decoded) = decode_string_token(&s)
+    {
+        return MetaValue::String(decoded);
+    }
+    if let Some(nt) = number_t
+        && let Some(mut dec) = parse_decimal_token(&nt)
+    {
+        if minus {
+            dec = -dec;
+        }
+        if let Some(c) = currency_t {
+            return MetaValue::Amount(Amount::new(dec, Currency::new(&c)));
+        }
+        return number_meta_value(&nt, dec);
+    }
+    if let Some(dt) = date_t
+        && let Some(date) = parse_date_token(&dt)
+    {
+        return MetaValue::Date(date);
+    }
+    if let Some(a) = account_t {
+        return MetaValue::Account(Account::new(&a));
+    }
+    if let Some(c) = currency_t {
+        return MetaValue::Currency(Currency::new(&c));
+    }
+    if let Some(b) = bool_v {
+        return MetaValue::Bool(b);
+    }
+    if let Some(tl) = tag_link {
+        return tl;
     }
     MetaValue::None
 }
@@ -3951,8 +4050,8 @@ mod tests {
     fn cost_spec_n_hash_t_parses_as_compound() {
         use rust_decimal_macros::dec;
         // This test previously pinned `{N # T}` -> Total{T} — the #1700
-        // mis-parse (beancount's compound_amount weighs N*per + total,
-        // so dropping the per-unit silently mis-weighed every compound
+        // misparse (beancount's compound_amount weighs N*per + total,
+        // so dropping the per-unit silently misweighed every compound
         // spec). It now pins the corrected as-written form.
         let src = "2024-01-01 open Assets:Stock\n\
                    2024-01-01 open Assets:Cash USD\n\

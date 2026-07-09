@@ -1324,6 +1324,16 @@ mod tests {
                     // The green walk_descendants produces these too.
                     format!("{:?}", p.account_occurrences),
                     format!("{:?}", p.currency_occurrences),
+                    // Remaining observables: the green conversion doesn't
+                    // produce these today (shared top-level walk), so they
+                    // hold trivially — pinned so a future green expansion
+                    // that touches them can't diverge unnoticed. Mirrors
+                    // the fuzz_green_eq_red target's field list.
+                    format!("{:?}", p.includes),
+                    format!("{:?}", p.plugins),
+                    format!("{:?}", p.warnings),
+                    format!("{:?}", p.has_leading_bom),
+                    format!("{:?}", p.alignment),
                 )
             };
             assert_eq!(

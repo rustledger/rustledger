@@ -48,4 +48,32 @@ fuzz_target!(|data: &[u8]| {
         format!("{:?}", red.currency_occurrences),
         "green vs red currency_occurrences diverged"
     );
+    // The remaining ParseResult observables. The green conversion doesn't
+    // produce these today (they come from the shared top-level walk), so
+    // they hold trivially — the assertions pin that: if the green path ever
+    // grows to touch includes/plugins/warnings/BOM/alignment, any divergence
+    // surfaces here instead of shipping unpinned.
+    assert_eq!(
+        format!("{:?}", green.includes),
+        format!("{:?}", red.includes),
+        "green vs red includes diverged"
+    );
+    assert_eq!(
+        format!("{:?}", green.plugins),
+        format!("{:?}", red.plugins),
+        "green vs red plugins diverged"
+    );
+    assert_eq!(
+        format!("{:?}", green.warnings),
+        format!("{:?}", red.warnings),
+        "green vs red warnings diverged"
+    );
+    assert_eq!(
+        green.has_leading_bom, red.has_leading_bom,
+        "green vs red has_leading_bom diverged"
+    );
+    assert_eq!(
+        green.alignment, red.alignment,
+        "green vs red alignment diverged"
+    );
 });

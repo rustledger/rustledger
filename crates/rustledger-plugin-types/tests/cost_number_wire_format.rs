@@ -3,6 +3,12 @@
 //! These tests pin the JSON shape that plugins and the Python compat
 //! shim depend on. Any change in serde representation here is a wire-
 //! format break for every plugin language binding.
+//!
+//! The cross-mirror guarantee (this shape == core serde == wasm
+//! `CostNumberJson` == ffi-wasi `InputCostNumber`, all four variants) is
+//! pinned in `rustledger-wasm/tests/cost_number_wire_parity.rs`; the WIT
+//! `cost-number` lowering/raising is pinned in `rustledger-ffi-component`'s
+//! unit tests.
 
 use rustledger_plugin_types::CostNumberData;
 

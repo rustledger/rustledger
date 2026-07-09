@@ -1615,7 +1615,7 @@ mod tests {
     //! `meta-value::number` (the old JSON-DTO path stringified it to
     //! `meta-value::text`).
 
-    use super::{directive_from_core, ffi, wit};
+    use super::{cost_number_from_core, directive_from_core, ffi, input_cost_number, wit};
     use rustledger_core::Directive;
 
     // Covers most directive types, a posting carrying BOTH cost and price, and
@@ -1858,5 +1858,84 @@ mod tests {
             })
             .expect("close");
         assert_eq!(close.account, "Assets:Cash");
+    }
+
+    /// WIT `cost-number` mapping, both directions — the fifth `CostNumber`
+    /// wire mirror. The four JSON mirrors are held to one canonical shape
+    /// by `rustledger-wasm/tests/cost_number_wire_parity.rs` (W1); the WIT
+    /// variant is positional rather than `kind`-tagged, so what parity
+    /// means HERE is: every core variant lowers to the same-named WIT arm
+    /// with the same string payloads (scale preserved), and every WIT arm
+    /// raises into the matching `InputCostNumber` variant. A new
+    /// `CostNumber` variant makes both matches non-exhaustive, forcing an
+    /// update at exactly these two sites.
+    #[test]
+    fn cost_number_lowers_to_matching_wit_arms() {
+        let d = |s: &str| rustledger_core::Decimal::from_str_exact(s).unwrap();
+        match cost_number_from_core(rustledger_core::CostNumber::PerUnit { value: d("100") }) {
+            wit::CostNumber::PerUnit(v) => assert_eq!(v, "100"),
+            other => panic!("PerUnit lowered to wrong arm: {other:?}"),
+        }
+        match cost_number_from_core(rustledger_core::CostNumber::Total { value: d("1500") }) {
+            wit::CostNumber::Total(v) => assert_eq!(v, "1500"),
+            other => panic!("Total lowered to wrong arm: {other:?}"),
+        }
+        match cost_number_from_core(rustledger_core::CostNumber::Compound {
+            per_unit: d("5.00"),
+            total: d("10.00"),
+        }) {
+            wit::CostNumber::Compound((per_unit, total)) => {
+                assert_eq!(per_unit, "5.00", "scale must be preserved");
+                assert_eq!(total, "10.00");
+            }
+            other => panic!("Compound lowered to wrong arm: {other:?}"),
+        }
+        match cost_number_from_core(rustledger_core::CostNumber::PerUnitFromTotal(
+            rustledger_core::BookedCost {
+                per_unit: d("150"),
+                total: d("300"),
+            },
+        )) {
+            wit::CostNumber::PerUnitFromTotal((per_unit, total)) => {
+                assert_eq!(per_unit, "150");
+                assert_eq!(total, "300");
+            }
+            other => panic!("PerUnitFromTotal lowered to wrong arm: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wit_cost_number_raises_to_matching_input_variants() {
+        let cases = [
+            wit::CostNumber::PerUnit("100".to_string()),
+            wit::CostNumber::Total("1500".to_string()),
+            wit::CostNumber::Compound(("5.00".to_string(), "10.00".to_string())),
+            wit::CostNumber::PerUnitFromTotal(("150".to_string(), "300".to_string())),
+        ];
+        for case in &cases {
+            match (case, input_cost_number(case)) {
+                (wit::CostNumber::PerUnit(v), ffi::InputCostNumber::PerUnit { value }) => {
+                    assert_eq!(&value, v);
+                }
+                (wit::CostNumber::Total(v), ffi::InputCostNumber::Total { value }) => {
+                    assert_eq!(&value, v);
+                }
+                (
+                    wit::CostNumber::Compound((p, t)),
+                    ffi::InputCostNumber::Compound { per_unit, total },
+                ) => {
+                    assert_eq!(&per_unit, p);
+                    assert_eq!(&total, t);
+                }
+                (
+                    wit::CostNumber::PerUnitFromTotal((p, t)),
+                    ffi::InputCostNumber::PerUnitFromTotal { per_unit, total },
+                ) => {
+                    assert_eq!(&per_unit, p);
+                    assert_eq!(&total, t);
+                }
+                (case, got) => panic!("WIT {case:?} raised to wrong variant: {got:?}"),
+            }
+        }
     }
 }

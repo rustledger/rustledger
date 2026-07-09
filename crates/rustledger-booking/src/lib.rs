@@ -42,9 +42,172 @@ use rust_decimal::prelude::Signed;
 use rustc_hash::FxHashMap;
 use rustledger_core::{Amount, Currency, IncompleteAmount, Transaction};
 
-/// Calculate the tolerance for a set of amounts.
+/// Option knobs for [`transaction_tolerances`], mirroring the ledger options
+/// that drive tolerance inference (`tolerance_multiplier`,
+/// `infer_tolerance_from_cost`, `inferred_tolerance_default`).
+#[derive(Debug, Clone)]
+pub struct ToleranceOptions<'a> {
+    /// Multiplier applied to each amount's quantum (beancount default 0.5).
+    pub multiplier: Decimal,
+    /// Whether per-unit costs and prices feed the tolerance (accumulated,
+    /// then max'd per currency), per `option "infer_tolerance_from_cost"`.
+    pub infer_from_cost: bool,
+    /// Per-currency tolerance floors from `option "inferred_tolerance_default"`;
+    /// the key `"*"` is a wildcard applying to all currencies.
+    pub defaults: &'a FxHashMap<String, Decimal>,
+}
+
+/// Calculate the quantum (smallest unit) of a decimal number based on its precision.
+/// For example: 10.436 has quantum 0.001, 100.00 has quantum 0.01
+#[must_use]
+pub fn decimal_quantum(value: Decimal) -> Decimal {
+    let scale = value.scale();
+    if scale == 0 {
+        Decimal::ONE
+    } else {
+        Decimal::new(1, scale)
+    }
+}
+
+/// Calculate per-currency balance tolerances for a transaction — the
+/// canonical tolerance semantics used by the validation pipeline.
 ///
-/// Tolerance is the maximum of all individual amount tolerances.
+/// This is the tolerance model that decides whether a transaction balances
+/// (beancount's `infer_tolerance_from_quantum`): each posting amount with
+/// decimal places contributes `quantum(amount) x multiplier`, max'd per
+/// currency; integer amounts contribute nothing (exact balance required).
+///
+/// When `infer_tolerance_from_cost` is enabled, for each posting with a cost:
+///   `tolerance = units_quantum * cost_per_unit * tolerance_multiplier`
+///
+/// The tolerance for each cost currency is the maximum of all such values
+/// computed from postings with costs in that currency.
+#[must_use]
+pub fn transaction_tolerances(
+    txn: &Transaction,
+    opts: &ToleranceOptions<'_>,
+) -> FxHashMap<rustledger_core::Currency, Decimal> {
+    // Pre-allocate for typical case (1-2 currencies)
+    let mut tolerances: FxHashMap<rustledger_core::Currency, Decimal> =
+        FxHashMap::with_capacity_and_hasher(txn.postings.len().min(4), Default::default());
+
+    // Default tolerance based on quantum of amounts in postings.
+    // Only amounts with decimal places contribute (Python's `if expo < 0:` guard).
+    // Integer amounts (scale=0) don't contribute — if all amounts for a currency
+    // are integers, the tolerance for that currency stays at 0 (exact balance required).
+    for posting in &txn.postings {
+        if let Some(units) = posting.amount()
+            && units.number.scale() > 0
+        {
+            let quantum = decimal_quantum(units.number);
+            // Use half the quantum as base tolerance (like Python beancount)
+            let base_tolerance = quantum * opts.multiplier;
+
+            tolerances
+                .entry(units.currency.clone())
+                .and_modify(|t| *t = (*t).max(base_tolerance))
+                .or_insert(base_tolerance);
+        }
+    }
+
+    // Calculate cost-inferred tolerance if enabled.
+    // In Python, cost/price tolerance is only computed for postings where units
+    // have decimal places (expo < 0). The cost tolerance is ACCUMULATED (summed)
+    // across postings, then max'd with the existing tolerance per currency.
+    if opts.infer_from_cost {
+        // Accumulated cost/price tolerances per currency
+        let mut cost_tolerances: FxHashMap<rustledger_core::Currency, Decimal> =
+            FxHashMap::with_capacity_and_hasher(txn.postings.len().min(4), Default::default());
+
+        for posting in &txn.postings {
+            if let Some(units) = posting.amount() {
+                // Only process postings with decimal amounts (Python: if expo < 0)
+                if units.number.scale() == 0 {
+                    continue;
+                }
+                let units_quantum = decimal_quantum(units.number);
+                let tolerance = units_quantum * opts.multiplier;
+
+                // Cost contribution — only per-unit cost feeds into
+                // tolerance inference. `PerUnitFromTotal` and `PerUnit`
+                // both expose a per-unit value via `per_unit()`.
+                if let Some(cost_spec) = &posting.cost
+                    && let Some(cost_per_unit) = cost_spec.number.and_then(|cn| cn.per_unit())
+                    && let Some(cost_currency) = &cost_spec.currency
+                {
+                    let cost_tolerance = tolerance * cost_per_unit;
+                    *cost_tolerances.entry(cost_currency.clone()).or_default() += cost_tolerance;
+                }
+
+                // Price contribution: only complete amounts contribute
+                // (incomplete/empty price annotations are filled in by
+                // interpolation later). `kind` (Unit vs Total) doesn't
+                // change the tolerance math here — both use `tolerance *
+                // price_amt.number`.
+                if let Some(price) = &posting.price
+                    && let Some(price_amt) = price
+                        .amount
+                        .as_ref()
+                        .and_then(rustledger_core::IncompleteAmount::as_amount)
+                {
+                    let price_tolerance = tolerance * price_amt.number;
+                    *cost_tolerances
+                        .entry(price_amt.currency.clone())
+                        .or_default() += price_tolerance;
+                }
+            }
+        }
+
+        // Merge cost tolerances: take max of existing and cost-inferred
+        for (currency, cost_tol) in cost_tolerances {
+            tolerances
+                .entry(currency)
+                .and_modify(|t| *t = (*t).max(cost_tol))
+                .or_insert(cost_tol);
+        }
+    }
+
+    // Apply per-currency default tolerances from `inferred_tolerance_default` option.
+    // These act as a floor: if the computed tolerance for a currency is less than the
+    // default, the default is used. The special key "*" applies to all currencies.
+    if !opts.defaults.is_empty() {
+        // Apply the wildcard default first (if any)
+        if let Some(wildcard_default) = opts.defaults.get("*") {
+            // Apply wildcard to all currencies that appear in the transaction
+            for posting in &txn.postings {
+                if let Some(units) = posting.amount() {
+                    tolerances
+                        .entry(units.currency.clone())
+                        .and_modify(|t| *t = (*t).max(*wildcard_default))
+                        .or_insert(*wildcard_default);
+                }
+            }
+        }
+
+        // Apply per-currency defaults (overrides wildcard for specific currencies)
+        for (currency_str, default_tol) in opts.defaults {
+            if currency_str == "*" {
+                continue;
+            }
+            let currency = rustledger_core::Currency::from(currency_str.as_str());
+            tolerances
+                .entry(currency)
+                .and_modify(|t| *t = (*t).max(*default_tol))
+                .or_insert(*default_tol);
+        }
+    }
+
+    tolerances
+}
+
+/// Calculate the tolerance for a bare set of amounts (low-level primitive).
+///
+/// Tolerance is the maximum of all individual amount tolerances, using each
+/// amount's fixed [`Amount::inferred_tolerance`]. This is **not** the
+/// pipeline's transaction-balancing tolerance: it ignores the ledger options
+/// (`tolerance_multiplier`, `infer_tolerance_from_cost`,
+/// `inferred_tolerance_default`). For the semantics that decide whether a
+/// transaction balances, use [`transaction_tolerances`].
 #[must_use]
 pub fn calculate_tolerance(amounts: &[&Amount]) -> FxHashMap<Currency, Decimal> {
     // Pre-allocate for typical case (1-3 currencies per transaction)
@@ -341,7 +504,14 @@ pub fn calculate_residual_precise(transaction: &Transaction) -> FxHashMap<Curren
     residual_weight::<BigDecimal>(transaction)
 }
 
-/// Check if a transaction is balanced within tolerance.
+/// Check if a transaction is balanced within the given tolerances
+/// (low-level primitive).
+///
+/// The caller supplies the tolerance map. The validation pipeline does not
+/// call this: it computes tolerances via [`transaction_tolerances`] and
+/// escalates non-zero residuals to [`calculate_residual_precise`] (the
+/// two-tier check from #1240). Pair this with [`transaction_tolerances`] —
+/// not [`calculate_tolerance`] — if you need pipeline-equivalent balancing.
 #[must_use]
 #[allow(clippy::implicit_hasher)]
 pub fn is_balanced(transaction: &Transaction, tolerances: &FxHashMap<Currency, Decimal>) -> bool {

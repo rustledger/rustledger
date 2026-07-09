@@ -344,140 +344,26 @@ pub fn validate_transaction_balance(
         }
     }
 }
-
-/// Calculate the quantum (smallest unit) of a decimal number based on its precision.
-/// For example: 10.436 has quantum 0.001, 100.00 has quantum 0.01
-pub fn decimal_quantum(value: Decimal) -> Decimal {
-    let scale = value.scale();
-    if scale == 0 {
-        Decimal::ONE
-    } else {
-        Decimal::new(1, scale)
-    }
-}
-
-/// Calculate per-currency tolerances for a transaction.
+/// Calculate per-currency balance tolerances for a transaction.
 ///
-/// When `infer_tolerance_from_cost` is enabled, for each posting with a cost:
-///   `tolerance = units_quantum * cost_per_unit * tolerance_multiplier`
-///
-/// The tolerance for each cost currency is the maximum of all such values
-/// computed from postings with costs in that currency.
+/// Thin wrapper over the canonical
+/// [`rustledger_booking::transaction_tolerances`], wiring in the
+/// ledger-driven knobs from [`ValidationOptions`]. The semantics live in
+/// `rustledger-booking` so every consumer (validator, embedders) shares one
+/// implementation.
+#[must_use]
 pub fn calculate_tolerances(
     txn: &Transaction,
     options: &ValidationOptions,
 ) -> FxHashMap<rustledger_core::Currency, Decimal> {
-    // Pre-allocate for typical case (1-2 currencies)
-    let mut tolerances: FxHashMap<rustledger_core::Currency, Decimal> =
-        FxHashMap::with_capacity_and_hasher(txn.postings.len().min(4), Default::default());
-
-    // Default tolerance based on quantum of amounts in postings.
-    // Only amounts with decimal places contribute (Python's `if expo < 0:` guard).
-    // Integer amounts (scale=0) don't contribute — if all amounts for a currency
-    // are integers, the tolerance for that currency stays at 0 (exact balance required).
-    for posting in &txn.postings {
-        if let Some(units) = posting.amount()
-            && units.number.scale() > 0
-        {
-            let quantum = decimal_quantum(units.number);
-            // Use half the quantum as base tolerance (like Python beancount)
-            let base_tolerance = quantum * options.tolerance_multiplier;
-
-            tolerances
-                .entry(units.currency.clone())
-                .and_modify(|t| *t = (*t).max(base_tolerance))
-                .or_insert(base_tolerance);
-        }
-    }
-
-    // Calculate cost-inferred tolerance if enabled.
-    // In Python, cost/price tolerance is only computed for postings where units
-    // have decimal places (expo < 0). The cost tolerance is ACCUMULATED (summed)
-    // across postings, then max'd with the existing tolerance per currency.
-    if options.infer_tolerance_from_cost {
-        // Accumulated cost/price tolerances per currency
-        let mut cost_tolerances: FxHashMap<rustledger_core::Currency, Decimal> =
-            FxHashMap::with_capacity_and_hasher(txn.postings.len().min(4), Default::default());
-
-        for posting in &txn.postings {
-            if let Some(units) = posting.amount() {
-                // Only process postings with decimal amounts (Python: if expo < 0)
-                if units.number.scale() == 0 {
-                    continue;
-                }
-                let units_quantum = decimal_quantum(units.number);
-                let tolerance = units_quantum * options.tolerance_multiplier;
-
-                // Cost contribution — only per-unit cost feeds into
-                // tolerance inference. `PerUnitFromTotal` and `PerUnit`
-                // both expose a per-unit value via `per_unit()`.
-                if let Some(cost_spec) = &posting.cost
-                    && let Some(cost_per_unit) = cost_spec.number.and_then(|cn| cn.per_unit())
-                    && let Some(cost_currency) = &cost_spec.currency
-                {
-                    let cost_tolerance = tolerance * cost_per_unit;
-                    *cost_tolerances.entry(cost_currency.clone()).or_default() += cost_tolerance;
-                }
-
-                // Price contribution: only complete amounts contribute
-                // (incomplete/empty price annotations are filled in by
-                // interpolation later). `kind` (Unit vs Total) doesn't
-                // change the tolerance math here — both use `tolerance *
-                // price_amt.number`.
-                if let Some(price) = &posting.price
-                    && let Some(price_amt) = price
-                        .amount
-                        .as_ref()
-                        .and_then(rustledger_core::IncompleteAmount::as_amount)
-                {
-                    let price_tolerance = tolerance * price_amt.number;
-                    *cost_tolerances
-                        .entry(price_amt.currency.clone())
-                        .or_default() += price_tolerance;
-                }
-            }
-        }
-
-        // Merge cost tolerances: take max of existing and cost-inferred
-        for (currency, cost_tol) in cost_tolerances {
-            tolerances
-                .entry(currency)
-                .and_modify(|t| *t = (*t).max(cost_tol))
-                .or_insert(cost_tol);
-        }
-    }
-
-    // Apply per-currency default tolerances from `inferred_tolerance_default` option.
-    // These act as a floor: if the computed tolerance for a currency is less than the
-    // default, the default is used. The special key "*" applies to all currencies.
-    if !options.inferred_tolerance_default.is_empty() {
-        // Apply the wildcard default first (if any)
-        if let Some(wildcard_default) = options.inferred_tolerance_default.get("*") {
-            // Apply wildcard to all currencies that appear in the transaction
-            for posting in &txn.postings {
-                if let Some(units) = posting.amount() {
-                    tolerances
-                        .entry(units.currency.clone())
-                        .and_modify(|t| *t = (*t).max(*wildcard_default))
-                        .or_insert(*wildcard_default);
-                }
-            }
-        }
-
-        // Apply per-currency defaults (overrides wildcard for specific currencies)
-        for (currency_str, default_tol) in &options.inferred_tolerance_default {
-            if currency_str == "*" {
-                continue;
-            }
-            let currency = rustledger_core::Currency::from(currency_str.as_str());
-            tolerances
-                .entry(currency)
-                .and_modify(|t| *t = (*t).max(*default_tol))
-                .or_insert(*default_tol);
-        }
-    }
-
-    tolerances
+    rustledger_booking::transaction_tolerances(
+        txn,
+        &rustledger_booking::ToleranceOptions {
+            multiplier: options.tolerance_multiplier,
+            infer_from_cost: options.infer_tolerance_from_cost,
+            defaults: &options.inferred_tolerance_default,
+        },
+    )
 }
 
 /// Update inventories with booking validation for each posting.
@@ -595,10 +481,11 @@ pub fn process_inventory_addition(
 
 #[cfg(test)]
 mod tolerance_tests {
-    //! Direct unit tests for `decimal_quantum` and `calculate_tolerances`
-    //! (#1309 cluster 3). The file had no tests, so the tolerance
-    //! arithmetic and the per-currency default/floor logic went
-    //! unasserted.
+    //! Direct unit tests for `calculate_tolerances` (#1309 cluster 3).
+    //! The semantics now live in `rustledger_booking::transaction_tolerances`;
+    //! these tests exercise the full path through the `ValidationOptions`
+    //! wrapper, pinning the tolerance arithmetic and the per-currency
+    //! default/floor logic against drift on either side.
     use super::*;
     use rust_decimal_macros::dec;
 
@@ -616,9 +503,15 @@ mod tolerance_tests {
 
     #[test]
     fn decimal_quantum_reflects_scale() {
-        assert_eq!(decimal_quantum(dec!(100.00)), dec!(0.01)); // scale 2
-        assert_eq!(decimal_quantum(dec!(10.436)), dec!(0.001)); // scale 3
-        assert_eq!(decimal_quantum(dec!(5)), dec!(1)); // scale 0 -> ONE
+        assert_eq!(
+            rustledger_booking::decimal_quantum(dec!(100.00)),
+            dec!(0.01)
+        ); // scale 2
+        assert_eq!(
+            rustledger_booking::decimal_quantum(dec!(10.436)),
+            dec!(0.001)
+        ); // scale 3
+        assert_eq!(rustledger_booking::decimal_quantum(dec!(5)), dec!(1)); // scale 0 -> ONE
     }
 
     #[test]

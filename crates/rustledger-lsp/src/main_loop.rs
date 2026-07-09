@@ -1138,7 +1138,10 @@ impl MainLoopState {
         };
 
         let (_text, parse_result) = self.get_document_data(&uri);
-        let resolved = handle_inlay_hint_resolve(hint, &parse_result);
+        // The tooltip prefers the loaded whole-ledger pipeline output
+        // (booked + pad-expanded) over the raw single-file parse.
+        let ledger_guard = self.ledger_state.read();
+        let resolved = handle_inlay_hint_resolve(hint, &parse_result, ledger_guard.ledger());
 
         serde_json::to_value(resolved).map_err(|e| e.to_string())
     }

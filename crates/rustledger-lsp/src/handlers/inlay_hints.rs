@@ -8,7 +8,7 @@
 
 use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Position};
 use rustledger_booking::interpolate;
-use rustledger_core::{Decimal, Directive, IncompleteAmount, SYNTHESIZED_FILE_ID};
+use rustledger_core::{Decimal, Directive, IncompleteAmount, SYNTHESIZED_FILE_ID, Transaction};
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
@@ -243,7 +243,11 @@ pub fn handle_inlay_hints(
 
 /// Handle an inlay hint resolve request.
 /// Adds rich tooltip with account balance information.
-pub fn handle_inlay_hint_resolve(hint: InlayHint, parse_result: &ParseResult) -> InlayHint {
+pub fn handle_inlay_hint_resolve(
+    hint: InlayHint,
+    parse_result: &ParseResult,
+    ledger: Option<&rustledger_loader::Ledger>,
+) -> InlayHint {
     let mut resolved = hint.clone();
 
     // Check if we have data to resolve
@@ -256,7 +260,7 @@ pub fn handle_inlay_hint_resolve(hint: InlayHint, parse_result: &ParseResult) ->
         let currency = data.get("currency").and_then(|v| v.as_str()).unwrap_or("");
 
         // Build rich tooltip with account information
-        let tooltip = build_account_tooltip(account, amount, currency, parse_result);
+        let tooltip = build_account_tooltip(account, amount, currency, parse_result, ledger);
         resolved.tooltip = Some(lsp_types::InlayHintTooltip::MarkupContent(
             lsp_types::MarkupContent {
                 kind: lsp_types::MarkupKind::Markdown,
@@ -269,27 +273,66 @@ pub fn handle_inlay_hint_resolve(hint: InlayHint, parse_result: &ParseResult) ->
 }
 
 /// Build a rich tooltip for an inferred amount hint.
+///
+/// Balance source, in preference order:
+///
+/// 1. **The loaded ledger** (`LedgerState`'s pipeline output), when a journal
+///    is configured: `Ledger::balance_view()` is date-sorted, BOOKED
+///    (interpolated amounts filled, cost specs resolved), plugin-rewritten,
+///    and pad-expanded, across the whole ledger including files this buffer
+///    can't see. This is the same "consume the pipeline's cached output
+///    instead of re-deriving" move the balance code lens made.
+/// 2. **This file's raw parse** as a fallback (no journal configured):
+///    a units-only sum over the buffer as written — unbooked, so elided
+///    amounts contribute nothing, and includes/pads are invisible. The
+///    tooltip labels this mode explicitly so the number is not mistaken
+///    for a ledger-wide balance (it used to say "Current Balance" for
+///    exactly that misleading sum).
 fn build_account_tooltip(
     account: &str,
     inferred_amount: &str,
     currency: &str,
     parse_result: &ParseResult,
+    ledger: Option<&rustledger_loader::Ledger>,
 ) -> String {
     let mut balances: HashMap<String, Decimal> = HashMap::new();
     let mut transaction_count = 0;
 
-    // Calculate running balance for this account
-    for spanned in &parse_result.directives {
-        if let Directive::Transaction(txn) = &spanned.value {
-            for posting in &txn.postings {
-                if posting.account.as_ref() == account {
-                    transaction_count += 1;
-                    if let Some(units) = &posting.units
-                        && let Some(number) = units.number()
-                    {
-                        let curr = units.currency().unwrap_or("???").to_string();
-                        *balances.entry(curr).or_default() += number;
-                    }
+    let balance_view; // keeps the whole-ledger view alive for the loop below
+    let (transactions, balance_label): (Box<dyn Iterator<Item = &Transaction>>, &str) =
+        if let Some(ledger) = ledger {
+            balance_view = ledger.balance_view();
+            (
+                Box::new(balance_view.iter().filter_map(|d| match d {
+                    Directive::Transaction(txn) => Some(txn),
+                    _ => None,
+                })),
+                "**Balance (whole ledger):**\n",
+            )
+        } else {
+            (
+                Box::new(
+                    parse_result
+                        .directives
+                        .iter()
+                        .filter_map(|s| match &s.value {
+                            Directive::Transaction(txn) => Some(txn),
+                            _ => None,
+                        }),
+                ),
+                "**Balance (this file, as written):**\n",
+            )
+        };
+
+    for txn in transactions {
+        for posting in &txn.postings {
+            if posting.account.as_ref() == account {
+                transaction_count += 1;
+                if let Some(units) = &posting.units
+                    && let Some(number) = units.number()
+                {
+                    let curr = units.currency().unwrap_or("???").to_string();
+                    *balances.entry(curr).or_default() += number;
                 }
             }
         }
@@ -302,7 +345,7 @@ fn build_account_tooltip(
         tooltip.push_str(&format!("📊 {} transactions\n\n", transaction_count));
 
         if !balances.is_empty() {
-            tooltip.push_str("**Current Balance:**\n");
+            tooltip.push_str(balance_label);
             for (curr, amount) in &balances {
                 tooltip.push_str(&format!("- {} {}\n", amount, curr));
             }
@@ -378,7 +421,7 @@ mod tests {
             })),
         };
 
-        let resolved = handle_inlay_hint_resolve(hint, &result);
+        let resolved = handle_inlay_hint_resolve(hint, &result, None);
 
         // Pattern-match the variant explicitly: a `String` tooltip
         // (the other variant) would silently pass the prior
@@ -1016,5 +1059,82 @@ mod tests {
             "field pad (min 2) + justify pad (1) must combine to 3; label={label:?}"
         );
         assert_eq!(label.trim_start(), "100.00 USD");
+    }
+
+    #[test]
+    fn tooltip_prefers_whole_ledger_booked_balances() {
+        // The whole-ledger path must see BOOKED amounts: the Expenses:Food
+        // legs below are elided in source, so the old raw-parse sum showed
+        // no balance at all for the account. Through the pipeline they book
+        // to +5.00/+10.00 USD. The buffer's own parse result is EMPTY to
+        // prove the data really comes from the loaded ledger, not the file.
+        let source = "2024-01-01 open Assets:Bank\n\
+                      2024-01-01 open Expenses:Food\n\
+                      2024-01-15 * \"Coffee\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n\
+                      2024-01-20 * \"Lunch\"\n  Assets:Bank  -10.00 USD\n  Expenses:Food\n";
+        let dir =
+            std::env::temp_dir().join(format!("rledger-inlay-tooltip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.beancount");
+        std::fs::write(&path, source).unwrap();
+        let ledger = rustledger_loader::load(
+            &path,
+            &rustledger_loader::LoadOptions {
+                validate: false,
+                ..rustledger_loader::LoadOptions::default()
+            },
+        )
+        .expect("load test ledger");
+        std::fs::remove_file(&path).ok();
+
+        let empty_buffer = parse("");
+        let hint = InlayHint {
+            position: Position::new(0, 0),
+            label: InlayHintLabel::String("  5.00 USD".to_string()),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: None,
+            padding_left: Some(true),
+            padding_right: None,
+            data: Some(serde_json::json!({
+                "kind": "inferred_amount",
+                "account": "Expenses:Food",
+                "amount": "5.00",
+                "currency": "USD",
+            })),
+        };
+
+        let resolved = handle_inlay_hint_resolve(hint.clone(), &empty_buffer, Some(&ledger));
+        let content = match resolved.tooltip {
+            Some(lsp_types::InlayHintTooltip::MarkupContent(c)) => c,
+            other => panic!("expected MarkupContent tooltip; got {other:?}"),
+        };
+        assert!(
+            content.value.contains("Balance (whole ledger):"),
+            "must label the pipeline-backed mode: {}",
+            content.value
+        );
+        assert!(
+            content.value.contains("15.00 USD"),
+            "booked (interpolated) amounts must be summed: {}",
+            content.value
+        );
+        assert!(
+            content.value.contains("2 transactions"),
+            "{}",
+            content.value
+        );
+
+        // Fallback (no ledger loaded): the empty buffer knows nothing.
+        let resolved = handle_inlay_hint_resolve(hint, &empty_buffer, None);
+        let content = match resolved.tooltip {
+            Some(lsp_types::InlayHintTooltip::MarkupContent(c)) => c,
+            other => panic!("expected MarkupContent tooltip; got {other:?}"),
+        };
+        assert!(
+            content.value.contains("First transaction"),
+            "file-local fallback must not invent balances: {}",
+            content.value
+        );
     }
 }

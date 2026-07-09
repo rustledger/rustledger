@@ -51,6 +51,29 @@ struct AccountConfig {
 }
 
 /// A cost lot for FIFO tracking.
+///
+/// # Why this is NOT `rustledger_core::Inventory` (Phase-1 sweep Z3)
+///
+/// This plugin deliberately keeps a private lot list instead of reusing the
+/// core inventory's booking-method reduction, because the two operations
+/// are different in kind, not just in code:
+///
+/// - **Core `Inventory::reduce` is unit-denominated**: a reduction consumes
+///   N units, matched against lots per booking method. This plugin's sells
+///   are **value-denominated**: [`process_fifo_sell`] consumes lots against
+///   a currency amount (`lot.units × current_price` vs the remaining value),
+///   which core has no API for — porting would mean re-deriving exactly the
+///   loop below on top of core types.
+/// - The plugin applies its own **rounding policy** (`round_down` on sells,
+///   `round_up` on buys, at `MAPPED_CURRENCY_PRECISION`) and computes `PnL`
+///   against `last_price`; core reduction is exact and PnL-agnostic
+///   (capital gains live in the booking engine).
+/// - The plugin operates in the **DTO domain** (`PostingData`, string
+///   numbers) on the plugin wire, not on core `Position`s.
+///
+/// Revisit only if core ever grows a value-denominated reduction — then
+/// this loop is the candidate call site. For unit-denominated needs, use
+/// `rustledger_core::Inventory`; do not extend this struct.
 #[derive(Clone, Debug)]
 struct CostLot {
     units: Decimal,

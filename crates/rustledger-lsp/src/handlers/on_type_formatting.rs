@@ -197,13 +197,13 @@ fn is_transaction_header(line: &str) -> bool {
 fn is_posting_line(line: &str) -> bool {
     let trimmed = line.trim();
 
-    // Posting lines are indented and start with an account type
+    // Posting lines are indented and start with an account type. The
+    // deliberately colon-less prefix match (mid-typing heuristic) reads the
+    // type list from core so a sixth type can't silently miss this site.
     line.starts_with("  ")
-        && (trimmed.starts_with("Assets")
-            || trimmed.starts_with("Liabilities")
-            || trimmed.starts_with("Equity")
-            || trimmed.starts_with("Income")
-            || trimmed.starts_with("Expenses"))
+        && rustledger_core::ACCOUNT_TYPES
+            .iter()
+            .any(|t| trimmed.starts_with(t))
 }
 
 #[cfg(test)]

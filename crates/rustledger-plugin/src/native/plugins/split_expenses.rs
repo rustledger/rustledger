@@ -97,8 +97,11 @@ impl NativePlugin for SplitExpensesPlugin {
                 let mut new_postings = Vec::new();
 
                 for posting in &txn.postings {
-                    // Check if this is an expense account
-                    let is_expense = posting.account.starts_with("Expenses:");
+                    // Check if this is an expense account (root-component
+                    // classification via core; identical to the old
+                    // `starts_with("Expenses:")` for any parsable account,
+                    // which always has >= 2 components).
+                    let is_expense = rustledger_core::account_type(&posting.account) == "expenses";
 
                     // Check if account already contains a member name
                     let has_member = members.iter().any(|m| posting.account.contains(m.as_str()));

@@ -16,8 +16,8 @@ use directives::{
     format_document_lines, format_event_lines, format_note_lines, format_open_lines,
     format_pad_lines, format_price_lines, format_query_lines,
 };
-pub use helpers::escape_string;
 pub(crate) use helpers::format_meta_value;
+pub use helpers::{escape_csv, escape_string};
 pub(crate) use transaction::{format_incomplete_amount, format_transaction_lines};
 pub use transaction::{format_posting_line, posting_format_line};
 
@@ -193,6 +193,15 @@ mod tests {
         let config = FormatConfig::default();
         let formatted = format_open(&open, &config);
         assert_eq!(formatted, "2024-01-01 open Assets:Bank:Checking USD,EUR\n");
+    }
+
+    #[test]
+    fn test_escape_csv() {
+        assert_eq!(escape_csv("plain"), "plain");
+        assert_eq!(escape_csv("a,b"), "\"a,b\"");
+        assert_eq!(escape_csv("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(escape_csv("line1\nline2"), "\"line1\nline2\"");
+        assert_eq!(escape_csv(""), "");
     }
 
     #[test]

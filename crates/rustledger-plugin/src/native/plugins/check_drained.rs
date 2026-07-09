@@ -67,13 +67,15 @@ impl NativePlugin for CheckDrainedPlugin {
             ops.push(PluginOp::Keep(i));
 
             if let DirectiveData::Close(data) = &wrapper.data {
-                // Only generate for balance sheet accounts (Assets, Liabilities, Equity)
-                let is_balance_sheet = data.account.starts_with("Assets:")
-                    || data.account.starts_with("Liabilities:")
-                    || data.account.starts_with("Equity:")
-                    || data.account == "Assets"
-                    || data.account == "Liabilities"
-                    || data.account == "Equity";
+                // Only generate for balance sheet accounts (Assets,
+                // Liabilities, Equity). `account_type` classifies by the
+                // root component, so both `Assets:...` and a bare `Assets`
+                // land in the same arm (the old hand-written check needed
+                // six clauses for that).
+                let is_balance_sheet = matches!(
+                    rustledger_core::account_type(&data.account),
+                    "assets" | "liabilities" | "equity"
+                );
 
                 if !is_balance_sheet {
                     continue;

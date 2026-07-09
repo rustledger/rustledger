@@ -468,11 +468,9 @@ pub fn is_word_char(c: char) -> bool {
 /// Account names start with a standard account type and contain colons.
 pub fn is_account_like(s: &str) -> bool {
     s.contains(':')
-        && (s.starts_with("Assets")
-            || s.starts_with("Liabilities")
-            || s.starts_with("Equity")
-            || s.starts_with("Income")
-            || s.starts_with("Expenses"))
+        && rustledger_core::ACCOUNT_TYPES
+            .iter()
+            .any(|t| s.starts_with(t))
 }
 
 /// Check if a string is a standard root account type.

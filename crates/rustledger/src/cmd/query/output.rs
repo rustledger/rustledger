@@ -671,13 +671,7 @@ fn value_to_json(value: &Value) -> serde_json::Value {
     }
 }
 
-fn escape_csv(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
+use rustledger_core::format::escape_csv;
 
 #[cfg(test)]
 mod tests {

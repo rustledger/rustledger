@@ -444,23 +444,11 @@ pub(super) fn account_balances(
     engine.into_inventories().into_iter().collect()
 }
 
-/// Escape a string for CSV output.
-pub(super) fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
-
-/// Escape a string for JSON output.
-pub(super) fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-}
+// CSV/JSON escaping: single-sourced in core. `escape_string` escapes the
+// exact set the old hand-chained `json_escape` did (backslash, quote, \n,
+// \r, \t), so the alias is behavior-identical.
+pub(super) use rustledger_core::format::escape_csv as csv_escape;
+pub(super) use rustledger_core::format::escape_string as json_escape;
 
 #[derive(Default)]
 pub(super) struct LedgerStats {

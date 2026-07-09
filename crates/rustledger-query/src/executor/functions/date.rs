@@ -216,7 +216,7 @@ impl Executor<'_> {
         let result = match field.as_str() {
             "YEAR" => rustledger_core::naive_date(i32::from(date.year()), 1, 1),
             "QUARTER" => {
-                let quarter = (date.month() as u32 - 1) / 3;
+                let quarter = quarter_index0(date.month() as u32);
                 rustledger_core::naive_date(i32::from(date.year()), quarter * 3 + 1, 1)
             }
             "MONTH" => rustledger_core::naive_date(i32::from(date.year()), date.month() as u32, 1),
@@ -263,7 +263,7 @@ impl Executor<'_> {
             "YEAR" => i64::from(date.year()),
             "MONTH" => i64::from(date.month()),
             "DAY" => i64::from(date.day()),
-            "QUARTER" => i64::from((date.month() - 1) / 3 + 1),
+            "QUARTER" => i64::from(quarter_index0(date.month() as u32) + 1),
             "WEEK" => {
                 // ISO week number via strftime %V
                 let week_str = jiff::fmt::strtime::format("%V", date).unwrap_or_default();
@@ -463,6 +463,15 @@ impl Executor<'_> {
 /// `date.checked_add(jiff::ToSpan::days(days)).unwrap()` aborted the process on
 /// a large offset. Build the span fallibly and propagate overflow as a
 /// `QueryError` (beanquery raises a catchable `OverflowError` here).
+/// Zero-based quarter index for a 1-based month (0 => Q1). The single
+/// quarter formula for this module — `DATE_TRUNC`, `QUARTER()`, and the
+/// `DATE_BIN` quarter arm all derive from it rather than re-deriving
+/// `(month - 1) / 3` inline (the sweep found the formula written twice
+/// here, diverging only in off-by-one framing).
+const fn quarter_index0(month1: u32) -> u32 {
+    (month1 - 1) / 3
+}
+
 fn add_days(date: NaiveDate, days: i64) -> Result<NaiveDate, QueryError> {
     let span = jiff::Span::new()
         .try_days(days)

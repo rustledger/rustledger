@@ -31,6 +31,7 @@ pub(super) fn execute_query<W: Write>(
     // columns (and `meta`-derived location lookups) resolve to real source
     // positions instead of NULL.
     let mut executor = Executor::new_with_sources(directives, source_map);
+    executor.set_account_types(settings.account_types.clone());
     let result = executor
         .execute(&query)
         .with_context(|| "failed to execute query")?;

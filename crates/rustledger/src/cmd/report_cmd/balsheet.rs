@@ -10,6 +10,7 @@ use std::io::Write;
 /// Generate a balance sheet report (Assets, Liabilities, Equity).
 pub(super) fn report_balsheet<W: Write>(
     directives: &[Directive],
+    account_types: &rustledger_core::AccountTypes,
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
@@ -20,16 +21,16 @@ pub(super) fn report_balsheet<W: Write>(
     // Partition the single source-of-truth balances (see
     // `super::account_balances`) into the three balance-sheet sections by
     // account prefix. No balance re-derivation here.
+    // Route by CONFIGURED account type (honors `name_*` renames — L5: a
+    // ledger with `option "name_assets" "Activa"` must still fill the
+    // balance sheet), never by hardcoded root prefixes.
+    use rustledger_core::AccountTypeKind as K;
     for (account, inv) in super::account_balances(directives) {
-        let account_str: &str = &account;
-        let section = if account_str.starts_with("Assets:") {
-            &mut assets
-        } else if account_str.starts_with("Liabilities:") {
-            &mut liabilities
-        } else if account_str.starts_with("Equity:") {
-            &mut equity
-        } else {
-            continue;
+        let section = match account_types.kind(&account) {
+            Some(K::Assets) => &mut assets,
+            Some(K::Liabilities) => &mut liabilities,
+            Some(K::Equity) => &mut equity,
+            _ => continue,
         };
         section.insert(account, inv);
     }

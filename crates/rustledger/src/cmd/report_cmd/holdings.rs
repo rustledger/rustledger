@@ -10,6 +10,7 @@ use std::io::Write;
 /// Generate a holdings report with cost basis.
 pub(super) fn report_holdings<W: Write>(
     directives: &[Directive],
+    account_types: &rustledger_core::AccountTypes,
     account_filter: Option<&str>,
     format: &OutputFormat,
     writer: &mut W,
@@ -30,7 +31,9 @@ pub(super) fn report_holdings<W: Write>(
                 }
 
                 let account_str: &str = &posting.account;
-                if !account_str.starts_with("Assets:") {
+                // Configured Assets root, not a hardcoded prefix (L5).
+                if account_types.kind(account_str) != Some(rustledger_core::AccountTypeKind::Assets)
+                {
                     continue;
                 }
 

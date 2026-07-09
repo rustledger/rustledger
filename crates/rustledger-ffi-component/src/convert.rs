@@ -644,11 +644,30 @@ fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::Quer
         };
     }
     let directives = rustledger_booking::merge_with_padding(&loaded.directives);
-    run_query(&directives, query_str)
+    run_query(&directives, query_str, account_types_from(&loaded.options))
 }
 
 /// Run one query against already-loaded, pad-expanded directives.
-pub fn run_query(directives: &[rustledger_core::Directive], query_str: &str) -> out::QueryResult {
+/// Build the config-aware account-type classifier from loaded ledger
+/// options, so BQL `POSSIGN`/`ACCOUNT_SORTKEY` honor `name_*` renames the
+/// way beanquery does (L5).
+fn account_types_from(
+    options: &rustledger_ffi_wasi::LedgerOptions,
+) -> rustledger_core::AccountTypes {
+    rustledger_core::AccountTypes {
+        assets: options.name_assets.clone(),
+        liabilities: options.name_liabilities.clone(),
+        equity: options.name_equity.clone(),
+        income: options.name_income.clone(),
+        expenses: options.name_expenses.clone(),
+    }
+}
+
+pub fn run_query(
+    directives: &[rustledger_core::Directive],
+    query_str: &str,
+    account_types: rustledger_core::AccountTypes,
+) -> out::QueryResult {
     let parsed = match parse_query(query_str) {
         Ok(q) => q,
         Err(e) => {
@@ -660,6 +679,7 @@ pub fn run_query(directives: &[rustledger_core::Directive], query_str: &str) -> 
         }
     };
     let mut executor = Executor::new(directives);
+    executor.set_account_types(account_types);
     match executor.execute(&parsed) {
         Ok(result) => {
             // Infer each column's datatype from its first NON-NULL value.
@@ -722,7 +742,10 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
     let loaded = ffi::helpers::load_source(source);
     let query_results: Vec<out::QueryResult> = if loaded.errors.is_empty() {
         let directives = rustledger_booking::merge_with_padding(&loaded.directives);
-        queries.iter().map(|q| run_query(&directives, q)).collect()
+        queries
+            .iter()
+            .map(|q| run_query(&directives, q, account_types_from(&loaded.options)))
+            .collect()
     } else {
         queries
             .iter()
@@ -1427,7 +1450,15 @@ pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryR
         .filter_map(|d| ffi::input_entry_to_directive(&loaded_directive_to_input(d)).ok())
         .collect();
     let directives = rustledger_booking::merge_with_padding(&core);
-    run_query(&directives, query_str)
+    // The `query-entries` WIT contract carries no ledger options, so the
+    // classifier defaults to the standard five roots. Renamed-root ledgers
+    // queried via host-provided entries won't POSSIGN-flip custom names —
+    // extending the contract with options is a WIT-version decision (L5 note).
+    run_query(
+        &directives,
+        query_str,
+        rustledger_core::AccountTypes::default(),
+    )
 }
 
 // ---- stateful ledger handle (`resource session`, #1421) -------------------
@@ -1569,7 +1600,17 @@ impl SessionState {
         let directives = self
             .padded
             .get_or_init(|| rustledger_booking::merge_with_padding(&self.directives));
-        run_query(directives, query_str)
+        run_query(
+            directives,
+            query_str,
+            rustledger_core::AccountTypes {
+                assets: self.options.name_assets.clone(),
+                liabilities: self.options.name_liabilities.clone(),
+                equity: self.options.name_equity.clone(),
+                income: self.options.name_income.clone(),
+                expenses: self.options.name_expenses.clone(),
+            },
+        )
     }
 
     /// Keep only directives within `[begin, end)`. Reuses the free `filter`'s

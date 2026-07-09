@@ -80,7 +80,8 @@ pub use format::{
     format_posting_line, posting_format_line, render_lines, resolve_alignment,
 };
 pub use identifiers::{
-    ACCOUNT_TYPES, Account, Currency, Link, Tag, account_type, is_subaccount_or_equal,
+    ACCOUNT_TYPES, Account, AccountTypeKind, AccountTypes, Currency, Link, Tag, account_type,
+    is_subaccount_or_equal,
 };
 pub use implicit_prices::extract_per_unit_price;
 pub use intern::{InternedStr, StringInterner};

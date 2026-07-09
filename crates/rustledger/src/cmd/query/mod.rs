@@ -214,13 +214,15 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
             &directives,
             &source_map,
             &display_context,
+            &ledger.options.to_account_types(),
             args,
         );
     };
 
     // Batch query: no pager (matching Python bean-query behavior).
     // Pager is only used in interactive REPL mode.
-    let settings = ShellSettings::from_args(args, display_context);
+    let settings =
+        ShellSettings::from_args(args, display_context, ledger.options.to_account_types());
     if let Some(ref output_path) = settings.output_file {
         let mut file = fs::File::create(output_path)
             .with_context(|| format!("failed to create output file {}", output_path.display()))?;
@@ -237,16 +239,24 @@ struct ShellSettings {
     pager: bool,
     output_file: Option<PathBuf>,
     display_context: DisplayContext,
+    /// Config-aware account types from the loaded ledger (L5: `POSSIGN` /
+    /// `ACCOUNT_SORTKEY` must honor `name_*` renames like beanquery).
+    account_types: rustledger_core::AccountTypes,
 }
 
 impl ShellSettings {
-    fn from_args(args: &Args, display_context: DisplayContext) -> Self {
+    fn from_args(
+        args: &Args,
+        display_context: DisplayContext,
+        account_types: rustledger_core::AccountTypes,
+    ) -> Self {
         Self {
             format: args.format.unwrap_or(OutputFormat::Text),
             numberify: args.numberify,
             pager: true,
             output_file: args.output.clone(),
             display_context,
+            account_types,
         }
     }
 }

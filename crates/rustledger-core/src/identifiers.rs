@@ -333,6 +333,123 @@ pub fn is_subaccount_or_equal(child: &str, parent: &str) -> bool {
 /// classify accounts in a config-aware context.
 pub const ACCOUNT_TYPES: [&str; 5] = ["Assets", "Liabilities", "Equity", "Income", "Expenses"];
 
+/// The five beancount account-type kinds, independent of their configured
+/// root names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountTypeKind {
+    /// Assets (debit-normal, balance sheet).
+    Assets,
+    /// Liabilities (credit-normal, balance sheet).
+    Liabilities,
+    /// Equity (credit-normal, balance sheet).
+    Equity,
+    /// Income (credit-normal, income statement).
+    Income,
+    /// Expenses (debit-normal, income statement).
+    Expenses,
+}
+
+/// Config-aware account-type classifier.
+///
+/// beancount lets a ledger rename its five root accounts via the `name_*`
+/// options (e.g. `option "name_income" "Revenue"`). Any consumer that
+/// classifies accounts by root — report section routing, BQL `POSSIGN` /
+/// `ACCOUNT_SORTKEY`, sign conventions — must classify against the
+/// *configured* names, not the [`ACCOUNT_TYPES`] defaults, or renamed
+/// ledgers silently misroute (empty income statements, unflipped signs —
+/// the L5 class). Construct via `Default` for standard names or from the
+/// loader's `Options`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountTypes {
+    /// Configured root name for Assets.
+    pub assets: String,
+    /// Configured root name for Liabilities.
+    pub liabilities: String,
+    /// Configured root name for Equity.
+    pub equity: String,
+    /// Configured root name for Income.
+    pub income: String,
+    /// Configured root name for Expenses.
+    pub expenses: String,
+}
+
+impl Default for AccountTypes {
+    fn default() -> Self {
+        Self {
+            assets: "Assets".to_string(),
+            liabilities: "Liabilities".to_string(),
+            equity: "Equity".to_string(),
+            income: "Income".to_string(),
+            expenses: "Expenses".to_string(),
+        }
+    }
+}
+
+impl AccountTypes {
+    /// Classify `account` by its root segment against the configured names.
+    ///
+    /// Returns `None` for roots matching none of the five (custom types).
+    #[must_use]
+    pub fn kind(&self, account: &str) -> Option<AccountTypeKind> {
+        let root = account.split(':').next().unwrap_or(account);
+        if root == self.assets {
+            Some(AccountTypeKind::Assets)
+        } else if root == self.liabilities {
+            Some(AccountTypeKind::Liabilities)
+        } else if root == self.equity {
+            Some(AccountTypeKind::Equity)
+        } else if root == self.income {
+            Some(AccountTypeKind::Income)
+        } else if root == self.expenses {
+            Some(AccountTypeKind::Expenses)
+        } else {
+            None
+        }
+    }
+
+    /// Balance-sheet account (Assets / Liabilities / Equity)?
+    #[must_use]
+    pub fn is_balance_sheet(&self, account: &str) -> bool {
+        matches!(
+            self.kind(account),
+            Some(AccountTypeKind::Assets | AccountTypeKind::Liabilities | AccountTypeKind::Equity)
+        )
+    }
+
+    /// Income-statement account (Income / Expenses)?
+    #[must_use]
+    pub fn is_income_statement(&self, account: &str) -> bool {
+        matches!(
+            self.kind(account),
+            Some(AccountTypeKind::Income | AccountTypeKind::Expenses)
+        )
+    }
+
+    /// Credit-normal account (Liabilities / Equity / Income) — the set whose
+    /// sign `POSSIGN` flips, matching beancount `get_account_sign` == -1.
+    #[must_use]
+    pub fn is_credit_normal(&self, account: &str) -> bool {
+        matches!(
+            self.kind(account),
+            Some(AccountTypeKind::Liabilities | AccountTypeKind::Equity | AccountTypeKind::Income)
+        )
+    }
+
+    /// Python-parity sort index for `ACCOUNT_SORTKEY`: Assets=0,
+    /// Liabilities=1, Equity=2, Income=3, Expenses=4, custom roots=5.
+    #[must_use]
+    pub fn sort_index(&self, account: &str) -> u8 {
+        match self.kind(account) {
+            Some(AccountTypeKind::Assets) => 0,
+            Some(AccountTypeKind::Liabilities) => 1,
+            Some(AccountTypeKind::Equity) => 2,
+            Some(AccountTypeKind::Income) => 3,
+            Some(AccountTypeKind::Expenses) => 4,
+            None => 5,
+        }
+    }
+}
+
 /// The lowercased root account type for `account` — the segment before the
 /// first `:` — or `"unknown"` if it is not one of [`ACCOUNT_TYPES`].
 #[must_use]

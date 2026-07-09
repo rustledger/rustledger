@@ -241,6 +241,11 @@ struct LoadedReport {
     /// Source-faithful directive stream (pads remain `Pad`). Used by
     /// reports that count/list source directive kinds.
     directives: Vec<rustledger_core::Directive>,
+    /// Config-aware account-type classifier (honors `name_*` renames).
+    /// Reports must route/sign accounts through this, never by hardcoded
+    /// root-prefix matching — renamed ledgers otherwise misroute (L5:
+    /// empty income statement under `option "name_income" "Revenue"`).
+    account_types: rustledger_core::AccountTypes,
     /// Pad-expanded view, present only when the ledger has pads AND the
     /// report is balance-computing. `None` means "use `directives`".
     balance_view: Option<Vec<rustledger_core::Directive>>,
@@ -322,10 +327,12 @@ fn load(file: &PathBuf, report: &Report, verbose: bool, no_cache: bool) -> Resul
     } else {
         None
     };
+    let account_types = ledger.options.to_account_types();
     let directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
 
     Ok(LoadedReport {
         directives,
+        account_types,
         balance_view,
     })
 }
@@ -361,16 +368,22 @@ fn render<W: io::Write>(
             balances::report_balances(balance_input, account.as_deref(), format, writer)?;
         }
         Report::Balsheet => {
-            balsheet::report_balsheet(balance_input, format, writer)?;
+            balsheet::report_balsheet(balance_input, &loaded.account_types, format, writer)?;
         }
         Report::Income => {
-            income::report_income(balance_input, format, writer)?;
+            income::report_income(balance_input, &loaded.account_types, format, writer)?;
         }
         Report::Journal { account, limit } => {
             journal::report_journal(directives, account.as_deref(), *limit, format, writer)?;
         }
         Report::Holdings { account } => {
-            holdings::report_holdings(balance_input, account.as_deref(), format, writer)?;
+            holdings::report_holdings(
+                balance_input,
+                &loaded.account_types,
+                account.as_deref(),
+                format,
+                writer,
+            )?;
         }
         Report::Networth {
             period,
@@ -380,6 +393,7 @@ fn render<W: io::Write>(
         } => {
             networth::report_networth(
                 balance_input,
+                &loaded.account_types,
                 period,
                 currency.as_deref(),
                 account.as_deref(),

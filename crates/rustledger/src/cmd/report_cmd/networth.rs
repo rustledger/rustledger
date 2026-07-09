@@ -19,6 +19,7 @@ use std::io::Write;
 /// * `writer` - Output writer
 pub(super) fn report_networth<W: Write>(
     directives: &[Directive],
+    account_types: &rustledger_core::AccountTypes,
     period: &str,
     currency_filter: Option<&str>,
     account_filter: Option<&str>,
@@ -104,9 +105,15 @@ pub(super) fn report_networth<W: Write>(
                     }
                 }
 
-                if account_str.starts_with("Assets:") && account_matches(account_str) {
+                // Configured roots, not hardcoded prefixes (L5).
+                use rustledger_core::AccountTypeKind as K;
+                if account_types.kind(account_str) == Some(K::Assets)
+                    && account_matches(account_str)
+                {
                     *asset_balance.entry(amount.currency.clone()).or_default() += amount.number;
-                } else if account_str.starts_with("Liabilities:") && account_matches(account_str) {
+                } else if account_types.kind(account_str) == Some(K::Liabilities)
+                    && account_matches(account_str)
+                {
                     *liability_balance
                         .entry(amount.currency.clone())
                         .or_default() += amount.number;

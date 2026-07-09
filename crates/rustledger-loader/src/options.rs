@@ -599,6 +599,20 @@ impl Options {
         self.custom.get(key).map(String::as_str)
     }
 
+    /// Config-aware [`rustledger_core::AccountTypes`] classifier honoring the
+    /// `name_*` renames. Consumers that route or sign accounts by root type
+    /// must use this, not the rename-blind `ACCOUNT_TYPES` defaults.
+    #[must_use]
+    pub fn to_account_types(&self) -> rustledger_core::AccountTypes {
+        rustledger_core::AccountTypes {
+            assets: self.name_assets.clone(),
+            liabilities: self.name_liabilities.clone(),
+            equity: self.name_equity.clone(),
+            income: self.name_income.clone(),
+            expenses: self.name_expenses.clone(),
+        }
+    }
+
     /// Get all account type prefixes.
     #[must_use]
     pub fn account_types(&self) -> [&str; 5] {

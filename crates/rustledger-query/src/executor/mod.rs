@@ -94,6 +94,12 @@ pub struct Executor<'a> {
     target_currency: Option<String>,
     /// Query date for price lookups (defaults to today).
     query_date: rustledger_core::NaiveDate,
+    /// Config-aware account-type classifier (honors `name_*` renames).
+    /// `POSSIGN` and `ACCOUNT_SORTKEY` must classify against this — hardcoded
+    /// roots diverge from beanquery on renamed ledgers (L5). Defaults to
+    /// the standard five; hosts with a loaded `Ledger` set it via
+    /// [`Executor::set_account_types`].
+    account_types: rustledger_core::AccountTypes,
     /// Cache for compiled regex patterns (`RwLock` for thread-safe parallel execution).
     // `Arc<Regex>`, not `Regex`: the `~`/`!~` operators look the regex up per
     // row, and cloning a `Regex` gives the clone a fresh, empty lazy-DFA cache
@@ -168,12 +174,20 @@ impl<'a> Executor<'a> {
             price_db,
             target_currency: None,
             query_date: jiff::Zoned::now().date(),
+            account_types: rustledger_core::AccountTypes::default(),
             regex_cache: RwLock::new(FxHashMap::default()),
             account_info,
             source_locations: None,
             source_map: None,
             tables: FxHashMap::default(),
         }
+    }
+
+    /// Set the config-aware account types (from the loaded ledger's
+    /// `name_*` options) so `POSSIGN` / `ACCOUNT_SORTKEY` classify renamed
+    /// roots the way beanquery does.
+    pub fn set_account_types(&mut self, account_types: rustledger_core::AccountTypes) {
+        self.account_types = account_types;
     }
 
     /// Create a new executor with source location support.
@@ -245,6 +259,7 @@ impl<'a> Executor<'a> {
             price_db,
             target_currency: None,
             query_date: jiff::Zoned::now().date(),
+            account_types: rustledger_core::AccountTypes::default(),
             regex_cache: RwLock::new(FxHashMap::default()),
             account_info,
             source_locations: Some(source_locations),
@@ -972,7 +987,7 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
                     Value::String(s) => {
-                        let type_index = Self::account_type_index(s);
+                        let type_index = self.account_type_index(s);
                         Ok(Value::String(format!("{type_index}-{s}")))
                     }
                     Value::Null => Ok(Value::Null),
@@ -1193,9 +1208,9 @@ impl<'a> Executor<'a> {
                         ));
                     }
                 };
-                let first_component = account_str.split(':').next().unwrap_or("");
-                let is_credit_normal =
-                    matches!(first_component, "Liabilities" | "Equity" | "Income");
+                // Configured credit-normal set (honors `name_*` renames) —
+                // beanquery flips for a renamed Income root too (L5).
+                let is_credit_normal = self.account_types.is_credit_normal(&account_str);
                 match &args[0] {
                     Value::Amount(a) => {
                         let mut amt = a.clone();

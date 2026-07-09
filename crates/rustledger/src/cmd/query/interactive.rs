@@ -43,6 +43,7 @@ pub(super) fn run_interactive(
     directives: &[Spanned<Directive>],
     source_map: &SourceMap,
     display_context: &DisplayContext,
+    account_types: &rustledger_core::AccountTypes,
     args: &Args,
 ) -> Result<()> {
     let mut rl: Editor<(), DefaultHistory> = DefaultEditor::new()?;
@@ -76,7 +77,8 @@ pub(super) fn run_interactive(
     );
     println!();
 
-    let mut settings = ShellSettings::from_args(args, display_context.clone());
+    let mut settings =
+        ShellSettings::from_args(args, display_context.clone(), account_types.clone());
 
     loop {
         let readline = rl.readline("beanquery> ");

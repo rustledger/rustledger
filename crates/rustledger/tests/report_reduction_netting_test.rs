@@ -5,9 +5,14 @@
 //! Before the fix, a buy of `10 AAPL {150}` followed by a sell of
 //! `-5 AAPL {150} @ 180` printed two rows (`10 AAPL` and `-5 AAPL`) —
 //! the reduction resolved to a different lot-key than the augmentation,
-//! so `Inventory.add` could not cancel them. These reports render only
-//! units (never cost), so the correct output is a single `5 AAPL` row.
-//! Verified against beancount 3.2.3: `sum(position)` = `5 AAPL {150.00 USD}`.
+//! so `Inventory.add` could not cancel them. The correct result is a
+//! single netted holding of `5 AAPL {150.00 USD}` — verified against
+//! beancount 3.2.3: `sum(position)` = `5 AAPL {150.00 USD}`.
+//!
+//! Realization now goes through the booking engine, so the reports also
+//! render the lot at cost (`5 AAPL { 150.00 USD, <date>}`) like beancount
+//! rather than a cost-less `5 AAPL`; these tests assert both the netted
+//! units and the cost annotation.
 
 mod common;
 
@@ -119,6 +124,15 @@ fn report_balances_nets_reduction() {
     let f = write_fixture();
     let stdout = run_report(&bin, f.path(), "balances");
     assert_netted_to_5(&stdout, "balances");
+    // The netted holding renders its lot at cost, beancount-style.
+    let aapl_line = stdout
+        .lines()
+        .find(|l| l.contains("AAPL"))
+        .unwrap_or_else(|| panic!("no AAPL row: {stdout}"));
+    assert!(
+        aapl_line.contains("150.00 USD"),
+        "balances must render the lot cost (5 AAPL {{150.00 USD}}), got: {aapl_line:?}",
+    );
 }
 
 /// The AAPL number on the single line that contains all of `needles`.

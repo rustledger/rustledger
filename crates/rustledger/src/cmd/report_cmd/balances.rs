@@ -17,8 +17,9 @@ pub(super) fn report_balances<W: Write>(
     // `super::account_balances`); no report re-derives them itself.
     let balances = super::account_balances(directives);
 
-    // Collect data for output
-    let mut rows: Vec<(&str, Decimal, &str)> = Vec::new();
+    // Collect data for output. `cost` is the beancount-style lot annotation
+    // (e.g. ` {150.00 USD}`) for held commodities, empty for plain currency.
+    let mut rows: Vec<(&str, Decimal, &str, String)> = Vec::new();
     for (account, inventory) in &balances {
         if let Some(filter) = account_filter
             && !account.starts_with(filter)
@@ -29,27 +30,45 @@ pub(super) fn report_balances<W: Write>(
             continue;
         }
         for position in inventory.positions() {
-            rows.push((account, position.units.number, &position.units.currency));
+            let cost = position
+                .cost
+                .as_ref()
+                .map(|c| format!("{c}"))
+                .unwrap_or_default();
+            rows.push((
+                account,
+                position.units.number,
+                &position.units.currency,
+                cost,
+            ));
         }
     }
 
     match format {
         OutputFormat::Csv => {
-            writeln!(writer, "account,amount,currency")?;
-            for (account, amount, currency) in &rows {
-                writeln!(writer, "{},{},{}", csv_escape(account), amount, currency)?;
+            writeln!(writer, "account,amount,currency,cost")?;
+            for (account, amount, currency, cost) in &rows {
+                writeln!(
+                    writer,
+                    "{},{},{},{}",
+                    csv_escape(account),
+                    amount,
+                    currency,
+                    csv_escape(cost)
+                )?;
             }
         }
         OutputFormat::Json => {
             writeln!(writer, "[")?;
-            for (i, (account, amount, currency)) in rows.iter().enumerate() {
+            for (i, (account, amount, currency, cost)) in rows.iter().enumerate() {
                 let comma = if i < rows.len() - 1 { "," } else { "" };
                 writeln!(
                     writer,
-                    r#"  {{"account": "{}", "amount": "{}", "currency": "{}"}}{}"#,
+                    r#"  {{"account": "{}", "amount": "{}", "currency": "{}", "cost": "{}"}}{}"#,
                     json_escape(account),
                     amount,
                     currency,
+                    json_escape(cost),
                     comma
                 )?;
             }
@@ -60,12 +79,16 @@ pub(super) fn report_balances<W: Write>(
             writeln!(writer, "{}", "=".repeat(60))?;
             writeln!(writer)?;
             let mut current_account = "";
-            for (account, amount, currency) in &rows {
+            for (account, amount, currency, cost) in &rows {
                 if *account != current_account {
                     writeln!(writer, "{account}")?;
                     current_account = account;
                 }
-                writeln!(writer, "  {amount:>15} {currency}")?;
+                if cost.is_empty() {
+                    writeln!(writer, "  {amount:>15} {currency}")?;
+                } else {
+                    writeln!(writer, "  {amount:>15} {currency} {cost}")?;
+                }
             }
         }
     }

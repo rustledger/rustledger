@@ -52,18 +52,24 @@ pub(super) fn report_balsheet<W: Write>(
     fn collect_rows(
         section: &str,
         balances: &BTreeMap<rustledger_core::Account, Inventory>,
-    ) -> Vec<(String, String, Decimal, String)> {
+    ) -> Vec<(String, String, Decimal, String, String)> {
         let mut rows = Vec::new();
         for (account, inventory) in balances {
             if inventory.is_empty() {
                 continue;
             }
             for position in inventory.positions() {
+                let cost = position
+                    .cost
+                    .as_ref()
+                    .map(|c| format!("{c}"))
+                    .unwrap_or_default();
                 rows.push((
                     section.to_string(),
                     account.to_string(),
                     position.units.number,
                     position.units.currency.to_string(),
+                    cost,
                 ));
             }
         }
@@ -85,15 +91,16 @@ pub(super) fn report_balsheet<W: Write>(
 
     match format {
         OutputFormat::Csv => {
-            writeln!(writer, "section,account,amount,currency")?;
-            for (section, account, amount, currency) in &all_rows {
+            writeln!(writer, "section,account,amount,currency,cost")?;
+            for (section, account, amount, currency, cost) in &all_rows {
                 writeln!(
                     writer,
-                    "{},{},{},{}",
+                    "{},{},{},{},{}",
                     section,
                     csv_escape(account),
                     amount,
-                    currency
+                    currency,
+                    csv_escape(cost)
                 )?;
             }
             // Add net worth rows
@@ -104,15 +111,16 @@ pub(super) fn report_balsheet<W: Write>(
         OutputFormat::Json => {
             writeln!(writer, "{{")?;
             writeln!(writer, r#"  "accounts": ["#)?;
-            for (i, (section, account, amount, currency)) in all_rows.iter().enumerate() {
+            for (i, (section, account, amount, currency, cost)) in all_rows.iter().enumerate() {
                 let comma = if i < all_rows.len() - 1 { "," } else { "" };
                 writeln!(
                     writer,
-                    r#"    {{"section": "{}", "account": "{}", "amount": "{}", "currency": "{}"}}{}"#,
+                    r#"    {{"section": "{}", "account": "{}", "amount": "{}", "currency": "{}", "cost": "{}"}}{}"#,
                     section,
                     json_escape(account),
                     amount,
                     currency,
+                    json_escape(cost),
                     comma
                 )?;
             }
@@ -139,10 +147,15 @@ pub(super) fn report_balsheet<W: Write>(
                         continue;
                     }
                     for position in inventory.positions() {
+                        let cost = position
+                            .cost
+                            .as_ref()
+                            .map(|c| format!(" {c}"))
+                            .unwrap_or_default();
                         writeln!(
                             writer,
-                            "  {:>12} {:>4}  {}",
-                            position.units.number, position.units.currency, account
+                            "  {:>12} {:>4}{}  {}",
+                            position.units.number, position.units.currency, cost, account
                         )?;
                     }
                 }

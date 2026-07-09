@@ -156,6 +156,19 @@ impl BookingEngine {
         self.inventories.get(account)
     }
 
+    /// Consume the engine and return its realized per-account inventories.
+    ///
+    /// After [`apply`](Self::apply)ing a booked directive stream, this is the
+    /// canonical realization — each account's `Inventory` carries its lots at
+    /// cost, with reductions already matched (FIFO/LIFO/etc. per the account's
+    /// booking method). Callers that render balances (reports, holdings) read
+    /// this rather than re-summing postings, so cost is retained and lot
+    /// matching is the engine's, not a re-implementation.
+    #[must_use]
+    pub fn into_inventories(self) -> FxHashMap<rustledger_core::Account, Inventory> {
+        self.inventories
+    }
+
     /// Book a transaction: fill in empty cost specs and calculate gains.
     ///
     /// This does NOT modify the internal inventories - call `apply` for that.

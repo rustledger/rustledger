@@ -409,44 +409,39 @@ fn render<W: io::Write>(
 ///
 /// Every balance-computing report (`balances`, `balsheet`, `income`, …) is a
 /// *view* over this map — none re-derives balances itself. That is the whole
-/// point: the same "sum the postings per account" logic used to live copied
+/// point: the same "what does each account hold" logic used to live copied
 /// across each report, and the copies drifted (reductions failing to net in
-/// `balances`/`balsheet` while `income` summed cost-less — #1726). One
+/// `balances`/`balsheet` while `income` summed differently — #1726). One
 /// function, one behavior, no drift.
 ///
-/// Positions are summed by commodity **cost-less** on purpose: these reports
-/// render only units, never cost, so a held commodity is a single running
-/// total per account+currency. (Trade-off: two lots at different costs merge,
-/// e.g. `10 AAPL {150}` + `10 AAPL {200}` → `20 AAPL`, rather than showing as
-/// separate lots the way beancount does — acceptable because cost is not
-/// displayed. If cost-accurate holdings reporting is ever wanted, this is the
-/// one place to teach lot-tracking, and every report inherits it.)
+/// Realization goes through the **booking engine** ([`apply`]), so held
+/// commodities keep their lots at cost and reductions are matched against
+/// those lots by the account's booking method — the same machinery the
+/// loader's book phase uses. Each `Inventory` therefore carries cost, and
+/// reports render `5 AAPL {150.00 USD}` like beancount rather than a
+/// cost-less `5 AAPL`. Two lots at different costs stay separate
+/// (`10 AAPL {150}` + `10 AAPL {200}`), matching beancount.
 ///
-/// `Open` directives seed a zero balance so opened accounts are represented;
-/// callers skip empty inventories on render, so this never changes output.
+/// [`apply`]: rustledger_booking::BookingEngine::apply
 pub(super) fn account_balances(
     directives: &[rustledger_core::Directive],
 ) -> std::collections::BTreeMap<rustledger_core::Account, rustledger_core::Inventory> {
     use rustledger_core::Directive;
-    let mut balances = std::collections::BTreeMap::new();
+    // Realize via the booking engine so held commodities carry their lots at
+    // cost and reductions match those lots (FIFO/LIFO/etc. per each account's
+    // booking method) — the same logic the loader's book phase uses, not a
+    // re-implementation. The input directives are already booked (costs
+    // resolved, interpolations applied), which is `apply`'s precondition.
+    let mut engine = rustledger_booking::BookingEngine::new();
+    engine.register_account_methods(directives.iter());
     for directive in directives {
-        match directive {
-            Directive::Open(open) => {
-                balances.entry(open.account.clone()).or_default();
-            }
-            Directive::Transaction(txn) => {
-                for posting in &txn.postings {
-                    if let Some(amount) = posting.amount() {
-                        let inv: &mut rustledger_core::Inventory =
-                            balances.entry(posting.account.clone()).or_default();
-                        inv.add(rustledger_core::Position::simple(amount.clone()));
-                    }
-                }
-            }
-            _ => {}
+        if let Directive::Transaction(txn) = directive {
+            engine.apply(txn);
         }
     }
-    balances
+    // FxHashMap has non-deterministic order; collect into a BTreeMap so report
+    // rows come out account-sorted and stable across runs.
+    engine.into_inventories().into_iter().collect()
 }
 
 /// Escape a string for CSV output.

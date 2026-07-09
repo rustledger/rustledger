@@ -560,13 +560,11 @@ fn validate_phase_inner<D: ValidatableDirective>(
     // otherwise).
     let mut sorted: Vec<&D> = Vec::with_capacity(directives.len());
     sorted.extend(directives.iter());
+    // Booking order via the canonical comparator (single source shared
+    // with the loader, booking engine, and LSP).
     let sort_fn = |a: &&D, b: &&D| {
-        let ad = a.directive();
-        let bd = b.directive();
-        ad.date()
-            .cmp(&bd.date())
-            .then_with(|| ad.priority().cmp(&bd.priority()))
-            .then_with(|| ad.has_cost_reduction().cmp(&bd.has_cost_reduction()))
+        rustledger_core::booking_sort_key(a.directive())
+            .cmp(&rustledger_core::booking_sort_key(b.directive()))
     };
     if sorted.len() >= PARALLEL_SORT_THRESHOLD {
         sorted.par_sort_by(sort_fn);

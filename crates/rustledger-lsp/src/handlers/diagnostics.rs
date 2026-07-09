@@ -138,7 +138,17 @@ pub struct PluginContext<'a> {
 /// model. As a result the LSP may report a slightly different error set
 /// than `rledger check` in edge cases that depend on synth plugins'
 /// interaction with Early validation; the canonical behavior is the
-/// loader's. Running plugins after booking (rather than before) keeps
+/// loader's (`rustledger_loader::process`, the
+/// sort → synth → Early → book → regular → Late → finalize pipeline).
+///
+/// Reviewed 2026-07 (duplication sweep, "finalize consumers" family):
+/// keeping this approximation is deliberate — the overlay model swaps
+/// per-buffer directive sets that `process()` (which starts from a raw
+/// `LoadResult`) cannot ingest, and `finalize`'s only current step that
+/// touches directive VALUES (`normalize_prices`, `@@`→`@`) runs AFTER
+/// Late validation in the loader too, so its absence here does not
+/// change diagnostics. If `finalize` ever gains a step that feeds
+/// validation, this function must mirror it — grep for this comment. Running plugins after booking (rather than before) keeps
 /// plugin-transformed directives (e.g., `effective_date` splitting
 /// transactions across dates) visible to validation (#793).
 ///
@@ -168,15 +178,10 @@ pub fn validation_errors_to_diagnostics(
     let line_index = LineIndex::new(source, encoding);
     let mut extra_diagnostics = Vec::new();
 
-    // Sort directives by date, type priority, then cost-basis reductions last
-    // (required for correct lot matching during booking).
-    booked_directives.sort_by_cached_key(|d| {
-        (
-            d.value.date(),
-            d.value.priority(),
-            d.value.has_cost_reduction(),
-        )
-    });
+    // Booking order via the canonical comparator — the SINGLE source for
+    // (date, priority, cost-reduction-last), shared with the loader and
+    // booking engine so the LSP cannot drift from `rledger check`'s order.
+    booked_directives.sort_by_cached_key(|d| rustledger_core::booking_sort_key(&d.value));
 
     // Run booking/interpolation on transactions before validation.
     // This fills in missing amounts (auto-balancing) so validation sees the complete picture.

@@ -1126,3 +1126,58 @@ jobs:
         run: |
           echo "::error::${{ steps.compat_test.outputs.regression_count }} check regression(s) vs the previous run — files that matched before and mismatch now. See the 'Run comprehensive compatibility test' log and compat-regressions.txt."
           exit 1
+
+  # Python-gated cargo integration tests.
+  #
+  # Several cargo test suites compare rledger against Python beancount
+  # directly (Command::new("bean-check")) and SKIP SILENTLY when the
+  # binary is absent — which is every environment except this one. The
+  # use-before-open silent-pass bug (#1742) sat on main behind exactly
+  # that skip: test_account_lifecycle_consistency would have caught it,
+  # but nothing in CI ever ran the test with bean-check on PATH.
+  #
+  # This job exists so those tests actually gate PRs:
+  # 1. install beancount and FAIL LOUDLY if bean-check isn't runnable
+  #    (a silent skip here would recreate the hole this job closes);
+  # 2. run the python-gated suites. Keep this list in sync with
+  #    `grep -rl 'Command::new("bean-' crates/*/tests`.
+  python-gated-cargo-tests:
+    name: Python-gated cargo tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+        with:
+          toolchain: stable
+      # rust-cache intentionally omitted — see the note on the
+      # compatibility-test job (LGPL-3.0 license-check interaction).
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.11'
+      - name: Install beancount
+        run: pip install beancount
+      - name: Assert bean-check is runnable (no silent skips)
+        run: |
+          bean-check --version
+          # The tests skip with "Skipping: Python beancount not available"
+          # when this binary is missing. This step guarantees that skip
+          # path is dead in CI — if bean-check breaks, the job goes red
+          # HERE instead of the tests green-skipping.
+      - name: Run python-gated test suites
+        env:
+          CARGO_TERM_COLOR: always
+        run: |
+          cargo test -p rustledger --test integration_test -- --nocapture
+          cargo test -p rustledger-core --test synthetic_generation -- --nocapture
+      - name: Fail on silent skips
+        run: |
+          # Belt and braces: re-run and grep for the skip marker. The
+          # assert step above should make this unreachable, but if a test
+          # gains a new availability probe (a different binary, a
+          # container) this catches it green-skipping.
+          if cargo test -p rustledger --test integration_test -- --nocapture 2>&1 | grep -q "Skipping: Python beancount not available"; then
+            echo "::error::python-gated tests skipped despite bean-check being installed — availability probe drifted"
+            exit 1
+          fi

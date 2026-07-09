@@ -1,4 +1,4 @@
-______________________________________________________________________
+---
 
 ## title: rledger extract description: Import transactions from bank statements
 
@@ -14,64 +14,64 @@ rledger extract [OPTIONS] [FILE]
 
 ## Arguments
 
-| Argument | Description |
-|----------|-------------|
-| `FILE` | CSV or OFX file to import (required unless using `--list-importers`) |
+| Argument | Description                                                          |
+| -------- | -------------------------------------------------------------------- |
+| `FILE`   | CSV or OFX file to import (required unless using `--list-importers`) |
 
 ## Options
 
 ### Config-based Import
 
-| Option | Description |
-|--------|-------------|
-| `-i, --importer <NAME>` | Use a named importer from config |
-| `--config <FILE>` | Path to importers.toml configuration file |
-| `--list-importers` | List available importers from config file and exit |
+| Option                  | Description                                        |
+| ----------------------- | -------------------------------------------------- |
+| `-i, --importer <NAME>` | Use a named importer from config                   |
+| `--config <FILE>`       | Path to importers.toml configuration file          |
+| `--list-importers`      | List available importers from config file and exit |
 
 ### Auto-Detection
 
-| Option | Description |
-|--------|-------------|
+| Option   | Description                                                                                     |
+| -------- | ----------------------------------------------------------------------------------------------- |
 | `--auto` | Auto-detect CSV format (delimiter, columns, date format). Conflicts with manual column options. |
 
 ### Direct CLI Import
 
-| Option | Description |
-|--------|-------------|
-| `-a, --account <ACCOUNT>` | Target account [default: Assets:Bank:Checking] |
-| `-c, --currency <CURRENCY>` | Currency for amounts [default: USD] |
-| `--date-column <COL>` | Date column name or index [default: Date] |
-| `--date-format <FMT>` | Date format (strftime-style) [default: %Y-%m-%d] |
-| `--narration-column <COL>` | Narration/description column [default: Description] |
-| `--payee-column <COL>` | Payee column name (optional) |
-| `--amount-column <COL>` | Amount column name or index [default: Amount] |
-| `--amount-locale <LOCALE>` | Locale for parsing amounts (e.g., `en_US`) |
-| `--amount-format <FMT>` | Custom format for parsing amounts |
-| `--debit-column <COL>` | Debit column (for separate debit/credit) |
-| `--credit-column <COL>` | Credit column (for separate debit/credit) |
-| `--delimiter <CHAR>` | CSV delimiter [default: ,] |
-| `--skip-rows <N>` | Number of header rows to skip [default: 0] |
-| `--invert-sign` | Invert sign of amounts |
-| `--no-header` | CSV has no header row |
-| `--include-zero-amounts` | Preserve rows whose amount is exactly zero (default drops them; bank "status filler" rows) |
+| Option                      | Description                                                                                |
+| --------------------------- | ------------------------------------------------------------------------------------------ |
+| `-a, --account <ACCOUNT>`   | Target account [default: Assets:Bank:Checking]                                             |
+| `-c, --currency <CURRENCY>` | Currency for amounts [default: USD]                                                        |
+| `--date-column <COL>`       | Date column name or index [default: Date]                                                  |
+| `--date-format <FMT>`       | Date format (strftime-style) [default: %Y-%m-%d]                                           |
+| `--narration-column <COL>`  | Narration/description column [default: Description]                                        |
+| `--payee-column <COL>`      | Payee column name (optional)                                                               |
+| `--amount-column <COL>`     | Amount column name or index [default: Amount]                                              |
+| `--amount-locale <LOCALE>`  | Locale for parsing amounts (e.g., `en_US`)                                                 |
+| `--amount-format <FMT>`     | Custom format for parsing amounts                                                          |
+| `--debit-column <COL>`      | Debit column (for separate debit/credit)                                                   |
+| `--credit-column <COL>`     | Credit column (for separate debit/credit)                                                  |
+| `--delimiter <CHAR>`        | CSV delimiter [default: ,]                                                                 |
+| `--skip-rows <N>`           | Number of header rows to skip [default: 0]                                                 |
+| `--invert-sign`             | Invert sign of amounts                                                                     |
+| `--no-header`               | CSV has no header row                                                                      |
+| `--include-zero-amounts`    | Preserve rows whose amount is exactly zero (default drops them; bank "status filler" rows) |
 
 ### Output Options
 
-| Option | Description |
-|--------|-------------|
-| `-o, --output <FILE>` | Write output to file instead of stdout |
-| `--existing <FILE>` | Existing ledger file for duplicate detection |
-| `--suggest-categories` | Use ML (Naive Bayes on the `--existing` ledger) to suggest accounts for transactions the rules engine didn't categorize. Requires `--existing`. |
-| `--balance <AMOUNT>` | Append a balance assertion directive with the given amount (e.g., `1234.56`) |
-| `--balance-date <DATE>` | Date for the balance assertion (defaults to today) |
+| Option                  | Description                                                                                                                                     |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-o, --output <FILE>`   | Write output to file instead of stdout                                                                                                          |
+| `--existing <FILE>`     | Existing ledger file for duplicate detection                                                                                                    |
+| `--suggest-categories`  | Use ML (Naive Bayes on the `--existing` ledger) to suggest accounts for transactions the rules engine didn't categorize. Requires `--existing`. |
+| `--balance <AMOUNT>`    | Append a balance assertion directive with the given amount (e.g., `1234.56`)                                                                    |
+| `--balance-date <DATE>` | Date for the balance assertion (defaults to today)                                                                                              |
 
 ### WASM Importers
 
 Third-party importers ship as sandboxed `.wasm` modules. Flags below override `wasm_importer_dir` from `importers.toml`.
 
-| Option | Description |
-|--------|-------------|
-| `--wasm-importer <PATH>` | Register a specific `.wasm` importer ahead of built-ins. Repeatable. User-specified modules take precedence over discovered ones and built-ins. |
+| Option                      | Description                                                                                                                                          |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--wasm-importer <PATH>`    | Register a specific `.wasm` importer ahead of built-ins. Repeatable. User-specified modules take precedence over discovered ones and built-ins.      |
 | `--wasm-importer-dir <DIR>` | Scan a directory for `*.wasm` importer modules at startup. Repeatable. Subdirectories are not recursed into; non-`.wasm` files are silently skipped. |
 
 ## Examples
@@ -178,10 +178,10 @@ default_expense = "Expenses:Unknown"
 The importer library supports additional enrichment features via the
 `CsvConfigBuilder` API:
 
-| Builder Method | Description |
-|----------------|-------------|
-| `use_merchant_dict(true)` | Enable the built-in merchant dictionary (75 common patterns) as a low-priority fallback for account categorization |
-| `regex_mappings(vec)` | Add regex-based account mappings (case-insensitive, compiled at load time) |
+| Builder Method            | Description                                                                                                         |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `use_merchant_dict(true)` | Enable the built-in merchant dictionary (75 common patterns) as a low-priority fallback for account categorization  |
+| `regex_mappings(vec)`     | Add regex-based account mappings (case-insensitive, compiled at load time)                                          |
 
 These options are available in the Rust library API but are not yet exposed as
 fields in `importers.toml` configuration. Substring-based mappings in
@@ -208,7 +208,8 @@ Use with:
 rledger extract --importer checking statement.csv
 ```
 
-The `importers.toml` file is auto-discovered from the current directory or `~/.config/rledger/`. To specify a custom path:
+The `importers.toml` file is auto-discovered from the current directory or the user config directory
+(`$RLEDGER_CONFIG_DIR` if set, otherwise the platform default such as `~/.config/rledger/`). To specify a custom path:
 
 ```bash
 rledger extract --config path/to/importers.toml --importer checking statement.csv

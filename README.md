@@ -248,7 +248,7 @@ date_format = "%m/%d/%Y"
 rledger extract --importer chase chase-statement.csv
 ```
 
-Config is searched in: current directory, `~/.config/rledger/importers.toml`, or via `--config`.
+Config is searched in: current directory, the user config directory (`$RLEDGER_CONFIG_DIR` if set, else `~/.config/rledger/importers.toml`), or via `--config`.
 
 ### Transaction Categorization
 

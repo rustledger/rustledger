@@ -67,7 +67,10 @@ The `importers.toml` file is searched for automatically in these locations (firs
 
 1. Path specified via `--config path/to/importers.toml` (the legacy spelling `--importers-config` is still accepted as an alias)
 1. `importers.toml` in the current directory
-1. `~/.config/rledger/importers.toml`
+1. `$RLEDGER_CONFIG_DIR/importers.toml` if set
+1. The platform default (`~/.config/rledger/importers.toml` on Linux,
+   `~/Library/Application Support/rledger/importers.toml` on macOS)
+1. Fallback on macOS (`~/.config/rledger/importers.toml`)
 
 ### Preserving a second date column
 

@@ -34,6 +34,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -350,6 +351,35 @@ pub struct LoadedConfig {
     pub sources: Vec<ConfigSource>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct EnvironmentConfig {
+    config_dir: Option<OsString>,
+    file: Option<String>,
+    format: Option<String>,
+    no_color: bool,
+    profile: Option<OsString>,
+}
+
+impl EnvironmentConfig {
+    fn load() -> Self {
+        Self {
+            config_dir: non_empty_os_var("RLEDGER_CONFIG_DIR"),
+            file: env::var("RLEDGER_FILE").ok(),
+            format: env::var("RLEDGER_FORMAT").ok(),
+            no_color: env::var("NO_COLOR").is_ok(),
+            profile: non_empty_os_var("RLEDGER_PROFILE"),
+        }
+    }
+
+    const fn has_source(&self) -> bool {
+        self.config_dir.is_some()
+            || self.file.is_some()
+            || self.format.is_some()
+            || self.no_color
+            || self.profile.is_some()
+    }
+}
+
 impl Config {
     /// Load configuration from all sources.
     ///
@@ -362,6 +392,9 @@ impl Config {
     pub fn load() -> Result<LoadedConfig> {
         let mut merged = Self::default();
         let mut sources = Vec::new();
+        let environment = EnvironmentConfig::load();
+
+        warn_if_rledger_config_set();
 
         // Load system config (lowest priority)
         if let Some(path) = system_config_path()
@@ -372,8 +405,11 @@ impl Config {
             sources.push(ConfigSource::System(path));
         }
 
+        let user_path =
+            user_config_file_with_override(environment.config_dir.clone(), "config.toml");
+
         // Load user config
-        if let Some(path) = user_config_path()
+        if let Some(path) = user_path
             && path.exists()
         {
             let config = Self::load_from_file(&path)?;
@@ -389,11 +425,8 @@ impl Config {
         }
 
         // Apply environment variables (higher than files)
-        merged = merged.apply_env();
-        if env::var("RLEDGER_FILE").is_ok()
-            || env::var("RLEDGER_FORMAT").is_ok()
-            || env::var("NO_COLOR").is_ok()
-        {
+        merged = merged.apply_env_config(&environment);
+        if environment.has_source() {
             sources.push(ConfigSource::Environment);
         }
 
@@ -454,14 +487,18 @@ impl Config {
 
     /// Apply environment variables to the config.
     #[must_use]
-    pub fn apply_env(mut self) -> Self {
-        if let Ok(file) = env::var("RLEDGER_FILE") {
-            self.default.file = Some(file);
+    pub fn apply_env(self) -> Self {
+        self.apply_env_config(&EnvironmentConfig::load())
+    }
+
+    fn apply_env_config(mut self, environment: &EnvironmentConfig) -> Self {
+        if let Some(file) = &environment.file {
+            self.default.file = Some(file.clone());
         }
-        if let Ok(format) = env::var("RLEDGER_FORMAT") {
-            self.output.format = Some(format);
+        if let Some(format) = &environment.format {
+            self.output.format = Some(format.clone());
         }
-        if env::var("NO_COLOR").is_ok() {
+        if environment.no_color {
             self.output.color = Some(false);
         }
         self
@@ -653,63 +690,120 @@ impl PriceConfig {
 }
 
 /// Get the user config directory path.
+///
+/// Checks `$RLEDGER_CONFIG_DIR` first (an empty value is treated as unset).
+/// The override names the application config directory.
+/// Without an override, this falls back to `dirs::config_dir()/rledger`.
+///
+/// The override moves the whole application directory, including `config.toml`
+/// and `importers.toml`.
+#[must_use]
 pub fn user_config_dir() -> Option<PathBuf> {
+    user_config_dir_with_override(non_empty_os_var("RLEDGER_CONFIG_DIR"))
+}
+
+/// Pure resolution of the user config directory from the `$RLEDGER_CONFIG_DIR`
+/// override — env is read by the caller so this is unit-testable.
+fn user_config_dir_with_override(override_dir: Option<OsString>) -> Option<PathBuf> {
+    if let Some(dir) = override_dir.filter(|d| !d.is_empty()) {
+        return Some(expand_os_path(dir));
+    }
     dirs::config_dir().map(|p| p.join("rledger"))
 }
 
 /// Get the user config file path.
 ///
 /// Precedence:
-/// 1. `$RLEDGER_CONFIG` — an explicit config file path (`~` and `$VAR` expanded).
-///    Highest precedence; ideal for cross-platform dotfile managers
-///    (chezmoi / home-manager) that want one canonical location (discussion #1616).
+/// 1. `$RLEDGER_CONFIG_DIR/config.toml` — an explicit config directory, used
+///    verbatim (also moves `importers.toml`; see [`user_config_dir`]). The
+///    macOS XDG fallback below does not apply: the directory was named
+///    explicitly.
 /// 2. The platform-native location `dirs::config_dir()/rledger/config.toml`
 ///    (`~/.config` on Linux, `~/Library/Application Support` on macOS).
 /// 3. macOS only: an XDG-style `$XDG_CONFIG_HOME`/`~/.config/rledger/config.toml`
 ///    when it exists — `dirs` ignores `XDG_CONFIG_HOME` on macOS, so we check it
 ///    here, letting a single `~/.config/rledger/config.toml` work on Linux *and*
 ///    macOS without any env var.
+#[must_use]
 pub fn user_config_path() -> Option<PathBuf> {
-    resolve_user_config_path(
-        env::var("RLEDGER_CONFIG").ok().filter(|s| !s.is_empty()),
-        user_config_dir().map(|p| p.join("config.toml")),
-    )
+    user_config_file("config.toml")
 }
 
-/// Pure resolution of the user config path from the `$RLEDGER_CONFIG` override
-/// and the platform-native default — env is read by the caller so this is
-/// unit-testable. See [`user_config_path`].
-fn resolve_user_config_path(
-    env_override: Option<String>,
-    native: Option<PathBuf>,
+/// Resolve a file in the user config directory.
+#[must_use]
+pub fn user_config_file(filename: &str) -> Option<PathBuf> {
+    user_config_file_with_override(non_empty_os_var("RLEDGER_CONFIG_DIR"), filename)
+}
+
+fn user_config_file_with_override(
+    dir_override: Option<OsString>,
+    filename: &str,
 ) -> Option<PathBuf> {
-    if let Some(p) = env_override {
-        return Some(Config::expand_path(&p));
+    let has_dir_override = dir_override.is_some();
+    let native = user_config_dir_with_override(dir_override).map(|p| p.join(filename));
+
+    // An explicit config dir disables the macOS XDG fallback.
+    if has_dir_override {
+        return native;
     }
+    resolve_user_config_path(native, filename)
+}
+
+fn expand_os_path(path: OsString) -> PathBuf {
+    match path.into_string() {
+        Ok(path) => Config::expand_path(&path),
+        // Preserve `~`/`$VAR` expansion even for non-UTF-8 paths.
+        Err(path) => Config::expand_path(&path.to_string_lossy()),
+    }
+}
+
+fn non_empty_os_var(name: &str) -> Option<OsString> {
+    env::var_os(name).filter(|value| !value.is_empty())
+}
+
+/// `RLEDGER_CONFIG` (a single-file override) was replaced by `RLEDGER_CONFIG_DIR`
+/// (a directory override covering both `config.toml` and `importers.toml`).
+/// It is now inert; warn so users relying on it notice instead of silently
+/// losing their override.
+fn warn_if_rledger_config_set() {
+    if non_empty_os_var("RLEDGER_CONFIG").is_some() {
+        eprintln!(
+            "warning: RLEDGER_CONFIG is no longer supported and has no effect; \
+             set RLEDGER_CONFIG_DIR to the directory containing config.toml instead"
+        );
+    }
+}
+
+/// Pure resolution of a user config file from the platform-native default —
+/// separated from the env/`dirs` reads so it is unit-testable. See [`user_config_path`].
+fn resolve_user_config_path(native: Option<PathBuf>, filename: &str) -> Option<PathBuf> {
     // macOS: honor an XDG-style config when the native location is absent, so a
-    // shared `~/.config/rledger/config.toml` works there too (#1616).
+    // shared `~/.config/rledger/<filename>` works there too (#1616).
     #[cfg(target_os = "macos")]
     if native.as_ref().is_none_or(|n| !n.exists())
-        && let Some(xdg) = macos_xdg_config_path()
+        && let Some(xdg) = macos_xdg_config_path(filename)
         && xdg.exists()
     {
         return Some(xdg);
     }
+    #[cfg(not(target_os = "macos"))]
+    let _ = filename;
     native
 }
 
-/// macOS XDG-style config path: `$XDG_CONFIG_HOME/rledger/config.toml`, else
-/// `~/.config/rledger/config.toml`. (On Linux this is already `user_config_dir`.)
+/// macOS XDG-style config path: `$XDG_CONFIG_HOME/rledger/<filename>`, else
+/// `~/.config/rledger/<filename>`. (On Linux this is already `user_config_dir`.)
 #[cfg(target_os = "macos")]
-fn macos_xdg_config_path() -> Option<PathBuf> {
+fn macos_xdg_config_path(filename: &str) -> Option<PathBuf> {
     env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
-        .map(|c| c.join("rledger").join("config.toml"))
+        .map(|c| c.join("rledger").join(filename))
 }
 
 /// Get the system config file path.
+#[must_use]
 pub fn system_config_path() -> Option<PathBuf> {
     #[cfg(unix)]
     {
@@ -728,12 +822,14 @@ pub fn system_config_path() -> Option<PathBuf> {
 }
 
 /// Find project config by searching upward from current directory.
+#[must_use]
 pub fn find_project_config() -> Option<PathBuf> {
     let cwd = env::current_dir().ok()?;
     find_project_config_from(&cwd)
 }
 
 /// Find project config by searching upward from a given directory.
+#[must_use]
 pub fn find_project_config_from(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
 
@@ -1430,8 +1526,8 @@ t = "check"
     }
 
     #[test]
-    fn test_user_config_path() {
-        let path = user_config_path();
+    fn test_user_config_path_uses_platform_default_without_override() {
+        let path = user_config_file_with_override(None, "config.toml");
         // Should return Some on most platforms
         if let Some(p) = path {
             assert!(p.to_string_lossy().contains("rledger"));
@@ -1440,20 +1536,17 @@ t = "check"
     }
 
     #[test]
-    fn resolve_user_config_path_env_override_wins() {
-        let native = Some(PathBuf::from("/native/rledger/config.toml"));
-        // An explicit RLEDGER_CONFIG path takes precedence over the native default.
+    fn resolve_user_config_path_uses_existing_native() {
+        // The native file must actually exist here: on macOS the XDG fallback
+        // fires for an absent native path, so a fake path would make this
+        // assertion depend on the developer's real ~/.config/rledger/config.toml.
+        let dir = tempfile::tempdir().unwrap();
+        let existing_native = dir.path().join("config.toml");
+        std::fs::write(&existing_native, "").unwrap();
         assert_eq!(
-            resolve_user_config_path(Some("/custom/my.toml".to_string()), native.clone()),
-            Some(PathBuf::from("/custom/my.toml"))
+            resolve_user_config_path(Some(existing_native.clone()), "config.toml"),
+            Some(existing_native)
         );
-        // `~` in the override is expanded to the home dir.
-        if let Some(home) = dirs::home_dir() {
-            assert_eq!(
-                resolve_user_config_path(Some("~/dots/rledger.toml".to_string()), native),
-                Some(home.join("dots/rledger.toml"))
-            );
-        }
     }
 
     /// The no-override → native case is only assertable off macOS: the
@@ -1465,12 +1558,42 @@ t = "check"
     /// test above and broke `cargo test` for macOS users).
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn resolve_user_config_path_no_override_uses_native_on_non_macos() {
+    fn resolve_user_config_path_uses_native_on_non_macos() {
         let native = Some(PathBuf::from("/home/u/.config/rledger/config.toml"));
-        assert_eq!(resolve_user_config_path(None, native.clone()), native);
+        assert_eq!(
+            resolve_user_config_path(native.clone(), "config.toml"),
+            native
+        );
+    }
 
-        // No override and no native location: nothing to resolve.
-        assert_eq!(resolve_user_config_path(None, None), None);
+    #[test]
+    fn test_user_config_dir_override_used_verbatim() {
+        // The override names the app directory itself — no `rledger` is
+        // appended (app-specific vars work like GNUPGHOME / CARGO_HOME).
+        let dir = user_config_dir_with_override(Some("/custom/config".into()));
+        assert_eq!(dir, Some(PathBuf::from("/custom/config")));
+    }
+
+    #[test]
+    fn test_user_config_dir_override_expands_tilde() {
+        if let Some(home) = dirs::home_dir() {
+            let dir = user_config_dir_with_override(Some("~/dots/rledger".into()));
+            assert_eq!(dir, Some(home.join("dots/rledger")));
+        }
+    }
+
+    #[test]
+    fn test_user_config_path_dir_override_joins_config_file() {
+        let path = user_config_file_with_override(Some("/custom/config".into()), "config.toml");
+        assert_eq!(path, Some(PathBuf::from("/custom/config/config.toml")));
+    }
+
+    #[test]
+    fn test_user_config_dir_empty_or_absent_override_uses_platform_default() {
+        // An empty RLEDGER_CONFIG_DIR is treated as unset.
+        let expected = dirs::config_dir().map(|p| p.join("rledger"));
+        assert_eq!(user_config_dir_with_override(Some("".into())), expected);
+        assert_eq!(user_config_dir_with_override(None), expected);
     }
 
     #[test]

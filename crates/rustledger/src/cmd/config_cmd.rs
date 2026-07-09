@@ -112,18 +112,13 @@ fn run_show<W: Write>(raw: bool, format: &str, out: &mut W) -> Result<()> {
                 }
                 config::ConfigSource::Environment => {
                     writeln!(out, "# === Environment Variables ===")?;
-                    if let Ok(file) = std::env::var("RLEDGER_FILE") {
-                        writeln!(out, "RLEDGER_FILE={file}")?;
-                    }
-                    if let Ok(format) = std::env::var("RLEDGER_FORMAT") {
-                        writeln!(out, "RLEDGER_FORMAT={format}")?;
-                    }
+                    write_non_empty_env(out, "RLEDGER_CONFIG_DIR")?;
+                    write_non_empty_env(out, "RLEDGER_FILE")?;
+                    write_non_empty_env(out, "RLEDGER_FORMAT")?;
                     if std::env::var("NO_COLOR").is_ok() {
                         writeln!(out, "NO_COLOR=1")?;
                     }
-                    if let Ok(profile) = std::env::var("RLEDGER_PROFILE") {
-                        writeln!(out, "RLEDGER_PROFILE={profile}")?;
-                    }
+                    write_non_empty_env(out, "RLEDGER_PROFILE")?;
                     writeln!(out)?;
                 }
                 _ => {}
@@ -134,6 +129,13 @@ fn run_show<W: Write>(raw: bool, format: &str, out: &mut W) -> Result<()> {
         print_config(&loaded, format, out)?;
     }
 
+    Ok(())
+}
+
+fn write_non_empty_env<W: Write>(out: &mut W, name: &str) -> Result<()> {
+    if let Some(value) = std::env::var_os(name).filter(|v| !v.is_empty()) {
+        writeln!(out, "{name}={}", value.to_string_lossy())?;
+    }
     Ok(())
 }
 
@@ -198,12 +200,12 @@ fn run_path<W: Write>(out: &mut W) -> Result<()> {
     writeln!(out, "Environment variables:")?;
     writeln!(
         out,
-        "  RLEDGER_CONFIG   Path to the config file (overrides the default location)"
+        "  RLEDGER_CONFIG_DIR  Config directory holding config.toml and importers.toml"
     )?;
-    writeln!(out, "  RLEDGER_FILE     Default beancount file")?;
-    writeln!(out, "  RLEDGER_FORMAT   Output format (text, csv, json)")?;
-    writeln!(out, "  RLEDGER_PROFILE  Active profile name")?;
-    writeln!(out, "  NO_COLOR         Disable colored output")?;
+    writeln!(out, "  RLEDGER_FILE        Default beancount file")?;
+    writeln!(out, "  RLEDGER_FORMAT      Output format (text, csv, json)")?;
+    writeln!(out, "  RLEDGER_PROFILE     Active profile name")?;
+    writeln!(out, "  NO_COLOR            Disable colored output")?;
 
     Ok(())
 }

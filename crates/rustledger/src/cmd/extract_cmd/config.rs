@@ -96,11 +96,10 @@ pub(super) fn find_importers_config(
         }
     }
 
-    if let Some(config_dir) = dirs::config_dir() {
-        let user_path = config_dir.join("rledger").join("importers.toml");
-        if user_path.exists() {
-            return Ok(Some(user_path));
-        }
+    if let Some(user_path) = crate::config::user_config_file("importers.toml")
+        && user_path.exists()
+    {
+        return Ok(Some(user_path));
     }
 
     Ok(None)

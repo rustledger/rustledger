@@ -18,7 +18,7 @@
 //!
 //! If no file is specified, rledger will use the default file from config:
 //! ```bash
-//! rledger check  # Uses file from ~/.config/rledger/config.toml
+//! rledger check  # Uses file from the user config
 //! ```
 //!
 //! # Aliases

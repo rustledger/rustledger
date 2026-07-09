@@ -1,4 +1,4 @@
-______________________________________________________________________
+---
 
 ## title: Configuration description: Configure rustledger with profiles and options
 
@@ -8,11 +8,12 @@ rustledger can be configured via environment variables, config files, and comman
 
 ## Environment Variables
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `RLEDGER_FILE` | Default beancount file | `~/ledger.beancount` |
-| `RLEDGER_PROFILE` | Active profile name | `business` |
-| `NO_COLOR` | Disable colored output | `1` |
+| Variable             | Description                                                             | Example              |
+| -------------------- | ----------------------------------------------------------------------- | -------------------- |
+| `RLEDGER_CONFIG_DIR` | Config directory, used as-is (holds `config.toml` and `importers.toml`) | `~/dots/rledger`     |
+| `RLEDGER_FILE`       | Default beancount file                                                  | `~/ledger.beancount` |
+| `RLEDGER_PROFILE`    | Active profile name                                                     | `business`           |
+| `NO_COLOR`           | Disable colored output                                                  | `1`                  |
 
 Set in your shell profile (`~/.bashrc`, `~/.zshrc`):
 
@@ -25,8 +26,19 @@ export RLEDGER_FILE="$HOME/finances/main.beancount"
 rustledger looks for configuration in these locations (highest to lowest priority):
 
 1. `.rledger.toml` in the current directory (searching upward)
-1. `~/.config/rledger/config.toml` (user config)
+1. The user config, resolved as:
+   - `$RLEDGER_CONFIG_DIR/config.toml` if set — an explicit config directory,
+     used as-is (this also relocates `importers.toml`)
+   - Otherwise the platform default:
+     - Linux: `$XDG_CONFIG_HOME/rledger/config.toml` (usually `~/.config/rledger/config.toml`)
+     - macOS: `~/Library/Application Support/rledger/config.toml`, falling back to
+       an XDG-style `~/.config/rledger/config.toml` when only that exists
+     - Windows: `%APPDATA%\rledger\config.toml`
 1. `/etc/rledger/config.toml` (system config, Unix only)
+
+```bash
+export RLEDGER_CONFIG_DIR="$HOME/dots/rledger"
+```
 
 Higher priority configs override lower ones. You can also generate a default config with:
 
@@ -93,14 +105,14 @@ option "booking_method" "FIFO"
 
 ### Common Options
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `title` | Ledger title | (none) |
-| `operating_currency` | Main currency | (none) |
-| `booking_method` | FIFO, LIFO, AVERAGE, etc. | STRICT |
-| `account_previous_balances` | Retained earnings account | `Equity:Opening-Balances` |
-| `account_current_earnings` | Current earnings account | `Equity:Earnings:Current` |
-| `inferred_tolerance_default` | Per-currency balance tolerance (e.g. `USD:0.005`) | (none) |
+| Option                       | Description                                       | Default                   |
+| ---------------------------- | ------------------------------------------------- | ------------------------- |
+| `title`                      | Ledger title                                      | (none)                    |
+| `operating_currency`         | Main currency                                     | (none)                    |
+| `booking_method`             | FIFO, LIFO, AVERAGE, etc.                         | STRICT                    |
+| `account_previous_balances`  | Retained earnings account                         | `Equity:Opening-Balances` |
+| `account_current_earnings`   | Current earnings account                          | `Equity:Earnings:Current` |
+| `inferred_tolerance_default` | Per-currency balance tolerance (e.g. `USD:0.005`) | (none)                    |
 
 ### Booking Methods
 

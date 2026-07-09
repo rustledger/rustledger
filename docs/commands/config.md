@@ -65,10 +65,11 @@ Configuration file search paths:
   system   (not found)  /etc/rledger/config.toml
 
 Environment variables:
-  RLEDGER_FILE     Default beancount file
-  RLEDGER_FORMAT   Output format (text, csv, json)
-  RLEDGER_PROFILE  Active profile name
-  NO_COLOR         Disable colored output
+  RLEDGER_CONFIG_DIR  Config directory holding config.toml and importers.toml
+  RLEDGER_FILE        Default beancount file
+  RLEDGER_FORMAT      Output format (text, csv, json)
+  RLEDGER_PROFILE     Active profile name
+  NO_COLOR            Disable colored output
 ```
 
 ### Create Default Config
@@ -77,7 +78,7 @@ Environment variables:
 rledger config init
 ```
 
-Creates `~/.config/rledger/config.toml` with default settings.
+Creates the user `config.toml` with default settings. If `RLEDGER_CONFIG_DIR` is set, the file is created there.
 
 ### Edit Config
 

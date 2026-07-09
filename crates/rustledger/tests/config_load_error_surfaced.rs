@@ -29,17 +29,12 @@ fn malformed_config_surfaces_parse_error_instead_of_silent_default() {
     let output = Command::new(bin)
         .args(["price", "hy"])
         // Run inside the tempdir so its `.rledger.toml` is the project
-        // config, and point every config-dir source at the (empty)
-        // tempdir so no real user/system config is loaded first. HOME +
-        // XDG_CONFIG_HOME cover Unix; APPDATA / PROGRAMDATA / USERPROFILE
-        // cover the Windows paths `dirs::config_dir()` consults, keeping
-        // the test hermetic across platforms.
+        // config. RLEDGER_CONFIG_DIR shields the user-config lookup from
+        // ambient developer state; PROGRAMDATA shields the Windows system
+        // config path.
         .current_dir(dir.path())
-        .env("HOME", dir.path())
-        .env("XDG_CONFIG_HOME", dir.path())
-        .env("APPDATA", dir.path())
         .env("PROGRAMDATA", dir.path())
-        .env("USERPROFILE", dir.path())
+        .env("RLEDGER_CONFIG_DIR", dir.path())
         .output()
         .expect("run rledger price");
 
@@ -82,11 +77,8 @@ fn malformed_config_does_not_block_help() {
     let output = Command::new(bin)
         .arg("--help")
         .current_dir(dir.path())
-        .env("HOME", dir.path())
-        .env("XDG_CONFIG_HOME", dir.path())
-        .env("APPDATA", dir.path())
         .env("PROGRAMDATA", dir.path())
-        .env("USERPROFILE", dir.path())
+        .env("RLEDGER_CONFIG_DIR", dir.path())
         .output()
         .expect("run rledger --help");
 

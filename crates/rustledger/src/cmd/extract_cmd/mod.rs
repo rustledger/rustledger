@@ -31,9 +31,9 @@
 //! ```
 //!
 //! The file is searched for in the following locations (first found wins):
-//! 1. Path specified via `--importers-config`
+//! 1. Path specified via `--config` / `--importers-config`
 //! 2. `importers.toml` in the current directory
-//! 3. `~/.config/rledger/importers.toml`
+//! 3. `importers.toml` in the user config directory
 //!
 //! # WASM importers (wave 2.3c+)
 //!
@@ -332,6 +332,13 @@ fn select_importer(registry: &ImporterRegistry, file: &Path, args: &Args) -> Arc
     }
 }
 
+fn importers_config_not_found_message() -> anyhow::Error {
+    let user_path = crate::config::user_config_file("importers.toml")
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "the user config directory".to_string());
+    anyhow!("No importers.toml found. Create one in the current directory or at {user_path}")
+}
+
 /// Resolve the list of directories to scan for WASM importers.
 ///
 /// Top-level dispatcher; the two real branches are
@@ -368,7 +375,7 @@ fn resolve_scan_dirs_explicit(path: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// No `--config` flag — soft-discover in default locations
-/// (cwd `importers.toml` then `~/.config/rledger/importers.toml`).
+/// (cwd `importers.toml` then the user config directory).
 /// A missing file is expected; a malformed file is unusual but not
 /// fatal (the user didn't explicitly point at it). Print a warning
 /// for the malformed case so the user can find their mistake.
@@ -537,9 +544,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
         let config = if let Some(ref importer_name) = args.importer {
             // Explicit --importer: require config file, find named entry
             let config_path = find_importers_config(args.config.as_deref())?
-                .ok_or_else(|| anyhow!(
-                    "No importers.toml found. Create one in the current directory or at ~/.config/rledger/importers.toml"
-                ))?;
+                .ok_or_else(importers_config_not_found_message)?;
 
             let importers_file = load_importers_config(&config_path)?;
 
@@ -570,9 +575,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
         } else if args.config.is_some() {
             // Explicit --config without --importer: try auto-identification by filename
             let config_path = find_importers_config(args.config.as_deref())?
-                .ok_or_else(|| anyhow!(
-                    "No importers.toml found. Create one in the current directory or at ~/.config/rledger/importers.toml"
-                ))?;
+                .ok_or_else(importers_config_not_found_message)?;
 
             let importers_file = load_importers_config(&config_path)?;
 
@@ -1421,13 +1424,13 @@ default_expense = "Expenses:Uncategorized"
     #[test]
     #[cfg(feature = "python-plugin-wasm")]
     fn resolve_scan_dirs_soft_fails_for_implicit_missing_config() {
-        // No --config provided, no importers.toml in cwd/XDG → empty
+        // No --config provided, no importers.toml in cwd/user config dir → empty
         // scan dirs, no error. This is the right behavior because
         // the user didn't ask for any config; absence is expected.
         let args = Args::parse_from(["extract"]);
         let dirs = resolve_scan_dirs(&args).expect("implicit missing is soft-fail");
         // Could be empty or non-empty depending on whether a real
-        // ~/.config/rledger/importers.toml exists in this test env.
+        // user importers.toml exists in this test env.
         // What we're asserting is that it didn't error.
         let _ = dirs;
     }

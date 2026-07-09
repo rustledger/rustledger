@@ -17,27 +17,21 @@ pub(super) fn report_balsheet<W: Write>(
     let mut liabilities: BTreeMap<rustledger_core::Account, Inventory> = BTreeMap::new();
     let mut equity: BTreeMap<rustledger_core::Account, Inventory> = BTreeMap::new();
 
-    for directive in directives {
-        if let Directive::Transaction(txn) = directive {
-            for posting in &txn.postings {
-                if let Some(amount) = posting.amount() {
-                    let account_str: &str = &posting.account;
-                    let balances = if account_str.starts_with("Assets:") {
-                        &mut assets
-                    } else if account_str.starts_with("Liabilities:") {
-                        &mut liabilities
-                    } else if account_str.starts_with("Equity:") {
-                        &mut equity
-                    } else {
-                        continue;
-                    };
-
-                    let inv = balances.entry(posting.account.clone()).or_default();
-                    let position = rustledger_core::Position::simple(amount.clone());
-                    inv.add(position);
-                }
-            }
-        }
+    // Partition the single source-of-truth balances (see
+    // `super::account_balances`) into the three balance-sheet sections by
+    // account prefix. No balance re-derivation here.
+    for (account, inv) in super::account_balances(directives) {
+        let account_str: &str = &account;
+        let section = if account_str.starts_with("Assets:") {
+            &mut assets
+        } else if account_str.starts_with("Liabilities:") {
+            &mut liabilities
+        } else if account_str.starts_with("Equity:") {
+            &mut equity
+        } else {
+            continue;
+        };
+        section.insert(account, inv);
     }
 
     // Helper to sum inventory by currency, keyed by the Currency newtype

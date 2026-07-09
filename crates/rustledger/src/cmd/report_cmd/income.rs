@@ -16,25 +16,19 @@ pub(super) fn report_income<W: Write>(
     let mut income: BTreeMap<rustledger_core::Account, Inventory> = BTreeMap::new();
     let mut expenses: BTreeMap<rustledger_core::Account, Inventory> = BTreeMap::new();
 
-    for directive in directives {
-        if let Directive::Transaction(txn) = directive {
-            for posting in &txn.postings {
-                if let Some(amount) = posting.amount() {
-                    let account_str: &str = &posting.account;
-                    let balances = if account_str.starts_with("Income:") {
-                        &mut income
-                    } else if account_str.starts_with("Expenses:") {
-                        &mut expenses
-                    } else {
-                        continue;
-                    };
-
-                    let inv = balances.entry(posting.account.clone()).or_default();
-                    let position = rustledger_core::Position::simple(amount.clone());
-                    inv.add(position);
-                }
-            }
-        }
+    // Partition the single source-of-truth balances (see
+    // `super::account_balances`) into income and expense sections by prefix.
+    // No balance re-derivation here.
+    for (account, inv) in super::account_balances(directives) {
+        let account_str: &str = &account;
+        let section = if account_str.starts_with("Income:") {
+            &mut income
+        } else if account_str.starts_with("Expenses:") {
+            &mut expenses
+        } else {
+            continue;
+        };
+        section.insert(account, inv);
     }
 
     fn sum_by_currency(

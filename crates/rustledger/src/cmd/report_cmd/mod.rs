@@ -405,6 +405,50 @@ fn render<W: io::Write>(
     Ok(())
 }
 
+/// The single source of truth for "what does each account hold".
+///
+/// Every balance-computing report (`balances`, `balsheet`, `income`, …) is a
+/// *view* over this map — none re-derives balances itself. That is the whole
+/// point: the same "sum the postings per account" logic used to live copied
+/// across each report, and the copies drifted (reductions failing to net in
+/// `balances`/`balsheet` while `income` summed cost-less — #1726). One
+/// function, one behavior, no drift.
+///
+/// Positions are summed by commodity **cost-less** on purpose: these reports
+/// render only units, never cost, so a held commodity is a single running
+/// total per account+currency. (Trade-off: two lots at different costs merge,
+/// e.g. `10 AAPL {150}` + `10 AAPL {200}` → `20 AAPL`, rather than showing as
+/// separate lots the way beancount does — acceptable because cost is not
+/// displayed. If cost-accurate holdings reporting is ever wanted, this is the
+/// one place to teach lot-tracking, and every report inherits it.)
+///
+/// `Open` directives seed a zero balance so opened accounts are represented;
+/// callers skip empty inventories on render, so this never changes output.
+pub(super) fn account_balances(
+    directives: &[rustledger_core::Directive],
+) -> std::collections::BTreeMap<rustledger_core::Account, rustledger_core::Inventory> {
+    use rustledger_core::Directive;
+    let mut balances = std::collections::BTreeMap::new();
+    for directive in directives {
+        match directive {
+            Directive::Open(open) => {
+                balances.entry(open.account.clone()).or_default();
+            }
+            Directive::Transaction(txn) => {
+                for posting in &txn.postings {
+                    if let Some(amount) = posting.amount() {
+                        let inv: &mut rustledger_core::Inventory =
+                            balances.entry(posting.account.clone()).or_default();
+                        inv.add(rustledger_core::Position::simple(amount.clone()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    balances
+}
+
 /// Escape a string for CSV output.
 pub(super) fn csv_escape(s: &str) -> String {
     if s.contains(',') || s.contains('"') || s.contains('\n') {

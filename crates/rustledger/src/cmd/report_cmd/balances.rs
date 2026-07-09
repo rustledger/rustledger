@@ -3,8 +3,7 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_core::{Directive, Inventory};
-use std::collections::BTreeMap;
+use rustledger_core::Directive;
 use std::io::Write;
 
 /// Generate a balances report.
@@ -14,25 +13,9 @@ pub(super) fn report_balances<W: Write>(
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
-    let mut balances: BTreeMap<rustledger_core::Account, Inventory> = BTreeMap::new();
-
-    for directive in directives {
-        match directive {
-            Directive::Open(open) => {
-                balances.entry(open.account.clone()).or_default();
-            }
-            Directive::Transaction(txn) => {
-                for posting in &txn.postings {
-                    if let Some(amount) = posting.amount() {
-                        let inv = balances.entry(posting.account.clone()).or_default();
-                        let position = rustledger_core::Position::simple(amount.clone());
-                        inv.add(position);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+    // Single source of truth for per-account balances (see
+    // `super::account_balances`); no report re-derives them itself.
+    let balances = super::account_balances(directives);
 
     // Collect data for output
     let mut rows: Vec<(&str, Decimal, &str)> = Vec::new();

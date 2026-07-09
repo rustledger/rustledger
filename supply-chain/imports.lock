@@ -290,8 +290,8 @@ user-login = "taiki-e"
 user-name = "Taiki Endo"
 
 [[publisher.crossbeam-epoch]]
-version = "0.9.18"
-when = "2024-01-08"
+version = "0.9.20"
+when = "2026-07-06"
 user-id = 33035
 user-login = "taiki-e"
 user-name = "Taiki Endo"

@@ -121,10 +121,38 @@ fn report_balances_nets_reduction() {
     assert_netted_to_5(&stdout, "balances");
 }
 
+/// The AAPL number on the single line that contains all of `needles`.
+fn aapl_number_on_line_with<'a>(stdout: &'a str, needles: &[&str]) -> Option<&'a str> {
+    stdout
+        .lines()
+        .filter(|l| l.contains("AAPL"))
+        .find(|l| needles.iter().all(|n| l.contains(n)))
+        .and_then(|l| l.split_whitespace().find(|t| t.parse::<f64>().is_ok()))
+}
+
 #[test]
 fn report_balsheet_nets_reduction() {
     let bin = require_rledger!();
     let f = write_fixture();
     let stdout = run_report(&bin, f.path(), "balsheet");
+    // Every AAPL figure is the netted 5 (never the pre-fix 10 / -5 split)...
     assert_netted_to_5(&stdout, "balsheet");
+    // ...AND the holding must actually propagate into the assets total and
+    // net worth, not just the account row. A regression that dropped AAPL
+    // from the totals could otherwise still print a lone `5 AAPL` account
+    // row and pass assert_netted_to_5 (Copilot review on #1727).
+    assert_eq!(
+        aapl_number_on_line_with(&stdout, &["Total Assets"]),
+        Some("5"),
+        "balsheet must carry the 5 AAPL holding into Total Assets: {stdout}",
+    );
+    // Net Worth section: the AAPL figure appears after the "Net Worth"
+    // header. Take the tail of the output and find its AAPL line.
+    let net_worth_tail = stdout.split_once("Net Worth").map_or("", |(_, tail)| tail);
+    assert!(
+        net_worth_tail
+            .lines()
+            .any(|l| l.contains("AAPL") && l.split_whitespace().any(|t| t == "5")),
+        "balsheet must carry the 5 AAPL holding into Net Worth: {stdout}",
+    );
 }

@@ -55,7 +55,7 @@ const READONLY_OPTIONS: &[&str] = &["filename"];
 /// Option validation warning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionWarning {
-    /// Warning code (E7001 through E7007).
+    /// Warning code (E7001 through E7008).
     pub code: &'static str,
     /// Warning message.
     pub message: String,
@@ -269,11 +269,26 @@ impl Options {
         match key {
             "title" => self.title = Some(value.to_string()),
             "operating_currency" => self.operating_currency.push(value.to_string()),
-            "name_assets" => self.name_assets = value.to_string(),
-            "name_liabilities" => self.name_liabilities = value.to_string(),
-            "name_equity" => self.name_equity = value.to_string(),
-            "name_income" => self.name_income = value.to_string(),
-            "name_expenses" => self.name_expenses = value.to_string(),
+            "name_assets" => {
+                self.warn_if_invalid_root("name_assets", value);
+                self.name_assets = value.to_string();
+            }
+            "name_liabilities" => {
+                self.warn_if_invalid_root("name_liabilities", value);
+                self.name_liabilities = value.to_string();
+            }
+            "name_equity" => {
+                self.warn_if_invalid_root("name_equity", value);
+                self.name_equity = value.to_string();
+            }
+            "name_income" => {
+                self.warn_if_invalid_root("name_income", value);
+                self.name_income = value.to_string();
+            }
+            "name_expenses" => {
+                self.warn_if_invalid_root("name_expenses", value);
+                self.name_expenses = value.to_string();
+            }
             "account_rounding" => {
                 if !Self::is_valid_account(value) {
                     self.warnings.push(OptionWarning {
@@ -611,32 +626,45 @@ impl Options {
         ]
     }
 
+    /// Warn (E7008) when a `name_*` account-type rename is not a lexable
+    /// account root: every account under such a root is unparsable (both
+    /// rledger and Python beancount fail at parse time with "unexpected
+    /// NUMBER"-style errors), so the rename can only produce a broken
+    /// ledger. Accepted anyway for option-handling parity — the warning
+    /// makes the failure mode visible at the option site instead of at
+    /// every account mention. The `account_*` options get the analogous
+    /// E7002 guard; `name_*` used to be the unguarded exception.
+    fn warn_if_invalid_root(&mut self, key: &str, value: &str) {
+        if !Self::is_valid_account_root(value) {
+            self.warnings.push(OptionWarning {
+                code: "E7008",
+                message: format!(
+                    "Invalid account type name: '{value}' cannot begin an \
+                     account name (accounts under it will never parse)"
+                ),
+                option: key.to_string(),
+                value: value.to_string(),
+            });
+        }
+    }
+
     /// Check if a value looks like a valid account name.
     ///
-    /// Valid accounts have format "Type:Subaccount:..." where each component
-    /// starts with an uppercase letter (any script) or a non-ASCII letter
-    /// without case (CJK, etc.), and components are colon-separated.
+    /// Delegates to the canonical [`rustledger_parser::is_valid_account_name`]
+    /// (the lexer itself), so option values are held to exactly the rule the
+    /// parser applies to account tokens. The old hand-written check here was a
+    /// third, divergent variant (it accepted lowercase-adjacent first chars the
+    /// lexer rejects and had no per-character rule at all).
     fn is_valid_account(value: &str) -> bool {
-        // Must contain at least one colon
-        if !value.contains(':') {
-            return false;
-        }
+        rustledger_parser::is_valid_account_name(value)
+    }
 
-        // Check each component
-        for part in value.split(':') {
-            if let Some(first) = part.chars().next() {
-                // Accept: uppercase (any script), non-ASCII alphabetic (CJK, etc.)
-                let valid = first.is_uppercase() || (!first.is_ascii() && first.is_alphabetic());
-                if !valid {
-                    return false;
-                }
-            } else {
-                // Empty component
-                return false;
-            }
-        }
-
-        true
+    /// Check if a value is usable as an account TYPE root (a `name_*` option
+    /// value): a single component (no `:`) such that accounts under it are
+    /// lexable. Checked by running the canonical account predicate on
+    /// `value:X` — a root is valid exactly when it can head a real account.
+    fn is_valid_account_root(value: &str) -> bool {
+        !value.contains(':') && rustledger_parser::is_valid_account_name(&format!("{value}:X"))
     }
 }
 
@@ -1018,6 +1046,55 @@ mod tests {
         assert_eq!(opts.warnings[0].code, "E7002");
         assert!(opts.warnings[0].message.contains("CURRENCY:EXAMPLE"));
         assert!(opts.display_precision.is_empty());
+    }
+
+    #[test]
+    fn test_name_option_invalid_root_warns_e7008() {
+        // Digit-start root: every account under it is unparsable (both
+        // rledger and Python fail at parse time) — the option site now
+        // says so up front instead of the ledger erroring at every mention.
+        let mut opts = Options::new();
+        opts.set("name_assets", "1Assets");
+        assert_eq!(opts.warnings.len(), 1);
+        assert_eq!(opts.warnings[0].code, "E7008");
+        assert!(opts.warnings[0].message.contains("1Assets"));
+        // Accepted anyway (option-handling parity).
+        assert_eq!(opts.name_assets, "1Assets");
+
+        // Colon inside a root can never match a root component.
+        let mut opts = Options::new();
+        opts.set("name_income", "In:Come");
+        assert_eq!(opts.warnings.len(), 1);
+        assert_eq!(opts.warnings[0].code, "E7008");
+    }
+
+    #[test]
+    fn test_name_option_valid_roots_no_warning() {
+        let mut opts = Options::new();
+        opts.set("name_income", "Revenue");
+        opts.set("name_assets", "Activa");
+        opts.set("name_expenses", "Ausgaben");
+        opts.set("name_liabilities", "負債"); // caseless (\p{Lo}) root
+        assert!(
+            opts.warnings.is_empty(),
+            "lexable renames must not warn: {:?}",
+            opts.warnings
+        );
+    }
+
+    #[test]
+    fn test_account_option_uses_canonical_rule() {
+        // The old hand-written is_valid_account had no per-character rule:
+        // 'Equity:Ro unding' style values with invalid chars slipped through
+        // as long as first chars looked right. The canonical predicate
+        // rejects what the lexer rejects.
+        let mut opts = Options::new();
+        opts.set("account_current_conversions", "Equity:Conv ersions");
+        assert!(opts.warnings.iter().any(|w| w.code == "E7002"));
+
+        let mut opts = Options::new();
+        opts.set("account_current_conversions", "Equity:Conversions:Current");
+        assert!(opts.warnings.is_empty(), "{:?}", opts.warnings);
     }
 
     #[test]

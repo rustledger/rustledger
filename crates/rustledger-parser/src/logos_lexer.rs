@@ -524,6 +524,34 @@ fn apply_err_layout_transparency(
     }
 }
 
+/// Whether `name` is a valid beancount account name.
+///
+/// This is the CANONICAL account-name rule, shared by every surface that
+/// admits account names (the validator's Open check, the loader's
+/// `account_*`/`name_*` option guards, the FFI directive builder).
+///
+/// Implemented by running the actual lexer and requiring that `name` lex
+/// to exactly one [`Token::Account`] spanning the whole input, so this
+/// predicate CANNOT drift from what the parser accepts: an account name
+/// is valid if and only if it round-trips through the language. (Before
+/// this existed, the validator and loader each hand-implemented the rule
+/// with different accepted character sets, and accounts that could never
+/// be parsed back could enter through synthesized-directive surfaces.)
+///
+/// The rule, per the `Account` token regex: two or more `:`-separated
+/// components; the root starts with an uppercase (`\p{Lu}`), caseless
+/// (`\p{Lo}`), or titlecase (`\p{Lt}`) letter; sub-components may also
+/// start with an ASCII digit; remaining characters are Unicode letters,
+/// ASCII digits, or `-`.
+#[must_use]
+pub fn is_valid_account_name(name: &str) -> bool {
+    let mut lexer = Token::lexer(name);
+    let Some(Ok(Token::Account(_))) = lexer.next() else {
+        return false;
+    };
+    lexer.span() == (0..name.len()) && lexer.next().is_none()
+}
+
 /// Tokenize source code into a vector of (Token, Span) pairs for the
 /// AST-style parser.
 ///
@@ -1273,5 +1301,40 @@ mod tests {
         assert!(token_types.contains(&Token::AtAt));
         assert!(token_types.contains(&Token::Comma));
         assert!(token_types.contains(&Token::Tilde));
+    }
+
+    #[test]
+    fn is_valid_account_name_matches_lexer_rule() {
+        use super::is_valid_account_name as ok;
+        // Valid: standard, unicode roots/components, digit-start SUB-component,
+        // hyphens, deep nesting.
+        assert!(ok("Assets:Cash"));
+        assert!(ok("Assets:US:BofA:Checking"));
+        assert!(ok("Assets:2024-Bonus"));
+        assert!(ok("Активы:Наличные")); // Cyrillic (\p{Lu} root)
+        assert!(ok("資産:現金")); // CJK (\p{Lo} root)
+        assert!(ok("Assets:Ægir")); // non-ASCII uppercase start
+        // Invalid: single component (roots alone are not accounts).
+        assert!(!ok("Assets"));
+        // Invalid: digit-start ROOT (sub-components may, roots may not).
+        assert!(!ok("1Assets:Cash"));
+        // Invalid: lowercase starts (ASCII and non-ASCII).
+        assert!(!ok("assets:Cash"));
+        assert!(!ok("Assets:cash"));
+        assert!(!ok("Assets:\u{e9}cash")); // é — lowercase letter start
+        // Invalid: characters outside letters/digits/hyphen.
+        assert!(!ok("Assets:Ca sh"));
+        assert!(!ok("Assets:Cash!"));
+        assert!(!ok("Assets:N\u{2116}1")); // № (numero sign, So)
+        assert!(!ok("Assets:Cash\u{1F600}")); // emoji
+        assert!(!ok("Assets:Ca_sh")); // underscore is currency-only
+        // Invalid: structural.
+        assert!(!ok(""));
+        assert!(!ok("Assets:"));
+        assert!(!ok(":Cash"));
+        assert!(!ok("Assets::Cash"));
+        assert!(!ok(" Assets:Cash"));
+        assert!(!ok("Assets:Cash "));
+        assert!(!ok("Assets:Cash\nAssets:Two"));
     }
 }

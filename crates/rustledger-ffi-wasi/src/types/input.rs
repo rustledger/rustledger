@@ -247,6 +247,26 @@ pub fn json_map_to_metadata(map: &HashMap<String, serde_json::Value>) -> Metadat
         .collect()
 }
 
+/// Validate a wire-supplied account name and convert it, rejecting names the
+/// parser could never read back. The builder path (`entry.create` /
+/// `entry.createBatch`) bypasses the loader pipeline entirely, so without
+/// this gate it admitted arbitrary strings as accounts — weaker than any
+/// surface in the system, and the resulting directives could not round-trip
+/// through text. The rule is the canonical
+/// [`rustledger_parser::is_valid_account_name`] (the lexer itself).
+fn parse_account(context: &str, value: &str) -> Result<rustledger_core::Account, String> {
+    if rustledger_parser::is_valid_account_name(value) {
+        Ok(value.to_string().into())
+    } else {
+        Err(format!(
+            "invalid {context} account {value:?}: not a valid beancount account \
+             name (expected Type:Component[:Component...] — components start \
+             with an uppercase or caseless letter, sub-components may start \
+             with a digit; letters, digits, and hyphens only)"
+        ))
+    }
+}
+
 /// Convert `InputEntry` to core Directive.
 pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String> {
     match entry {
@@ -359,7 +379,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                         .map(rustledger_core::PriceAnnotation::unit);
 
                     Ok::<_, String>(rustledger_core::Spanned::synthesized(rustledger_core::Posting {
-                        account: p.account.clone().into(),
+                        account: parse_account("posting", &p.account)?,
                         units,
                         cost,
                         price,
@@ -395,7 +415,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Open(rustledger_core::Open {
                 date,
-                account: account.clone().into(),
+                account: parse_account("open", account)?,
                 currencies: currencies.iter().map(|c| c.clone().into()).collect(),
                 booking: booking.clone(),
                 meta: json_map_to_metadata(meta),
@@ -411,7 +431,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Close(rustledger_core::Close {
                 date,
-                account: account.clone().into(),
+                account: parse_account("close", account)?,
                 meta: json_map_to_metadata(meta),
             }))
         }
@@ -426,7 +446,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Balance(rustledger_core::Balance {
                 date,
-                account: account.clone().into(),
+                account: parse_account("balance", account)?,
                 amount: parse_input_amount("balance amount", amount)?,
                 tolerance: None,
                 meta: json_map_to_metadata(meta),
@@ -443,8 +463,8 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Pad(rustledger_core::Pad {
                 date,
-                account: account.clone().into(),
-                source_account: source_account.clone().into(),
+                account: parse_account("pad", account)?,
+                source_account: parse_account("pad source", source_account)?,
                 meta: json_map_to_metadata(meta),
             }))
         }
@@ -505,7 +525,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Note(rustledger_core::Note {
                 date,
-                account: account.clone().into(),
+                account: parse_account("note", account)?,
                 comment: comment.clone(),
                 meta: json_map_to_metadata(meta),
             }))
@@ -523,7 +543,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Document(rustledger_core::Document {
                 date,
-                account: account.clone().into(),
+                account: parse_account("document", account)?,
                 path: path.clone(),
                 tags: tags.iter().map(|t| t.clone().into()).collect(),
                 links: links.iter().map(|l| l.clone().into()).collect(),
@@ -875,5 +895,47 @@ mod tests {
             result.is_err(),
             "PerUnitFromTotal without units must reject (post-booking shape requires units)"
         );
+    }
+
+    // ===== Builder ingress account validation (L4) =====
+
+    #[test]
+    fn create_rejects_unparsable_account() {
+        // The create/batch path bypasses the loader pipeline; accounts must
+        // still be held to the canonical lexer rule or unroundtrippable
+        // directives enter programmatically.
+        let entry = InputEntry::Open {
+            date: "2024-01-01".to_string(),
+            account: "assets:cash".to_string(), // lowercase root
+            currencies: vec![],
+            booking: None,
+            meta: Default::default(),
+        };
+        let err = input_entry_to_directive(&entry).unwrap_err();
+        assert!(err.contains("invalid open account"), "{err}");
+
+        let entry = InputEntry::Close {
+            date: "2024-01-01".to_string(),
+            account: "Assets:Ca sh".to_string(),
+            meta: Default::default(),
+        };
+        let err = input_entry_to_directive(&entry).unwrap_err();
+        assert!(err.contains("invalid close account"), "{err}");
+    }
+
+    #[test]
+    fn create_accepts_valid_unicode_account() {
+        let entry = InputEntry::Open {
+            date: "2024-01-01".to_string(),
+            account: "資産:現金".to_string(),
+            currencies: vec![],
+            booking: None,
+            meta: Default::default(),
+        };
+        let d = input_entry_to_directive(&entry).expect("valid unicode account");
+        match d {
+            Directive::Open(o) => assert_eq!(o.account.as_str(), "資産:現金"),
+            other => panic!("expected Open, got {other:?}"),
+        }
     }
 }

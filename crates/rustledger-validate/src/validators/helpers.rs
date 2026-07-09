@@ -49,19 +49,21 @@ pub fn require_account_open(
 /// The `account_types` parameter specifies valid account type prefixes (from options
 /// like `name_assets`, `name_liabilities`, etc.). Defaults are: Assets, Liabilities,
 /// Equity, Income, Expenses.
+///
+/// The character-level rule delegates to the canonical
+/// [`rustledger_parser::is_valid_account_name`] (the lexer itself), so the
+/// validator accepts exactly the set of names that can round-trip through
+/// the parser — no more (the old hand-written check here admitted digit-start
+/// roots and arbitrary non-ASCII characters mid-component, which the parser
+/// rejects), and no less. The root-type membership check on top is ledger
+/// semantics, not lexing, and stays here.
 pub fn validate_account_name(account: &str, account_types: &[String]) -> Option<String> {
     if account.is_empty() {
         return Some("account name is empty".to_string());
     }
 
-    // Iterate components without allocating a Vec
-    let mut components = account.split(':');
-
-    // Check root account type (first component)
-    let root = components.next()?;
-    if root.is_empty() {
-        return Some("component 1 is empty".to_string());
-    }
+    // Check root account type (first component) — ledger semantics.
+    let root = account.split(':').next()?;
     if !account_types.iter().any(|t| t == root) {
         return Some(format!(
             "account must start with one of: {}. To use a different root name, \
@@ -70,41 +72,71 @@ pub fn validate_account_name(account: &str, account_types: &[String]) -> Option<
         ));
     }
 
-    // Check each component (starting from root)
-    // We already validated root's content will be checked below
-    for (i, part) in std::iter::once(root).chain(components).enumerate() {
-        if part.is_empty() {
-            return Some(format!("component {} is empty", i + 1));
-        }
-
-        // First character must be an uppercase letter (any script) or digit.
-        // Unicode uppercase (\p{Lu}) covers Latin A-Z, Cyrillic А-Я, etc.
-        // Non-ASCII non-letter characters (CJK ideographs, etc.) are also
-        // accepted as they have no case distinction.
-        let Some(first_char) = part.chars().next() else {
-            return Some(format!("component {} is empty", i + 1));
-        };
-        // Accept: uppercase letters (any script), digits, or non-ASCII
-        // letters without case (CJK ideographs, etc.). Matches the lexer
-        // regex [\p{Lu}\p{Lo}\p{Lt}0-9].
-        let is_valid_start = first_char.is_uppercase()
-            || first_char.is_ascii_digit()
-            || (!first_char.is_ascii() && first_char.is_alphabetic());
-        if !is_valid_start {
-            return Some(format!(
-                "component '{part}' must start with uppercase letter or digit"
-            ));
-        }
-
-        // Remaining characters: letters (any script), digits, or hyphens.
-        for c in part.chars().skip(1) {
-            if !c.is_ascii_alphanumeric() && c != '-' && c.is_ascii() {
-                return Some(format!(
-                    "component '{part}' contains invalid character '{c}'"
-                ));
-            }
-        }
+    // Character/structure rule — the canonical parser predicate.
+    if !rustledger_parser::is_valid_account_name(account) {
+        return Some(format!(
+            "'{account}' is not a valid account name: expected two or more \
+             colon-separated components, each starting with an uppercase or \
+             caseless letter (sub-components may start with a digit), \
+             containing only letters, digits, and hyphens"
+        ));
     }
 
     None // Valid
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_account_name;
+
+    fn types() -> Vec<String> {
+        ["Assets", "Liabilities", "Equity", "Income", "Expenses"]
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn accepts_parser_valid_names() {
+        let t = types();
+        assert_eq!(validate_account_name("Assets:Cash", &t), None);
+        assert_eq!(validate_account_name("Assets:2024-Bonus", &t), None);
+        assert_eq!(validate_account_name("Assets:US:BofA:Checking", &t), None);
+    }
+
+    #[test]
+    fn respects_renamed_roots() {
+        let t = vec!["Activa".to_string(), "Revenue".to_string()];
+        assert_eq!(validate_account_name("Activa:Kas", &t), None);
+        assert!(validate_account_name("Assets:Cash", &t).is_some());
+    }
+
+    #[test]
+    fn rejects_what_the_lexer_rejects() {
+        // Pre-L4 this validator hand-implemented the character rule and
+        // accepted all of these; none can round-trip through the parser.
+        // The rule now IS the lexer (rustledger_parser::is_valid_account_name).
+        let t = types();
+        // Single component: an account is Type:Component+.
+        assert!(validate_account_name("Assets", &t).is_some());
+        // Arbitrary non-ASCII characters mid-component (the old check only
+        // rejected invalid ASCII).
+        assert!(validate_account_name("Assets:N\u{2116}1", &t).is_some()); // №
+        assert!(validate_account_name("Assets:Cash\u{1F600}", &t).is_some()); // emoji
+        // Lowercase sub-component start.
+        assert!(validate_account_name("Assets:cash", &t).is_some());
+        // Empty / structural.
+        assert!(validate_account_name("", &t).is_some());
+        assert!(validate_account_name("Assets:", &t).is_some());
+        assert!(validate_account_name("Assets::Cash", &t).is_some());
+    }
+
+    #[test]
+    fn digit_start_root_rejected_even_if_renamed() {
+        // A digit-start root can never begin an Account token, so even a
+        // matching renamed type is unusable (the loader warns E7008 at the
+        // option site; this is the same rule seen from the validator).
+        let t = vec!["1Assets".to_string()];
+        assert!(validate_account_name("1Assets:Cash", &t).is_some());
+    }
 }

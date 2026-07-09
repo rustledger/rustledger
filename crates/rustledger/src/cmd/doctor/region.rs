@@ -83,30 +83,18 @@ pub(super) fn cmd_region<W: Write>(
                     Some(Conversion::Cost) => {
                         // Use cost if available, otherwise fall back to units
                         if let Some(ref cost) = posting.cost {
-                            // Calculate total cost from cost spec. The
-                            // post-#1164 `CostNumber` enum keeps the
-                            // original total when booking derives a
-                            // per-unit (`PerUnitFromTotal`), so the
-                            // `total()` accessor is preferred here for
-                            // precision; the `PerUnit` fallback
-                            // multiplies by units, matching the pre-
-                            // #1164 branch order (total → per-unit →
-                            // none).
-                            let total_cost = if let Some(total) = cost
+                            // Total cost via the exhaustive helper: stored
+                            // totals stay precision-exact (PerUnitFromTotal /
+                            // Total, the post-#1164 preference) and Compound
+                            // costs `N·a + b`. The previous total()/per_unit()
+                            // accessor chain returned None for Compound and
+                            // fell through to bare units mislabeled as the
+                            // cost currency (L3 — this command reads the RAW
+                            // load stream, where Compound survives as-written).
+                            let total_cost = cost
                                 .number
                                 .as_ref()
-                                .and_then(rustledger_core::CostNumber::total)
-                            {
-                                total
-                            } else if let Some(per_unit) = cost
-                                .number
-                                .as_ref()
-                                .and_then(rustledger_core::CostNumber::per_unit)
-                            {
-                                amount.number * per_unit
-                            } else {
-                                amount.number
-                            };
+                                .map_or(amount.number, |n| n.total_for(amount.number));
                             let currency = cost
                                 .currency
                                 .clone()

@@ -269,7 +269,7 @@ pub enum CostNumber {
     /// USD}` as `total = 0` — arithmetically exact in both cases.
     ///
     /// Before #1700 the parser folded this form into [`Self::Total`]
-    /// with only the post-`#` value, silently mis-weighing every
+    /// with only the post-`#` value, silently misweighing every
     /// compound spec (valid ledgers errored, invalid ones passed).
     Compound {
         /// Per-unit component (`a` in `{a # b}`); zero when omitted.
@@ -579,9 +579,33 @@ impl CostNumber {
             Self::PerUnitFromTotal(b) => Some(b.total),
             // Compound's `total` field is only the lump component; the
             // whole total (N*per_unit + total) needs units. Exposing the
-            // lump here would mis-weigh callers that treat this as the
+            // lump here would misweigh callers that treat this as the
             // full total — the exact bug class this variant fixes.
             Self::PerUnit { .. } | Self::Compound { .. } => None,
+        }
+    }
+
+    /// The total cost of `units` under this cost number, exhaustive over
+    /// every variant — stored totals are preferred for precision, exactly
+    /// like the `total()`-then-`per_unit()` chain, but `Compound` is
+    /// handled instead of silently dropped:
+    ///
+    /// - `Total` / `PerUnitFromTotal`: the stored total (precision-exact).
+    /// - `PerUnit`: `value * units`.
+    /// - `Compound { per_unit, total }`: `per_unit * units + total`
+    ///   (the `N·a + b` rule from #1704; `total` is only the lump).
+    ///
+    /// Consumers computing "what did N units cost" MUST use this rather
+    /// than chaining the `total()`/`per_unit()` accessors — both return
+    /// `None` for `Compound`, and accessor-chain fallbacks silently
+    /// miscost compound lots (the doctor/clamp bug class).
+    #[must_use]
+    pub fn total_for(&self, units: Decimal) -> Decimal {
+        match self {
+            Self::Total { value } => *value,
+            Self::PerUnitFromTotal(b) => b.total,
+            Self::PerUnit { value } => *value * units,
+            Self::Compound { per_unit, total } => *per_unit * units + *total,
         }
     }
 }
@@ -817,6 +841,41 @@ impl fmt::Display for CostSpec {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+
+    /// `total_for` must be exhaustive: every variant yields the correct
+    /// total for N units, including `Compound` (which the `total()` /
+    /// `per_unit()` accessors both refuse — the doctor/clamp bug class).
+    #[test]
+    fn total_for_covers_all_variants() {
+        let n = Decimal::from(10);
+        assert_eq!(
+            CostNumber::PerUnit {
+                value: Decimal::new(500, 2)
+            }
+            .total_for(n),
+            Decimal::new(5000, 2), // 10 * 5.00
+        );
+        assert_eq!(
+            CostNumber::Total {
+                value: Decimal::new(6000, 2)
+            }
+            .total_for(n),
+            Decimal::new(6000, 2), // stored total, precision-exact
+        );
+        let booked = BookedCost::new(Decimal::new(600, 2), Decimal::new(6000, 2), n);
+        assert_eq!(
+            CostNumber::PerUnitFromTotal(booked).total_for(n),
+            Decimal::new(6000, 2), // stored total preferred
+        );
+        assert_eq!(
+            CostNumber::Compound {
+                per_unit: Decimal::new(500, 2),
+                total: Decimal::new(1000, 2),
+            }
+            .total_for(n),
+            Decimal::new(6000, 2), // 10*5.00 + 10.00 = N*a + b
+        );
+    }
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         crate::naive_date(year, month, day).unwrap()

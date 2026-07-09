@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use rustledger_core::{
-    Amount, Cost, CostNumber, CostSpec, Decimal, Directive, IncompleteAmount, Inventory, Metadata,
+    Amount, CostNumber, CostSpec, Decimal, Directive, IncompleteAmount, Inventory, Metadata,
     NaiveDate, Position, Posting, Span, Spanned, Transaction,
 };
 
@@ -36,32 +36,16 @@ const fn type_priority(d: &Directive) -> u8 {
 }
 
 /// Build a [`Position`] from a booked posting's units + optional cost spec.
-/// Falls back to a cost-less position when the cost is absent or unresolved.
-fn posting_position(units: &Amount, cost: Option<&CostSpec>) -> Position {
-    let Some(spec) = cost else {
-        return Position::simple(units.clone());
-    };
-    let Some(cost_number) = spec.number else {
-        return Position::simple(units.clone());
-    };
-    // Per-unit value: PerUnit / PerUnitFromTotal yield it directly; a residual
-    // Total spec is divided by |units| (matches the old JSON behavior).
-    let per_unit = cost_number.per_unit().or(match cost_number {
-        CostNumber::Total { value } if !units.number.is_zero() => Some(value / units.number.abs()),
-        _ => None,
-    });
-    let (Some(number), Some(currency)) = (per_unit, spec.currency.clone()) else {
-        return Position::simple(units.clone());
-    };
-    Position::with_cost(
-        units.clone(),
-        Cost {
-            number,
-            currency,
-            date: spec.date,
-            label: spec.label.clone(),
-        },
-    )
+///
+/// Delegates to the canonical [`Position::from_posting`] (→
+/// `CostSpec::resolve`), which handles every `CostNumber` variant. The
+/// previous hand-rolled per-unit ladder here had no `Compound` arm and
+/// silently summarized compound-cost lots as cost-less, destroying their
+/// basis in the clamped opening balance (L2). `date` is the posting's
+/// transaction date — `resolve` uses it to fill lot dates the spec omits,
+/// matching how the booking engine, query engine, and reports build lots.
+fn posting_position(units: &Amount, cost: Option<&CostSpec>, date: NaiveDate) -> Position {
+    Position::from_posting(units, cost, date)
 }
 
 /// A synthesized posting (used for summary/earnings transactions).
@@ -211,7 +195,7 @@ pub fn clamp_indexed(
                         let p = &sp.value;
                         if let Some(units) = p.units.as_ref().and_then(IncompleteAmount::as_amount)
                         {
-                            let pos = posting_position(units, p.cost.as_ref());
+                            let pos = posting_position(units, p.cost.as_ref(), t.date);
                             balances.entry(p.account.to_string()).or_default().add(pos);
                         }
                     }
@@ -301,6 +285,45 @@ mod tests {
     fn mentions(dir: &Directive, account: &str) -> bool {
         matches!(dir, Directive::Transaction(t)
             if t.postings.iter().any(|p| p.value.account.to_string() == account))
+    }
+
+    /// L2 regression: a pre-window lot bought at COMPOUND cost
+    /// (`{a # b}`) must keep its cost basis in the clamped opening
+    /// balance. The old hand-rolled per-unit ladder had no `Compound`
+    /// arm and summarized the lot cost-less, destroying the basis.
+    #[test]
+    fn clamp_preserves_compound_cost_basis() {
+        let src = "2024-01-01 open Assets:Broker\n\
+                   2024-01-01 open Assets:Cash\n\n\
+                   2024-01-05 * \"buy\"\n  \
+                   Assets:Broker  10 WIDGET {5.00 # 10.00 USD}\n  \
+                   Assets:Cash  -60.00 USD\n";
+        let directives = dirs(src);
+        let clamped = clamp(&directives, d(2024, 6, 1), d(2024, 12, 31));
+        let summary = clamped
+            .iter()
+            .find(|dd| is_summary(dd) && mentions(dd, "Assets:Broker"))
+            .expect("summary transaction for the pre-window lot");
+        let Directive::Transaction(t) = summary else {
+            unreachable!()
+        };
+        let broker = t
+            .postings
+            .iter()
+            .find(|p| p.value.account.to_string() == "Assets:Broker")
+            .expect("broker posting");
+        let cost = broker
+            .value
+            .cost
+            .as_ref()
+            .and_then(|c| c.number)
+            .expect("compound cost basis must survive clamping (was None pre-fix)");
+        // resolve(): (10*5.00 + 10.00) / 10 = 6.00 per unit.
+        assert_eq!(
+            cost.per_unit(),
+            Some(rust_decimal::Decimal::new(600, 2)),
+            "summarized per-unit must be 6.00, got {cost:?}",
+        );
     }
 
     #[test]

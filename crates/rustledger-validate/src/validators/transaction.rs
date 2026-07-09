@@ -49,6 +49,17 @@ pub fn validate_transaction_early(
             state
                 .account_not_open_early
                 .insert((posting.file_id, posting.span));
+        } else {
+            // Explicit posting, account absent at this point in the sorted
+            // stream. Presence is re-checked late (plugin renames), but if
+            // the account turns out to exist by then, the DATE check must
+            // still run: a use-before-open posting always streams before its
+            // `open`, so this is the only chance to notice the deferral.
+            state.lifecycle_deferred.insert((
+                posting.file_id,
+                posting.span,
+                posting.account.clone(),
+            ));
         }
     }
 }
@@ -73,6 +84,20 @@ pub fn validate_transaction_late(
     // guards against double-reporting one that is still unopened.
     for posting in &txn.postings {
         if let Some(account_state) = state.accounts.get(&posting.account) {
+            // Lifecycle (open/close DATE) check for postings the early phase
+            // couldn't judge: their account was absent then (its `open`
+            // streams later, or a plugin renamed the posting), but by late
+            // `accounts` holds every open in the ledger, so presence alone
+            // proves nothing about dates. Postings whose account existed
+            // early already had lifecycle checked there — re-running those
+            // here would double-report posting-after-close.
+            if state.lifecycle_deferred.contains(&(
+                posting.file_id,
+                posting.span,
+                posting.account.clone(),
+            )) {
+                validate_account_lifecycle(txn, posting, account_state, errors);
+            }
             validate_posting_currency(state, txn, posting, account_state, errors);
         } else if !state
             .account_not_open_early

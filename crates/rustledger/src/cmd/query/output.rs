@@ -2,6 +2,7 @@
 
 use super::ShellSettings;
 use anyhow::{Context, Result};
+use rustledger_core::format::escape_csv;
 use rustledger_core::{Directive, DisplayContext, Spanned};
 use rustledger_loader::SourceMap;
 use rustledger_query::{Executor, Value, parse as parse_query};
@@ -670,8 +671,6 @@ fn value_to_json(value: &Value) -> serde_json::Value {
         Value::Null => serde_json::Value::Null,
     }
 }
-
-use rustledger_core::format::escape_csv;
 
 #[cfg(test)]
 mod tests {

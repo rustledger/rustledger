@@ -21,8 +21,10 @@ pub fn format_meta_value(value: &MetaValue) -> String {
 }
 
 /// Escape a string for CSV output (RFC-4180 style): values containing a
-/// comma, double quote, or newline are wrapped in double quotes with inner
-/// quotes doubled; everything else passes through unchanged.
+/// comma, double quote, or line feed (`\n` — carriage returns do NOT
+/// trigger quoting, matching the prior copies byte-for-byte) are wrapped
+/// in double quotes with inner quotes doubled; everything else passes
+/// through unchanged.
 ///
 /// The single implementation behind every CSV surface (`rledger report
 /// --format csv`, BQL CSV output) — these previously carried byte-identical

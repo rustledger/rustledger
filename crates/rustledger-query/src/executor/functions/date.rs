@@ -455,6 +455,19 @@ impl Executor<'_> {
     }
 }
 
+/// Zero-based quarter index for a 1-based month (0 => Q1). The single
+/// quarter formula for this module — `DATE_TRUNC`, `QUARTER()`, and the
+/// `DATE_BIN` quarter arm all derive from it rather than re-deriving
+/// `(month - 1) / 3` inline (the sweep found the formula written twice
+/// here, diverging only in off-by-one framing).
+///
+/// `month1` must be 1-based (`Zoned`/`Date::month()` guarantees 1..=12);
+/// 0 would wrap in release builds, so debug builds assert.
+const fn quarter_index0(month1: u32) -> u32 {
+    debug_assert!(month1 >= 1);
+    (month1 - 1) / 3
+}
+
 /// Add `days` to `date`, returning a graceful error instead of panicking when
 /// `days` is out of range.
 ///
@@ -463,15 +476,6 @@ impl Executor<'_> {
 /// `date.checked_add(jiff::ToSpan::days(days)).unwrap()` aborted the process on
 /// a large offset. Build the span fallibly and propagate overflow as a
 /// `QueryError` (beanquery raises a catchable `OverflowError` here).
-/// Zero-based quarter index for a 1-based month (0 => Q1). The single
-/// quarter formula for this module — `DATE_TRUNC`, `QUARTER()`, and the
-/// `DATE_BIN` quarter arm all derive from it rather than re-deriving
-/// `(month - 1) / 3` inline (the sweep found the formula written twice
-/// here, diverging only in off-by-one framing).
-const fn quarter_index0(month1: u32) -> u32 {
-    (month1 - 1) / 3
-}
-
 fn add_days(date: NaiveDate, days: i64) -> Result<NaiveDate, QueryError> {
     let span = jiff::Span::new()
         .try_days(days)

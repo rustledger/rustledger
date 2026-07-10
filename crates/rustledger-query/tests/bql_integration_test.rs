@@ -4482,7 +4482,7 @@ fn test_null_propagation_in_nested_aggregates() {
     if let Value::Number(n) = &result.rows[0][0] {
         assert_eq!(*n, dec!(-1600));
     } else {
-        panic!("Expected Number value, got {:?}", &result.rows[0][0]);
+        panic!("Expected Number value, got {:?}", result.rows[0][0]);
     }
 }
 
@@ -4510,12 +4510,12 @@ fn test_number_cost_position_without_cost() {
     if let Value::Number(n) = &result.rows[0][0] {
         assert_eq!(*n, dec!(-10));
     } else {
-        panic!("Expected Number, got {:?}", &result.rows[0][0]);
+        panic!("Expected Number, got {:?}", result.rows[0][0]);
     }
     if let Value::Number(n) = &result.rows[1][0] {
         assert_eq!(*n, dec!(10));
     } else {
-        panic!("Expected Number, got {:?}", &result.rows[1][0]);
+        panic!("Expected Number, got {:?}", result.rows[1][0]);
     }
 }
 
@@ -4553,7 +4553,7 @@ fn test_cost_mixed_inventory_with_and_without_cost() {
     if let Value::Number(n) = &result.rows[0][0] {
         assert_eq!(*n, dec!(-1000));
     } else {
-        panic!("Expected Number, got {:?}", &result.rows[0][0]);
+        panic!("Expected Number, got {:?}", result.rows[0][0]);
     }
 }
 
@@ -4692,7 +4692,7 @@ fn test_safediv_with_null() {
     if let Value::Number(n) = &result.rows[0][0] {
         assert_eq!(*n, dec!(1));
     } else {
-        panic!("Expected Number value, got {:?}", &result.rows[0][0]);
+        panic!("Expected Number value, got {:?}", result.rows[0][0]);
     }
 }
 

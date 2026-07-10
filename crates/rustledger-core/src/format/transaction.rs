@@ -34,18 +34,18 @@ pub fn format_transaction_lines(txn: &Transaction, config: &FormatConfig) -> Vec
     metadata_lines(&txn.meta, &config.indent, &mut lines);
 
     // Posting-level metadata is indented one level deeper than the posting.
-    let meta_indent = format!("{}{}", &config.indent, &config.indent);
+    let meta_indent = format!("{}{}", config.indent, config.indent);
 
     for posting in &txn.postings {
         // Comments that appear before this posting.
         for comment in &posting.comments {
-            lines.push(FormatLine::Plain(format!("{}{}", &config.indent, comment)));
+            lines.push(FormatLine::Plain(format!("{}{}", config.indent, comment)));
         }
         // The posting line itself (account + amount + first trailing comment).
         lines.push(posting_format_line(posting, config));
         // Any additional trailing comments on their own lines.
         for trailing in posting.trailing_comments.iter().skip(1) {
-            lines.push(FormatLine::Plain(format!("{}{}", &config.indent, trailing)));
+            lines.push(FormatLine::Plain(format!("{}{}", config.indent, trailing)));
         }
         // Posting-level metadata.
         if !posting.meta.is_empty() {
@@ -55,7 +55,7 @@ pub fn format_transaction_lines(txn: &Transaction, config: &FormatConfig) -> Vec
 
     // Transaction trailing comments (after all postings).
     for comment in &txn.trailing_comments {
-        lines.push(FormatLine::Plain(format!("{}{}", &config.indent, comment)));
+        lines.push(FormatLine::Plain(format!("{}{}", config.indent, comment)));
     }
 
     lines

@@ -1393,10 +1393,17 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
     // Convert inputs to core directives, remembering each one's position in
     // `entries` so a `clamp_indexed` source index can map an output back to the
     // exact original WIT directive. These are already-loaded WIT directives, so
-    // conversion is not expected to fail; if one ever does it is skipped — this
-    // surface returns `Vec<wit::Directive>` with no error channel (matching the
-    // unparsable-bounds early return above) — and `orig_index` keeps the
-    // surviving cores aligned to their WIT source.
+    // conversion normally succeeds — with one known exception since the
+    // account-name ingress gate: a held directive whose account is not a
+    // lexable account name (possible via plugin-synthesized or
+    // embedder-constructed directives; parser-produced accounts always
+    // re-lex) now FAILS conversion and is dropped from the result. This
+    // surface returns `Vec<wit::Directive>` with no error channel (matching
+    // the unparsable-bounds early return above), so the drop is silent —
+    // acceptable because such a directive could never round-trip through
+    // text anyway; if that trade stops being acceptable, add a warnings
+    // channel to the WIT signature. `orig_index` keeps the surviving cores
+    // aligned to their WIT source.
     let mut core: Vec<rustledger_core::Directive> = Vec::with_capacity(entries.len());
     let mut orig_index: Vec<usize> = Vec::with_capacity(entries.len());
     for (i, d) in entries.iter().enumerate() {
@@ -1421,6 +1428,10 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
 /// The typed counterpart to `filter`/`clamp`: converts the WIT directives to
 /// core, expands pads (as the source-based query does), then runs the query —
 /// so the embedder queries the directives it holds with no re-parse/re-render.
+///
+/// Like `clamp`, a held directive that fails conversion is silently dropped
+/// (`filter_map(..ok())`) — since the account-name ingress gate this includes
+/// directives with un-lexable account names; see the note in [`clamp`].
 pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryResult {
     let core: Vec<rustledger_core::Directive> = entries
         .iter()

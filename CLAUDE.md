@@ -268,6 +268,79 @@ When you choose to be stricter or more correct than Python on a specific case:
 - `scripts/compat-bql-test.py` — `_is_beanquery_empty_aggregate_quirk` runtime predicate for beanquery#1055.
 - `rustledger-loader/src/process.rs` — split plugin pass (synth pre-booking, regular post-booking) so the Early validator sees plugin-synthesized Opens while cost-spec-reading plugins still see booked values. See `PluginPass` rustdoc. The pipeline is `sort → synth-plugins → Early → book → regular-plugins → Late → finalize`.
 
+## Canonical-Function Discipline (Phase-3 of the 2026-07 duplication review)
+
+A repo-wide correctness review (PRs #1731–#1743) traced every found bug to one
+anti-pattern:
+
+> **A consumer that can't (or won't) call the canonical function re-derives
+> the logic inline, and nothing asserts agreement.**
+
+Every re-derivation starts byte-identical and silently drifts (POSSIGN's
+hardcoded account roots, the query weight ladder's precision loss, three
+divergent account-name validators, the green/red parser mirrors). When you
+write code that computes something the pipeline already computes, apply, in
+order of preference:
+
+1. **Call the canonical.** If a layering boundary blocks the call, move or
+   re-expose the canonical rather than copying it. Existing canonicals to
+   know: `rustledger_booking::{transaction_tolerances, cost_number_weight,
+   price_weight}` (balance semantics), `rustledger_core::booking_sort_key`
+   (directive order), `CostSpec::resolve` / `Position::from_posting`
+   (cost resolution), `rustledger_parser::is_valid_account_name` (account
+   names — implemented by RUNNING the lexer, so it cannot drift),
+   `AccountTypes` (config-aware account classification — never match root
+   prefixes by string), `cost_spec_from_tokens` / `meta_value_from_tokens`
+   (green/red CST semantics), `process_pads` + `Ledger::balance_view`
+   (pad expansion), `rustledger_core::format::{escape_csv, escape_string}`
+   and `DisplayContext` (rendering).
+1. **If the copy is deliberate, document the divergence at BOTH sites** with
+   cross-references naming each other and a revisit condition (examples:
+   `is_booking_reduction`'s paired comments; the valuation plugin's
+   value-denominated FIFO; the LSP's single-pass validation pipeline).
+1. **Pin agreement with a drift-guard test** that compares the two surfaces
+   end-to-end on the shapes that historically broke (examples:
+   `query_report_realization_parity_test`, `fuzz_green_eq_red` + its corpus
+   test, `cost_number_wire_parity` across all five `CostNumber` mirrors).
+   A guard that a future divergence CANNOT trip is decoration — assert on
+   the exact observable, not a proxy (a bare substring match on `60.00 USD`
+   was once satisfied by the wrong output line).
+
+Two supporting rules from the same review:
+
+- **Tests must be hermetic in what they assert about the environment.**
+  Asserting "stdout is not a TTY", "no `~/.config/rledger` exists", or "this
+  env var is unset" breaks on real developer machines (#1729). Inject the
+  environmental inputs (`PagerEnv`-style) instead of assuming them, and never
+  `set_var` in parallel tests.
+- **Availability-gated tests must fail loudly somewhere.** A test that
+  silently skips when a tool is missing is a test that never runs anywhere
+  (the use-before-open bug shipped behind exactly that skip for its entire
+  life). The `python-gated-cargo-tests` CI job asserts tool presence before
+  running and greps for skip markers after; new gated suites must be added
+  to it.
+
+## Toolchain Bumps
+
+CI pins an explicit stable version instead of floating (`toolchain: 1.97.0`
+in every workflow), after a floating-`stable` release broke every open PR
+overnight (#1745: new lints plus a debug-frame-size change that overflowed
+the BQL parser's test-thread stack). To bump:
+
+1. Update the version in **BOTH places in lockstep**: every
+   `toolchain:` pin in `.github/workflows/*.yml` AND `rust-toolchain.toml`'s
+   `channel`. rustup's file-based override beats the workflow-installed
+   toolchain, so splitting them silently strands wasm targets on the wrong
+   install (#1751 — every wasip2 job failed with "can't find crate for
+   `std`").
+1. Before pushing, run clippy + the full test suite under the NEW version
+   (`rustup toolchain install <ver>`, `RUSTUP_TOOLCHAIN=<ver> cargo clippy
+   --all-features --all-targets -- -D warnings`) and under the nix-pinned
+   MSRV. New-lint fixes and behavioral breakage land in the bump PR itself.
+1. Note that workflow-only PRs skip the component-build jobs via the
+   `should_build` path gate — a toolchain bump PR should touch a Rust file
+   (or dispatch the jobs manually) so the gated jobs actually validate it.
+
 ## Common Patterns
 
 ### Adding a new plugin

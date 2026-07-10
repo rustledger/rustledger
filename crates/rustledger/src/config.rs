@@ -1450,20 +1450,29 @@ t = "check"
         // `~` in the override is expanded to the home dir.
         if let Some(home) = dirs::home_dir() {
             assert_eq!(
-                resolve_user_config_path(Some("~/dots/rledger.toml".to_string()), native.clone()),
+                resolve_user_config_path(Some("~/dots/rledger.toml".to_string()), native),
                 Some(home.join("dots/rledger.toml"))
             );
         }
-        // An empty override is treated as unset (filtered by the caller), so the
-        // native default is used.
-        assert_eq!(resolve_user_config_path(None, native.clone()), native);
     }
 
+    /// The no-override → native case is only assertable off macOS: the
+    /// macOS XDG fallback (#1616) probes the REAL filesystem for
+    /// `~/.config/rledger/config.toml` when the (fake) native path does
+    /// not exist, so on any macOS machine with an actual rledger config
+    /// the sentinel loses to the user's file and the assertion fails
+    /// (#1729 — this exact assertion previously lived in the env-override
+    /// test above and broke `cargo test` for macOS users).
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn resolve_user_config_path_no_override_uses_native_on_non_macos() {
         let native = Some(PathBuf::from("/home/u/.config/rledger/config.toml"));
         assert_eq!(resolve_user_config_path(None, native.clone()), native);
+
+        // An empty override is treated as unset (filtered by the caller),
+        // so the native default is used.
+        let other = Some(PathBuf::from("/native/rledger/config.toml"));
+        assert_eq!(resolve_user_config_path(None, other.clone()), other);
     }
 
     #[test]

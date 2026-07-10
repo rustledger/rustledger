@@ -82,20 +82,51 @@ pub fn is_broken_pipe(err: &anyhow::Error) -> bool {
 ///
 /// Falls back to stdout otherwise.
 pub fn create_pager(config_pager: Option<&str>) -> PagerWriter {
+    create_pager_in(&PagerEnv::from_process(), config_pager)
+}
+
+/// The process-environment inputs to the paging decision, separated from
+/// [`create_pager`] so the decision is TESTABLE: the old tests asserted the
+/// non-TTY branch by ASSUMING test stdout is never a terminal, which is
+/// false under `cargo test` in a real terminal (libtest captures the
+/// thread-local print handles, not fd 1) — the tests then failed AND
+/// actually spawned `less` on the developer's machine (#1729). Tests now
+/// construct this struct directly and never consult (or mutate — parallel
+/// tests race on `set_var`) the real environment.
+struct PagerEnv {
+    /// Whether fd 1 is a terminal (`io::stdout().is_terminal()`).
+    is_tty: bool,
+    /// Whether `NO_PAGER` is set.
+    no_pager: bool,
+    /// `$PAGER`, if set.
+    pager: Option<String>,
+}
+
+impl PagerEnv {
+    fn from_process() -> Self {
+        Self {
+            is_tty: io::stdout().is_terminal(),
+            no_pager: std::env::var_os("NO_PAGER").is_some(),
+            pager: std::env::var("PAGER").ok(),
+        }
+    }
+}
+
+fn create_pager_in(env: &PagerEnv, config_pager: Option<&str>) -> PagerWriter {
     // Don't page if stdout is not a TTY (piped, redirected, etc.)
-    if !io::stdout().is_terminal() {
+    if !env.is_tty {
         return PagerWriter::Stdout(io::stdout().lock());
     }
 
     // Check NO_PAGER env var
-    if std::env::var_os("NO_PAGER").is_some() {
+    if env.no_pager {
         return PagerWriter::Stdout(io::stdout().lock());
     }
 
     // Resolve pager command: config → $PAGER → "less"
     let pager_cmd = config_pager
         .map(String::from)
-        .or_else(|| std::env::var("PAGER").ok())
+        .or_else(|| env.pager.clone())
         .unwrap_or_else(|| "less".to_string());
 
     if pager_cmd.is_empty() {
@@ -157,17 +188,63 @@ mod tests {
         assert!(!is_broken_pipe(&err));
     }
 
+    /// Hermetic environment for pager-decision tests: every field is
+    /// explicit, so outcomes cannot depend on the terminal, `NO_PAGER`,
+    /// or `$PAGER` of whoever runs the tests (#1729).
+    fn env(is_tty: bool, no_pager: bool, pager: Option<&str>) -> PagerEnv {
+        PagerEnv {
+            is_tty,
+            no_pager,
+            pager: pager.map(String::from),
+        }
+    }
+
     #[test]
     fn test_create_pager_non_tty() {
-        // In CI/tests, stdout is not a TTY — should always return Stdout variant
-        let writer = create_pager(None);
+        // Non-TTY stdout never pages, with or without config.
+        let writer = create_pager_in(&env(false, false, None), None);
         assert!(matches!(writer, PagerWriter::Stdout(_)));
     }
 
     #[test]
     fn test_create_pager_with_config_non_tty() {
-        // Even with config, non-TTY should return Stdout
-        let writer = create_pager(Some("less -R"));
+        let writer = create_pager_in(&env(false, false, Some("less")), Some("less -R"));
+        assert!(matches!(writer, PagerWriter::Stdout(_)));
+    }
+
+    #[test]
+    fn test_create_pager_tty_no_pager_wins() {
+        // NO_PAGER suppresses paging even on a TTY with a configured pager.
+        let writer = create_pager_in(&env(true, true, Some("less")), Some("less -R"));
+        assert!(matches!(writer, PagerWriter::Stdout(_)));
+    }
+
+    #[test]
+    fn test_create_pager_tty_empty_command_falls_back() {
+        // An explicitly empty pager command means "don't page".
+        let writer = create_pager_in(&env(true, false, None), Some(""));
+        assert!(matches!(writer, PagerWriter::Stdout(_)));
+        // Same via $PAGER.
+        let writer = create_pager_in(&env(true, false, Some("")), None);
+        assert!(matches!(writer, PagerWriter::Stdout(_)));
+    }
+
+    #[test]
+    fn test_create_pager_tty_unparsable_command_falls_back() {
+        // shell_words can't split an unterminated quote — fall back, don't panic.
+        let writer = create_pager_in(&env(true, false, None), Some("less '"));
+        assert!(matches!(writer, PagerWriter::Stdout(_)));
+    }
+
+    #[test]
+    fn test_create_pager_tty_spawn_failure_falls_back() {
+        // A pager binary that doesn't exist must fall back to stdout rather
+        // than erroring. (Spawn-SUCCESS on a TTY is deliberately untested:
+        // it would launch a real process from the test suite.)
+        let writer = create_pager_in(
+            &env(true, false, None),
+            Some("/nonexistent/rledger-test-pager-binary"),
+        );
         assert!(matches!(writer, PagerWriter::Stdout(_)));
     }
 

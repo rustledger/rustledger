@@ -571,9 +571,9 @@ fn validate_phase_inner<D: ValidatableDirective>(
         .map(|d| (rustledger_core::booking_sort_key(d.directive()), d))
         .collect();
     if keyed.len() >= PARALLEL_SORT_THRESHOLD {
-        keyed.par_sort_by(|a, b| a.0.cmp(&b.0));
+        keyed.par_sort_by_key(|k| k.0);
     } else {
-        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+        keyed.sort_by_key(|k| k.0);
     }
 
     for (_, d) in keyed {

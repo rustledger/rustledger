@@ -77,11 +77,14 @@ pub fn decimal_quantum(value: Decimal) -> Decimal {
 /// decimal places contributes `quantum(amount) x multiplier`, max'd per
 /// currency; integer amounts contribute nothing (exact balance required).
 ///
-/// When `infer_tolerance_from_cost` is enabled, for each posting with a cost:
-///   `tolerance = units_quantum * cost_per_unit * tolerance_multiplier`
-///
-/// The tolerance for each cost currency is the maximum of all such values
-/// computed from postings with costs in that currency.
+/// When `infer_tolerance_from_cost` is enabled, each posting with a
+/// per-unit cost (or price) contributes
+/// `units_quantum * cost_per_unit * multiplier`; these contributions are
+/// ACCUMULATED (summed) per cost currency across the transaction's
+/// postings, and the accumulated value is then max'd against the base
+/// quantum tolerance for that currency. (The doc used to claim the
+/// per-posting maximum — the implementation, moved verbatim from the
+/// validator, has always summed.)
 #[must_use]
 pub fn transaction_tolerances(
     txn: &Transaction,

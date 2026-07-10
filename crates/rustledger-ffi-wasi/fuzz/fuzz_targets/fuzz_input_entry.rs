@@ -40,6 +40,13 @@ fn accounts_of(d: &Directive) -> Vec<&str> {
 }
 
 fuzz_target!(|data: &[u8]| {
+    // Bound resource usage independent of runner flags: the CI job passes
+    // -max_len=4096, but a local `cargo fuzz run` without it could feed
+    // multi-megabyte inputs into serde (review catch). 64 KiB is far above
+    // any realistic wire entry while keeping pathological JSON cheap.
+    if data.len() > 64 * 1024 {
+        return;
+    }
     let Ok(entry) = serde_json::from_slice::<InputEntry>(data) else {
         return;
     };

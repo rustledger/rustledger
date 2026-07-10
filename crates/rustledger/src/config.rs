@@ -1469,10 +1469,8 @@ t = "check"
         let native = Some(PathBuf::from("/home/u/.config/rledger/config.toml"));
         assert_eq!(resolve_user_config_path(None, native.clone()), native);
 
-        // An empty override is treated as unset (filtered by the caller),
-        // so the native default is used.
-        let other = Some(PathBuf::from("/native/rledger/config.toml"));
-        assert_eq!(resolve_user_config_path(None, other.clone()), other);
+        // No override and no native location: nothing to resolve.
+        assert_eq!(resolve_user_config_path(None, None), None);
     }
 
     #[test]

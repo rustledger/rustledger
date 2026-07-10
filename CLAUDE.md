@@ -323,13 +323,16 @@ Two supporting rules from the same review:
 ## Toolchain Bumps
 
 CI pins an explicit stable version instead of floating (`toolchain: 1.97.0`
-in every workflow), after a floating-`stable` release broke every open PR
-overnight (#1745: new lints plus a debug-frame-size change that overflowed
-the BQL parser's test-thread stack). To bump:
+at every site that previously said `stable`; the MSRV job and the
+nightly-based jobs keep their own separate pins), after a floating-`stable`
+release broke every open PR overnight (#1745: new lints plus a
+debug-frame-size change that overflowed the BQL parser's test-thread
+stack). To bump:
 
-1. Update the version in **BOTH places in lockstep**: every
-   `toolchain:` pin in `.github/workflows/*.yml` AND `rust-toolchain.toml`'s
-   `channel`. rustup's file-based override beats the workflow-installed
+1. Update the version in **BOTH places in lockstep**: every stable-channel
+   `toolchain:` pin in `.github/workflows/*.yml` (grep for the `pinned
+   stable` comment; leave MSRV/nightly pins alone) AND
+   `rust-toolchain.toml`'s `channel`. rustup's file-based override beats the workflow-installed
    toolchain, so splitting them silently strands wasm targets on the wrong
    install (#1751 — every wasip2 job failed with "can't find crate for
    `std`").

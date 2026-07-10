@@ -391,7 +391,9 @@ impl AccountTypes {
     /// Returns `None` for roots matching none of the five (custom types).
     #[must_use]
     pub fn kind(&self, account: &str) -> Option<AccountTypeKind> {
-        let root = account.split(':').next().unwrap_or(account);
+        // Root segment before the first ':', or the whole name when there
+        // is no colon (`split_once` makes the two cases explicit).
+        let root = account.split_once(':').map_or(account, |(root, _)| root);
         if root == self.assets {
             Some(AccountTypeKind::Assets)
         } else if root == self.liabilities {

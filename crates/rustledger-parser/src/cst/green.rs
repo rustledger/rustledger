@@ -1329,11 +1329,11 @@ mod tests {
                     // hold trivially — pinned so a future green expansion
                     // that touches them can't diverge unnoticed. Mirrors
                     // the fuzz_green_eq_red target's field list.
-                    format!("{:?}", p.includes),
-                    format!("{:?}", p.plugins),
+                    p.includes.clone(),
+                    p.plugins.clone(),
                     format!("{:?}", p.warnings),
-                    format!("{:?}", p.has_leading_bom),
-                    format!("{:?}", p.alignment),
+                    p.has_leading_bom,
+                    p.alignment,
                 )
             };
             assert_eq!(

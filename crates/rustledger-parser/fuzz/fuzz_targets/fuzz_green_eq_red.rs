@@ -54,13 +54,11 @@ fuzz_target!(|data: &[u8]| {
     // grows to touch includes/plugins/warnings/BOM/alignment, any divergence
     // surfaces here instead of shipping unpinned.
     assert_eq!(
-        format!("{:?}", green.includes),
-        format!("{:?}", red.includes),
+        green.includes, red.includes,
         "green vs red includes diverged"
     );
     assert_eq!(
-        format!("{:?}", green.plugins),
-        format!("{:?}", red.plugins),
+        green.plugins, red.plugins,
         "green vs red plugins diverged"
     );
     assert_eq!(

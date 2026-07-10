@@ -112,6 +112,13 @@ fn json_variants() -> Vec<CostNumberJson> {
 
 #[test]
 fn all_serializing_mirrors_emit_the_canonical_shape() {
+    // zip() truncates to the shortest iterator — assert the lengths first
+    // so a variant accidentally dropped from any list fails the test
+    // instead of silently shrinking the parity guarantee (review catch).
+    assert_eq!(canonical().len(), 4);
+    assert_eq!(core_variants().len(), 4);
+    assert_eq!(data_variants().len(), 4);
+    assert_eq!(json_variants().len(), 4);
     for (((kind, expected), core), (data, json)) in canonical()
         .into_iter()
         .zip(core_variants())

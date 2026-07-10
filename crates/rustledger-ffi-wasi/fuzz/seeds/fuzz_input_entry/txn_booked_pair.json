@@ -1,0 +1,1 @@
+{"type":"transaction","date":"2024-02-01","postings":[{"account":"Assets:Broker","units":{"number":"2","currency":"VEA"},"cost":{"number":{"kind":"per_unit_from_total","per_unit":"60.00","total":"120.00"},"currency":"USD","date":"2024-02-01"}},{"account":"Assets:Cash","units":{"number":"-120.00","currency":"USD"}}]}

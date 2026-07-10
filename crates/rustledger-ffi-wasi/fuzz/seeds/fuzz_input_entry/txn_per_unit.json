@@ -1,0 +1,1 @@
+{"type":"transaction","date":"2024-01-15","flag":"*","narration":"buy","postings":[{"account":"Assets:Broker","units":{"number":"10","currency":"AAPL"},"cost":{"number":{"kind":"per_unit","value":"150.00"},"currency":"USD"}},{"account":"Assets:Cash","units":{"number":"-1500.00","currency":"USD"}}]}

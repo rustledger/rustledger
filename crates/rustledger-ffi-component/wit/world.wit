@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.3.0;
+package rustledger:ledger@3.4.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -462,6 +462,15 @@ interface ledger {
     /// `allow-unrestricted-includes` / `plugins` semantics match `load-file`;
     /// load failures are surfaced via `info().errors`, not a trap.
     from-file: static func(path: string, allow-unrestricted-includes: bool, plugins: list<string>) -> session;
+    /// Hold an already-loaded directive set (added in 3.4.0 for the
+    /// rustfava filtered-query path — rustfava#173). The embedder pays the
+    /// directive marshaling ONCE per entry set (e.g. per filter change)
+    /// and subsequent `query`/`filter`/`clamp` calls run against the held
+    /// core directives with no per-call shuttling. Directives that fail
+    /// conversion (e.g. un-lexable accounts) are dropped, mirroring
+    /// `builder.query-entries`; the drop count is observable as
+    /// `info().entries` length vs what was sent.
+    from-entries: static func(entries: list<directive>) -> session;
 
     /// Everything the host needs at load time: entries, errors, options,
     /// plugins, and the resolved include graph.

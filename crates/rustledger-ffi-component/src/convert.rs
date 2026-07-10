@@ -1516,6 +1516,40 @@ impl SessionState {
         }
     }
 
+    /// Hold an already-loaded directive set (WIT 3.4.0, `from-entries`).
+    /// The typed counterpart to `builder.query-entries`'s conversion step:
+    /// wire directives convert to core ONCE here, and every subsequent
+    /// method call runs against the held core list with no re-marshaling.
+    /// Conversion failures (e.g. un-lexable accounts, see the note on
+    /// `clamp`) drop the directive, mirroring `query-entries`.
+    pub fn from_entries(entries: &[wit::Directive]) -> Self {
+        // The one-time conversion is this API's whole reason to exist —
+        // reserve up front so a large ledger doesn't reallocate through
+        // the collect (review catch; drops are rare, over-reserving by
+        // the dropped count is fine).
+        let mut directives: Vec<rustledger_core::Directive> = Vec::with_capacity(entries.len());
+        directives.extend(
+            entries
+                .iter()
+                .filter_map(|d| ffi::input_entry_to_directive(&loaded_directive_to_input(d)).ok()),
+        );
+        let n = directives.len();
+        Self {
+            directives,
+            lines: vec![0; n],
+            files: vec!["<entries>".to_string(); n],
+            errors: vec![],
+            // Held entries carry no ledger options (they were stripped at
+            // the original load); defaults here match what a stand-alone
+            // directive set implies. Embedders holding options should keep
+            // consulting their load-time `info()`.
+            options: options(ffi::LedgerOptions::default()),
+            plugins: vec![],
+            includes: vec![],
+            padded: std::cell::OnceCell::new(),
+        }
+    }
+
     /// Parse + book from a file path. Mirrors the free `load_file`'s handling
     /// (path-security flag inversion, requested-plugin pass, per-directive
     /// file provenance); a load failure becomes an empty ledger whose single
@@ -1989,5 +2023,45 @@ mod tests {
                 (case, got) => panic!("WIT {case:?} raised to wrong variant: {got:?}"),
             }
         }
+    }
+
+    /// WIT 3.4.0 `session.from-entries`: a held directive set answers
+    /// queries with no per-call marshaling, and conversion-failing
+    /// directives (un-lexable accounts) are dropped like
+    /// `builder.query-entries` — observable via `info()`.
+    #[test]
+    fn session_from_entries_holds_and_queries() {
+        use super::SessionState;
+        // Round-trip the comprehensive LEDGER through the real load path
+        // (parse + book) into WIT directives, then hold them in a session
+        // built from that WIT list.
+        let loaded = ffi::helpers::load_source(LEDGER);
+        let wit_dirs: Vec<wit::Directive> = loaded
+            .directives
+            .iter()
+            .map(|d| directive_from_core(d, 0, "<test>"))
+            .collect();
+        let n = wit_dirs.len();
+        let session = SessionState::from_entries(&wit_dirs);
+        assert_eq!(
+            session.info().entries.len(),
+            n,
+            "all well-formed directives must survive the hold"
+        );
+        let result = session.query("SELECT account, sum(position) GROUP BY account");
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(!result.rows.is_empty());
+
+        // An un-lexable account drops its directive (mirrors query-entries).
+        let bad = directive_from_core(
+            &rustledger_core::Directive::Open(rustledger_core::Open::new(
+                rustledger_core::naive_date(2024, 1, 1).unwrap(),
+                "bad account name",
+            )),
+            0,
+            "<test>",
+        );
+        let session = SessionState::from_entries(&[bad]);
+        assert_eq!(session.info().entries.len(), 0);
     }
 }

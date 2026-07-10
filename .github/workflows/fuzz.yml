@@ -12,6 +12,8 @@ on:
       - 'crates/rustledger-parser/**'
       - 'crates/rustledger-query/**'
       - 'crates/rustledger-booking/**'
+      - 'crates/rustledger-ffi-wasi/**'
+      - '.github/workflows/fuzz.yml'
   schedule:
     # Nightly at 4 AM UTC
     - cron: '0 4 * * *'
@@ -35,6 +37,7 @@ on:
           - fuzz_query_parse
           - fuzz_query_execute
           - fuzz_booking
+          - fuzz_input_entry
 permissions:
   contents: read
 env:
@@ -371,4 +374,115 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           tail -20 crates/rustledger-booking/fuzz-output.txt >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  fuzz-ffi-ingress:
+    name: Fuzz FFI ingress (fuzz_input_entry)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Check if target should run
+        id: check
+        run: |
+          INPUT_TARGET="${{ github.event.inputs.target || 'all' }}"
+          if [ "$INPUT_TARGET" = "all" ] || [ "$INPUT_TARGET" = "fuzz_input_entry" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # nightly
+        if: steps.check.outputs.should_run == 'true'
+        with:
+          toolchain: nightly
+      - name: Install cargo-fuzz
+        if: steps.check.outputs.should_run == 'true'
+        run: cargo install cargo-fuzz
+      - name: Restore corpus cache
+        if: steps.check.outputs.should_run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: crates/rustledger-ffi-wasi/fuzz/corpus/fuzz_input_entry
+          key: fuzz-corpus-ffi-ingress-${{ github.sha }}
+          restore-keys: |
+            fuzz-corpus-ffi-ingress-
+      - name: Determine fuzz duration
+        if: steps.check.outputs.should_run == 'true'
+        id: duration
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # Nightly: 30 minutes
+            echo "seconds=1800" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual: use input or default 10 minutes
+            echo "seconds=${{ github.event.inputs.duration || '600' }}" >> $GITHUB_OUTPUT
+          else
+            # PR: 10 minutes
+            echo "seconds=600" >> $GITHUB_OUTPUT
+          fi
+      - name: Run fuzzer
+        if: steps.check.outputs.should_run == 'true'
+        run: |
+          cd crates/rustledger-ffi-wasi
+          # Seed the corpus with the committed wire-shape examples (one per
+          # InputEntry variant plus the booked-pair/bad-account edges) so a
+          # cold cache still starts with structural coverage.
+          mkdir -p fuzz/corpus/fuzz_input_entry
+          cp fuzz/seeds/fuzz_input_entry/* fuzz/corpus/fuzz_input_entry/ || true
+          echo "Running fuzz_input_entry for ${{ steps.duration.outputs.seconds }} seconds..."
+          cargo +nightly fuzz run fuzz_input_entry -- \
+            -max_total_time=${{ steps.duration.outputs.seconds }} \
+            -max_len=4096 \
+            -print_final_stats=1 \
+            2>&1 | tee fuzz-output.txt
+      - name: Check for crashes
+        if: steps.check.outputs.should_run == 'true'
+        run: |
+          cd crates/rustledger-ffi-wasi
+          dir="fuzz/artifacts/fuzz_input_entry"
+          # Fail on ANY artifact that is not a benign `slow-unit-*`. This is
+          # the safe superset of libFuzzer's real-failure prefixes
+          # (crash-/oom-/timeout-/leak-/mismatch-), so an unknown or future
+          # failure type cannot slip through. `slow-unit-*` means an input was
+          # slow but completed — surface it as a non-fatal warning rather than
+          # failing the build (#1342). `find` on a missing dir is empty under
+          # 2>/dev/null, so no separate existence/`ls` guard is needed.
+          crashes=$(find "$dir" -maxdepth 1 -type f ! -name 'slow-unit-*' 2>/dev/null)
+          slow=$(find "$dir" -maxdepth 1 -type f -name 'slow-unit-*' 2>/dev/null)
+          if [ -n "$slow" ]; then
+            echo "::warning::Fuzzer found slow units (non-fatal); investigate for super-linear behavior:"
+            echo "$slow"
+          fi
+          if [ -n "$crashes" ]; then
+            echo "::error::Fuzzer found crash artifacts!"
+            ls -la "$dir"/
+            exit 1
+          fi
+          if [ -z "$slow" ]; then
+            echo "No crash artifacts found"
+          else
+            echo "No crashes found (slow units are non-fatal)"
+          fi
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: crashes-fuzz_input_entry
+          path: crates/rustledger-ffi-wasi/fuzz/artifacts/fuzz_input_entry/
+      - name: Upload corpus
+        if: steps.check.outputs.should_run == 'true' && github.event_name == 'schedule'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: corpus-fuzz_input_entry
+          path: crates/rustledger-ffi-wasi/fuzz/corpus/fuzz_input_entry/
+          retention-days: 7
+      - name: Summary
+        if: steps.check.outputs.should_run == 'true'
+        run: |
+          echo "## Fuzz Results: fuzz_input_entry" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Duration: ${{ steps.duration.outputs.seconds }} seconds" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -20 crates/rustledger-ffi-wasi/fuzz-output.txt >> $GITHUB_STEP_SUMMARY || true
           echo '```' >> $GITHUB_STEP_SUMMARY

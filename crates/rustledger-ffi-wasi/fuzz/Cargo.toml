@@ -1,0 +1,34 @@
+[package]
+name = "rustledger-ffi-wasi-fuzz"
+version = "0.0.0"
+authors = ["Automatically generated"]
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.rustledger-ffi-wasi]
+path = ".."
+
+[dependencies.rustledger-core]
+path = "../../rustledger-core"
+
+# For the account-gate invariant assertion (the canonical predicate).
+[dependencies.rustledger-parser]
+path = "../../rustledger-parser"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_input_entry"
+path = "fuzz_targets/fuzz_input_entry.rs"
+test = false
+doc = false
+bench = false

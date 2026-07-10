@@ -8,14 +8,19 @@
 # of sync, cargo runs under this channel's install while wasm targets were
 # added to the pinned one, and every wasip2/wasm job fails with
 # "can't find crate for `std`" (the #1750 Component Parity failure).
+# CHANNEL ONLY — no components/targets here. Listing them makes rustup's
+# implicit override sync (first cargo invocation in every CI job) download
+# and install them transactionally, and that transaction intermittently
+# fails on hosted runners with "failed to install component:
+# 'clippy-preview…', detected conflict: 'bin/cargo-clippy'" (#1754 hit it
+# twice; identical green runs exist — it's a per-runner dice roll). CI jobs
+# declare what they need explicitly via the dtolnay action's
+# `components:`/`targets:` inputs, so the sync must have nothing to do.
+#
+# Developers without nix: add what you need once, onto THIS pinned
+# toolchain (a bare `rustup component add` targets whatever toolchain is
+# default, which may differ) —
+#   rustup component add --toolchain 1.97.0 clippy rustfmt rust-src llvm-tools-preview
+#   rustup target add --toolchain 1.97.0 wasm32-unknown-unknown
 [toolchain]
 channel = "1.97.0"
-components = [
-  "cargo",
-  "clippy",
-  "rust-src",
-  "rustc",
-  "rustfmt",
-  "llvm-tools-preview",
-]
-targets = ["wasm32-unknown-unknown"]

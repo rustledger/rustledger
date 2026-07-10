@@ -49,12 +49,22 @@ pub fn validate_transaction_early(
             state
                 .account_not_open_early
                 .insert((posting.file_id, posting.span));
-        } else {
+        } else if posting.file_id != rustledger_core::SYNTHESIZED_FILE_ID {
             // Explicit posting, account absent at this point in the sorted
             // stream. Presence is re-checked late (plugin renames), but if
             // the account turns out to exist by then, the DATE check must
             // still run: a use-before-open posting always streams before its
             // `open`, so this is the only chance to notice the deferral.
+            //
+            // Synthesized postings are NOT deferred: they all share the
+            // sentinel `(SYNTHESIZED_FILE_ID, Span::ZERO)` identity, so a
+            // deferred key from one would match every synthesized posting
+            // to the same account in late — re-running lifecycle on
+            // postings whose account existed early and double-reporting
+            // posting-after-close. Programmatically built postings dated
+            // before their open therefore stay unchecked, the same
+            // documented gap as plugin-ADDED postings (which also lack a
+            // stable source identity).
             state.lifecycle_deferred.insert((
                 posting.file_id,
                 posting.span,

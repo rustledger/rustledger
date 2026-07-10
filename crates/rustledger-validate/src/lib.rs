@@ -373,14 +373,16 @@ pub struct LedgerState {
     /// account existed early already had their lifecycle checked there —
     /// re-running it in late would double-report posting-after-close.
     ///
-    /// Keyed by `(file_id, span, account)` — not source identity alone —
-    /// because synthesized postings share a sentinel span: without the
-    /// account in the key, one deferred synthesized posting would make every
-    /// synthesized posting re-run lifecycle in late, double-reporting
-    /// posting-after-close errors already emitted early. The account key
-    /// also means a posting RENAMED by a regular plugin is not re-checked
-    /// against its new account's dates (pre-rename key ≠ post-rename key) —
-    /// unchanged from the pre-fix behavior for that edge.
+    /// Keyed by `(file_id, span, account)`. Synthesized postings (sentinel
+    /// `SYNTHESIZED_FILE_ID` + `Span::ZERO`) are never inserted — their
+    /// shared identity would make one deferred posting's key match every
+    /// synthesized posting to the same account across the ledger,
+    /// double-reporting posting-after-close in late (deep-review catch);
+    /// they stay lifecycle-unchecked like plugin-added postings. The
+    /// account in the key means a posting RENAMED by a regular plugin is
+    /// not re-checked against its new account's dates (pre-rename key ≠
+    /// post-rename key) — unchanged from the pre-fix behavior for that
+    /// edge.
     pub(crate) lifecycle_deferred: FxHashSet<(u16, rustledger_core::Span, Account)>,
     /// Per-`balance`-assertion computed result recorded during Late validation:
     /// `diff = computed − asserted`. Lets consumers render per-assertion pass/fail
@@ -3318,10 +3320,19 @@ mod tests {
         Directive::Open(Open::new(d, account))
     }
 
+    /// Build a transaction whose postings carry UNIQUE source spans, like
+    /// parsed input. The lifecycle-deferral machinery keys on
+    /// `(file_id, span, account)` and deliberately skips synthesized
+    /// (sentinel-identity) postings, so these tests must not use
+    /// `with_synthesized_posting` or the deferral under test never arms.
     fn txn_at(d: NaiveDate, postings: Vec<Posting>) -> Directive {
         let mut t = Transaction::new(d, "t");
-        for p in postings {
-            t = t.with_synthesized_posting(p);
+        for (i, p) in postings.into_iter().enumerate() {
+            let start = (d.day() as usize) * 100 + i * 10;
+            t = t.with_posting(rustledger_core::Spanned::new(
+                p,
+                rustledger_core::Span::new(start, start + 9),
+            ));
         }
         Directive::Transaction(t)
     }
@@ -3416,6 +3427,37 @@ mod tests {
         assert_eq!(
             hits, 1,
             "after-close must be reported exactly once: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn synthesized_postings_are_not_lifecycle_deferred() {
+        // Synthesized postings share the sentinel (SYNTHESIZED_FILE_ID,
+        // Span::ZERO) identity; deferring them would make one key match
+        // every synthesized posting to the same account and double-report
+        // posting-after-close (deep-review catch). They are skipped
+        // instead — a programmatically built use-before-open posting is
+        // NOT reported (documented gap, same class as plugin-added
+        // postings). This test pins the no-error side so a future change
+        // to the deferral consciously revisits the trade-off.
+        let mut t = Transaction::new(date(2020, 1, 15), "synth");
+        t = t.with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")));
+        t = t.with_synthesized_posting(Posting::new(
+            "Equity:Opening",
+            Amount::new(dec!(-100), "USD"),
+        ));
+        let directives = vec![
+            open_at(date(2020, 1, 1), "Equity:Opening"),
+            Directive::Transaction(t),
+            open_at(date(2020, 2, 1), "Assets:Bank"),
+        ];
+        let errors = validate(&directives);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.code == ErrorCode::AccountNotOpen
+                    && e.message.contains("not opened until")),
+            "synthesized postings must not arm the late lifecycle check: {errors:?}"
         );
     }
 

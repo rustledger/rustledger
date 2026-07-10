@@ -17,8 +17,10 @@
 # declare what they need explicitly via the dtolnay action's
 # `components:`/`targets:` inputs, so the sync must have nothing to do.
 #
-# Developers without nix: add what you need once —
-#   rustup component add clippy rustfmt rust-src llvm-tools-preview
-#   rustup target add wasm32-unknown-unknown
+# Developers without nix: add what you need once, onto THIS pinned
+# toolchain (a bare `rustup component add` targets whatever toolchain is
+# default, which may differ) —
+#   rustup component add --toolchain 1.97.0 clippy rustfmt rust-src llvm-tools-preview
+#   rustup target add --toolchain 1.97.0 wasm32-unknown-unknown
 [toolchain]
 channel = "1.97.0"

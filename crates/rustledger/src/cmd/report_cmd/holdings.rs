@@ -85,13 +85,15 @@ pub(super) fn report_holdings<W: Write>(
         OutputFormat::Csv => {
             writeln!(writer, "account,units,currency,cost_basis,cost_currency")?;
             for (account, units, currency, cost_basis, cost_currency) in &rows {
+                // `csv_escape` on the numeric fields: with `render_commas`
+                // they contain thousands separators (review catch).
                 writeln!(
                     writer,
                     "{},{},{},{},{}",
                     csv_escape(account),
-                    units,
+                    csv_escape(units),
                     currency,
-                    cost_basis,
+                    csv_escape(cost_basis),
                     cost_currency
                 )?;
             }

@@ -1,6 +1,6 @@
 //! Net worth report - Net worth over time.
 
-use super::OutputFormat;
+use super::{OutputFormat, csv_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
 use rustledger_core::Directive;
@@ -150,7 +150,9 @@ pub(super) fn report_networth<W: Write>(
             writeln!(writer, "period,currency,amount")?;
             for (period_label, net_worth) in &period_results {
                 for (currency, amount) in net_worth {
-                    let amount = ctx.format_amount_number(*amount, currency);
+                    // Escaped: `render_commas` puts separators in the number
+                    // (review catch).
+                    let amount = csv_escape(&ctx.format_amount_number(*amount, currency));
                     writeln!(writer, "{period_label},{currency},{amount}")?;
                 }
             }

@@ -52,11 +52,13 @@ pub(super) fn report_balances<W: Write>(
         OutputFormat::Csv => {
             writeln!(writer, "account,amount,currency,cost")?;
             for (account, amount, currency, cost) in &rows {
+                // `csv_escape(amount)`: with `render_commas` the formatted
+                // number contains thousands separators (review catch).
                 writeln!(
                     writer,
                     "{},{},{},{}",
                     csv_escape(account),
-                    amount,
+                    csv_escape(amount),
                     currency,
                     csv_escape(cost)
                 )?;

@@ -87,17 +87,19 @@ pub(super) fn report_income<W: Write>(
         OutputFormat::Csv => {
             writeln!(writer, "section,account,amount,currency")?;
             for (section, account, amount, currency) in &all_rows {
+                // `csv_escape(amount)`: with `render_commas` the formatted
+                // number contains thousands separators (review catch).
                 writeln!(
                     writer,
                     "{},{},{},{}",
                     section,
                     csv_escape(account),
-                    amount,
+                    csv_escape(amount),
                     currency
                 )?;
             }
             for (currency, total) in &net_income {
-                let total = ctx.format_amount_number(*total, currency);
+                let total = csv_escape(&ctx.format_amount_number(*total, currency));
                 writeln!(writer, "Net Income,TOTAL,{total},{currency}")?;
             }
         }

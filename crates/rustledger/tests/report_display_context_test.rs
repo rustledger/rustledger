@@ -101,3 +101,47 @@ fn income_totals_render_at_ledger_precision() {
         "income statement must render at ledger precision: {text}",
     );
 }
+
+#[test]
+fn csv_amounts_with_render_commas_are_quoted() {
+    // `option "render_commas" "TRUE"` puts thousands separators in
+    // formatted numbers; CSV fields containing commas must be quoted
+    // (RFC-4180) or the row grows extra columns (review catch on U4).
+    let bin = require_rledger!();
+    let source = format!("option \"render_commas\" \"TRUE\"\n{MIXED_PRECISION}");
+    let mut f = tempfile::Builder::new()
+        .prefix("display-ctx-commas-")
+        .suffix(".beancount")
+        .tempfile()
+        .expect("tempfile");
+    f.write_all(source.as_bytes()).expect("write");
+    let path = f.path().to_str().unwrap().to_owned();
+
+    let csv = run_report(&bin, &path, &["balances", "--format", "csv"]);
+    assert!(
+        csv.contains("\"2,357.65\""),
+        "comma-bearing amounts must be CSV-quoted: {csv}",
+    );
+    // Every data row must still have exactly the header's 4 columns when
+    // parsed with quote-awareness — approximate by checking no row has a
+    // bare (unquoted) thousands comma.
+    for line in csv.lines().skip(1) {
+        let quoted_stripped: String = {
+            let mut out = String::new();
+            let mut in_q = false;
+            for c in line.chars() {
+                match c {
+                    '\"' => in_q = !in_q,
+                    ',' if in_q => out.push('_'),
+                    c => out.push(c),
+                }
+            }
+            out
+        };
+        assert_eq!(
+            quoted_stripped.matches(',').count(),
+            3,
+            "row must have 4 columns outside quotes: {line}",
+        );
+    }
+}

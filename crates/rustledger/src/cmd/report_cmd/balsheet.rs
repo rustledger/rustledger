@@ -96,20 +96,24 @@ pub(super) fn report_balsheet<W: Write>(
         OutputFormat::Csv => {
             writeln!(writer, "section,account,amount,currency,cost")?;
             for (section, account, amount, currency, cost) in &all_rows {
+                // `csv_escape(amount)`: with `render_commas` the formatted
+                // number contains thousands separators (review catch).
                 writeln!(
                     writer,
                     "{},{},{},{},{}",
                     section,
                     csv_escape(account),
-                    amount,
+                    csv_escape(amount),
                     currency,
                     csv_escape(cost)
                 )?;
             }
             // Add net worth rows
             for (currency, total) in &net_worth {
-                let total = ctx.format_amount_number(*total, currency);
-                writeln!(writer, "Net Worth,TOTAL,{total},{currency}")?;
+                let total = csv_escape(&ctx.format_amount_number(*total, currency));
+                // Trailing comma: empty `cost` field keeps the row at the
+                // header's five columns (review catch — was four wide).
+                writeln!(writer, "Net Worth,TOTAL,{total},{currency},")?;
             }
         }
         OutputFormat::Json => {

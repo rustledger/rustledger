@@ -1171,7 +1171,9 @@ jobs:
           # guarantees that skip path is dead in CI — if a binary breaks,
           # the job goes red HERE instead of the tests green-skipping.
           bean-check --version
-          bean-price --version
+          # bean-price has no --version flag (it errors demanding sources);
+          # --help is the probe bean_price_compat.rs itself uses.
+          bean-price --help > /dev/null
       - name: Run python-gated test suites
         env:
           CARGO_TERM_COLOR: always

@@ -1,9 +1,15 @@
 # Rust toolchain configuration
 # This ensures consistent toolchain across developers not using Nix
 # Nix users get the toolchain from flake.nix instead
-
+#
+# LOCKSTEP: this channel must match the `toolchain: <version>` pin in
+# .github/workflows/*.yml (see #1749). rustup's file-based override BEATS
+# the toolchain the dtolnay action installs targets for — with the two out
+# of sync, cargo runs under this channel's install while wasm targets were
+# added to the pinned one, and every wasip2/wasm job fails with
+# "can't find crate for `std`" (the #1750 Component Parity failure).
 [toolchain]
-channel = "stable"
+channel = "1.97.0"
 components = [
   "cargo",
   "clippy",

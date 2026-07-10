@@ -1412,6 +1412,10 @@ pub(super) trait TokenView {
 }
 
 impl TokenView for rowan::SyntaxToken<crate::BeancountLanguage> {
+    // `Self::kind`/`Self::text` resolve to the INHERENT `SyntaxToken`
+    // methods (inherent associated functions take precedence over trait
+    // methods in path resolution) — this is delegation, not recursion.
+    // The `Self::` form is clippy's own preference here (`use_self`).
     fn kind(&self) -> crate::SyntaxKind {
         Self::kind(self)
     }

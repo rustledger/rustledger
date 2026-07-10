@@ -47,9 +47,10 @@ fn doctor_region_costs_compound_lots() {
     assert!(out.status.success(), "doctor region failed");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("60.00 USD"),
-        "compound cost must total N*a+b = 60.00 USD (pre-fix showed the \
-         bare unit count '10 USD'): {stdout}",
+        stdout.contains("Assets:Broker 60.00 USD"),
+        "compound cost must total N*a+b = 60.00 USD on the Broker line \
+         (a bare \"60.00 USD\" match would be satisfied by the cash leg \
+         and pass even under the pre-fix bug; deep-review catch): {stdout}",
     );
     assert!(
         !stdout.contains("Assets:Broker 10 USD"),

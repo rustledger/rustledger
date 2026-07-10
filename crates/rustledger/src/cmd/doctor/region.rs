@@ -82,7 +82,9 @@ pub(super) fn cmd_region<W: Write>(
                 let (display_number, display_currency) = match conversion {
                     Some(Conversion::Cost) => {
                         // Use cost if available, otherwise fall back to units
-                        if let Some(ref cost) = posting.cost {
+                        if let Some(ref cost) = posting.cost
+                            && let Some(number) = cost.number.as_ref()
+                        {
                             // Total cost via the exhaustive helper: stored
                             // totals stay precision-exact (PerUnitFromTotal /
                             // Total, the post-#1164 preference) and Compound
@@ -91,10 +93,14 @@ pub(super) fn cmd_region<W: Write>(
                             // fell through to bare units mislabeled as the
                             // cost currency (L3 — this command reads the RAW
                             // load stream, where Compound survives as-written).
-                            let total_cost = cost
-                                .number
-                                .as_ref()
-                                .map_or(amount.number, |n| n.total_for(amount.number));
+                            //
+                            // A cost spec WITHOUT a number (`{}`, bare
+                            // `{USD}` lot matching) has no determinable cost
+                            // here, so it falls through to the units display
+                            // below — labeling the unit count with the cost
+                            // currency would be the same mislabel bug in a
+                            // different coat (review catch).
+                            let total_cost = number.total_for(amount.number);
                             let currency = cost
                                 .currency
                                 .clone()

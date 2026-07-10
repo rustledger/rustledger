@@ -590,10 +590,19 @@ impl CostNumber {
     /// like the `total()`-then-`per_unit()` chain, but `Compound` is
     /// handled instead of silently dropped:
     ///
-    /// - `Total` / `PerUnitFromTotal`: the stored total (precision-exact).
-    /// - `PerUnit`: `value * units`.
-    /// - `Compound { per_unit, total }`: `per_unit * units + total`
+    /// - `Total` / `PerUnitFromTotal`: the stored total (precision-exact),
+    ///   with the sign following `units`.
+    /// - `PerUnit`: `value * units` (sign carries through `units`).
+    /// - `Compound { per_unit, total }`: `per_unit * units + total × sign(units)`
     ///   (the `N·a + b` rule from #1704; `total` is only the lump).
+    ///
+    /// Stored totals and lumps are written as positive magnitudes in
+    /// source, so the sign is taken from `units` for EVERY variant — a
+    /// reduction (negative units) yields a negative total across the
+    /// board, the same sign rule the balance-weight ladder applies.
+    /// (Pre-fix, `Total`/`PerUnitFromTotal` returned the unsigned stored
+    /// total while `PerUnit` was signed through multiplication, so
+    /// reductions costed with opposite signs depending on the spec shape.)
     ///
     /// Consumers computing "what did N units cost" MUST use this rather
     /// than chaining the `total()`/`per_unit()` accessors — both return
@@ -601,11 +610,13 @@ impl CostNumber {
     /// miscost compound lots (the doctor/clamp bug class).
     #[must_use]
     pub fn total_for(&self, units: Decimal) -> Decimal {
+        use rust_decimal::prelude::Signed;
+        let signum = units.signum();
         match self {
-            Self::Total { value } => *value,
-            Self::PerUnitFromTotal(b) => b.total,
+            Self::Total { value } => *value * signum,
+            Self::PerUnitFromTotal(b) => b.total * signum,
             Self::PerUnit { value } => *value * units,
-            Self::Compound { per_unit, total } => *per_unit * units + *total,
+            Self::Compound { per_unit, total } => *per_unit * units + *total * signum,
         }
     }
 }
@@ -874,6 +885,51 @@ mod tests {
             }
             .total_for(n),
             Decimal::new(6000, 2), // 10*5.00 + 10.00 = N*a + b
+        );
+    }
+
+    #[test]
+    fn total_for_signs_reductions_consistently() {
+        // Stored totals/lumps are positive magnitudes in source; the sign
+        // must come from `units` for EVERY variant, or reductions cost
+        // with opposite signs depending on spec shape (review catch on
+        // the original fix: Total/PerUnitFromTotal were unsigned while
+        // PerUnit signed through multiplication).
+        let n = Decimal::from(-10);
+        assert_eq!(
+            CostNumber::PerUnit {
+                value: Decimal::new(500, 2)
+            }
+            .total_for(n),
+            Decimal::new(-5000, 2),
+        );
+        assert_eq!(
+            CostNumber::Total {
+                value: Decimal::new(6000, 2)
+            }
+            .total_for(n),
+            Decimal::new(-6000, 2),
+        );
+        let booked = BookedCost::new(Decimal::new(600, 2), Decimal::new(6000, 2), n.abs());
+        assert_eq!(
+            CostNumber::PerUnitFromTotal(booked).total_for(n),
+            Decimal::new(-6000, 2),
+        );
+        assert_eq!(
+            CostNumber::Compound {
+                per_unit: Decimal::new(500, 2),
+                total: Decimal::new(1000, 2),
+            }
+            .total_for(n),
+            Decimal::new(-6000, 2), // -10*5.00 + 10.00*sign(-10)
+        );
+        // Zero units: everything costs zero.
+        assert_eq!(
+            CostNumber::Total {
+                value: Decimal::new(6000, 2)
+            }
+            .total_for(Decimal::ZERO),
+            Decimal::ZERO,
         );
     }
 

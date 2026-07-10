@@ -226,6 +226,31 @@ pub fn to_js<T: serde::Serialize>(value: &T) -> Result<JsValue, JsError> {
 }
 
 /// Extract [`LedgerOptions`] from parsed option directives (parser format).
+/// Derive the configured [`rustledger_core::AccountTypes`] from raw parsed
+/// option tuples (`name_assets` etc. over the standard defaults).
+///
+/// The wasm wire `LedgerOptions` deliberately carries only title/currencies,
+/// so query surfaces must NOT go through it for classification — they take
+/// the account types from here (single-file paths) or from the loader's
+/// `Options::to_account_types` (multi-file), or `POSSIGN`/`ACCOUNT_SORTKEY`
+/// silently misclassify renamed ledgers (the L5 bug class).
+pub fn account_types_from_raw(
+    options: &[(String, String, rustledger_parser::Span)],
+) -> rustledger_core::AccountTypes {
+    let mut at = rustledger_core::AccountTypes::default();
+    for (key, value, _span) in options {
+        match key.as_str() {
+            "name_assets" => at.assets.clone_from(value),
+            "name_liabilities" => at.liabilities.clone_from(value),
+            "name_equity" => at.equity.clone_from(value),
+            "name_income" => at.income.clone_from(value),
+            "name_expenses" => at.expenses.clone_from(value),
+            _ => {}
+        }
+    }
+    at
+}
+
 pub fn extract_options(options: &[(String, String, rustledger_parser::Span)]) -> LedgerOptions {
     let mut ledger_options = LedgerOptions::default();
 
@@ -335,5 +360,24 @@ mod warning_severity_tests {
         assert_eq!(warn.severity, Severity::Warning);
         let err = validation_error_to_wasm(&mk(ErrorCode::AccountNotOpen), &lookup, None, Some(1));
         assert_eq!(err.severity, Severity::Error);
+    }
+}
+
+#[cfg(test)]
+mod account_types_tests {
+    use super::account_types_from_raw;
+
+    #[test]
+    fn raw_options_override_defaults() {
+        let span = rustledger_parser::Span::ZERO;
+        let opts = vec![
+            ("name_income".to_string(), "Revenue".to_string(), span),
+            ("title".to_string(), "x".to_string(), span),
+        ];
+        let at = account_types_from_raw(&opts);
+        assert_eq!(at.income, "Revenue");
+        assert_eq!(at.assets, "Assets"); // untouched types keep defaults
+        assert!(at.is_credit_normal("Revenue:Sales"));
+        assert!(!at.is_credit_normal("Income:Sales")); // renamed away
     }
 }

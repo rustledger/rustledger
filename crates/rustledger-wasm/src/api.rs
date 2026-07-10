@@ -161,6 +161,11 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
     // (#1300) correctly by construction via `process_pads`.
     let directives = merge_with_padding(&load.directives);
     let mut executor = Executor::new(&directives);
+    // Config-aware classification (POSSIGN/ACCOUNT_SORTKEY honor name_*
+    // renames) — same wiring as the CLI query path.
+    executor.set_account_types(crate::helpers::account_types_from_raw(
+        &load.parse_result.options,
+    ));
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result
@@ -743,6 +748,8 @@ pub fn query_multi_file(
     // Merge pad-synthesized transactions into the directive stream
     // (matching CLI query pipeline). See `wasm::query` above for the
     // architectural rule.
+    // Grab the configured account types before `ledger` fields are moved.
+    let account_types = ledger.options.to_account_types();
     let booked_directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
     let directives = merge_with_padding(&booked_directives);
 
@@ -761,6 +768,7 @@ pub fn query_multi_file(
 
     // Execute query
     let mut executor = Executor::new(&directives);
+    executor.set_account_types(account_types);
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result

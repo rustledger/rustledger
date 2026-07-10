@@ -23,7 +23,11 @@ use crate::types::{Error, FormatResult, LedgerOptions, PadResult, QueryResult};
 // Shared query/directive logic (used by both ParsedLedger and Ledger)
 // =============================================================================
 
-fn execute_query(directives: &[Directive], query_str: &str) -> Result<JsValue, JsError> {
+fn execute_query(
+    directives: &[Directive],
+    query_str: &str,
+    account_types: rustledger_core::AccountTypes,
+) -> Result<JsValue, JsError> {
     use crate::convert::value_to_cell;
     use rustledger_query::{Executor, parse as parse_query};
 
@@ -48,6 +52,10 @@ fn execute_query(directives: &[Directive], query_str: &str) -> Result<JsValue, J
     // included.
     let expanded = rustledger_booking::merge_with_padding(directives);
     let mut executor = Executor::new(&expanded);
+    // Config-aware classification (POSSIGN/ACCOUNT_SORTKEY honor name_*
+    // renames) — the wasm wire LedgerOptions deliberately lacks name_*,
+    // so callers supply core AccountTypes from their construction source.
+    executor.set_account_types(account_types);
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result
@@ -271,7 +279,11 @@ impl ParsedLedger {
             };
             return to_js(&result);
         }
-        execute_query(&self.directives, query_str)
+        execute_query(
+            &self.directives,
+            query_str,
+            crate::helpers::account_types_from_raw(&self.parse_result.options),
+        )
     }
 
     /// Get account balances (shorthand for query("BALANCES")).
@@ -482,6 +494,11 @@ pub struct Ledger {
     directives: Vec<Directive>,
     /// Ledger options.
     options: LedgerOptions,
+    /// Configured account-type roots (`name_*` renames) for query
+    /// classification. Not part of the wire `LedgerOptions` (deliberate);
+    /// persisted in the cache payload so `fromCache` ledgers classify
+    /// identically.
+    account_types: rustledger_core::AccountTypes,
     /// Processing errors (load, booking, validation).
     errors: Vec<Error>,
     /// Editor cache for cross-file completions.
@@ -526,6 +543,7 @@ impl Ledger {
                 return Ok(Self {
                     directives: Vec::new(),
                     options: LedgerOptions::default(),
+                    account_types: rustledger_core::AccountTypes::default(),
                     errors: vec![Error::new(format!("Load error: {e}"))],
                     editor_cache: editor::EditorCache::from_directives(&[]),
                 });
@@ -536,6 +554,7 @@ impl Ledger {
             title: load_result.options.title.clone(),
             operating_currencies: load_result.options.operating_currency.clone(),
         };
+        let account_types = load_result.options.to_account_types();
 
         let load_options = LoadOptions {
             validate: true,
@@ -557,6 +576,7 @@ impl Ledger {
                 Ok(Self {
                     directives,
                     options,
+                    account_types,
                     errors,
                     editor_cache,
                 })
@@ -564,6 +584,7 @@ impl Ledger {
             Err(e) => Ok(Self {
                 directives: Vec::new(),
                 options,
+                account_types,
                 errors: vec![Error::new(format!("Processing error: {e}"))],
                 editor_cache: editor::EditorCache::from_directives(&[]),
             }),
@@ -604,7 +625,7 @@ impl Ledger {
     /// Run a BQL query on this ledger.
     #[wasm_bindgen]
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
-        execute_query(&self.directives, query_str)
+        execute_query(&self.directives, query_str, self.account_types.clone())
     }
 
     /// Get account balances (shorthand for query("BALANCES")).
@@ -654,6 +675,13 @@ impl Ledger {
         let payload = cache::LedgerPayload {
             directives: self.directives.clone(),
             options: self.options.clone(),
+            account_type_names: vec![
+                self.account_types.assets.clone(),
+                self.account_types.liabilities.clone(),
+                self.account_types.equity.clone(),
+                self.account_types.income.clone(),
+                self.account_types.expenses.clone(),
+            ],
             errors: self.errors.clone(),
         };
         cache::serialize_ledger(&payload).map_err(|e| JsError::new(&e))
@@ -674,9 +702,24 @@ impl Ledger {
 
         let editor_cache = editor::EditorCache::from_directives(&payload.directives);
 
+        let account_types = match <[String; 5]>::try_from(payload.account_type_names) {
+            Ok([assets, liabilities, equity, income, expenses]) => rustledger_core::AccountTypes {
+                assets,
+                liabilities,
+                equity,
+                income,
+                expenses,
+            },
+            // Wrong arity can only come from a hand-built blob (the version
+            // header already gates format changes); fall back to defaults
+            // rather than erroring on an otherwise-valid payload.
+            Err(_) => rustledger_core::AccountTypes::default(),
+        };
+
         Ok(Self {
             directives: payload.directives,
             options: payload.options,
+            account_types,
             errors: payload.errors,
             editor_cache,
         })

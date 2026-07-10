@@ -891,6 +891,7 @@ option "operating_currency" "EUR"
         let payload = cache::LedgerPayload {
             directives: processed.directives.clone(),
             options: processed.options.clone(),
+            account_type_names: Vec::new(),
             errors: Vec::new(),
         };
 

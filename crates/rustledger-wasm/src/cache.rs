@@ -28,8 +28,8 @@ use crate::types::{Error, LedgerOptions};
 ///
 /// v2 (#1597): `Error` gained `code`/`phase`/`hint`/`file`/`end_line`/
 /// `end_column`, changing its rkyv archived layout — a v1 blob must be rejected
-/// and re-parsed rather than mis-read under the new layout.
-pub const CACHE_VERSION: u32 = 2;
+/// and re-parsed rather than misread under the new layout.
+pub const CACHE_VERSION: u32 = 3;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";
@@ -58,6 +58,12 @@ pub struct ParsedLedgerPayload {
 pub struct LedgerPayload {
     pub directives: Vec<Directive>,
     pub options: LedgerOptions,
+    /// Configured account-type roots as `[assets, liabilities, equity,
+    /// income, expenses]` — `name_*` renames must survive the cache or
+    /// `fromCache` ledgers silently misclassify in BQL (the L5 class).
+    /// Plain strings rather than `rustledger_core::AccountTypes` so the
+    /// rkyv derive stays local to this crate.
+    pub account_type_names: Vec<String>,
     pub errors: Vec<Error>,
 }
 
@@ -165,6 +171,13 @@ mod tests {
                 operating_currencies: vec!["USD".to_string()],
                 title: Some("Test".to_string()),
             },
+            account_type_names: vec![
+                "Assets".to_string(),
+                "Liabilities".to_string(),
+                "Equity".to_string(),
+                "Revenue".to_string(),
+                "Expenses".to_string(),
+            ],
             errors: vec![Error::new("a warning")],
         };
         let bytes = serialize_ledger(&payload).expect("serialize");
@@ -212,6 +225,7 @@ option "operating_currency" "USD"
         let mut bytes = serialize_ledger(&LedgerPayload {
             directives: Vec::new(),
             options: LedgerOptions::default(),
+            account_type_names: Vec::new(),
             errors: Vec::new(),
         })
         .unwrap();
@@ -233,6 +247,7 @@ option "operating_currency" "USD"
         let mut bytes = serialize_ledger(&LedgerPayload {
             directives: Vec::new(),
             options: LedgerOptions::default(),
+            account_type_names: Vec::new(),
             errors: Vec::new(),
         })
         .unwrap();
@@ -272,6 +287,7 @@ option "operating_currency" "USD"
         let bytes = serialize_ledger(&LedgerPayload {
             directives: Vec::new(),
             options: LedgerOptions::default(),
+            account_type_names: Vec::new(),
             errors: Vec::new(),
         })
         .unwrap();

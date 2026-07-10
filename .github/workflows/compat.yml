@@ -1130,17 +1130,24 @@ jobs:
   # Python-gated cargo integration tests.
   #
   # Several cargo test suites compare rledger against Python beancount
-  # directly (Command::new("bean-check")) and SKIP SILENTLY when the
-  # binary is absent — which is every environment except this one. The
-  # use-before-open silent-pass bug (#1742) sat on main behind exactly
-  # that skip: test_account_lifecycle_consistency would have caught it,
-  # but nothing in CI ever ran the test with bean-check on PATH.
+  # tooling directly (Command::new("bean-check") / "bean-price") and SKIP
+  # SILENTLY when the binary is absent — which is every environment except
+  # this one. The use-before-open silent-pass bug (#1742) sat on main
+  # behind exactly that skip: test_account_lifecycle_consistency would
+  # have caught it, but nothing in CI ever ran the test with bean-check
+  # on PATH.
   #
   # This job exists so those tests actually gate PRs:
-  # 1. install beancount and FAIL LOUDLY if bean-check isn't runnable
-  #    (a silent skip here would recreate the hole this job closes);
-  # 2. run the python-gated suites. Keep this list in sync with
-  #    `grep -rl 'Command::new("bean-' crates/*/tests`.
+  # 1. install beancount + beanprice and FAIL LOUDLY if the binaries
+  #    aren't runnable (a silent skip here would recreate the hole this
+  #    job closes);
+  # 2. run the python-gated suites — keep the list in sync with
+  #    `grep -rl 'Command::new("bean-' crates/*/tests` (currently:
+  #    rustledger integration_test + bean_price_compat,
+  #    rustledger-core synthetic_generation);
+  # 3. grep the captured output for every suite's skip marker, so a new
+  #    availability probe (different binary, a container check) can't
+  #    quietly reintroduce the green-skip.
   python-gated-cargo-tests:
     name: Python-gated cargo tests
     runs-on: ubuntu-latest
@@ -1156,28 +1163,31 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.11'
-      - name: Install beancount
-        run: pip install beancount
-      - name: Assert bean-check is runnable (no silent skips)
+      - name: Install beancount and beanprice
+        run: pip install beancount beanprice
+      - name: Assert python tools are runnable (no silent skips)
         run: |
+          # The tests skip when these binaries are missing. This step
+          # guarantees that skip path is dead in CI — if a binary breaks,
+          # the job goes red HERE instead of the tests green-skipping.
           bean-check --version
-          # The tests skip with "Skipping: Python beancount not available"
-          # when this binary is missing. This step guarantees that skip
-          # path is dead in CI — if bean-check breaks, the job goes red
-          # HERE instead of the tests green-skipping.
+          bean-price --version
       - name: Run python-gated test suites
         env:
           CARGO_TERM_COLOR: always
         run: |
-          cargo test -p rustledger --test integration_test -- --nocapture
-          cargo test -p rustledger-core --test synthetic_generation -- --nocapture
+          # tee the output so the skip-marker check below inspects THIS
+          # run (a rerun inside an `if` would mask test failures and
+          # cover only one suite — review catch).
+          set -o pipefail
+          cargo test -p rustledger --test integration_test --test bean_price_compat -- --nocapture 2>&1 | tee /tmp/gated-tests.log
+          cargo test -p rustledger-core --test synthetic_generation -- --nocapture 2>&1 | tee -a /tmp/gated-tests.log
       - name: Fail on silent skips
         run: |
-          # Belt and braces: re-run and grep for the skip marker. The
-          # assert step above should make this unreachable, but if a test
-          # gains a new availability probe (a different binary, a
-          # container) this catches it green-skipping.
-          if cargo test -p rustledger --test integration_test -- --nocapture 2>&1 | grep -q "Skipping: Python beancount not available"; then
-            echo "::error::python-gated tests skipped despite bean-check being installed — availability probe drifted"
+          # Every gated suite prints a recognizable marker when it skips;
+          # any of them appearing means an availability probe drifted
+          # despite the assert step above.
+          if grep -Eq "Skipping: Python beancount not available|bean-check not found, skipping|skipping bean-price compat" /tmp/gated-tests.log; then
+            echo "::error::python-gated tests skipped despite the tools being installed — availability probe drifted"
             exit 1
           fi

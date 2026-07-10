@@ -17,6 +17,17 @@ on:
   schedule:
     - cron: '0 3 * * *' # Nightly at 3 AM UTC (for historical tracking)
   workflow_dispatch:
+    inputs:
+      synthetic_seed:
+        description: 'Synthetic-generation seed (reproduce a nightly divergence)'
+        required: false
+        default: ''
+        type: string
+      synthetic_count:
+        description: 'Number of synthetic files to generate'
+        required: false
+        default: ''
+        type: string
 # Prevent concurrent runs from racing on the compatibility branch
 concurrency:
   group: compatibility-${{ github.event.pull_request.number || 'nightly' }}
@@ -86,14 +97,37 @@ jobs:
       - name: Build rustledger
         run: |
           cargo build --release -p rustledger --no-default-features
+      - name: Choose synthetic seed and count
+        id: synth
+        run: |
+          # DIFFERENTIAL TESTING: nightly runs use a FRESH seed so the
+          # synthetic corpus explores new ledger shapes every night instead
+          # of re-checking the same 50 files forever; PR/push runs keep the
+          # fixed seed for deterministic, baseline-comparable results.
+          # Reproduce any nightly divergence with:
+          #   gh workflow run compat.yml -f synthetic_seed=<seed> -f synthetic_count=<count>
+          if [ -n "${{ github.event.inputs.synthetic_seed || '' }}" ]; then
+            SEED="${{ github.event.inputs.synthetic_seed }}"
+            COUNT="${{ github.event.inputs.synthetic_count || '500' }}"
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            SEED="${{ github.run_id }}"
+            COUNT=500
+          else
+            SEED=12345
+            COUNT=50
+          fi
+          echo "seed=$SEED" >> $GITHUB_OUTPUT
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          echo "## Synthetic corpus" >> $GITHUB_STEP_SUMMARY
+          echo "seed: \`$SEED\` — count: $COUNT (reproduce: \`gh workflow run compat.yml -f synthetic_seed=$SEED -f synthetic_count=$COUNT\`)" >> $GITHUB_STEP_SUMMARY
       - name: Generate synthetic test files
         run: |
-          echo "Generating synthetic test files..."
+          echo "Generating synthetic test files (seed=${{ steps.synth.outputs.seed }}, count=${{ steps.synth.outputs.count }})..."
           # Use rledger doctor to generate synthetic files with manifest
           ./target/release/rledger doctor generate-synthetic \
             --output tests/compatibility/synthetic \
-            --count 50 \
-            --seed 12345 \
+            --count ${{ steps.synth.outputs.count }} \
+            --seed ${{ steps.synth.outputs.seed }} \
             --manifest \
             --skip-validation
           echo "Generated $(find tests/compatibility/synthetic -name '*.beancount' 2>/dev/null | wc -l) synthetic files"
@@ -1126,6 +1160,36 @@ jobs:
         run: |
           echo "::error::${{ steps.compat_test.outputs.regression_count }} check regression(s) vs the previous run — files that matched before and mismatch now. See the 'Run comprehensive compatibility test' log and compat-regressions.txt."
           exit 1
+
+      # DIFFERENTIAL GATE: synthetic files are generated fresh (random seed on
+      # nightly runs), so a divergence there has NO baseline entry and the
+      # regression gate above is structurally blind to it. Gate ABSOLUTELY:
+      # every synthetic file's check verdict must match Python's, or the run
+      # fails with the divergent list and the seed to reproduce.
+      - name: Gate on synthetic differential divergences
+        if: steps.compat_test.outputs.synthetic_match != steps.compat_test.outputs.synthetic_total
+        run: |
+          echo "::error::Synthetic differential divergence: ${{ steps.compat_test.outputs.synthetic_match }}/${{ steps.compat_test.outputs.synthetic_total }} synthetic files agree with Python (seed=${{ steps.synth.outputs.seed }}). Divergent files:"
+          python3 - <<'PYEOF'
+          import json, os
+          # The jsonl lives in CWD on PR runs; the compatibility-branch step
+          # (push/schedule only) moves it to /tmp before switching branches.
+          path = next(p for p in ('compat-check-results.jsonl', '/tmp/compat-check-results.jsonl') if os.path.exists(p))
+          for line in open(path):
+              r = json.loads(line)
+              if r.get('category', '').startswith('synthetic') and not r.get('check_match', True):
+                  print(f"  {r['file']}: python_ok={r['python_ok']} rust_ok={r['rust_ok']}")
+          PYEOF
+          echo "Reproduce: gh workflow run compat.yml -f synthetic_seed=${{ steps.synth.outputs.seed }} -f synthetic_count=${{ steps.synth.outputs.count }}"
+          exit 1
+
+      - name: Upload divergent synthetic corpus
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: synthetic-corpus-seed-${{ steps.synth.outputs.seed }}
+          path: tests/compatibility/synthetic/
+          retention-days: 30
 
   # Python-gated cargo integration tests.
   #

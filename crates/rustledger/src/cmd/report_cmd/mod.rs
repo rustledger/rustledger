@@ -249,6 +249,12 @@ struct LoadedReport {
     /// Pad-expanded view, present only when the ledger has pads AND the
     /// report is balance-computing. `None` means "use `directives`".
     balance_view: Option<Vec<rustledger_core::Directive>>,
+    /// Per-currency display precision inferred by the loader (plus
+    /// `display_precision` overrides and `render_commas`). Balance-style
+    /// reports render numbers through this — the same context BQL output
+    /// uses — instead of raw `Decimal` `Display`, whose precision is an
+    /// artifact of booking arithmetic rather than ledger convention (U4).
+    display_context: rustledger_core::DisplayContext,
 }
 
 /// Load and fully process the file (parse → book → plugins), producing the
@@ -328,12 +334,14 @@ fn load(file: &PathBuf, report: &Report, verbose: bool, no_cache: bool) -> Resul
         None
     };
     let account_types = ledger.options.to_account_types();
+    let display_context = ledger.display_context.clone();
     let directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
 
     Ok(LoadedReport {
         directives,
         account_types,
         balance_view,
+        display_context,
     })
 }
 
@@ -365,13 +373,31 @@ fn render<W: io::Write>(
     // stream); source-faithful reports get `&directives`.
     match report {
         Report::Balances { account } => {
-            balances::report_balances(balance_input, account.as_deref(), format, writer)?;
+            balances::report_balances(
+                balance_input,
+                account.as_deref(),
+                &loaded.display_context,
+                format,
+                writer,
+            )?;
         }
         Report::Balsheet => {
-            balsheet::report_balsheet(balance_input, &loaded.account_types, format, writer)?;
+            balsheet::report_balsheet(
+                balance_input,
+                &loaded.account_types,
+                &loaded.display_context,
+                format,
+                writer,
+            )?;
         }
         Report::Income => {
-            income::report_income(balance_input, &loaded.account_types, format, writer)?;
+            income::report_income(
+                balance_input,
+                &loaded.account_types,
+                &loaded.display_context,
+                format,
+                writer,
+            )?;
         }
         Report::Journal { account, limit } => {
             journal::report_journal(directives, account.as_deref(), *limit, format, writer)?;
@@ -381,6 +407,7 @@ fn render<W: io::Write>(
                 balance_input,
                 &loaded.account_types,
                 account.as_deref(),
+                &loaded.display_context,
                 format,
                 writer,
             )?;
@@ -394,6 +421,7 @@ fn render<W: io::Write>(
             networth::report_networth(
                 balance_input,
                 &loaded.account_types,
+                &loaded.display_context,
                 period,
                 currency.as_deref(),
                 account.as_deref(),

@@ -3,7 +3,7 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_core::Directive;
+use rustledger_core::{Directive, DisplayContext};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -12,6 +12,7 @@ pub(super) fn report_holdings<W: Write>(
     directives: &[Directive],
     account_types: &rustledger_core::AccountTypes,
     account_filter: Option<&str>,
+    ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
@@ -61,8 +62,10 @@ pub(super) fn report_holdings<W: Write>(
         }
     }
 
-    // Collect rows: (account, units, currency, cost_basis, cost_currency)
-    let mut rows: Vec<(String, Decimal, String, Decimal, String)> = Vec::new();
+    // Collect rows: (account, units, currency, cost basis, cost currency).
+    // Units and cost basis render through the ledger's DisplayContext so
+    // precision follows ledger convention, not booking-arithmetic scale (U4).
+    let mut rows: Vec<(String, String, String, String, String)> = Vec::new();
     for (account, currencies) in &holdings {
         for (currency, (units, cost_basis, cost_currency)) in currencies {
             if *units == Decimal::ZERO {
@@ -70,9 +73,9 @@ pub(super) fn report_holdings<W: Write>(
             }
             rows.push((
                 account.to_string(),
-                *units,
+                ctx.format_amount_number(*units, currency),
                 currency.clone(),
-                *cost_basis,
+                ctx.format_amount_number(*cost_basis, cost_currency),
                 cost_currency.clone(),
             ));
         }

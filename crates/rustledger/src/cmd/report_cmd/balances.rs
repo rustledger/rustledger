@@ -2,14 +2,14 @@
 
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
-use rust_decimal::Decimal;
-use rustledger_core::Directive;
+use rustledger_core::{Directive, DisplayContext};
 use std::io::Write;
 
 /// Generate a balances report.
 pub(super) fn report_balances<W: Write>(
     directives: &[Directive],
     account_filter: Option<&str>,
+    ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
@@ -19,7 +19,11 @@ pub(super) fn report_balances<W: Write>(
 
     // Collect data for output. `cost` is the beancount-style lot annotation
     // (e.g. ` {150.00 USD}`) for held commodities, empty for plain currency.
-    let mut rows: Vec<(&str, Decimal, &str, String)> = Vec::new();
+    // Numbers render through the ledger's DisplayContext (per-currency
+    // inferred precision, `display_precision` overrides, `render_commas`)
+    // — the same context BQL output uses — so `100 USD` in a 2dp ledger
+    // prints as `100.00 USD` regardless of booking-arithmetic scale (U4).
+    let mut rows: Vec<(&str, String, &str, String)> = Vec::new();
     for (account, inventory) in &balances {
         if let Some(filter) = account_filter
             && !account.starts_with(filter)
@@ -37,7 +41,7 @@ pub(super) fn report_balances<W: Write>(
                 .unwrap_or_default();
             rows.push((
                 account,
-                position.units.number,
+                ctx.format_amount_number(position.units.number, &position.units.currency),
                 &position.units.currency,
                 cost,
             ));

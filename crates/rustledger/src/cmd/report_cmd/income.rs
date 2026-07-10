@@ -3,7 +3,7 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_core::{Directive, Inventory};
+use rustledger_core::{Directive, DisplayContext, Inventory};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -11,6 +11,7 @@ use std::io::Write;
 pub(super) fn report_income<W: Write>(
     directives: &[Directive],
     account_types: &rustledger_core::AccountTypes,
+    ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
@@ -48,7 +49,8 @@ pub(super) fn report_income<W: Write>(
     fn collect_rows(
         section: &str,
         balances: &BTreeMap<rustledger_core::Account, Inventory>,
-    ) -> Vec<(String, String, Decimal, String)> {
+        ctx: &DisplayContext,
+    ) -> Vec<(String, String, String, String)> {
         let mut rows = Vec::new();
         for (account, inventory) in balances {
             if inventory.is_empty() {
@@ -58,7 +60,7 @@ pub(super) fn report_income<W: Write>(
                 rows.push((
                     section.to_string(),
                     account.to_string(),
-                    position.units.number,
+                    ctx.format_amount_number(position.units.number, &position.units.currency),
                     position.units.currency.to_string(),
                 ));
             }
@@ -67,8 +69,8 @@ pub(super) fn report_income<W: Write>(
     }
 
     let mut all_rows = Vec::new();
-    all_rows.extend(collect_rows("Income", &income));
-    all_rows.extend(collect_rows("Expenses", &expenses));
+    all_rows.extend(collect_rows("Income", &income, ctx));
+    all_rows.extend(collect_rows("Expenses", &expenses, ctx));
 
     // Net income = -(Income) - Expenses (income is negative in double-entry)
     let income_totals = sum_by_currency(&income);
@@ -95,6 +97,7 @@ pub(super) fn report_income<W: Write>(
                 )?;
             }
             for (currency, total) in &net_income {
+                let total = ctx.format_amount_number(*total, currency);
                 writeln!(writer, "Net Income,TOTAL,{total},{currency}")?;
             }
         }
@@ -118,6 +121,7 @@ pub(super) fn report_income<W: Write>(
             let ni_vec: Vec<_> = net_income.iter().collect();
             for (i, (currency, total)) in ni_vec.iter().enumerate() {
                 let comma = if i < ni_vec.len() - 1 { "," } else { "" };
+                let total = ctx.format_amount_number(**total, currency);
                 writeln!(writer, r#"    "{currency}": "{total}"{comma}"#)?;
             }
             writeln!(writer, "  }}")?;
@@ -128,6 +132,7 @@ pub(super) fn report_income<W: Write>(
                 writer: &mut W,
                 title: &str,
                 balances: &BTreeMap<rustledger_core::Account, Inventory>,
+                ctx: &DisplayContext,
             ) -> Result<BTreeMap<rustledger_core::Currency, Decimal>> {
                 writeln!(writer, "{title}")?;
                 writeln!(writer, "{}", "-".repeat(60))?;
@@ -139,7 +144,12 @@ pub(super) fn report_income<W: Write>(
                         writeln!(
                             writer,
                             "  {:>12} {:>4}  {}",
-                            position.units.number, position.units.currency, account
+                            ctx.format_amount_number(
+                                position.units.number,
+                                &position.units.currency
+                            ),
+                            position.units.currency,
+                            account
                         )?;
                     }
                 }
@@ -151,6 +161,7 @@ pub(super) fn report_income<W: Write>(
                 }
                 writeln!(writer)?;
                 for (currency, total) in &totals {
+                    let total = ctx.format_amount_number(*total, currency);
                     writeln!(writer, "  {total:>12} {currency:>4}  Total {title}")?;
                 }
                 writeln!(writer)?;
@@ -161,12 +172,13 @@ pub(super) fn report_income<W: Write>(
             writeln!(writer, "{}", "=".repeat(60))?;
             writeln!(writer)?;
 
-            write_section(writer, "Income", &income)?;
-            write_section(writer, "Expenses", &expenses)?;
+            write_section(writer, "Income", &income, ctx)?;
+            write_section(writer, "Expenses", &expenses, ctx)?;
 
             writeln!(writer, "Net Income")?;
             writeln!(writer, "{}", "-".repeat(60))?;
             for (currency, total) in &net_income {
+                let total = ctx.format_amount_number(*total, currency);
                 writeln!(writer, "  {total:>12} {currency:>4}")?;
             }
         }

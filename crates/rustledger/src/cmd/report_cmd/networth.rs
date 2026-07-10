@@ -17,9 +17,15 @@ use std::io::Write;
 /// * `no_zero` - If true, hide zero balances from output
 /// * `format` - Output format (text, csv, json)
 /// * `writer` - Output writer
+// Nine parameters: the report's five filters/knobs plus the four
+// threading params every balance report takes (directives, account
+// types, display context, writer). Bundling them into a struct would
+// obscure the call site more than it helps — allowed deliberately.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn report_networth<W: Write>(
     directives: &[Directive],
     account_types: &rustledger_core::AccountTypes,
+    ctx: &rustledger_core::DisplayContext,
     period: &str,
     currency_filter: Option<&str>,
     account_filter: Option<&str>,
@@ -144,6 +150,7 @@ pub(super) fn report_networth<W: Write>(
             writeln!(writer, "period,currency,amount")?;
             for (period_label, net_worth) in &period_results {
                 for (currency, amount) in net_worth {
+                    let amount = ctx.format_amount_number(*amount, currency);
                     writeln!(writer, "{period_label},{currency},{amount}")?;
                 }
             }
@@ -156,6 +163,7 @@ pub(super) fn report_networth<W: Write>(
                 for (currency, amount) in net_worth {
                     entry_idx += 1;
                     let comma = if entry_idx < total_entries { "," } else { "" };
+                    let amount = ctx.format_amount_number(*amount, currency);
                     writeln!(
                         writer,
                         r#"  {{"period": "{period_label}", "currency": "{currency}", "amount": "{amount}"}}{comma}"#
@@ -172,6 +180,7 @@ pub(super) fn report_networth<W: Write>(
             for (period_label, net_worth) in &period_results {
                 write!(writer, "{period_label:12}")?;
                 for (currency, amount) in net_worth {
+                    let amount = ctx.format_amount_number(*amount, currency);
                     write!(writer, "  {amount:>12} {currency}")?;
                 }
                 writeln!(writer)?;

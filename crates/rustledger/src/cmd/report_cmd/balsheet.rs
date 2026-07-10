@@ -3,7 +3,7 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_core::{Directive, Inventory};
+use rustledger_core::{Directive, DisplayContext, Inventory};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -11,6 +11,7 @@ use std::io::Write;
 pub(super) fn report_balsheet<W: Write>(
     directives: &[Directive],
     account_types: &rustledger_core::AccountTypes,
+    ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
@@ -49,11 +50,12 @@ pub(super) fn report_balsheet<W: Write>(
         totals
     }
 
-    // Collect rows: (section, account, amount, currency)
+    // Collect rows: (section, account, formatted amount, currency)
     fn collect_rows(
         section: &str,
         balances: &BTreeMap<rustledger_core::Account, Inventory>,
-    ) -> Vec<(String, String, Decimal, String, String)> {
+        ctx: &DisplayContext,
+    ) -> Vec<(String, String, String, String, String)> {
         let mut rows = Vec::new();
         for (account, inventory) in balances {
             if inventory.is_empty() {
@@ -68,7 +70,7 @@ pub(super) fn report_balsheet<W: Write>(
                 rows.push((
                     section.to_string(),
                     account.to_string(),
-                    position.units.number,
+                    ctx.format_amount_number(position.units.number, &position.units.currency),
                     position.units.currency.to_string(),
                     cost,
                 ));
@@ -78,9 +80,9 @@ pub(super) fn report_balsheet<W: Write>(
     }
 
     let mut all_rows = Vec::new();
-    all_rows.extend(collect_rows("Assets", &assets));
-    all_rows.extend(collect_rows("Liabilities", &liabilities));
-    all_rows.extend(collect_rows("Equity", &equity));
+    all_rows.extend(collect_rows("Assets", &assets, ctx));
+    all_rows.extend(collect_rows("Liabilities", &liabilities, ctx));
+    all_rows.extend(collect_rows("Equity", &equity, ctx));
 
     // Net worth = Assets - Liabilities
     let asset_totals = sum_by_currency(&assets);
@@ -106,6 +108,7 @@ pub(super) fn report_balsheet<W: Write>(
             }
             // Add net worth rows
             for (currency, total) in &net_worth {
+                let total = ctx.format_amount_number(*total, currency);
                 writeln!(writer, "Net Worth,TOTAL,{total},{currency}")?;
             }
         }
@@ -130,6 +133,7 @@ pub(super) fn report_balsheet<W: Write>(
             let nw_vec: Vec<_> = net_worth.iter().collect();
             for (i, (currency, total)) in nw_vec.iter().enumerate() {
                 let comma = if i < nw_vec.len() - 1 { "," } else { "" };
+                let total = ctx.format_amount_number(**total, currency);
                 writeln!(writer, r#"    "{currency}": "{total}"{comma}"#)?;
             }
             writeln!(writer, "  }}")?;
@@ -140,6 +144,7 @@ pub(super) fn report_balsheet<W: Write>(
                 writer: &mut W,
                 title: &str,
                 balances: &BTreeMap<rustledger_core::Account, Inventory>,
+                ctx: &DisplayContext,
             ) -> Result<BTreeMap<rustledger_core::Currency, Decimal>> {
                 writeln!(writer, "{title}")?;
                 writeln!(writer, "{}", "-".repeat(60))?;
@@ -156,7 +161,13 @@ pub(super) fn report_balsheet<W: Write>(
                         writeln!(
                             writer,
                             "  {:>12} {:>4}{}  {}",
-                            position.units.number, position.units.currency, cost, account
+                            ctx.format_amount_number(
+                                position.units.number,
+                                &position.units.currency
+                            ),
+                            position.units.currency,
+                            cost,
+                            account
                         )?;
                     }
                 }
@@ -168,6 +179,7 @@ pub(super) fn report_balsheet<W: Write>(
                 }
                 writeln!(writer)?;
                 for (currency, total) in &totals {
+                    let total = ctx.format_amount_number(*total, currency);
                     writeln!(writer, "  {total:>12} {currency:>4}  Total {title}")?;
                 }
                 writeln!(writer)?;
@@ -178,13 +190,14 @@ pub(super) fn report_balsheet<W: Write>(
             writeln!(writer, "{}", "=".repeat(60))?;
             writeln!(writer)?;
 
-            write_section(writer, "Assets", &assets)?;
-            write_section(writer, "Liabilities", &liabilities)?;
-            write_section(writer, "Equity", &equity)?;
+            write_section(writer, "Assets", &assets, ctx)?;
+            write_section(writer, "Liabilities", &liabilities, ctx)?;
+            write_section(writer, "Equity", &equity, ctx)?;
 
             writeln!(writer, "Net Worth")?;
             writeln!(writer, "{}", "-".repeat(60))?;
             for (currency, total) in &net_worth {
+                let total = ctx.format_amount_number(*total, currency);
                 writeln!(writer, "  {total:>12} {currency:>4}")?;
             }
         }

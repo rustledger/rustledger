@@ -53,7 +53,7 @@ jobs:
       # 2026-01-16); only the action wrapper is dormant.
       - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
-          toolchain: stable
+          toolchain: 1.97.0 # pinned stable — bump deliberately (see #1745 for why floating broke)
       - name: Relax the MSRV gate for Kani's bundled toolchain
         run: |
           # Kani vendors its own nightly (v0.67 ships nightly-2025-11-21 =

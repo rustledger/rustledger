@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
-          toolchain: stable
+          toolchain: 1.97.0 # pinned stable — bump deliberately (see #1745 for why floating broke)
       # Note: rust-cache intentionally omitted to avoid LGPL-3.0 license check failure.
       # The dependency-review workflow runs from the base branch, so adding LGPL-3.0 to
       # allow-licenses in this PR won't take effect until merged. Nightly builds don't
@@ -1156,7 +1156,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
-          toolchain: stable
+          toolchain: 1.97.0 # pinned stable — bump deliberately (see #1745 for why floating broke)
       # rust-cache intentionally omitted — see the note on the
       # compatibility-test job (LGPL-3.0 license-check interaction).
       - name: Set up Python

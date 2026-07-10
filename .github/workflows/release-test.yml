@@ -461,7 +461,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
         with:
-          toolchain: stable
+          toolchain: 1.97.0 # pinned stable — bump deliberately (see #1745 for why floating broke)
       - name: Install cargo-binstall
         run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
       - name: Wait for binstall availability

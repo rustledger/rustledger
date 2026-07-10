@@ -456,10 +456,12 @@ impl Executor<'_> {
 }
 
 /// Zero-based quarter index for a 1-based month (0 => Q1). The single
-/// quarter formula for this module — `DATE_TRUNC`, `QUARTER()`, and the
-/// `DATE_BIN` quarter arm all derive from it rather than re-deriving
-/// `(month - 1) / 3` inline (the sweep found the formula written twice
-/// here, diverging only in off-by-one framing).
+/// `(month - 1) / 3` formula for this module — `DATE_TRUNC` and
+/// `QUARTER()` both derive from it rather than re-deriving it inline
+/// (the sweep found it written twice, diverging only in off-by-one
+/// framing). `DATE_BIN`'s quarter arm is NOT a user of this formula:
+/// it buckets by months-elapsed-since-origin (`months_diff / (3 * amt)`),
+/// which is origin- and width-relative, not calendar-quarter indexing.
 ///
 /// `month1` must be 1-based (`Zoned`/`Date::month()` guarantees 1..=12);
 /// 0 would wrap in release builds, so debug builds assert.

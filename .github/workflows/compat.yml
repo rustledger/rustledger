@@ -99,6 +99,13 @@ jobs:
           cargo build --release -p rustledger --no-default-features
       - name: Choose synthetic seed and count
         id: synth
+        env:
+          # Untrusted dispatch inputs enter ONLY via env (never interpolated
+          # into the script text) and are validated numeric below — inline
+          # `${{ inputs.* }}` in `run:` is a shell-injection vector
+          # (review catch).
+          INPUT_SEED: ${{ github.event.inputs.synthetic_seed || '' }}
+          INPUT_COUNT: ${{ github.event.inputs.synthetic_count || '' }}
         run: |
           # DIFFERENTIAL TESTING: nightly runs use a FRESH seed so the
           # synthetic corpus explores new ledger shapes every night instead
@@ -106,9 +113,12 @@ jobs:
           # fixed seed for deterministic, baseline-comparable results.
           # Reproduce any nightly divergence with:
           #   gh workflow run compat.yml -f synthetic_seed=<seed> -f synthetic_count=<count>
-          if [ -n "${{ github.event.inputs.synthetic_seed || '' }}" ]; then
-            SEED="${{ github.event.inputs.synthetic_seed }}"
-            COUNT="${{ github.event.inputs.synthetic_count || '500' }}"
+          numeric() { [[ "$1" =~ ^[0-9]+$ ]]; }
+          if [ -n "$INPUT_SEED" ]; then
+            numeric "$INPUT_SEED" || { echo "::error::synthetic_seed must be numeric"; exit 1; }
+            SEED="$INPUT_SEED"
+            COUNT="${INPUT_COUNT:-500}"
+            numeric "$COUNT" || { echo "::error::synthetic_count must be numeric"; exit 1; }
           elif [ "${{ github.event_name }}" = "schedule" ]; then
             SEED="${{ github.run_id }}"
             COUNT=500
@@ -116,10 +126,11 @@ jobs:
             SEED=12345
             COUNT=50
           fi
-          echo "seed=$SEED" >> $GITHUB_OUTPUT
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
-          echo "## Synthetic corpus" >> $GITHUB_STEP_SUMMARY
-          echo "seed: \`$SEED\` — count: $COUNT (reproduce: \`gh workflow run compat.yml -f synthetic_seed=$SEED -f synthetic_count=$COUNT\`)" >> $GITHUB_STEP_SUMMARY
+          printf 'seed=%s\ncount=%s\n' "$SEED" "$COUNT" >> "$GITHUB_OUTPUT"
+          {
+            printf '## Synthetic corpus\n'
+            printf 'seed: `%s` — count: %s (reproduce: `gh workflow run compat.yml -f synthetic_seed=%s -f synthetic_count=%s`)\n' "$SEED" "$COUNT" "$SEED" "$COUNT"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Generate synthetic test files
         run: |
           echo "Generating synthetic test files (seed=${{ steps.synth.outputs.seed }}, count=${{ steps.synth.outputs.count }})..."
@@ -1171,10 +1182,13 @@ jobs:
         run: |
           echo "::error::Synthetic differential divergence: ${{ steps.compat_test.outputs.synthetic_match }}/${{ steps.compat_test.outputs.synthetic_total }} synthetic files agree with Python (seed=${{ steps.synth.outputs.seed }}). Divergent files:"
           python3 - <<'PYEOF'
-          import json, os
+          import json, os, sys
           # The jsonl lives in CWD on PR runs; the compatibility-branch step
           # (push/schedule only) moves it to /tmp before switching branches.
-          path = next(p for p in ('compat-check-results.jsonl', '/tmp/compat-check-results.jsonl') if os.path.exists(p))
+          path = next((p for p in ('compat-check-results.jsonl', '/tmp/compat-check-results.jsonl') if os.path.exists(p)), None)
+          if path is None:
+              print('::error::compat-check-results.jsonl not found in CWD or /tmp — cannot list divergent files (the gate condition itself is authoritative)')
+              sys.exit(0)  # the step already exits 1 after this snippet
           for line in open(path):
               r = json.loads(line)
               if r.get('category', '').startswith('synthetic') and not r.get('check_match', True):
@@ -1184,7 +1198,10 @@ jobs:
           exit 1
 
       - name: Upload divergent synthetic corpus
-        if: failure()
+        # Only when the synthetic gate itself tripped — a plain `failure()`
+        # would ship the corpus for any unrelated late-step failure
+        # (review catch).
+        if: failure() && steps.compat_test.outputs.synthetic_match != steps.compat_test.outputs.synthetic_total
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: synthetic-corpus-seed-${{ steps.synth.outputs.seed }}

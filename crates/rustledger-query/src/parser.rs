@@ -34,9 +34,25 @@ enum ComparisonSuffix {
 /// denial-of-service surfaced by the query fuzzer's slow-unit corpus
 /// (a ~2 KB input of
 /// 1023 nested parens took >10 s and overflowed an 8 MB stack). Real
-/// queries nest only a handful deep; 128 is far above any legitimate
+/// queries nest only a handful deep; 64 is far above any legitimate
 /// query yet shallow enough to stay fast and stack-safe.
+///
+/// STACK SAFETY: the cap alone is not what keeps recursion safe — frame
+/// sizes drift with toolchains (Rust 1.97's debug frames grew enough
+/// that even 50 levels overflowed a 2 MiB cargo-test thread where 1.96
+/// handled 100+). On native targets [`parse`] therefore runs the
+/// recursive grammar on a dedicated [`PARSE_STACK_SIZE`] thread, making
+/// the depth budget explicit instead of inherited from whichever thread
+/// happens to call it (main = 8 MiB, cargo-test/rayon workers = 2 MiB).
+/// On wasm32 there are no threads; the pre-scan cap and the engine's own
+/// stack limits apply as before.
 const MAX_NESTING_DEPTH: usize = 128;
+
+/// Stack size for the dedicated parse thread on native targets. Sized
+/// for `MAX_NESTING_DEPTH` recursion levels at worst-case (debug-build)
+/// frame sizes with generous headroom.
+#[cfg(not(target_arch = "wasm32"))]
+const PARSE_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 /// Byte offset at which parenthesis nesting first exceeds
 /// [`MAX_NESTING_DEPTH`], or `None` if the input stays within the bound.
@@ -89,6 +105,33 @@ pub fn parse(source: &str) -> Result<Query, ParseError> {
         ));
     }
 
+    // Run the recursive descent on a thread with an explicit, generous
+    // stack: the caller's stack budget is unknown (2 MiB on cargo-test
+    // and rayon/tokio workers) and grammar frame sizes drift across
+    // toolchains — see the note on `MAX_NESTING_DEPTH`. Scoped so
+    // `source` can be borrowed; the join panics only if the parse thread
+    // panicked, which propagates the panic as before.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .name("bql-parse".to_string())
+                .stack_size(PARSE_STACK_SIZE)
+                .spawn_scoped(scope, || parse_on_current_stack(source))
+                .expect("spawn bql-parse thread")
+                .join()
+                .expect("bql-parse thread panicked")
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        parse_on_current_stack(source)
+    }
+}
+
+/// The recursive grammar proper — must only be called with a known-adequate
+/// stack (the dedicated thread in [`parse`], or wasm's engine stack).
+fn parse_on_current_stack(source: &str) -> Result<Query, ParseError> {
     let (result, errs) = query_parser()
         .then_ignore(ws())
         .then_ignore(end())
@@ -1956,6 +1999,10 @@ mod tests {
     #[test]
     fn moderate_nesting_still_parses() {
         // 100 levels of real function nesting (well under the 128 cap).
+        // Runs on `parse`'s dedicated big-stack thread, so this passes
+        // regardless of the 2 MiB cargo-test thread stack or toolchain
+        // frame-size drift (Rust 1.97 SIGABRT'd this test at the old
+        // caller-stack recursion).
         let depth = 100usize;
         let inner = "x".to_string();
         let body = format!("{}{}{}", "abs(".repeat(depth), inner, ")".repeat(depth));

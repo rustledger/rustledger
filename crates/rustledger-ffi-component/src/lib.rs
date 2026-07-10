@@ -104,6 +104,12 @@ impl GuestSession for LedgerSession {
         }
     }
 
+    fn from_entries(entries: Vec<Directive>) -> Session {
+        Session::new(Self {
+            state: convert::SessionState::from_entries(&entries),
+        })
+    }
+
     fn from_file(path: String, allow_unrestricted_includes: bool, plugins: Vec<String>) -> Session {
         Session::new(Self {
             state: convert::SessionState::from_file(&path, allow_unrestricted_includes, &plugins),

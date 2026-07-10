@@ -178,6 +178,18 @@ impl NativePlugin for CurrencyAccountsPlugin {
                             })
                         }
                         Some(CostNumberData::PerUnitFromTotal { per_unit, total }) => {
+                            // Struct literal, deliberately NOT
+                            // `BookedCost::try_new`: the weight arithmetic
+                            // reads only `.total` for this variant (see
+                            // `cost_number_weight`), so the
+                            // `per_unit x |units| == total` invariant is
+                            // irrelevant here — and enforcing it would need
+                            // an error channel this infallible closure
+                            // doesn't have. Consistency of wire-supplied
+                            // pairs is the ingress boundary's job
+                            // (ffi-wasi `input_entry_to_directive` rejects
+                            // inconsistent pairs via `try_new`); this DTO
+                            // arrives from the host's own booked data.
                             Some(CostNumber::PerUnitFromTotal(BookedCost {
                                 per_unit: parse(per_unit),
                                 total: parse(total),

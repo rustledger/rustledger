@@ -280,8 +280,14 @@ pub fn handle_inlay_hint_resolve(
 ///    is configured: `Ledger::balance_view()` is date-sorted, BOOKED
 ///    (interpolated amounts filled, cost specs resolved), plugin-rewritten,
 ///    and pad-expanded, across the whole ledger including files this buffer
-///    can't see. This is the same "consume the pipeline's cached output
-///    instead of re-deriving" move the balance code lens made.
+///    can't see. The LEDGER is the cached artifact (loaded once, refreshed
+///    on file events); `balance_view()` itself clones and pad-merges the
+///    directive stream per call, so each tooltip resolve is O(n) in ledger
+///    size. That's deliberate: resolve fires once per mouse-hover on a
+///    hint (client-gated), not per keystroke — the same trade the balance
+///    code lens made when it adopted the validator's cached diagnostics.
+///    If profiling ever shows hover latency here, cache the merged view
+///    (or per-account sums) on `LedgerState` next to the ledger.
 /// 2. **This file's raw parse** as a fallback (no journal configured):
 ///    a units-only sum over the buffer as written — unbooked, so elided
 ///    amounts contribute nothing, and includes/pads are invisible. The
@@ -1072,10 +1078,8 @@ mod tests {
                       2024-01-01 open Expenses:Food\n\
                       2024-01-15 * \"Coffee\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n\
                       2024-01-20 * \"Lunch\"\n  Assets:Bank  -10.00 USD\n  Expenses:Food\n";
-        let dir =
-            std::env::temp_dir().join(format!("rledger-inlay-tooltip-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("main.beancount");
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("main.beancount");
         std::fs::write(&path, source).unwrap();
         let ledger = rustledger_loader::load(
             &path,
@@ -1085,7 +1089,7 @@ mod tests {
             },
         )
         .expect("load test ledger");
-        std::fs::remove_file(&path).ok();
+        drop(dir); // TempDir removes the directory and file
 
         let empty_buffer = parse("");
         let hint = InlayHint {

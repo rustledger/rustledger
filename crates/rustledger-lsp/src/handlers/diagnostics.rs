@@ -148,7 +148,9 @@ pub struct PluginContext<'a> {
 /// touches directive VALUES (`normalize_prices`, `@@`→`@`) runs AFTER
 /// Late validation in the loader too, so its absence here does not
 /// change diagnostics. If `finalize` ever gains a step that feeds
-/// validation, this function must mirror it — grep for this comment. Running plugins after booking (rather than before) keeps
+/// validation, this function must mirror it — grep for this comment.
+///
+/// Running plugins after booking (rather than before) keeps
 /// plugin-transformed directives (e.g., `effective_date` splitting
 /// transactions across dates) visible to validation (#793).
 ///

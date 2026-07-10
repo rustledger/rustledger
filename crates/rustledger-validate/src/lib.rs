@@ -554,10 +554,12 @@ fn validate_phase_inner<D: ValidatableDirective>(
 
     let mut errors = Vec::new();
 
-    // Sort directives by date, then by type priority
-    // (e.g., balance assertions before transactions on the same day).
-    // Parallel sort only for large collections (threading overhead
-    // otherwise).
+    // Sort directives into canonical booking order: date, then type
+    // priority (e.g., balance assertions before transactions on the same
+    // day), then the cost-reduction-last tiebreak — the full
+    // `booking_sort_key` tuple, shared with the loader, booking engine,
+    // and LSP. Parallel sort only for large collections (threading
+    // overhead otherwise).
     let mut sorted: Vec<&D> = Vec::with_capacity(directives.len());
     sorted.extend(directives.iter());
     // Booking order via the canonical comparator (single source shared

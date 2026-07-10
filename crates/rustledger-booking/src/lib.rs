@@ -53,7 +53,11 @@ pub struct ToleranceOptions<'a> {
     /// then max'd per currency), per `option "infer_tolerance_from_cost"`.
     pub infer_from_cost: bool,
     /// Per-currency tolerance floors from `option "inferred_tolerance_default"`;
-    /// the key `"*"` is a wildcard applying to all currencies.
+    /// the key `"*"` is a wildcard floor applied to every currency that
+    /// appears as a posting UNIT currency in the transaction (a currency
+    /// present only via cost/price inference gets no wildcard floor,
+    /// though a named per-currency default still reaches it) — behavior
+    /// inherited verbatim from the validator.
     pub defaults: &'a FxHashMap<String, Decimal>,
 }
 
@@ -172,7 +176,9 @@ pub fn transaction_tolerances(
 
     // Apply per-currency default tolerances from `inferred_tolerance_default` option.
     // These act as a floor: if the computed tolerance for a currency is less than the
-    // default, the default is used. The special key "*" applies to all currencies.
+    // default, the default is used. The special key "*" floors every currency that
+    // appears as a posting UNIT currency (not currencies present only via
+    // cost/price inference — named defaults below reach those too).
     if !opts.defaults.is_empty() {
         // Apply the wildcard default first (if any)
         if let Some(wildcard_default) = opts.defaults.get("*") {

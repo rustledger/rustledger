@@ -1523,10 +1523,16 @@ impl SessionState {
     /// Conversion failures (e.g. un-lexable accounts, see the note on
     /// `clamp`) drop the directive, mirroring `query-entries`.
     pub fn from_entries(entries: &[wit::Directive]) -> Self {
-        let directives: Vec<rustledger_core::Directive> = entries
-            .iter()
-            .filter_map(|d| ffi::input_entry_to_directive(&loaded_directive_to_input(d)).ok())
-            .collect();
+        // The one-time conversion is this API's whole reason to exist —
+        // reserve up front so a large ledger doesn't reallocate through
+        // the collect (review catch; drops are rare, over-reserving by
+        // the dropped count is fine).
+        let mut directives: Vec<rustledger_core::Directive> = Vec::with_capacity(entries.len());
+        directives.extend(
+            entries
+                .iter()
+                .filter_map(|d| ffi::input_entry_to_directive(&loaded_directive_to_input(d)).ok()),
+        );
         let n = directives.len();
         Self {
             directives,

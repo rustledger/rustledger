@@ -374,7 +374,10 @@ def _derive_account_state_machine(src: dict, dst: dict) -> list:
 
 
 def _derive_price_db(src: dict, dst: dict) -> list:
-    """Price database: the single changed [base][quote] entry."""
+    """Price database: SetPrice(base, quote, price) writes [base][quote]
+    AND clears [quote][base] (direction supersession, #1759), so a delta
+    may touch two entries. The action is the changed entry whose new
+    value is NONZERO; the zero-change is its implied inverse clear."""
     nonzero = sorted(
         [b, q, dst["prices"][b][q]]
         for b in dst["prices"]
@@ -384,10 +387,11 @@ def _derive_price_db(src: dict, dst: dict) -> list:
     state = {"prices": nonzero}
     for b in sorted(dst["prices"]):
         for q in sorted(dst["prices"][b]):
-            if dst["prices"][b][q] != src["prices"][b][q]:
+            if dst["prices"][b][q] != src["prices"][b][q] and dst["prices"][b][q] != 0:
                 return ["SetPrice", {"base": b, "quote": q, "price": dst["prices"][b][q]}, state]
     # Same-value overwrite: SetPrice re-setting an existing entry leaves
-    # `prices` unchanged (only opCount moves). Any nonzero entry replays
+    # `prices` unchanged (only opCount moves; the inverse was already
+    # cleared by the earlier set). Any nonzero entry replays
     # identically; pick the smallest for determinism.
     if nonzero:
         b, q, price = nonzero[0]

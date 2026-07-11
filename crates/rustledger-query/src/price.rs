@@ -35,13 +35,48 @@ pub struct PriceEntry {
 
 /// Database of currency prices.
 ///
-/// Stores prices as a map from base currency to a list of (date, price, quote currency).
-/// Prices are kept sorted by date for efficient lookup.
+/// Two structures with distinct jobs, mirroring Python beancount's
+/// split between Price *directives* and the *price map* built from
+/// them:
+///
+/// - `prices` — the raw provenance store: every entry as declared (or
+///   extracted from a transaction), with its `explicit` flag. Feeds
+///   the `#prices` BQL table, `len()`, and the two-pass dedup gating
+///   (#1006). Never mirrored or deduplicated.
+/// - `lookup` — the conversion index every price lookup reads, built
+///   from the raw entries by a faithful port of beancount's
+///   `build_price_map` merge (see `rebuild_lookup`). Both
+///   directions of every pair are materialized, so lookups pick the
+///   most recent rate *regardless of which direction it was written
+///   in* (issue #1759 — an older direct rate must not shadow a newer
+///   inverse one).
 #[derive(Debug, Default)]
 pub struct PriceDatabase {
     /// Prices indexed by base currency.
     /// Each base currency maps to a list of price entries sorted by date.
     prices: HashMap<rustledger_core::Currency, Vec<PriceEntry>>,
+    /// Every raw entry in insertion (ledger) order. The lookup-index
+    /// build consumes this instead of `prices`: beancount's merge
+    /// tie-breaks depend on Python dict insertion order, which a hash
+    /// map cannot preserve.
+    raw_seq: Vec<RawPrice>,
+    /// The conversion index: base → quote → date-sorted rates, one
+    /// rate per date, both directions of every pair present. Rebuilt
+    /// by [`Self::sort_prices`].
+    lookup: HashMap<
+        rustledger_core::Currency,
+        HashMap<rustledger_core::Currency, Vec<(NaiveDate, Decimal)>>,
+    >,
+}
+
+/// One raw price observation in ledger order — input to the
+/// conversion-index build.
+#[derive(Debug, Clone)]
+struct RawPrice {
+    base: rustledger_core::Currency,
+    quote: rustledger_core::Currency,
+    date: NaiveDate,
+    rate: Decimal,
 }
 
 impl PriceDatabase {
@@ -49,6 +84,8 @@ impl PriceDatabase {
     pub fn new() -> Self {
         Self {
             prices: HashMap::default(),
+            raw_seq: Vec::new(),
+            lookup: HashMap::default(),
         }
     }
 
@@ -121,12 +158,116 @@ impl PriceDatabase {
         db
     }
 
-    /// Sort all price entries by date.
+    /// Sort all price entries by date and rebuild the conversion
+    /// index.
     ///
     /// Call this after adding prices to ensure lookups work correctly.
     pub fn sort_prices(&mut self) {
         for entries in self.prices.values_mut() {
             entries.sort_by_key(|e| e.date);
+        }
+        self.rebuild_lookup();
+    }
+
+    /// Rebuild the conversion index from the raw entries.
+    ///
+    /// A faithful port of Python beancount's `build_price_map` merge
+    /// (`beancount/core/prices.py`), whose observable semantics are
+    /// emergent from the build order and cannot be reproduced by
+    /// per-lookup rules (issue #1759):
+    ///
+    /// 1. Group raw entries per `(base, quote)` pair, preserving
+    ///    first-seen pair order and per-pair entry order (Python
+    ///    dicts are insertion-ordered; the tie-breaks below depend
+    ///    on it).
+    /// 2. When both directions of a pair exist, invert the one with
+    ///    fewer rates and merge it into the other ("swallow"). Zero
+    ///    rates are dropped on inversion (zero-cost postings, e.g.
+    ///    gifted options). On equal counts Python removes
+    ///    `(quote, base)`, keeping whichever direction is reached
+    ///    first in insertion order.
+    /// 3. Sort each pair's list by date (stable, so same-date order
+    ///    stays originals-then-inverted) and collapse to one rate per
+    ///    date keeping the LAST — Python's
+    ///    `sorted_uniquify(..., last=True)`.
+    /// 4. Materialize the inverse of every surviving pair, so the
+    ///    index is direction-blind at lookup time.
+    fn rebuild_lookup(&mut self) {
+        type Pair = (rustledger_core::Currency, rustledger_core::Currency);
+
+        // Step 1: group per pair in insertion order.
+        let mut order: Vec<Pair> = Vec::new();
+        let mut index: HashMap<Pair, usize> = HashMap::default();
+        let mut lists: Vec<Option<Vec<(NaiveDate, Decimal)>>> = Vec::new();
+        for raw in &self.raw_seq {
+            let key = (raw.base.clone(), raw.quote.clone());
+            let i = *index.entry(key.clone()).or_insert_with(|| {
+                order.push(key);
+                lists.push(Some(Vec::new()));
+                lists.len() - 1
+            });
+            if let Some(list) = &mut lists[i] {
+                list.push((raw.date, raw.rate));
+            }
+        }
+
+        // Step 2: swallow the direction with fewer rates.
+        for i in 0..order.len() {
+            let inv_key = (order[i].1.clone(), order[i].0.clone());
+            let Some(&j) = index.get(&inv_key) else {
+                continue;
+            };
+            if lists[i].is_none() || lists[j].is_none() {
+                // Already swallowed when its inverse was visited —
+                // matches Python's second visit being a no-op.
+                continue;
+            }
+            let len_i = lists[i].as_ref().map_or(0, Vec::len);
+            let len_j = lists[j].as_ref().map_or(0, Vec::len);
+            let (keep, remove) = if len_i < len_j { (j, i) } else { (i, j) };
+            let removed = lists[remove].take().unwrap_or_default();
+            if let Some(target) = lists[keep].as_mut() {
+                target.extend(
+                    removed
+                        .iter()
+                        .filter(|(_, rate)| !rate.is_zero())
+                        .map(|&(d, rate)| (d, Decimal::ONE / rate)),
+                );
+            }
+        }
+
+        // Step 3: stable date sort + one rate per date (last wins).
+        let mut merged: Vec<(Pair, Vec<(NaiveDate, Decimal)>)> = Vec::new();
+        for (i, key) in order.into_iter().enumerate() {
+            let Some(mut list) = lists[i].take() else {
+                continue;
+            };
+            list.sort_by_key(|entry| entry.0);
+            let mut deduped: Vec<(NaiveDate, Decimal)> = Vec::with_capacity(list.len());
+            for (d, rate) in list {
+                match deduped.last_mut() {
+                    Some(last) if last.0 == d => last.1 = rate,
+                    _ => deduped.push((d, rate)),
+                }
+            }
+            merged.push((key, deduped));
+        }
+
+        // Step 4: materialize all inverses. After step 2 at most one
+        // direction per pair survives, so these inserts cannot
+        // collide with a surviving forward list.
+        self.lookup = HashMap::default();
+        for ((base, quote), list) in merged {
+            let inverted: Vec<(NaiveDate, Decimal)> = list
+                .iter()
+                .filter(|(_, rate)| !rate.is_zero())
+                .map(|&(d, rate)| (d, Decimal::ONE / rate))
+                .collect();
+            self.lookup
+                .entry(quote.clone())
+                .or_default()
+                .insert(base.clone(), inverted);
+            self.lookup.entry(base).or_default().insert(quote, list);
         }
     }
 
@@ -142,6 +283,12 @@ impl PriceDatabase {
             explicit: true,
         };
 
+        self.raw_seq.push(RawPrice {
+            base: price.currency.clone(),
+            quote: price.amount.currency.clone(),
+            date: price.date,
+            rate: price.amount.number,
+        });
         self.prices
             .entry(price.currency.clone())
             .or_default()
@@ -256,6 +403,12 @@ impl PriceDatabase {
             explicit: false,
         };
 
+        self.raw_seq.push(RawPrice {
+            base: base_currency.clone(),
+            quote: quote_currency.clone(),
+            date,
+            rate: price,
+        });
         self.prices
             .entry(base_currency.clone())
             .or_default()
@@ -264,191 +417,105 @@ impl PriceDatabase {
 
     /// Get the price of a currency on or before a given date.
     ///
-    /// Returns the most recent price for the base currency in terms of the quote currency.
-    /// Tries direct lookup, inverse lookup, and chained lookup (A→B→C).
+    /// Returns the most recent rate for the pair from the conversion
+    /// index — which holds both directions of every pair, so a rate
+    /// declared as `quote → base` is found (inverted) exactly like a
+    /// direct one, with date recency deciding between them (#1759).
+    /// Falls back to a chained lookup (A→B→C) when the pair has no
+    /// rates at all.
     pub fn get_price(&self, base: &str, quote: &str, date: NaiveDate) -> Option<Decimal> {
         // Same currency = price of 1
         if base == quote {
             return Some(Decimal::ONE);
         }
 
-        // Try direct price lookup
-        if let Some(price) = self.get_direct_price(base, quote, date) {
-            return Some(price);
-        }
-
-        // Try inverse price lookup
-        if let Some(price) = self.get_direct_price(quote, base, date)
-            && price != Decimal::ZERO
-        {
-            return Some(Decimal::ONE / price);
+        if let Some(rate) = self.lookup_rate_at(base, quote, date) {
+            return Some(rate);
         }
 
         // Try chained lookup (A→B→C where B is an intermediate currency)
         self.get_chained_price(base, quote, date)
     }
 
-    /// Get direct price (base currency priced in quote currency).
-    fn get_direct_price(&self, base: &str, quote: &str, date: NaiveDate) -> Option<Decimal> {
-        if let Some(entries) = self.prices.get(base) {
-            for entry in entries.iter().rev() {
-                if entry.date <= date && entry.currency == quote {
-                    return Some(entry.price);
-                }
-            }
-        }
-        None
+    /// Most recent rate for the pair on or before `date`, from the
+    /// conversion index.
+    fn lookup_rate_at(&self, base: &str, quote: &str, date: NaiveDate) -> Option<Decimal> {
+        let list = self.lookup.get(base)?.get(quote)?;
+        let idx = list.partition_point(|entry| entry.0 <= date);
+        (idx > 0).then(|| list[idx - 1].1)
+    }
+
+    /// Latest rate for the pair, from the conversion index.
+    fn lookup_rate_latest(&self, base: &str, quote: &str) -> Option<Decimal> {
+        self.lookup
+            .get(base)?
+            .get(quote)?
+            .last()
+            .map(|entry| entry.1)
     }
 
     /// Try to find a price through an intermediate currency.
     /// For A→C, try to find A→B and B→C for some intermediate B.
+    ///
+    /// This is a rustledger extension — beancount's price map has no
+    /// transitive lookups. One hop only; both legs read the
+    /// bidirectional index, so no per-leg inverse handling is needed.
+    /// Intermediates are tried in sorted order so the result is
+    /// deterministic when several paths exist.
     fn get_chained_price(&self, base: &str, quote: &str, date: NaiveDate) -> Option<Decimal> {
-        // Collect all currencies that have prices from 'base'
-        let intermediates: Vec<rustledger_core::Currency> =
-            if let Some(entries) = self.prices.get(base) {
-                entries
-                    .iter()
-                    .filter(|e| e.date <= date)
-                    .map(|e| e.currency.clone())
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        let inner = self.lookup.get(base)?;
+        let mut intermediates: Vec<&rustledger_core::Currency> = inner.keys().collect();
+        intermediates.sort_unstable_by_key(|c| c.as_str());
 
-        // Try each intermediate currency
         for intermediate in intermediates {
-            if intermediate == quote {
+            if intermediate.as_str() == quote {
                 continue; // Already tried direct
             }
-
-            // Get price base→intermediate
-            if let Some(price1) = self.get_direct_price(base, &intermediate, date) {
-                // Get price intermediate→quote (try direct, inverse, but not chained to avoid loops)
-                if let Some(price2) = self.get_direct_price(&intermediate, quote, date) {
-                    return Some(price1 * price2);
-                }
-                // Try inverse for second leg
-                if let Some(price2) = self.get_direct_price(quote, &intermediate, date)
-                    && price2 != Decimal::ZERO
-                {
-                    return Some(price1 / price2);
-                }
+            let Some(rate1) = self.lookup_rate_at(base, intermediate.as_str(), date) else {
+                continue;
+            };
+            if let Some(rate2) = self.lookup_rate_at(intermediate.as_str(), quote, date) {
+                return Some(rate1 * rate2);
             }
         }
-
-        // Also try currencies that price TO base (inverse first leg)
-        for (currency, entries) in &self.prices {
-            for entry in entries.iter().rev() {
-                if entry.date <= date && entry.currency == base && entry.price != Decimal::ZERO {
-                    // We have currency→base, so base→currency = 1/price
-                    let price1 = Decimal::ONE / entry.price;
-
-                    // Now try currency→quote
-                    if let Some(price2) = self.get_direct_price(currency, quote, date) {
-                        return Some(price1 * price2);
-                    }
-                    if let Some(price2) = self.get_direct_price(quote, currency, date)
-                        && price2 != Decimal::ZERO
-                    {
-                        return Some(price1 / price2);
-                    }
-                }
-            }
-        }
-
         None
     }
 
     /// Get the latest price of a currency (most recent date).
     ///
-    /// Supports direct lookup, inverse lookup, and chained lookup (A→B→C).
+    /// Same direction-blind semantics as [`Self::get_price`], using
+    /// each pair's most recent rate.
     pub fn get_latest_price(&self, base: &str, quote: &str) -> Option<Decimal> {
         // Same currency = price of 1
         if base == quote {
             return Some(Decimal::ONE);
         }
 
-        // Try direct price lookup
-        if let Some(price) = self.get_direct_latest_price(base, quote) {
-            return Some(price);
-        }
-
-        // Try inverse price lookup
-        if let Some(price) = self.get_direct_latest_price(quote, base)
-            && price != Decimal::ZERO
-        {
-            return Some(Decimal::ONE / price);
+        if let Some(rate) = self.lookup_rate_latest(base, quote) {
+            return Some(rate);
         }
 
         // Try chained lookup (A→B→C where B is an intermediate currency)
         self.get_chained_latest_price(base, quote)
     }
 
-    /// Get direct latest price (base currency priced in quote currency).
-    fn get_direct_latest_price(&self, base: &str, quote: &str) -> Option<Decimal> {
-        if let Some(entries) = self.prices.get(base) {
-            // Find the most recent price in the target currency
-            for entry in entries.iter().rev() {
-                if entry.currency == quote {
-                    return Some(entry.price);
-                }
-            }
-        }
-        None
-    }
-
-    /// Try to find the latest price through an intermediate currency.
-    /// For A→C, try to find A→B and B→C for some intermediate B.
+    /// Latest-rate variant of [`Self::get_chained_price`].
     fn get_chained_latest_price(&self, base: &str, quote: &str) -> Option<Decimal> {
-        // Collect all currencies that have prices from 'base'
-        let intermediates: Vec<rustledger_core::Currency> =
-            if let Some(entries) = self.prices.get(base) {
-                entries.iter().map(|e| e.currency.clone()).collect()
-            } else {
-                Vec::new()
-            };
+        let inner = self.lookup.get(base)?;
+        let mut intermediates: Vec<&rustledger_core::Currency> = inner.keys().collect();
+        intermediates.sort_unstable_by_key(|c| c.as_str());
 
-        // Try each intermediate currency
         for intermediate in intermediates {
-            if intermediate == quote {
+            if intermediate.as_str() == quote {
                 continue; // Already tried direct
             }
-
-            // Get price base→intermediate
-            if let Some(price1) = self.get_direct_latest_price(base, &intermediate) {
-                // Get price intermediate→quote (try direct, inverse, but not chained to avoid loops)
-                if let Some(price2) = self.get_direct_latest_price(&intermediate, quote) {
-                    return Some(price1 * price2);
-                }
-                // Try inverse for second leg
-                if let Some(price2) = self.get_direct_latest_price(quote, &intermediate)
-                    && price2 != Decimal::ZERO
-                {
-                    return Some(price1 / price2);
-                }
+            let Some(rate1) = self.lookup_rate_latest(base, intermediate.as_str()) else {
+                continue;
+            };
+            if let Some(rate2) = self.lookup_rate_latest(intermediate.as_str(), quote) {
+                return Some(rate1 * rate2);
             }
         }
-
-        // Also try currencies that price TO base (inverse first leg)
-        for (currency, entries) in &self.prices {
-            for entry in entries.iter().rev() {
-                if entry.currency == base && entry.price != Decimal::ZERO {
-                    // We have currency→base, so base→currency = 1/price
-                    let price1 = Decimal::ONE / entry.price;
-
-                    // Now try currency→quote
-                    if let Some(price2) = self.get_direct_latest_price(currency, quote) {
-                        return Some(price1 * price2);
-                    }
-                    if let Some(price2) = self.get_direct_latest_price(quote, currency)
-                        && price2 != Decimal::ZERO
-                    {
-                        return Some(price1 / price2);
-                    }
-                }
-            }
-        }
-
         None
     }
 
@@ -544,9 +611,7 @@ mod tests {
         });
 
         // Sort after adding
-        for entries in db.prices.values_mut() {
-            entries.sort_by_key(|e| e.date);
-        }
+        db.sort_prices();
 
         // Lookup on exact date
         assert_eq!(
@@ -583,9 +648,7 @@ mod tests {
         });
 
         // Sort
-        for entries in db.prices.values_mut() {
-            entries.sort_by_key(|e| e.date);
-        }
+        db.sort_prices();
 
         // Can lookup USD->EUR
         assert_eq!(
@@ -610,9 +673,7 @@ mod tests {
             meta: Default::default(),
         });
 
-        for entries in db.prices.values_mut() {
-            entries.sort_by_key(|e| e.date);
-        }
+        db.sort_prices();
 
         let shares = Amount::new(dec!(10), "AAPL");
         let usd = db.convert(&shares, "USD", date(2024, 1, 1)).unwrap();
@@ -676,9 +737,7 @@ mod tests {
         });
 
         // Sort
-        for entries in db.prices.values_mut() {
-            entries.sort_by_key(|e| e.date);
-        }
+        db.sort_prices();
 
         // Direct lookup AAPL -> USD works
         assert_eq!(
@@ -719,9 +778,7 @@ mod tests {
         });
 
         // Sort
-        for entries in db.prices.values_mut() {
-            entries.sort_by_key(|e| e.date);
-        }
+        db.sort_prices();
 
         // BTC -> EUR should work via BTC -> USD -> EUR
         // BTC -> USD = 40000
@@ -753,9 +810,7 @@ mod tests {
         });
 
         // Sort
-        for entries in db.prices.values_mut() {
-            entries.sort_by_key(|e| e.date);
-        }
+        db.sort_prices();
 
         // No path from AAPL to GBP
         assert_eq!(db.get_price("AAPL", "GBP", date(2024, 1, 1)), None);
@@ -1116,6 +1171,198 @@ mod tests {
         assert_eq!(
             db.get_price("BAM", "EUR", date(2017, 12, 15)),
             Some(dec!(0.5113))
+        );
+    }
+
+    // ============================================================================
+    // Issue #1759 regressions — direction-blind date recency
+    // ============================================================================
+    //
+    // Beancount's `build_price_map` materializes both directions of
+    // every pair, so a lookup picks the most recent rate regardless
+    // of which direction it was declared in. Pre-fix, rustledger
+    // returned any direct entry before consulting the inverse
+    // direction, so an OLDER direct rate shadowed a NEWER inverse
+    // one.
+
+    fn price(date_: NaiveDate, base: &str, number: Decimal, quote: &str) -> PriceDirective {
+        PriceDirective {
+            date: date_,
+            currency: base.into(),
+            amount: Amount::new(number, quote),
+            meta: Default::default(),
+        }
+    }
+
+    /// The core #1759 shape: USD→GBP declared on the 12th, GBP→USD
+    /// declared on the 13th. The newer inverse must win for USD→GBP.
+    #[test]
+    fn test_newer_inverse_beats_older_direct() {
+        let mut db = PriceDatabase::new();
+        db.add_price(&price(date(2026, 7, 12), "USD", dec!(0.7472), "GBP"));
+        db.add_price(&price(date(2026, 7, 13), "GBP", dec!(1.2655), "USD"));
+        db.sort_prices();
+
+        // Latest USD→GBP is the 13th's inverted GBP→USD rate.
+        assert_eq!(
+            db.get_latest_price("USD", "GBP"),
+            Some(Decimal::ONE / dec!(1.2655))
+        );
+        assert_eq!(
+            db.get_price("USD", "GBP", date(2026, 7, 13)),
+            Some(Decimal::ONE / dec!(1.2655))
+        );
+        // On the 12th the direct rate is still the most recent.
+        assert_eq!(
+            db.get_price("USD", "GBP", date(2026, 7, 12)),
+            Some(dec!(0.7472))
+        );
+        // And the other direction mirrors it.
+        assert_eq!(db.get_latest_price("GBP", "USD"), Some(dec!(1.2655)));
+        assert_eq!(
+            db.get_price("GBP", "USD", date(2026, 7, 12)),
+            Some(Decimal::ONE / dec!(0.7472))
+        );
+    }
+
+    /// Symmetric sanity: when the DIRECT rate is newer it still wins.
+    #[test]
+    fn test_newer_direct_beats_older_inverse() {
+        let mut db = PriceDatabase::new();
+        db.add_price(&price(date(2026, 7, 12), "GBP", dec!(1.2655), "USD"));
+        db.add_price(&price(date(2026, 7, 13), "USD", dec!(0.7472), "GBP"));
+        db.sort_prices();
+
+        assert_eq!(db.get_latest_price("USD", "GBP"), Some(dec!(0.7472)));
+    }
+
+    /// The swallow rule: the direction with fewer rates is inverted
+    /// into the one with more, and date recency is decided on the
+    /// merged list.
+    #[test]
+    fn test_swallow_smaller_direction_into_larger() {
+        let mut db = PriceDatabase::new();
+        db.add_price(&price(date(2026, 7, 10), "USD", dec!(0.75), "GBP"));
+        db.add_price(&price(date(2026, 7, 12), "USD", dec!(0.7472), "GBP"));
+        db.add_price(&price(date(2026, 7, 13), "GBP", dec!(1.2655), "USD"));
+        db.sort_prices();
+
+        // Merged USD→GBP list: 10th direct, 12th direct, 13th inverted.
+        assert_eq!(
+            db.get_price("USD", "GBP", date(2026, 7, 11)),
+            Some(dec!(0.75))
+        );
+        assert_eq!(
+            db.get_price("USD", "GBP", date(2026, 7, 12)),
+            Some(dec!(0.7472))
+        );
+        assert_eq!(
+            db.get_latest_price("USD", "GBP"),
+            Some(Decimal::ONE / dec!(1.2655))
+        );
+    }
+
+    /// Same-date tie between a direct and an inverse rate: Python's
+    /// `sorted_uniquify(..., last=True)` keeps ONE rate per date, and
+    /// with equal counts the first-seen direction survives the
+    /// swallow, so its list is [direct, appended-inverted] and the
+    /// inverted rate wins the stable sort's last position.
+    #[test]
+    fn test_same_date_direct_and_inverse_last_wins() {
+        let mut db = PriceDatabase::new();
+        db.add_price(&price(date(2026, 7, 12), "USD", dec!(0.75), "GBP"));
+        db.add_price(&price(date(2026, 7, 12), "GBP", dec!(1.25), "USD"));
+        db.sort_prices();
+
+        // 1/1.25 = 0.8 — the inverted entry replaces the direct one.
+        assert_eq!(
+            db.get_price("USD", "GBP", date(2026, 7, 12)),
+            Some(dec!(0.8))
+        );
+        assert_eq!(db.get_latest_price("GBP", "USD"), Some(dec!(1.25)));
+    }
+
+    /// Zero rates (zero-cost postings, e.g. gifted options) stay in
+    /// their declared direction but are never inverted — no division
+    /// by zero, and the reverse direction simply has no rate.
+    #[test]
+    fn test_zero_rate_not_inverted() {
+        let mut db = PriceDatabase::new();
+        db.add_price(&price(date(2026, 7, 12), "OPT", Decimal::ZERO, "USD"));
+        db.sort_prices();
+
+        assert_eq!(
+            db.get_price("OPT", "USD", date(2026, 7, 12)),
+            Some(Decimal::ZERO)
+        );
+        assert_eq!(db.get_price("USD", "OPT", date(2026, 7, 12)), None);
+    }
+
+    /// End-to-end #1759 shape via `from_directives`: implicit prices
+    /// from transaction postings in BOTH directions, newest declared
+    /// as the inverse (`-18.68 GBP @ 1.2655 USD`), exactly like the
+    /// issue's Format C / Format D pair.
+    #[test]
+    fn test_implicit_inverse_price_wins_by_date() {
+        use rustledger_core::{Posting, PriceAnnotation, Transaction};
+
+        let directives = vec![
+            // Format C: 12.70 USD @@ 9.49 GBP → USD→GBP on the 12th.
+            Directive::Transaction(
+                Transaction::new(date(2026, 7, 12), "Format C")
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Checking",
+                        Amount::new(dec!(-9.49), "GBP"),
+                    ))
+                    .with_synthesized_posting(
+                        Posting::new("Expenses:Test", Amount::new(dec!(12.70), "USD"))
+                            .with_price(PriceAnnotation::total(Amount::new(dec!(9.49), "GBP"))),
+                    ),
+            ),
+            // Format D: -18.68 GBP @ 1.2655 USD → GBP→USD on the 13th.
+            Directive::Transaction(
+                Transaction::new(date(2026, 7, 13), "Format D")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Checking", Amount::new(dec!(-18.68), "GBP"))
+                            .with_price(PriceAnnotation::unit(Amount::new(dec!(1.2655), "USD"))),
+                    )
+                    .with_synthesized_posting(Posting::new(
+                        "Expenses:Test",
+                        Amount::new(dec!(23.64), "USD"),
+                    )),
+            ),
+        ];
+        let db = PriceDatabase::from_directives(&directives);
+
+        // Beancount converts 100 USD to 79.02 GBP using the 13th's
+        // inverted rate, not 74.72 GBP from the 12th's direct one.
+        let converted = db
+            .convert_latest(&Amount::new(dec!(100.00), "USD"), "GBP")
+            .expect("USD→GBP rate available");
+        assert_eq!(converted.number.round_dp(2), dec!(79.02));
+
+        // The raw provenance store is untouched by the index build:
+        // both extracted entries remain, in their declared directions.
+        assert_eq!(db.len(), 2);
+    }
+
+    /// Chained lookups go through the bidirectional index too: an
+    /// inverse-declared leg participates in an A→B→C path with the
+    /// same date-recency rule per leg.
+    #[test]
+    fn test_chained_lookup_uses_newest_rate_per_leg() {
+        let mut db = PriceDatabase::new();
+        // AAPL→USD.
+        db.add_price(&price(date(2026, 7, 10), "AAPL", dec!(150.00), "USD"));
+        // USD→EUR twice: old direct, newer inverse.
+        db.add_price(&price(date(2026, 7, 11), "USD", dec!(0.92), "EUR"));
+        db.add_price(&price(date(2026, 7, 12), "EUR", dec!(1.10), "USD"));
+        db.sort_prices();
+
+        // AAPL→EUR = 150 × (1/1.10), not 150 × 0.92.
+        assert_eq!(
+            db.get_latest_price("AAPL", "EUR"),
+            Some(dec!(150.00) * (Decimal::ONE / dec!(1.10)))
         );
     }
 }

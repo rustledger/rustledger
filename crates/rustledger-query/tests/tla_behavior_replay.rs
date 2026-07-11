@@ -8,10 +8,13 @@
 //! Mapping: each model `SetPrice(base, quote, price)` becomes an
 //! `add_price` of a price directive at a strictly-later date, so the model's
 //! overwrite semantics ("the price is the last one set") corresponds to
-//! `get_latest_price`. Conformance is checked on every entry the MODEL has
-//! set: `get_latest_price(base, quote) == prices[base][quote]`. Entries the
-//! model has NOT set (0) are not asserted — the implementation legitimately
-//! derives inverse rates the model doesn't track.
+//! `get_latest_price`. The model clears the opposite direction on every set
+//! (direction supersession, #1759 — a pair has ONE rate timeline, like
+//! beancount's `build_price_map`), so conformance is checked both ways on
+//! every entry the model holds: `get_latest_price(base, quote) ==
+//! prices[base][quote]` AND `get_latest_price(quote, base)` is its
+//! reciprocal (the implementation derives inverses; the model stores 0
+//! there, which is why zero entries are never asserted as absent).
 
 use rust_decimal::Decimal;
 use rustledger_core::{Amount, NaiveDate, Price as PriceDirective, naive_date};
@@ -68,8 +71,18 @@ fn replay_every_price_db_behavior() {
                 amount: Amount::new(Decimal::from(price), quote),
                 meta: Default::default(),
             });
+            // Finalize before reading — lookups go through the
+            // conversion index, built by `sort_prices`.
+            db.sort_prices();
 
-            // Every model-set entry must read back as the latest price.
+            // Every model-held entry must read back as the latest
+            // price, and its derived inverse as the reciprocal.
+            // Compared at 20 decimal places: the build may invert a
+            // swallowed rate twice (1/(1/r)), leaving a residue in
+            // the 28th significant digit — Python beancount's
+            // build_price_map performs the same double inversion
+            // with its own last-digit artifacts, so exactness at
+            // full precision is not part of the modeled contract.
             for entry in state["prices"].as_array().expect("prices") {
                 let (b, q, p) = (
                     entry[0].as_str().expect("base"),
@@ -77,9 +90,14 @@ fn replay_every_price_db_behavior() {
                     entry[2].as_i64().expect("price"),
                 );
                 assert_eq!(
-                    db.get_latest_price(b, q),
-                    Some(Decimal::from(p)),
+                    db.get_latest_price(b, q).map(|r| r.round_dp(20)),
+                    Some(Decimal::from(p).round_dp(20)),
                     "PriceDB behavior {bi} step {si}: latest {b}/{q} diverged"
+                );
+                assert_eq!(
+                    db.get_latest_price(q, b).map(|r| r.round_dp(20)),
+                    Some((Decimal::ONE / Decimal::from(p)).round_dp(20)),
+                    "PriceDB behavior {bi} step {si}: inverse {q}/{b} diverged"
                 );
             }
         }

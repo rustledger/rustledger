@@ -91,6 +91,7 @@ proptest! {
         };
 
         db.add_price(&price_directive);
+        db.sort_prices();
 
         // Even after adding a "self-price", get_price should return 1.0
         let result = db.get_price(currency, currency, date);
@@ -124,6 +125,7 @@ proptest! {
             amount: Amount::new(price_val, quote),
             meta: Default::default(),
         });
+        db.sort_prices();
 
         // Direct lookup
         let direct = db.get_price(base, quote, date);
@@ -170,7 +172,9 @@ proptest! {
             meta: Default::default(),
         });
 
-        // Sort (normally done by from_directives)
+        // Finalize (normally done by from_directives)
+        db.sort_prices();
+
         // Chained lookup: AAPL -> EUR = AAPL -> USD * USD -> EUR = 150 * 0.92 = 138
         let chained = db.get_price("AAPL", "EUR", date);
 

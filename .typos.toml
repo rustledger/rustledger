@@ -1,4 +1,11 @@
 [default.extend-words]
+# Attestation-standards terms (docs/roadmap/attestations.md):
+# Federal Rules of Evidence; CBOR Object Signing and Encryption (RFC 9052);
+# ETSI JSON AdES signature profile
+FRE = "FRE"
+COSE = "COSE"
+AdES = "AdES"
+JAdES = "JAdES"
 # OFX tag name: currency exchange rate (<CURRATE>)
 CURRATE = "CURRATE"
 # Financial term: Profit and Loss

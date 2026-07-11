@@ -45,6 +45,7 @@ Lower the on-ramp and meet people where they work:
 - A **browser playground** — `rustledger-wasm` already compiles the engine to WASM, so a "try it in the browser" surface is mostly packaging, and it doubles as live, runnable docs.
 - **Incremental, low-latency LSP** so editor responsiveness stays flat as ledgers grow (range-based reparse over the lossless CST), plus the missing refactors (rename, code actions).
 - A **stable, documented plugin surface** (the SemVer gate is the first step) so third-party native and WASM plugins are safe to depend on.
+- **Verifiable ledger statements** — signed, selectively-disclosable attestations of *computed* state (balances as of a date, covenant booleans) that a user hands to an accountant or lender, verifiable with off-the-shelf SD-JWT libraries. Plain text stays the only source of truth; the layer stores nothing user-authored. See [Verifiable Ledger Statements](./attestations.md).
 
 ## The substrate: keep raising the floor
 

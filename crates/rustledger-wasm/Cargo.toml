@@ -95,9 +95,15 @@ schemars = { workspace = true, optional = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 # Cross-mirror wire-parity test (tests/cost_number_wire_parity.rs) —
 # native-only, compares this crate's CostNumberJson against the other
-# CostNumber wire mirrors.
-rustledger-plugin-types.workspace = true
-rustledger-ffi-wasi.workspace = true
+# CostNumber wire mirrors. Path-ONLY (not `workspace = true`): the
+# workspace dep carries a `version = "X.Y.Z"` requirement, which cargo
+# bakes into the published package's dev-deps — making `cargo publish`
+# of THIS crate fail whenever the sibling isn't on crates.io yet at that
+# exact version (broke the v0.21.0 publish: wasm was ordered before
+# ffi-wasi). Path-only dev-deps are stripped at publish, which is
+# exactly right for test-only siblings.
+rustledger-plugin-types = { path = "../rustledger-plugin-types" }
+rustledger-ffi-wasi = { path = "../rustledger-ffi-wasi" }
 serde_json.workspace = true
 
 # `getrandom` 0.3 (pulled in transitively via `imbl` → `rand_xoshiro`

@@ -63,6 +63,11 @@ multiple-versions = "deny"
 # Forbid `version = "*"` specs in published crates — they bind to whatever
 # happens to resolve at publish time, with no SemVer guard.
 wildcards = "deny"
+# ...except path-only dependencies. Sibling-crate dev-deps are
+# deliberately `path`-only WITHOUT a version (#1758): cargo strips
+# versionless dev-deps at publish, so they can never bind to a
+# published version — but cargo-deny models them as wildcards.
+allow-wildcard-paths = true
 highlight = "all"
 
 # Crates we never want to depend on, even transitively. We use rustls

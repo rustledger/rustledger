@@ -1,3 +1,55 @@
+## [0.21.0] - 2026-07-11
+
+### 🚀 Features
+
+- *(report)* Balances/balsheet show lots at cost, like beancount (#1728)
+- *(report)* Render numbers through the ledger DisplayContext (U4) (#1750)
+- *(fuzz)* Fuzz the FFI ingress boundary (input_entry_to_directive) (#1753)
+- *(ffi)* Session.from-entries — hold a directive set across calls (WIT 3.4.0) (#1755)
+- *(ci)* Randomized nightly synthetic corpus with an absolute differential gate (#1754)
+
+### 🐛 Bug Fixes
+
+- *(ci)* Unblock main by resolving CodeQL action skew and RustSec advisory (#1723)
+- *(deps)* Bump crossbeam-epoch to 0.9.20 (#1724)
+- Honor name_* account-root renames in reports and BQL (beanquery parity) (#1731)
+- Compound costs mispriced in doctor region and ops clamp (#1732)
+- One canonical account-name rule; validate FFI ingress; warn on bad name_* roots (#1739)
+- *(validate)* Catch postings dated before their account's open (#1742)
+- Make pager and config tests hermetic under a TTY (#1747)
+- *(ci)* Probe bean-price with --help, not --version (#1748)
+- *(ci)* Pin rust-toolchain.toml in lockstep with the workflow pin (#1751)
+- *(ci)* Channel-only rust-toolchain.toml — kill the implicit component sync (#1756)
+
+### 🚜 Refactor
+
+- *(report)* Single source of truth for account balances (#1726) (#1727)
+- Single-source the booking-order comparator (LSP + validator) (#1734)
+- Promote transaction tolerance semantics to booking as the canonical (#1735)
+- Single-source the posting weight arithmetic in booking (#1736)
+- *(parser)* Share cost-spec and meta-value semantics between green and red walkers (#1737)
+- *(lsp)* Inlay tooltip balances from the loaded ledger; document valuation FIFO (#1743)
+
+### 📚 Documentation
+
+- Canonical-function discipline and toolchain-bump runbook (#1752)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(ci)* Bump dorny/paths-filter from 4.0.1 to 4.0.2 (#1716)
+- *(ci)* Bump docker/setup-qemu-action from 4.1.0 to 4.2.0 (#1717)
+- *(ci)* Bump github/codeql-action/init from 4.36.2 to 4.36.3 (#1719)
+- *(ci)* Bump anomalyco/opencode/github from 1.17.11 to 1.17.13 (#1721)
+- *(ci)* Bump docker/setup-buildx-action from 4.1.0 to 4.2.0 (#1718)
+- *(ci)* Bump docker/metadata-action from 6.1.0 to 6.2.0 (#1720)
+- Add cargo-vet exemption for crossbeam-epoch 0.9.20 (#1725)
+- Fix Rust 1.97 toolchain breakage (clippy lints + BQL parse stack) (#1745)
+- *(test)* Pin BQL BALANCES == report balances on netted reductions (#1733)
+- *(parser)* Pin includes/plugins/warnings/bom/alignment in green-red parity (#1738)
+- Pin CostNumber wire parity across all five mirrors (#1740)
+- Run the python-gated cargo tests with bean-check installed (#1746)
+- Consolidate utility copies (CSV/JSON escaping, account-type checks, quarter math) (#1741)
+- *(ci)* Pin the CI toolchain to 1.97.0 instead of floating stable (#1749)
 # Changelog
 
 Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadmap/index.md); completed items land here so the roadmaps stay forward-only.

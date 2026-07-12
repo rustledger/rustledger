@@ -2078,49 +2078,18 @@ mod tests {
 
 use crate::exports::rustledger::ledger::importer as imp;
 use rustledger_importer::csv_importer::CsvImporter;
-use rustledger_importer::{OfxImporter, toml_entry};
+use rustledger_importer::{DetectedFormat, OfxImporter, detect_format, toml_entry};
 
-/// Sniff OFX content: OFX 1.x starts with an `OFXHEADER` SGML preamble; 2.x
-/// is XML containing an `<OFX>` element. Checked case-insensitively over the
-/// head of the file so a generic `.txt` download is still recognized.
-fn looks_like_ofx(content: &[u8]) -> bool {
-    let head_len = content.len().min(2048);
-    let head = String::from_utf8_lossy(&content[..head_len]).to_uppercase();
-    head.contains("OFXHEADER") || head.contains("<OFX")
-}
-
-/// Filename extension, lowercased.
-fn extension(filename: &str) -> Option<String> {
-    std::path::Path::new(filename)
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-}
-
-/// Whether the file should be treated as OFX: extension first, content
-/// sniff as fallback.
-fn is_ofx(filename: &str, content: &[u8]) -> bool {
-    matches!(extension(filename).as_deref(), Some("ofx" | "qfx")) || looks_like_ofx(content)
-}
-
-/// Names of built-in importers that recognize the file. Mirrors the
-/// registry's builtin `identify` heuristics (extension), extended with a
-/// content sniff so bytes-only hosts get an answer for misnamed downloads.
+/// Names of built-in importers that recognize the file. Delegates to the
+/// canonical `rustledger_importer::detect_format` — the extension is
+/// authoritative when recognized; the content sniff only decides for
+/// absent/unrecognized extensions (misnamed downloads).
 pub fn import_identify(filename: &str, content: &[u8]) -> Vec<String> {
-    let mut names = Vec::new();
-    if is_ofx(filename, content) {
-        names.push("OFX/QFX".to_string());
+    match detect_format(filename, content) {
+        Some(DetectedFormat::Ofx) => vec!["OFX/QFX".to_string()],
+        Some(DetectedFormat::Csv) => vec!["CSV".to_string()],
+        None => Vec::new(),
     }
-    let csv_ext = matches!(extension(filename).as_deref(), Some("csv"));
-    if csv_ext
-        || (names.is_empty()
-            && std::str::from_utf8(content)
-                .ok()
-                .and_then(rustledger_importer::csv_inference::infer_csv_config)
-                .is_some())
-    {
-        names.push("CSV".to_string());
-    }
-    names
 }
 
 /// Infer a CSV mapping; returns an `importers.toml` entry (bare TOML table)
@@ -2133,15 +2102,24 @@ pub fn import_infer(_filename: &str, content: &[u8]) -> Result<String, String> {
 }
 
 /// Extract directives from statement bytes using a declarative config entry.
+///
+/// Mirrors the CLI's semantics: `currency` defaults to USD when the entry
+/// omits it (the schema's documented default — the CLI injects it via the
+/// `--currency` flag default), and non-UTF-8 content is decoded lossily so
+/// a Latin-1 OFX 1.x download degrades to replacement characters in text
+/// fields instead of dead-ending a file `identify` just recognized.
 pub fn import_extract(
     filename: &str,
     content: &[u8],
     config: &str,
 ) -> Result<imp::ExtractResult, String> {
-    let entry = toml_entry::ImporterEntry::from_toml_str(config).map_err(|e| e.to_string())?;
-    let text = std::str::from_utf8(content).map_err(|_| "content is not UTF-8".to_string())?;
+    let mut entry = toml_entry::ImporterEntry::from_toml_str(config).map_err(|e| e.to_string())?;
+    if entry.currency.is_none() {
+        entry.currency = Some("USD".to_string());
+    }
+    let text = String::from_utf8_lossy(content);
 
-    let result = if is_ofx(filename, content) {
+    let result = if detect_format(filename, content) == Some(DetectedFormat::Ofx) {
         // OFX needs only account/currency; column mappings don't apply.
         let mut builder = rustledger_importer::ImporterConfig::csv();
         if let Some(ref account) = entry.account {
@@ -2152,12 +2130,12 @@ pub fn import_extract(
         }
         let cfg = builder.build().map_err(|e| e.to_string())?;
         OfxImporter
-            .extract_from_string(text, &cfg)
+            .extract_from_string(&text, &cfg)
             .map_err(|e| e.to_string())?
     } else {
         let cfg = toml_entry::build_config_from_entry(&entry).map_err(|e| e.to_string())?;
         CsvImporter
-            .extract_string(text, &cfg)
+            .extract_string(&text, &cfg)
             .map_err(|e| e.to_string())?
     };
 
@@ -2190,6 +2168,41 @@ mod importer_tests {
         );
         // Headerless junk matches nothing.
         assert!(import_identify("blob.bin", &[0u8, 159, 146, 150]).is_empty());
+    }
+
+    /// The extension is authoritative: a CSV whose narration mentions
+    /// "<OFX" must stay on the CSV path (review finding — the sniff must
+    /// not override an explicit extension).
+    #[test]
+    fn csv_extension_beats_ofx_looking_content() {
+        let csv = "Date,Description,Amount\n2026-07-01,REFUND <OFX PORTAL>,-4.50\n";
+        assert_eq!(import_identify("bank.csv", csv.as_bytes()), vec!["CSV"]);
+        let config = "name = \"x\"\naccount = \"Assets:Bank\"\ndate_column = \"Date\"\nnarration_column = \"Description\"\namount_column = \"Amount\"\n";
+        let result = import_extract("bank.csv", csv.as_bytes(), config).expect("CSV path");
+        assert_eq!(result.entries.len(), 1);
+    }
+
+    /// Currency defaults to USD (the schema's documented default), so an
+    /// entry with only account works over the component exactly like the
+    /// CLI, where the --currency flag default supplies it.
+    #[test]
+    fn currency_defaults_to_usd() {
+        let config = "name = \"ofx\"\naccount = \"Assets:Checking\"\n";
+        let result = import_extract("bank.ofx", OFX.as_bytes(), config).expect("extracts");
+        assert_eq!(result.entries.len(), 1);
+    }
+
+    /// Latin-1 OFX (CHARSET:1252, the OFX 1.x default many banks emit) is
+    /// decoded lossily instead of dead-ending a file identify recognized.
+    #[test]
+    fn latin1_ofx_extracts_lossily() {
+        let mut bytes = OFX.replace("Coffee", "Entr~e").into_bytes();
+        let idx = bytes.iter().position(|&b| b == b'~').expect("marker");
+        bytes[idx] = 0xE9; // \u{e9} in Latin-1 (Entree with an accent) — invalid UTF-8
+        assert_eq!(import_identify("bank.ofx", &bytes), vec!["OFX/QFX"]);
+        let config = "name = \"ofx\"\naccount = \"Assets:Checking\"\ncurrency = \"USD\"\n";
+        let result = import_extract("bank.ofx", &bytes, config).expect("lossy decode extracts");
+        assert_eq!(result.entries.len(), 1);
     }
 
     /// The infer -> extract loop a GUI host runs: infer a mapping, append

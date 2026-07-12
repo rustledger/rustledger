@@ -571,9 +571,11 @@ interface importer {
     warnings: list<string>,
   }
 
-  /// Names of built-in importers that recognize the file, by filename
-  /// extension with a content sniff as fallback (e.g. an OFX body served
-  /// with a generic extension). Empty when nothing matches.
+  /// Names of built-in importers that recognize the file. The filename
+  /// extension is AUTHORITATIVE when recognized (.csv is CSV even if the
+  /// content mentions "<OFX"); the content sniff only decides for absent
+  /// or unrecognized extensions (e.g. an OFX body served as .txt). Empty
+  /// when nothing matches.
   identify: func(filename: string, content: list<u8>) -> list<string>;
 
   /// Infer a CSV column mapping from content. Returns an `importers.toml`
@@ -585,9 +587,13 @@ interface importer {
   /// Extract directives from statement content. `config` is ONE
   /// `importers.toml` entry as a bare TOML table (`name = "..."`,
   /// `date_column = "..."`, ...) — the exact schema documented for the
-  /// CLI; both surfaces share the same canonical parser. OFX content is
-  /// detected via `identify` semantics and needs only `account`/`currency`
-  /// from the config; everything else applies to CSV.
+  /// CLI; both surfaces share the same canonical parser, and `currency`
+  /// defaults to USD exactly like the CLI's --currency flag. OFX content
+  /// is detected via `identify` semantics and needs only
+  /// `account`/`currency` from the config; everything else applies to
+  /// CSV. Non-UTF-8 content (e.g. a Latin-1 OFX 1.x download) is decoded
+  /// lossily — unmappable bytes degrade to replacement characters in text
+  /// fields rather than failing the extraction.
   extract: func(filename: string, content: list<u8>, config: string) -> result<extract-result, string>;
 }
 

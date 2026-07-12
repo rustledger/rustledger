@@ -943,7 +943,53 @@ fn importer_extract_matches_native_engine() -> Result<()> {
     let native_cfg = rustledger_importer::toml_entry::build_config_from_entry(&entry)?;
     let native = rustledger_importer::csv_importer::CsvImporter.extract_string(CSV, &native_cfg)?;
 
-    assert_eq!(result.entries.len(), native.directives.len());
-    assert_eq!(result.entries.len(), 2);
+    // Compare the exact observables (date, narration, postings), not just
+    // counts — a count-only guard is decoration per the drift-guard rule.
+    fn wit_shape(
+        d: &rustledger::ledger::types::Directive,
+    ) -> (String, String, Vec<(String, String)>) {
+        let rustledger::ledger::types::Directive::Transaction(t) = d else {
+            panic!("expected transaction, got {d:?}");
+        };
+        (
+            t.date.clone(),
+            t.narration.clone().unwrap_or_default(),
+            t.postings
+                .iter()
+                .map(|p| {
+                    let units = p
+                        .units
+                        .as_ref()
+                        .map(|u| format!("{} {}", u.number, u.currency))
+                        .unwrap_or_default();
+                    (p.account.clone(), units)
+                })
+                .collect(),
+        )
+    }
+    fn native_shape(d: &rustledger_core::Directive) -> (String, String, Vec<(String, String)>) {
+        let rustledger_core::Directive::Transaction(t) = d else {
+            panic!("expected transaction, got {d:?}");
+        };
+        (
+            t.date.to_string(),
+            t.narration.to_string(),
+            t.postings
+                .iter()
+                .map(|p| {
+                    let units = p
+                        .amount()
+                        .map(|a| format!("{} {}", a.number, a.currency))
+                        .unwrap_or_default();
+                    (p.account.to_string(), units)
+                })
+                .collect(),
+        )
+    }
+    let component_shapes: Vec<_> = result.entries.iter().map(wit_shape).collect();
+    let native_shapes: Vec<_> = native.directives.iter().map(native_shape).collect();
+    assert_eq!(component_shapes, native_shapes);
+    assert_eq!(component_shapes.len(), 2);
+    assert_eq!(result.warnings, native.warnings);
     Ok(())
 }

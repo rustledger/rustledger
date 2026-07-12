@@ -256,6 +256,57 @@ pub trait Importer: Send + Sync {
     }
 }
 
+/// A statement format recognized by [`detect_format`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectedFormat {
+    /// Comma/character-separated values.
+    Csv,
+    /// OFX 1.x (SGML) or 2.x (XML), including QFX.
+    Ofx,
+}
+
+/// Sniff OFX content: OFX 1.x starts with an `OFXHEADER` SGML preamble; 2.x
+/// is XML containing an `<OFX>` element. Checked case-insensitively over the
+/// head of the file so a generic `.txt` download is still recognized.
+fn looks_like_ofx(content: &[u8]) -> bool {
+    let head_len = content.len().min(2048);
+    let head = String::from_utf8_lossy(&content[..head_len]).to_uppercase();
+    head.contains("OFXHEADER") || head.contains("<OFX")
+}
+
+/// Canonical filename+content format dispatch for the built-in importers.
+///
+/// The extension is AUTHORITATIVE when recognized: a `.csv` whose narration
+/// happens to contain `<OFX` must not be routed to the OFX parser, and a
+/// `.ofx` is OFX even if its head looks odd. The content sniff only decides
+/// when the extension is absent or unrecognized (e.g. an OFX body served as
+/// `.txt`, or extensionless uploads). Shared by every bytes-based surface
+/// (the WASI component's `importer` interface) so dispatch policy cannot
+/// drift per-surface.
+#[must_use]
+pub fn detect_format(filename: &str, content: &[u8]) -> Option<DetectedFormat> {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase());
+    match ext.as_deref() {
+        Some("csv") => Some(DetectedFormat::Csv),
+        Some("ofx" | "qfx") => Some(DetectedFormat::Ofx),
+        _ => {
+            if looks_like_ofx(content) {
+                Some(DetectedFormat::Ofx)
+            } else if std::str::from_utf8(content)
+                .ok()
+                .and_then(csv_inference::infer_csv_config)
+                .is_some()
+            {
+                Some(DetectedFormat::Csv)
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// Auto-extract transactions from a file by inferring its format.
 ///
 /// If the file is OFX/QFX, uses the OFX importer directly. Otherwise,

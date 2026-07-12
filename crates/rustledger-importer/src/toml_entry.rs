@@ -122,6 +122,16 @@ pub fn parse_column_value(value: &toml::Value) -> Option<String> {
     }
 }
 
+/// Like [`parse_column_value`], but a wrong TOML type is an ERROR naming the
+/// field — a mistyped `amount_column = 2.0` must not silently fall back to
+/// the builder's default column (review finding on the 3.5.0 component
+/// surface; previously the CLI silently ignored such values too).
+fn require_column_value(field: &str, value: &toml::Value) -> Result<String> {
+    parse_column_value(value).ok_or_else(|| {
+        anyhow!("`{field}` must be a column name (string) or 0-based index (integer), got: {value}")
+    })
+}
+
 /// Parse an amount-locale name (e.g. `de_DE`, `en_US`) into a [`Locale`].
 ///
 /// Emits a consistent error for an unrecognized name. Shared by the CLI's
@@ -147,9 +157,8 @@ pub fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterConfig> 
     if let Some(ref currency) = entry.currency {
         builder = builder.currency(currency);
     }
-    if let Some(ref val) = entry.date_column
-        && let Some(col) = parse_column_value(val)
-    {
+    if let Some(ref val) = entry.date_column {
+        let col = require_column_value("date_column", val)?;
         builder = apply_column(
             builder,
             &col,
@@ -175,9 +184,8 @@ pub fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterConfig> 
         });
         builder = builder.secondary_date(col, fmt, key);
     }
-    if let Some(ref val) = entry.narration_column
-        && let Some(col) = parse_column_value(val)
-    {
+    if let Some(ref val) = entry.narration_column {
+        let col = require_column_value("narration_column", val)?;
         builder = apply_column(
             builder,
             &col,
@@ -185,9 +193,8 @@ pub fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterConfig> 
             |b, n| b.narration_column(n),
         );
     }
-    if let Some(ref val) = entry.payee_column
-        && let Some(col) = parse_column_value(val)
-    {
+    if let Some(ref val) = entry.payee_column {
+        let col = require_column_value("payee_column", val)?;
         builder = apply_column(
             builder,
             &col,
@@ -195,9 +202,8 @@ pub fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterConfig> 
             |b, n| b.payee_column(n),
         );
     }
-    if let Some(ref val) = entry.amount_column
-        && let Some(col) = parse_column_value(val)
-    {
+    if let Some(ref val) = entry.amount_column {
+        let col = require_column_value("amount_column", val)?;
         builder = apply_column(
             builder,
             &col,
@@ -205,9 +211,8 @@ pub fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterConfig> 
             |b, n| b.amount_column(n),
         );
     }
-    if let Some(ref val) = entry.currency_column
-        && let Some(col) = parse_column_value(val)
-    {
+    if let Some(ref val) = entry.currency_column {
+        let col = require_column_value("currency_column", val)?;
         builder = apply_column(
             builder,
             &col,
@@ -215,14 +220,12 @@ pub fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterConfig> 
             |b, n| b.currency_column(n),
         );
     }
-    if let Some(ref val) = entry.debit_column
-        && let Some(col) = parse_column_value(val)
-    {
+    if let Some(ref val) = entry.debit_column {
+        let col = require_column_value("debit_column", val)?;
         builder = builder.debit_column(&col);
     }
-    if let Some(ref val) = entry.credit_column
-        && let Some(col) = parse_column_value(val)
-    {
+    if let Some(ref val) = entry.credit_column {
+        let col = require_column_value("credit_column", val)?;
         builder = builder.credit_column(&col);
     }
     if let Some(ref locale) = entry.amount_locale {
@@ -322,6 +325,10 @@ pub fn entry_toml_from_inferred(
     if let Some(ref c) = inferred.currency_column {
         t.insert("currency_column".into(), col(c));
     }
+    // Inference only ever produces a Name column here (secondary-date
+    // detection is header-gated — see `csv_inference`'s SecondaryDate
+    // construction), so the Name-only match is lossless. Pinned by
+    // `inferred_secondary_date_is_always_named`.
     if let Some(ref sd) = inferred.secondary_date
         && let ColumnSpec::Name(ref n) = sd.column
     {
@@ -426,6 +433,68 @@ amount_column = 2
         let entry = ImporterEntry::from_toml_str(&toml_str).expect("round-trips");
         assert_eq!(entry.name, "inferred");
         build_config_from_entry(&entry).expect("config builds");
+    }
+
+    /// A mistyped column value is an error, not a silent fallback to the
+    /// default column.
+    #[test]
+    fn wrong_column_type_is_rejected() {
+        let entry = ImporterEntry::from_toml_str(
+            "name = \"bad\"\naccount = \"Assets:Bank\"\namount_column = 2.0",
+        )
+        .expect("parses as TOML");
+        let err = build_config_from_entry(&entry).expect_err("must reject");
+        assert!(err.to_string().contains("amount_column"), "{err}");
+    }
+
+    /// Drift guard: the TOML round-trip path (`entry_toml_from_inferred` →
+    /// `build_config_from_entry`) must agree with the canonical direct
+    /// mapping (`InferredCsvConfig::to_csv_config`) on the same inference.
+    #[test]
+    fn inferred_toml_path_matches_to_csv_config() {
+        let content = "Booking Date,Value Date,Description,Amount\n\
+                       2026-07-01,2026-07-02,Coffee,-4.50\n\
+                       2026-07-03,2026-07-04,Salary,2500.00\n";
+        let inferred = crate::csv_inference::infer_csv_config(content).expect("inferable");
+        let direct = inferred.to_csv_config();
+
+        let toml_str = entry_toml_from_inferred("x", &inferred);
+        let entry = ImporterEntry::from_toml_str(&toml_str).expect("round-trips");
+        let via_toml = build_config_from_entry(&entry).expect("config builds");
+        let ImporterType::Csv(via_toml) = &via_toml.importer_type;
+
+        assert_eq!(
+            format!("{:?}", via_toml.date_column),
+            format!("{:?}", direct.date_column)
+        );
+        assert_eq!(via_toml.date_format, direct.date_format);
+        assert_eq!(
+            format!("{:?}", via_toml.amount_column),
+            format!("{:?}", direct.amount_column)
+        );
+        assert_eq!(
+            format!("{:?}", via_toml.narration_column),
+            format!("{:?}", direct.narration_column)
+        );
+        assert_eq!(via_toml.delimiter, direct.delimiter);
+        assert_eq!(via_toml.has_header, direct.has_header);
+        assert_eq!(
+            format!("{:?}", via_toml.secondary_date),
+            format!("{:?}", direct.secondary_date),
+            "secondary date must survive the TOML round trip"
+        );
+    }
+
+    /// The invariant `entry_toml_from_inferred`'s Name-only secondary-date
+    /// match relies on: inference never emits an Index secondary column.
+    #[test]
+    fn inferred_secondary_date_is_always_named() {
+        let content = "Booking Date,Value Date,Description,Amount\n\
+                       2026-07-01,2026-07-02,Coffee,-4.50\n";
+        let inferred = crate::csv_inference::infer_csv_config(content).expect("inferable");
+        if let Some(sd) = inferred.secondary_date {
+            assert!(matches!(sd.column, crate::config::ColumnSpec::Name(_)));
+        }
     }
 
     /// The Debug form of `Locale` is the locale code and parses back —

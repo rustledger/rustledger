@@ -29,3 +29,27 @@ updates:
     labels:
       - "dependencies"
     open-pull-requests-limit: 5
+  # npm — MCP server. The MCP spec moves fast (2026-07-28 restructures the
+  # protocol core); without this entry the @modelcontextprotocol/sdk pin
+  # never gets update PRs and spec adoption stalls silently (issue #1767).
+  - package-ecosystem: "npm"
+    directory: "/packages/mcp-server"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 5
+  # npm — VS Code extension.
+  - package-ecosystem: "npm"
+    directory: "/packages/vscode"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+    open-pull-requests-limit: 5

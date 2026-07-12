@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.5.0;
+package rustledger:ledger@3.6.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -558,7 +558,7 @@ interface format {
   /// entries) to canonical beancount text; the loaded->input
   /// down-conversion (dropping loader-assigned source locations) happens
   /// inside the component so hosts never reshape directives themselves.
-  /// Added in 3.5.0 alongside the importer interface — it closes the
+  /// Added in 3.6.0 alongside `importer.dedup` — it closes the
   /// extract -> review -> save-to-ledger loop.
   format-loaded: func(entries: list<directive>) -> result<string, string>;
 }
@@ -608,6 +608,7 @@ interface importer {
   /// `rledger extract --existing` (date proximity + amount + text
   /// similarity), so a host review UI and the CLI agree on what counts as
   /// a duplicate. Non-transaction candidates are never duplicates.
+  /// Added in 3.6.0.
   dedup: func(candidates: list<directive>, existing: list<directive>) -> list<bool>;
 }
 

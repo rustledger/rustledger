@@ -45,14 +45,16 @@ use exports::rustledger::ledger::ledger::{
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. 3.5 adds the
-/// `importer` interface (identify / infer / extract — the `rledger extract`
-/// engine over the boundary); 3.4 added `session.from-entries` (hold a
+/// The Component-Model api-version this build implements. 3.6 adds
+/// `importer.dedup` and `format.format-loaded` (the extract → review →
+/// save loop); 3.5 added the `importer` interface (identify / infer /
+/// extract — the `rledger extract` engine over the boundary); 3.4 added
+/// `session.from-entries` (hold a
 /// directive set, rustfava#173/#249); 3.2 added the `host.decrypt` import so
 /// encrypted (`.gpg`/`.asc`) ledgers can be decrypted by the host (#1667);
 /// 3.1 added the `diff` field on `balance-dir` (#1663); 3.0 was the breaking
 /// `expand-pads` parameter on `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.5";
+const API_VERSION: &str = "3.6";
 
 struct Component;
 

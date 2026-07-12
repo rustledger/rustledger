@@ -28,6 +28,10 @@ wasm-importer = [
   "dep:thiserror",
   "dep:rustledger-plugin",
 ]
+# The `importers.toml` entry schema (`toml_entry` module) — the canonical
+# declarative-config parser shared by the CLI and the WASI component's
+# `importer` interface. Off by default so slim builds skip toml/serde.
+toml-config = ["dep:serde", "dep:toml"]
 
 [dependencies]
 rustledger-core.workspace = true
@@ -50,6 +54,7 @@ wasmtime = { workspace = true, optional = true }
 rmp-serde = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

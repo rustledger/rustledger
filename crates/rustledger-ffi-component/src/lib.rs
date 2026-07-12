@@ -38,19 +38,21 @@ mod convert;
 
 use exports::rustledger::ledger::builder::{Directive, Guest as BuilderGuest, InputDirective};
 use exports::rustledger::ledger::format::Guest as FormatGuest;
+use exports::rustledger::ledger::importer::{ExtractResult, Guest as ImporterGuest};
 use exports::rustledger::ledger::ledger::{
     BatchResult, Guest as LedgerGuest, GuestSession, LoadResult, QueryResult, Session,
     ValidateResult,
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. 3.2 adds the
-/// `host.decrypt` import so encrypted (`.gpg`/`.asc`) ledgers can be decrypted by
-/// the host — a WASI guest can't reach the keyring (#1667). 3.4 added
-/// `session.from-entries` (hold a directive set, rustfava#173/#249); 3.1 added
-/// the `diff` field on `balance-dir` (#1663); 3.0 was the breaking
+/// The Component-Model api-version this build implements. 3.5 adds the
+/// `importer` interface (identify / infer / extract — the `rledger extract`
+/// engine over the boundary); 3.4 added `session.from-entries` (hold a
+/// directive set, rustfava#173/#249); 3.2 added the `host.decrypt` import so
+/// encrypted (`.gpg`/`.asc`) ledgers can be decrypted by the host (#1667);
+/// 3.1 added the `diff` field on `balance-dir` (#1663); 3.0 was the breaking
 /// `expand-pads` parameter on `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.4";
+const API_VERSION: &str = "3.5";
 
 struct Component;
 
@@ -161,6 +163,22 @@ impl UtilGuest for Component {
     }
     fn get_account_type(account: String) -> String {
         convert::get_account_type(&account)
+    }
+}
+
+impl ImporterGuest for Component {
+    fn identify(filename: String, content: Vec<u8>) -> Vec<String> {
+        convert::import_identify(&filename, &content)
+    }
+    fn infer(filename: String, content: Vec<u8>) -> Result<String, String> {
+        convert::import_infer(&filename, &content)
+    }
+    fn extract(
+        filename: String,
+        content: Vec<u8>,
+        config: String,
+    ) -> Result<ExtractResult, String> {
+        convert::import_extract(&filename, &content, &config)
     }
 }
 

@@ -912,3 +912,38 @@ fn load_file_decrypts_via_host_import() -> Result<()> {
     );
     Ok(())
 }
+
+/// The `importer` interface (3.5.0) over the real component: identify a CSV,
+/// infer its mapping, extract with the inferred config, and agree with the
+/// native `rustledger-importer` engine on the result.
+#[test]
+fn importer_extract_matches_native_engine() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    const CSV: &str =
+        "Date,Description,Amount\n2026-07-01,Coffee Shop,-4.50\n2026-07-02,Salary,2500.00\n";
+    let (mut store, inst) = instantiate()?;
+    let importer = inst.rustledger_ledger_importer();
+
+    let names = importer.call_identify(&mut store, "bank.csv", CSV.as_bytes())?;
+    assert_eq!(names, vec!["CSV".to_string()]);
+
+    let config = importer
+        .call_infer(&mut store, "bank.csv", CSV.as_bytes())?
+        .expect("CSV is inferable");
+    let config = format!("{config}account = \"Assets:Bank\"\ncurrency = \"USD\"\n");
+    let result = importer
+        .call_extract(&mut store, "bank.csv", CSV.as_bytes(), &config)?
+        .expect("extraction succeeds");
+
+    // Native engine on the same content + config — the drift guard.
+    let entry = rustledger_importer::toml_entry::ImporterEntry::from_toml_str(&config)?;
+    let native_cfg = rustledger_importer::toml_entry::build_config_from_entry(&entry)?;
+    let native = rustledger_importer::csv_importer::CsvImporter.extract_string(CSV, &native_cfg)?;
+
+    assert_eq!(result.entries.len(), native.directives.len());
+    assert_eq!(result.entries.len(), 2);
+    Ok(())
+}

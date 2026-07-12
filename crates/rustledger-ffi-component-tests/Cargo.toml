@@ -16,6 +16,7 @@ anyhow = "1"
 tempfile.workspace = true
 rustledger-core.workspace = true
 rustledger-ffi-wasi.workspace = true
+rustledger-importer = { workspace = true, features = ["toml-config"] }
 
 [lints]
 workspace = true

@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.4.0;
+package rustledger:ledger@3.5.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -556,6 +556,41 @@ interface format {
   format-entries: func(entries: list<input-directive>) -> result<string, string>;
 }
 
+/// Bank-statement import — the `rledger extract` engine over the component
+/// boundary (added in 3.5.0; roadmap "import over the component boundary").
+/// Covers the NATIVE importers: CSV (with auto-inference) and OFX 1.x/2.x.
+/// Sandboxed `.wasm` plugin importers remain a host-side concern — a
+/// component cannot host nested guests.
+interface importer {
+  use types.{directive};
+
+  /// Extracted directives plus non-fatal diagnostics (skipped rows etc.).
+  /// Entries carry the given statement filename as their source location.
+  record extract-result {
+    entries: list<directive>,
+    warnings: list<string>,
+  }
+
+  /// Names of built-in importers that recognize the file, by filename
+  /// extension with a content sniff as fallback (e.g. an OFX body served
+  /// with a generic extension). Empty when nothing matches.
+  identify: func(filename: string, content: list<u8>) -> list<string>;
+
+  /// Infer a CSV column mapping from content. Returns an `importers.toml`
+  /// entry as a bare TOML table — the same schema `extract` accepts — so
+  /// the host can surface it for editing and pass it straight back.
+  /// Errors when the content doesn't look like confidently-parseable CSV.
+  infer: func(filename: string, content: list<u8>) -> result<string, string>;
+
+  /// Extract directives from statement content. `config` is ONE
+  /// `importers.toml` entry as a bare TOML table (`name = "..."`,
+  /// `date_column = "..."`, ...) — the exact schema documented for the
+  /// CLI; both surfaces share the same canonical parser. OFX content is
+  /// detected via `identify` semantics and needs only `account`/`currency`
+  /// from the config; everything else applies to CSV.
+  extract: func(filename: string, content: list<u8>, config: string) -> result<extract-result, string>;
+}
+
 /// Capabilities the host provides to the component.
 interface host {
   /// Decrypt an encrypted ledger file on the host — e.g. via the user's GPG
@@ -577,4 +612,5 @@ world rustledger {
   export builder;
   export util;
   export format;
+  export importer;
 }

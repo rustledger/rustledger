@@ -38,6 +38,8 @@ pub mod csv_inference;
 pub mod ofx_importer;
 pub mod registry;
 pub mod test_fixtures;
+#[cfg(feature = "toml-config")]
+pub mod toml_entry;
 #[cfg(feature = "wasm-importer")]
 pub mod wasm;
 

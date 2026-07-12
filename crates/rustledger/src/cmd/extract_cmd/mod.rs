@@ -70,7 +70,6 @@ use config::{
 #[cfg(feature = "python-plugin-wasm")]
 use config::expand_tilde;
 use duplicate::load_existing_transactions;
-use format_num_pattern::Locale;
 use rustledger_core::{Directive, FormatConfig};
 use rustledger_importer::config::CsvConfigBuilder;
 use rustledger_importer::{Importer, ImporterConfig, ImporterRegistry, csv_importer::CsvImporter};
@@ -78,7 +77,6 @@ use rustledger_parser::format::canonicalize_directives;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::Arc;
 
 /// Extract transactions from bank files.
@@ -463,12 +461,9 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
     Ok(registry)
 }
 
-/// Parse an `--amount-locale` value (e.g. `de_DE`, `en_US`) into a [`Locale`],
-/// with a consistent error for an unrecognized name. Shared by the `--auto`
-/// and raw-CLI config paths.
-fn parse_amount_locale(name: &str) -> Result<Locale> {
-    Locale::from_str(name).map_err(|_| anyhow!("{name} is not a valid locale"))
-}
+// `parse_amount_locale` moved to `rustledger_importer::toml_entry` (the
+// canonical config-schema module, shared with the WASI component).
+use rustledger_importer::toml_entry::parse_amount_locale;
 
 /// Run the extract command with the given arguments, writing extracted
 /// directives to stdout.
@@ -900,9 +895,9 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use super::config::{ImporterEntry, parse_column_value};
     use super::*;
     use rustledger_importer::config::ImporterType;
+    use rustledger_importer::toml_entry::{ImporterEntry, parse_column_value};
     use std::collections::HashMap;
 
     fn write_temp_config(content: &str) -> (tempfile::TempDir, PathBuf) {

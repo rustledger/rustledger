@@ -36,6 +36,11 @@ rustledger-validate.workspace = true
 # types. During the dual-ship window both crates coexist; the shared logic
 # moves to a neutral home when the wasip1 surface is retired (Phase 5).
 rustledger-ffi-wasi.workspace = true
+# The `importer` interface (3.5.0): CSV/OFX extraction + inference, with the
+# canonical `importers.toml` entry schema (`toml-config`). Default features
+# only — the `.wasm` plugin-importer runtime (wasmtime host) cannot exist
+# inside a component and stays a host-side concern.
+rustledger-importer = { workspace = true, features = ["toml-config"] }
 
 [lints]
 workspace = true

@@ -117,7 +117,7 @@ wasmtime = "46.0.0"
 wasmtime-wasi = "46.0.0"
 wat = "1"
 # WIT / Component Model guest bindings (rustledger-ffi-component, #1384)
-wit-bindgen = "0.58"
+wit-bindgen = "0.59"
 
 # Parallelization
 rayon = "1.12"

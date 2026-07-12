@@ -1274,6 +1274,20 @@ pub fn format_entries(entries: &[wit::InputDirective]) -> Result<String, String>
     format_directives(&dirs)
 }
 
+/// Render LOADED directives to canonical beancount text (3.5.0). The
+/// loaded->input down-conversion is the same one `session.from-entries` and
+/// `builder.query-entries` use, so an entry that round-trips there renders
+/// here.
+pub fn format_loaded(entries: &[wit::Directive]) -> Result<String, String> {
+    let mut dirs = Vec::with_capacity(entries.len());
+    for e in entries {
+        dirs.push(ffi::input_entry_to_directive(&loaded_directive_to_input(
+            e,
+        ))?);
+    }
+    format_directives(&dirs)
+}
+
 // ---- builder: clamp (WIT loaded directives -> core -> ops::clamp -> WIT) ----
 
 fn loaded_meta(m: &wit::Meta) -> std::collections::HashMap<String, Json> {
@@ -2152,6 +2166,43 @@ pub fn import_extract(
     })
 }
 
+/// Flag duplicate candidates against existing entries using the canonical
+/// fuzzy matcher (`rustledger_ops::dedup::is_duplicate`) — the same one
+/// `rledger extract --existing` filters with, so the two surfaces agree on
+/// what counts as a duplicate. One bool per candidate, in order;
+/// non-transaction candidates are never duplicates.
+pub fn import_dedup(candidates: &[wit::Directive], existing: &[wit::Directive]) -> Vec<bool> {
+    fn to_core(entries: &[wit::Directive]) -> Vec<rustledger_core::Directive> {
+        entries
+            .iter()
+            .filter_map(|d| ffi::input_entry_to_directive(&loaded_directive_to_input(d)).ok())
+            .collect()
+    }
+    let existing_txns: Vec<rustledger_core::Transaction> = to_core(existing)
+        .into_iter()
+        .filter_map(|d| match d {
+            rustledger_core::Directive::Transaction(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let config = rustledger_ops::dedup::FuzzyDedupConfig::default();
+    candidates
+        .iter()
+        .map(|d| {
+            // Convert per-candidate so one unconvertible candidate can't
+            // shift flags out of alignment with the input order.
+            ffi::input_entry_to_directive(&loaded_directive_to_input(d))
+                .ok()
+                .is_some_and(|core| match core {
+                    rustledger_core::Directive::Transaction(t) => {
+                        rustledger_ops::dedup::is_duplicate(&t, &existing_txns, &config)
+                    }
+                    _ => false,
+                })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod importer_tests {
     use super::*;
@@ -2171,6 +2222,27 @@ mod importer_tests {
         );
         // Headerless junk matches nothing.
         assert!(import_identify("blob.bin", &[0u8, 159, 146, 150]).is_empty());
+    }
+
+    /// The extract -> dedup -> format-loaded loop a host review UI runs.
+    #[test]
+    fn dedup_flags_and_format_loaded_close_the_loop() {
+        let config = "name = \"x\"\naccount = \"Assets:Bank\"\ndate_column = \"Date\"\nnarration_column = \"Description\"\namount_column = \"Amount\"\n";
+        let first = import_extract("bank.csv", CSV.as_bytes(), config).expect("extracts");
+        assert_eq!(first.entries.len(), 2);
+
+        // Re-importing the same statement: every entry is a duplicate of
+        // the "existing" set; against an empty ledger nothing is.
+        let flags = import_dedup(&first.entries, &first.entries);
+        assert_eq!(flags, vec![true, true]);
+        let flags = import_dedup(&first.entries, &[]);
+        assert_eq!(flags, vec![false, false]);
+
+        // The extracted entries render to canonical text a host can write
+        // into the ledger file.
+        let text = format_loaded(&first.entries).expect("renders");
+        assert!(text.contains("Assets:Bank"), "{text}");
+        assert!(text.contains("2026-07-01"), "{text}");
     }
 
     /// The extension is authoritative: a CSV whose narration mentions

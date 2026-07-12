@@ -180,6 +180,9 @@ impl ImporterGuest for Component {
     ) -> Result<ExtractResult, String> {
         convert::import_extract(&filename, &content, &config)
     }
+    fn dedup(candidates: Vec<Directive>, existing: Vec<Directive>) -> Vec<bool> {
+        convert::import_dedup(&candidates, &existing)
+    }
 }
 
 impl FormatGuest for Component {
@@ -194,6 +197,9 @@ impl FormatGuest for Component {
     }
     fn format_entries(entries: Vec<InputDirective>) -> Result<String, String> {
         convert::format_entries(&entries)
+    }
+    fn format_loaded(entries: Vec<Directive>) -> Result<String, String> {
+        convert::format_loaded(&entries)
     }
 }
 

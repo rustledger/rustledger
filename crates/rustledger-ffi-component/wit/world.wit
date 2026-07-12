@@ -543,7 +543,7 @@ interface util {
 /// Pretty-printing — replaces `format.source` / `format.entries`. Renders
 /// beancount text in canonical form.
 interface format {
-  use types.{input-directive};
+  use types.{directive, input-directive};
 
   /// Canonically reformat beancount source text.
   format-source: func(source: string) -> string;
@@ -554,6 +554,13 @@ interface format {
   /// Render constructed directives to canonical beancount text. Fallible: an
   /// invalid input entry fails the call.
   format-entries: func(entries: list<input-directive>) -> result<string, string>;
+  /// Render LOADED directives (e.g. `importer.extract` output or session
+  /// entries) to canonical beancount text; the loaded->input
+  /// down-conversion (dropping loader-assigned source locations) happens
+  /// inside the component so hosts never reshape directives themselves.
+  /// Added in 3.5.0 alongside the importer interface — it closes the
+  /// extract -> review -> save-to-ledger loop.
+  format-loaded: func(entries: list<directive>) -> result<string, string>;
 }
 
 /// Bank-statement import — the `rledger extract` engine over the component
@@ -595,6 +602,13 @@ interface importer {
   /// lossily — unmappable bytes degrade to replacement characters in text
   /// fields rather than failing the extraction.
   extract: func(filename: string, content: list<u8>, config: string) -> result<extract-result, string>;
+
+  /// Flag which candidate entries duplicate an existing entry — one bool
+  /// per candidate, in order. Uses the same fuzzy matcher as
+  /// `rledger extract --existing` (date proximity + amount + text
+  /// similarity), so a host review UI and the CLI agree on what counts as
+  /// a duplicate. Non-transaction candidates are never duplicates.
+  dedup: func(candidates: list<directive>, existing: list<directive>) -> list<bool>;
 }
 
 /// Capabilities the host provides to the component.

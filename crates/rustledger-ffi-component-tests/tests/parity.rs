@@ -991,5 +991,20 @@ fn importer_extract_matches_native_engine() -> Result<()> {
     assert_eq!(component_shapes, native_shapes);
     assert_eq!(component_shapes.len(), 2);
     assert_eq!(result.warnings, native.warnings);
+
+    // dedup over the boundary: the same entries re-imported are all
+    // duplicates; against an empty ledger none are.
+    let flags = importer.call_dedup(&mut store, &result.entries, &result.entries)?;
+    assert_eq!(flags, vec![true, true]);
+    let flags = importer.call_dedup(&mut store, &result.entries, &[])?;
+    assert_eq!(flags, vec![false, false]);
+
+    // format-loaded renders the extracted entries to canonical text the
+    // host can write into the ledger — closing the extract/review/save loop.
+    let text = inst
+        .rustledger_ledger_format()
+        .call_format_loaded(&mut store, &result.entries)?
+        .expect("renders");
+    assert!(text.contains("Assets:Bank"), "{text}");
     Ok(())
 }

@@ -277,11 +277,15 @@ pub fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterConfig> 
 /// [`build_config_from_entry`], so a host can show it to the user, let them
 /// edit it, and pass it straight back to an extract call. Only inferred
 /// fields are emitted; account/currency are the caller's to add.
-#[must_use]
+///
+/// # Errors
+/// Serialization of a flat table of scalars should not fail; the error is
+/// still propagated rather than swallowed so a future non-scalar field
+/// can't silently produce an empty config.
 pub fn entry_toml_from_inferred(
     name: &str,
     inferred: &crate::csv_inference::InferredCsvConfig,
-) -> String {
+) -> Result<String> {
     use crate::config::ColumnSpec;
     use toml::Value;
 
@@ -348,8 +352,7 @@ pub fn entry_toml_from_inferred(
         // `parse_amount_locale`. Pinned by `inferred_locale_round_trips`.
         t.insert("amount_locale".into(), Value::String(format!("{locale:?}")));
     }
-    // A table of scalars always serializes.
-    toml::to_string(&Value::Table(t)).unwrap_or_default()
+    toml::to_string(&Value::Table(t)).map_err(|e| anyhow!("serializing inferred config: {e}"))
 }
 
 #[cfg(test)]
@@ -429,7 +432,7 @@ amount_column = 2
         let content =
             "Date,Description,Amount\n2026-07-01,Coffee,-4.50\n2026-07-02,Salary,2500.00\n";
         let inferred = crate::csv_inference::infer_csv_config(content).expect("inferable");
-        let toml_str = entry_toml_from_inferred("inferred", &inferred);
+        let toml_str = entry_toml_from_inferred("inferred", &inferred).expect("serializes");
         let entry = ImporterEntry::from_toml_str(&toml_str).expect("round-trips");
         assert_eq!(entry.name, "inferred");
         build_config_from_entry(&entry).expect("config builds");
@@ -458,7 +461,7 @@ amount_column = 2
         let inferred = crate::csv_inference::infer_csv_config(content).expect("inferable");
         let direct = inferred.to_csv_config();
 
-        let toml_str = entry_toml_from_inferred("x", &inferred);
+        let toml_str = entry_toml_from_inferred("x", &inferred).expect("serializes");
         let entry = ImporterEntry::from_toml_str(&toml_str).expect("round-trips");
         let via_toml = build_config_from_entry(&entry).expect("config builds");
         let ImporterType::Csv(via_toml) = &via_toml.importer_type;

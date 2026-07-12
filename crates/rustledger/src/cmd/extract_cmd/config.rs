@@ -4,10 +4,10 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::path::Path;
 
-// The `[[importers]]` entry schema and its `ImporterConfig` mapping are the
-// canonical `rustledger_importer::toml_entry` module (shared with the WASI
-// component's `importer` interface); this module keeps only file discovery
-// and the CLI-side `ImportersFile` wrapper.
+// The `[[importers]]` entry schema and its `ImporterConfig` mapping live in
+// the canonical `rustledger_importer::toml_entry` module (shared with the
+// WASI component's `importer` interface); this module keeps only file
+// discovery and the CLI-side `ImportersFile` wrapper.
 pub(super) use rustledger_importer::toml_entry::{
     ImporterEntry, apply_column, build_config_from_entry,
 };

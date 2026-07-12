@@ -2098,7 +2098,7 @@ pub fn import_infer(_filename: &str, content: &[u8]) -> Result<String, String> {
     let text = std::str::from_utf8(content).map_err(|_| "content is not UTF-8".to_string())?;
     let inferred = rustledger_importer::csv_inference::infer_csv_config(text)
         .ok_or_else(|| "content does not look like parseable CSV".to_string())?;
-    Ok(toml_entry::entry_toml_from_inferred("inferred", &inferred))
+    toml_entry::entry_toml_from_inferred("inferred", &inferred).map_err(|e| e.to_string())
 }
 
 /// Extract directives from statement bytes using a declarative config entry.
@@ -2121,10 +2121,13 @@ pub fn import_extract(
 
     let result = if detect_format(filename, content) == Some(DetectedFormat::Ofx) {
         // OFX needs only account/currency; column mappings don't apply.
-        let mut builder = rustledger_importer::ImporterConfig::csv();
-        if let Some(ref account) = entry.account {
-            builder = builder.account(account);
-        }
+        // `account` is required HERE (not defaulted): the builder would
+        // otherwise silently target Expenses:Unknown, which is wrong for
+        // the asset/liability account a statement belongs to.
+        let Some(ref account) = entry.account else {
+            return Err("OFX extraction requires `account` in the config entry".to_string());
+        };
+        let mut builder = rustledger_importer::ImporterConfig::csv().account(account);
         if let Some(ref currency) = entry.currency {
             builder = builder.currency(currency);
         }
@@ -2226,6 +2229,15 @@ mod importer_tests {
         let config = "name = \"ofx\"\naccount = \"Assets:Checking\"\ncurrency = \"USD\"\n";
         let result = import_extract("bank.ofx", OFX.as_bytes(), config).expect("extracts");
         assert_eq!(result.entries.len(), 1);
+    }
+
+    /// OFX without `account` is an error, not a silent import into the
+    /// builder's Expenses:Unknown default (review comment).
+    #[test]
+    fn extract_ofx_without_account_is_rejected() {
+        let err =
+            import_extract("bank.ofx", OFX.as_bytes(), "name = \"ofx\"").expect_err("rejects");
+        assert!(err.contains("account"), "{err}");
     }
 
     #[test]

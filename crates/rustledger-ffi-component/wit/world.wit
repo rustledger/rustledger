@@ -589,9 +589,9 @@ interface importer {
   /// `date_column = "..."`, ...) — the exact schema documented for the
   /// CLI; both surfaces share the same canonical parser, and `currency`
   /// defaults to USD exactly like the CLI's --currency flag. OFX content
-  /// is detected via `identify` semantics and needs only
-  /// `account`/`currency` from the config; everything else applies to
-  /// CSV. Non-UTF-8 content (e.g. a Latin-1 OFX 1.x download) is decoded
+  /// is detected via `identify` semantics and needs only `account`
+  /// (required) and `currency` from the config; everything else applies
+  /// to CSV. Non-UTF-8 content (e.g. a Latin-1 OFX 1.x download) is decoded
   /// lossily — unmappable bytes degrade to replacement characters in text
   /// fields rather than failing the extraction.
   extract: func(filename: string, content: list<u8>, config: string) -> result<extract-result, string>;

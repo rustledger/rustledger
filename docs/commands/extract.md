@@ -180,7 +180,7 @@ The importer library supports additional enrichment features via the
 
 | Builder Method | Description |
 |----------------|-------------|
-| `use_merchant_dict(true)` | Enable the built-in merchant dictionary (~150 common patterns) as a low-priority fallback for account categorization |
+| `use_merchant_dict(true)` | Enable the built-in merchant dictionary (76 common patterns) as a low-priority fallback for account categorization |
 | `regex_mappings(vec)` | Add regex-based account mappings (case-insensitive, compiled at load time) |
 
 These options are available in the Rust library API but are not yet exposed as

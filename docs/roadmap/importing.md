@@ -16,13 +16,21 @@ opts in), **declarative** (banks described by data, not code), and
 
 ## Now / In progress
 
-The clear next steps, building directly on the shipped pipeline.
+The clear next steps. Re-prioritized after the 2026-07 import review, which
+found that the biggest problem is not a missing feature but an integration
+gap: **the Rust import engine is unreachable from every GUI surface.**
+rustfava's import UI is upstream Fava's Python-beangulp flow (an optional
+extra requiring user-authored Python importers), and the WASI component —
+the primary embedding surface — exposes no import interface at all. None of
+the engine's auto-inference, WASM importers, ML categorization, or fuzzy
+dedup is visible to a web/desktop user.
 
 | Item | Why it matters | Approach |
 |------|----------------|----------|
-| **Declarative institution profiles** | Per-user CSV column-mapping is the #1 setup friction. | A profile loader: a bank described by its source format (CSV/OFX layout), date/amount conventions, and default categorization rules — so a known bank "just works". Ships with built-in profiles for the most common US institutions on top of the loader. |
-| **Automatic balance extraction** | `--balance` exists but the amount is hand-typed, so the assertion only catches *your* typos, not import gaps. | Pull the statement's opening/closing balance during extraction and compare it against the computed ledger balance; emit a diagnostic on mismatch. This is what turns importing from "hope it's complete" into "proven complete". |
-| **Online-learning categorization** | The model trains once on the existing ledger and never improves from use. | Feed accept/correct decisions back into the Naive-Bayes model so suggestions get better the more you import. |
+| **Import over the component boundary** | Converts the import engine from a CLI feature into the product's ingestion layer — every GUI surface (rustfava, desktop) inherits it. | Add an `extract`/`identify` interface to the `rustledger:ledger` WIT world (additive minor bump), implemented in `rustledger-ffi-component` on top of `rustledger-importer`. Config rides as the existing `importers.toml` entry schema so the CLI and component share one canonical config parser. Then a rustfava ingest backend that consumes it — beangulp stays as the escape hatch for existing Python importers. |
+| **Expose the finished-but-unwired ops** | `rustledger-ops::reconcile()` (statement-vs-import comparison) and `transfer.rs` (inter-account transfer pairing, the core of multi-source matching) exist and are tested, but no CLI or component surface calls them. | Wire the reconciliation *comparison* (not just balance-directive generation) into `extract` output, and give transfer pairing a consumer. Days of work that delivers part of the "Reconciliation / review UX" row early. |
+| **Automatic balance extraction — OFX first** | `--balance` exists but the amount is hand-typed, so the assertion only catches *your* typos, not import gaps. **OFX statements already carry `<LEDGERBAL>` with an as-of date; the parser currently drops it.** | Phase 1: surface the OFX ledger balance during extraction and feed it to the existing `reconcile()` — nearly free, and every OFX import becomes verified-complete. Phase 2: CSV via an institution-profile field. This is what turns importing from "hope it's complete" into "proven complete". |
+| **Declarative institution profiles — fixtures first** | Per-user CSV column-mapping is the #1 setup friction. But the repo ships **zero** built-in profiles and has **no real-institution fixture files** (tests use inline synthetic CSV/OFX), so there is nothing to pin a contributed profile against. | Sequence: (1) an anonymized per-institution statement-fixture corpus with snapshot tests — for an importer, fixtures *are* the spec; (2) a profile catalog on top of the existing `importers.toml` loader (`--bank <name>`); (3) only then the community registry, so a contributed profile is verifiably correct before others rely on it. |
 
 ## Next
 
@@ -30,12 +38,16 @@ Well-scoped, but sequenced behind the items above.
 
 | Item | Why it matters | Approach |
 |------|----------------|----------|
-| **Reconciliation / review UX** | Imports need a confirmation step, not blind trust. | A per-account, per-period view: opening/closing balances, what each source agrees on, and a queue to resolve mismatches before they hit the ledger. Pairs with balance extraction. |
+| **Online-learning categorization** | The model trains once on the existing ledger and never improves from use (`train()`/`predict()` only — no feedback path). | Feed accept/correct decisions back into the Naive-Bayes model so suggestions get better the more you import. Sequenced behind the component boundary so corrections made in the fava UI have a path back to the model, and it needs a decisions store. |
+| **camt.053 native importer** | The ISO 20022 statement format is *the* EU bank-statement standard; today the native parsers are CSV and OFX only (no QIF/MT940/camt). | A native camt.053 reader alongside CSV/OFX. QIF is cheap legacy coverage to add opportunistically; MT940 stays WASM-importer territory. |
+| **Flagship WASM importer: IBKR** ([#923](https://github.com/rustledger/rustledger/issues/923)) | Exercises the plugin path end-to-end and produces the template a community registry needs. | Ship the IBKR importer as a maintained example WASM importer rather than a native builtin. Also close the WASM config-projection gap (`use_merchant_dict`, regex mappings aren't carried across the boundary or exposed in `importers.toml`). |
+| **Reconciliation / review UX** | Imports need a confirmation step, not blind trust. | A per-account, per-period view: opening/closing balances, what each source agrees on, and a queue to resolve mismatches before they hit the ledger. Pairs with balance extraction; the `reconcile()`/`transfer.rs` wiring above is its data source. |
 | **Bank-API sync (SimpleFIN first)** | CSV/PDF is manual and lossy; an API is the difference between weekly chores and continuous. | Start with **SimpleFIN** (open protocol, low cost, no per-bank engineering). Plaid/Teller as optional, user-keyed backends behind the same interface later. Strictly opt-in. |
 | **Recurring / expected-transaction detection** | Plain-text accounting silently *omits* what's missing; nobody notices a skipped paycheck import. | Let users declare expected recurring entries (rent, salary) and alert when an expected transaction doesn't show up — catches gaps the balance check can't. |
-| **Multi-source matching** | Once there are two sources (CSV + API, or statement + export), naive dedup produces doubles or drops. | Match on amount + a date window with field-level scoring and a confidence output, producing match *groups* rather than binary yes/no. Feeds the review queue rather than auto-resolving. |
-| **Community importer registry** | Every user re-deriving the same bank profile is wasted effort. | A shareable registry of `importers.toml` profiles, with automated tests against sample data so a contributed profile is verifiably correct before others rely on it. |
+| **Multi-source matching** | Once there are two sources (CSV + API, or statement + export), naive dedup produces doubles or drops. | Match on amount + a date window with field-level scoring and a confidence output, producing match *groups* rather than binary yes/no. Builds on `transfer.rs`; feeds the review queue rather than auto-resolving. |
+| **Community importer registry** | Every user re-deriving the same bank profile is wasted effort. | A shareable registry of `importers.toml` profiles, with automated tests against the fixture corpus so a contributed profile is verifiably correct before others rely on it. |
 | **PDF statement extraction** | Many institutions only provide PDFs. | A local-first pipeline (text or OCR → layout/table detection → parse) with a declarative parser registry keyed by statement format. Local OCR by default; see below for the cloud escape hatch. |
+| **Document filing (beangulp `archive`/`file` parity)** | beancount users with beangulp document-filing workflows have no migration path: the `Importer` trait deliberately omits `account()`/`date()`/`filename()` and there are no `archive`/`file` verbs. | Decide deliberately — adopt a filing surface (it dovetails with the attestation layer's `source_hash` provenance story) or document it as out of scope. The current silence is the only wrong option. |
 
 ## Exploring / Later
 

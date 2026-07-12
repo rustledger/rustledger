@@ -301,25 +301,6 @@ pub fn list_importers_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<
     Ok(())
 }
 
-/// Pick the importer for a given file + CLI args.
-///
-/// - If the user explicitly chose a TOML entry (`--importer <name>`),
-///   force [`CsvImporter`]: TOML profiles are CSV-only by definition
-///   of [`rustledger_importer::config::ImporterType`] today, and the
-///   profile's column mappings would be lost if registry-identify
-///   silently routed the file to a different engine (e.g. a
-///   `.ofx`-named file picked up by `OfxImporter`).
-/// - Otherwise let the registry identify by extension. This is the
-///   path WASM importers reach via `--wasm-importer` /
-///   `--wasm-importer-dir` — including when combined with
-///   `--config` for pattern-matched TOML profiles. (Earlier this
-///   function also force-CSV'd when `--config` was set alone; that
-///   meant `--wasm-importer my.wasm --config x.toml` silently
-///   ignored the WASM module. Fixed by limiting the force-CSV path
-///   to `--importer`.)
-/// - Fall back to [`CsvImporter`] for unknown extensions (e.g. `.qbo`
-///   Quicken exports) so users with custom-extension TOML entries
-///   keep working.
 /// Run the resolved config entry's external `preprocess` command, if any.
 ///
 /// The entry is resolved the same way the CSV config branch resolves it —
@@ -335,6 +316,10 @@ pub fn list_importers_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<
 /// importer. See the `preprocess` field docs in
 /// `rustledger_importer::toml_entry`.
 fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTempFile>> {
+    // Named const rather than an inline literal: `{input}` inside a call
+    // trips clippy's literal_string_with_formatting_args.
+    const INPUT_PLACEHOLDER: &str = "{input}";
+
     let Some(config_path) = find_importers_config(args.config.as_deref())? else {
         return Ok(None);
     };
@@ -358,7 +343,10 @@ fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTe
     };
 
     let input = file.to_string_lossy();
-    let cmd_args: Vec<String> = rest.iter().map(|a| a.replace("{input}", &input)).collect();
+    let cmd_args: Vec<String> = rest
+        .iter()
+        .map(|a| a.replace(INPUT_PLACEHOLDER, &input))
+        .collect();
     eprintln!("Preprocessing with: {program} {}", cmd_args.join(" "));
     let output = std::process::Command::new(program)
         .args(&cmd_args)
@@ -382,6 +370,25 @@ fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTe
     Ok(Some(tmp))
 }
 
+/// Pick the importer for a given file + CLI args.
+///
+/// - If the user explicitly chose a TOML entry (`--importer <name>`),
+///   force [`CsvImporter`]: TOML profiles are CSV-only by definition
+///   of [`rustledger_importer::config::ImporterType`] today, and the
+///   profile's column mappings would be lost if registry-identify
+///   silently routed the file to a different engine (e.g. a
+///   `.ofx`-named file picked up by `OfxImporter`).
+/// - Otherwise let the registry identify by extension. This is the
+///   path WASM importers reach via `--wasm-importer` /
+///   `--wasm-importer-dir` — including when combined with
+///   `--config` for pattern-matched TOML profiles. (Earlier this
+///   function also force-CSV'd when `--config` was set alone; that
+///   meant `--wasm-importer my.wasm --config x.toml` silently
+///   ignored the WASM module. Fixed by limiting the force-CSV path
+///   to `--importer`.)
+/// - Fall back to [`CsvImporter`] for unknown extensions (e.g. `.qbo`
+///   Quicken exports) so users with custom-extension TOML entries
+///   keep working.
 fn select_importer(registry: &ImporterRegistry, file: &Path, args: &Args) -> Arc<dyn Importer> {
     if args.importer.is_some() {
         Arc::new(CsvImporter)

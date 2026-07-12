@@ -175,7 +175,7 @@ tokio = { version = "1", features = ["full"] }
 getrandom = { version = "0.2", features = ["js"] }
 
 # LSP
-lsp-server = "0.8"
+lsp-server = "0.9"
 lsp-types = "0.97"
 # Pin to `cr_lines` feature only (no `unicode_lines`) so ropey's line
 # breaks match `similar::TextDiff::from_lines` semantics: LF, CRLF, bare

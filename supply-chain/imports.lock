@@ -1108,11 +1108,6 @@ version = "0.253.0"
 when = "2026-07-07"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
-[[publisher.wasm-encoder]]
-version = "0.253.0"
-when = "2026-07-07"
-trusted-publisher = "github:bytecodealliance/wasm-tools"
-
 [[publisher.wasm-metadata]]
 version = "0.236.0"
 when = "2025-07-28"
@@ -1132,11 +1127,6 @@ trusted-publisher = "github:bytecodealliance/wasm-tools"
 [[publisher.wasmparser]]
 version = "0.251.0"
 when = "2026-05-28"
-trusted-publisher = "github:bytecodealliance/wasm-tools"
-
-[[publisher.wasmparser]]
-version = "0.253.0"
-when = "2026-07-07"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmparser]]

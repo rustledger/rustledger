@@ -990,14 +990,59 @@ fn importer_extract_matches_native_engine() -> Result<()> {
     let native_shapes: Vec<_> = native.directives.iter().map(native_shape).collect();
     assert_eq!(component_shapes, native_shapes);
     assert_eq!(component_shapes.len(), 2);
-    assert_eq!(result.warnings, native.warnings);
+    let warning_messages: Vec<&str> = result.warnings.iter().map(|w| w.message.as_str()).collect();
+    let native_warnings: Vec<&str> = native.warnings.iter().map(String::as_str).collect();
+    assert_eq!(warning_messages, native_warnings);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .all(|w| w.severity == "warning" && w.phase == "extract")
+    );
 
-    // dedup over the boundary: the same entries re-imported are all
-    // duplicates; against an empty ledger none are.
-    let flags = importer.call_dedup(&mut store, &result.entries, &result.entries)?;
+    // dedup over the boundary, held-session flavor: a session holding the
+    // extracted entries flags a re-import; a fuzzy near-miss (reworded
+    // narration, same date/amount) must agree with the NATIVE canonical
+    // matcher's verdict — not just degenerate identity inputs.
+    let session = inst.rustledger_ledger_ledger().session();
+    let handle = session.call_from_entries(&mut store, &result.entries)?;
+    let flags = session.call_dedup(&mut store, handle, &result.entries)?;
     assert_eq!(flags, vec![true, true]);
-    let flags = importer.call_dedup(&mut store, &result.entries, &[])?;
-    assert_eq!(flags, vec![false, false]);
+
+    let mut reworded = result.entries.clone();
+    let rustledger::ledger::types::Directive::Transaction(t) = &mut reworded[0] else {
+        panic!("expected transaction");
+    };
+    t.narration = Some("Coffee Shop purchase".to_string());
+    let component_flags = session.call_dedup(&mut store, handle, &reworded)?;
+    // Native verdict on the same near-miss.
+    let mut native_reworded = native.directives.clone();
+    if let rustledger_core::Directive::Transaction(t) = &mut native_reworded[0] {
+        t.narration = "Coffee Shop purchase".into();
+    }
+    let native_txns: Vec<_> = native
+        .directives
+        .iter()
+        .filter_map(|d| match d {
+            rustledger_core::Directive::Transaction(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    let native_flags: Vec<bool> = native_reworded
+        .iter()
+        .map(|d| match d {
+            rustledger_core::Directive::Transaction(t) => rustledger_ops::dedup::is_duplicate(
+                t,
+                &native_txns,
+                &rustledger_ops::dedup::FuzzyDedupConfig::default(),
+            ),
+            _ => false,
+        })
+        .collect();
+    assert_eq!(
+        component_flags, native_flags,
+        "dedup drift vs native matcher"
+    );
 
     // format-loaded renders the extracted entries to canonical text the
     // host can write into the ledger — closing the extract/review/save loop.

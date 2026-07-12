@@ -482,6 +482,17 @@ interface ledger {
     /// Clamp to `[begin, end)`, synthesizing opening-balance and summary
     /// directives at the boundaries.
     clamp: func(begin-date: string, end-date: string) -> list<directive>;
+    /// Flag which candidate entries duplicate one already HELD in this
+    /// session — one bool per candidate, in order (added in 3.6.0 for the
+    /// import review flow). Uses the same fuzzy matcher as
+    /// `rledger extract --existing`: same date, same first-posting amount,
+    /// and similar payee/narration text — so a host review UI and the CLI
+    /// agree on what counts as a duplicate. Living on the session avoids
+    /// re-marshaling the full ledger per import, and the session's
+    /// documented conversion-drop policy (see `from-entries`) covers the
+    /// comparison set. Candidates that fail conversion, and
+    /// non-transaction candidates, are never flagged.
+    dedup: func(candidates: list<directive>) -> list<bool>;
   }
 }
 
@@ -569,13 +580,16 @@ interface format {
 /// Sandboxed `.wasm` plugin importers remain a host-side concern — a
 /// component cannot host nested guests.
 interface importer {
-  use types.{directive};
+  use types.{directive, error};
 
   /// Extracted directives plus non-fatal diagnostics (skipped rows etc.).
   /// Entries carry the given statement filename as their source location.
+  /// Warnings use the structured `error` record (severity `warning`, phase
+  /// `extract`) so future line/field attribution is additive rather than a
+  /// record-shape break.
   record extract-result {
     entries: list<directive>,
-    warnings: list<string>,
+    warnings: list<error>,
   }
 
   /// Names of built-in importers that recognize the file. The filename
@@ -602,14 +616,6 @@ interface importer {
   /// lossily — unmappable bytes degrade to replacement characters in text
   /// fields rather than failing the extraction.
   extract: func(filename: string, content: list<u8>, config: string) -> result<extract-result, string>;
-
-  /// Flag which candidate entries duplicate an existing entry — one bool
-  /// per candidate, in order. Uses the same fuzzy matcher as
-  /// `rledger extract --existing` (date proximity + amount + text
-  /// similarity), so a host review UI and the CLI agree on what counts as
-  /// a duplicate. Non-transaction candidates are never duplicates.
-  /// Added in 3.6.0.
-  dedup: func(candidates: list<directive>, existing: list<directive>) -> list<bool>;
 }
 
 /// Capabilities the host provides to the component.

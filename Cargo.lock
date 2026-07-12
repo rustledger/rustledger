@@ -3494,6 +3494,7 @@ dependencies = [
  "rustledger-core",
  "rustledger-ffi-wasi",
  "rustledger-importer",
+ "rustledger-ops",
  "tempfile",
  "wasmtime",
  "wasmtime-wasi",

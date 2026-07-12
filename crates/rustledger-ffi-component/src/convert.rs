@@ -1274,7 +1274,7 @@ pub fn format_entries(entries: &[wit::InputDirective]) -> Result<String, String>
     format_directives(&dirs)
 }
 
-/// Render LOADED directives to canonical beancount text (3.5.0). The
+/// Render LOADED directives to canonical beancount text (3.6.0). The
 /// loaded->input down-conversion is the same one `session.from-entries` and
 /// `builder.query-entries` use, so an entry that round-trips there renders
 /// here.
@@ -1681,6 +1681,43 @@ impl SessionState {
     /// Clamp to `[begin, end)`, running `rustledger_ops::clamp` **directly on
     /// the held core directives** — no WIT -> core -> WIT round-trip, the value
     /// the resource exists to deliver (#1421).
+    /// Flag duplicate candidates against the HELD directives using the
+    /// batch canonical (`rustledger_ops::dedup::find_fuzzy_duplicates`),
+    /// which precomputes each held transaction's comparison key once —
+    /// per-candidate matching would rebuild every key for every candidate.
+    /// Same matcher as `rledger extract --existing`: same date, same
+    /// first-posting amount, similar payee/narration text. One bool per
+    /// candidate, in input order; a candidate that fails conversion (or
+    /// isn't a transaction) is never flagged, mirroring the documented
+    /// `from-entries` drop policy for the held side.
+    pub fn dedup(&self, candidates: &[wit::Directive]) -> Vec<bool> {
+        // Convert per-candidate so one unconvertible candidate can't shift
+        // flags out of alignment with the input order. `None` marks it.
+        let cores: Vec<Option<rustledger_core::Directive>> = candidates
+            .iter()
+            .map(|d| ffi::input_entry_to_directive(&loaded_directive_to_input(d)).ok())
+            .collect();
+        let convertible: Vec<rustledger_core::Directive> =
+            cores.iter().flatten().cloned().collect();
+        let matches = rustledger_ops::dedup::find_fuzzy_duplicates(
+            &convertible,
+            &self.directives,
+            &rustledger_ops::dedup::FuzzyDedupConfig::default(),
+        );
+        let dup_in_convertible: std::collections::HashSet<usize> =
+            matches.iter().map(|m| m.new_index).collect();
+        // Map convertible-space indices back to candidate-space.
+        let mut flags = vec![false; candidates.len()];
+        let mut j = 0;
+        for (i, core) in cores.iter().enumerate() {
+            if core.is_some() {
+                flags[i] = dup_in_convertible.contains(&j);
+                j += 1;
+            }
+        }
+        flags
+    }
+
     pub fn clamp(&self, begin: &str, end: &str) -> Vec<wit::Directive> {
         let (Ok(begin_date), Ok(end_date)) = (
             begin.parse::<rustledger_core::NaiveDate>(),
@@ -2162,45 +2199,23 @@ pub fn import_extract(
             .iter()
             .map(|d| directive_from_core(d, 0, filename))
             .collect(),
-        warnings: result.warnings,
+        warnings: result.warnings.into_iter().map(extract_warning).collect(),
     })
 }
 
-/// Flag duplicate candidates against existing entries using the canonical
-/// fuzzy matcher (`rustledger_ops::dedup::is_duplicate`) — the same one
-/// `rledger extract --existing` filters with, so the two surfaces agree on
-/// what counts as a duplicate. One bool per candidate, in order;
-/// non-transaction candidates are never duplicates.
-pub fn import_dedup(candidates: &[wit::Directive], existing: &[wit::Directive]) -> Vec<bool> {
-    fn to_core(entries: &[wit::Directive]) -> Vec<rustledger_core::Directive> {
-        entries
-            .iter()
-            .filter_map(|d| ffi::input_entry_to_directive(&loaded_directive_to_input(d)).ok())
-            .collect()
+/// An import warning as the structured `error` record (severity `warning`,
+/// phase `extract`) — same diagnostic shape as every other surface, and
+/// line/field attribution can be added later without a record-shape break.
+fn extract_warning(message: String) -> wit::Error {
+    wit::Error {
+        message,
+        line: None,
+        column: None,
+        field: None,
+        entry_index: None,
+        severity: "warning".to_string(),
+        phase: "extract".to_string(),
     }
-    let existing_txns: Vec<rustledger_core::Transaction> = to_core(existing)
-        .into_iter()
-        .filter_map(|d| match d {
-            rustledger_core::Directive::Transaction(t) => Some(t),
-            _ => None,
-        })
-        .collect();
-    let config = rustledger_ops::dedup::FuzzyDedupConfig::default();
-    candidates
-        .iter()
-        .map(|d| {
-            // Convert per-candidate so one unconvertible candidate can't
-            // shift flags out of alignment with the input order.
-            ffi::input_entry_to_directive(&loaded_directive_to_input(d))
-                .ok()
-                .is_some_and(|core| match core {
-                    rustledger_core::Directive::Transaction(t) => {
-                        rustledger_ops::dedup::is_duplicate(&t, &existing_txns, &config)
-                    }
-                    _ => false,
-                })
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -2231,12 +2246,20 @@ mod importer_tests {
         let first = import_extract("bank.csv", CSV.as_bytes(), config).expect("extracts");
         assert_eq!(first.entries.len(), 2);
 
-        // Re-importing the same statement: every entry is a duplicate of
-        // the "existing" set; against an empty ledger nothing is.
-        let flags = import_dedup(&first.entries, &first.entries);
-        assert_eq!(flags, vec![true, true]);
-        let flags = import_dedup(&first.entries, &[]);
-        assert_eq!(flags, vec![false, false]);
+        // Re-importing the same statement into a session holding it:
+        // every entry is a duplicate; an empty session flags nothing.
+        let held = SessionState::from_entries(&first.entries);
+        assert_eq!(held.dedup(&first.entries), vec![true, true]);
+        let empty = SessionState::from_entries(&[]);
+        assert_eq!(empty.dedup(&first.entries), vec![false, false]);
+
+        // A fuzzy near-miss agrees with the canonical matcher: same
+        // date/amount, lightly-reworded narration is still a duplicate.
+        let mut reworded = first.entries.clone();
+        if let wit::Directive::Transaction(t) = &mut reworded[0] {
+            t.narration = Some("Coffee Shop purchase".to_string());
+        }
+        assert_eq!(held.dedup(&reworded), vec![true, true]);
 
         // The extracted entries render to canonical text a host can write
         // into the ledger file.

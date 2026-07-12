@@ -136,6 +136,10 @@ impl GuestSession for LedgerSession {
     fn clamp(&self, begin_date: String, end_date: String) -> Vec<Directive> {
         self.state.clamp(&begin_date, &end_date)
     }
+
+    fn dedup(&self, candidates: Vec<Directive>) -> Vec<bool> {
+        self.state.dedup(&candidates)
+    }
 }
 
 impl BuilderGuest for Component {
@@ -181,9 +185,6 @@ impl ImporterGuest for Component {
         config: String,
     ) -> Result<ExtractResult, String> {
         convert::import_extract(&filename, &content, &config)
-    }
-    fn dedup(candidates: Vec<Directive>, existing: Vec<Directive>) -> Vec<bool> {
-        convert::import_dedup(&candidates, &existing)
     }
 }
 

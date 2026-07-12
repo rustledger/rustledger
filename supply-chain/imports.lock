@@ -630,8 +630,8 @@ user-login = "Amanieu"
 user-name = "Amanieu d'Antras"
 
 [[publisher.lsp-server]]
-version = "0.8.0"
-when = "2026-06-24"
+version = "0.9.0"
+when = "2026-07-11"
 user-id = 55123
 user-login = "rust-lang-owner"
 

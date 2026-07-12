@@ -254,6 +254,37 @@ rledger extract statement.csv \
   --invert-sign
 ```
 
+## External Preprocessing (PDF and other formats)
+
+An importer entry can declare a `preprocess` command — an argv array run
+before format detection and extraction. Any `{input}` argument is replaced
+with the statement's path; the command's stdout becomes the content the
+rest of the pipeline (auto-inference, column mapping, categorization)
+consumes. This is how PDF statements import today, until a native parser
+exists:
+
+```toml
+[[importers]]
+name = "mybank-pdf"
+filename_pattern = "*.pdf"
+account = "Assets:Checking"
+# pdftotext's -layout output piped through a small table-to-CSV script:
+preprocess = ["sh", "-c", "pdftotext -layout {input} - | mybank-table-to-csv"]
+date_column = "Date"
+narration_column = "Description"
+amount_column = "Amount"
+```
+
+The command runs with the CLI only — the WASI component cannot exec and
+rejects entries that set `preprocess` (a GUI host runs the preprocessor
+itself and passes the output as content).
+
+**Trust model**: `preprocess` executes a program from your config, exactly
+like a shell alias. Only write commands you trust, and treat an
+`importers.toml` you did not author like a shell script before running
+`rledger extract` near it. A community profile registry must never carry
+`preprocess` entries.
+
 ## See Also
 
 - [Importing Guide](../guides/importing.md) - Detailed import tutorial

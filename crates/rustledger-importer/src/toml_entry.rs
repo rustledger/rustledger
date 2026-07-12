@@ -79,6 +79,22 @@ pub struct ImporterEntry {
     pub mappings: HashMap<String, String>,
     /// Categorize via the built-in merchant dictionary (off by default).
     pub use_merchant_dict: Option<bool>,
+    /// External preprocessing command (argv array). When set, the command
+    /// runs BEFORE format detection and extraction: any `{input}` argument
+    /// is replaced by the statement's path, stdout becomes the content the
+    /// rest of the pipeline (inference, column mapping) consumes. This is
+    /// how PDF and other unsupported formats import today — e.g.
+    /// `preprocess = ["pdftotext", "-layout", "{input}", "-"]` piped
+    /// through a table-to-CSV script — until a native parser exists.
+    ///
+    /// **Trust model**: this executes a program from your config, exactly
+    /// like a shell alias — only write commands you trust, and treat an
+    /// `importers.toml` from someone else like a shell script. Honored by
+    /// the CLI only; the WASI component cannot exec and rejects entries
+    /// that set it (the host runs the preprocessor and passes its output
+    /// as content instead).
+    #[serde(default)]
+    pub preprocess: Option<Vec<String>>,
 }
 
 impl ImporterEntry {
@@ -419,6 +435,25 @@ amount_column = 2
             Some("2".to_string())
         );
         build_config_from_entry(&entry).expect("config builds");
+    }
+
+    #[test]
+    fn preprocess_parses_as_argv() {
+        let entry = ImporterEntry::from_toml_str(
+            "name = \"pdf\"\npreprocess = [\"pdftotext\", \"-layout\", \"{input}\", \"-\"]",
+        )
+        .expect("parses");
+        assert_eq!(
+            entry.preprocess.as_deref(),
+            Some(
+                &[
+                    "pdftotext".to_string(),
+                    "-layout".into(),
+                    "{input}".into(),
+                    "-".into()
+                ][..]
+            )
+        );
     }
 
     #[test]

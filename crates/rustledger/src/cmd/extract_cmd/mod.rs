@@ -320,6 +320,68 @@ pub fn list_importers_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<
 /// - Fall back to [`CsvImporter`] for unknown extensions (e.g. `.qbo`
 ///   Quicken exports) so users with custom-extension TOML entries
 ///   keep working.
+/// Run the resolved config entry's external `preprocess` command, if any.
+///
+/// The entry is resolved the same way the CSV config branch resolves it —
+/// by `--importer` name, else by `filename_pattern` glob — from the same
+/// config file. Returns a temp file (with a `.csv` suffix so extension
+/// dispatch lands on the CSV importer) holding the command's stdout, or
+/// `None` when no entry with `preprocess` applies. Any `{input}` argument
+/// is replaced with the statement path; a missing placeholder is fine for
+/// commands that read their input elsewhere.
+///
+/// Trust model: this executes a user-authored command from the user's own
+/// config, the same trust boundary as a shell alias or a beangulp Python
+/// importer. See the `preprocess` field docs in
+/// `rustledger_importer::toml_entry`.
+fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTempFile>> {
+    let Some(config_path) = find_importers_config(args.config.as_deref())? else {
+        return Ok(None);
+    };
+    let importers_file = load_importers_config(&config_path)?;
+    let filename = file
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let entry = if let Some(ref name) = args.importer {
+        importers_file.importers.iter().find(|e| e.name == *name)
+    } else {
+        find_matching_importers(&importers_file, &filename)
+            .into_iter()
+            .find(|e| e.preprocess.is_some())
+    };
+    let Some(argv) = entry.and_then(|e| e.preprocess.as_ref()) else {
+        return Ok(None);
+    };
+    let [program, rest @ ..] = argv.as_slice() else {
+        return Err(anyhow!("`preprocess` must name a command"));
+    };
+
+    let input = file.to_string_lossy();
+    let cmd_args: Vec<String> = rest.iter().map(|a| a.replace("{input}", &input)).collect();
+    eprintln!("Preprocessing with: {program} {}", cmd_args.join(" "));
+    let output = std::process::Command::new(program)
+        .args(&cmd_args)
+        .output()
+        .with_context(|| format!("failed to run preprocess command `{program}`"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "preprocess command `{program}` failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let mut tmp = tempfile::Builder::new()
+        .prefix("rledger-preprocess-")
+        .suffix(".csv")
+        .tempfile()
+        .context("failed to create preprocess temp file")?;
+    io::Write::write_all(&mut tmp, &output.stdout)
+        .context("failed to write preprocessed content")?;
+    Ok(Some(tmp))
+}
+
 fn select_importer(registry: &ImporterRegistry, file: &Path, args: &Args) -> Arc<dyn Importer> {
     if args.importer.is_some() {
         Arc::new(CsvImporter)
@@ -491,6 +553,16 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
 /// default stdout sink for the formatted directives is redirected to the
 /// injected writer.
 pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Result<()> {
+    // External preprocessing (PDF etc.): if the resolved config entry
+    // declares `preprocess`, run it FIRST and hand the rest of the
+    // pipeline a temp .csv holding its stdout — so `--auto` inference,
+    // dispatch, and column mapping all operate on the preprocessed
+    // content unchanged. The binding keeps the temp file alive to EOF.
+    let preprocessed = maybe_preprocess(args, file)?;
+    let file: &Path = preprocessed
+        .as_ref()
+        .map_or(file, tempfile::NamedTempFile::path);
+
     let registry = build_registry(args)?;
 
     // Pick the dispatcher BEFORE building config: only `CsvImporter`
@@ -1000,6 +1072,77 @@ narration_column = 1
         );
     }
 
+    /// The external `preprocess` hook end-to-end: a `.pdf`-named input is
+    /// imported by running the entry's command (here `cat`, standing in
+    /// for pdftotext|table-to-csv) and feeding its stdout through the
+    /// normal CSV pipeline — the flow that makes PDF statements importable
+    /// before a native parser exists.
+    #[cfg(unix)]
+    #[test]
+    fn test_preprocess_makes_pdf_named_input_importable() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("statement.pdf");
+        std::fs::write(&pdf, "Date,Description,Amount\n2026-07-01,Coffee,-4.50\n").unwrap();
+        let config = dir.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            r#"
+[[importers]]
+name = "pdf-bank"
+filename_pattern = "*.pdf"
+account = "Assets:Bank"
+date_column = "Date"
+narration_column = "Description"
+amount_column = "Amount"
+preprocess = ["cat", "{input}"]
+"#,
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            "--config",
+            config.to_str().unwrap(),
+            "--importer",
+            "pdf-bank",
+            pdf.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        run_with_writer(&args, &pdf, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Coffee"), "row not imported: {text}");
+        assert!(text.contains("Assets:Bank"), "account missing: {text}");
+    }
+
+    /// A failing preprocess command surfaces its stderr, not a CSV error.
+    #[cfg(unix)]
+    #[test]
+    fn test_preprocess_failure_reports_command_error() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("statement.pdf");
+        std::fs::write(&pdf, "x").unwrap();
+        let config = dir.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            "[[importers]]\nname = \"bad\"\nfilename_pattern = \"*.pdf\"\npreprocess = [\"false\"]\n",
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            "--config",
+            config.to_str().unwrap(),
+            "--importer",
+            "bad",
+            pdf.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        let err = run_with_writer(&args, &pdf, &mut out).unwrap_err();
+        assert!(err.to_string().contains("preprocess command"), "{err}");
+    }
+
     #[test]
     fn test_cli_numeric_column_args_extract_by_index() {
         // Regression: numeric --date-column/--amount-column/--payee-column
@@ -1076,6 +1219,7 @@ narration_column = 1
             mappings: HashMap::new(),
             filename_pattern: None,
             use_merchant_dict: None,
+            preprocess: None,
         };
 
         let config = build_config_from_entry(&entry).unwrap();
@@ -1115,6 +1259,7 @@ narration_column = 1
             mappings,
             filename_pattern: None,
             use_merchant_dict: None,
+            preprocess: None,
         };
 
         let config = build_config_from_entry(&entry).unwrap();
@@ -1153,6 +1298,7 @@ narration_column = 1
             mappings: HashMap::new(),
             filename_pattern: None,
             use_merchant_dict: None,
+            preprocess: None,
         };
 
         let config = build_config_from_entry(&entry).unwrap();
@@ -1192,6 +1338,7 @@ narration_column = 1
             mappings: HashMap::new(),
             filename_pattern: None,
             use_merchant_dict: None,
+            preprocess: None,
         };
 
         let config = build_config_from_entry(&entry).unwrap();

@@ -2537,6 +2537,14 @@ pub fn import_extract(
     config: &str,
 ) -> Result<imp::ExtractResult, String> {
     let mut entry = toml_entry::ImporterEntry::from_toml_str(config).map_err(|e| e.to_string())?;
+    if entry.preprocess.is_some() {
+        return Err(
+            "`preprocess` is not available over the component boundary (a WASI \
+             component cannot exec): run the preprocessor on the host and pass \
+             its output as `content`"
+                .to_string(),
+        );
+    }
     if entry.currency.is_none() {
         entry.currency = Some("USD".to_string());
     }
@@ -2970,6 +2978,14 @@ mod importer_tests {
         let err =
             import_extract("bank.ofx", OFX.as_bytes(), "name = \"ofx\"").expect_err("rejects");
         assert!(err.contains("account"), "{err}");
+    }
+
+    /// `preprocess` cannot exec inside a component — reject with guidance.
+    #[test]
+    fn extract_rejects_preprocess_entries() {
+        let config = "name = \"pdf\"\naccount = \"Assets:Bank\"\npreprocess = [\"pdftotext\"]";
+        let err = import_extract("x.csv", CSV.as_bytes(), config).expect_err("rejects");
+        assert!(err.contains("host"), "{err}");
     }
 
     #[test]

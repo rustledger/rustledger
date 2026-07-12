@@ -71,7 +71,7 @@ jobs:
           else
             echo "should_run=false" >> $GITHUB_OUTPUT
           fi
-      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # nightly
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # nightly
         if: steps.check.outputs.should_run == 'true'
         with:
           toolchain: nightly
@@ -180,7 +180,7 @@ jobs:
           else
             echo "should_run=false" >> $GITHUB_OUTPUT
           fi
-      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # nightly
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # nightly
         if: steps.check.outputs.should_run == 'true'
         with:
           toolchain: nightly
@@ -285,7 +285,7 @@ jobs:
           else
             echo "should_run=false" >> $GITHUB_OUTPUT
           fi
-      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # nightly
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # nightly
         if: steps.check.outputs.should_run == 'true'
         with:
           toolchain: nightly
@@ -391,7 +391,7 @@ jobs:
           else
             echo "should_run=false" >> $GITHUB_OUTPUT
           fi
-      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # nightly
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # nightly
         if: steps.check.outputs.should_run == 'true'
         with:
           toolchain: nightly

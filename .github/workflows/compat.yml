@@ -45,7 +45,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
         with:
           toolchain: 1.97.0 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
       # Note: rust-cache intentionally omitted to avoid LGPL-3.0 license check failure.
@@ -1235,7 +1235,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # stable
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
         with:
           toolchain: 1.97.0 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
       # rust-cache intentionally omitted — see the note on the

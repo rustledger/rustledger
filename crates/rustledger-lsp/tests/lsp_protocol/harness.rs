@@ -223,9 +223,12 @@ impl LspTestClient {
             .expect("send to server");
 
         let resp = self.expect_response(&id);
-        let result = resp
-            .result
-            .unwrap_or_else(|| panic!("server returned error on {}: {:?}", R::METHOD, resp.error));
+        let result = match resp.response_kind {
+            lsp_server::ResponseKind::Ok { result } => result,
+            lsp_server::ResponseKind::Err { error } => {
+                panic!("server returned error on {}: {error:?}", R::METHOD)
+            }
+        };
         serde_json::from_value(result).expect("response deserialize")
     }
 
@@ -474,4 +477,22 @@ fn minimal_server_capabilities() -> serde_json::Value {
 #[must_use]
 pub fn test_uri(name: &str) -> String {
     format!("file:///{}", name)
+}
+
+/// lsp-server 0.9 moved `result`/`error` into the `ResponseKind` enum
+/// (rust-analyzer/lsp-server@0.9.0); these give tests back the 0.8-style
+/// `Option` views.
+pub fn response_ok(resp: Response) -> Option<serde_json::Value> {
+    match resp.response_kind {
+        lsp_server::ResponseKind::Ok { result } => Some(result),
+        lsp_server::ResponseKind::Err { .. } => None,
+    }
+}
+
+/// The error half of [`response_ok`].
+pub fn response_err(resp: Response) -> Option<lsp_server::ResponseError> {
+    match resp.response_kind {
+        lsp_server::ResponseKind::Ok { .. } => None,
+        lsp_server::ResponseKind::Err { error } => Some(error),
+    }
 }

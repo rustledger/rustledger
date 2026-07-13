@@ -147,8 +147,7 @@ fn issue_1253_balance_lens_ships_eagerly_resolved_with_cancel_belt_and_braces() 
          {bad:?}"
     );
 
-    let result = resp
-        .result
+    let result = harness::response_ok(resp)
         .expect("server returned a result, not an error, for cancelled-but-completed codeLens");
     let lenses: Option<Vec<lsp_types::CodeLens>> = serde_json::from_value(result).unwrap();
     let lenses = lenses.expect("lenses should be Some on a non-empty document");
@@ -255,8 +254,7 @@ fn unknown_method_returns_method_not_found_error() {
         .expect("send bogus request");
 
     let resp = client.expect_response(&id);
-    let err = resp
-        .error
+    let err = harness::response_err(resp)
         .expect("server returned an error, not a result, for an unknown method");
     assert_eq!(
         err.code,
@@ -409,7 +407,7 @@ plugin \"beancount_reds_plugins.effective_date.effective_date\" \"{\n\
         }
     };
 
-    let result = resp.result.expect("codeLens returned a result");
+    let result = harness::response_ok(resp).expect("codeLens returned a result");
     let lenses: Option<Vec<lsp_types::CodeLens>> = serde_json::from_value(result).unwrap();
     let lenses = lenses.expect("lenses emitted on a non-empty document");
 
@@ -523,7 +521,7 @@ fn real_balance_failure_round_trips_to_warning_lens() {
         }
     };
 
-    let result = resp.result.expect("codeLens returned a result");
+    let result = harness::response_ok(resp).expect("codeLens returned a result");
     let lenses: Option<Vec<lsp_types::CodeLens>> = serde_json::from_value(result).unwrap();
     let lenses = lenses.expect("lenses emitted on a non-empty document");
 
@@ -690,7 +688,7 @@ fn multi_file_balance_lens_reflects_cross_file_aggregation() {
         }
     };
 
-    let result = resp.result.expect("codeLens returned a result");
+    let result = harness::response_ok(resp).expect("codeLens returned a result");
     let lenses: Option<Vec<lsp_types::CodeLens>> = serde_json::from_value(result).unwrap();
     let lenses = lenses.expect("lenses emitted");
 
@@ -862,7 +860,7 @@ fn completion_resolve_returns_single_item_and_uses_journal() {
     };
     client.raw_send_request(req).expect("send resolve");
     let resp = client.expect_response(&id);
-    let result = resp.result.expect("resolve returned a result");
+    let result = harness::response_ok(resp).expect("resolve returned a result");
 
     // Finding 1: the result must be a single object, not an array.
     assert!(
@@ -1143,7 +1141,7 @@ fn async_request_invalidated_by_edit_still_gets_a_response() {
         }
     };
     // If the result raced in as stale, it must be reported as ContentModified.
-    if let Some(err) = resp.error {
+    if let Some(err) = harness::response_err(resp) {
         assert_eq!(
             err.code, -32801,
             "a stale async result must be reported as ContentModified, got {err:?}"

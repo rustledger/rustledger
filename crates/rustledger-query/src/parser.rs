@@ -1072,14 +1072,16 @@ fn string_literal<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<
 
     // Single-quoted string (SQL-style): `''` continues the string (and
     // stays as-is in the value); anything else ends at the first `'`.
+    // The body is captured as one input slice (`to_slice`) — the value
+    // is verbatim anyway, so no per-piece assembly is needed.
     let single_quoted = just('\'')
         .ignore_then(
             just("''")
-                .to("''".to_string())
-                .or(none_of("'").map(String::from))
+                .ignored()
+                .or(none_of("'").ignored())
                 .repeated()
-                .collect::<Vec<String>>()
-                .map(|parts| parts.concat()),
+                .to_slice()
+                .map(ToString::to_string),
         )
         .then_ignore(just('\''));
 

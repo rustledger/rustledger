@@ -1473,24 +1473,11 @@ impl<'a> Executor<'a> {
             "GETITEM" | "GET" => {
                 Self::require_args_count(&name_upper, args, 2)?;
                 match (&args[0], &args[1]) {
-                    (Value::Inventory(inv), Value::String(currency)) => {
-                        let amount = inv.units(currency);
-                        if amount.is_zero() {
-                            Ok(Value::Null)
-                        } else {
-                            Ok(Value::Amount(Amount::new(amount, currency.as_str())))
-                        }
-                    }
-                    // Metadata / object lookup — mirror the per-row path
-                    // (`eval_getitem`). Previously only the lazy path handled
-                    // these, so `getitem(meta, key)` errored in the eager /
-                    // `#postings` evaluation path.
-                    (Value::Metadata(meta), Value::String(key)) => {
-                        Ok(Self::meta_value_to_value(meta.get(key)))
-                    }
-                    (Value::Object(obj), Value::String(key)) => {
-                        Ok(obj.get(key).cloned().unwrap_or(Value::Null))
-                    }
+                    // Container lookups delegate to the CANONICAL
+                    // `getitem_lookup`, shared with `[...]` subscript
+                    // expressions so the two spellings cannot drift
+                    // (#1800 review).
+                    (container, Value::String(key)) => Self::getitem_lookup(container, key),
                     (Value::Null, _) => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "GETITEM expects (inventory, string), (metadata, string), or (object, string)"
@@ -1949,6 +1936,11 @@ impl<'a> Executor<'a> {
             Expr::Column(name) => name.clone(),
             Expr::Function(func) => func.name.clone(),
             Expr::Window(wf) => wf.name.clone(),
+            // Postfix accesses name themselves by their source spelling so
+            // ORDER BY / PIVOT BY string resolution finds the target (a
+            // bare "colN" broke `SELECT entry.narration ORDER BY
+            // entry.narration`, #1800 review).
+            Expr::Attribute { .. } | Expr::Subscript { .. } => expr.to_string(),
             _ => format!("col{index}"),
         }
     }

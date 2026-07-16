@@ -30,6 +30,12 @@ impl<'a> Executor<'a> {
             }
             Expr::UnaryOp(op) => Self::is_aggregate_expr(&op.operand),
             Expr::Paren(inner) => Self::is_aggregate_expr(inner),
+            // A postfix access over an aggregate (first(entry).payee) is
+            // itself aggregate — without this the query is misrouted down
+            // the per-row path and silently returns NULL rows (#1800 review).
+            Expr::Attribute { operand, .. } | Expr::Subscript { operand, .. } => {
+                Self::is_aggregate_expr(operand)
+            }
             _ => false,
         }
     }

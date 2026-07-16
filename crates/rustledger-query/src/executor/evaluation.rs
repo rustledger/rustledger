@@ -214,7 +214,10 @@ impl Executor<'_> {
     /// CANONICAL builder: the default-path `entry` column and the
     /// `#postings` table's `entry` column both call this, so their
     /// shapes cannot drift.
-    pub(super) fn entry_object(txn: &rustledger_core::Transaction) -> Value {
+    pub(super) fn entry_object(
+        txn: &rustledger_core::Transaction,
+        entry_loc: Option<&crate::executor::SourceLocation>,
+    ) -> Value {
         let mut obj = BTreeMap::new();
         obj.insert("date".to_string(), Value::Date(txn.date));
         obj.insert("flag".to_string(), Value::String(txn.flag.to_string()));
@@ -233,8 +236,14 @@ impl Executor<'_> {
             "links".to_string(),
             Value::StringSet(txn.links.iter().map(ToString::to_string).collect()),
         );
+        // Same filename/lineno augmentation the ENTRY_META function and
+        // the posting-level `meta` column apply (via `augmented_meta`), so
+        // `entry.meta['filename']` agrees with `entry_meta('filename')` —
+        // upstream's entry.meta always carries source location (#1800
+        // review).
+        let augmented = Self::augmented_meta(&txn.meta, entry_loc);
         let mut meta_obj = BTreeMap::new();
-        for (k, v) in &txn.meta {
+        for (k, v) in &augmented {
             meta_obj.insert(k.clone(), Self::meta_value_to_value(Some(v)));
         }
         obj.insert("meta".to_string(), Value::Object(Box::new(meta_obj)));
@@ -252,7 +261,7 @@ impl Executor<'_> {
     /// error). rustledger's `entry` object omits empty fields (e.g. an
     /// absent payee), so the two cases are indistinguishable at runtime —
     /// NULL reproduces upstream for the common case and is lenient for
-    /// typos. Pinned in `bql_attribute_subscript_test.rs`.
+    /// typos. Pinned in `attribute_subscript_test.rs`.
     pub(super) fn eval_attribute(value: Value, name: &str) -> Result<Value, QueryError> {
         match value {
             Value::Object(obj) => Ok(obj.get(name).cloned().unwrap_or(Value::Null)),
@@ -263,11 +272,29 @@ impl Executor<'_> {
         }
     }
 
-    /// String-keyed subscript access (`meta['key']`, #1796). Mirrors
-    /// GETITEM's metadata/object arms — a missing key is `NULL`, exactly
-    /// like upstream's `getitem`.
+    /// String-keyed subscript access (`meta['key']`, #1796). Delegates to
+    /// the CANONICAL [`Self::getitem_lookup`] shared with the GETITEM
+    /// function, so the two spellings of the same lookup cannot drift
+    /// (the first draft re-implemented two of GETITEM's three arms and
+    /// `balance['USD']` type-errored where `getitem(balance,'USD')`
+    /// worked — #1800 review).
     pub(super) fn eval_subscript(value: Value, key: &str) -> Result<Value, QueryError> {
-        match value {
+        Self::getitem_lookup(&value, key)
+    }
+
+    /// CANONICAL container lookup for GETITEM and `[...]` subscripts:
+    /// inventory-by-currency, metadata-by-key, object-by-key. A missing
+    /// key (or zero inventory units) is `NULL`, like upstream's `getitem`.
+    pub(super) fn getitem_lookup(container: &Value, key: &str) -> Result<Value, QueryError> {
+        match container {
+            Value::Inventory(inv) => {
+                let amount = inv.units(key);
+                if amount.is_zero() {
+                    Ok(Value::Null)
+                } else {
+                    Ok(Value::Amount(rustledger_core::Amount::new(amount, key)))
+                }
+            }
             Value::Metadata(meta) => Ok(Self::meta_value_to_value(meta.get(key))),
             Value::Object(obj) => Ok(obj.get(key).cloned().unwrap_or(Value::Null)),
             Value::Null => Ok(Value::Null),
@@ -474,8 +501,15 @@ impl Executor<'_> {
             )),
             // has_cost - check if posting has cost specification
             "has_cost" => Ok(Value::Boolean(posting.cost.is_some())),
-            // entry - parent transaction as structured object
-            "entry" => Ok(Self::entry_object(ctx.transaction)),
+            // entry - parent transaction as structured object. The
+            // location is the enclosing DIRECTIVE's (like ENTRY_META),
+            // not the posting's.
+            "entry" => {
+                let entry_loc = ctx
+                    .directive_index
+                    .and_then(|i| self.get_source_location(i).cloned());
+                Ok(Self::entry_object(ctx.transaction, entry_loc.as_ref()))
+            }
             // type - directive type. bean-query lowercases it (`transaction`),
             // and the `#postings` table already emits lowercase; the default
             // posting source is always a transaction. (Confirmed against the

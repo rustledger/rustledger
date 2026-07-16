@@ -372,8 +372,12 @@ impl Executor<'_> {
             }
 
             // Evaluate outer targets
-            let outer_row =
-                self.evaluate_subquery_row(&outer_query.targets, inner_row, &inner_column_map)?;
+            let outer_row = self.evaluate_subquery_row(
+                &outer_query.targets,
+                inner_row,
+                &inner_column_map,
+                &inner_result.columns,
+            )?;
 
             if outer_query.distinct {
                 // O(1) hash-based deduplication
@@ -521,7 +525,8 @@ impl Executor<'_> {
             };
 
             // Evaluate targets (including hidden columns)
-            let result_row = self.evaluate_subquery_row(&extended_targets, row, &column_map)?;
+            let result_row =
+                self.evaluate_subquery_row(&extended_targets, row, &column_map, &table.columns)?;
 
             if query.distinct {
                 // DISTINCT should only consider visible columns, not hidden sort columns.
@@ -706,13 +711,29 @@ impl Executor<'_> {
             if let Some(alias) = &target.alias {
                 names.push(alias.clone());
             } else if matches!(target.expr, Expr::Wildcard) {
-                // Expand wildcard to all inner columns
-                names.extend(inner_columns.iter().cloned());
+                // Expand wildcard to all VISIBLE inner columns.
+                names.extend(
+                    inner_columns
+                        .iter()
+                        .filter(|c| !Self::wildcard_hidden(c))
+                        .cloned(),
+                );
             } else {
                 names.push(self.expr_to_name(&target.expr, i));
             }
         }
         Ok(names)
+    }
+
+    /// Whether a table column is hidden from `SELECT *` expansion.
+    ///
+    /// Upstream beanquery's wildcard omits the structured `entry` column,
+    /// and our underscore-prefixed helper columns (`_entry_meta`,
+    /// `_posting_meta`) were ALSO leaking into `SELECT *` before #1800 —
+    /// one rule now covers both. Every hidden column stays addressable by
+    /// explicit name. Pinned by `select_star_hides_structured_and_helper_columns`.
+    fn wildcard_hidden(name: &str) -> bool {
+        name.starts_with('_') || name == "entry"
     }
 
     /// Evaluate a filter expression against a subquery row.
@@ -836,12 +857,20 @@ impl Executor<'_> {
         targets: &[Target],
         inner_row: &[Value],
         column_map: &FxHashMap<String, usize>,
+        inner_columns: &[String],
     ) -> Result<Row, QueryError> {
         let mut row = Vec::new();
         for target in targets {
             if matches!(target.expr, Expr::Wildcard) {
-                // Expand wildcard to all values from inner row
-                row.extend(inner_row.iter().cloned());
+                // Expand wildcard to the VISIBLE inner values, matching the
+                // name expansion above.
+                row.extend(
+                    inner_row
+                        .iter()
+                        .zip(inner_columns)
+                        .filter(|(_, c)| !Self::wildcard_hidden(c))
+                        .map(|(v, _)| v.clone()),
+                );
             } else {
                 row.push(self.evaluate_subquery_expr(&target.expr, inner_row, column_map)?);
             }

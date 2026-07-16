@@ -673,7 +673,11 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
             Sub(String),
         }
         let postfix = choice((
+            // Whitespace is allowed on BOTH sides of the dot — upstream's
+            // tatsu grammar skips whitespace between tokens, so
+            // `entry . meta` parses there (#1800 review).
             ws().ignore_then(just('.'))
+                .ignore_then(ws())
                 .ignore_then(identifier())
                 .map(Postfix::Attr),
             ws().ignore_then(just('['))

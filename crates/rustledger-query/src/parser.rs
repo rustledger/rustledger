@@ -62,7 +62,11 @@ const PARSE_STACK_SIZE: usize = 16 * 1024 * 1024;
 /// bytes rather than expression delimiters. String lexing here MUST agree
 /// with [`string_literal`] (upstream semantics, #1797): backslash is an
 /// ordinary byte (never an escape), and `''` continues a single-quoted
-/// string. Pinned by `nesting_scan_agrees_with_string_literal_lexing`.
+/// string. Pinned by the MAX_NESTING_DEPTH-straddling guards in
+/// `string_literal_escapes_test.rs`. (A third, DELIBERATELY divergent
+/// string scanner exists: `completions::tokenize_bql`, a heuristic
+/// completion-context tokenizer that only understands double quotes —
+/// see its doc comment for the divergence rationale.)
 fn nesting_exceeds_limit(source: &str) -> Option<usize> {
     let mut depth: usize = 0;
     let mut chars = source.char_indices().peekable();
@@ -1065,9 +1069,16 @@ fn table_identifier<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtr
 /// `parser_test.py` pins `'rainy''day'` -> `rainy''day`. Double-quoted
 /// strings have no escapes at all and end at the first `"`.
 fn string_literal<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>> + Clone {
-    // Double-quoted string: body is everything up to the first `"`.
+    // Double-quoted string: body is everything up to the first `"`,
+    // captured as one input slice like the single-quoted arm.
     let double_quoted = just('"')
-        .ignore_then(none_of("\"").repeated().collect::<String>())
+        .ignore_then(
+            none_of("\"")
+                .ignored()
+                .repeated()
+                .to_slice()
+                .map(ToString::to_string),
+        )
         .then_ignore(just('"'));
 
     // Single-quoted string (SQL-style): `''` continues the string (and

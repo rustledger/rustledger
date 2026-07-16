@@ -76,20 +76,60 @@ fn doubled_quote_continues_single_quoted_string_verbatim() {
     );
 }
 
-/// Drift guard: the paren-nesting pre-scan must lex strings identically
-/// to the parser — a string whose body pre-fix "escaped" the closing
-/// quote (trailing `\`) followed by deep parens must parse fine, and a
-/// `''`-continued string containing parens must not count them.
+/// The quote-run edge family of the upstream regex
+/// `\'(?:[^\']|\'\')*\'`: empty string, a body that is ONLY a doubled
+/// quote, and a trailing `''` right before the closing quote. These are
+/// the inputs where a PEG re-encoding is fragile (alternation order,
+/// laziness, or an "unescape" step would silently change them).
 #[test]
-fn nesting_scan_agrees_with_string_literal_lexing() {
-    // A trailing-backslash string followed by real parens: the OLD
-    // pre-scan treated `\` as escaping the closing quote and swallowed
-    // the rest of the query as string body, desynchronizing its paren
-    // count from the parser's.
+fn quote_run_edges_match_upstream_regex() {
+    assert_eq!(eval_scalar("''"), Value::String(String::new()));
+    assert_eq!(eval_scalar("''''"), Value::String("''".into()));
+    assert_eq!(eval_scalar("'a'''"), Value::String("a''".into()));
+    // Three bare quotes cannot form a complete string in the upstream
+    // grammar either (it lexes as empty-string + stray quote there);
+    // both implementations reject the query.
+    assert!(parse("SELECT '''").is_err());
+}
+
+/// Drift guards: the paren-nesting pre-scan must lex strings identically
+/// to the parser. Its ONLY observable is the `MAX_NESTING_DEPTH` (128)
+/// rejection, so each guard straddles that limit — a scanner that
+/// disagrees with the parser about where a string ends flips the
+/// outcome (per the review of #1798: a guard that a divergence cannot
+/// trip is decoration).
+#[test]
+fn nesting_scan_counts_real_parens_after_trailing_backslash_string() {
+    // `'\'` is a complete one-character string; the 150 parens after it
+    // are REAL and must trip the nesting cap. A scanner that regresses
+    // to backslash-escaping swallows the rest of the query as string
+    // body, skips the cap, and hands the parser 150-deep recursion —
+    // on wasm32 the pre-scan is the only stack protection.
+    let deep = "(".repeat(150);
+    let query = format!(r"SELECT length('\') {deep}");
+    let err = parse(&query).expect_err("must hit the nesting cap");
+    assert!(
+        err.to_string().contains("nesting"),
+        "expected the nesting-depth error, got: {err}"
+    );
+}
+
+#[test]
+fn nesting_scan_ignores_parens_inside_doubled_quote_string() {
+    // 150 `(` inside a ''-continued single-quoted string are opaque
+    // bytes. A scanner that ends the string at the first quote of the
+    // `''` sees them as code and falsely rejects a legitimate query.
+    let parens = "(".repeat(150);
+    assert_eq!(
+        eval_scalar(&format!("length('{parens}''{parens}')")),
+        Value::Integer(302)
+    );
+}
+
+/// The pre-fix user-visible shapes stay covered end-to-end.
+#[test]
+fn strings_with_escapes_evaluate_through_parenthesized_args() {
     assert_eq!(eval_scalar(r"length(('\'))"), Value::Integer(1));
-    // Parens inside a ''-continued string body are opaque bytes, and a
-    // `\)` regex escape deletes a literal paren from a parenthesized
-    // string argument.
     assert_eq!(
         eval_scalar(r"subst('\)', '', ('y)'))"),
         Value::String("y".into())

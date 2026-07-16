@@ -142,6 +142,15 @@ pub fn complete(partial_query: &str, cursor_pos: usize) -> CompletionResult {
 }
 
 /// Simple tokenizer for BQL.
+///
+/// DELIBERATE divergence from the parser's [`crate::parser`] string
+/// lexing (#1797 review): this is a heuristic completion-context
+/// tokenizer — it only recognizes double-quoted strings and knows
+/// nothing of single quotes or `''` continuation. Tokenizing an
+/// unusual literal wrongly costs at worst an odd completion suggestion, never a
+/// wrong query result. Revisit if completions ever gate on string
+/// VALUES rather than token boundaries; the parser-side counterpart
+/// note lives on `nesting_exceeds_limit`.
 fn tokenize_bql(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();

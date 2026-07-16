@@ -131,7 +131,7 @@ fn attribute_in_where_and_group_by() {
 
 /// An aggregate wrapped in postfix access is still an aggregate:
 /// `first(entry).payee` must produce ONE aggregated row, not a NULL per
-/// posting (pre-review, is_aggregate_expr didn't recurse into the new
+/// posting (pre-review, `is_aggregate_expr` didn't recurse into the new
 /// variants and the query was silently misrouted down the per-row path).
 #[test]
 fn aggregate_under_postfix_access() {

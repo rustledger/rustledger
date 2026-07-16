@@ -272,7 +272,7 @@ impl<'a> Executor<'a> {
                 Self::eval_attribute(self.evaluate_aggregate_expr(operand, group)?, name)
             }
             Expr::Subscript { operand, key } => {
-                Self::eval_subscript(self.evaluate_aggregate_expr(operand, group)?, key)
+                Self::eval_subscript(&self.evaluate_aggregate_expr(operand, group)?, key)
             }
             Expr::Function(func) => {
                 match func.name.to_uppercase().as_str() {
@@ -615,7 +615,7 @@ impl<'a> Executor<'a> {
                 name,
             ),
             Expr::Subscript { operand, key } => Self::eval_subscript(
-                self.evaluate_having_expr(operand, row, col_map, alias_map, group)?,
+                &self.evaluate_having_expr(operand, row, col_map, alias_map, group)?,
                 key,
             ),
             Expr::Column(name) => {
@@ -711,7 +711,7 @@ impl<'a> Executor<'a> {
                 name,
             ),
             Expr::Subscript { operand, key } => Self::eval_subscript(
-                self.evaluate_aggregate_table_expr(operand, group, column_map)?,
+                &self.evaluate_aggregate_table_expr(operand, group, column_map)?,
                 key,
             ),
             Expr::Function(func) => {
@@ -988,7 +988,7 @@ impl<'a> Executor<'a> {
                 name,
             ),
             Expr::Subscript { operand, key } => Self::eval_subscript(
-                self.evaluate_having_table_expr(
+                &self.evaluate_having_table_expr(
                     operand, row, col_map, alias_map, group, column_map,
                 )?,
                 key,

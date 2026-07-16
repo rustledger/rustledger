@@ -165,7 +165,7 @@ impl Executor<'_> {
                 Self::eval_attribute(self.evaluate_expr(operand, ctx)?, name)
             }
             Expr::Subscript { operand, key } => {
-                Self::eval_subscript(self.evaluate_expr(operand, ctx)?, key)
+                Self::eval_subscript(&self.evaluate_expr(operand, ctx)?, key)
             }
             Expr::Literal(lit) => self.evaluate_literal(lit),
             Expr::Function(func) => self.evaluate_function(func, ctx),
@@ -278,8 +278,8 @@ impl Executor<'_> {
     /// (the first draft re-implemented two of GETITEM's three arms and
     /// `balance['USD']` type-errored where `getitem(balance,'USD')`
     /// worked — #1800 review).
-    pub(super) fn eval_subscript(value: Value, key: &str) -> Result<Value, QueryError> {
-        Self::getitem_lookup(&value, key)
+    pub(super) fn eval_subscript(value: &Value, key: &str) -> Result<Value, QueryError> {
+        Self::getitem_lookup(value, key)
     }
 
     /// CANONICAL container lookup for GETITEM and `[...]` subscripts:

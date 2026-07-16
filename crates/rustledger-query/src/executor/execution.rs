@@ -759,7 +759,7 @@ impl Executor<'_> {
                 Self::eval_attribute(self.evaluate_subquery_expr(operand, row, column_map)?, name)
             }
             Expr::Subscript { operand, key } => {
-                Self::eval_subscript(self.evaluate_subquery_expr(operand, row, column_map)?, key)
+                Self::eval_subscript(&self.evaluate_subquery_expr(operand, row, column_map)?, key)
             }
             Expr::Wildcard => Err(QueryError::Evaluation(
                 "Wildcard not allowed in expression context".to_string(),

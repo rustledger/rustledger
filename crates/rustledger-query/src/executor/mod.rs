@@ -2005,6 +2005,9 @@ impl<'a> Executor<'a> {
 fn expr_references_column(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Column(col) => col.eq_ignore_ascii_case(name),
+        Expr::Attribute { operand, .. } | Expr::Subscript { operand, .. } => {
+            expr_references_column(operand, name)
+        }
         Expr::Function(call) => call.args.iter().any(|a| expr_references_column(a, name)),
         Expr::Window(call) => {
             // Function args + the OVER clause's PARTITION BY / ORDER BY

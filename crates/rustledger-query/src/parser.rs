@@ -662,7 +662,39 @@ fn at_function<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>
 #[allow(clippy::large_stack_frames)]
 fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
     recursive(|expr| {
-        let primary = primary_expr(expr.clone()).boxed();
+        // Postfix attribute/subscript access binds tighter than any
+        // operator (upstream bql.ebnf: `primary = attribute | subscript |
+        // atom`, both left-recursive on primary — here a postfix fold so
+        // `entry.meta['key']` and `a.b.c` chain, #1796). Number literals
+        // are consumed whole by `literal()` first, so `1.5` never reaches
+        // the attribute dot.
+        enum Postfix {
+            Attr(String),
+            Sub(String),
+        }
+        let postfix = choice((
+            ws().ignore_then(just('.'))
+                .ignore_then(identifier())
+                .map(Postfix::Attr),
+            ws().ignore_then(just('['))
+                .ignore_then(ws())
+                .ignore_then(string_literal())
+                .then_ignore(ws())
+                .then_ignore(just(']'))
+                .map(Postfix::Sub),
+        ));
+        let primary = primary_expr(expr.clone())
+            .foldl(postfix.repeated(), |operand, p| match p {
+                Postfix::Attr(name) => Expr::Attribute {
+                    operand: Box::new(operand),
+                    name,
+                },
+                Postfix::Sub(key) => Expr::Subscript {
+                    operand: Box::new(operand),
+                    key,
+                },
+            })
+            .boxed();
 
         // Unary minus
         let unary = just('-')

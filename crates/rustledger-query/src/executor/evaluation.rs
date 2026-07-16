@@ -161,6 +161,12 @@ impl Executor<'_> {
         match expr {
             Expr::Wildcard => Ok(Value::Null), // Wildcard isn't really an expression
             Expr::Column(name) => self.evaluate_column(name, ctx),
+            Expr::Attribute { operand, name } => {
+                Self::eval_attribute(self.evaluate_expr(operand, ctx)?, name)
+            }
+            Expr::Subscript { operand, key } => {
+                Self::eval_subscript(self.evaluate_expr(operand, ctx)?, key)
+            }
             Expr::Literal(lit) => self.evaluate_literal(lit),
             Expr::Function(func) => self.evaluate_function(func, ctx),
             Expr::Window(_) => {
@@ -203,6 +209,74 @@ impl Executor<'_> {
     }
 
     /// Evaluate a column reference.
+    /// The parent transaction as a structured [`Value::Object`] — the
+    /// `entry` column (attribute-accessible via `entry.<field>`, #1796).
+    /// CANONICAL builder: the default-path `entry` column and the
+    /// `#postings` table's `entry` column both call this, so their
+    /// shapes cannot drift.
+    pub(super) fn entry_object(txn: &rustledger_core::Transaction) -> Value {
+        let mut obj = BTreeMap::new();
+        obj.insert("date".to_string(), Value::Date(txn.date));
+        obj.insert("flag".to_string(), Value::String(txn.flag.to_string()));
+        if let Some(ref payee) = txn.payee {
+            obj.insert("payee".to_string(), Value::String(payee.to_string()));
+        }
+        obj.insert(
+            "narration".to_string(),
+            Value::String(txn.narration.to_string()),
+        );
+        obj.insert(
+            "tags".to_string(),
+            Value::StringSet(txn.tags.iter().map(ToString::to_string).collect()),
+        );
+        obj.insert(
+            "links".to_string(),
+            Value::StringSet(txn.links.iter().map(ToString::to_string).collect()),
+        );
+        let mut meta_obj = BTreeMap::new();
+        for (k, v) in &txn.meta {
+            meta_obj.insert(k.clone(), Self::meta_value_to_value(Some(v)));
+        }
+        obj.insert("meta".to_string(), Value::Object(Box::new(meta_obj)));
+        Value::Object(Box::new(obj))
+    }
+
+    /// Dotted attribute access (`entry.meta`, #1796). Upstream compiles
+    /// attributes against structured dtypes and errors on non-structured
+    /// operands; rustledger's structured values are dynamic
+    /// [`Value::Object`]s, so lookup happens here at evaluation time.
+    ///
+    /// Stricter-vs-looser note (Python Compatibility Policy): a MISSING
+    /// attribute returns `NULL`, where upstream distinguishes "field
+    /// exists but is None" (NULL) from "no such attribute" (compile
+    /// error). rustledger's `entry` object omits empty fields (e.g. an
+    /// absent payee), so the two cases are indistinguishable at runtime —
+    /// NULL reproduces upstream for the common case and is lenient for
+    /// typos. Pinned in `bql_attribute_subscript_test.rs`.
+    pub(super) fn eval_attribute(value: Value, name: &str) -> Result<Value, QueryError> {
+        match value {
+            Value::Object(obj) => Ok(obj.get(name).cloned().unwrap_or(Value::Null)),
+            Value::Null => Ok(Value::Null),
+            other => Err(QueryError::Type(format!(
+                "cannot access attribute '{name}': operand {other:?} is not structured"
+            ))),
+        }
+    }
+
+    /// String-keyed subscript access (`meta['key']`, #1796). Mirrors
+    /// GETITEM's metadata/object arms — a missing key is `NULL`, exactly
+    /// like upstream's `getitem`.
+    pub(super) fn eval_subscript(value: Value, key: &str) -> Result<Value, QueryError> {
+        match value {
+            Value::Metadata(meta) => Ok(Self::meta_value_to_value(meta.get(key))),
+            Value::Object(obj) => Ok(obj.get(key).cloned().unwrap_or(Value::Null)),
+            Value::Null => Ok(Value::Null),
+            other => Err(QueryError::Type(format!(
+                "cannot subscript with '{key}': operand {other:?} is not a mapping"
+            ))),
+        }
+    }
+
     pub(super) fn evaluate_column(
         &self,
         name: &str,
@@ -401,34 +475,7 @@ impl Executor<'_> {
             // has_cost - check if posting has cost specification
             "has_cost" => Ok(Value::Boolean(posting.cost.is_some())),
             // entry - parent transaction as structured object
-            "entry" => {
-                let txn = ctx.transaction;
-                let mut obj = BTreeMap::new();
-                obj.insert("date".to_string(), Value::Date(txn.date));
-                obj.insert("flag".to_string(), Value::String(txn.flag.to_string()));
-                if let Some(ref payee) = txn.payee {
-                    obj.insert("payee".to_string(), Value::String(payee.to_string()));
-                }
-                obj.insert(
-                    "narration".to_string(),
-                    Value::String(txn.narration.to_string()),
-                );
-                obj.insert(
-                    "tags".to_string(),
-                    Value::StringSet(txn.tags.iter().map(ToString::to_string).collect()),
-                );
-                obj.insert(
-                    "links".to_string(),
-                    Value::StringSet(txn.links.iter().map(ToString::to_string).collect()),
-                );
-                // Include transaction metadata
-                let mut meta_obj = BTreeMap::new();
-                for (k, v) in &txn.meta {
-                    meta_obj.insert(k.clone(), Self::meta_value_to_value(Some(v)));
-                }
-                obj.insert("meta".to_string(), Value::Object(Box::new(meta_obj)));
-                Ok(Value::Object(Box::new(obj)))
-            }
+            "entry" => Ok(Self::entry_object(ctx.transaction)),
             // type - directive type. bean-query lowercases it (`transaction`),
             // and the `#postings` table already emits lowercase; the default
             // posting source is always a transaction. (Confirmed against the

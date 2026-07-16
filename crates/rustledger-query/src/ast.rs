@@ -196,6 +196,23 @@ pub enum Expr {
     },
     /// Set literal for IN operator, e.g., `('EUR', 'USD')`.
     Set(Vec<Self>),
+    /// Dotted attribute access on a structured value, e.g. `entry.meta`
+    /// (upstream bql.ebnf: `attribute = operand:primary '.' name:identifier`,
+    /// #1796).
+    Attribute {
+        /// The structured operand.
+        operand: Box<Self>,
+        /// The attribute name.
+        name: String,
+    },
+    /// String-keyed subscript access, e.g. `meta['key']` (upstream
+    /// bql.ebnf: `subscript = operand:primary '[' key:string ']'`, #1796).
+    Subscript {
+        /// The mapping operand.
+        operand: Box<Self>,
+        /// The string key.
+        key: String,
+    },
 }
 
 /// A literal value.
@@ -570,6 +587,8 @@ impl fmt::Display for Expr {
         match self {
             Self::Wildcard => write!(f, "*"),
             Self::Column(name) => write!(f, "{name}"),
+            Self::Attribute { operand, name } => write!(f, "{operand}.{name}"),
+            Self::Subscript { operand, key } => write!(f, "{operand}['{key}']"),
             Self::Literal(lit) => write!(f, "{lit}"),
             Self::Function(func) => {
                 write!(f, "{}(", func.name)?;

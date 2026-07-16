@@ -583,6 +583,9 @@ impl Executor<'_> {
             // Metadata and collection columns
             "meta".to_string(),
             "accounts".to_string(),
+            // Parent transaction as a structured object (entry.meta etc.,
+            // #1796) — same canonical builder as the default-path column.
+            "entry".to_string(),
             // Hidden metadata columns for META/ENTRY_META functions
             "_entry_meta".to_string(),
             "_posting_meta".to_string(),
@@ -753,6 +756,7 @@ impl Executor<'_> {
                     posting_loc.as_ref(),
                 ))),
                 Value::StringSet(all_accounts),
+                Self::entry_object(txn),
                 // Hidden metadata columns
                 Self::metadata_to_value(&txn.meta),
                 Self::metadata_to_value(&posting.meta),

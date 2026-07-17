@@ -280,8 +280,9 @@ The shell expands `$RLEDGER_*` so `bean-price` sees its own argument convention.
 > command honored `RLEDGER_DATE`. A script that ignores `RLEDGER_DATE`
 > and prints its latest quote will have that quote recorded under
 > whatever `--date` was passed. If your fetcher can't honor the date,
-> emit the dated beancount form (`<date> price <ticker> <amount>
-> <currency>`) or a JSON `date` field so the true date wins.
+> emit the dated beancount form
+> (`<date> price <ticker> <amount> <currency>`)
+> or a JSON `date` field so the true date wins.
 
 #### Legacy: appended CLI arguments
 

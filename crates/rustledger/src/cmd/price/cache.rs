@@ -209,8 +209,8 @@ impl PriceCache {
     /// Save cache to disk (only if modified). Prunes stale entries.
     ///
     /// A no-op when the on-disk file belongs to a newer schema — see
-    /// [`Self::classify_contents`]: this run trades caching away rather
-    /// than destroy a newer binary's data.
+    /// `classify_contents` (private): this run trades caching away
+    /// rather than destroy a newer binary's data.
     pub fn save(&mut self) {
         if self.readonly || !self.dirty {
             return;

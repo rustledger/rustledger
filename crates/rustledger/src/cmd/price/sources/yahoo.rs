@@ -39,15 +39,20 @@ impl YahooFinanceSource {
     fn build_url(&self, symbol: &str, date: Option<NaiveDate>) -> Result<String> {
         match date {
             Some(d) => {
+                // Window bounds are fetch SLOP, not the classification: a
+                // bar's day is decided by the exchange-local date below, so
+                // the window is padded a day on each side to cover every
+                // UTC offset (deep review of #1801: NZX/ASX sessions cross
+                // UTC midnight).
                 let end = d
-                    .tomorrow()
+                    .checked_add(jiff::Span::new().days(2))
                     .context("date overflow")?
                     .to_zoned(jiff::tz::TimeZone::UTC)
                     .context("date out of range")?
                     .timestamp()
                     .as_second();
                 let begin = d
-                    .checked_sub(jiff::Span::new().days(5))
+                    .checked_sub(jiff::Span::new().days(6))
                     .context("date underflow")?
                     .to_zoned(jiff::tz::TimeZone::UTC)
                     .context("date out of range")?
@@ -99,15 +104,38 @@ impl YahooFinanceSource {
             .and_then(serde_json::Value::as_str)
             .map(ToString::to_string);
 
+        // Quote timestamps are exchange-session times; classify them by
+        // the EXCHANGE's civil date via meta.gmtoffset (what beanprice
+        // does through exchangeTimezoneName). Classifying by UTC date
+        // shifts NZX/ASX bars onto the wrong day — the same wrong-date
+        // class #1794 fixed (deep review).
+        let gmtoffset = result
+            .get("meta")
+            .and_then(|m| m.get("gmtoffset"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let quote_civil_date = |secs: i64| -> Option<NaiveDate> {
+            jiff::Timestamp::from_second(secs.checked_add(gmtoffset)?)
+                .ok()
+                .map(|t| t.to_zoned(jiff::tz::TimeZone::UTC).date())
+        };
+
         let Some(requested) = requested else {
-            // Latest quote.
-            let price_value = result
-                .get("meta")
+            // Latest quote — labeled with the QUOTE's own trading day
+            // (meta.regularMarketTime) when present, not the local clock:
+            // fetching on a weekend must date the price Friday.
+            let meta = result.get("meta");
+            let price_value = meta
                 .and_then(|m| m.get("regularMarketPrice"))
                 .with_context(|| format!("No price found for {ticker}"))?;
             let price = crate::cmd::price::price_decimal_from_json(price_value)
                 .with_context(|| format!("Invalid price for {ticker}"))?;
-            return Ok((price, currency, jiff::Zoned::now().date()));
+            let date = meta
+                .and_then(|m| m.get("regularMarketTime"))
+                .and_then(serde_json::Value::as_i64)
+                .and_then(quote_civil_date)
+                .unwrap_or_else(|| jiff::Zoned::now().date());
+            return Ok((price, currency, date));
         };
 
         // Historical: walk timestamps/closes in parallel, keep the last
@@ -124,18 +152,23 @@ impl YahooFinanceSource {
             .and_then(serde_json::Value::as_array)
             .with_context(|| format!("No close series for {ticker}"))?;
 
+        // No early break: Yahoo does not guarantee sorted timestamps, so
+        // track the maximum quote date <= requested across the whole
+        // series (deep review).
         let mut best: Option<(rust_decimal::Decimal, NaiveDate)> = None;
         for (ts, close) in timestamps.iter().zip(closes) {
             if close.is_null() {
                 continue;
             }
             let Some(secs) = ts.as_i64() else { continue };
-            let Ok(stamp) = jiff::Timestamp::from_second(secs) else {
+            let Some(quote_date) = quote_civil_date(secs) else {
                 continue;
             };
-            let quote_date = stamp.to_zoned(jiff::tz::TimeZone::UTC).date();
             if quote_date > requested {
-                break;
+                continue;
+            }
+            if best.as_ref().is_some_and(|(_, d)| *d > quote_date) {
+                continue;
             }
             if let Some(price) = crate::cmd::price::price_decimal_from_json(close) {
                 best = Some((price, quote_date));
@@ -205,7 +238,7 @@ mod tests {
         assert!(url.contains("period2="), "{url}");
         assert!(!url.contains("range="), "{url}");
         // period2 is the exclusive end: midnight UTC of the day after.
-        assert!(url.contains("period2=1735862400"), "{url}");
+        assert!(url.contains("period2=1735948800"), "{url}");
     }
 
     /// Fixture-driven historical parsing: Sat 2025-01-04 requested, the
@@ -263,6 +296,51 @@ mod tests {
         let err = YahooFinanceSource::parse_chart(&json, Some(requested), "AAPL")
             .expect_err("must refuse");
         assert!(err.to_string().contains("on or before"), "{err}");
+    }
+
+    /// Exchange-timezone classification (deep review): NZX trades at
+    /// UTC+13, so Tuesday's 10:00 NZST bar is Monday 21:00 UTC. Classified
+    /// by UTC date it would masquerade as Monday and overwrite Monday's
+    /// real close; classified by exchange-local date (meta.gmtoffset) the
+    /// Monday request returns MONDAY's close.
+    #[test]
+    fn parse_chart_classifies_by_exchange_timezone() {
+        // gmtoffset +13h (46800). Monday 2026-07-13 10:00 NZST
+        // = Sunday 2026-07-12 21:00 UTC = 1783976400.
+        // Tuesday 2026-07-14 10:00 NZST = Monday 2026-07-13 21:00 UTC
+        // = 1784062800.
+        let json: serde_json::Value = serde_json::json!({
+            "chart": { "result": [{
+                "meta": { "currency": "NZD", "gmtoffset": 46800 },
+                "timestamp": [1_783_976_400_i64, 1_784_062_800_i64],
+                "indicators": { "quote": [{ "close": [1.11, 2.22] }] }
+            }], "error": null }
+        });
+        let requested = rustledger_core::naive_date(2026, 7, 13).unwrap();
+        let (price, _, date) =
+            YahooFinanceSource::parse_chart(&json, Some(requested), "AIR.NZ").expect("parses");
+        assert_eq!(price.to_string(), "1.11", "Monday's bar, not Tuesday's");
+        assert_eq!(date, rustledger_core::naive_date(2026, 7, 13).unwrap());
+    }
+
+    /// The latest path labels with the quote's own trading day
+    /// (regularMarketTime + gmtoffset), not the local clock.
+    #[test]
+    fn parse_chart_latest_uses_quote_own_date() {
+        // Friday 2026-07-10 16:00 US/Eastern (UTC-4) = 20:00 UTC
+        // = 1783800000; gmtoffset -14400.
+        let json: serde_json::Value = serde_json::json!({
+            "chart": { "result": [{
+                "meta": {
+                    "currency": "USD",
+                    "regularMarketPrice": 243.85,
+                    "regularMarketTime": 1_783_800_000_i64,
+                    "gmtoffset": -14400
+                }
+            }], "error": null }
+        });
+        let (_, _, date) = YahooFinanceSource::parse_chart(&json, None, "AAPL").expect("parses");
+        assert_eq!(date, rustledger_core::naive_date(2026, 7, 10).unwrap());
     }
 
     /// The latest path still reads regularMarketPrice.

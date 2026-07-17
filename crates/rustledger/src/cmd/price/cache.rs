@@ -24,6 +24,19 @@ pub struct PriceCache {
     dirty: bool,
 }
 
+/// Current cache schema. Bumped in #1801: version 1 was an unversioned
+/// bare map that could hold live quotes mislabeled with historical dates
+/// (#1794); those entries must never be served, so unversioned or
+/// mismatched files load as empty.
+const CACHE_SCHEMA_VERSION: u32 = 2;
+
+/// The on-disk cache envelope.
+#[derive(Debug, Serialize, Deserialize)]
+struct CacheFile {
+    version: u32,
+    entries: HashMap<String, CachedPrice>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedPrice {
     price: String,
@@ -41,7 +54,16 @@ impl PriceCache {
 
         let entries = if path.exists() {
             match std::fs::read_to_string(&path) {
-                Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+                // Versioned envelope: entries from other schema versions are
+                // DISCARDED, not migrated. Pre-#1801 caches hold live quotes
+                // stored under historical dates (the #1794 corruption); the
+                // old bare-map format fails to parse as CacheFile, so those
+                // poisoned entries can never be served again (deep review —
+                // the cache sits ABOVE the sources, bypassing their fixes).
+                Ok(contents) => match serde_json::from_str::<CacheFile>(&contents) {
+                    Ok(file) if file.version == CACHE_SCHEMA_VERSION => file.entries,
+                    _ => HashMap::new(),
+                },
                 Err(_) => HashMap::new(),
             }
         } else {
@@ -115,7 +137,11 @@ impl PriceCache {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        if let Ok(json) = serde_json::to_string_pretty(&self.entries)
+        let file = CacheFile {
+            version: CACHE_SCHEMA_VERSION,
+            entries: self.entries.clone(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&file)
             && std::fs::write(&self.path, json).is_ok()
         {
             self.dirty = false;
@@ -284,12 +310,15 @@ mod tests {
             assert!(!cache.dirty, "dirty should be cleared after save");
         }
 
-        // Load and verify
+        // Load and verify through the versioned envelope.
         {
+            let file: CacheFile =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(file.version, CACHE_SCHEMA_VERSION);
             let cache = PriceCache {
                 path: path.clone(),
                 ttl: Duration::from_hours(1),
-                entries: serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap(),
+                entries: file.entries,
                 dirty: false,
             };
             let cached = cache.get("yahoo:AAPL:USD:latest");
@@ -320,5 +349,26 @@ mod tests {
         cache.clear();
         assert!(cache.entries.is_empty());
         assert!(cache.get("key").is_none());
+    }
+
+    /// A pre-#1801 cache (unversioned bare map — the format that could
+    /// hold live quotes mislabeled with historical dates, #1794) must
+    /// load as EMPTY, never serving its poisoned entries.
+    #[test]
+    fn unversioned_legacy_cache_is_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prices.json");
+        // The 0.21.0 on-disk shape: entries map at the top level.
+        std::fs::write(
+            &path,
+            r#"{"yahoo:AAPL:USD:2000-01-03":{"price":"317.31","currency":"USD","date":"2000-01-03","source":"yahoo","cached_at":1700000000}}"#,
+        )
+        .unwrap();
+        let loaded = std::fs::read_to_string(&path).unwrap();
+        let parsed = serde_json::from_str::<CacheFile>(&loaded);
+        assert!(
+            parsed.is_err(),
+            "legacy bare-map format must fail the versioned parse"
+        );
     }
 }

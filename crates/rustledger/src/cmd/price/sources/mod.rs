@@ -30,23 +30,25 @@ pub use yahoo::YahooFinanceSource;
 use super::{PriceRequest, PriceResponse};
 use anyhow::Result;
 
-/// Reject a historical `--date` on a source that can only fetch the
+/// Reject an explicit `--date` on a source that can only fetch the
 /// LATEST quote.
 ///
 /// Labeling the latest price with an arbitrary historical date silently
 /// corrupts price archives (#1794 — Yahoo emitted the live quote under
-/// `--date 2000-01-03`). A latest-only source must refuse instead.
-/// Today's date is allowed: the latest quote genuinely belongs to today.
+/// `--date 2000-01-03`). Matching beanprice, a dated fetch requires a
+/// source with real historical support, so latest-only sources refuse
+/// ANY `--date` — including today's, which keeps the rule clock-free
+/// and consistent across a batch that straddles midnight (deep review).
+/// Date-independent identity branches (e.g. EUR→EUR = 1.0) early-return
+/// BEFORE this guard.
 ///
 /// # Errors
-/// Errors when `request.date` names a day other than today.
+/// Errors whenever `request.date` is set.
 pub(super) fn reject_historical_date(
     source: &str,
     request: &crate::cmd::price::PriceRequest,
 ) -> anyhow::Result<()> {
-    if let Some(date) = request.date
-        && date != jiff::Zoned::now().date()
-    {
+    if let Some(date) = request.date {
         anyhow::bail!(
             "the '{source}' source only provides the latest quote and cannot fetch {} \
              for {date}; drop --date, or use a source with historical support \
@@ -113,34 +115,74 @@ mod guard_tests {
         }
     }
 
-    /// Latest-only sources refuse a historical --date instead of
-    /// mislabeling the current quote (#1794). Uses a FIXED past date so
-    /// the assertion is deterministic (never "yesterday", which races
-    /// the midnight rollover — review comment).
+    /// Latest-only sources refuse ANY --date instead of mislabeling the
+    /// current quote (#1794) — including today's, keeping the rule
+    /// clock-free (deep review: a per-fetch clock comparison flips
+    /// behavior mid-batch across midnight).
     #[test]
-    fn historical_date_is_rejected() {
+    fn any_explicit_date_is_rejected() {
         let past = rustledger_core::naive_date(2000, 1, 3).expect("valid date");
         let err = super::reject_historical_date("coinbase", &request(Some(past)))
             .expect_err("must refuse");
         assert!(err.to_string().contains("latest quote"), "{err}");
         assert!(err.to_string().contains("coinbase"), "{err}");
+
+        let today = jiff::Zoned::now().date();
+        assert!(
+            super::reject_historical_date("coinbase", &request(Some(today))).is_err(),
+            "today's date is also refused — dated fetches need historical support"
+        );
     }
 
-    /// Today's date is allowed — the latest quote genuinely belongs to
-    /// today — and no date always passes. The guard reads the clock
-    /// again internally, so re-check that "today" was stable across the
-    /// call and retry if midnight flipped between the two reads.
+    /// No date always passes.
     #[test]
-    fn today_and_absent_date_pass() {
-        loop {
-            let today = jiff::Zoned::now().date();
-            let passed = super::reject_historical_date("coinbase", &request(Some(today))).is_ok();
-            if jiff::Zoned::now().date() == today {
-                assert!(passed, "today's date must pass the guard");
-                break;
-            }
-            // Midnight rolled over mid-test; retry with the new date.
-        }
+    fn absent_date_passes() {
         assert!(super::reject_historical_date("coinbase", &request(None)).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod guard_wiring_tests {
+    use crate::cmd::price::{PriceConfig, PriceRequest, PriceSourceRegistry};
+
+    /// Drift guard (deep review of #1801): every latest-only builtin must
+    /// actually CALL `reject_historical_date` from `fetch_price`. The
+    /// guard fires before any network I/O, so a hermetic dated fetch must
+    /// fail with the guard's message — a source that forgot the guard
+    /// would instead surface a network/parse error (or worse, succeed).
+    /// `yahoo` (real historical support) and `external` (forwards the
+    /// date to the user's command) are exempt by design.
+    #[test]
+    fn every_latest_only_source_rejects_dated_fetches() {
+        let registry = PriceSourceRegistry::new(&PriceConfig::default());
+        let past = rustledger_core::naive_date(2000, 1, 3).expect("valid date");
+        for name in [
+            "alphavantage",
+            "coinbase",
+            "coincap",
+            "coinmarketcap",
+            "eastmoneyfund",
+            "ecb",
+            "oanda",
+            "quandl",
+            "ratesapi",
+            "tsp",
+        ] {
+            let source = registry
+                .get(name)
+                .unwrap_or_else(|| panic!("builtin source '{name}' must exist"));
+            let request = PriceRequest {
+                ticker: "AAPL".to_string(),
+                currency: "USD".to_string(),
+                date: Some(past),
+            };
+            let err = source
+                .fetch_price(&request)
+                .expect_err("dated fetch must be refused before any I/O");
+            assert!(
+                err.to_string().contains("latest quote"),
+                "source '{name}' did not fire the historical-date guard: {err}"
+            );
+        }
     }
 }

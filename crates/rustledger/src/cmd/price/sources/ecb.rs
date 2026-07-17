@@ -127,8 +127,6 @@ impl PriceSource for EcbSource {
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
         // Latest-only source: a historical --date must refuse, not
         // mislabel the current quote (#1794).
-        super::reject_historical_date(self.name(), request)?;
-
         let ticker = request.ticker.to_uppercase();
         let currency = request.currency.to_uppercase();
 
@@ -140,6 +138,8 @@ impl PriceSource for EcbSource {
 
         let date = request.date.unwrap_or_else(|| jiff::Zoned::now().date());
 
+        // Identity rate: 1.0 is correct for ANY date, so this branch
+        // deliberately sits ABOVE the latest-only guard (deep review).
         if ticker == "EUR" && currency == "EUR" {
             // EUR to EUR = 1
             return Ok(PriceResponse {
@@ -149,6 +149,10 @@ impl PriceSource for EcbSource {
                 source: self.name().to_string(),
             });
         }
+
+        // Latest-only source: a historical --date must refuse, not
+        // mislabel the current quote (#1794).
+        super::reject_historical_date(self.name(), request)?;
 
         if ticker == "EUR" {
             // EUR -> X: fetch X rate (X per EUR), return as-is
@@ -185,7 +189,7 @@ impl PriceSource for EcbSource {
         // Cross-rate: X -> Y via EUR
         // X per EUR and Y per EUR => Y per X = (Y per EUR) / (X per EUR)
         let (ticker_rate, ticker_date) = self.fetch_rate(&ticker)?;
-        let (currency_rate, _) = self.fetch_rate(&currency)?;
+        let (currency_rate, currency_date) = self.fetch_rate(&currency)?;
 
         if ticker_rate.is_zero() {
             anyhow::bail!("Cannot compute cross-rate: zero rate for {ticker}");
@@ -196,8 +200,11 @@ impl PriceSource for EcbSource {
         Ok(PriceResponse {
             price: cross_rate,
             currency,
-            // Same rule as the direct branches: the feed's own date.
-            date: ticker_date,
+            // Same rule as the direct branches: the feed's own date. Both
+            // legs come from the same daily feed, but two fetches can
+            // straddle a publication — the OLDER reference date is the one
+            // both rates are valid for (deep review).
+            date: ticker_date.min(currency_date),
             source: self.name().to_string(),
         })
     }

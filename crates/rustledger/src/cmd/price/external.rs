@@ -201,6 +201,10 @@ impl PriceSource for ExternalCommandSource {
     }
 
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
+        // Deliberately NOT guarded by `reject_historical_date`: the
+        // requested date is forwarded to the external command via
+        // RLEDGER_DATE below, so historical semantics are the external
+        // fetcher's contract, not ours (#1801 review).
         if self.command.is_empty() {
             anyhow::bail!("External command is empty");
         }

@@ -117,7 +117,13 @@ impl AlphaVantageSource {
         let price = Decimal::from_str(price_str)
             .with_context(|| format!("Failed to parse price: {price_str}"))?;
 
-        let date = jiff::Zoned::now().date();
+        // The quote's OWN trading day when present — a weekend fetch must
+        // date the price Friday, not today (deep review of #1801).
+        let date = quote
+            .get("07. latest trading day")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| s.parse::<rustledger_core::NaiveDate>().ok())
+            .unwrap_or_else(|| jiff::Zoned::now().date());
 
         Ok(PriceResponse {
             price,

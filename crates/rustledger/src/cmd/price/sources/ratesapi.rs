@@ -42,16 +42,16 @@ impl PriceSource for RatesApiSource {
     }
 
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        // Identity rate: 1.0 is correct for ANY date, so this branch
-        // deliberately sits ABOVE the latest-only guard (deep review —
-        // the guard must not remove previously-correct dated identity
-        // answers).
+        // Identity rate: 1.0 is correct for any PAST date, so this
+        // branch deliberately sits ABOVE the latest-only guard (deep
+        // review — the guard must not remove previously-correct dated
+        // identity answers). Future labels are refused by
+        // identity_label_date (round-4 review).
         if request.ticker.to_uppercase() == request.currency.to_uppercase() {
-            let date = request.date.unwrap_or_else(|| jiff::Zoned::now().date());
             return Ok(PriceResponse {
                 price: Decimal::ONE,
                 currency: request.currency.clone(),
-                date,
+                date: super::identity_label_date(self.name(), request)?,
                 source: self.name().to_string(),
             });
         }

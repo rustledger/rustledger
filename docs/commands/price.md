@@ -24,7 +24,7 @@ rledger price [OPTIONS] [SYMBOL]...
 |--------|-------------|
 | `-f, --file <FILE>` | Beancount file to discover commodities from |
 | `-c, --currency <CURRENCY>` | Base currency for price quotes [default: USD] |
-| `-d, --date <DATE>` | Date for prices (YYYY-MM-DD, defaults to today) |
+| `-d, --date <DATE>` | Date for prices (YYYY-MM-DD, defaults to today). Historical dates need a source with historical support: `yahoo`, or an external `--source-cmd` that honors `RLEDGER_DATE`. Latest-only sources (coinbase, ecb, ratesapi, alphavantage, …) accept only today's date and refuse past or future dates instead of mislabeling the current quote (#1794). |
 | `-b, --beancount` | Output as beancount price directives |
 | `--source-meta` | With `-b`, also write a `source:` metadata line on each price directive recording which provider produced the quote (opt-in provenance — see note below). Requires `-b`. |
 | `-s, --source <SOURCE>` | Use specific source (overrides mapping) |
@@ -178,7 +178,13 @@ use_default_source = true
 Prices are cached to disk to reduce API calls. By default, cached prices expire after **30 minutes** (matching Python `bean-price` behavior).
 
 - **Latest prices** (no `--date`) expire after the configured TTL
-- **Historical prices** (with `--date`) don't expire via TTL, but are pruned after 7 days of inactivity
+- **Settled historical prices** (a `--date` strictly before the day the
+  quote was fetched) don't expire via TTL — a past close is immutable —
+  but are pruned after 7 days of inactivity
+- **Same-day prices** (`--date <today>`) are intraday quotes, not
+  closes: they expire with the TTL like latest prices, so a re-run
+  after the TTL refetches. Raise `cache_ttl` if you re-run same-day
+  batches against rate-limited sources
 - Cache file location: platform cache directory (e.g., `~/.cache/rledger/prices.json` on Linux)
 
 ### Configuration
@@ -267,6 +273,15 @@ rledger price PROP --currency AUD \
 The shell expands `$RLEDGER_*` so `bean-price` sees its own argument convention. No rledger-specific glue required.
 
 `RLEDGER_DATE` is set to the empty string (not unset) when no date is requested, so `${RLEDGER_DATE:-today}` shell idioms work.
+
+> **Trust contract for dated fetches:** when the command's output carries
+> no date of its own (a plain number, or JSON without a `date` field),
+> rledger labels the price with the *requested* date, trusting that the
+> command honored `RLEDGER_DATE`. A script that ignores `RLEDGER_DATE`
+> and prints its latest quote will have that quote recorded under
+> whatever `--date` was passed. If your fetcher can't honor the date,
+> emit the dated beancount form (`<date> price <ticker> <amount>
+> <currency>`) or a JSON `date` field so the true date wins.
 
 #### Legacy: appended CLI arguments
 

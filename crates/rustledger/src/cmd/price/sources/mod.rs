@@ -30,13 +30,32 @@ pub use yahoo::YahooFinanceSource;
 use super::{PriceRequest, PriceResponse};
 use anyhow::Result;
 
-/// The run's notion of "today", latched at the first guarded fetch.
+/// The civil day of this process's FIRST guarded fetch.
 ///
-/// A `--date $(date +%F)` batch that straddles midnight must not flip
-/// mid-run from accepted to refused — a per-fetch clock read left the
-/// tail of the batch failing with advice to "drop --date" even though
-/// the flag was correct when the run began (round-3 deep review).
-static RUN_TODAY: std::sync::OnceLock<rustledger_core::NaiveDate> = std::sync::OnceLock::new();
+/// Used only to widen the guard by one day across a midnight straddle —
+/// see [`latest_date_window_ok`]. It deliberately does NOT replace the
+/// live clock (round-4 deep review: an unconditional process-wide latch
+/// froze "today" forever for long-lived library embedders, refusing
+/// every fetch after the first midnight).
+static FIRST_FETCH_DAY: std::sync::OnceLock<rustledger_core::NaiveDate> =
+    std::sync::OnceLock::new();
+
+/// Pure decision for the latest-only guard: `date` is fetchable when it
+/// IS `today`, or when the run started on `date` and midnight has since
+/// passed (`date` is yesterday AND equals the first-fetch day). The
+/// second arm keeps a `--date $(date +%F)` batch working to its end
+/// when it straddles midnight (round-3 review), without letting a
+/// long-lived embedder replay its start day weeks later — the window
+/// never widens past one day (round-4 review).
+fn latest_date_window_ok(
+    date: rustledger_core::NaiveDate,
+    today: rustledger_core::NaiveDate,
+    first_fetch_day: rustledger_core::NaiveDate,
+) -> bool {
+    date == today
+        || (date == first_fetch_day
+            && today.checked_sub(jiff::Span::new().days(1)).ok() == Some(date))
+}
 
 /// Reject a past or future `--date` on a source that can only fetch the
 /// LATEST quote.
@@ -48,28 +67,58 @@ static RUN_TODAY: std::sync::OnceLock<rustledger_core::NaiveDate> = std::sync::O
 /// <today>` is allowed, because the latest quote IS a valid answer for
 /// today and the emitted directive carries the response's own date
 /// anyway (round-2 deep review: nightly `--date $(date +%F)` runs
-/// worked on every source before #1801 and must keep working). "Today"
-/// is latched once per process — see [`RUN_TODAY`].
+/// worked on every source before #1801 and must keep working). A batch
+/// that straddles midnight stays accepted — see
+/// [`latest_date_window_ok`].
 /// Date-independent identity branches (e.g. USD→USD = 1.0) early-return
-/// BEFORE this guard.
+/// BEFORE this guard but refuse future labels via
+/// [`identity_label_date`].
 ///
 /// # Errors
-/// Errors whenever `request.date` is set to any day other than today.
+/// Errors whenever `request.date` is outside the accepted window.
 pub(super) fn reject_historical_date(
     source: &str,
     request: &crate::cmd::price::PriceRequest,
 ) -> anyhow::Result<()> {
-    if let Some(date) = request.date
-        && date != *RUN_TODAY.get_or_init(|| jiff::Zoned::now().date())
-    {
-        anyhow::bail!(
-            "the '{source}' source only provides the latest quote and cannot fetch {} \
-             for {date}; drop --date, or use a source with historical support \
-             (e.g. yahoo)",
-            request.ticker
-        );
+    if let Some(date) = request.date {
+        let today = jiff::Zoned::now().date();
+        let first_fetch_day = *FIRST_FETCH_DAY.get_or_init(|| today);
+        if !latest_date_window_ok(date, today, first_fetch_day) {
+            anyhow::bail!(
+                "the '{source}' source only provides the latest quote and cannot fetch {} \
+                 for {date}; drop --date, or use a source with historical support \
+                 (e.g. yahoo)",
+                request.ticker
+            );
+        }
     }
     Ok(())
+}
+
+/// Date label for a date-independent identity answer (X→X = 1.0).
+///
+/// Identity is numerically correct for any PAST day, which is why the
+/// identity branches sit ABOVE [`reject_historical_date`] — but a
+/// FUTURE label would fabricate a directive for a day that hasn't
+/// happened, which every guarded path refuses; refuse it here too
+/// (round-4 deep review: `--date 2030-01-01` on an ecb/ratesapi
+/// identity pair emitted `2030-01-01 price USD 1 USD` and cached it).
+///
+/// # Errors
+/// Errors when `request.date` is after today.
+pub(super) fn identity_label_date(
+    source: &str,
+    request: &crate::cmd::price::PriceRequest,
+) -> anyhow::Result<rustledger_core::NaiveDate> {
+    let today = jiff::Zoned::now().date();
+    match request.date {
+        Some(date) if date > today => anyhow::bail!(
+            "the '{source}' source cannot label a price with the future date {date}; \
+             use a date on or before today"
+        ),
+        Some(date) => Ok(date),
+        None => Ok(today),
+    }
 }
 
 /// Parse a feed-supplied date label — either a bare `YYYY-MM-DD` or the
@@ -177,6 +226,57 @@ mod guard_tests {
     #[test]
     fn absent_date_passes() {
         assert!(super::reject_historical_date("coinbase", &request(None)).is_ok());
+    }
+
+    /// The acceptance window: today always; yesterday ONLY when the
+    /// run's first fetch happened on it (a genuine midnight straddle).
+    /// A long-lived process can never replay its start day later than
+    /// that, and future dates never pass (round-4 deep review).
+    #[test]
+    fn window_accepts_midnight_straddle_only() {
+        let d = rustledger_core::naive_date(2026, 7, 16).unwrap();
+        let next = d.checked_add(jiff::Span::new().days(1)).unwrap();
+        let much_later = d.checked_add(jiff::Span::new().days(30)).unwrap();
+
+        assert!(super::latest_date_window_ok(d, d, d), "same day");
+        assert!(
+            super::latest_date_window_ok(d, next, d),
+            "midnight straddle: run started on d, clock now d+1"
+        );
+        assert!(
+            !super::latest_date_window_ok(d, much_later, d),
+            "a daemon must not replay its start day weeks later"
+        );
+        assert!(
+            !super::latest_date_window_ok(d, next, next),
+            "yesterday is refused when the run did NOT start on it"
+        );
+        assert!(
+            !super::latest_date_window_ok(much_later, d, d),
+            "future dates never pass"
+        );
+    }
+
+    /// Identity answers accept any past-or-today label but refuse a
+    /// future one — identity bypasses the main guard, so this is its
+    /// own fence (round-4 deep review).
+    #[test]
+    fn identity_label_refuses_future_dates() {
+        let today = jiff::Zoned::now().date();
+        let past = rustledger_core::naive_date(2020, 1, 1).unwrap();
+        let future = today.checked_add(jiff::Span::new().days(7)).unwrap();
+
+        assert_eq!(
+            super::identity_label_date("ecb", &request(Some(past))).unwrap(),
+            past
+        );
+        assert_eq!(
+            super::identity_label_date("ecb", &request(None)).unwrap(),
+            today
+        );
+        let err = super::identity_label_date("ecb", &request(Some(future)))
+            .expect_err("future labels are fabrication");
+        assert!(err.to_string().contains("future"), "{err}");
     }
 }
 

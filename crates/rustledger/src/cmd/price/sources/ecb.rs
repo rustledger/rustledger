@@ -133,17 +133,16 @@ impl PriceSource for EcbSource {
         // 2. ticker=X, currency=EUR: fetch X rate, invert it (EUR per X)
         // 3. ticker=X, currency=Y: fetch both, compute cross-rate (Y per X)
 
-        let date = request.date.unwrap_or_else(|| jiff::Zoned::now().date());
-
-        // Identity rate: 1.0 is correct for ANY pair and ANY date (the
-        // pre-#1801 cross-rate path answered USD/USD = rate/rate = 1 for
-        // dated requests too), so this branch deliberately sits ABOVE
-        // the latest-only guard — same shape as ratesapi (deep review).
+        // Identity rate: 1.0 is correct for ANY pair and any PAST date
+        // (the pre-#1801 cross-rate path answered USD/USD = rate/rate
+        // = 1 for dated requests too), so this branch deliberately sits
+        // ABOVE the latest-only guard — same shape as ratesapi. Future
+        // labels are refused by identity_label_date (round-4 review).
         if ticker == currency {
             return Ok(PriceResponse {
                 price: Decimal::ONE,
                 currency,
-                date,
+                date: super::identity_label_date(self.name(), request)?,
                 source: self.name().to_string(),
             });
         }
@@ -194,17 +193,31 @@ impl PriceSource for EcbSource {
         // rate yields a number that is not a valid rate for ANY date.
         // Refuse rather than emit a silently corrupted directive
         // (round-2 deep review — min() labeling was not sound). Two
-        // causes, one transient and one permanent (round-3 review: for a
-        // currency the ECB stopped publishing — HRK, RUB — the feed
-        // returns its frozen final observation forever, so "retry" alone
-        // was misleading advice).
+        // causes: a transient publication straddle (gap of a day or a
+        // weekend) and a permanently frozen series — the ECB stops
+        // publishing discontinued currencies (HRK, RUB) but keeps
+        // serving their final observation, so a large gap gets the
+        // permanent diagnosis instead of useless "retry" advice
+        // (rounds 3-4 deep review).
         if ticker_date != currency_date {
+            let (older_date, older_ccy) = if ticker_date < currency_date {
+                (ticker_date, &ticker)
+            } else {
+                (currency_date, &currency)
+            };
+            let gap_days = (ticker_date - currency_date).get_days().abs();
+            if gap_days > 5 {
+                anyhow::bail!(
+                    "ECB's {older_ccy} series is frozen at {older_date} — the ECB \
+                     no longer publishes it (discontinued currency); use a \
+                     different price source for {older_ccy}"
+                );
+            }
             anyhow::bail!(
                 "ECB returned different reference dates for the two legs of \
-                 {ticker}/{currency} ({ticker_date} vs {currency_date}): either \
-                 the fetches straddled the daily ~16:00 CET publication (retry \
-                 shortly), or the leg with the older date is no longer published \
-                 by the ECB and needs a different price source"
+                 {ticker}/{currency} ({ticker_date} vs {currency_date}) — the \
+                 fetches likely straddled the daily ~16:00 CET publication; \
+                 retry shortly"
             );
         }
 

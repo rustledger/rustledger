@@ -6,7 +6,6 @@ use super::{PriceSource, user_agent};
 use crate::cmd::price::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
-use rustledger_core::NaiveDate;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -93,29 +92,15 @@ impl PriceSource for EastMoneyFundSource {
         let price = Decimal::from_str(price_str)
             .with_context(|| format!("Failed to parse NAV: {price_str}"))?;
 
-        // Get the date from gztime (估算时间) or jzrq (净值日期)
-        let date = json
-            .get("gztime")
-            .or_else(|| json.get("jzrq"))
-            .and_then(serde_json::Value::as_str)
-            .and_then(|s| {
-                // Try different date formats
-                s.parse::<NaiveDate>()
-                    .or_else(|_| {
-                        // Try parsing just the date portion (first 10 chars)
-                        // Use char_indices for UTF-8 safety
-                        if let Some((idx, _)) = s.char_indices().nth(10) {
-                            s[..idx].parse::<NaiveDate>()
-                        } else if s.len() >= 10 && s.is_char_boundary(10) {
-                            s[..10].parse::<NaiveDate>()
-                        } else {
-                            // Return an error that will be converted to None by and_then
-                            "".parse::<NaiveDate>()
-                        }
-                    })
-                    .ok()
-            })
-            .unwrap_or_else(|| request.date.unwrap_or_else(|| jiff::Zoned::now().date()));
+        // Get the date from gztime (估算时间) or jzrq (净值日期) — the
+        // feed's own date, never the requested one (#1794; the inline
+        // parse with a request.date fallback was the last un-canonical
+        // copy of this extraction — round-4 deep review).
+        let date = super::feed_date_or_today(
+            json.get("gztime")
+                .or_else(|| json.get("jzrq"))
+                .and_then(serde_json::Value::as_str),
+        );
 
         Ok(PriceResponse {
             price,

@@ -204,7 +204,15 @@ impl PriceSource for ExternalCommandSource {
         // Deliberately NOT guarded by `reject_historical_date`: the
         // requested date is forwarded to the external command via
         // RLEDGER_DATE below, so historical semantics are the external
-        // fetcher's contract, not ours (#1801 review).
+        // fetcher's contract, not ours (#1801 review). That contract is
+        // a TRUST contract: output formats that carry no date of their
+        // own (plain number, JSON without a date field) are labeled with
+        // the requested date on the assumption the command honored
+        // RLEDGER_DATE — rledger cannot verify a user-authored command,
+        // so a script that ignores the date and prints its latest quote
+        // WILL be recorded under the requested date. Documented in
+        // docs/commands/price.md; scripts that can't honor RLEDGER_DATE
+        // should emit the dated beancount form instead (round-4 review).
         if self.command.is_empty() {
             anyhow::bail!("External command is empty");
         }
@@ -290,6 +298,9 @@ impl PriceSource for ExternalCommandSource {
                 return Ok(PriceResponse {
                     price,
                     currency,
+                    // No date in the JSON: trust contract — the command is
+                    // assumed to have honored RLEDGER_DATE (see fetch_price
+                    // top comment). Emit a "date" field to override.
                     date: date.unwrap_or_else(|| {
                         request.date.unwrap_or_else(|| jiff::Zoned::now().date())
                     }),
@@ -313,6 +324,10 @@ impl PriceSource for ExternalCommandSource {
             return Ok(PriceResponse {
                 price,
                 currency,
+                // Plain-number output carries no date: trust contract —
+                // the command is assumed to have honored RLEDGER_DATE
+                // (see fetch_price top comment). Use the beancount form
+                // (`<date> price <ticker> <amount> <ccy>`) to override.
                 date: request.date.unwrap_or_else(|| jiff::Zoned::now().date()),
                 source: self.source_name.clone(),
             });

@@ -31,11 +31,12 @@ impl YahooFinanceSource {
 
     /// Build the Yahoo Finance chart-API URL.
     ///
-    /// Latest quote: a one-day range. Historical (#1794): a window of the
-    /// five days up to and including the requested date, via epoch
-    /// `period1`/`period2` — mirroring beanprice's `get_historical_price`,
-    /// which fetches `time - 5d .. time` so weekends/holidays resolve to
-    /// the preceding trading day.
+    /// Latest quote: a one-day range. Historical (#1794): an epoch
+    /// `period1`/`period2` window from six days before to two days after
+    /// the requested date (UTC midnights) — beanprice's
+    /// `get_historical_price` window of `time - 5d .. time`, padded a day
+    /// each side so every exchange UTC offset is covered; the bounds are
+    /// fetch slop, classification happens in `parse_chart`.
     fn build_url(&self, symbol: &str, date: Option<NaiveDate>) -> Result<String> {
         match date {
             Some(d) => {
@@ -105,26 +106,39 @@ impl YahooFinanceSource {
             .map(ToString::to_string);
 
         // Quote timestamps are exchange-session times; classify them by
-        // the EXCHANGE's civil date via meta.gmtoffset (what beanprice
-        // does through exchangeTimezoneName). Classifying by UTC date
-        // shifts NZX/ASX bars onto the wrong day — the same wrong-date
-        // class #1794 fixed (deep review).
-        let gmtoffset = result
-            .get("meta")
+        // the EXCHANGE's civil date. Classifying by UTC date shifts
+        // NZX/ASX bars onto the wrong day — the same wrong-date class
+        // #1794 fixed (deep review). Prefer meta.exchangeTimezoneName
+        // (what beanprice uses): a real timezone handles a DST switch
+        // inside the fetch window, where meta.gmtoffset — a single
+        // response-time offset — would misclassify pre-switch
+        // midnight-anchored bars by a day (round-2 deep review). Fall
+        // back to gmtoffset when the name is absent or the tz database
+        // is unavailable.
+        let meta = result.get("meta");
+        let exchange_tz = meta
+            .and_then(|m| m.get("exchangeTimezoneName"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|name| jiff::tz::TimeZone::get(name).ok());
+        let gmtoffset = meta
             .and_then(|m| m.get("gmtoffset"))
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(0);
-        let quote_civil_date = |secs: i64| -> Option<NaiveDate> {
-            jiff::Timestamp::from_second(secs.checked_add(gmtoffset)?)
-                .ok()
-                .map(|t| t.to_zoned(jiff::tz::TimeZone::UTC).date())
+        let quote_civil_date = move |secs: i64| -> Option<NaiveDate> {
+            match &exchange_tz {
+                Some(tz) => jiff::Timestamp::from_second(secs)
+                    .ok()
+                    .map(|t| t.to_zoned(tz.clone()).date()),
+                None => jiff::Timestamp::from_second(secs.checked_add(gmtoffset)?)
+                    .ok()
+                    .map(|t| t.to_zoned(jiff::tz::TimeZone::UTC).date()),
+            }
         };
 
         let Some(requested) = requested else {
             // Latest quote — labeled with the QUOTE's own trading day
             // (meta.regularMarketTime) when present, not the local clock:
             // fetching on a weekend must date the price Friday.
-            let meta = result.get("meta");
             let price_value = meta
                 .and_then(|m| m.get("regularMarketPrice"))
                 .with_context(|| format!("No price found for {ticker}"))?;
@@ -299,20 +313,22 @@ mod tests {
     }
 
     /// Exchange-timezone classification (deep review): NZX trades at
-    /// UTC+13, so Tuesday's 10:00 NZST bar is Monday 21:00 UTC. Classified
-    /// by UTC date it would masquerade as Monday and overwrite Monday's
-    /// real close; classified by exchange-local date (meta.gmtoffset) the
-    /// Monday request returns MONDAY's close.
+    /// UTC+12 in July (NZST), so Tuesday's 10:00 NZST bar is Monday
+    /// 22:00 UTC. Classified by UTC date it would masquerade as Monday
+    /// and overwrite Monday's real close; classified by exchange-local
+    /// date (meta.gmtoffset — no exchangeTimezoneName in this fixture,
+    /// exercising the fallback) the Monday request returns MONDAY's
+    /// close.
     #[test]
     fn parse_chart_classifies_by_exchange_timezone() {
-        // gmtoffset +13h (46800). Monday 2026-07-13 10:00 NZST
-        // = Sunday 2026-07-12 21:00 UTC = 1783890000.
-        // Tuesday 2026-07-14 10:00 NZST = Monday 2026-07-13 21:00 UTC
-        // = 1783976400 — by UTC date it masquerades as Monday.
+        // gmtoffset +12h (43200). Monday 2026-07-13 10:00 NZST
+        // = Sunday 2026-07-12 22:00 UTC = 1783893600.
+        // Tuesday 2026-07-14 10:00 NZST = Monday 2026-07-13 22:00 UTC
+        // = 1783980000 — by UTC date it masquerades as Monday.
         let json: serde_json::Value = serde_json::json!({
             "chart": { "result": [{
-                "meta": { "currency": "NZD", "gmtoffset": 46800 },
-                "timestamp": [1_783_890_000_i64, 1_783_976_400_i64],
+                "meta": { "currency": "NZD", "gmtoffset": 43200 },
+                "timestamp": [1_783_893_600_i64, 1_783_980_000_i64],
                 "indicators": { "quote": [{ "close": [1.11, 2.22] }] }
             }], "error": null }
         });
@@ -321,6 +337,36 @@ mod tests {
             YahooFinanceSource::parse_chart(&json, Some(requested), "AIR.NZ").expect("parses");
         assert_eq!(price.to_string(), "1.11", "Monday's bar, not Tuesday's");
         assert_eq!(date, rustledger_core::naive_date(2026, 7, 13).unwrap());
+    }
+
+    /// A DST switch inside the fetch window (round-2 deep review):
+    /// meta.gmtoffset is the offset at RESPONSE time, so applying it to
+    /// a bar from before the switch shifts midnight-anchored bars by an
+    /// hour — a full civil day for FX bars stamped at local 00:00.
+    /// exchangeTimezoneName resolves each bar with the offset in force
+    /// at ITS OWN instant.
+    #[test]
+    fn parse_chart_handles_dst_transition_via_timezone_name() {
+        // America/New_York, DST ends 2025-11-02.
+        // Fri 2025-10-31 00:00 EDT (UTC-4) = 04:00 UTC = 1761883200 —
+        //   post-switch gmtoffset -18000 would misdate it 2025-10-30.
+        // Tue 2025-11-04 00:00 EST (UTC-5) = 05:00 UTC = 1762232400.
+        let json: serde_json::Value = serde_json::json!({
+            "chart": { "result": [{
+                "meta": {
+                    "currency": "USD",
+                    "exchangeTimezoneName": "America/New_York",
+                    "gmtoffset": -18000
+                },
+                "timestamp": [1_761_883_200_i64, 1_762_232_400_i64],
+                "indicators": { "quote": [{ "close": [1.11, 2.22] }] }
+            }], "error": null }
+        });
+        let requested = rustledger_core::naive_date(2025, 10, 31).unwrap();
+        let (price, _, date) =
+            YahooFinanceSource::parse_chart(&json, Some(requested), "EURUSD=X").expect("parses");
+        assert_eq!(price.to_string(), "1.11", "Friday's pre-switch bar");
+        assert_eq!(date, requested, "classified by its own instant's offset");
     }
 
     /// The latest path labels with the quote's own trading day

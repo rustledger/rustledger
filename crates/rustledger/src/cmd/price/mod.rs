@@ -238,7 +238,11 @@ impl PriceSourceRegistry {
     ) -> Result<PriceResponse> {
         let attempts = self.resolve_mapping(commodity, mapping)?;
 
-        let mut last_error = None;
+        // Every failed attempt is kept, not just the last: in a chain
+        // like [yahoo, coinbase] with --date, the trailing source's
+        // "latest quote only" refusal must not mask yahoo's real
+        // (possibly transient) failure (round-2 deep review of #1801).
+        let mut errors: Vec<(String, anyhow::Error)> = Vec::new();
         let mut unknown_sources = Vec::new();
 
         for (source_name, ticker) in &attempts {
@@ -252,7 +256,7 @@ impl PriceSourceRegistry {
                 match source.fetch_price(&request) {
                     Ok(response) => return Ok(response),
                     Err(e) => {
-                        last_error = Some(e);
+                        errors.push((source_name.clone(), e));
                         // Try next source in fallback chain
                     }
                 }
@@ -263,13 +267,29 @@ impl PriceSourceRegistry {
         }
 
         // Build an informative error message
-        let err_msg = if let Some(e) = last_error {
+        let err_msg = if errors.len() == 1 {
+            // A single failure keeps its full error value.
+            let (_, single) = errors.remove(0);
             if unknown_sources.is_empty() {
-                e
+                single
             } else {
                 anyhow::anyhow!(
-                    "{}; note: unknown sources skipped: {}",
-                    e,
+                    "{single:#}; note: unknown sources skipped: {}",
+                    unknown_sources.join(", ")
+                )
+            }
+        } else if !errors.is_empty() {
+            let attempts_report = errors
+                .iter()
+                .map(|(name, e)| format!("{name}: {e:#}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            if unknown_sources.is_empty() {
+                anyhow::anyhow!("all sources failed for {commodity}: {attempts_report}")
+            } else {
+                anyhow::anyhow!(
+                    "all sources failed for {commodity}: {attempts_report}; \
+                     note: unknown sources skipped: {}",
                     unknown_sources.join(", ")
                 )
             }

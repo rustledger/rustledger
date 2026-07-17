@@ -37,6 +37,14 @@ struct CacheFile {
     entries: HashMap<String, CachedPrice>,
 }
 
+/// Borrowing mirror of [`CacheFile`] for serialization — avoids deep-
+/// cloning every entry on save. Field names must match `CacheFile`.
+#[derive(Serialize)]
+struct CacheFileRef<'a> {
+    version: u32,
+    entries: &'a HashMap<String, CachedPrice>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedPrice {
     price: String,
@@ -49,10 +57,16 @@ struct CachedPrice {
 impl PriceCache {
     /// Load cache from disk, or create empty if not found.
     pub fn load(ttl_secs: u64) -> Self {
-        let path = cache_file_path();
+        Self::load_from_path(cache_file_path(), ttl_secs)
+    }
+
+    /// Load a cache from an explicit path (injectable for tests — the
+    /// discard-on-mismatch behavior below must be assertable through the
+    /// real load path, not a re-implemented parse).
+    fn load_from_path(path: PathBuf, ttl_secs: u64) -> Self {
         let ttl = Duration::from_secs(ttl_secs);
 
-        let entries = if path.exists() {
+        let (entries, discarded) = if path.exists() {
             match std::fs::read_to_string(&path) {
                 // Versioned envelope: entries from other schema versions are
                 // DISCARDED, not migrated. Pre-#1801 caches hold live quotes
@@ -60,21 +74,29 @@ impl PriceCache {
                 // old bare-map format fails to parse as CacheFile, so those
                 // poisoned entries can never be served again (deep review —
                 // the cache sits ABOVE the sources, bypassing their fixes).
+                // NOTE: a pre-#1801 binary sharing this file cannot read the
+                // v2 envelope and will clobber it on its next fetch; that
+                // downgrade path is accepted — readable-by-old-binaries
+                // would mean keeping the poisoned format alive.
                 Ok(contents) => match serde_json::from_str::<CacheFile>(&contents) {
-                    Ok(file) if file.version == CACHE_SCHEMA_VERSION => file.entries,
-                    _ => HashMap::new(),
+                    Ok(file) if file.version == CACHE_SCHEMA_VERSION => (file.entries, false),
+                    // Discarding marks the cache dirty so save() rewrites
+                    // the file even when the run fetches nothing — otherwise
+                    // the poisoned pre-#1801 file survives on disk for any
+                    // older binary to serve again (round-2 deep review).
+                    _ => (HashMap::new(), true),
                 },
-                Err(_) => HashMap::new(),
+                Err(_) => (HashMap::new(), true),
             }
         } else {
-            HashMap::new()
+            (HashMap::new(), false)
         };
 
         Self {
             path,
             ttl,
             entries,
-            dirty: false,
+            dirty: discarded,
         }
     }
 
@@ -137,9 +159,9 @@ impl PriceCache {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        let file = CacheFile {
+        let file = CacheFileRef {
             version: CACHE_SCHEMA_VERSION,
-            entries: self.entries.clone(),
+            entries: &self.entries,
         };
         if let Ok(json) = serde_json::to_string_pretty(&file)
             && std::fs::write(&self.path, json).is_ok()
@@ -310,17 +332,13 @@ mod tests {
             assert!(!cache.dirty, "dirty should be cleared after save");
         }
 
-        // Load and verify through the versioned envelope.
+        // Load through the REAL load path and verify the entry survives
+        // the versioned envelope round trip.
         {
             let file: CacheFile =
                 serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             assert_eq!(file.version, CACHE_SCHEMA_VERSION);
-            let cache = PriceCache {
-                path: path.clone(),
-                ttl: Duration::from_hours(1),
-                entries: file.entries,
-                dirty: false,
-            };
+            let cache = PriceCache::load_from_path(path.clone(), 3600);
             let cached = cache.get("yahoo:AAPL:USD:latest");
             assert!(cached.is_some(), "should find cached entry after load");
             assert_eq!(cached.unwrap().price, response.price);
@@ -353,9 +371,14 @@ mod tests {
 
     /// A pre-#1801 cache (unversioned bare map — the format that could
     /// hold live quotes mislabeled with historical dates, #1794) must
-    /// load as EMPTY, never serving its poisoned entries.
+    /// load as EMPTY through the REAL load path, never serving its
+    /// poisoned entries — and the discard must mark the cache dirty so
+    /// the very next `save()` destroys the poisoned file even when the
+    /// run fetched nothing (round-2 deep review: the earlier version of
+    /// this test asserted a re-implemented parse, which a future
+    /// legacy-migration fallback inside `load()` could not trip).
     #[test]
-    fn unversioned_legacy_cache_is_discarded() {
+    fn unversioned_legacy_cache_is_discarded_and_rewritten() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prices.json");
         // The 0.21.0 on-disk shape: entries map at the top level.
@@ -364,11 +387,50 @@ mod tests {
             r#"{"yahoo:AAPL:USD:2000-01-03":{"price":"317.31","currency":"USD","date":"2000-01-03","source":"yahoo","cached_at":1700000000}}"#,
         )
         .unwrap();
-        let loaded = std::fs::read_to_string(&path).unwrap();
-        let parsed = serde_json::from_str::<CacheFile>(&loaded);
+
+        let mut cache = PriceCache::load_from_path(path.clone(), 3600);
         assert!(
-            parsed.is_err(),
-            "legacy bare-map format must fail the versioned parse"
+            cache.get("yahoo:AAPL:USD:2000-01-03").is_none(),
+            "poisoned legacy entry must never be served"
+        );
+        assert!(cache.entries.is_empty(), "legacy file must load as empty");
+        assert!(cache.dirty, "discard must mark dirty so save() rewrites");
+
+        cache.save();
+        let rewritten: CacheFile =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(rewritten.version, CACHE_SCHEMA_VERSION);
+        assert!(
+            rewritten.entries.is_empty(),
+            "save() after a discard must replace the poisoned file with an empty v2 envelope"
+        );
+    }
+
+    /// A well-formed current-version file loads its entries and is NOT
+    /// dirty — the discard path above must not fire on healthy files.
+    #[test]
+    fn current_version_cache_loads_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prices.json");
+        {
+            let mut cache = PriceCache::load_from_path(path.clone(), 3600);
+            assert!(!cache.dirty, "missing file is not a discard");
+            cache.insert(
+                "yahoo:AAPL:USD:2024-01-15",
+                &PriceResponse {
+                    price: Decimal::new(15000, 2),
+                    currency: "USD".to_string(),
+                    date: rustledger_core::naive_date(2024, 1, 15).unwrap(),
+                    source: "yahoo".to_string(),
+                },
+            );
+            cache.save();
+        }
+        let cache = PriceCache::load_from_path(path, 3600);
+        assert!(!cache.dirty, "healthy v2 file must not be marked dirty");
+        assert!(
+            cache.get("yahoo:AAPL:USD:2024-01-15").is_some(),
+            "entries from a healthy v2 file must be served"
         );
     }
 }

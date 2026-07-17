@@ -125,8 +125,6 @@ impl PriceSource for EcbSource {
     }
 
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        // Latest-only source: a historical --date must refuse, not
-        // mislabel the current quote (#1794).
         let ticker = request.ticker.to_uppercase();
         let currency = request.currency.to_uppercase();
 
@@ -138,10 +136,11 @@ impl PriceSource for EcbSource {
 
         let date = request.date.unwrap_or_else(|| jiff::Zoned::now().date());
 
-        // Identity rate: 1.0 is correct for ANY date, so this branch
-        // deliberately sits ABOVE the latest-only guard (deep review).
-        if ticker == "EUR" && currency == "EUR" {
-            // EUR to EUR = 1
+        // Identity rate: 1.0 is correct for ANY pair and ANY date (the
+        // pre-#1801 cross-rate path answered USD/USD = rate/rate = 1 for
+        // dated requests too), so this branch deliberately sits ABOVE
+        // the latest-only guard — same shape as ratesapi (deep review).
+        if ticker == currency {
             return Ok(PriceResponse {
                 price: Decimal::ONE,
                 currency,
@@ -191,6 +190,20 @@ impl PriceSource for EcbSource {
         let (ticker_rate, ticker_date) = self.fetch_rate(&ticker)?;
         let (currency_rate, currency_date) = self.fetch_rate(&currency)?;
 
+        // The two legs are separate fetches of a once-daily feed; if they
+        // straddle the ~16:00 CET publication they reference different
+        // days, and dividing a Monday rate by a Friday rate yields a
+        // number that is not a valid rate for ANY date. Refuse rather
+        // than emit a silently corrupted directive (round-2 deep review —
+        // min() labeling was not sound).
+        if ticker_date != currency_date {
+            anyhow::bail!(
+                "ECB returned different reference dates for the two legs of \
+                 {ticker}/{currency} ({ticker_date} vs {currency_date}) — the \
+                 fetches straddled a daily publication; retry in a moment"
+            );
+        }
+
         if ticker_rate.is_zero() {
             anyhow::bail!("Cannot compute cross-rate: zero rate for {ticker}");
         }
@@ -200,11 +213,9 @@ impl PriceSource for EcbSource {
         Ok(PriceResponse {
             price: cross_rate,
             currency,
-            // Same rule as the direct branches: the feed's own date. Both
-            // legs come from the same daily feed, but two fetches can
-            // straddle a publication — the OLDER reference date is the one
-            // both rates are valid for (deep review).
-            date: ticker_date.min(currency_date),
+            // Same rule as the direct branches: the feed's own reference
+            // date (both legs agree — checked above).
+            date: ticker_date,
             source: self.name().to_string(),
         })
     }
@@ -237,5 +248,20 @@ mod tests {
         let response = source.fetch_price(&request).unwrap();
         assert_eq!(response.price, Decimal::ONE);
         assert_eq!(response.currency, "EUR");
+    }
+
+    /// Any identity pair — not just EUR/EUR — answers 1.0 for any
+    /// requested date without network access. The pre-#1801 cross-rate
+    /// path gave dated USD/USD = 1 too; the latest-only guard must not
+    /// remove that (round-2 deep review).
+    #[test]
+    fn dated_non_eur_identity_returns_one() {
+        let source = EcbSource::new(Duration::from_secs(30));
+        let date = rustledger_core::naive_date(2024, 6, 30).unwrap();
+        let mut request = PriceRequest::new("USD", "USD");
+        request.date = Some(date);
+        let response = source.fetch_price(&request).unwrap();
+        assert_eq!(response.price, Decimal::ONE);
+        assert_eq!(response.date, date);
     }
 }

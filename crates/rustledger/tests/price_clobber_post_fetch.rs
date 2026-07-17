@@ -187,7 +187,13 @@ fn clobber_cache_hit_skips_when_cached_date_matches_existing() {
             "cached_at": cached_at,
         }),
     );
-    std::fs::write(&cache_file, serde_json::to_string(&entries).unwrap()).unwrap();
+    // The CURRENT versioned envelope (cache.rs CACHE_SCHEMA_VERSION) — a
+    // bare map is the pre-#1801 legacy format, which load() discards,
+    // silently turning this test into a guard-error no-op (round-2 deep
+    // review). The stderr assertion below pins that the cache path
+    // actually ran.
+    let envelope = serde_json::json!({ "version": 2, "entries": entries });
+    std::fs::write(&cache_file, serde_json::to_string(&envelope).unwrap()).unwrap();
 
     let fixture = "\
 2024-01-01 commodity AAPL
@@ -216,6 +222,9 @@ fn clobber_cache_hit_skips_when_cached_date_matches_existing() {
             "coinbase",
             "--date",
             "2024-01-15",
+            // --verbose so the cache-hit skip announces itself on stderr —
+            // the assertion below needs it to prove which path ran.
+            "--verbose",
         ])
         .output()
         .expect("rledger price should execute");
@@ -226,6 +235,15 @@ fn clobber_cache_hit_skips_when_cached_date_matches_existing() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The skip must come from the CACHE-HIT branch specifically — an
+    // empty stdout alone is also satisfied by the fetch erroring (e.g.
+    // the historical-date guard on a cache MISS), which is exactly how
+    // this test went vacuous once (round-2 deep review).
+    assert!(
+        stderr.contains("skipped from cache"),
+        "the cache-hit dedup branch must be the path taken. stderr was:\n{stderr}"
+    );
     let new_directive_count = stdout.lines().filter(|l| l.contains("price AAPL")).count();
     assert_eq!(
         new_directive_count, 0,

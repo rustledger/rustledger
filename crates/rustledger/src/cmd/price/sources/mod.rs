@@ -30,25 +30,29 @@ pub use yahoo::YahooFinanceSource;
 use super::{PriceRequest, PriceResponse};
 use anyhow::Result;
 
-/// Reject an explicit `--date` on a source that can only fetch the
+/// Reject a past or future `--date` on a source that can only fetch the
 /// LATEST quote.
 ///
 /// Labeling the latest price with an arbitrary historical date silently
 /// corrupts price archives (#1794 — Yahoo emitted the live quote under
 /// `--date 2000-01-03`). Matching beanprice, a dated fetch requires a
-/// source with real historical support, so latest-only sources refuse
-/// ANY `--date` — including today's, which keeps the rule clock-free
-/// and consistent across a batch that straddles midnight (deep review).
-/// Date-independent identity branches (e.g. EUR→EUR = 1.0) early-return
+/// source with real historical support — with one exception: `--date
+/// <today>` is allowed, because the latest quote IS a valid answer for
+/// today and the emitted directive carries the response's own date
+/// anyway (round-2 deep review: nightly `--date $(date +%F)` runs
+/// worked on every source before #1801 and must keep working).
+/// Date-independent identity branches (e.g. USD→USD = 1.0) early-return
 /// BEFORE this guard.
 ///
 /// # Errors
-/// Errors whenever `request.date` is set.
+/// Errors whenever `request.date` is set to any day other than today.
 pub(super) fn reject_historical_date(
     source: &str,
     request: &crate::cmd::price::PriceRequest,
 ) -> anyhow::Result<()> {
-    if let Some(date) = request.date {
+    if let Some(date) = request.date
+        && date != jiff::Zoned::now().date()
+    {
         anyhow::bail!(
             "the '{source}' source only provides the latest quote and cannot fetch {} \
              for {date}; drop --date, or use a source with historical support \
@@ -115,12 +119,13 @@ mod guard_tests {
         }
     }
 
-    /// Latest-only sources refuse ANY --date instead of mislabeling the
-    /// current quote (#1794) — including today's, keeping the rule
-    /// clock-free (deep review: a per-fetch clock comparison flips
-    /// behavior mid-batch across midnight).
+    /// Latest-only sources refuse any past or future --date instead of
+    /// mislabeling the current quote (#1794). Today's date is the one
+    /// exception: the latest quote is a valid answer for today, and
+    /// pre-#1801 nightly `--date $(date +%F)` runs must keep working
+    /// (round-2 deep review).
     #[test]
-    fn any_explicit_date_is_rejected() {
+    fn past_and_future_dates_are_rejected_today_passes() {
         let past = rustledger_core::naive_date(2000, 1, 3).expect("valid date");
         let err = super::reject_historical_date("coinbase", &request(Some(past)))
             .expect_err("must refuse");
@@ -128,9 +133,17 @@ mod guard_tests {
         assert!(err.to_string().contains("coinbase"), "{err}");
 
         let today = jiff::Zoned::now().date();
+        let future = today
+            .checked_add(jiff::Span::new().days(7))
+            .expect("valid date");
         assert!(
-            super::reject_historical_date("coinbase", &request(Some(today))).is_err(),
-            "today's date is also refused — dated fetches need historical support"
+            super::reject_historical_date("coinbase", &request(Some(future))).is_err(),
+            "a future date must be refused — the latest quote is not a quote for next week"
+        );
+
+        assert!(
+            super::reject_historical_date("coinbase", &request(Some(today))).is_ok(),
+            "--date <today> is a valid request for the latest quote"
         );
     }
 

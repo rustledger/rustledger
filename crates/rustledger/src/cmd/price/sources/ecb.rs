@@ -2,8 +2,8 @@
 //!
 //! Fetches currency exchange rates from the ECB.
 
-use super::{PriceSource, user_agent};
-use crate::cmd::price::{PriceRequest, PriceResponse};
+use super::{PricePair, PriceSource, user_agent};
+use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
@@ -123,33 +123,17 @@ impl PriceSource for EcbSource {
         "European Central Bank - currency exchange rates"
     }
 
-    fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        let ticker = request.ticker.to_uppercase();
-        let currency = request.currency.to_uppercase();
+    fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
+        let ticker = pair.ticker.to_uppercase();
+        let currency = pair.currency.to_uppercase();
 
         // ECB provides rates as "X per 1 EUR"
-        // We need to handle three cases:
+        // We need to handle three cases (identity pairs and dated
+        // requests never reach here — the trait's canonical dispatch
+        // handles both, #1802):
         // 1. ticker=EUR, currency=X: fetch X rate, return as-is (X per EUR)
         // 2. ticker=X, currency=EUR: fetch X rate, invert it (EUR per X)
         // 3. ticker=X, currency=Y: fetch both, compute cross-rate (Y per X)
-
-        // Identity rate: 1.0 is correct for ANY pair and any PAST date
-        // (the pre-#1801 cross-rate path answered USD/USD = rate/rate
-        // = 1 for dated requests too), so this branch deliberately sits
-        // ABOVE the latest-only guard — same shape as ratesapi. Future
-        // labels are refused by identity_label_date (round-4 review).
-        if ticker == currency {
-            return Ok(PriceResponse {
-                price: Decimal::ONE,
-                currency,
-                date: super::identity_label_date(self.name(), request)?,
-                source: self.name().to_string(),
-            });
-        }
-
-        // Latest-only source: a historical --date must refuse, not
-        // mislabel the current quote (#1794).
-        super::reject_historical_date(self.name(), request)?;
 
         if ticker == "EUR" {
             // EUR -> X: fetch X rate (X per EUR), return as-is
@@ -259,7 +243,9 @@ mod tests {
 
     #[test]
     fn test_eur_to_eur_returns_one() {
-        // EUR to EUR should always return 1.0 without network access
+        // EUR to EUR should always return 1.0 without network access —
+        // served by the trait's canonical identity arm (#1802).
+        use crate::cmd::price::PriceRequest;
         let source = EcbSource::new(Duration::from_secs(30));
         let request = PriceRequest::new("EUR", "EUR");
         let response = source.fetch_price(&request).unwrap();
@@ -269,10 +255,11 @@ mod tests {
 
     /// Any identity pair — not just EUR/EUR — answers 1.0 for any
     /// requested date without network access. The pre-#1801 cross-rate
-    /// path gave dated USD/USD = 1 too; the latest-only guard must not
-    /// remove that (round-2 deep review).
+    /// path gave dated USD/USD = 1 too; the dispatch must keep that
+    /// (round-2 deep review, hoisted into the trait in #1802).
     #[test]
     fn dated_non_eur_identity_returns_one() {
+        use crate::cmd::price::PriceRequest;
         let source = EcbSource::new(Duration::from_secs(30));
         let date = rustledger_core::naive_date(2024, 6, 30).unwrap();
         let mut request = PriceRequest::new("USD", "USD");

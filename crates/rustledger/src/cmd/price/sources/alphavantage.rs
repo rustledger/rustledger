@@ -2,8 +2,8 @@
 //!
 //! Fetches stock, forex, and crypto prices from Alpha Vantage.
 
-use super::{PriceSource, user_agent};
-use crate::cmd::price::{PriceRequest, PriceResponse};
+use super::{PricePair, PriceSource, user_agent};
+use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use std::env;
@@ -62,12 +62,12 @@ impl AlphaVantageSource {
     }
 
     /// Determine the type of request and fetch accordingly.
-    fn fetch_internal(&self, request: &PriceRequest, api_key: &str) -> Result<PriceResponse> {
-        let ticker = &request.ticker;
+    fn fetch_internal(&self, pair: &PricePair, api_key: &str) -> Result<PriceResponse> {
+        let ticker = &pair.ticker;
 
         // Check for crypto prefix
         if let Some(symbol) = ticker.strip_prefix("CRYPTO:") {
-            return self.fetch_crypto(symbol, &request.currency, api_key);
+            return self.fetch_crypto(symbol, &pair.currency, api_key);
         }
 
         // Check for forex format (contains /)
@@ -79,7 +79,7 @@ impl AlphaVantageSource {
         }
 
         // Default to stock
-        self.fetch_stock(ticker, &request.currency, api_key)
+        self.fetch_stock(ticker, &pair.currency, api_key)
     }
 
     fn fetch_stock(&self, symbol: &str, currency: &str, api_key: &str) -> Result<PriceResponse> {
@@ -206,13 +206,9 @@ impl PriceSource for AlphaVantageSource {
         Some("ALPHAVANTAGE_API_KEY")
     }
 
-    fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        // Latest-only source: a historical --date must refuse, not
-        // mislabel the current quote (#1794).
-        super::reject_historical_date(self.name(), request)?;
-
+    fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         let api_key = Self::get_api_key()?;
-        self.fetch_internal(request, &api_key)
+        self.fetch_internal(pair, &api_key)
     }
 }
 

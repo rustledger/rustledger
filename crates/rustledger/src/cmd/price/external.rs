@@ -3,7 +3,7 @@
 //! This module provides a price source that executes an external command
 //! to fetch prices. This allows users to integrate custom price fetchers.
 
-use super::sources::PriceSource;
+use super::sources::{PricePair, PriceSource};
 use super::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -200,19 +200,34 @@ impl PriceSource for ExternalCommandSource {
         "External command price source"
     }
 
+    fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
+        self.fetch_price(&PriceRequest {
+            ticker: pair.ticker.clone(),
+            currency: pair.currency.clone(),
+            date: None,
+        })
+    }
+
+    fn historical_coverage(&self) -> super::sources::HistoricalCoverage {
+        // The date is forwarded to the user's command via RLEDGER_DATE;
+        // whatever history the command can serve, this source can.
+        super::sources::HistoricalCoverage::Full
+    }
+
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        // Deliberately NOT guarded by `reject_historical_date`: the
-        // requested date is forwarded to the external command via
-        // RLEDGER_DATE below, so historical semantics are the external
-        // fetcher's contract, not ours (#1801 review). That contract is
-        // a TRUST contract: output formats that carry no date of their
-        // own (plain number, JSON without a date field) are labeled with
-        // the requested date on the assumption the command honored
-        // RLEDGER_DATE — rledger cannot verify a user-authored command,
-        // so a script that ignores the date and prints its latest quote
-        // WILL be recorded under the requested date. Documented in
-        // docs/commands/price.md; scripts that can't honor RLEDGER_DATE
-        // should emit the dated beancount form instead (round-4 review).
+        // The ONE sanctioned override of the trait's canonical dispatch
+        // (see `PriceSource::fetch_price`): the requested date is
+        // forwarded to the external command via RLEDGER_DATE below, so
+        // historical semantics are the external fetcher's contract, not
+        // ours (#1801 review). That contract is a TRUST contract: output
+        // formats that carry no date of their own (plain number, JSON
+        // without a date field) are labeled with the requested date on
+        // the assumption the command honored RLEDGER_DATE — rledger
+        // cannot verify a user-authored command, so a script that
+        // ignores the date and prints its latest quote WILL be recorded
+        // under the requested date. Documented in docs/commands/price.md;
+        // scripts that can't honor RLEDGER_DATE should emit the dated
+        // beancount form instead (round-4 review).
         if self.command.is_empty() {
             anyhow::bail!("External command is empty");
         }

@@ -2,8 +2,8 @@
 //!
 //! Fetches cryptocurrency prices from `CoinCap`.
 
-use super::{PriceSource, user_agent};
-use crate::cmd::price::{PriceRequest, PriceResponse};
+use super::{PricePair, PriceSource, user_agent};
+use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -71,22 +71,18 @@ impl PriceSource for CoinCapSource {
         "CoinCap - cryptocurrency prices"
     }
 
-    fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        // Latest-only source: a historical --date must refuse, not
-        // mislabel the current quote (#1794).
-        super::reject_historical_date(self.name(), request)?;
-
-        let url = self.build_url(&request.ticker);
+    fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
+        let url = self.build_url(&pair.ticker);
 
         let mut response = ureq::get(&url)
             .header("User-Agent", user_agent())
             .call()
-            .with_context(|| format!("Failed to fetch price for {}", request.ticker))?;
+            .with_context(|| format!("Failed to fetch price for {}", pair.ticker))?;
 
         let json: serde_json::Value = response
             .body_mut()
             .read_json()
-            .with_context(|| format!("Failed to parse response for {}", request.ticker))?;
+            .with_context(|| format!("Failed to parse response for {}", pair.ticker))?;
 
         // Check for errors
         if let Some(error) = json.get("error") {
@@ -106,7 +102,7 @@ impl PriceSource for CoinCapSource {
         let price = Decimal::from_str(price_str)
             .with_context(|| format!("Failed to parse price: {price_str}"))?;
 
-        let date = request.date.unwrap_or_else(|| jiff::Zoned::now().date());
+        let date = jiff::Zoned::now().date();
 
         // CoinCap only provides USD prices
         Ok(PriceResponse {

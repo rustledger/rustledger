@@ -2,8 +2,8 @@
 //!
 //! Fetches forex rates from OANDA's API.
 
-use super::{PriceSource, user_agent};
-use crate::cmd::price::{PriceRequest, PriceResponse};
+use super::{PricePair, PriceSource, user_agent};
+use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use std::env;
@@ -75,13 +75,9 @@ impl PriceSource for OandaSource {
         Some("OANDA_API_KEY")
     }
 
-    fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        // Latest-only source: a historical --date must refuse, not
-        // mislabel the current quote (#1794).
-        super::reject_historical_date(self.name(), request)?;
-
+    fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         let api_key = Self::get_api_key()?;
-        let instrument = Self::format_instrument(&request.ticker, &request.currency);
+        let instrument = Self::format_instrument(&pair.ticker, &pair.currency);
         let url = self.build_url(&instrument);
 
         let mut response = ureq::get(&url)
@@ -123,15 +119,12 @@ impl PriceSource for OandaSource {
         let price = Decimal::from_str(close_str)
             .with_context(|| format!("Failed to parse price: {close_str}"))?;
 
-        let date = request.date.unwrap_or_else(|| jiff::Zoned::now().date());
+        let date = jiff::Zoned::now().date();
 
         let target_currency = if instrument.contains('_') {
-            instrument
-                .split('_')
-                .next_back()
-                .unwrap_or(&request.currency)
+            instrument.split('_').next_back().unwrap_or(&pair.currency)
         } else {
-            &request.currency
+            &pair.currency
         };
 
         Ok(PriceResponse {

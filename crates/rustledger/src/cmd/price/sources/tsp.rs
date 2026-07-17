@@ -2,8 +2,8 @@
 //!
 //! Fetches TSP fund share prices from the TSP.gov website.
 
-use super::{PriceSource, user_agent};
-use crate::cmd::price::{PriceRequest, PriceResponse};
+use super::{PricePair, PriceSource, user_agent};
+use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use std::time::Duration;
 
@@ -70,13 +70,9 @@ impl PriceSource for TspSource {
         "Thrift Savings Plan - TSP fund share prices"
     }
 
-    fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        // Latest-only source: a historical --date must refuse, not
-        // mislabel the current quote (#1794).
-        super::reject_historical_date(self.name(), request)?;
-
-        let fund_name = Self::normalize_fund(&request.ticker)
-            .with_context(|| format!("Unknown TSP fund: {}", request.ticker))?;
+    fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
+        let fund_name = Self::normalize_fund(&pair.ticker)
+            .with_context(|| format!("Unknown TSP fund: {}", pair.ticker))?;
 
         let url = self.build_url();
 

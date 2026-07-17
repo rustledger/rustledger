@@ -2,8 +2,8 @@
 //!
 //! Fetches cryptocurrency prices from `CoinMarketCap`.
 
-use super::{PriceSource, user_agent};
-use crate::cmd::price::{PriceRequest, PriceResponse};
+use super::{PricePair, PriceSource, user_agent};
+use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use std::env;
 use std::time::Duration;
@@ -63,20 +63,16 @@ impl PriceSource for CoinMarketCapSource {
         Some("CMC_API_KEY")
     }
 
-    fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        // Latest-only source: a historical --date must refuse, not
-        // mislabel the current quote (#1794).
-        super::reject_historical_date(self.name(), request)?;
-
+    fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         let api_key = Self::get_api_key()?;
-        let url = self.build_url(&request.ticker, &request.currency);
+        let url = self.build_url(&pair.ticker, &pair.currency);
 
         let mut response = ureq::get(&url)
             .header("User-Agent", user_agent())
             .header("X-CMC_PRO_API_KEY", &api_key)
             .header("Accept", "application/json")
             .call()
-            .with_context(|| format!("Failed to fetch price for {}", request.ticker))?;
+            .with_context(|| format!("Failed to fetch price for {}", pair.ticker))?;
 
         let json: serde_json::Value = response
             .body_mut()
@@ -103,7 +99,7 @@ impl PriceSource for CoinMarketCapSource {
             .and_then(serde_json::Value::as_object)
             .with_context(|| "Missing data in response")?;
 
-        let symbol_upper = request.ticker.to_uppercase();
+        let symbol_upper = pair.ticker.to_uppercase();
         let coin_data = data
             .get(&symbol_upper)
             .with_context(|| format!("No data for symbol: {symbol_upper}"))?;
@@ -113,7 +109,7 @@ impl PriceSource for CoinMarketCapSource {
             .and_then(serde_json::Value::as_object)
             .with_context(|| "Missing quote data")?;
 
-        let currency_upper = request.currency.to_uppercase();
+        let currency_upper = pair.currency.to_uppercase();
         let currency_quote = quote
             .get(&currency_upper)
             .with_context(|| format!("No quote for currency: {currency_upper}"))?;
@@ -125,11 +121,11 @@ impl PriceSource for CoinMarketCapSource {
         let price = crate::cmd::price::price_decimal_from_json(price_value)
             .with_context(|| format!("Invalid price format: {price_value}"))?;
 
-        let date = request.date.unwrap_or_else(|| jiff::Zoned::now().date());
+        let date = jiff::Zoned::now().date();
 
         Ok(PriceResponse {
             price,
-            currency: request.currency.to_uppercase(),
+            currency: pair.currency.to_uppercase(),
             date,
             source: self.name().to_string(),
         })

@@ -2,8 +2,8 @@
 //!
 //! Fetches Chinese mutual fund prices from East Money (天天基金).
 
-use super::{PriceSource, user_agent};
-use crate::cmd::price::{PriceRequest, PriceResponse};
+use super::{PricePair, PriceSource, user_agent};
+use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -62,18 +62,14 @@ impl PriceSource for EastMoneyFundSource {
         "East Money Fund - Chinese mutual fund NAVs (天天基金)"
     }
 
-    fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        // Latest-only source: a historical --date must refuse, not
-        // mislabel the current quote (#1794).
-        super::reject_historical_date(self.name(), request)?;
-
-        let url = self.build_url(&request.ticker);
+    fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
+        let url = self.build_url(&pair.ticker);
 
         let mut response = ureq::get(&url)
             .header("User-Agent", user_agent())
             .header("Referer", "https://fund.eastmoney.com/")
             .call()
-            .with_context(|| format!("Failed to fetch fund {}", request.ticker))?;
+            .with_context(|| format!("Failed to fetch fund {}", pair.ticker))?;
 
         let body = response
             .body_mut()

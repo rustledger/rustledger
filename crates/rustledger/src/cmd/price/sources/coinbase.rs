@@ -2,8 +2,8 @@
 //!
 //! Fetches cryptocurrency prices from Coinbase.
 
-use super::{PriceSource, user_agent};
-use crate::cmd::price::{PriceRequest, PriceResponse};
+use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
+use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -30,8 +30,14 @@ impl CoinbaseSource {
         Self {}
     }
 
-    /// Build the Coinbase API URL.
-    fn build_url(&self, ticker: &str, currency: &str) -> String {
+    /// Build the Coinbase API URL. A date adds `?date=YYYY-MM-DD`,
+    /// which the spot endpoint answers with that day's price.
+    fn build_url(
+        &self,
+        ticker: &str,
+        currency: &str,
+        date: Option<rustledger_core::NaiveDate>,
+    ) -> String {
         // If the ticker already contains a dash, use it directly
         // Otherwise, append the currency
         let pair = if ticker.contains('-') {
@@ -39,35 +45,24 @@ impl CoinbaseSource {
         } else {
             format!("{ticker}-{currency}")
         };
-        format!("https://api.coinbase.com/v2/prices/{pair}/spot")
-    }
-}
-
-impl PriceSource for CoinbaseSource {
-    fn name(&self) -> &'static str {
-        "coinbase"
+        match date {
+            Some(d) => format!("https://api.coinbase.com/v2/prices/{pair}/spot?date={d}"),
+            None => format!("https://api.coinbase.com/v2/prices/{pair}/spot"),
+        }
     }
 
-    fn description(&self) -> &'static str {
-        "Coinbase - cryptocurrency spot prices"
-    }
-
-    fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        // Latest-only source: a historical --date must refuse, not
-        // mislabel the current quote (#1794).
-        super::reject_historical_date(self.name(), request)?;
-
-        let url = self.build_url(&request.ticker, &request.currency);
-
-        let mut response = ureq::get(&url)
+    /// Shared fetch + parse for the spot endpoint (dated or not).
+    /// Returns `(price, currency)`.
+    fn fetch_spot(&self, url: &str, pair: &PricePair) -> Result<(Decimal, String)> {
+        let mut response = ureq::get(url)
             .header("User-Agent", user_agent())
             .call()
-            .with_context(|| format!("Failed to fetch price for {}", request.ticker))?;
+            .with_context(|| format!("Failed to fetch price for {}", pair.ticker))?;
 
         let json: serde_json::Value = response
             .body_mut()
             .read_json()
-            .with_context(|| format!("Failed to parse response for {}", request.ticker))?;
+            .with_context(|| format!("Failed to parse response for {}", pair.ticker))?;
 
         // Check for errors
         if let Some(errors) = json.get("errors")
@@ -95,17 +90,52 @@ impl PriceSource for CoinbaseSource {
         let currency = data
             .get("currency")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or(&request.currency)
+            .unwrap_or(&pair.currency)
             .to_string();
 
-        let date = request.date.unwrap_or_else(|| jiff::Zoned::now().date());
+        Ok((price, currency))
+    }
+}
+
+impl PriceSource for CoinbaseSource {
+    fn name(&self) -> &'static str {
+        "coinbase"
+    }
+
+    fn description(&self) -> &'static str {
+        "Coinbase - cryptocurrency spot prices"
+    }
+
+    fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
+        let url = self.build_url(&pair.ticker, &pair.currency, None);
+        let (price, currency) = self.fetch_spot(&url, pair)?;
 
         Ok(PriceResponse {
             price,
             currency,
-            date,
+            // The spot endpoint carries no date field; a dateless spot
+            // quote is a live quote for today.
+            date: jiff::Zoned::now().date(),
             source: self.name().to_string(),
         })
+    }
+
+    fn historical_coverage(&self) -> HistoricalCoverage {
+        HistoricalCoverage::Full
+    }
+
+    fn fetch_window(&self, pair: &PricePair, window: DateWindow) -> Result<Vec<PricePoint>> {
+        // Crypto trades every day, so the exact-date spot endpoint
+        // answers for any day: a single point at the window's end
+        // satisfies the dispatch's on-or-before selection without
+        // burning one request per day of the window.
+        let url = self.build_url(&pair.ticker, &pair.currency, Some(window.end));
+        let (price, currency) = self.fetch_spot(&url, pair)?;
+        Ok(vec![PricePoint {
+            date: window.end,
+            price,
+            currency: Some(currency),
+        }])
     }
 }
 
@@ -117,11 +147,19 @@ mod tests {
     fn test_build_url() {
         let source = CoinbaseSource::new(Duration::from_secs(30));
 
-        let url = source.build_url("BTC", "USD");
+        let url = source.build_url("BTC", "USD", None);
         assert_eq!(url, "https://api.coinbase.com/v2/prices/BTC-USD/spot");
 
-        let url = source.build_url("BTC-EUR", "USD");
+        let url = source.build_url("BTC-EUR", "USD", None);
         assert_eq!(url, "https://api.coinbase.com/v2/prices/BTC-EUR/spot");
+
+        // Historical (#1802): the spot endpoint takes an exact date.
+        let d = rustledger_core::naive_date(2024, 1, 15).unwrap();
+        let url = source.build_url("BTC", "USD", Some(d));
+        assert_eq!(
+            url,
+            "https://api.coinbase.com/v2/prices/BTC-USD/spot?date=2024-01-15"
+        );
     }
 
     #[test]

@@ -2,8 +2,8 @@
 //!
 //! Fetches financial data from Quandl/Nasdaq Data Link.
 
-use super::{PriceSource, user_agent};
-use crate::cmd::price::{PriceRequest, PriceResponse};
+use super::{PricePair, PriceSource, user_agent};
+use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use std::env;
 use std::time::Duration;
@@ -76,20 +76,16 @@ impl PriceSource for QuandlSource {
         Some("QUANDL_API_KEY")
     }
 
-    fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
-        // Latest-only source: a historical --date must refuse, not
-        // mislabel the current quote (#1794).
-        super::reject_historical_date(self.name(), request)?;
-
+    fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         let api_key = Self::get_api_key()?;
-        let (database, dataset) = Self::parse_dataset(&request.ticker);
+        let (database, dataset) = Self::parse_dataset(&pair.ticker);
         let full_dataset = format!("{database}/{dataset}");
         let url = self.build_url(&full_dataset, &api_key);
 
         let mut response = ureq::get(&url)
             .header("User-Agent", user_agent())
             .call()
-            .with_context(|| format!("Failed to fetch data for {}", request.ticker))?;
+            .with_context(|| format!("Failed to fetch data for {}", pair.ticker))?;
 
         let json: serde_json::Value = response
             .body_mut()
@@ -162,7 +158,7 @@ impl PriceSource for QuandlSource {
 
         Ok(PriceResponse {
             price,
-            currency: request.currency.clone(),
+            currency: pair.currency.clone(),
             date,
             source: self.name().to_string(),
         })

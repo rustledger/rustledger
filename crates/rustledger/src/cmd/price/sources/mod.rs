@@ -114,25 +114,33 @@ mod guard_tests {
     }
 
     /// Latest-only sources refuse a historical --date instead of
-    /// mislabeling the current quote (#1794).
+    /// mislabeling the current quote (#1794). Uses a FIXED past date so
+    /// the assertion is deterministic (never "yesterday", which races
+    /// the midnight rollover — review comment).
     #[test]
     fn historical_date_is_rejected() {
-        let yesterday = jiff::Zoned::now()
-            .date()
-            .yesterday()
-            .expect("valid yesterday");
-        let err = super::reject_historical_date("coinbase", &request(Some(yesterday)))
+        let past = rustledger_core::naive_date(2000, 1, 3).expect("valid date");
+        let err = super::reject_historical_date("coinbase", &request(Some(past)))
             .expect_err("must refuse");
         assert!(err.to_string().contains("latest quote"), "{err}");
         assert!(err.to_string().contains("coinbase"), "{err}");
     }
 
     /// Today's date is allowed — the latest quote genuinely belongs to
-    /// today — and no date always passes.
+    /// today — and no date always passes. The guard reads the clock
+    /// again internally, so re-check that "today" was stable across the
+    /// call and retry if midnight flipped between the two reads.
     #[test]
     fn today_and_absent_date_pass() {
-        let today = jiff::Zoned::now().date();
-        assert!(super::reject_historical_date("coinbase", &request(Some(today))).is_ok());
+        loop {
+            let today = jiff::Zoned::now().date();
+            let passed = super::reject_historical_date("coinbase", &request(Some(today))).is_ok();
+            if jiff::Zoned::now().date() == today {
+                assert!(passed, "today's date must pass the guard");
+                break;
+            }
+            // Midnight rolled over mid-test; retry with the new date.
+        }
         assert!(super::reject_historical_date("coinbase", &request(None)).is_ok());
     }
 }

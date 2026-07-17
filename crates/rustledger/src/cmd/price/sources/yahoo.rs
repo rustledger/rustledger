@@ -306,13 +306,13 @@ mod tests {
     #[test]
     fn parse_chart_classifies_by_exchange_timezone() {
         // gmtoffset +13h (46800). Monday 2026-07-13 10:00 NZST
-        // = Sunday 2026-07-12 21:00 UTC = 1783976400.
+        // = Sunday 2026-07-12 21:00 UTC = 1783890000.
         // Tuesday 2026-07-14 10:00 NZST = Monday 2026-07-13 21:00 UTC
-        // = 1784062800.
+        // = 1783976400 — by UTC date it masquerades as Monday.
         let json: serde_json::Value = serde_json::json!({
             "chart": { "result": [{
                 "meta": { "currency": "NZD", "gmtoffset": 46800 },
-                "timestamp": [1_783_976_400_i64, 1_784_062_800_i64],
+                "timestamp": [1_783_890_000_i64, 1_783_976_400_i64],
                 "indicators": { "quote": [{ "close": [1.11, 2.22] }] }
             }], "error": null }
         });
@@ -328,13 +328,13 @@ mod tests {
     #[test]
     fn parse_chart_latest_uses_quote_own_date() {
         // Friday 2026-07-10 16:00 US/Eastern (UTC-4) = 20:00 UTC
-        // = 1783800000; gmtoffset -14400.
+        // = 1783713600; gmtoffset -14400.
         let json: serde_json::Value = serde_json::json!({
             "chart": { "result": [{
                 "meta": {
                     "currency": "USD",
                     "regularMarketPrice": 243.85,
-                    "regularMarketTime": 1_783_800_000_i64,
+                    "regularMarketTime": 1_783_713_600_i64,
                     "gmtoffset": -14400
                 }
             }], "error": null }

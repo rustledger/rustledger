@@ -105,11 +105,7 @@ impl PriceSource for RatesApiSource {
         // The feed's OWN quote date when present (exchangerate.host
         // returns a "date" field) — on weekends the latest rate belongs
         // to Friday and must say so (deep review, same rule as ECB).
-        let date = json
-            .get("date")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|s| s.parse::<rustledger_core::NaiveDate>().ok())
-            .unwrap_or_else(|| jiff::Zoned::now().date());
+        let date = super::feed_date_or_today(json.get("date").and_then(serde_json::Value::as_str));
 
         Ok(PriceResponse {
             price,

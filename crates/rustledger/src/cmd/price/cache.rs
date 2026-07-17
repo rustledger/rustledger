@@ -24,11 +24,18 @@ pub struct PriceCache {
     dirty: bool,
 }
 
-/// Current cache schema. Bumped in #1801: version 1 was an unversioned
-/// bare map that could hold live quotes mislabeled with historical dates
-/// (#1794); those entries must never be served, so unversioned or
-/// mismatched files load as empty.
-const CACHE_SCHEMA_VERSION: u32 = 2;
+/// Current cache schema.
+///
+/// Bumped in #1801: version 1 was an unversioned bare map that could
+/// hold live quotes mislabeled with historical dates (#1794); those
+/// entries must never be served, so unversioned or older-versioned
+/// files load as empty (newer-versioned files also load as empty but
+/// are left on disk for the newer binary).
+///
+/// Public so integration tests that pre-write cache fixtures reference
+/// the real constant instead of a literal that silently goes stale on
+/// the next bump (round-3 deep review).
+pub const CACHE_SCHEMA_VERSION: u32 = 2;
 
 /// The on-disk cache envelope.
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,13 +87,24 @@ impl PriceCache {
                 // would mean keeping the poisoned format alive.
                 Ok(contents) => match serde_json::from_str::<CacheFile>(&contents) {
                     Ok(file) if file.version == CACHE_SCHEMA_VERSION => (file.entries, false),
-                    // Discarding marks the cache dirty so save() rewrites
-                    // the file even when the run fetches nothing — otherwise
-                    // the poisoned pre-#1801 file survives on disk for any
-                    // older binary to serve again (round-2 deep review).
+                    // A NEWER schema — this binary is the outdated one.
+                    // Don't serve entries it can't vouch for, but don't
+                    // mark dirty either: a no-fetch run must leave the
+                    // newer binary's cache untouched (round-3 review —
+                    // dirty here made every old-binary run wipe it).
+                    Ok(file) if file.version > CACHE_SCHEMA_VERSION => (HashMap::new(), false),
+                    // Older or unversioned (the pre-#1801 bare map):
+                    // poisoned — discard AND mark dirty so save() rewrites
+                    // the file even when the run fetches nothing, otherwise
+                    // the poisoned file survives on disk for any older
+                    // binary to serve again (round-2 deep review).
                     _ => (HashMap::new(), true),
                 },
-                Err(_) => (HashMap::new(), true),
+                // Transient I/O error (EACCES, network home dir): leave the
+                // file alone — it may be perfectly healthy (round-3 review:
+                // marking dirty here let a recoverable read error destroy
+                // the whole cache on save()).
+                Err(_) => (HashMap::new(), false),
             }
         } else {
             (HashMap::new(), false)
@@ -102,15 +120,25 @@ impl PriceCache {
 
     /// Look up a cached price. Returns `None` if missing or expired.
     ///
-    /// Historical prices (with a specific date in the key) never expire.
-    /// Latest prices expire after the configured TTL.
-    /// This matches Python bean-price behavior.
+    /// SETTLED historical prices (keyed under a date strictly before
+    /// today) never expire — a past close is immutable. Latest prices
+    /// AND prices keyed under today (or a future date) expire after the
+    /// configured TTL: a `--date <today>` fetch from a latest-only
+    /// source is an intraday quote, and serving the morning's value all
+    /// day from a never-expiring entry would freeze it as the day's
+    /// price of record (round-3 deep review). This matches Python
+    /// bean-price behavior for the settled case.
     pub fn get(&self, key: &str) -> Option<PriceResponse> {
         let entry = self.entries.get(key)?;
 
-        // Historical prices never expire; latest prices use TTL
-        let is_latest = key.ends_with(":latest");
-        if is_latest {
+        // Only strictly-past dated keys are exempt from the TTL.
+        let is_settled = !key.ends_with(":latest")
+            && key
+                .rsplit(':')
+                .next()
+                .and_then(|s| s.parse::<NaiveDate>().ok())
+                .is_some_and(|d| d < jiff::Zoned::now().date());
+        if !is_settled {
             let now = now_secs();
             if self.ttl.is_zero() || now.saturating_sub(entry.cached_at) > self.ttl.as_secs() {
                 return None; // Expired or caching disabled
@@ -403,6 +431,79 @@ mod tests {
         assert!(
             rewritten.entries.is_empty(),
             "save() after a discard must replace the poisoned file with an empty v2 envelope"
+        );
+    }
+
+    /// A NEWER-versioned file (downgraded binary) loads as empty but is
+    /// NOT dirty: this binary must not serve entries it can't vouch for,
+    /// and must not destroy the newer binary's cache on `save()` either
+    /// (round-3 deep review — the round-2 discard-marks-dirty fix made
+    /// every old-binary run wipe a newer cache).
+    #[test]
+    fn newer_version_cache_is_ignored_but_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prices.json");
+        let future = format!(
+            r#"{{"version":{},"entries":{{"yahoo:AAPL:USD:2024-01-15":{{"price":"150.00","currency":"USD","date":"2024-01-15","source":"yahoo","cached_at":1700000000}}}}}}"#,
+            CACHE_SCHEMA_VERSION + 1
+        );
+        std::fs::write(&path, &future).unwrap();
+
+        let mut cache = PriceCache::load_from_path(path.clone(), 3600);
+        assert!(cache.entries.is_empty(), "newer schema must not be served");
+        assert!(!cache.dirty, "newer schema must not be marked for rewrite");
+
+        cache.save();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            future,
+            "a no-insert run must leave the newer binary's cache untouched"
+        );
+    }
+
+    /// A transient read error must NOT queue the file for destruction —
+    /// it may be perfectly healthy (round-3 deep review: EACCES on a
+    /// network home dir wiped the whole cache on `save()`).
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_cache_is_not_marked_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory at the cache path: exists() is true, read fails.
+        let path = dir.path().join("prices.json");
+        std::fs::create_dir(&path).unwrap();
+
+        let cache = PriceCache::load_from_path(path, 3600);
+        assert!(cache.entries.is_empty());
+        assert!(
+            !cache.dirty,
+            "a read error must leave the on-disk cache alone"
+        );
+    }
+
+    /// A key dated TODAY is an intraday quote, not a settled close — it
+    /// must honor the TTL instead of never expiring (round-3 deep
+    /// review: the first `--date <today>` fetch froze as that day's
+    /// price of record).
+    #[test]
+    fn today_dated_key_honors_ttl() {
+        let today = jiff::Zoned::now().date();
+        let mut cache = PriceCache {
+            path: PathBuf::from("/tmp/test-price-cache-today.json"),
+            ttl: Duration::from_secs(0), // everything TTL-subject expires
+            entries: HashMap::new(),
+            dirty: false,
+        };
+        let response = PriceResponse {
+            price: Decimal::new(15000, 2),
+            currency: "USD".to_string(),
+            date: today,
+            source: "coinbase".to_string(),
+        };
+        let key = format!("coinbase:BTC:USD:{today}");
+        cache.insert(&key, &response);
+        assert!(
+            cache.get(&key).is_none(),
+            "a today-dated entry must expire with the TTL"
         );
     }
 

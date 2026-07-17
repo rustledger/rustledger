@@ -94,7 +94,7 @@ impl EcbSource {
             .with_context(|| format!("Failed to parse rate: {rate_value}"))?;
 
         // Try to get the date from the structure
-        let date = json
+        let date_str = json
             .get("structure")
             .and_then(|s| s.get("dimensions"))
             .and_then(|d| d.get("observation"))
@@ -107,9 +107,8 @@ impl EcbSource {
                 values.get(idx)
             })
             .and_then(|v| v.get("id"))
-            .and_then(serde_json::Value::as_str)
-            .and_then(|s| s.parse::<NaiveDate>().ok())
-            .unwrap_or_else(|| jiff::Zoned::now().date());
+            .and_then(serde_json::Value::as_str);
+        let date = super::feed_date_or_today(date_str);
 
         Ok((rate, date))
     }
@@ -191,16 +190,21 @@ impl PriceSource for EcbSource {
         let (currency_rate, currency_date) = self.fetch_rate(&currency)?;
 
         // The two legs are separate fetches of a once-daily feed; if they
-        // straddle the ~16:00 CET publication they reference different
-        // days, and dividing a Monday rate by a Friday rate yields a
-        // number that is not a valid rate for ANY date. Refuse rather
-        // than emit a silently corrupted directive (round-2 deep review —
-        // min() labeling was not sound).
+        // reference different days, dividing a Monday rate by a Friday
+        // rate yields a number that is not a valid rate for ANY date.
+        // Refuse rather than emit a silently corrupted directive
+        // (round-2 deep review — min() labeling was not sound). Two
+        // causes, one transient and one permanent (round-3 review: for a
+        // currency the ECB stopped publishing — HRK, RUB — the feed
+        // returns its frozen final observation forever, so "retry" alone
+        // was misleading advice).
         if ticker_date != currency_date {
             anyhow::bail!(
                 "ECB returned different reference dates for the two legs of \
-                 {ticker}/{currency} ({ticker_date} vs {currency_date}) — the \
-                 fetches straddled a daily publication; retry in a moment"
+                 {ticker}/{currency} ({ticker_date} vs {currency_date}): either \
+                 the fetches straddled the daily ~16:00 CET publication (retry \
+                 shortly), or the leg with the older date is no longer published \
+                 by the ECB and needs a different price source"
             );
         }
 

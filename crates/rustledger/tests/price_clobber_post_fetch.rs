@@ -187,12 +187,16 @@ fn clobber_cache_hit_skips_when_cached_date_matches_existing() {
             "cached_at": cached_at,
         }),
     );
-    // The CURRENT versioned envelope (cache.rs CACHE_SCHEMA_VERSION) — a
-    // bare map is the pre-#1801 legacy format, which load() discards,
-    // silently turning this test into a guard-error no-op (round-2 deep
-    // review). The stderr assertion below pins that the cache path
-    // actually ran.
-    let envelope = serde_json::json!({ "version": 2, "entries": entries });
+    // The CURRENT versioned envelope — a bare map is the pre-#1801
+    // legacy format, which load() discards, silently turning this test
+    // into a guard-error no-op (round-2 deep review). The stderr
+    // assertion below pins that the cache path actually ran; referencing
+    // the real constant keeps the fixture from going stale on the next
+    // schema bump (round-3 deep review).
+    let envelope = serde_json::json!({
+        "version": rustledger::cmd::price::cache::CACHE_SCHEMA_VERSION,
+        "entries": entries
+    });
     std::fs::write(&cache_file, serde_json::to_string(&envelope).unwrap()).unwrap();
 
     let fixture = "\

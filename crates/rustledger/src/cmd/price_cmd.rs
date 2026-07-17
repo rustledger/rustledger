@@ -458,13 +458,13 @@ pub fn run_with_writer<W: Write>(
                         // Also store under the default source key for fast lookup.
                         // Trade-off: if a user later changes their `price:`
                         // source for (symbol, currency) — e.g. yahoo→google —
-                        // a historical-date lookup (no TTL) under the global
-                        // default key will return the OLD source's payload
-                        // until the user runs `--clear-cache`. "Latest" lookups
-                        // are protected by the 30-min TTL on `:latest` keys
-                        // (cache.rs:64-74). Documented limitation; honors the
-                        // perf goal of not re-attempting failed-fallback sources
-                        // on every run.
+                        // a settled historical-date lookup (no TTL) under the
+                        // global default key will return the OLD source's
+                        // payload until the user runs `--clear-cache`. Latest
+                        // and today-dated lookups are protected by the TTL
+                        // (see `PriceCache::get`). Documented limitation;
+                        // honors the perf goal of not re-attempting
+                        // failed-fallback sources on every run.
                         if actual_key != key {
                             c.insert(&key, &response);
                         }

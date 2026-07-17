@@ -5,7 +5,6 @@
 use super::{PriceSource, user_agent};
 use crate::cmd::price::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
-use rustledger_core::NaiveDate;
 use std::env;
 use std::time::Duration;
 
@@ -149,12 +148,11 @@ impl PriceSource for QuandlSource {
             })
             .with_context(|| "No price column found in dataset")?;
 
-        // Extract date
-        let date = data
-            .get(date_idx)
-            .and_then(serde_json::Value::as_str)
-            .and_then(|s| s.parse::<NaiveDate>().ok())
-            .unwrap_or_else(|| request.date.unwrap_or_else(|| jiff::Zoned::now().date()));
+        // The feed's own date, never the requested one (#1794; the old
+        // request.date fallback was the exact mislabeling pattern this
+        // PR removes — round-3 deep review).
+        let date =
+            super::feed_date_or_today(data.get(date_idx).and_then(serde_json::Value::as_str));
 
         // Extract price
         let price_value = data.get(price_idx).with_context(|| "Missing price value")?;

@@ -103,7 +103,13 @@ anyhow.workspace = true
 rust_decimal.workspace = true
 format_num_pattern.workspace = true
 glob.workspace = true
-jiff.workspace = true
+# tzdb-bundle-always: the yahoo source classifies quote bars by
+# exchange timezone (meta.exchangeTimezoneName); without a bundled tzdb
+# that silently degrades to the DST-unsafe gmtoffset fallback on any
+# machine lacking /usr/share/zoneinfo (containers, the nix build
+# sandbox), and its regression test would fail only there (round-3
+# deep review of #1801).
+jiff = { workspace = true, features = ["tzdb-bundle-always"] }
 ureq.workspace = true
 sha2.workspace = true
 

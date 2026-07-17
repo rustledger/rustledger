@@ -119,11 +119,11 @@ impl AlphaVantageSource {
 
         // The quote's OWN trading day when present — a weekend fetch must
         // date the price Friday, not today (deep review of #1801).
-        let date = quote
-            .get("07. latest trading day")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|s| s.parse::<rustledger_core::NaiveDate>().ok())
-            .unwrap_or_else(|| jiff::Zoned::now().date());
+        let date = super::feed_date_or_today(
+            quote
+                .get("07. latest trading day")
+                .and_then(serde_json::Value::as_str),
+        );
 
         Ok(PriceResponse {
             price,
@@ -174,12 +174,11 @@ impl AlphaVantageSource {
         // is "YYYY-MM-DD HH:MM:SS" in UTC) — a weekend FX fetch returns
         // Friday's rate and must be dated Friday, not today (#1794
         // class; round-2 deep review).
-        let date = rate_data
-            .get("6. Last Refreshed")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|s| s.get(..10))
-            .and_then(|s| s.parse::<rustledger_core::NaiveDate>().ok())
-            .unwrap_or_else(|| jiff::Zoned::now().date());
+        let date = super::feed_date_or_today(
+            rate_data
+                .get("6. Last Refreshed")
+                .and_then(serde_json::Value::as_str),
+        );
 
         Ok(PriceResponse {
             price,

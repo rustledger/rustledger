@@ -30,6 +30,14 @@ pub use yahoo::YahooFinanceSource;
 use super::{PriceRequest, PriceResponse};
 use anyhow::Result;
 
+/// The run's notion of "today", latched at the first guarded fetch.
+///
+/// A `--date $(date +%F)` batch that straddles midnight must not flip
+/// mid-run from accepted to refused — a per-fetch clock read left the
+/// tail of the batch failing with advice to "drop --date" even though
+/// the flag was correct when the run began (round-3 deep review).
+static RUN_TODAY: std::sync::OnceLock<rustledger_core::NaiveDate> = std::sync::OnceLock::new();
+
 /// Reject a past or future `--date` on a source that can only fetch the
 /// LATEST quote.
 ///
@@ -40,7 +48,8 @@ use anyhow::Result;
 /// <today>` is allowed, because the latest quote IS a valid answer for
 /// today and the emitted directive carries the response's own date
 /// anyway (round-2 deep review: nightly `--date $(date +%F)` runs
-/// worked on every source before #1801 and must keep working).
+/// worked on every source before #1801 and must keep working). "Today"
+/// is latched once per process — see [`RUN_TODAY`].
 /// Date-independent identity branches (e.g. USD→USD = 1.0) early-return
 /// BEFORE this guard.
 ///
@@ -51,7 +60,7 @@ pub(super) fn reject_historical_date(
     request: &crate::cmd::price::PriceRequest,
 ) -> anyhow::Result<()> {
     if let Some(date) = request.date
-        && date != jiff::Zoned::now().date()
+        && date != *RUN_TODAY.get_or_init(|| jiff::Zoned::now().date())
     {
         anyhow::bail!(
             "the '{source}' source only provides the latest quote and cannot fetch {} \
@@ -61,6 +70,23 @@ pub(super) fn reject_historical_date(
         );
     }
     Ok(())
+}
+
+/// Parse a feed-supplied date label — either a bare `YYYY-MM-DD` or the
+/// date prefix of a `YYYY-MM-DD HH:MM:SS` timestamp — falling back to
+/// the local today when the field is absent or malformed.
+///
+/// Canonical helper for the "quote's OWN date" rule (#1794): a source
+/// labels its response with the feed's reference date, never the
+/// requested date and never the local clock when the feed says
+/// otherwise. Round-3 deep review: the per-source copies of this
+/// extraction had already drifted once (alphavantage forex/crypto kept
+/// the local-clock label while the stock path was fixed), so the
+/// parsing lives here and the sources pass in the raw field.
+pub(super) fn feed_date_or_today(raw: Option<&str>) -> rustledger_core::NaiveDate {
+    raw.and_then(|s| s.get(..10))
+        .and_then(|s| s.parse::<rustledger_core::NaiveDate>().ok())
+        .unwrap_or_else(|| jiff::Zoned::now().date())
 }
 
 /// Trait for price data sources.
@@ -151,6 +177,32 @@ mod guard_tests {
     #[test]
     fn absent_date_passes() {
         assert!(super::reject_historical_date("coinbase", &request(None)).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod feed_date_tests {
+    use super::feed_date_or_today;
+
+    #[test]
+    fn parses_bare_date_and_timestamp_prefix() {
+        let expected = rustledger_core::naive_date(2024, 1, 15).unwrap();
+        assert_eq!(feed_date_or_today(Some("2024-01-15")), expected);
+        // Alpha Vantage "6. Last Refreshed" shape.
+        assert_eq!(feed_date_or_today(Some("2024-01-15 10:30:00")), expected);
+    }
+
+    /// Absent, short, or malformed fields fall back to today instead of
+    /// erroring — the date label degrades, the price still flows.
+    #[test]
+    fn falls_back_to_today_on_missing_or_malformed() {
+        let today = jiff::Zoned::now().date();
+        assert_eq!(feed_date_or_today(None), today);
+        assert_eq!(feed_date_or_today(Some("")), today);
+        assert_eq!(feed_date_or_today(Some("2024")), today);
+        assert_eq!(feed_date_or_today(Some("not-a-date-at-all")), today);
+        // Multibyte content at the 10-byte boundary must not panic.
+        assert_eq!(feed_date_or_today(Some("2024-01-1é 10:30:00")), today);
     }
 }
 

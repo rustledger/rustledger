@@ -42,6 +42,10 @@ impl PriceSource for RatesApiSource {
     }
 
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
+        // Latest-only source: a historical --date must refuse, not
+        // mislabel the current quote (#1794).
+        super::reject_historical_date(self.name(), request)?;
+
         // If ticker and currency are the same, return 1.0
         if request.ticker.to_uppercase() == request.currency.to_uppercase() {
             let date = request.date.unwrap_or_else(|| jiff::Zoned::now().date());

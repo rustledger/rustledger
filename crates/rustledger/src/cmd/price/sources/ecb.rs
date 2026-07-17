@@ -125,6 +125,10 @@ impl PriceSource for EcbSource {
     }
 
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
+        // Latest-only source: a historical --date must refuse, not
+        // mislabel the current quote (#1794).
+        super::reject_historical_date(self.name(), request)?;
+
         let ticker = request.ticker.to_uppercase();
         let currency = request.currency.to_uppercase();
 
@@ -152,7 +156,10 @@ impl PriceSource for EcbSource {
             return Ok(PriceResponse {
                 price: rate,
                 currency,
-                date: request.date.unwrap_or(rate_date),
+                // The ECB feed's OWN reference date — never the requested one:
+                // on weekends/holidays the latest rate is Friday's and must
+                // be labeled as such (#1794).
+                date: rate_date,
                 source: self.name().to_string(),
             });
         }
@@ -167,7 +174,10 @@ impl PriceSource for EcbSource {
             return Ok(PriceResponse {
                 price: inverted,
                 currency,
-                date: request.date.unwrap_or(rate_date),
+                // The ECB feed's OWN reference date — never the requested one:
+                // on weekends/holidays the latest rate is Friday's and must
+                // be labeled as such (#1794).
+                date: rate_date,
                 source: self.name().to_string(),
             });
         }
@@ -186,7 +196,8 @@ impl PriceSource for EcbSource {
         Ok(PriceResponse {
             price: cross_rate,
             currency,
-            date: request.date.unwrap_or(ticker_date),
+            // Same rule as the direct branches: the feed's own date.
+            date: ticker_date,
             source: self.name().to_string(),
         })
     }

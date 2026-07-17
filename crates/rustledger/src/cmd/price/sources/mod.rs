@@ -30,6 +30,33 @@ pub use yahoo::YahooFinanceSource;
 use super::{PriceRequest, PriceResponse};
 use anyhow::Result;
 
+/// Reject a historical `--date` on a source that can only fetch the
+/// LATEST quote.
+///
+/// Labeling the latest price with an arbitrary historical date silently
+/// corrupts price archives (#1794 — Yahoo emitted the live quote under
+/// `--date 2000-01-03`). A latest-only source must refuse instead.
+/// Today's date is allowed: the latest quote genuinely belongs to today.
+///
+/// # Errors
+/// Errors when `request.date` names a day other than today.
+pub(super) fn reject_historical_date(
+    source: &str,
+    request: &crate::cmd::price::PriceRequest,
+) -> anyhow::Result<()> {
+    if let Some(date) = request.date
+        && date != jiff::Zoned::now().date()
+    {
+        anyhow::bail!(
+            "the '{source}' source only provides the latest quote and cannot fetch {} \
+             for {date}; drop --date, or use a source with historical support \
+             (e.g. yahoo)",
+            request.ticker
+        );
+    }
+    Ok(())
+}
+
 /// Trait for price data sources.
 ///
 /// All price sources must implement this trait. The trait is object-safe
@@ -72,4 +99,40 @@ pub trait PriceSource: Send + Sync {
 /// Helper function to build a User-Agent header for HTTP requests.
 pub(crate) const fn user_agent() -> &'static str {
     "Mozilla/5.0 (compatible; rustledger/1.0; +https://github.com/rustledger/rustledger)"
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use crate::cmd::price::PriceRequest;
+
+    fn request(date: Option<rustledger_core::NaiveDate>) -> PriceRequest {
+        PriceRequest {
+            ticker: "AAPL".to_string(),
+            currency: "USD".to_string(),
+            date,
+        }
+    }
+
+    /// Latest-only sources refuse a historical --date instead of
+    /// mislabeling the current quote (#1794).
+    #[test]
+    fn historical_date_is_rejected() {
+        let yesterday = jiff::Zoned::now()
+            .date()
+            .yesterday()
+            .expect("valid yesterday");
+        let err = super::reject_historical_date("coinbase", &request(Some(yesterday)))
+            .expect_err("must refuse");
+        assert!(err.to_string().contains("latest quote"), "{err}");
+        assert!(err.to_string().contains("coinbase"), "{err}");
+    }
+
+    /// Today's date is allowed — the latest quote genuinely belongs to
+    /// today — and no date always passes.
+    #[test]
+    fn today_and_absent_date_pass() {
+        let today = jiff::Zoned::now().date();
+        assert!(super::reject_historical_date("coinbase", &request(Some(today))).is_ok());
+        assert!(super::reject_historical_date("coinbase", &request(None)).is_ok());
+    }
 }

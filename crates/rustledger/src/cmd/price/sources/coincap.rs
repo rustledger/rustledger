@@ -72,6 +72,10 @@ impl PriceSource for CoinCapSource {
     }
 
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
+        // Latest-only source: a historical --date must refuse, not
+        // mislabel the current quote (#1794).
+        super::reject_historical_date(self.name(), request)?;
+
         let url = self.build_url(&request.ticker);
 
         let mut response = ureq::get(&url)

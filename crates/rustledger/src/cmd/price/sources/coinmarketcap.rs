@@ -64,6 +64,10 @@ impl PriceSource for CoinMarketCapSource {
     }
 
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
+        // Latest-only source: a historical --date must refuse, not
+        // mislabel the current quote (#1794).
+        super::reject_historical_date(self.name(), request)?;
+
         let api_key = Self::get_api_key()?;
         let url = self.build_url(&request.ticker, &request.currency);
 

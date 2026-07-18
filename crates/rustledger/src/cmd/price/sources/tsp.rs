@@ -149,11 +149,8 @@ impl PriceSource for TspSource {
 
         let mut points = Vec::new();
         for entry in self.fetch_history()? {
-            let Some(date) = entry
-                .get("date")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|s| s.get(..10))
-                .and_then(|s| s.parse::<rustledger_core::NaiveDate>().ok())
+            let Some(date) =
+                super::feed_date(entry.get("date").and_then(serde_json::Value::as_str))
             else {
                 continue;
             };

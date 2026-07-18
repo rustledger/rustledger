@@ -61,27 +61,48 @@ impl EcbSource {
         &self,
         currency: &str,
         window: Option<DateWindow>,
+        undated_fallback: Option<NaiveDate>,
     ) -> Result<Vec<(NaiveDate, Decimal)>> {
         let url = self.build_url(&currency.to_uppercase(), window);
 
-        let mut response = ureq::get(&url)
+        let mut response = match ureq::get(&url)
             .header("User-Agent", user_agent())
             .header("Accept", "application/json")
             .call()
-            .with_context(|| format!("Failed to fetch ECB rate for {currency}"))?;
+        {
+            Ok(response) => response,
+            // The SDMX API answers an EMPTY selection with HTTP 404
+            // ("No results found") — that is the fetch_window
+            // contract's "no observations here" (a clean no-quote at
+            // the dispatch), not a transport failure (deep review of
+            // #1804: a frozen HRK window read as a network error).
+            Err(ureq::Error::StatusCode(404)) => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to fetch ECB rate for {currency}"));
+            }
+        };
 
         let json: serde_json::Value = response
             .body_mut()
             .read_json()
             .with_context(|| format!("Failed to parse ECB response for {currency}"))?;
 
-        Self::parse_series(&json)
+        Self::parse_series(&json, undated_fallback)
     }
 
     /// Parse an SDMX-JSON EXR response into dated observations.
     /// Factored off the HTTP fetch so fixtures can exercise it without
     /// a network (#1802 source ports).
-    fn parse_series(json: &serde_json::Value) -> Result<Vec<(NaiveDate, Decimal)>> {
+    ///
+    /// An observation whose date cannot be resolved takes
+    /// `undated_fallback` when given (the LATEST-fetch convention:
+    /// today), and is SKIPPED when `None` (the historical convention —
+    /// deep review of #1804: dropping the latest fallback turned rates
+    /// main served into "No observations" errors).
+    fn parse_series(
+        json: &serde_json::Value,
+        undated_fallback: Option<NaiveDate>,
+    ) -> Result<Vec<(NaiveDate, Decimal)>> {
         let datasets = json
             .get("dataSets")
             .and_then(serde_json::Value::as_array)
@@ -118,15 +139,14 @@ impl EcbSource {
             else {
                 continue;
             };
-            let Some(date) = date_values
+            let resolved = date_values
                 .and_then(|values| {
                     let idx: usize = obs_key.parse().ok()?;
                     values.get(idx)
                 })
                 .and_then(|v| v.get("id"))
-                .and_then(serde_json::Value::as_str)
-                .and_then(|s| s.parse::<NaiveDate>().ok())
-            else {
+                .and_then(serde_json::Value::as_str);
+            let Some(date) = super::feed_date(resolved).or(undated_fallback) else {
                 continue;
             };
             points.push((date, rate));
@@ -137,7 +157,11 @@ impl EcbSource {
     /// Latest single rate for a currency: the greatest-dated
     /// observation of a `lastNObservations=1` fetch.
     fn fetch_rate(&self, currency: &str) -> Result<(Decimal, NaiveDate)> {
-        let series = self.fetch_series(currency, None)?;
+        // Latest convention: an observation with an unresolvable date
+        // is today-labeled, matching feed_date_or's LATEST rule (deep
+        // review of #1804 restored this after the series refactor
+        // dropped it).
+        let series = self.fetch_series(currency, None, Some(jiff::Zoned::now().date()))?;
         let (date, rate) = series
             .into_iter()
             .max_by_key(|(date, _)| *date)
@@ -270,7 +294,7 @@ impl PriceSource for EcbSource {
         // own reference date.
         if ticker == "EUR" {
             // EUR -> X: the series as-is (X per EUR).
-            let series = self.fetch_series(&currency, Some(window))?;
+            let series = self.fetch_series(&currency, Some(window), None)?;
             return Ok(series
                 .into_iter()
                 .map(|(date, rate)| PricePoint {
@@ -284,7 +308,7 @@ impl PriceSource for EcbSource {
         if currency == "EUR" {
             // X -> EUR: invert each observation (EUR per X). Zero rates
             // are skipped rather than erroring the whole window.
-            let series = self.fetch_series(&ticker, Some(window))?;
+            let series = self.fetch_series(&ticker, Some(window), None)?;
             return Ok(series
                 .into_iter()
                 .filter(|(_, rate)| !rate.is_zero())
@@ -301,8 +325,8 @@ impl PriceSource for EcbSource {
         // for the historical path: days where only one leg published
         // (or a leg is frozen — HRK, RUB) simply produce no point, and
         // the dispatch's on-or-before selection works with what joined.
-        let ticker_series = self.fetch_series(&ticker, Some(window))?;
-        let currency_series = self.fetch_series(&currency, Some(window))?;
+        let ticker_series = self.fetch_series(&ticker, Some(window), None)?;
+        let currency_series = self.fetch_series(&currency, Some(window), None)?;
         let by_date: std::collections::HashMap<NaiveDate, Decimal> =
             ticker_series.into_iter().collect();
         Ok(currency_series
@@ -363,7 +387,7 @@ mod tests {
                 { "id": "2024-01-15" }
             ]}]}}
         });
-        let mut series = EcbSource::parse_series(&json).expect("parses");
+        let mut series = EcbSource::parse_series(&json, None).expect("parses");
         series.sort_by_key(|(date, _)| *date);
         assert_eq!(series.len(), 2, "the null observation is skipped");
         assert_eq!(

@@ -82,7 +82,14 @@ impl EastMoneyFundSource {
     /// missing.
     fn parse_history(json: &serde_json::Value) -> Result<Vec<PricePoint>> {
         // Check for errors
-        if let Some(code) = json.get("ErrCode").and_then(serde_json::Value::as_i64)
+        // ErrCode arrives as a number today; tolerate a string-typed
+        // code too so a feed change cannot silently skip the check
+        // (deep review of #1804).
+        let err_code = json.get("ErrCode").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        });
+        if let Some(code) = err_code
             && code != 0
         {
             let message = json
@@ -100,20 +107,17 @@ impl EastMoneyFundSource {
 
         let mut points = Vec::new();
         for item in items {
-            let Some(date) = item
-                .get("FSRQ")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|s| s.get(..10))
-                .and_then(|s| s.parse::<rustledger_core::NaiveDate>().ok())
+            let Some(date) = super::feed_date(item.get("FSRQ").and_then(serde_json::Value::as_str))
             else {
                 continue;
             };
             // DWJZ is "" on days without a published NAV — skip, don't
-            // error.
+            // error. The canonical JSON-price parser tolerates both
+            // string and number shapes, like every sibling parser
+            // (deep review of #1804).
             let Some(price) = item
                 .get("DWJZ")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|s| Decimal::from_str(s).ok())
+                .and_then(crate::cmd::price::price_decimal_from_json)
             else {
                 continue;
             };
@@ -190,6 +194,17 @@ impl PriceSource for EastMoneyFundSource {
     }
 
     fn fetch_window(&self, pair: &PricePair, window: DateWindow) -> Result<Vec<PricePoint>> {
+        // One page of 49 NAVs covers the dispatch's 7-day windows many
+        // times over, but a wider window from a library caller would be
+        // SILENTLY truncated to the newest page — refuse it explicitly
+        // instead (deep review of #1804; paging support can come with a
+        // real consumer).
+        let span_days = (window.end - window.start).get_days().abs() + 1;
+        if span_days > 49 {
+            anyhow::bail!(
+                "eastmoneyfund history fetches are limited to 49 days per request                  (window spans {span_days} days); narrow the window"
+            );
+        }
         let url = Self::build_history_url(&pair.ticker, window);
 
         // The lsjz API rejects requests without an eastmoney Referer,

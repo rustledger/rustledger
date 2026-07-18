@@ -89,7 +89,7 @@ impl AlphaVantageSource {
 
         let mut points = Vec::with_capacity(series.len());
         for (date_str, daily_bar) in series {
-            let Ok(date) = date_str.parse::<rustledger_core::NaiveDate>() else {
+            let Some(date) = super::feed_date(Some(date_str)) else {
                 continue;
             };
             let Some(price) = daily_bar
@@ -306,7 +306,42 @@ impl PriceSource for AlphaVantageSource {
             .read_json()
             .with_context(|| "Failed to parse Alpha Vantage response")?;
 
-        Self::parse_daily_series(&json)
+        let points = Self::parse_daily_series(&json)?;
+        // Drop the still-open US session's bar: TIME_SERIES_DAILY dates
+        // are US/Eastern market days, and the dispatch's past-vs-today
+        // split uses the LOCAL calendar — a UTC+8 user's local
+        // "yesterday" can be the live US session, whose in-progress bar
+        // must not be served as a settled close (deep review of #1804).
+        // Completed Eastern days are settled and pass through.
+        let eastern_today = Self::eastern_today();
+        Ok(Self::drop_unsettled(points, eastern_today))
+    }
+}
+
+impl AlphaVantageSource {
+    /// The current civil day on the US/Eastern market calendar,
+    /// falling back to UTC when the tz database is unavailable.
+    fn eastern_today() -> rustledger_core::NaiveDate {
+        jiff::tz::TimeZone::get("America/New_York").map_or_else(
+            |_| {
+                jiff::Timestamp::now()
+                    .to_zoned(jiff::tz::TimeZone::UTC)
+                    .date()
+            },
+            |tz| jiff::Timestamp::now().to_zoned(tz).date(),
+        )
+    }
+
+    /// Keep only bars from COMPLETED Eastern market days — pure for
+    /// testability (deep review of #1804).
+    fn drop_unsettled(
+        points: Vec<PricePoint>,
+        eastern_today: rustledger_core::NaiveDate,
+    ) -> Vec<PricePoint> {
+        points
+            .into_iter()
+            .filter(|p| p.date < eastern_today)
+            .collect()
     }
 }
 
@@ -350,6 +385,41 @@ mod tests {
                 .expect_err("must refuse before any I/O");
             assert!(err.to_string().contains("stock tickers only"), "{err}");
         }
+    }
+
+    /// The still-open Eastern session's bar is dropped; completed days
+    /// pass (pure helper — deep review of #1804: a UTC+8 user's local
+    /// yesterday can be the LIVE US session).
+    #[test]
+    fn drop_unsettled_removes_the_open_sessions_bar() {
+        let d = |day| rustledger_core::naive_date(2024, 1, day).unwrap();
+        let point = |day| PricePoint {
+            date: d(day),
+            price: Decimal::ONE,
+            currency: None,
+        };
+        let kept = AlphaVantageSource::drop_unsettled(vec![point(11), point(12)], d(12));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].date, d(11), "the eastern-today bar is dropped");
+    }
+
+    /// The forex refusal holds THROUGH the canonical dispatch, not just
+    /// on a direct `fetch_window` call: a dated forex fetch must fail
+    /// hermetically before the API-key check or any network I/O (deep
+    /// review of #1804 — the old latest-only wiring pin was removed
+    /// when alphavantage became window-capable).
+    #[test]
+    fn dated_forex_refuses_through_the_dispatch() {
+        let source = AlphaVantageSource::new(Duration::from_secs(30));
+        let request = crate::cmd::price::PriceRequest {
+            ticker: "EUR/USD".to_string(),
+            currency: "USD".to_string(),
+            date: Some(rustledger_core::naive_date(2024, 1, 10).unwrap()),
+        };
+        let err = source
+            .fetch_price(&request)
+            .expect_err("must refuse before any I/O");
+        assert!(err.to_string().contains("stock tickers only"), "{err}");
     }
 
     /// `TIME_SERIES_DAILY` parsing: every daily close becomes a dated

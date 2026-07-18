@@ -18,14 +18,19 @@ use crate::{
 use std::fmt::Write;
 
 /// Append metadata entries (deterministic sorted order) as `Plain` lines.
-pub(super) fn metadata_lines(meta: &Metadata, indent: &str, out: &mut Vec<FormatLine>) {
+pub(super) fn metadata_lines(
+    meta: &Metadata,
+    indent: &str,
+    config: &FormatConfig,
+    out: &mut Vec<FormatLine>,
+) {
     let mut keys: Vec<_> = meta.keys().collect();
     keys.sort();
     for key in keys {
         out.push(FormatLine::Plain(format!(
             "{indent}{}: {}",
             key,
-            format_meta_value(&meta[key])
+            format_meta_value(&meta[key], config)
         )));
     }
 }
@@ -44,14 +49,22 @@ fn amount_split(amount: &Amount, config: &FormatConfig) -> (String, String) {
 pub fn format_balance_lines(bal: &Balance, config: &FormatConfig) -> Vec<FormatLine> {
     let (number, mut suffix) = amount_split(&bal.amount, config);
     if let Some(tol) = &bal.tolerance {
-        write!(suffix, " ~ {tol}").expect("write to String is infallible");
+        // The tolerance shares the amount's currency and its display
+        // precision — mixed precision on one line reads as a typo
+        // (deep review of #1807).
+        write!(
+            suffix,
+            " ~ {}",
+            super::render_number(*tol, bal.amount.currency.as_str(), config)
+        )
+        .expect("write to String is infallible");
     }
     let mut lines = vec![FormatLine::Aligned {
         prefix: format!("{} balance {}", bal.date, bal.account),
         number,
         suffix,
     }];
-    metadata_lines(&bal.meta, &config.indent, &mut lines);
+    metadata_lines(&bal.meta, &config.indent, config, &mut lines);
     lines
 }
 
@@ -63,7 +76,7 @@ pub fn format_price_lines(price: &Price, config: &FormatConfig) -> Vec<FormatLin
         number,
         suffix,
     }];
-    metadata_lines(&price.meta, &config.indent, &mut lines);
+    metadata_lines(&price.meta, &config.indent, config, &mut lines);
     lines
 }
 
@@ -77,7 +90,7 @@ pub fn format_open_lines(open: &Open, config: &FormatConfig) -> Vec<FormatLine> 
         write!(header, " \"{booking}\"").expect("write to String is infallible");
     }
     let mut lines = vec![FormatLine::Plain(header)];
-    metadata_lines(&open.meta, &config.indent, &mut lines);
+    metadata_lines(&open.meta, &config.indent, config, &mut lines);
     lines
 }
 
@@ -87,7 +100,7 @@ pub fn format_close_lines(close: &Close, config: &FormatConfig) -> Vec<FormatLin
         "{} close {}",
         close.date, close.account
     ))];
-    metadata_lines(&close.meta, &config.indent, &mut lines);
+    metadata_lines(&close.meta, &config.indent, config, &mut lines);
     lines
 }
 
@@ -97,7 +110,7 @@ pub fn format_commodity_lines(comm: &Commodity, config: &FormatConfig) -> Vec<Fo
         "{} commodity {}",
         comm.date, comm.currency
     ))];
-    metadata_lines(&comm.meta, &config.indent, &mut lines);
+    metadata_lines(&comm.meta, &config.indent, config, &mut lines);
     lines
 }
 
@@ -107,7 +120,7 @@ pub fn format_pad_lines(pad: &Pad, config: &FormatConfig) -> Vec<FormatLine> {
         "{} pad {} {}",
         pad.date, pad.account, pad.source_account
     ))];
-    metadata_lines(&pad.meta, &config.indent, &mut lines);
+    metadata_lines(&pad.meta, &config.indent, config, &mut lines);
     lines
 }
 
@@ -119,7 +132,7 @@ pub fn format_event_lines(event: &Event, config: &FormatConfig) -> Vec<FormatLin
         escape_string(&event.event_type),
         escape_string(&event.value)
     ))];
-    metadata_lines(&event.meta, &config.indent, &mut lines);
+    metadata_lines(&event.meta, &config.indent, config, &mut lines);
     lines
 }
 
@@ -131,7 +144,7 @@ pub fn format_query_lines(query: &Query, config: &FormatConfig) -> Vec<FormatLin
         escape_string(&query.name),
         escape_string(&query.query)
     ))];
-    metadata_lines(&query.meta, &config.indent, &mut lines);
+    metadata_lines(&query.meta, &config.indent, config, &mut lines);
     lines
 }
 
@@ -143,7 +156,7 @@ pub fn format_note_lines(note: &Note, config: &FormatConfig) -> Vec<FormatLine> 
         note.account,
         escape_string(&note.comment)
     ))];
-    metadata_lines(&note.meta, &config.indent, &mut lines);
+    metadata_lines(&note.meta, &config.indent, config, &mut lines);
     lines
 }
 
@@ -155,7 +168,7 @@ pub fn format_document_lines(doc: &Document, config: &FormatConfig) -> Vec<Forma
         doc.account,
         escape_string(&doc.path)
     ))];
-    metadata_lines(&doc.meta, &config.indent, &mut lines);
+    metadata_lines(&doc.meta, &config.indent, config, &mut lines);
     lines
 }
 
@@ -167,10 +180,11 @@ pub fn format_custom_lines(custom: &Custom, config: &FormatConfig) -> Vec<Format
         escape_string(&custom.custom_type)
     );
     for value in &custom.values {
-        write!(header, " {}", format_meta_value(value)).expect("write to String is infallible");
+        write!(header, " {}", format_meta_value(value, config))
+            .expect("write to String is infallible");
     }
     let mut lines = vec![FormatLine::Plain(header)];
-    metadata_lines(&custom.meta, &config.indent, &mut lines);
+    metadata_lines(&custom.meta, &config.indent, config, &mut lines);
     lines
 }
 

@@ -4,7 +4,7 @@ use super::format_amount;
 use crate::MetaValue;
 
 /// Format a metadata value.
-pub fn format_meta_value(value: &MetaValue) -> String {
+pub fn format_meta_value(value: &MetaValue, config: &super::FormatConfig) -> String {
     match value {
         MetaValue::String(s) => format!("\"{}\"", escape_string(s)),
         MetaValue::Account(a) => a.to_string(),
@@ -12,8 +12,11 @@ pub fn format_meta_value(value: &MetaValue) -> String {
         MetaValue::Tag(t) => format!("#{t}"),
         MetaValue::Link(l) => format!("^{l}"),
         MetaValue::Date(d) => d.to_string(),
+        // Bare numbers have no currency to look precision up under —
+        // they keep their own scale (same rule as interpolation
+        // targets in posting rendering, #1766).
         MetaValue::Number(n) => n.to_string(),
-        MetaValue::Amount(a) => format_amount(a),
+        MetaValue::Amount(a) => super::format_amount_with(a, config),
         MetaValue::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         MetaValue::None => String::new(),
         MetaValue::Int(i) => i.to_string(),

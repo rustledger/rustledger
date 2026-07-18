@@ -31,7 +31,7 @@ pub fn format_transaction_lines(txn: &Transaction, config: &FormatConfig) -> Vec
     lines.push(FormatLine::Plain(header));
 
     // Transaction-level metadata (deterministic sorted order).
-    metadata_lines(&txn.meta, &config.indent, &mut lines);
+    metadata_lines(&txn.meta, &config.indent, config, &mut lines);
 
     // Posting-level metadata is indented one level deeper than the posting.
     let meta_indent = format!("{}{}", config.indent, config.indent);
@@ -49,7 +49,7 @@ pub fn format_transaction_lines(txn: &Transaction, config: &FormatConfig) -> Vec
         }
         // Posting-level metadata.
         if !posting.meta.is_empty() {
-            metadata_lines(&posting.meta, &meta_indent, &mut lines);
+            metadata_lines(&posting.meta, &meta_indent, config, &mut lines);
         }
     }
 
@@ -215,11 +215,7 @@ pub(super) fn format_posting(posting: &Posting, config: &FormatConfig) -> String
 /// Format an incomplete amount.
 pub fn format_incomplete_amount(amount: &IncompleteAmount, config: &FormatConfig) -> String {
     match amount {
-        IncompleteAmount::Complete(a) => format!(
-            "{} {}",
-            super::render_number(a.number, a.currency.as_str(), config),
-            a.currency
-        ),
+        IncompleteAmount::Complete(a) => super::format_amount_with(a, config),
         IncompleteAmount::NumberOnly(n) => n.to_string(),
         IncompleteAmount::CurrencyOnly(c) => c.to_string(),
     }

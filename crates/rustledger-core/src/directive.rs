@@ -1981,7 +1981,13 @@ mod tests {
     fn meta_value_int_display_and_kind() {
         assert_eq!(MetaValue::Int(42).to_string(), "42");
         assert_eq!(MetaValue::Int(-7).to_string(), "-7");
-        assert_eq!(crate::format::format_meta_value(&MetaValue::Int(42)), "42");
+        assert_eq!(
+            crate::format::format_meta_value(
+                &MetaValue::Int(42),
+                &crate::format::FormatConfig::default()
+            ),
+            "42"
+        );
         assert_eq!(meta_value_kind(&MetaValue::Int(0)), "int");
     }
 

@@ -3481,6 +3481,46 @@ mod tests {
         assert!(out.contains("1234.5 USD"), "own scale preserved: {out}");
     }
 
+    /// Padded COST and PRICE-annotation numbers survive the shim's
+    /// pass 2 (the CST re-canonicalization preserves trailing zeros),
+    /// and the pass-1 emitter and the shim agree on every rendered
+    /// number — the cross-surface drift guard the `render_number` doc
+    /// claims (deep review of #1807).
+    #[test]
+    fn canonicalize_pads_costs_and_prices_and_agrees_with_pass_one() {
+        use rustledger_core::format::FormatConfig;
+
+        let source = "2024-01-10 * \"buy\"\n  Assets:Broker  2 AAPL {150 USD} @ 155.5 USD\n  Assets:Cash  -310.00 USD\n";
+        let parsed = crate::parse(source);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+
+        let mut ctx = rustledger_core::DisplayContext::new();
+        ctx.set_fixed_precision("USD", 2);
+        let config = FormatConfig {
+            number_display: Some(ctx),
+            ..FormatConfig::default()
+        };
+
+        let pass_one = rustledger_core::format::format_directives(
+            parsed.directives.iter().map(|d| &d.value),
+            &config,
+        );
+        let canonical =
+            canonicalize_directives(parsed.directives.iter().map(|d| &d.value), &config)
+                .expect("padded cost/price text must survive the reparse");
+
+        for padded in ["{150.00 USD}", "@ 155.50 USD"] {
+            assert!(
+                pass_one.contains(padded),
+                "pass-1 emitter pads {padded}: {pass_one}"
+            );
+            assert!(
+                canonical.contains(padded),
+                "the shim preserves the padded {padded}: {canonical}"
+            );
+        }
+    }
+
     #[test]
     fn canonicalize_directives_roundtrips_every_synthesized_directive() {
         // For each canonical-form fixture: parse → take the typed

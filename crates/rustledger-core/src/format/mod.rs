@@ -10,7 +10,9 @@ mod helpers;
 mod transaction;
 
 pub use align::{Alignment, FormatLine, render_lines, resolve_alignment};
-pub(crate) use amount::{format_amount, format_cost_spec, format_price_annotation};
+pub(crate) use amount::{
+    format_amount, format_amount_with, format_cost_spec, format_price_annotation,
+};
 use directives::{
     format_balance_lines, format_close_lines, format_commodity_lines, format_custom_lines,
     format_document_lines, format_event_lines, format_note_lines, format_open_lines,
@@ -31,17 +33,21 @@ pub struct FormatConfig {
     pub alignment: Alignment,
     /// Indentation for postings and metadata (default: 2 spaces).
     pub indent: String,
-    /// Optional number rendering context (#1766): when set, every
-    /// amount/cost/price number is rendered through
-    /// [`crate::DisplayContext::format`] for per-currency PRECISION
-    /// padding (`option "display_precision"`, observed distributions).
-    /// Thousands separators are deliberately NOT emitted even when the
-    /// context has `render_commas` set: canonical ledger text carries
-    /// no separators (the CST canonicalizer strips them by definition,
-    /// matching `bean-format`) — commas remain a report/query display
-    /// concern, honored where they always were. `None` preserves each
-    /// value's own scale byte-for-byte (the historical behavior, and
-    /// what source-preserving formatters want).
+    /// Optional number rendering context (#1766): when set, amount,
+    /// cost, price, tolerance, and amount-typed metadata numbers render
+    /// through [`crate::DisplayContext::format_plain`] — per-currency
+    /// PRECISION padding (`option "display_precision"`, observed
+    /// distributions) that never rounds an over-precise value away
+    /// (quantizing a balance amount would change its meaning), and
+    /// leaves currencies the context does not track byte-faithful to
+    /// their own scale. Thousands separators are deliberately never
+    /// emitted even when the context has `render_commas` set: canonical
+    /// ledger text carries no separators (the CST canonicalizer strips
+    /// them by definition, matching `bean-format`) — commas remain a
+    /// report/query display concern, honored where they always were.
+    /// `None` preserves each value's own scale byte-for-byte (the
+    /// historical behavior, and what source-preserving formatters
+    /// want).
     pub number_display: Option<crate::DisplayContext>,
 }
 
@@ -62,8 +68,7 @@ impl FormatConfig {
     pub fn with_column(column: usize) -> Self {
         Self {
             alignment: Alignment::CurrencyColumn(column),
-            indent: "  ".to_string(),
-            number_display: None,
+            ..Self::default()
         }
     }
 
@@ -71,9 +76,8 @@ impl FormatConfig {
     #[must_use]
     pub fn with_indent(indent_width: usize) -> Self {
         Self {
-            alignment: Alignment::default(),
             indent: " ".repeat(indent_width),
-            number_display: None,
+            ..Self::default()
         }
     }
 
@@ -83,7 +87,7 @@ impl FormatConfig {
         Self {
             alignment: Alignment::CurrencyColumn(column),
             indent: " ".repeat(indent_width),
-            number_display: None,
+            ..Self::default()
         }
     }
 }
@@ -112,6 +116,30 @@ pub fn format_directive_lines(directive: &Directive, config: &FormatConfig) -> V
     }
 }
 
+/// Render one number for ledger text: through the config's
+/// [`crate::DisplayContext`] when present, or the value's own scale
+/// otherwise. The single chokepoint every formatter amount/cost/price
+/// number emission goes through — keep it that way so the two
+/// behaviors cannot drift per call site (#1766).
+///
+/// Context semantics come from [`crate::DisplayContext::format_plain`]:
+/// a TRACKED currency pads to the tracked precision (never rounding an
+/// over-precise value away); an UNTRACKED currency stays byte-faithful
+/// to its own scale; thousands separators are never emitted (canonical
+/// ledger text carries none — `render_commas` stays a report/query
+/// display concern).
+#[must_use]
+pub fn render_number(
+    number: rust_decimal::Decimal,
+    currency: &str,
+    config: &FormatConfig,
+) -> String {
+    match &config.number_display {
+        Some(ctx) => ctx.format_plain(number, currency),
+        None => number.to_string(),
+    }
+}
+
 /// Format a list of directives to a string, aligning all of them together
 /// against shared, file-wide column widths in a single pass.
 ///
@@ -132,34 +160,10 @@ pub fn format_directive_lines(directive: &Directive, config: &FormatConfig) -> V
 /// between directives should drop down to [`format_directive_lines`] +
 /// [`render_lines`] and push a `FormatLine::Plain(String::new())` between
 /// each directive's lines (see `crates/rustledger/src/cmd/extract_cmd` for
-/// Render one number for output: through the config's
-/// [`crate::DisplayContext`] when present (precision padding +
-/// commas, #1766), or the value's own scale otherwise. The single
-/// chokepoint every formatter number emission goes through — keep it
-/// that way so the two behaviors cannot drift per call site.
-#[must_use]
-pub fn render_number(
-    number: rust_decimal::Decimal,
-    currency: &str,
-    config: &FormatConfig,
-) -> String {
-    match &config.number_display {
-        Some(ctx) => {
-            let rendered = ctx.format(number, currency);
-            // Canonical ledger text carries no thousands separators
-            // (see the field doc on `number_display`); strip any
-            // grouping the context added so direct format_directives
-            // callers agree byte-for-byte with the canonicalize shim,
-            // whose reparse pass strips them anyway (#1766).
-            if rendered.contains(',') {
-                rendered.replace(',', "")
-            } else {
-                rendered
-            }
-        }
-        None => number.to_string(),
-    }
-}
+/// an example).
+///
+/// Numbers render through [`render_number`] — the config's optional
+/// display context applies per-currency precision padding (#1766).
 
 /// an example).
 #[must_use]
@@ -290,73 +294,94 @@ mod tests {
     #[test]
     fn test_format_meta_value_string() {
         let val = MetaValue::String("hello world".to_string());
-        assert_eq!(format_meta_value(&val), "\"hello world\"");
+        assert_eq!(
+            format_meta_value(&val, &FormatConfig::default()),
+            "\"hello world\""
+        );
     }
 
     #[test]
     fn test_format_meta_value_string_with_quotes() {
         let val = MetaValue::String("say \"hello\"".to_string());
-        assert_eq!(format_meta_value(&val), "\"say \\\"hello\\\"\"");
+        assert_eq!(
+            format_meta_value(&val, &FormatConfig::default()),
+            "\"say \\\"hello\\\"\""
+        );
     }
 
     #[test]
     fn test_format_meta_value_account() {
         let val = MetaValue::Account("Assets:Bank:Checking".into());
-        assert_eq!(format_meta_value(&val), "Assets:Bank:Checking");
+        assert_eq!(
+            format_meta_value(&val, &FormatConfig::default()),
+            "Assets:Bank:Checking"
+        );
     }
 
     #[test]
     fn test_format_meta_value_currency() {
         let val = MetaValue::Currency("USD".into());
-        assert_eq!(format_meta_value(&val), "USD");
+        assert_eq!(format_meta_value(&val, &FormatConfig::default()), "USD");
     }
 
     #[test]
     fn test_format_meta_value_tag() {
         let val = MetaValue::Tag("trip-2024".into());
-        assert_eq!(format_meta_value(&val), "#trip-2024");
+        assert_eq!(
+            format_meta_value(&val, &FormatConfig::default()),
+            "#trip-2024"
+        );
     }
 
     #[test]
     fn test_format_meta_value_link() {
         let val = MetaValue::Link("invoice-123".into());
-        assert_eq!(format_meta_value(&val), "^invoice-123");
+        assert_eq!(
+            format_meta_value(&val, &FormatConfig::default()),
+            "^invoice-123"
+        );
     }
 
     #[test]
     fn test_format_meta_value_date() {
         let val = MetaValue::Date(date(2024, 6, 15));
-        assert_eq!(format_meta_value(&val), "2024-06-15");
+        assert_eq!(
+            format_meta_value(&val, &FormatConfig::default()),
+            "2024-06-15"
+        );
     }
 
     #[test]
     fn test_format_meta_value_number() {
         let val = MetaValue::Number(dec!(123.456));
-        assert_eq!(format_meta_value(&val), "123.456");
+        assert_eq!(format_meta_value(&val, &FormatConfig::default()), "123.456");
     }
 
     #[test]
     fn test_format_meta_value_amount() {
         let val = MetaValue::Amount(Amount::new(dec!(99.99), "USD"));
-        assert_eq!(format_meta_value(&val), "99.99 USD");
+        assert_eq!(
+            format_meta_value(&val, &FormatConfig::default()),
+            "99.99 USD"
+        );
     }
 
     #[test]
     fn test_format_meta_value_bool_true() {
         let val = MetaValue::Bool(true);
-        assert_eq!(format_meta_value(&val), "TRUE");
+        assert_eq!(format_meta_value(&val, &FormatConfig::default()), "TRUE");
     }
 
     #[test]
     fn test_format_meta_value_bool_false() {
         let val = MetaValue::Bool(false);
-        assert_eq!(format_meta_value(&val), "FALSE");
+        assert_eq!(format_meta_value(&val, &FormatConfig::default()), "FALSE");
     }
 
     #[test]
     fn test_format_meta_value_none() {
         let val = MetaValue::None;
-        assert_eq!(format_meta_value(&val), "");
+        assert_eq!(format_meta_value(&val, &FormatConfig::default()), "");
     }
 
     #[test]
@@ -893,6 +918,13 @@ mod tests {
             "untracked currencies keep natural rendering"
         );
         assert_eq!(
+            render_number(rust_decimal_macros::dec!(100.50), "EUR", &config),
+            "100.50",
+            "untracked currencies stay byte-faithful — no trailing-zero \
+             stripping, which would widen a balance assertion's implicit \
+             tolerance (deep review of #1807)"
+        );
+        assert_eq!(
             render_number(
                 rust_decimal_macros::dec!(1234.5),
                 "USD",
@@ -922,9 +954,9 @@ mod tests {
             Amount::new(rust_decimal_macros::dec!(1234.5), "USD"),
         );
         let out = format_directives(std::iter::once(&Directive::Balance(bal)), &config);
-        assert!(
-            out.contains("1234.50 USD"),
-            "balance renders through the context (padded, no separators): {out}"
+        assert_eq!(
+            out, "2024-01-15 balance Assets:Bank  1234.50 USD\n",
+            "balance renders through the context (padded, no separators)"
         );
     }
 

@@ -8,6 +8,27 @@ use anyhow::{Context, Result};
 use rustledger_core::NaiveDate;
 use std::time::Duration;
 
+/// A resolved exchange timezone (or fixed-offset fallback) for
+/// classifying bar timestamps — see [`YahooFinanceSource::exchange_clock`].
+struct ExchangeClock {
+    tz: Option<jiff::tz::TimeZone>,
+    gmtoffset: i64,
+}
+
+impl ExchangeClock {
+    /// The exchange-local civil day `secs` falls on.
+    fn civil_date(&self, secs: i64) -> Option<NaiveDate> {
+        if let Some(tz) = &self.tz {
+            return jiff::Timestamp::from_second(secs)
+                .ok()
+                .map(|t| t.to_zoned(tz.clone()).date());
+        }
+        jiff::Timestamp::from_second(secs.checked_add(self.gmtoffset)?)
+            .ok()
+            .map(|t| t.to_zoned(jiff::tz::TimeZone::UTC).date())
+    }
+}
+
 /// Yahoo Finance price source.
 ///
 /// Uses the Yahoo Finance API to fetch prices for stocks, ETFs, mutual funds,
@@ -90,10 +111,11 @@ impl YahooFinanceSource {
             .with_context(|| format!("No price found for {ticker}"))?;
         let price = crate::cmd::price::price_decimal_from_json(price_value)
             .with_context(|| format!("Invalid price for {ticker}"))?;
+        let clock = Self::exchange_clock(result);
         let date = meta
             .and_then(|m| m.get("regularMarketTime"))
             .and_then(serde_json::Value::as_i64)
-            .and_then(|secs| Self::quote_civil_date(result, secs))
+            .and_then(|secs| clock.civil_date(secs))
             .unwrap_or_else(|| jiff::Zoned::now().date());
         Ok((price, currency, date))
     }
@@ -123,13 +145,14 @@ impl YahooFinanceSource {
             .and_then(serde_json::Value::as_array)
             .with_context(|| format!("No close series for {ticker}"))?;
 
+        let clock = Self::exchange_clock(result);
         let mut points = Vec::with_capacity(timestamps.len());
         for (ts, close) in timestamps.iter().zip(closes) {
             if close.is_null() {
                 continue;
             }
             let Some(secs) = ts.as_i64() else { continue };
-            let Some(date) = Self::quote_civil_date(result, secs) else {
+            let Some(date) = clock.civil_date(secs) else {
                 continue;
             };
             if let Some(price) = crate::cmd::price::price_decimal_from_json(close) {
@@ -164,7 +187,9 @@ impl YahooFinanceSource {
             .with_context(|| format!("Invalid response structure for {ticker}"))
     }
 
-    /// The exchange-local civil day a bar timestamp falls on.
+    /// The exchange clock for classifying bar timestamps, resolved ONCE
+    /// per response (the tz-database lookup and meta traversal are
+    /// loop-invariant — deep review of #1803).
     ///
     /// Quote timestamps are exchange-session times; classified by UTC
     /// date, NZX/ASX bars shift onto the wrong day — the wrong-date
@@ -174,24 +199,17 @@ impl YahooFinanceSource {
     /// offset — would misclassify pre-switch midnight-anchored bars by
     /// a day. Falls back to gmtoffset when the name is absent or the tz
     /// database is unavailable (#1801 rounds 2-4).
-    fn quote_civil_date(result: &serde_json::Value, secs: i64) -> Option<NaiveDate> {
+    fn exchange_clock(result: &serde_json::Value) -> ExchangeClock {
         let meta = result.get("meta");
-        let exchange_tz = meta
+        let tz = meta
             .and_then(|m| m.get("exchangeTimezoneName"))
             .and_then(serde_json::Value::as_str)
             .and_then(|name| jiff::tz::TimeZone::get(name).ok());
-        if let Some(tz) = exchange_tz {
-            return jiff::Timestamp::from_second(secs)
-                .ok()
-                .map(|t| t.to_zoned(tz).date());
-        }
         let gmtoffset = meta
             .and_then(|m| m.get("gmtoffset"))
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(0);
-        jiff::Timestamp::from_second(secs.checked_add(gmtoffset)?)
-            .ok()
-            .map(|t| t.to_zoned(jiff::tz::TimeZone::UTC).date())
+        ExchangeClock { tz, gmtoffset }
     }
 
     /// Shared HTTP GET + JSON parse for the chart endpoint.

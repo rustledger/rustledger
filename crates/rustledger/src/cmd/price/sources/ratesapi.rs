@@ -37,8 +37,17 @@ impl RatesApiSource {
     }
 
     /// Shared fetch + parse for the latest and dated endpoints (same
-    /// response shape). Returns `(price, feed_date)`.
-    fn fetch_rate(&self, url: &str, pair: &PricePair) -> Result<(Decimal, NaiveDate)> {
+    /// response shape). Returns `(price, feed_date)`; a missing/broken
+    /// `date` field falls back to `date_fallback` — today for a latest
+    /// fetch, the requested day for a dated one (a today-fallback on a
+    /// historical response would be discarded by the dispatch's
+    /// on-or-before selection, deep review of #1803).
+    fn fetch_rate(
+        &self,
+        url: &str,
+        pair: &PricePair,
+        date_fallback: NaiveDate,
+    ) -> Result<(Decimal, NaiveDate)> {
         let mut response = ureq::get(url)
             .header("User-Agent", user_agent())
             .call()
@@ -79,9 +88,31 @@ impl RatesApiSource {
         // The feed's OWN quote date when present (exchangerate.host
         // returns a "date" field) — on weekends the latest rate belongs
         // to Friday and must say so (deep review, same rule as ECB).
-        let date = super::feed_date_or_today(json.get("date").and_then(serde_json::Value::as_str));
+        let date = super::feed_date_or(
+            json.get("date").and_then(serde_json::Value::as_str),
+            date_fallback,
+        );
 
         Ok((price, date))
+    }
+
+    /// The EU reference series publishes on WEEKDAYS only: a
+    /// weekend-dated label can only be the provider echoing the
+    /// requested URL date over Friday's rate, so clamp it back to the
+    /// preceding Friday instead of writing a rate for a day the ECB
+    /// published nothing (deep review of #1803). Weekday holidays are
+    /// not detectable this way and pass through — a residual trust in
+    /// the feed's labeling.
+    fn eu_reference_label(date: NaiveDate) -> NaiveDate {
+        match date.weekday() {
+            jiff::civil::Weekday::Saturday => {
+                date.checked_sub(jiff::Span::new().days(1)).unwrap_or(date)
+            }
+            jiff::civil::Weekday::Sunday => {
+                date.checked_sub(jiff::Span::new().days(2)).unwrap_or(date)
+            }
+            _ => date,
+        }
     }
 }
 
@@ -100,7 +131,7 @@ impl PriceSource for RatesApiSource {
             &pair.currency.to_uppercase(),
             None,
         );
-        let (price, date) = self.fetch_rate(&url, pair)?;
+        let (price, date) = self.fetch_rate(&url, pair, jiff::Zoned::now().date())?;
 
         Ok(PriceResponse {
             price,
@@ -119,20 +150,35 @@ impl PriceSource for RatesApiSource {
     }
 
     fn fetch_window(&self, pair: &PricePair, window: DateWindow) -> Result<Vec<PricePoint>> {
-        // The dated endpoint answers any single day with the nearest
-        // preceding business-day rate under the feed's OWN date, so one
-        // request at the window's end covers the dispatch's on-or-before
-        // selection.
+        // Parity with main for a same-day request: the dated endpoint
+        // serves reference data, while --date <today> historically hit
+        // /latest — keep it that way (deep review of #1803).
+        if window.end == jiff::Zoned::now().date() {
+            let response = self.fetch_latest(pair)?;
+            return Ok(vec![PricePoint {
+                date: response.date,
+                price: response.price,
+                currency: None,
+            }]);
+        }
+
+        // The dated endpoint answers a single day; one request at the
+        // window's end covers the dispatch's on-or-before selection.
+        // The feed's date label is trusted EXCEPT when it echoes a
+        // weekend day — see eu_reference_label.
         let url = self.build_url(
             &pair.ticker.to_uppercase(),
             &pair.currency.to_uppercase(),
             Some(window.end),
         );
-        let (price, date) = self.fetch_rate(&url, pair)?;
+        let (price, date) = self.fetch_rate(&url, pair, window.end)?;
         Ok(vec![PricePoint {
-            date,
+            date: Self::eu_reference_label(date),
             price,
-            currency: Some(pair.currency.clone()),
+            // The feed reports no currency; the dispatch substitutes
+            // the request's (carrying a copy here would shadow that
+            // canonical fallback — deep review of #1803).
+            currency: None,
         }])
     }
 }
@@ -161,6 +207,22 @@ mod tests {
         let source = RatesApiSource::new(Duration::from_secs(30));
         assert_eq!(source.name(), "ratesapi");
         assert!(!source.requires_api_key());
+    }
+
+    /// Weekend-dated labels can only be the provider echoing the URL
+    /// date over Friday's rate — the EU reference series publishes on
+    /// weekdays only, so the label clamps to the preceding Friday
+    /// (deep review of #1803).
+    #[test]
+    fn eu_reference_label_clamps_weekends_to_friday() {
+        let fri = rustledger_core::naive_date(2024, 1, 12).unwrap();
+        let sat = rustledger_core::naive_date(2024, 1, 13).unwrap();
+        let sun = rustledger_core::naive_date(2024, 1, 14).unwrap();
+        let mon = rustledger_core::naive_date(2024, 1, 15).unwrap();
+        assert_eq!(RatesApiSource::eu_reference_label(sat), fri);
+        assert_eq!(RatesApiSource::eu_reference_label(sun), fri);
+        assert_eq!(RatesApiSource::eu_reference_label(fri), fri);
+        assert_eq!(RatesApiSource::eu_reference_label(mon), mon);
     }
 
     #[test]

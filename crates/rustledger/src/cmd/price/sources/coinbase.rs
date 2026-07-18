@@ -125,10 +125,25 @@ impl PriceSource for CoinbaseSource {
     }
 
     fn fetch_window(&self, pair: &PricePair, window: DateWindow) -> Result<Vec<PricePoint>> {
+        // Parity with main for a same-day request: the dated endpoint
+        // serves that day's reference price, while --date <today>
+        // historically hit the LIVE spot endpoint — keep it that way
+        // (deep review of #1803).
+        if window.end == jiff::Zoned::now().date() {
+            let response = self.fetch_latest(pair)?;
+            return Ok(vec![PricePoint {
+                date: response.date,
+                price: response.price,
+                currency: Some(response.currency),
+            }]);
+        }
+
         // Crypto trades every day, so the exact-date spot endpoint
-        // answers for any day: a single point at the window's end
+        // answers for any past day: a single point at the window's end
         // satisfies the dispatch's on-or-before selection without
-        // burning one request per day of the window.
+        // burning one request per day of the window. The dispatch
+        // refuses future dates before this can run, so window.end is a
+        // real, completed day.
         let url = self.build_url(&pair.ticker, &pair.currency, Some(window.end));
         let (price, currency) = self.fetch_spot(&url, pair)?;
         Ok(vec![PricePoint {

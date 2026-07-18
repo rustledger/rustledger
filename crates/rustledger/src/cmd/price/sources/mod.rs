@@ -182,9 +182,23 @@ fn identity_label_date(
 /// the local-clock label while the stock path was fixed), so the
 /// parsing lives here and the sources pass in the raw field.
 pub(super) fn feed_date_or_today(raw: Option<&str>) -> rustledger_core::NaiveDate {
+    feed_date_or(raw, jiff::Zoned::now().date())
+}
+
+/// [`feed_date_or_today`] with an explicit fallback.
+///
+/// A LATEST fetch falls back to today; a DATED fetch must fall back to
+/// the requested/window date instead — falling back to today there
+/// labels a historical rate with the fetch day, which the dispatch's
+/// on-or-before selection then discards, turning a served rate into a
+/// spurious "no quote" error (deep review of #1803).
+pub(super) fn feed_date_or(
+    raw: Option<&str>,
+    fallback: rustledger_core::NaiveDate,
+) -> rustledger_core::NaiveDate {
     raw.and_then(|s| s.get(..10))
         .and_then(|s| s.parse::<rustledger_core::NaiveDate>().ok())
-        .unwrap_or_else(|| jiff::Zoned::now().date())
+        .unwrap_or(fallback)
 }
 
 /// Trait for price data sources.
@@ -303,11 +317,13 @@ pub trait PriceSource: Send + Sync {
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
         // 1. Identity: X priced in X is 1.0 on any past-or-today date,
         // source-independent (hoisted out of per-source branches by the
-        // #1801 reviews; future labels refuse).
+        // #1801 reviews; future labels refuse). The currency is
+        // uppercased — beancount commodities are uppercase, and main's
+        // ecb identity branch normalized (deep review of #1803).
         if request.ticker.eq_ignore_ascii_case(&request.currency) {
             return Ok(PriceResponse {
                 price: Decimal::ONE,
-                currency: request.currency.clone(),
+                currency: request.currency.to_uppercase(),
                 date: identity_label_date(self.name(), request)?,
                 source: self.name().to_string(),
             });
@@ -323,15 +339,50 @@ pub trait PriceSource: Send + Sync {
             return self.fetch_latest(&pair);
         };
 
+        // The midnight-straddle latch initializes on the FIRST dated
+        // fetch of ANY kind — covered sources included — so a batch
+        // whose pre-midnight fetches all hit window-capable sources
+        // still latches its start day for the uncovered sources it
+        // reaches after midnight (deep review of #1803; the latch
+        // previously sat inside the uncovered arm only).
+        let today = jiff::Zoned::now().date();
+        let first_fetch_day = *FIRST_FETCH_DAY.get_or_init(|| today);
+
+        // A price for a day that hasn't happened cannot exist: refuse
+        // FUTURE dates on every source, before any coverage routing.
+        // Without this, Full/Since coverage "covers" the future and the
+        // dated provider endpoints get asked for it — a provider that
+        // answers or clamps would have its response labeled with the
+        // fabricated future date (#1794 class; deep review of #1803).
+        // The straddle window is not future: it only ever looks back.
+        if requested > today {
+            anyhow::bail!(
+                "the '{}' source cannot fetch {} for the future date {requested}; \
+                 prices for days that have not happened do not exist",
+                self.name(),
+                request.ticker
+            );
+        }
+
         // 3. Covered date → window + canonical selection. Today is
         // routed here too for window-capable sources (a same-day
         // request returns the freshest daily bar — yahoo's
-        // pre-existing behavior).
+        // pre-existing behavior; coinbase/ratesapi delegate the
+        // end==today case to their latest endpoints internally for
+        // parity with main).
         let coverage = self.historical_coverage();
         if coverage.covers(requested) {
-            let start = requested
+            let mut start = requested
                 .checked_sub(jiff::Span::new().days(HISTORICAL_LOOKBACK_DAYS))
                 .context("date underflow")?;
+            // Never ask a source for days before its declared epoch —
+            // the DateWindow contract requires consistency with
+            // historical_coverage (deep review of #1803).
+            if let HistoricalCoverage::Since(epoch) = coverage
+                && start < epoch
+            {
+                start = epoch;
+            }
             let window = DateWindow {
                 start,
                 end: requested,
@@ -354,12 +405,22 @@ pub trait PriceSource: Send + Sync {
         }
 
         // 4. Uncovered date, but it is today (or a midnight straddle):
-        // the latest quote IS a valid answer for today, and the
-        // response carries the quote's own date anyway (#1801).
-        let today = jiff::Zoned::now().date();
-        let first_fetch_day = *FIRST_FETCH_DAY.get_or_init(|| today);
+        // the latest quote IS a valid answer for today (#1801). A
+        // response the source labeled AFTER the requested day — the
+        // straddle minute, where a local-clock label has already
+        // rolled to the new day — is clamped back to the requested
+        // day, matching main's request-date labeling for the accepted
+        // window without giving sources date access (deep review of
+        // #1803: a 00:01 straddle fetch was labeled the NEW day,
+        // shifting the archive entry and colliding with the next
+        // night's run). Feed-supplied dates on or before the request
+        // (ECB's Friday on a weekend) pass through untouched.
         if latest_date_window_ok(requested, today, first_fetch_day) {
-            return self.fetch_latest(&pair);
+            let mut response = self.fetch_latest(&pair)?;
+            if response.date > requested {
+                response.date = requested;
+            }
+            return Ok(response);
         }
 
         // 5. Refuse: mislabeling the latest quote with this date is the
@@ -607,6 +668,117 @@ mod dispatch_tests {
         assert!(err.to_string().contains("future"), "{err}");
     }
 
+    /// A future date refuses on EVERY source — including window-capable
+    /// ones, whose coverage would otherwise "cover" it and forward the
+    /// fabricated date to the provider's dated endpoint (deep review of
+    /// #1803; #1794 class).
+    #[test]
+    fn future_dates_refuse_even_on_covered_sources() {
+        struct PanicWindow;
+        impl PriceSource for PanicWindow {
+            fn name(&self) -> &'static str {
+                "mock-covered"
+            }
+            fn description(&self) -> &'static str {
+                "full coverage, panics on any fetch"
+            }
+            fn fetch_latest(&self, _p: &PricePair) -> Result<PriceResponse> {
+                panic!("future date must refuse before any fetch");
+            }
+            fn historical_coverage(&self) -> HistoricalCoverage {
+                HistoricalCoverage::Full
+            }
+            fn fetch_window(&self, _p: &PricePair, _w: DateWindow) -> Result<Vec<PricePoint>> {
+                panic!("future date must refuse before any fetch");
+            }
+        }
+        let future = jiff::Zoned::now()
+            .date()
+            .checked_add(jiff::Span::new().days(7))
+            .unwrap();
+        let err = PanicWindow
+            .fetch_price(&request(Some(future)))
+            .expect_err("refuse");
+        assert!(err.to_string().contains("future"), "{err}");
+    }
+
+    /// The straddle-minute clamp: a latest response the source labeled
+    /// AFTER the requested day is clamped back to the requested day —
+    /// a 00:01 fetch in a batch that started before midnight must not
+    /// shift the archive entry onto the new day (deep review of #1803).
+    /// Feed dates on or before the request pass through untouched
+    /// (asserted by `latest_only_refuses_past_and_future_but_serves_today`).
+    #[test]
+    fn straddle_accepted_latest_is_clamped_to_requested_day() {
+        struct LabelsTomorrow;
+        impl PriceSource for LabelsTomorrow {
+            fn name(&self) -> &'static str {
+                "mock-tomorrow"
+            }
+            fn description(&self) -> &'static str {
+                "labels its quote with the next civil day"
+            }
+            fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
+                Ok(PriceResponse {
+                    price: Decimal::new(100, 2),
+                    currency: pair.currency.clone(),
+                    date: jiff::Zoned::now()
+                        .date()
+                        .checked_add(jiff::Span::new().days(1))
+                        .unwrap(),
+                    source: self.name().to_string(),
+                })
+            }
+        }
+        let today = jiff::Zoned::now().date();
+        let response = LabelsTomorrow
+            .fetch_price(&request(Some(today)))
+            .expect("today is accepted");
+        assert_eq!(
+            response.date, today,
+            "a label after the requested day is clamped to it"
+        );
+    }
+
+    /// The window handed to a Since source never starts before its
+    /// declared epoch — the dispatch clamps the look-back (deep review
+    /// of #1803: the `DateWindow` contract requires consistency with
+    /// `historical_coverage`).
+    #[test]
+    fn since_window_start_is_clamped_to_epoch() {
+        use std::sync::Mutex;
+        struct CapturesWindow(Mutex<Option<DateWindow>>);
+        impl PriceSource for CapturesWindow {
+            fn name(&self) -> &'static str {
+                "mock-capture"
+            }
+            fn description(&self) -> &'static str {
+                "records the window it is asked for"
+            }
+            fn fetch_latest(&self, _p: &PricePair) -> Result<PriceResponse> {
+                panic!("covered date must use the window path");
+            }
+            fn historical_coverage(&self) -> HistoricalCoverage {
+                HistoricalCoverage::Since(rustledger_core::naive_date(2020, 1, 6).unwrap())
+            }
+            fn fetch_window(&self, _p: &PricePair, w: DateWindow) -> Result<Vec<PricePoint>> {
+                *self.0.lock().unwrap() = Some(w);
+                Ok(vec![PricePoint {
+                    date: w.end,
+                    price: Decimal::ONE,
+                    currency: None,
+                }])
+            }
+        }
+        let src = CapturesWindow(Mutex::new(None));
+        let epoch = rustledger_core::naive_date(2020, 1, 6).unwrap();
+        let requested = epoch.checked_add(jiff::Span::new().days(1)).unwrap();
+        src.fetch_price(&request(Some(requested))).expect("fetch");
+        let window = src.0.lock().unwrap().expect("window captured");
+        assert_eq!(window.start, epoch, "look-back clamped to the epoch");
+        assert_eq!(window.end, requested);
+    }
+
     /// The selection helper itself: greatest date <= requested, order
     /// independent, currency carried through.
     #[test]
@@ -687,6 +859,21 @@ mod feed_date_tests {
         assert_eq!(feed_date_or_today(Some("2024-01-15")), expected);
         // Alpha Vantage "6. Last Refreshed" shape.
         assert_eq!(feed_date_or_today(Some("2024-01-15 10:30:00")), expected);
+    }
+
+    /// An explicit fallback is honored — a DATED fetch must fall back
+    /// to the requested day, not today (deep review of #1803: a
+    /// today-fallback on a historical response gets discarded by the
+    /// on-or-before selection).
+    #[test]
+    fn explicit_fallback_is_used_for_missing_fields() {
+        let fallback = rustledger_core::naive_date(2015, 8, 14).unwrap();
+        assert_eq!(super::feed_date_or(None, fallback), fallback);
+        assert_eq!(super::feed_date_or(Some("garbage"), fallback), fallback);
+        assert_eq!(
+            super::feed_date_or(Some("2015-08-14 16:00:00"), fallback),
+            fallback
+        );
     }
 
     /// Absent, short, or malformed fields fall back to today instead of

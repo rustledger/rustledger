@@ -615,32 +615,37 @@ fn session_from_entries_with_options_carries_renamed_roots() -> Result<()> {
 
     let q = "SELECT possign(100, 'Einnahmen:Salary')";
 
+    // Exact-variant matching, not a debug-substring proxy (Copilot
+    // review: `contains("-100")` also matches "-1000").
+    fn first_number(r: &exports::rustledger::ledger::ledger::QueryResult) -> &str {
+        match r
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .expect("query returns at least one row")
+        {
+            rustledger::ledger::types::QueryValue::Number(n) => n.as_str(),
+            other => panic!("POSSIGN must return query-value::number, got {other:?}"),
+        }
+    }
+
     let with_options =
         session.call_from_entries_with_options(&mut store, &info.entries, &info.options)?;
     let r = session.call_query(&mut store, with_options, q)?;
     assert!(r.errors.is_empty(), "query errored: {:?}", r.errors);
-    let cell = format!("{:?}", r.rows[0][0]);
-    assert!(
-        cell.contains("-100"),
-        "held options must POSSIGN-negate the renamed income root: {cell}"
+    assert_eq!(
+        first_number(&r),
+        "-100",
+        "held options must POSSIGN-negate the renamed income root"
     );
 
     let without_options = session.call_from_entries(&mut store, &info.entries)?;
     let r = session.call_query(&mut store, without_options, q)?;
     assert!(r.errors.is_empty(), "query errored: {:?}", r.errors);
-    let cell = format!(
-        "{:?}",
-        r.rows
-            .first()
-            .and_then(|row| row.first())
-            .expect("query returns at least one row")
-    );
-    // Positive AND negative: the unflipped value must actually be there
-    // (a bare negative would pass vacuously on an error/null cell —
-    // CLAUDE.md drift-guard rule).
-    assert!(
-        cell.contains("100") && !cell.contains("-100"),
-        "options-less entries default the classifier (documented, #1766): {cell}"
+    assert_eq!(
+        first_number(&r),
+        "100",
+        "options-less entries default the classifier (documented, #1766)"
     );
     Ok(())
 }

@@ -2283,18 +2283,19 @@ option \"name_income\" \"Einnahmen\"
   Einnahmen:Salary
 ";
 
-    /// Extract the first cell of the first row as its debug rendering —
-    /// enough to pin the sign without depending on the numeric variant's
-    /// exact shape.
-    fn first_cell(result: &super::out::QueryResult) -> String {
-        format!(
-            "{:?}",
-            result
-                .rows
-                .first()
-                .and_then(|r| r.first())
-                .expect("query returns at least one row")
-        )
+    /// The first cell of the first row as the typed numeric value —
+    /// exact-variant matching, not a debug-substring proxy (Copilot
+    /// review: `contains("-100")` also matches "-1000").
+    fn first_number(result: &super::out::QueryResult) -> String {
+        match result
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .expect("query returns at least one row")
+        {
+            super::wit::QueryValue::Number(n) => n.clone(),
+            other => panic!("POSSIGN must return query-value::number, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2313,19 +2314,17 @@ option \"name_income\" \"Einnahmen\"
 
         let with_options =
             SessionState::from_entries_with_options(&info.entries, info.options.clone());
-        let cell = first_cell(&with_options.query(query));
-        assert!(
-            cell.contains("-100"),
-            "renamed income root must POSSIGN-negate: {cell:?}"
+        assert_eq!(
+            first_number(&with_options.query(query)),
+            "-100",
+            "renamed income root must POSSIGN-negate"
         );
 
         let without_options = SessionState::from_entries(&info.entries);
-        let cell = first_cell(&without_options.query(query));
-        // Positive AND negative: a bare negative would pass vacuously on
-        // an error/null cell (CLAUDE.md drift-guard rule).
-        assert!(
-            cell.contains("100") && !cell.contains("-100"),
-            "options-less entries default the classifier (documented, #1766): {cell:?}"
+        assert_eq!(
+            first_number(&without_options.query(query)),
+            "100",
+            "options-less entries default the classifier (documented, #1766)"
         );
     }
 

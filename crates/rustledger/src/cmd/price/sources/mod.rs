@@ -734,7 +734,10 @@ mod dispatch_tests {
     /// `historical_coverage`).
     #[test]
     fn since_window_start_is_clamped_to_epoch() {
-        use std::sync::Mutex;
+        // Sync interior mutability for a cfg(test) mock capture; Cell/RefCell
+        // fail the trait's Sync bound and parking_lot is not a dependency of
+        // this crate.
+        use std::sync::Mutex; // ratchet-allow: std-sync cfg(test) mock capture, not library code
         struct CapturesWindow(Mutex<Option<DateWindow>>);
         impl PriceSource for CapturesWindow {
             fn name(&self) -> &'static str {

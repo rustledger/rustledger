@@ -419,27 +419,6 @@ impl DisplayContext {
     /// precision via `round_dp(dp)`. That was correct for under-scale
     /// padding but wrong for over-scale truncation — it lost
     /// arithmetic precision that bean-query preserved (closes #1103).
-    /// Ledger-text variant of [`Self::format`] (#1766): pads a TRACKED
-    /// currency's value to the tracked precision (never rounding an
-    /// over-precise value away), and returns an UNTRACKED currency's
-    /// value at its own scale, byte-faithful — no `normalize()`
-    /// trailing-zero stripping, which would silently widen a balance
-    /// assertion's implicit tolerance. Never emits thousands
-    /// separators regardless of `render_commas`: canonical ledger text
-    /// carries none (separators stay a report/query display concern).
-    #[must_use]
-    pub fn format_plain(&self, number: Decimal, currency: &str) -> String {
-        match self.get_precision(currency) {
-            Some(dp) => {
-                let effective_dp = number.scale().max(dp);
-                let rounded = number.round_dp(effective_dp);
-                let formatted = format!("{rounded}");
-                Self::ensure_decimal_places(&formatted, effective_dp)
-            }
-            None => number.to_string(),
-        }
-    }
-
     #[must_use]
     pub fn format(&self, number: Decimal, currency: &str) -> String {
         let precision = self.get_precision(currency);
@@ -468,6 +447,27 @@ impl DisplayContext {
             } else {
                 formatted
             }
+        }
+    }
+
+    /// Ledger-text variant of [`Self::format`] (#1766): pads a TRACKED
+    /// currency's value to the tracked precision (never rounding an
+    /// over-precise value away), and returns an UNTRACKED currency's
+    /// value at its own scale, byte-faithful — no `normalize()`
+    /// trailing-zero stripping, which would silently widen a balance
+    /// assertion's implicit tolerance. Never emits thousands
+    /// separators regardless of `render_commas`: canonical ledger text
+    /// carries none (separators stay a report/query display concern).
+    #[must_use]
+    pub fn format_plain(&self, number: Decimal, currency: &str) -> String {
+        match self.get_precision(currency) {
+            Some(dp) => {
+                let effective_dp = number.scale().max(dp);
+                let rounded = number.round_dp(effective_dp);
+                let formatted = format!("{rounded}");
+                Self::ensure_decimal_places(&formatted, effective_dp)
+            }
+            None => number.to_string(),
         }
     }
 

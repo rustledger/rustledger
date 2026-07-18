@@ -1,6 +1,5 @@
 //! Shared helper functions for formatting.
 
-use super::format_amount;
 use crate::MetaValue;
 
 /// Format a metadata value.

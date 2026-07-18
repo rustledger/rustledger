@@ -10,9 +10,7 @@ mod helpers;
 mod transaction;
 
 pub use align::{Alignment, FormatLine, render_lines, resolve_alignment};
-pub(crate) use amount::{
-    format_amount, format_amount_with, format_cost_spec, format_price_annotation,
-};
+pub(crate) use amount::{format_amount_with, format_cost_spec, format_price_annotation};
 use directives::{
     format_balance_lines, format_close_lines, format_commodity_lines, format_custom_lines,
     format_document_lines, format_event_lines, format_note_lines, format_open_lines,
@@ -116,11 +114,12 @@ pub fn format_directive_lines(directive: &Directive, config: &FormatConfig) -> V
     }
 }
 
-/// Render one number for ledger text: through the config's
-/// [`crate::DisplayContext`] when present, or the value's own scale
-/// otherwise. The single chokepoint every formatter amount/cost/price
-/// number emission goes through — keep it that way so the two
-/// behaviors cannot drift per call site (#1766).
+/// Render one number for ledger text.
+///
+/// Through the config's [`crate::DisplayContext`] when present, or the
+/// value's own scale otherwise. The single chokepoint every formatter
+/// amount/cost/price number emission goes through — keep it that way
+/// so the two behaviors cannot drift per call site (#1766).
 ///
 /// Context semantics come from [`crate::DisplayContext::format_plain`]:
 /// a TRACKED currency pads to the tracked precision (never rounding an
@@ -164,7 +163,6 @@ pub fn render_number(
 ///
 /// Numbers render through [`render_number`] — the config's optional
 /// display context applies per-currency precision padding (#1766).
-
 /// an example).
 #[must_use]
 pub fn format_directives<'a, I>(directives: I, config: &FormatConfig) -> String
@@ -1183,25 +1181,37 @@ mod tests {
     #[test]
     fn test_format_amount_negative() {
         let amount = Amount::new(dec!(-100.50), "USD");
-        assert_eq!(format_amount(&amount), "-100.50 USD");
+        assert_eq!(
+            format_amount_with(&amount, &FormatConfig::default()),
+            "-100.50 USD"
+        );
     }
 
     #[test]
     fn test_format_amount_zero() {
         let amount = Amount::new(dec!(0), "EUR");
-        assert_eq!(format_amount(&amount), "0 EUR");
+        assert_eq!(
+            format_amount_with(&amount, &FormatConfig::default()),
+            "0 EUR"
+        );
     }
 
     #[test]
     fn test_format_amount_large_number() {
         let amount = Amount::new(dec!(1234567890.12), "USD");
-        assert_eq!(format_amount(&amount), "1234567890.12 USD");
+        assert_eq!(
+            format_amount_with(&amount, &FormatConfig::default()),
+            "1234567890.12 USD"
+        );
     }
 
     #[test]
     fn test_format_amount_small_decimal() {
         let amount = Amount::new(dec!(0.00001), "BTC");
-        assert_eq!(format_amount(&amount), "0.00001 BTC");
+        assert_eq!(
+            format_amount_with(&amount, &FormatConfig::default()),
+            "0.00001 BTC"
+        );
     }
 
     #[test]

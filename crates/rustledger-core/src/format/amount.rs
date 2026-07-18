@@ -3,13 +3,8 @@
 use super::escape_string;
 use crate::{Amount, CostSpec, PriceAnnotation};
 
-/// Format an amount.
-pub fn format_amount(amount: &Amount) -> String {
-    format!("{} {}", amount.number, amount.currency)
-}
-
-/// [`format_amount`] rendered through a config's optional
-/// number-display context (#1766).
+/// Format an amount through a config's optional number-display
+/// context (#1766).
 pub fn format_amount_with(amount: &Amount, config: &super::FormatConfig) -> String {
     format!(
         "{} {}",

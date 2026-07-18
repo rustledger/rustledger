@@ -1478,7 +1478,9 @@ pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryR
     // The `query-entries` WIT contract carries no ledger options, so the
     // classifier defaults to the standard five roots. Renamed-root ledgers
     // queried via host-provided entries won't POSSIGN-flip custom names —
-    // extending the contract with options is a WIT-version decision (L5 note).
+    // `session.from-entries-with-options` (3.7.0, #1766) is the
+    // options-carrying path; this free function is doc-soft-deprecated
+    // in its favor.
     run_query(
         &directives,
         query_str,
@@ -1537,6 +1539,22 @@ impl SessionState {
     /// Conversion failures (e.g. un-lexable accounts, see the note on
     /// `clamp`) drop the directive, mirroring `query-entries`.
     pub fn from_entries(entries: &[wit::Directive]) -> Self {
+        // Held entries carry no ledger options (they were stripped at
+        // the original load); defaults here match what a stand-alone
+        // directive set implies. Embedders holding the original load's
+        // options should use `from_entries_with_options` (#1766).
+        Self::from_entries_with_options(entries, options(ffi::LedgerOptions::default()))
+    }
+
+    /// `from_entries` with the ledger's options attached (WIT 3.7.0,
+    /// #1766): the session becomes the canonical options carrier, so
+    /// `query` builds its account classifier from the ledger's own
+    /// `name-*` roots and `info()` echoes what was provided. New
+    /// entry-consuming methods inherit the held options for free.
+    pub fn from_entries_with_options(
+        entries: &[wit::Directive],
+        options: wit::LedgerOptions,
+    ) -> Self {
         // The one-time conversion is this API's whole reason to exist —
         // reserve up front so a large ledger doesn't reallocate through
         // the collect (review catch; drops are rare, over-reserving by
@@ -1553,11 +1571,7 @@ impl SessionState {
             lines: vec![0; n],
             files: vec!["<entries>".to_string(); n],
             errors: vec![],
-            // Held entries carry no ledger options (they were stripped at
-            // the original load); defaults here match what a stand-alone
-            // directive set implies. Embedders holding options should keep
-            // consulting their load-time `info()`.
-            options: options(ffi::LedgerOptions::default()),
+            options,
             plugins: vec![],
             includes: vec![],
             padded: std::cell::OnceCell::new(),
@@ -2215,6 +2229,89 @@ fn extract_warning(message: String) -> wit::Error {
         entry_index: None,
         severity: "warning".to_string(),
         phase: "extract".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod session_options_tests {
+    //! The `from-entries-with-options` carrier (WIT 3.7.0, #1766): a
+    //! session rebuilt from another session's `info()` must classify
+    //! accounts with the LEDGER's roots, where the options-less
+    //! `from_entries` falls back to the defaults. POSSIGN is the exact
+    //! observable the L5 note recorded as broken.
+
+    use super::SessionState;
+
+    const RENAMED: &str = "\
+option \"name_income\" \"Einnahmen\"
+2024-01-01 open Einnahmen:Salary
+2024-01-01 open Assets:Bank
+
+2024-01-02 * \"pay\"
+  Assets:Bank  100.00 USD
+  Einnahmen:Salary
+";
+
+    /// Extract the first cell of the first row as its debug rendering —
+    /// enough to pin the sign without depending on the numeric variant's
+    /// exact shape.
+    fn first_cell(result: &super::out::QueryResult) -> String {
+        format!(
+            "{:?}",
+            result
+                .rows
+                .first()
+                .and_then(|r| r.first())
+                .expect("query returns at least one row")
+        )
+    }
+
+    #[test]
+    fn with_options_honors_renamed_roots_where_from_entries_defaults() {
+        let loaded = SessionState::from_source(RENAMED);
+        let info = loaded.info();
+        assert!(
+            info.errors.is_empty(),
+            "fixture must load: {:?}",
+            info.errors
+        );
+
+        // POSSIGN negates income-rooted accounts; "Einnahmen" is income
+        // only when the ledger's renamed roots are carried.
+        let query = "SELECT possign(100, 'Einnahmen:Salary')";
+
+        let with_options =
+            SessionState::from_entries_with_options(&info.entries, info.options.clone());
+        assert!(
+            first_cell(&with_options.query(query)).contains("-100"),
+            "renamed income root must POSSIGN-negate: {:?}",
+            first_cell(&with_options.query(query))
+        );
+
+        let without_options = SessionState::from_entries(&info.entries);
+        let cell = first_cell(&without_options.query(query));
+        assert!(
+            !cell.contains("-100"),
+            "options-less entries default the classifier (documented, #1766): {cell:?}"
+        );
+    }
+
+    /// `info()` echoes the provided options — the session is the
+    /// canonical carrier, so a host can round-trip them.
+    #[test]
+    fn info_echoes_provided_options() {
+        let loaded = SessionState::from_source(RENAMED);
+        let info = loaded.info();
+        let session = SessionState::from_entries_with_options(&info.entries, info.options.clone());
+        assert_eq!(session.info().options.name_income, "Einnahmen");
+        // And the options-less constructor documents its default.
+        assert_eq!(
+            SessionState::from_entries(&info.entries)
+                .info()
+                .options
+                .name_income,
+            "Income"
+        );
     }
 }
 

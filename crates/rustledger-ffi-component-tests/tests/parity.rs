@@ -583,6 +583,56 @@ const LEDGER_WITH_COST: &str = "\
   Assets:Cash  -14 USD
 ";
 
+/// `from-entries-with-options` (WIT 3.7.0, #1766): a session rebuilt
+/// from another session's `info()` carries the ledger's OPTIONS across
+/// the component boundary, so BQL `POSSIGN` classifies renamed account
+/// roots — where the options-less `from-entries` documents the default
+/// classifier. The sign flip is the exact observable the L5 note
+/// recorded as broken.
+#[test]
+fn session_from_entries_with_options_carries_renamed_roots() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    let ledger = inst.rustledger_ledger_ledger();
+    let session = ledger.session();
+
+    const RENAMED: &str = "option \"name_income\" \"Einnahmen\"\n\
+2024-01-01 open Einnahmen:Salary\n\
+2024-01-01 open Assets:Bank\n\
+\n\
+2024-01-02 * \"pay\"\n\
+  Assets:Bank  100.00 USD\n\
+  Einnahmen:Salary\n";
+    let loaded = session.call_constructor(&mut store, RENAMED)?;
+    let info = session.call_info(&mut store, loaded)?;
+    assert!(info.errors.is_empty(), "load errored: {:?}", info.errors);
+    assert_eq!(info.options.name_income, "Einnahmen");
+
+    let q = "SELECT possign(100, 'Einnahmen:Salary')";
+
+    let with_options =
+        session.call_from_entries_with_options(&mut store, &info.entries, &info.options)?;
+    let r = session.call_query(&mut store, with_options, q)?;
+    assert!(r.errors.is_empty(), "query errored: {:?}", r.errors);
+    let cell = format!("{:?}", r.rows[0][0]);
+    assert!(
+        cell.contains("-100"),
+        "held options must POSSIGN-negate the renamed income root: {cell}"
+    );
+
+    let without_options = session.call_from_entries(&mut store, &info.entries)?;
+    let r = session.call_query(&mut store, without_options, q)?;
+    let cell = format!("{:?}", r.rows[0][0]);
+    assert!(
+        !cell.contains("-100"),
+        "options-less entries default the classifier (documented, #1766): {cell}"
+    );
+    Ok(())
+}
+
 /// The stateful `resource session` (#173): construct once, then info/query/
 /// clamp run against the held ledger. Crucially `clamp` operates on the held
 /// core directives, so cost basis survives with no WIT->core->WIT round-trip.

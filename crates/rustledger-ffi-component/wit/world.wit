@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.6.0;
+package rustledger:ledger@3.7.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -470,7 +470,20 @@ interface ledger {
     /// conversion (e.g. un-lexable accounts) are dropped, mirroring
     /// `builder.query-entries`; the drop count is observable as
     /// `info().entries` length vs what was sent.
+    ///
+    /// The held ledger runs with DEFAULT ledger options (the entries
+    /// carry none) — renamed account roots will not classify, so
+    /// embedders that hold the original load's options should use
+    /// `from-entries-with-options` instead (#1766).
     from-entries: static func(entries: list<directive>) -> session;
+    /// `from-entries` carrying the ledger's options (added in 3.7.0,
+    /// #1766): the session becomes the canonical carrier, so `query`
+    /// classifies accounts with the ledger's own `name-*` roots
+    /// (BQL `POSSIGN`/`ACCOUNT_SORTKEY` on renamed-root ledgers) and
+    /// `info()` echoes what was provided. Pass the options from the
+    /// original load's `info()`. New entry-consuming capability should
+    /// go resource-first and inherit these held options.
+    from-entries-with-options: static func(entries: list<directive>, options: ledger-options) -> session;
 
     /// Everything the host needs at load time: entries, errors, options,
     /// plugins, and the resolved include graph.
@@ -523,6 +536,12 @@ interface builder {
   /// (#1423). The typed counterpart to `filter`/`clamp`: the embedder
   /// passes the directives it holds (e.g. a filtered view) instead of source
   /// text, so there is no re-parse and no re-render to beancount.
+  ///
+  /// Runs with DEFAULT ledger options (#1766). Prefer
+  /// `session.from-entries-with-options` + `session.query`, which
+  /// carries the ledger's own account roots — this function and its
+  /// `filter`/`clamp` siblings duplicate session methods and are
+  /// retained for compatibility.
   query-entries: func(entries: list<directive>, query: string) -> query-result;
 }
 
@@ -571,6 +590,11 @@ interface format {
   /// inside the component so hosts never reshape directives themselves.
   /// Added in 3.6.0 alongside `importer.dedup` — it closes the
   /// extract -> review -> save-to-ledger loop.
+  ///
+  /// Renders with the DEFAULT format configuration: the rendering
+  /// pipeline does not yet honor `display-precision`/`render-commas`
+  /// from ledger-options anywhere (CLI included) — options-aware
+  /// rendering is tracked in #1766 and will arrive via the session.
   format-loaded: func(entries: list<directive>) -> result<string, string>;
 }
 

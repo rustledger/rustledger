@@ -240,19 +240,27 @@ impl DisplayContext {
         out.into_iter()
     }
 
-    /// Export every currency's RESOLVED precision (fixed override if set,
-    /// else the inferred precision under the active policy) as a
-    /// wire-friendly list, sorted by currency. This is what crosses the
-    /// FFI boundary as `ledger-options.display-precision` (#1766): the
-    /// same per-currency answer [`Self::get_precision`] would give, so an
-    /// embedder that re-applies the list as fixed overrides reproduces
-    /// this context's precision decisions exactly. Skips the
-    /// `__default__` naked-decimal bucket (see [`Self::currencies`]).
+    /// Export the DECLARED per-currency precisions — `option
+    /// "display_precision"` entries plus commodity `precision:` metadata
+    /// (both land in the fixed table) — sorted by currency. This is what
+    /// crosses the FFI boundary as `ledger-options.display-precision`
+    /// (#1766). Declarations only, deliberately NOT the inferred
+    /// precisions: inference is derivable from the entries themselves
+    /// wherever they travel ([`Self::from_directives`] stage 1), and
+    /// exporting inferred values as fixed would freeze them against a
+    /// consumer's later entry-set changes — and starve embedder-side
+    /// fallbacks (rustfava infers locally exactly when this list leaves
+    /// a currency undeclared).
     #[must_use]
-    pub fn resolved_precisions(&self) -> Vec<(String, u32)> {
-        self.currencies()
-            .filter_map(|c| self.get_precision(c).map(|p| (c.to_string(), p)))
-            .collect()
+    pub fn declared_precisions(&self) -> Vec<(String, u32)> {
+        let mut v: Vec<(String, u32)> = self
+            .fixed_precisions
+            .iter()
+            .filter(|(c, _)| c.as_str() != DEFAULT_CURRENCY)
+            .map(|(c, p)| (c.clone(), *p))
+            .collect();
+        v.sort_unstable();
+        v
     }
 
     /// Return the dp histogram for `currency` as ascending `(dp, count)`
@@ -1661,6 +1669,12 @@ mod tests {
             ctx.get_precision("EUR"),
             Some(3),
             "option override wins over the inferred 1"
+        );
+        assert_eq!(
+            ctx.declared_precisions(),
+            vec![("EUR".to_string(), 3), ("USD".to_string(), 4)],
+            "the wire export carries declarations only (post-precedence), \
+             sorted — never inferred values"
         );
     }
 }

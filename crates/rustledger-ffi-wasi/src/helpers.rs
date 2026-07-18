@@ -211,16 +211,19 @@ pub fn load_source(source: &str) -> LoadResult {
 /// can build options from a file load.
 ///
 /// `display_precision` is NOT copied from the raw options: it is the
-/// ledger's RESOLVED per-currency precision, exported from the loader's
-/// canonical [`rustledger_core::DisplayContext`] (inference from the
-/// ledger's own amounts, overridden by `option "display_precision"`,
-/// overridden by commodity `precision:` metadata). Pre-#1766 the two
-/// load paths disagreed here — `load_source` overwrote the field with a
-/// local `PrecisionTracker` re-derivation (dropping the user's explicit
-/// option entirely) while `load_file` shipped the explicit option only
-/// (no inference). Both now ship the same canonical resolution, which
-/// `session.format` re-applies as fixed overrides to reproduce the
-/// loader's precision decisions across the boundary.
+/// ledger's DECLARED per-currency precision — `option
+/// "display_precision"` entries plus commodity `precision:` metadata —
+/// exported from the loader's canonical
+/// [`rustledger_core::DisplayContext`], which resolves the two
+/// declaration kinds' precedence. Declarations only, not inference:
+/// embedders re-derive inference from the entries (`session.format`
+/// does, via `DisplayContext::from_directives`; rustfava's loader falls
+/// back to its own inference exactly when a currency is undeclared
+/// here). Pre-#1766 the two load paths disagreed — `load_source`
+/// overwrote the field with a local `PrecisionTracker` inference
+/// re-derivation (dropping the user's explicit option entirely) while
+/// `load_file` shipped the raw option map (missing commodity
+/// metadata).
 #[must_use]
 pub fn build_ledger_options(
     options: &rustledger_loader::Options,
@@ -237,7 +240,7 @@ pub fn build_ledger_options(
         documents: options.documents.clone(),
         commodities: Vec::new(),
         booking_method: options.booking_method.clone(),
-        display_precision: display.resolved_precisions().into_iter().collect(),
+        display_precision: display.declared_precisions().into_iter().collect(),
         render_commas: options.render_commas,
         inferred_tolerance_default: options
             .inferred_tolerance_default

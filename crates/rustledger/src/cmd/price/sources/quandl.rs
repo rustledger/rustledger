@@ -2,7 +2,7 @@
 //!
 //! Fetches financial data from Quandl/Nasdaq Data Link.
 
-use super::{PricePair, PriceSource, user_agent};
+use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use std::env;
@@ -42,11 +42,20 @@ impl QuandlSource {
         env::var("QUANDL_API_KEY").with_context(|| "QUANDL_API_KEY environment variable not set")
     }
 
-    /// Build the Quandl API URL.
-    fn build_url(&self, dataset: &str, api_key: &str) -> String {
-        format!(
-            "https://data.nasdaq.com/api/v3/datasets/{dataset}/data.json?limit=1&api_key={api_key}"
-        )
+    /// Build the Quandl API URL. `None` asks for the latest row
+    /// (`limit=1`); a [`DateWindow`] asks for the inclusive
+    /// `start_date`/`end_date` slice of the dataset (#1802 source
+    /// ports).
+    fn build_url(&self, dataset: &str, api_key: &str, window: Option<DateWindow>) -> String {
+        match window {
+            Some(w) => format!(
+                "https://data.nasdaq.com/api/v3/datasets/{dataset}/data.json?start_date={}&end_date={}&api_key={api_key}",
+                w.start, w.end
+            ),
+            None => format!(
+                "https://data.nasdaq.com/api/v3/datasets/{dataset}/data.json?limit=1&api_key={api_key}"
+            ),
+        }
     }
 
     /// Parse the dataset identifier.
@@ -57,32 +66,17 @@ impl QuandlSource {
             ("WIKI", ticker)
         }
     }
-}
 
-impl PriceSource for QuandlSource {
-    fn name(&self) -> &'static str {
-        "quandl"
-    }
-
-    fn description(&self) -> &'static str {
-        "Nasdaq Data Link (Quandl) - financial datasets (requires API key)"
-    }
-
-    fn requires_api_key(&self) -> bool {
-        true
-    }
-
-    fn api_key_env_var(&self) -> Option<&'static str> {
-        Some("QUANDL_API_KEY")
-    }
-
-    fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
-        let api_key = Self::get_api_key()?;
-        let (database, dataset) = Self::parse_dataset(&pair.ticker);
-        let full_dataset = format!("{database}/{dataset}");
-        let url = self.build_url(&full_dataset, &api_key);
-
-        let mut response = ureq::get(&url)
+    /// Shared fetch + parse for the dataset endpoint (latest or
+    /// windowed — same response shape): every row of
+    /// `dataset_data.data` becomes a [`PricePoint`] (#1802 source
+    /// ports). Rows with a missing/unparsable date or price are
+    /// SKIPPED, never today-labeled — a today-fallback on a historical
+    /// row would be discarded by the dispatch's on-or-before selection,
+    /// turning a served rate into a spurious no-quote error (deep
+    /// review of #1803).
+    fn fetch_rows(&self, url: &str, pair: &PricePair) -> Result<Vec<PricePoint>> {
+        let mut response = ureq::get(url)
             .header("User-Agent", user_agent())
             .call()
             .with_context(|| format!("Failed to fetch data for {}", pair.ticker))?;
@@ -109,12 +103,10 @@ impl PriceSource for QuandlSource {
             .get("dataset_data")
             .with_context(|| "Missing dataset_data in response")?;
 
-        let data = dataset_data
+        let rows = dataset_data
             .get("data")
             .and_then(serde_json::Value::as_array)
-            .and_then(|a| a.first())
-            .and_then(serde_json::Value::as_array)
-            .with_context(|| "No data available")?;
+            .with_context(|| "Missing data in response")?;
 
         let column_names = dataset_data
             .get("column_names")
@@ -144,24 +136,96 @@ impl PriceSource for QuandlSource {
             })
             .with_context(|| "No price column found in dataset")?;
 
-        // The feed's own date, never the requested one (#1794; the old
-        // request.date fallback was the exact mislabeling pattern this
-        // PR removes — round-3 deep review).
-        let date =
-            super::feed_date_or_today(data.get(date_idx).and_then(serde_json::Value::as_str));
+        let mut points = Vec::new();
+        for row in rows {
+            let Some(row) = row.as_array() else {
+                continue;
+            };
+            // The row's OWN date, never the requested one (#1794) —
+            // and never today (see the fn doc).
+            let Some(date) = row
+                .get(date_idx)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| s.get(..10))
+                .and_then(|s| s.parse::<rustledger_core::NaiveDate>().ok())
+            else {
+                continue;
+            };
+            let Some(price) = row
+                .get(price_idx)
+                .and_then(crate::cmd::price::price_decimal_from_json)
+            else {
+                continue;
+            };
+            points.push(PricePoint {
+                date,
+                price,
+                // The dataset's quote currency is dataset-defined and
+                // not reported per row; the dispatch substitutes the
+                // request currency, uppercased.
+                currency: None,
+            });
+        }
+        Ok(points)
+    }
+}
 
-        // Extract price
-        let price_value = data.get(price_idx).with_context(|| "Missing price value")?;
+impl PriceSource for QuandlSource {
+    fn name(&self) -> &'static str {
+        "quandl"
+    }
 
-        let price = crate::cmd::price::price_decimal_from_json(price_value)
-            .with_context(|| format!("Invalid price format: {price_value}"))?;
+    fn description(&self) -> &'static str {
+        "Nasdaq Data Link (Quandl) - financial datasets (requires API key)"
+    }
+
+    fn requires_api_key(&self) -> bool {
+        true
+    }
+
+    fn api_key_env_var(&self) -> Option<&'static str> {
+        Some("QUANDL_API_KEY")
+    }
+
+    fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
+        let api_key = Self::get_api_key()?;
+        let (database, dataset) = Self::parse_dataset(&pair.ticker);
+        let full_dataset = format!("{database}/{dataset}");
+        let url = self.build_url(&full_dataset, &api_key, None);
+
+        // The row's own date, never the requested one (#1794); the
+        // greatest-date pick guards against a provider that ignores
+        // limit=1 (providers do not guarantee sorted series).
+        let points = self.fetch_rows(&url, pair)?;
+        let point = points
+            .into_iter()
+            .max_by_key(|p| p.date)
+            .with_context(|| "No data available")?;
 
         Ok(PriceResponse {
-            price,
+            price: point.price,
             currency: pair.currency.clone(),
-            date,
+            date: point.date,
             source: self.name().to_string(),
         })
+    }
+
+    fn historical_coverage(&self) -> HistoricalCoverage {
+        // Nasdaq Data Link datasets carry their own full history
+        // (#1802 source ports); dates a given dataset lacks surface as
+        // the dispatch's clean no-quote error, not a refusal.
+        HistoricalCoverage::Full
+    }
+
+    fn fetch_window(&self, pair: &PricePair, window: DateWindow) -> Result<Vec<PricePoint>> {
+        // Same endpoint as the latest path, sliced by the inclusive
+        // start_date/end_date parameters (#1802 source ports); the
+        // dispatch does on-or-before selection over the rows.
+        let api_key = Self::get_api_key()?;
+        let (database, dataset) = Self::parse_dataset(&pair.ticker);
+        let full_dataset = format!("{database}/{dataset}");
+        let url = self.build_url(&full_dataset, &api_key, Some(window));
+        self.fetch_rows(&url, pair)
     }
 }
 
@@ -179,9 +243,20 @@ mod tests {
     #[test]
     fn test_build_url() {
         let source = QuandlSource::new(Duration::from_secs(30));
-        let url = source.build_url("WIKI/AAPL", "demo");
+        let url = source.build_url("WIKI/AAPL", "demo", None);
         assert!(url.contains("WIKI/AAPL"));
         assert!(url.contains("data.nasdaq.com"));
+        assert!(url.contains("limit=1"), "{url}");
+
+        // Historical (#1802): the window replaces the limit=1 form.
+        let window = DateWindow {
+            start: rustledger_core::naive_date(2024, 1, 8).unwrap(),
+            end: rustledger_core::naive_date(2024, 1, 15).unwrap(),
+        };
+        let url = source.build_url("WIKI/AAPL", "demo", Some(window));
+        assert!(url.contains("start_date=2024-01-08"), "{url}");
+        assert!(url.contains("end_date=2024-01-15"), "{url}");
+        assert!(!url.contains("limit="), "{url}");
     }
 
     #[test]

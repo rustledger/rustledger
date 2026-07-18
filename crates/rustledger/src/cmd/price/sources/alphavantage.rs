@@ -2,7 +2,7 @@
 //!
 //! Fetches stock, forex, and crypto prices from Alpha Vantage.
 
-use super::{PricePair, PriceSource, user_agent};
+use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -45,6 +45,66 @@ impl AlphaVantageSource {
         format!(
             "https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={api_key}"
         )
+    }
+
+    /// Build the `TIME_SERIES_DAILY` URL for a stock's history (#1802
+    /// source ports). `compact` returns the trailing ~100 trading days;
+    /// windows ending further back need `full` (the whole listing
+    /// history — a heavier payload, fetched only when required).
+    fn build_daily_url(symbol: &str, api_key: &str, window: DateWindow) -> String {
+        let compact_horizon = jiff::Zoned::now()
+            .date()
+            .checked_sub(jiff::Span::new().days(90))
+            .ok();
+        let outputsize = match compact_horizon {
+            Some(horizon) if window.end >= horizon => "compact",
+            _ => "full",
+        };
+        format!(
+            "https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&outputsize={outputsize}&apikey={api_key}"
+        )
+    }
+
+    /// Parse a `TIME_SERIES_DAILY` response: every daily close as a
+    /// dated point. Factored off the HTTP fetch for hermetic fixture
+    /// tests (#1802 source ports). The listing currency is not carried
+    /// in the response, so points leave `currency` to the dispatch's
+    /// request-currency fallback.
+    fn parse_daily_series(json: &serde_json::Value) -> Result<Vec<PricePoint>> {
+        // Rate-limit and error notes use the same shapes as the quote
+        // endpoints.
+        if let Some(note) = json.get("Note") {
+            let msg = note.as_str().unwrap_or("API limit reached");
+            anyhow::bail!("Alpha Vantage: {msg}");
+        }
+        if let Some(error) = json.get("Error Message") {
+            let msg = error.as_str().unwrap_or("Unknown error");
+            anyhow::bail!("Alpha Vantage error: {msg}");
+        }
+
+        let series = json
+            .get("Time Series (Daily)")
+            .and_then(serde_json::Value::as_object)
+            .with_context(|| "Missing 'Time Series (Daily)' in response")?;
+
+        let mut points = Vec::with_capacity(series.len());
+        for (date_str, daily_bar) in series {
+            let Ok(date) = date_str.parse::<rustledger_core::NaiveDate>() else {
+                continue;
+            };
+            let Some(price) = daily_bar
+                .get("4. close")
+                .and_then(crate::cmd::price::price_decimal_from_json)
+            else {
+                continue;
+            };
+            points.push(PricePoint {
+                date,
+                price,
+                currency: None,
+            });
+        }
+        Ok(points)
     }
 
     /// Build the Alpha Vantage API URL for forex.
@@ -210,6 +270,44 @@ impl PriceSource for AlphaVantageSource {
         let api_key = Self::get_api_key()?;
         self.fetch_internal(pair, &api_key)
     }
+
+    fn historical_coverage(&self) -> HistoricalCoverage {
+        // TIME_SERIES_DAILY carries decades of STOCK history; forex and
+        // crypto tickers refuse hermetically in fetch_window below —
+        // coverage is per-source, per-ticker gaps error at fetch
+        // (#1802 source ports).
+        HistoricalCoverage::Full
+    }
+
+    fn fetch_window(&self, pair: &PricePair, window: DateWindow) -> Result<Vec<PricePoint>> {
+        // Historical support covers STOCK tickers only for now: the
+        // forex (`EUR/USD`) and crypto (`CRYPTO:BTC`) ticker forms use
+        // different daily endpoints with different response shapes —
+        // refuse BEFORE any network I/O with a pointer at the sources
+        // that serve those asset classes historically (#1802).
+        if pair.ticker.contains('/') || pair.ticker.starts_with("CRYPTO:") {
+            anyhow::bail!(
+                "alphavantage historical fetches support stock tickers only; for dated \
+                 {} quotes use ratesapi (FX) or coinbase (crypto), or drop --date",
+                pair.ticker
+            );
+        }
+
+        let api_key = Self::get_api_key()?;
+        let url = Self::build_daily_url(&pair.ticker, &api_key, window);
+
+        let mut response = ureq::get(&url)
+            .header("User-Agent", user_agent())
+            .call()
+            .with_context(|| format!("Failed to fetch daily series for {}", pair.ticker))?;
+
+        let json: serde_json::Value = response
+            .body_mut()
+            .read_json()
+            .with_context(|| "Failed to parse Alpha Vantage response")?;
+
+        Self::parse_daily_series(&json)
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +329,59 @@ mod tests {
         assert!(url.contains("EUR"));
         assert!(url.contains("USD"));
         assert!(url.contains("CURRENCY_EXCHANGE_RATE"));
+    }
+
+    /// Forex and crypto ticker forms refuse historical fetches BEFORE
+    /// any network I/O — hermetic (#1802 source ports).
+    #[test]
+    fn fetch_window_refuses_forex_and_crypto_tickers_hermetically() {
+        let source = AlphaVantageSource::new(Duration::from_secs(30));
+        let window = DateWindow {
+            start: rustledger_core::naive_date(2024, 1, 8).unwrap(),
+            end: rustledger_core::naive_date(2024, 1, 15).unwrap(),
+        };
+        for ticker in ["EUR/USD", "CRYPTO:BTC"] {
+            let pair = PricePair {
+                ticker: ticker.to_string(),
+                currency: "USD".to_string(),
+            };
+            let err = source
+                .fetch_window(&pair, window)
+                .expect_err("must refuse before any I/O");
+            assert!(err.to_string().contains("stock tickers only"), "{err}");
+        }
+    }
+
+    /// `TIME_SERIES_DAILY` parsing: every daily close becomes a dated
+    /// point; malformed entries are skipped (hermetic fixture).
+    #[test]
+    fn parse_daily_series_extracts_all_closes() {
+        let json: serde_json::Value = serde_json::json!({
+            "Time Series (Daily)": {
+                "2024-01-12": { "4. close": "185.9200" },
+                "2024-01-11": { "4. close": "185.5900" },
+                "not-a-date": { "4. close": "1.0" },
+                "2024-01-10": { "1. open": "184.00" }
+            }
+        });
+        let mut points = AlphaVantageSource::parse_daily_series(&json).expect("parses");
+        points.sort_by_key(|p| p.date);
+        assert_eq!(points.len(), 2, "malformed entries are skipped");
+        assert_eq!(
+            points[0].date,
+            rustledger_core::naive_date(2024, 1, 11).unwrap()
+        );
+        assert_eq!(points[1].price.to_string(), "185.9200");
+    }
+
+    /// A rate-limit Note refuses instead of parsing garbage.
+    #[test]
+    fn parse_daily_series_surfaces_rate_limit_note() {
+        let json: serde_json::Value = serde_json::json!({
+            "Note": "Thank you for using Alpha Vantage! Our standard API rate limit is 25 requests per day."
+        });
+        let err = AlphaVantageSource::parse_daily_series(&json).expect_err("must refuse");
+        assert!(err.to_string().contains("Alpha Vantage"), "{err}");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! Fetches Chinese mutual fund prices from East Money (天天基金).
 
-use super::{PricePair, PriceSource, user_agent};
+use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -50,6 +50,82 @@ impl EastMoneyFundSource {
 
         let json_str = &response[start + 1..end];
         serde_json::from_str(json_str).with_context(|| "Failed to parse JSON from JSONP")
+    }
+
+    /// Build the historical-NAV (`lsjz`, 历史净值) API URL for an
+    /// inclusive [`DateWindow`] (#1802 source ports). `pageSize=49`
+    /// comfortably covers the dispatch's trailing look-back window on
+    /// the first page.
+    fn build_history_url(fund_code: &str, window: DateWindow) -> String {
+        format!(
+            "https://api.fund.eastmoney.com/f10/lsjz?fundCode={fund_code}&pageIndex=1&pageSize=49&startDate={}&endDate={}",
+            window.start, window.end
+        )
+    }
+
+    /// Parse an `lsjz` response body into [`PricePoint`]s — an
+    /// associated fn over the parsed [`serde_json::Value`] so it is
+    /// unit-testable without HTTP (#1802 source ports).
+    ///
+    /// Each `Data.LSJZList` item carries `FSRQ` (the NAV's own civil
+    /// date) and `DWJZ` (unit NAV, a string that can be empty). Items
+    /// with a missing/unparsable date or NAV are SKIPPED, never
+    /// today-labeled — a today-fallback on a historical item would be
+    /// discarded by the dispatch's on-or-before selection, turning a
+    /// served NAV into a spurious no-quote error (deep review of
+    /// #1803).
+    ///
+    /// # Errors
+    ///
+    /// Errors when the response carries a non-zero `ErrCode` (the
+    /// message is the feed's `ErrMsg`) or when `Data.LSJZList` is
+    /// missing.
+    fn parse_history(json: &serde_json::Value) -> Result<Vec<PricePoint>> {
+        // Check for errors
+        if let Some(code) = json.get("ErrCode").and_then(serde_json::Value::as_i64)
+            && code != 0
+        {
+            let message = json
+                .get("ErrMsg")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Unknown error");
+            anyhow::bail!("East Money error {code}: {message}");
+        }
+
+        let items = json
+            .get("Data")
+            .and_then(|d| d.get("LSJZList"))
+            .and_then(serde_json::Value::as_array)
+            .with_context(|| "Missing Data.LSJZList in response")?;
+
+        let mut points = Vec::new();
+        for item in items {
+            let Some(date) = item
+                .get("FSRQ")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| s.get(..10))
+                .and_then(|s| s.parse::<rustledger_core::NaiveDate>().ok())
+            else {
+                continue;
+            };
+            // DWJZ is "" on days without a published NAV — skip, don't
+            // error.
+            let Some(price) = item
+                .get("DWJZ")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| Decimal::from_str(s).ok())
+            else {
+                continue;
+            };
+            points.push(PricePoint {
+                date,
+                price,
+                // This source only serves CNY NAVs, same as the latest
+                // path's hardcoded currency.
+                currency: Some("CNY".to_string()),
+            });
+        }
+        Ok(points)
     }
 }
 
@@ -105,6 +181,33 @@ impl PriceSource for EastMoneyFundSource {
             source: self.name().to_string(),
         })
     }
+
+    fn historical_coverage(&self) -> HistoricalCoverage {
+        // The lsjz endpoint serves each fund's NAV series back to its
+        // inception (#1802 source ports); pre-inception dates surface
+        // as the dispatch's clean no-quote error, not a refusal.
+        HistoricalCoverage::Full
+    }
+
+    fn fetch_window(&self, pair: &PricePair, window: DateWindow) -> Result<Vec<PricePoint>> {
+        let url = Self::build_history_url(&pair.ticker, window);
+
+        // The lsjz API rejects requests without an eastmoney Referer,
+        // so send the fund-detail origin alongside the shared
+        // User-Agent (#1802 source ports).
+        let mut response = ureq::get(&url)
+            .header("User-Agent", user_agent())
+            .header("Referer", "https://fundf10.eastmoney.com/")
+            .call()
+            .with_context(|| format!("Failed to fetch history for fund {}", pair.ticker))?;
+
+        let json: serde_json::Value = response
+            .body_mut()
+            .read_json()
+            .with_context(|| "Failed to parse East Money history response")?;
+
+        Self::parse_history(&json)
+    }
 }
 
 #[cfg(test)]
@@ -140,5 +243,56 @@ mod tests {
         let source = EastMoneyFundSource::new(Duration::from_secs(30));
         assert_eq!(source.name(), "eastmoneyfund");
         assert!(!source.requires_api_key());
+    }
+
+    #[test]
+    fn test_build_history_url() {
+        let window = DateWindow {
+            start: rustledger_core::naive_date(2024, 1, 8).unwrap(),
+            end: rustledger_core::naive_date(2024, 1, 15).unwrap(),
+        };
+        assert_eq!(
+            EastMoneyFundSource::build_history_url("000001", window),
+            "https://api.fund.eastmoney.com/f10/lsjz?fundCode=000001&pageIndex=1&pageSize=49\
+             &startDate=2024-01-08&endDate=2024-01-15"
+        );
+    }
+
+    /// Historical parsing (#1802 source ports): each `LSJZList` item's
+    /// `FSRQ`/`DWJZ` becomes a CNY point; an empty `DWJZ` (a day with
+    /// no published NAV) is skipped, not an error.
+    #[test]
+    fn test_parse_history() {
+        let json = serde_json::json!({
+            "Data": {
+                "LSJZList": [
+                    {"FSRQ": "2024-01-15", "DWJZ": "1.2345"},
+                    {"FSRQ": "2024-01-12", "DWJZ": ""},
+                    {"FSRQ": "2024-01-11", "DWJZ": "1.2000"},
+                ]
+            },
+            "ErrCode": 0,
+        });
+        let points = EastMoneyFundSource::parse_history(&json).unwrap();
+        assert_eq!(points.len(), 2, "the empty-DWJZ item is skipped");
+        assert_eq!(
+            points[0].date,
+            rustledger_core::naive_date(2024, 1, 15).unwrap()
+        );
+        assert_eq!(points[0].price.to_string(), "1.2345");
+        assert_eq!(points[0].currency.as_deref(), Some("CNY"));
+        assert_eq!(
+            points[1].date,
+            rustledger_core::naive_date(2024, 1, 11).unwrap()
+        );
+        assert_eq!(points[1].price.to_string(), "1.2000");
+    }
+
+    /// A non-zero `ErrCode` bails with the feed's `ErrMsg`.
+    #[test]
+    fn test_parse_history_error_code() {
+        let json = serde_json::json!({"ErrCode": 500, "ErrMsg": "no such fund"});
+        let err = EastMoneyFundSource::parse_history(&json).expect_err("must bail");
+        assert!(err.to_string().contains("no such fund"), "{err}");
     }
 }

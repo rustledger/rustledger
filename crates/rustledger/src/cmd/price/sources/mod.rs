@@ -904,16 +904,7 @@ mod capability_wiring_tests {
     fn latest_only_builtins_refuse_dated_fetches() {
         let registry = PriceSourceRegistry::new(&PriceConfig::default());
         let past = rustledger_core::naive_date(2000, 1, 3).expect("valid date");
-        for name in [
-            "alphavantage",
-            "coincap",
-            "coinmarketcap",
-            "eastmoneyfund",
-            "ecb",
-            "oanda",
-            "quandl",
-            "tsp",
-        ] {
+        for name in ["coincap", "coinmarketcap", "oanda"] {
             let source = registry
                 .get(name)
                 .unwrap_or_else(|| panic!("builtin source '{name}' must exist"));
@@ -960,5 +951,17 @@ mod capability_wiring_tests {
             coverage("ratesapi"),
             HistoricalCoverage::Since(rustledger_core::naive_date(1999, 1, 4).unwrap())
         );
+        // The remaining table rows of #1802, ported in the source-ports
+        // PR: ecb shares ratesapi's EU-reference epoch; the rest carry
+        // provider-defined history (per-ticker gaps surface as clean
+        // no-quote/refusal errors at fetch).
+        assert_eq!(
+            coverage("ecb"),
+            HistoricalCoverage::Since(rustledger_core::naive_date(1999, 1, 4).unwrap())
+        );
+        assert_eq!(coverage("alphavantage"), HistoricalCoverage::Full);
+        assert_eq!(coverage("quandl"), HistoricalCoverage::Full);
+        assert_eq!(coverage("tsp"), HistoricalCoverage::Full);
+        assert_eq!(coverage("eastmoneyfund"), HistoricalCoverage::Full);
     }
 }

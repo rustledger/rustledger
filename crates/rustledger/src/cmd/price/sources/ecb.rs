@@ -2,7 +2,7 @@
 //!
 //! Fetches currency exchange rates from the ECB.
 
-use super::{PricePair, PriceSource, user_agent};
+use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -36,19 +36,33 @@ impl EcbSource {
         Self {}
     }
 
-    /// Build the ECB API URL for a currency pair.
-    fn build_url(&self, currency: &str) -> String {
+    /// Build the ECB API URL for a currency's EUR-reference series:
+    /// the latest observation, or every observation in a civil-date
+    /// window (`startPeriod`/`endPeriod`, #1802 source ports — the SDMX
+    /// data API serves the full series back to 1999, not just the
+    /// 90-day XML feed).
+    fn build_url(&self, currency: &str, window: Option<DateWindow>) -> String {
+        let selector = match window {
+            Some(w) => format!("startPeriod={}&endPeriod={}", w.start, w.end),
+            None => "lastNObservations=1".to_string(),
+        };
         format!(
-            "https://data-api.ecb.europa.eu/service/data/EXR/D.{currency}.EUR.SP00.A?lastNObservations=1&format=jsondata"
+            "https://data-api.ecb.europa.eu/service/data/EXR/D.{currency}.EUR.SP00.A?{selector}&format=jsondata"
         )
     }
 }
 
 impl EcbSource {
-    /// Fetch a rate from the ECB API for a currency against EUR.
-    /// Returns (rate, date) where rate is "units of currency per 1 EUR".
-    fn fetch_rate(&self, currency: &str) -> Result<(Decimal, NaiveDate)> {
-        let url = self.build_url(&currency.to_uppercase());
+    /// Fetch a currency's EUR-reference series: every observation the
+    /// selector matched, as `(date, rate)` with rate = "units of
+    /// currency per 1 EUR". Observations with missing dates or
+    /// unparsable rates are skipped.
+    fn fetch_series(
+        &self,
+        currency: &str,
+        window: Option<DateWindow>,
+    ) -> Result<Vec<(NaiveDate, Decimal)>> {
+        let url = self.build_url(&currency.to_uppercase(), window);
 
         let mut response = ureq::get(&url)
             .header("User-Agent", user_agent())
@@ -61,7 +75,13 @@ impl EcbSource {
             .read_json()
             .with_context(|| format!("Failed to parse ECB response for {currency}"))?;
 
-        // Navigate the SDMX-JSON structure to find the rate
+        Self::parse_series(&json)
+    }
+
+    /// Parse an SDMX-JSON EXR response into dated observations.
+    /// Factored off the HTTP fetch so fixtures can exercise it without
+    /// a network (#1802 source ports).
+    fn parse_series(json: &serde_json::Value) -> Result<Vec<(NaiveDate, Decimal)>> {
         let datasets = json
             .get("dataSets")
             .and_then(serde_json::Value::as_array)
@@ -79,37 +99,49 @@ impl EcbSource {
             .and_then(serde_json::Value::as_object)
             .with_context(|| "Missing observations in ECB response")?;
 
-        // Get the most recent observation
-        let (obs_key, obs_value) = observations
-            .iter()
-            .next_back()
-            .with_context(|| "No observations in ECB response")?;
-
-        let rate_value = obs_value
-            .as_array()
-            .and_then(|a| a.first())
-            .with_context(|| "Invalid rate value in ECB response")?;
-
-        let rate = crate::cmd::price::price_decimal_from_json(rate_value)
-            .with_context(|| format!("Failed to parse rate: {rate_value}"))?;
-
-        // Try to get the date from the structure
-        let date_str = json
+        // Observation keys index into the date dimension's value list.
+        let date_values = json
             .get("structure")
             .and_then(|s| s.get("dimensions"))
             .and_then(|d| d.get("observation"))
             .and_then(|o| o.as_array())
             .and_then(|a| a.first())
             .and_then(|t| t.get("values"))
-            .and_then(|v| v.as_array())
-            .and_then(|values| {
-                let idx: usize = obs_key.parse().unwrap_or(0);
-                values.get(idx)
-            })
-            .and_then(|v| v.get("id"))
-            .and_then(serde_json::Value::as_str);
-        let date = super::feed_date_or_today(date_str);
+            .and_then(|v| v.as_array());
 
+        let mut points = Vec::with_capacity(observations.len());
+        for (obs_key, obs_value) in observations {
+            let Some(rate) = obs_value
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(crate::cmd::price::price_decimal_from_json)
+            else {
+                continue;
+            };
+            let Some(date) = date_values
+                .and_then(|values| {
+                    let idx: usize = obs_key.parse().ok()?;
+                    values.get(idx)
+                })
+                .and_then(|v| v.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| s.parse::<NaiveDate>().ok())
+            else {
+                continue;
+            };
+            points.push((date, rate));
+        }
+        Ok(points)
+    }
+
+    /// Latest single rate for a currency: the greatest-dated
+    /// observation of a `lastNObservations=1` fetch.
+    fn fetch_rate(&self, currency: &str) -> Result<(Decimal, NaiveDate)> {
+        let series = self.fetch_series(currency, None)?;
+        let (date, rate) = series
+            .into_iter()
+            .max_by_key(|(date, _)| *date)
+            .with_context(|| "No observations in ECB response")?;
         Ok((rate, date))
     }
 }
@@ -220,6 +252,74 @@ impl PriceSource for EcbSource {
             source: self.name().to_string(),
         })
     }
+
+    fn historical_coverage(&self) -> HistoricalCoverage {
+        // The SDMX data API serves the EU reference series from the
+        // euro's first trading day (#1802 source ports).
+        HistoricalCoverage::Since(
+            rustledger_core::naive_date(1999, 1, 4).expect("static date is valid"),
+        )
+    }
+
+    fn fetch_window(&self, pair: &PricePair, window: DateWindow) -> Result<Vec<PricePoint>> {
+        let ticker = pair.ticker.to_uppercase();
+        let currency = pair.currency.to_uppercase();
+
+        // Same three shapes as fetch_latest, but over the window's full
+        // series (#1802 source ports). Every point carries the feed's
+        // own reference date.
+        if ticker == "EUR" {
+            // EUR -> X: the series as-is (X per EUR).
+            let series = self.fetch_series(&currency, Some(window))?;
+            return Ok(series
+                .into_iter()
+                .map(|(date, rate)| PricePoint {
+                    date,
+                    price: rate,
+                    currency: Some(currency.clone()),
+                })
+                .collect());
+        }
+
+        if currency == "EUR" {
+            // X -> EUR: invert each observation (EUR per X). Zero rates
+            // are skipped rather than erroring the whole window.
+            let series = self.fetch_series(&ticker, Some(window))?;
+            return Ok(series
+                .into_iter()
+                .filter(|(_, rate)| !rate.is_zero())
+                .map(|(date, rate)| PricePoint {
+                    date,
+                    price: Decimal::ONE / rate,
+                    currency: Some(currency.clone()),
+                })
+                .collect());
+        }
+
+        // Cross-rate: X -> Y via EUR, joined PER REFERENCE DAY. The
+        // per-date join replaces fetch_latest's leg-date-mismatch bail
+        // for the historical path: days where only one leg published
+        // (or a leg is frozen — HRK, RUB) simply produce no point, and
+        // the dispatch's on-or-before selection works with what joined.
+        let ticker_series = self.fetch_series(&ticker, Some(window))?;
+        let currency_series = self.fetch_series(&currency, Some(window))?;
+        let by_date: std::collections::HashMap<NaiveDate, Decimal> =
+            ticker_series.into_iter().collect();
+        Ok(currency_series
+            .into_iter()
+            .filter_map(|(date, currency_rate)| {
+                let ticker_rate = by_date.get(&date)?;
+                if ticker_rate.is_zero() {
+                    return None;
+                }
+                Some(PricePoint {
+                    date,
+                    price: currency_rate / *ticker_rate,
+                    currency: Some(currency.clone()),
+                })
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -229,9 +329,52 @@ mod tests {
     #[test]
     fn test_build_url() {
         let source = EcbSource::new(Duration::from_secs(30));
-        let url = source.build_url("USD");
+        let url = source.build_url("USD", None);
         assert!(url.contains("USD"));
         assert!(url.contains("data-api.ecb.europa.eu"));
+        assert!(url.contains("lastNObservations=1"), "{url}");
+
+        // Historical (#1802): the window selects a startPeriod/endPeriod
+        // range instead of the latest observation.
+        let window = DateWindow {
+            start: rustledger_core::naive_date(2024, 1, 8).unwrap(),
+            end: rustledger_core::naive_date(2024, 1, 15).unwrap(),
+        };
+        let url = source.build_url("USD", Some(window));
+        assert!(url.contains("startPeriod=2024-01-08"), "{url}");
+        assert!(url.contains("endPeriod=2024-01-15"), "{url}");
+        assert!(!url.contains("lastNObservations"), "{url}");
+    }
+
+    /// SDMX-JSON parsing: every observation becomes a dated point via
+    /// the structure's date dimension; malformed entries are skipped
+    /// (#1802 source ports — hermetic, no network).
+    #[test]
+    fn parse_series_extracts_all_dated_observations() {
+        let json: serde_json::Value = serde_json::json!({
+            "dataSets": [{ "series": { "0:0:0:0:0": { "observations": {
+                "0": [1.0876],
+                "1": [1.0921],
+                "2": [null]
+            }}}}],
+            "structure": { "dimensions": { "observation": [{ "values": [
+                { "id": "2024-01-11" },
+                { "id": "2024-01-12" },
+                { "id": "2024-01-15" }
+            ]}]}}
+        });
+        let mut series = EcbSource::parse_series(&json).expect("parses");
+        series.sort_by_key(|(date, _)| *date);
+        assert_eq!(series.len(), 2, "the null observation is skipped");
+        assert_eq!(
+            series[0].0,
+            rustledger_core::naive_date(2024, 1, 11).unwrap()
+        );
+        assert_eq!(series[0].1.to_string(), "1.0876");
+        assert_eq!(
+            series[1].0,
+            rustledger_core::naive_date(2024, 1, 12).unwrap()
+        );
     }
 
     #[test]

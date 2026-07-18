@@ -24,7 +24,7 @@ rledger price [OPTIONS] [SYMBOL]...
 |--------|-------------|
 | `-f, --file <FILE>` | Beancount file to discover commodities from |
 | `-c, --currency <CURRENCY>` | Base currency for price quotes [default: USD] |
-| `-d, --date <DATE>` | Date for prices (YYYY-MM-DD, defaults to today). Historical dates need a source with historical support: `yahoo`, `coinbase` (from 2015-01-01, its exchange launch; later-listed pairs start later), `ratesapi` (EU-reference history from 1999-01-04), or an external `--source-cmd` that honors `RLEDGER_DATE`. Latest-only sources (ecb, alphavantage, coincap, …) accept only today's date and refuse past or future dates instead of mislabeling the current quote (#1794, #1802). |
+| `-d, --date <DATE>` | Date for prices (YYYY-MM-DD, defaults to today). Historical dates need a source with historical support: `yahoo`, `coinbase` (from 2015-01-01), `ratesapi` and `ecb` (EU-reference history from 1999-01-04), `alphavantage` (stock tickers only), `quandl`, `tsp`, `eastmoneyfund`, or an external `--source-cmd` that honors `RLEDGER_DATE`. Latest-only sources (coincap, coinmarketcap, oanda) accept only today's date and refuse past or future dates instead of mislabeling the current quote (#1794, #1802). |
 | `-b, --beancount` | Output as beancount price directives |
 | `--source-meta` | With `-b`, also write a `source:` metadata line on each price directive recording which provider produced the quote (opt-in provenance — see note below). Requires `-b`. |
 | `-s, --source <SOURCE>` | Use specific source (overrides mapping) |

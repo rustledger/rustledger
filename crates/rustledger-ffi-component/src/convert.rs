@@ -71,7 +71,14 @@ fn meta_value_from_core(v: &MetaValue) -> wit::MetaValue {
         MetaValue::Tag(t) => wit::MetaValue::Text(t.to_string()),
         MetaValue::Link(l) => wit::MetaValue::Text(l.to_string()),
         MetaValue::Date(d) => wit::MetaValue::Text(d.to_string()),
-        MetaValue::Int(i) => wit::MetaValue::Text(i.to_string()),
+        // `number`, not `text`: the return path (`json_from_meta_value` →
+        // `json_to_meta_value`) restores an integral number as
+        // `MetaValue::Int`, so an integer round-trips the session/builder
+        // boundary intact. As `text` it came back as a STRING — a session
+        // round-trip turned `precision: 4` into `precision: "4"`, quoting
+        // every integer metadata value in re-rendered ledger text and
+        // breaking commodity-precision handling in `session.format` (#1766).
+        MetaValue::Int(i) => wit::MetaValue::Number(i.to_string()),
         MetaValue::Number(n) => wit::MetaValue::Number(n.to_string()),
         MetaValue::Bool(b) => wit::MetaValue::Boolean(*b),
         MetaValue::Amount(a) => wit::MetaValue::Amount(amount_from_core(a)),
@@ -1570,11 +1577,12 @@ impl SessionState {
     /// `from_entries` with the ledger's options attached (WIT 3.7.0,
     /// #1766). What the held options DO today: `query` builds its
     /// account classifier from the `name-*` roots (BQL
-    /// `POSSIGN`/`ACCOUNT_SORTKEY` on renamed-root ledgers), and
-    /// `info()` echoes the full record. Booked-time options
+    /// `POSSIGN`/`ACCOUNT_SORTKEY` on renamed-root ledgers),
+    /// `info()` echoes the full record, and `format` (3.8.0) renders
+    /// with the held `display_precision`. Booked-time options
     /// (booking-method, tolerances) cannot re-apply — the entries are
-    /// already booked — and clamp/rendering do not consume options yet
-    /// (#1766 tracks both).
+    /// already booked — and clamp does not consume options yet (its
+    /// hardcoded summary accounts are #1806).
     ///
     /// Empty `name-*` fields are replaced with their defaults (an
     /// empty root can never classify — a zero-initialized record from
@@ -1761,6 +1769,34 @@ impl SessionState {
             }
         }
         flags
+    }
+
+    /// Render the held directives to canonical text honoring the ledger's
+    /// display precision (WIT 3.8.0, #1766) — the options-aware rendering
+    /// `format.format-loaded` can't do (a bare directive list carries no
+    /// options). Builds the `DisplayContext` with the canonical
+    /// [`rustledger_core::DisplayContext::from_directives`] (the exact
+    /// builder the CLI's loader uses: amount-scan inference, then the held
+    /// options' `display_precision` overrides, then per-commodity
+    /// `precision:` metadata) and renders through the same
+    /// `canonicalize_directives` path as the free `format` interface —
+    /// only the config differs. `render_commas` is NOT set: ledger text
+    /// never carries thousands separators (`format_plain` ignores the
+    /// flag; it stays a report/query concern).
+    pub fn format(&self) -> Result<String, String> {
+        let ctx = rustledger_core::DisplayContext::from_directives(
+            self.directives.iter(),
+            self.options
+                .display_precision
+                .iter()
+                .map(|(c, p)| (c.as_str(), *p)),
+        );
+        let config = rustledger_core::format::FormatConfig {
+            number_display: Some(ctx),
+            ..Default::default()
+        };
+        rustledger_parser::format::canonicalize_directives(self.directives.iter(), &config)
+            .map_err(|e| e.to_string())
     }
 
     pub fn clamp(&self, begin: &str, end: &str) -> Vec<wit::Directive> {
@@ -2362,6 +2398,106 @@ option \"name_income\" \"Einnahmen\"
                 .name_income,
             "Income"
         );
+    }
+}
+
+#[cfg(test)]
+mod session_format_tests {
+    //! `session.format` (WIT 3.8.0, #1766): render the held entries
+    //! honoring the ledger's display precision. The distinguishing
+    //! observable: an option precision WIDER than every written amount —
+    //! inference alone can never produce it, so padding to it proves the
+    //! held options reached the renderer.
+
+    use super::SessionState;
+
+    /// `USD:0.001` (3dp) is wider than the written 2dp, so the padded
+    /// third decimal can only come from the option.
+    const PRECISION_LEDGER: &str = "\
+option \"display_precision\" \"USD:0.001\"
+2024-01-01 open Assets:Bank
+2024-01-15 balance Assets:Bank  100.50 USD
+";
+
+    #[test]
+    fn format_pads_to_display_precision_option() {
+        let session = SessionState::from_source(PRECISION_LEDGER);
+        let info = session.info();
+        assert!(
+            info.errors.is_empty(),
+            "fixture must load: {:?}",
+            info.errors
+        );
+        let text = session.format().expect("held entries render");
+        assert!(
+            text.contains("2024-01-15 balance Assets:Bank 100.500 USD\n"),
+            "option 3dp must pad the written 2dp amount, got:\n{text}"
+        );
+    }
+
+    /// The round-trip that motivated the whole options carrier: a session
+    /// rebuilt from another session's `info()` formats identically WITH
+    /// the options, and falls back to entry-inferred precision without.
+    #[test]
+    fn from_entries_with_options_carries_display_precision() {
+        let loaded = SessionState::from_source(PRECISION_LEDGER);
+        let info = loaded.info();
+        assert!(
+            info.options
+                .display_precision
+                .contains(&("USD".to_string(), 3)),
+            "loader must derive 3 digits from USD:0.001, got {:?}",
+            info.options.display_precision
+        );
+
+        let with_options =
+            SessionState::from_entries_with_options(&info.entries, info.options.clone());
+        let text = with_options.format().expect("held entries render");
+        assert!(
+            text.contains("2024-01-15 balance Assets:Bank 100.500 USD\n"),
+            "held options must pad to 3dp, got:\n{text}"
+        );
+
+        let without_options = SessionState::from_entries(&info.entries);
+        let text = without_options.format().expect("held entries render");
+        assert!(
+            text.contains("2024-01-15 balance Assets:Bank 100.50 USD\n"),
+            "options-less entries keep the entry-inferred 2dp, got:\n{text}"
+        );
+    }
+
+    /// Commodity `precision:` metadata travels IN the held entries (it is
+    /// a directive, not an option), so even the options-less path honors
+    /// it — and it wins over the option, same precedence as the loader
+    /// (pinned currency-by-currency in
+    /// `rustledger_core::display_context`'s precedence test).
+    #[test]
+    fn commodity_precision_metadata_survives_the_entries_round_trip() {
+        const LEDGER: &str = "\
+option \"display_precision\" \"USD:0.1\"
+2024-01-01 commodity USD
+  precision: 4
+2024-01-01 open Assets:Bank
+2024-01-15 balance Assets:Bank  100.50 USD
+";
+        let loaded = SessionState::from_source(LEDGER);
+        let info = loaded.info();
+        assert!(
+            info.errors.is_empty(),
+            "fixture must load: {:?}",
+            info.errors
+        );
+        for session in [
+            &loaded,
+            &SessionState::from_entries_with_options(&info.entries, info.options.clone()),
+            &SessionState::from_entries(&info.entries),
+        ] {
+            let text = session.format().expect("held entries render");
+            assert!(
+                text.contains("2024-01-15 balance Assets:Bank 100.5000 USD\n"),
+                "commodity metadata 4dp must win everywhere, got:\n{text}"
+            );
+        }
     }
 }
 

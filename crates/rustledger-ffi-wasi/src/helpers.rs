@@ -1,6 +1,6 @@
 //! Helper functions and utilities.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use rustledger_core::Directive;
 use rustledger_parser::{Spanned, parse as parse_beancount};
@@ -28,44 +28,6 @@ impl LineLookup {
             Ok(line) => line as u32 + 1,
             Err(line) => line as u32,
         }
-    }
-}
-
-/// Track precision per currency: maps currency -> (`precision_counts` map)
-pub struct PrecisionTracker {
-    counts: HashMap<String, HashMap<u32, u32>>,
-}
-
-impl PrecisionTracker {
-    pub fn new() -> Self {
-        Self {
-            counts: HashMap::new(),
-        }
-    }
-
-    pub fn observe(&mut self, currency: &str, number: rustledger_core::Decimal) {
-        let precision = number.scale();
-        let currency_counts = self.counts.entry(currency.to_string()).or_default();
-        *currency_counts.entry(precision).or_insert(0) += 1;
-    }
-
-    pub fn most_common_precision(&self) -> HashMap<String, u32> {
-        self.counts
-            .iter()
-            .map(|(currency, counts)| {
-                let precision = counts
-                    .iter()
-                    .max_by_key(|(_, count)| *count)
-                    .map_or(2, |(prec, _)| *prec);
-                (currency.clone(), precision)
-            })
-            .collect()
-    }
-}
-
-impl Default for PrecisionTracker {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -143,7 +105,6 @@ pub fn load_source(source: &str) -> LoadResult {
     let mut directives: Vec<Directive> = Vec::new();
     let mut directive_lines: Vec<u32> = Vec::new();
     let mut commodities: HashSet<String> = HashSet::new();
-    let mut precision_tracker = PrecisionTracker::new();
     for spanned in &ledger.directives {
         // Synth/plugin-generated directives carry a `file_id` absent from the
         // source map, so they fall through to line 0 — the "generated entry"
@@ -170,24 +131,20 @@ pub fn load_source(source: &str) -> LoadResult {
                         && let Some(amt) = units.as_amount()
                     {
                         commodities.insert(amt.currency.to_string());
-                        precision_tracker.observe(amt.currency.as_ref(), amt.number);
                     }
                     if let Some(price) = &p.price
                         && let Some(amt) = price.amount()
                     {
                         commodities.insert(amt.currency.to_string());
-                        precision_tracker.observe(amt.currency.as_ref(), amt.number);
                     }
                 }
             }
             Directive::Balance(b) => {
                 commodities.insert(b.amount.currency.to_string());
-                precision_tracker.observe(b.amount.currency.as_ref(), b.amount.number);
             }
             Directive::Price(p) => {
                 commodities.insert(p.currency.to_string());
                 commodities.insert(p.amount.currency.to_string());
-                precision_tracker.observe(p.amount.currency.as_ref(), p.amount.number);
             }
             _ => {}
         }
@@ -223,11 +180,10 @@ pub fn load_source(source: &str) -> LoadResult {
         .map(ledger_error_to_ffi)
         .collect();
 
-    let mut options = build_ledger_options(&ledger.options);
+    let mut options = build_ledger_options(&ledger.options, &ledger.display_context);
     let mut commodity_list: Vec<_> = commodities.into_iter().collect();
     commodity_list.sort();
     options.commodities = commodity_list;
-    options.display_precision = precision_tracker.most_common_precision();
 
     let plugins: Vec<Plugin> = ledger
         .plugins
@@ -253,8 +209,23 @@ pub fn load_source(source: &str) -> LoadResult {
 /// Convert loader `Options` into the wire DTO `LedgerOptions`. Moved here from
 /// the JSON-RPC router so both the router and the WIT component crate (#1384)
 /// can build options from a file load.
+///
+/// `display_precision` is NOT copied from the raw options: it is the
+/// ledger's RESOLVED per-currency precision, exported from the loader's
+/// canonical [`rustledger_core::DisplayContext`] (inference from the
+/// ledger's own amounts, overridden by `option "display_precision"`,
+/// overridden by commodity `precision:` metadata). Pre-#1766 the two
+/// load paths disagreed here — `load_source` overwrote the field with a
+/// local `PrecisionTracker` re-derivation (dropping the user's explicit
+/// option entirely) while `load_file` shipped the explicit option only
+/// (no inference). Both now ship the same canonical resolution, which
+/// `session.format` re-applies as fixed overrides to reproduce the
+/// loader's precision decisions across the boundary.
 #[must_use]
-pub fn build_ledger_options(options: &rustledger_loader::Options) -> LedgerOptions {
+pub fn build_ledger_options(
+    options: &rustledger_loader::Options,
+    display: &rustledger_core::DisplayContext,
+) -> LedgerOptions {
     LedgerOptions {
         title: options.title.clone(),
         operating_currency: options.operating_currency.clone(),
@@ -266,11 +237,7 @@ pub fn build_ledger_options(options: &rustledger_loader::Options) -> LedgerOptio
         documents: options.documents.clone(),
         commodities: Vec::new(),
         booking_method: options.booking_method.clone(),
-        display_precision: options
-            .display_precision
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect(),
+        display_precision: display.resolved_precisions().into_iter().collect(),
         render_commas: options.render_commas,
         inferred_tolerance_default: options
             .inferred_tolerance_default
@@ -402,7 +369,7 @@ pub fn load_file_with_fs(
     }
 
     let errors: Vec<Error> = ledger.errors.iter().map(ledger_error_to_ffi).collect();
-    let options = build_ledger_options(&ledger.options);
+    let options = build_ledger_options(&ledger.options, &ledger.display_context);
     let plugins: Vec<Plugin> = ledger
         .plugins
         .iter()

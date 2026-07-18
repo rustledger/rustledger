@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.7.0;
+package rustledger:ledger@3.8.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -480,10 +480,11 @@ interface ledger {
     /// #1766). What the held options do TODAY: `query` classifies
     /// accounts with the ledger's own `name-*` roots (BQL
     /// `POSSIGN`/`ACCOUNT_SORTKEY` on renamed-root ledgers), and
-    /// `info()` echoes the full record. Booked-time options
+    /// `info()` echoes the full record, and `format` (3.8.0) renders
+    /// with the held `display-precision`. Booked-time options
     /// (booking-method, tolerances) cannot re-apply to already-booked
-    /// entries, and `clamp`/rendering do not consume options yet —
-    /// both tracked in #1766. Pass the options from the original
+    /// entries, and `clamp` does not consume options yet (its
+    /// hardcoded summary accounts are #1806). Pass the options from the original
     /// load's `info()`; empty `name-*` fields fall back to the
     /// defaults (an empty root can never classify), and classification
     /// matches roots exactly. New entry-consuming capability should go
@@ -512,6 +513,21 @@ interface ledger {
     /// comparison set. Candidates that fail conversion, and
     /// non-transaction candidates, are never flagged.
     dedup: func(candidates: list<directive>) -> list<bool>;
+    /// Render the HELD directives to canonical beancount text honoring
+    /// the ledger's display precision (added in 3.8.0, #1766) — the
+    /// options-aware rendering that `format.format-loaded` documents as
+    /// out of its own scope. Per-currency precision is inferred from the
+    /// held entries' own amounts (mode of the observed decimal places,
+    /// matching bean-query), overridden by the held options'
+    /// `display-precision` entries, then by per-commodity `precision:`
+    /// metadata — the same precedence the CLI's loader applies. Tracked
+    /// currencies pad to the resolved precision (an over-precise value is
+    /// never rounded away); currencies with no resolved precision render
+    /// at their own scale, byte-faithful. Ledger text never carries
+    /// thousands separators, so `render-commas` does not apply here (it
+    /// remains a report/query rendering concern). Fallible: a held entry
+    /// that cannot be re-rendered fails the call.
+    format: func() -> result<string, string>;
   }
 }
 
@@ -597,10 +613,10 @@ interface format {
   /// Added in 3.6.0 alongside `importer.dedup` — it closes the
   /// extract -> review -> save-to-ledger loop.
   ///
-  /// Renders with the DEFAULT format configuration: the rendering
-  /// pipeline does not yet honor `display-precision`/`render-commas`
-  /// from ledger-options anywhere (CLI included) — options-aware
-  /// rendering is tracked in #1766 and will arrive via the session.
+  /// Renders with the DEFAULT format configuration: a bare directive
+  /// list carries no ledger options to honor. Options-aware rendering
+  /// (per-currency `display-precision`, #1766) lives on `session.format`
+  /// (3.8.0), where the held options and entries supply the precision.
   format-loaded: func(entries: list<directive>) -> result<string, string>;
 }
 

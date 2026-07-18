@@ -650,6 +650,69 @@ fn session_from_entries_with_options_carries_renamed_roots() -> Result<()> {
     Ok(())
 }
 
+/// `session.format` (WIT 3.8.0, #1766): render the held entries honoring
+/// the ledger's display precision, over the real component boundary. The
+/// distinguishing observable: an option precision WIDER than every written
+/// amount (3dp vs 2dp) — inference alone can never produce the padded
+/// third decimal, so it proves `display-precision` crossed the boundary
+/// and reached the renderer. Also pins the `info()` ->
+/// `from-entries-with-options` round trip (pads WITH the options, falls
+/// back to entry-inferred 2dp without).
+#[test]
+fn session_format_honors_display_precision() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    let ledger = inst.rustledger_ledger_ledger();
+    let session = ledger.session();
+
+    const PRECISION_LEDGER: &str = concat!(
+        "option \"display_precision\" \"USD:0.001\"\n",
+        "2024-01-01 open Assets:Bank\n",
+        "2024-01-15 balance Assets:Bank  100.50 USD\n",
+    );
+    let loaded = session.call_constructor(&mut store, PRECISION_LEDGER)?;
+    let info = session.call_info(&mut store, loaded)?;
+    assert!(info.errors.is_empty(), "load errored: {:?}", info.errors);
+    assert!(
+        info.options
+            .display_precision
+            .contains(&("USD".to_string(), 3)),
+        "options must carry the resolved USD 3dp, got {:?}",
+        info.options.display_precision
+    );
+
+    let text = session
+        .call_format(&mut store, loaded)?
+        .map_err(|e| anyhow::anyhow!("format failed: {e}"))?;
+    assert!(
+        text.contains("2024-01-15 balance Assets:Bank 100.500 USD\n"),
+        "option 3dp must pad the written 2dp amount, got:\n{text}"
+    );
+
+    let with_options =
+        session.call_from_entries_with_options(&mut store, &info.entries, &info.options)?;
+    let text = session
+        .call_format(&mut store, with_options)?
+        .map_err(|e| anyhow::anyhow!("format failed: {e}"))?;
+    assert!(
+        text.contains("2024-01-15 balance Assets:Bank 100.500 USD\n"),
+        "held options must pad to 3dp after the round trip, got:\n{text}"
+    );
+
+    let without_options = session.call_from_entries(&mut store, &info.entries)?;
+    let text = session
+        .call_format(&mut store, without_options)?
+        .map_err(|e| anyhow::anyhow!("format failed: {e}"))?;
+    assert!(
+        text.contains("2024-01-15 balance Assets:Bank 100.50 USD\n"),
+        "options-less entries keep the entry-inferred 2dp, got:\n{text}"
+    );
+    Ok(())
+}
+
 /// The stateful `resource session` (#173): construct once, then info/query/
 /// clamp run against the held ledger. Crucially `clamp` operates on the held
 /// core directives, so cost basis survives with no WIT->core->WIT round-trip.

@@ -38,6 +38,7 @@
 //! assert_eq!(ctx.format(dec!(1.5), "EUR"), "1.5");
 //! ```
 
+use crate::Directive;
 use rust_decimal::{Decimal, MathematicalOps};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -239,6 +240,21 @@ impl DisplayContext {
         out.into_iter()
     }
 
+    /// Export every currency's RESOLVED precision (fixed override if set,
+    /// else the inferred precision under the active policy) as a
+    /// wire-friendly list, sorted by currency. This is what crosses the
+    /// FFI boundary as `ledger-options.display-precision` (#1766): the
+    /// same per-currency answer [`Self::get_precision`] would give, so an
+    /// embedder that re-applies the list as fixed overrides reproduces
+    /// this context's precision decisions exactly. Skips the
+    /// `__default__` naked-decimal bucket (see [`Self::currencies`]).
+    #[must_use]
+    pub fn resolved_precisions(&self) -> Vec<(String, u32)> {
+        self.currencies()
+            .filter_map(|c| self.get_precision(c).map(|p| (c.to_string(), p)))
+            .collect()
+    }
+
     /// Return the dp histogram for `currency` as ascending `(dp, count)`
     /// pairs. Empty if the currency has no observed samples.
     ///
@@ -294,6 +310,130 @@ impl DisplayContext {
     pub fn set_fixed_precision(&mut self, currency: &str, precision: u32) {
         self.fixed_precisions
             .insert(currency.to_string(), precision);
+    }
+
+    /// Build a display context from a set of directives plus fixed
+    /// per-currency overrides. This is THE canonical builder — the loader
+    /// calls it for every load, and the FFI component's `session.format`
+    /// calls it over the held entries (#1766) — so the sampling rules
+    /// below stay in one place.
+    ///
+    /// Three stages, in precedence order (later wins):
+    /// 1. Scan every directive's amounts to infer per-currency dp
+    ///    distributions (posting units, cost specs, price annotations,
+    ///    balance amounts + tolerances, price directives).
+    /// 2. Apply `fixed_precisions` (from `option "display_precision"`).
+    /// 3. Apply per-commodity `precision: N` metadata (issue #991), AFTER
+    ///    the options so a commodity-level declaration wins over the
+    ///    global option. Multi-declaration of the same currency is
+    ///    last-wins (matches typical option-stacking semantics). Invalid
+    ///    values are silently skipped here — `rustledger-validate`
+    ///    surfaces them as `InvalidPrecisionMetadata` warnings (E5003) so
+    ///    users see the problem without breaking loading.
+    ///
+    /// The iterator must be cheaply cloneable (e.g. a slice iter or a
+    /// `map` over one) because the directives are walked twice (amount
+    /// scan, then commodity metadata).
+    ///
+    /// `render_commas` is NOT set here — it is presentation policy, not
+    /// precision inference; callers set it via [`Self::set_render_commas`].
+    pub fn from_directives<'a, I>(
+        directives: I,
+        fixed_precisions: impl IntoIterator<Item = (&'a str, u32)>,
+    ) -> Self
+    where
+        I: IntoIterator<Item = &'a Directive>,
+        I::IntoIter: Clone,
+    {
+        let directives = directives.into_iter();
+        let mut ctx = Self::new();
+
+        // Stage 1: scan directives for amounts to infer precision.
+        for directive in directives.clone() {
+            match directive {
+                Directive::Transaction(txn) => {
+                    for posting in &txn.postings {
+                        // Units (IncompleteAmount)
+                        if let Some(ref units) = posting.units
+                            && let (Some(number), Some(currency)) =
+                                (units.number(), units.currency())
+                        {
+                            ctx.update(number, currency);
+                        }
+                        // Cost (CostSpec) — feed the user-written amount to
+                        // the display-context inference. Prefer `total()`
+                        // over `per_unit()` so that for `PerUnitFromTotal`
+                        // we sample the user's literal `{{ total }}` rather
+                        // than the booker-derived per-unit (which has been
+                        // divided by |units| and typically carries far more
+                        // trailing precision than the source spec).
+                        if let Some(ref cost) = posting.cost
+                            && let (Some(number), Some(currency)) = (
+                                cost.number.map(|cn| {
+                                    cn.total().or_else(|| cn.per_unit()).unwrap_or_default()
+                                }),
+                                &cost.currency,
+                            )
+                        {
+                            ctx.update(number, currency.as_str());
+                        }
+                        // Price annotations: included so the per-currency dist
+                        // sees them, matching Python beancount's DisplayContext
+                        // population. With the default `Precision::MostCommon`
+                        // policy (introduced for bean-query parity), high-
+                        // precision computed exchange rates are naturally
+                        // ignored by the mode — they're a small minority next
+                        // to mainstream postings. Pre-fix (under MAX policy)
+                        // they were excluded to avoid inflating display
+                        // precision; that exclusion is no longer needed.
+                        if let Some(ref price) = posting.price
+                            && let Some(amount) = price.amount()
+                        {
+                            ctx.update(amount.number, amount.currency.as_str());
+                        }
+                    }
+                }
+                Directive::Balance(bal) => {
+                    ctx.update(bal.amount.number, bal.amount.currency.as_str());
+                    if let Some(tol) = bal.tolerance {
+                        ctx.update(tol, bal.amount.currency.as_str());
+                    }
+                }
+                Directive::Price(p) => {
+                    // Same rationale as posting price annotations above —
+                    // included now that MostCommon is the default. The single
+                    // 28dp computed-rate price won't shift the mode for a
+                    // currency with hundreds of mainstream postings.
+                    ctx.update(p.amount.number, p.amount.currency.as_str());
+                }
+                Directive::Pad(_)
+                | Directive::Open(_)
+                | Directive::Close(_)
+                | Directive::Commodity(_)
+                | Directive::Event(_)
+                | Directive::Query(_)
+                | Directive::Note(_)
+                | Directive::Document(_)
+                | Directive::Custom(_) => {}
+            }
+        }
+
+        // Stage 2: fixed precisions from options (override inferred values).
+        for (currency, precision) in fixed_precisions {
+            ctx.set_fixed_precision(currency, precision);
+        }
+
+        // Stage 3: per-commodity `precision: N` metadata (see doc above).
+        for directive in directives {
+            if let Directive::Commodity(comm) = directive
+                && let Some(value) = comm.meta.get("precision")
+                && let Ok(precision) = crate::parse_precision_meta(value)
+            {
+                ctx.set_fixed_precision(comm.currency.as_str(), precision);
+            }
+        }
+
+        ctx
     }
 
     /// Get the precision for a currency.
@@ -1474,6 +1614,53 @@ mod tests {
             ctx.format_default(dec!(-0.0000)),
             "0.0000",
             "Decimal(-0.0000) — rust_decimal canonicalizes negative zero"
+        );
+    }
+
+    /// The canonical builder's three-stage precedence (#1766): amount-scan
+    /// inference < `display_precision` option < commodity `precision:`
+    /// metadata. The loader and the FFI component's `session.format` both
+    /// call this — the precedence must not depend on which one.
+    #[test]
+    fn from_directives_precedence_inferred_option_commodity() {
+        use crate::{Amount, Balance, Commodity, Directive, MetaValue};
+        let d = crate::naive_date(2024, 1, 1).unwrap();
+        let mut usd_commodity = Commodity::new(d, "USD");
+        usd_commodity
+            .meta
+            .insert("precision".to_string(), MetaValue::Int(4));
+        let dirs = [
+            // USD: 2dp twice, 0dp once -> inferred mode 2.
+            Directive::Balance(Balance::new(d, "Assets:A", Amount::new(dec!(1.50), "USD"))),
+            Directive::Balance(Balance::new(d, "Assets:B", Amount::new(dec!(2.25), "USD"))),
+            Directive::Balance(Balance::new(d, "Assets:C", Amount::new(dec!(3), "USD"))),
+            // EUR: single 1dp observation -> inferred 1.
+            Directive::Balance(Balance::new(d, "Assets:D", Amount::new(dec!(9.5), "EUR"))),
+            // JPY: never observed as an amount, no fixed override.
+            Directive::Commodity(usd_commodity),
+        ];
+
+        // No overrides: pure inference.
+        let ctx = DisplayContext::from_directives(dirs.iter().take(4), std::iter::empty());
+        assert_eq!(ctx.get_precision("USD"), Some(2), "mode of {{2,2,0}}dp");
+        assert_eq!(ctx.get_precision("EUR"), Some(1));
+        assert_eq!(
+            ctx.get_precision("JPY"),
+            None,
+            "unseen currency stays untracked"
+        );
+
+        // Option override beats inference; commodity metadata beats both.
+        let ctx = DisplayContext::from_directives(dirs.iter(), [("EUR", 3), ("USD", 5)]);
+        assert_eq!(
+            ctx.get_precision("USD"),
+            Some(4),
+            "commodity `precision: 4` metadata wins over the option's 5"
+        );
+        assert_eq!(
+            ctx.get_precision("EUR"),
+            Some(3),
+            "option override wins over the inferred 1"
         );
     }
 }

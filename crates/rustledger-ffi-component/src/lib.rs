@@ -45,7 +45,9 @@ use exports::rustledger::ledger::ledger::{
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. 3.7 adds
+/// The Component-Model api-version this build implements. 3.8 adds
+/// `session.format` (render the held entries honoring the ledger's
+/// `display-precision`, #1766); 3.7 added
 /// `session.from-entries-with-options` (the session carries the
 /// ledger's options over the boundary, #1766); 3.6 added
 /// `importer.dedup` and `format.format-loaded` (the extract → review →
@@ -56,7 +58,7 @@ use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 /// encrypted (`.gpg`/`.asc`) ledgers can be decrypted by the host (#1667);
 /// 3.1 added the `diff` field on `balance-dir` (#1663); 3.0 was the breaking
 /// `expand-pads` parameter on `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.7";
+const API_VERSION: &str = "3.8";
 
 struct Component;
 
@@ -147,6 +149,10 @@ impl GuestSession for LedgerSession {
 
     fn dedup(&self, candidates: Vec<Directive>) -> Vec<bool> {
         self.state.dedup(&candidates)
+    }
+
+    fn format(&self) -> Result<String, String> {
+        self.state.format()
     }
 }
 

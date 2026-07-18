@@ -721,104 +721,21 @@ impl Loader {
 
 /// Build a display context from loaded directives and options.
 ///
-/// This scans all directives for amounts and tracks the maximum precision seen
-/// for each currency. Fixed precisions from `option "display_precision"` override
-/// the inferred values.
+/// Thin wrapper over the canonical builder
+/// [`DisplayContext::from_directives`] (moved to `rustledger-core` so the
+/// FFI component's `session.format` shares the exact sampling rules —
+/// #1766): amount-scan inference, then `option "display_precision"`
+/// overrides, then per-commodity `precision:` metadata. Only
+/// `render_commas` — presentation policy, not precision — is applied here.
 fn build_display_context(directives: &[Spanned<Directive>], options: &Options) -> DisplayContext {
-    let mut ctx = DisplayContext::new();
-
-    // Set render_commas from options
+    let mut ctx = DisplayContext::from_directives(
+        directives.iter().map(|s| &s.value),
+        options
+            .display_precision
+            .iter()
+            .map(|(c, p)| (c.as_str(), *p)),
+    );
     ctx.set_render_commas(options.render_commas);
-
-    // Scan directives for amounts to infer precision
-    for spanned in directives {
-        match &spanned.value {
-            Directive::Transaction(txn) => {
-                for posting in &txn.postings {
-                    // Units (IncompleteAmount)
-                    if let Some(ref units) = posting.units
-                        && let (Some(number), Some(currency)) = (units.number(), units.currency())
-                    {
-                        ctx.update(number, currency);
-                    }
-                    // Cost (CostSpec) — feed the user-written amount to
-                    // the display-context inference. Prefer `total()`
-                    // over `per_unit()` so that for `PerUnitFromTotal`
-                    // we sample the user's literal `{{ total }}` rather
-                    // than the booker-derived per-unit (which has been
-                    // divided by |units| and typically carries far more
-                    // trailing precision than the source spec).
-                    if let Some(ref cost) = posting.cost
-                        && let (Some(number), Some(currency)) = (
-                            cost.number
-                                .map(|cn| cn.total().or_else(|| cn.per_unit()).unwrap_or_default()),
-                            &cost.currency,
-                        )
-                    {
-                        ctx.update(number, currency.as_str());
-                    }
-                    // Price annotations: included so the per-currency dist
-                    // sees them, matching Python beancount's DisplayContext
-                    // population. With the default `Precision::MostCommon`
-                    // policy (introduced for bean-query parity), high-
-                    // precision computed exchange rates are naturally
-                    // ignored by the mode — they're a small minority next
-                    // to mainstream postings. Pre-fix (under MAX policy)
-                    // they were excluded to avoid inflating display
-                    // precision; that exclusion is no longer needed.
-                    if let Some(ref price) = posting.price
-                        && let Some(amount) = price.amount()
-                    {
-                        ctx.update(amount.number, amount.currency.as_str());
-                    }
-                }
-            }
-            Directive::Balance(bal) => {
-                ctx.update(bal.amount.number, bal.amount.currency.as_str());
-                if let Some(tol) = bal.tolerance {
-                    ctx.update(tol, bal.amount.currency.as_str());
-                }
-            }
-            Directive::Price(p) => {
-                // Same rationale as posting price annotations above —
-                // included now that MostCommon is the default. The single
-                // 28dp computed-rate price won't shift the mode for a
-                // currency with hundreds of mainstream postings.
-                ctx.update(p.amount.number, p.amount.currency.as_str());
-            }
-            Directive::Pad(_)
-            | Directive::Open(_)
-            | Directive::Close(_)
-            | Directive::Commodity(_)
-            | Directive::Event(_)
-            | Directive::Query(_)
-            | Directive::Note(_)
-            | Directive::Document(_)
-            | Directive::Custom(_) => {}
-        }
-    }
-
-    // Apply fixed precisions from options (these override inferred values)
-    for (currency, precision) in &options.display_precision {
-        ctx.set_fixed_precision(currency, *precision);
-    }
-
-    // Apply per-commodity `precision: N` metadata (issue #991), AFTER the
-    // options loop so a commodity-level declaration wins over the global
-    // option. Multi-declaration of the same currency is last-wins (matches
-    // typical option-stacking semantics). Invalid values are silently
-    // skipped here — `rustledger-validate` surfaces them as
-    // `InvalidPrecisionMetadata` warnings (E5003) so users see the problem
-    // without breaking loading.
-    for spanned in directives {
-        if let Directive::Commodity(comm) = &spanned.value
-            && let Some(value) = comm.meta.get("precision")
-            && let Ok(precision) = rustledger_core::parse_precision_meta(value)
-        {
-            ctx.set_fixed_precision(comm.currency.as_str(), precision);
-        }
-    }
-
     ctx
 }
 

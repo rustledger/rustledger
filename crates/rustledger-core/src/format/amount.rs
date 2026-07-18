@@ -1,11 +1,21 @@
 //! Amount and cost formatting.
 
-use super::{escape_string, format_incomplete_amount};
+use super::escape_string;
 use crate::{Amount, CostSpec, PriceAnnotation};
 
 /// Format an amount.
 pub fn format_amount(amount: &Amount) -> String {
     format!("{} {}", amount.number, amount.currency)
+}
+
+/// [`format_amount`] rendered through a config's optional
+/// number-display context (#1766).
+pub fn format_amount_with(amount: &Amount, config: &super::FormatConfig) -> String {
+    format!(
+        "{} {}",
+        super::render_number(amount.number, amount.currency.as_str(), config),
+        amount.currency
+    )
 }
 
 /// Format a cost specification.
@@ -19,7 +29,7 @@ pub fn format_amount(amount: &Amount) -> String {
 /// `Position.__str__` output). That collapses the user-written
 /// `{{ total }}` source form, so do NOT call this on booked
 /// directives if you need the original `{{...}}` to survive.
-pub fn format_cost_spec(spec: &CostSpec) -> String {
+pub fn format_cost_spec(spec: &CostSpec, config: &super::FormatConfig) -> String {
     // Max 4 elements: amount, date, label, merge.
     let mut parts = Vec::with_capacity(4);
 
@@ -33,18 +43,19 @@ pub fn format_cost_spec(spec: &CostSpec) -> String {
     // "lot1"}}` to round-trip as `{{1500 USD}}` (review A-3.9).
     let uses_double_braces = matches!(spec.number, Some(crate::CostNumber::Total { .. }));
     if let Some(curr) = &spec.currency {
+        let render = |n| super::render_number(n, curr.as_str(), config);
         match spec.number {
             Some(crate::CostNumber::PerUnit { value: num }) => {
-                parts.push(format!("{num} {curr}"));
+                parts.push(format!("{} {curr}", render(num)));
             }
             Some(crate::CostNumber::PerUnitFromTotal(b)) => {
-                parts.push(format!("{} {curr}", b.per_unit));
+                parts.push(format!("{} {curr}", render(b.per_unit)));
             }
             Some(crate::CostNumber::Total { value: num }) => {
-                parts.push(format!("{num} {curr}"));
+                parts.push(format!("{} {curr}", render(num)));
             }
             Some(crate::CostNumber::Compound { per_unit, total }) => {
-                parts.push(format!("{per_unit} # {total} {curr}"));
+                parts.push(format!("{} # {} {curr}", render(per_unit), render(total)));
             }
             None => {}
         }
@@ -72,14 +83,15 @@ pub fn format_cost_spec(spec: &CostSpec) -> String {
     }
 }
 
-/// Format a price annotation.
-pub fn format_price_annotation(price: &PriceAnnotation) -> String {
+/// Format a price annotation through the config's optional
+/// number-display context (#1766).
+pub fn format_price_annotation(price: &PriceAnnotation, config: &super::FormatConfig) -> String {
     let sigil = price.kind.to_string();
     match &price.amount {
         Some(crate::IncompleteAmount::Complete(amt)) => {
-            format!("{sigil} {}", format_amount(amt))
+            format!("{sigil} {}", format_amount_with(amt, config))
         }
-        Some(inc) => format!("{sigil} {}", format_incomplete_amount(inc)),
+        Some(inc) => format!("{sigil} {}", super::format_incomplete_amount(inc, config)),
         None => sigil,
     }
 }
@@ -95,7 +107,10 @@ mod tests {
         let spec = CostSpec::empty()
             .with_number(crate::CostNumber::PerUnit { value: dec!(150) })
             .with_currency("USD");
-        assert_eq!(format_cost_spec(&spec), "{150 USD}");
+        assert_eq!(
+            format_cost_spec(&spec, &crate::format::FormatConfig::default()),
+            "{150 USD}"
+        );
     }
 
     #[test]
@@ -103,7 +118,10 @@ mod tests {
         let spec = CostSpec::empty()
             .with_number(crate::CostNumber::Total { value: dec!(1500) })
             .with_currency("USD");
-        assert_eq!(format_cost_spec(&spec), "{{1500 USD}}");
+        assert_eq!(
+            format_cost_spec(&spec, &crate::format::FormatConfig::default()),
+            "{{1500 USD}}"
+        );
     }
 
     #[test]
@@ -117,13 +135,19 @@ mod tests {
         let spec = CostSpec::empty()
             .with_number(CostNumber::PerUnitFromTotal(b))
             .with_currency("USD");
-        assert_eq!(format_cost_spec(&spec), "{150 USD}");
+        assert_eq!(
+            format_cost_spec(&spec, &crate::format::FormatConfig::default()),
+            "{150 USD}"
+        );
     }
 
     #[test]
     fn cost_spec_empty_renders_braces() {
         let spec = CostSpec::empty();
-        assert_eq!(format_cost_spec(&spec), "{}");
+        assert_eq!(
+            format_cost_spec(&spec, &crate::format::FormatConfig::default()),
+            "{}"
+        );
     }
 
     #[test]
@@ -134,7 +158,10 @@ mod tests {
         // beancount's `Position.__str__` for currency-only lot
         // matches.
         let spec = CostSpec::empty().with_currency("USD");
-        assert_eq!(format_cost_spec(&spec), "{}");
+        assert_eq!(
+            format_cost_spec(&spec, &crate::format::FormatConfig::default()),
+            "{}"
+        );
     }
 
     #[test]
@@ -151,7 +178,7 @@ mod tests {
             .with_label("lot1")
             .with_merge();
         assert_eq!(
-            format_cost_spec(&spec),
+            format_cost_spec(&spec, &crate::format::FormatConfig::default()),
             "{{1500 USD, 2024-01-15, \"lot1\", *}}"
         );
     }
@@ -166,7 +193,7 @@ mod tests {
             .with_label("lot1")
             .with_merge();
         assert_eq!(
-            format_cost_spec(&spec),
+            format_cost_spec(&spec, &crate::format::FormatConfig::default()),
             "{150 USD, 2024-01-15, \"lot1\", *}"
         );
     }

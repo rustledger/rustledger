@@ -1,8 +1,8 @@
 //! Transaction and posting formatting.
 
+use super::FormatConfig;
 use super::align::{FormatLine, render_lines};
 use super::directives::metadata_lines;
-use super::{FormatConfig, format_cost_spec, format_price_annotation};
 use crate::{IncompleteAmount, Posting, Transaction};
 use std::fmt::Write;
 
@@ -84,12 +84,20 @@ fn posting_prefix(posting: &Posting, config: &FormatConfig) -> String {
 /// "rest" (currency, cost, price). Returns `None` for the number when the
 /// posting has no number to align (currency-only or amount-free postings),
 /// in which case the `rest` still holds any currency/cost/price text.
-fn posting_amount_split(posting: &Posting) -> (Option<String>, String) {
+fn posting_amount_split(posting: &Posting, config: &FormatConfig) -> (Option<String>, String) {
     let (number, mut rest) = match &posting.units {
         None => (None, String::new()),
-        Some(IncompleteAmount::Complete(amount)) => {
-            (Some(amount.number.to_string()), amount.currency.to_string())
-        }
+        Some(IncompleteAmount::Complete(amount)) => (
+            Some(super::render_number(
+                amount.number,
+                amount.currency.as_str(),
+                config,
+            )),
+            amount.currency.to_string(),
+        ),
+        // A bare number has no currency to look precision up under —
+        // the DisplayContext's default-currency bucket would guess, so
+        // interpolation targets keep their own scale.
         Some(IncompleteAmount::NumberOnly(n)) => (Some(n.to_string()), String::new()),
         Some(IncompleteAmount::CurrencyOnly(c)) => (None, c.to_string()),
     };
@@ -98,13 +106,13 @@ fn posting_amount_split(posting: &Posting) -> (Option<String>, String) {
         if !rest.is_empty() {
             rest.push(' ');
         }
-        rest.push_str(&format_cost_spec(cost));
+        rest.push_str(&super::format_cost_spec(cost, config));
     }
     if let Some(price) = &posting.price {
         if !rest.is_empty() {
             rest.push(' ');
         }
-        rest.push_str(&format_price_annotation(price));
+        rest.push_str(&super::format_price_annotation(price, config));
     }
     (number, rest)
 }
@@ -130,7 +138,7 @@ fn build_posting_line(
     include_trailing_comment: bool,
 ) -> FormatLine {
     let prefix = posting_prefix(posting, config);
-    let (number, rest) = posting_amount_split(posting);
+    let (number, rest) = posting_amount_split(posting, config);
     let comment = if include_trailing_comment {
         posting.trailing_comments.first()
     } else {
@@ -205,9 +213,13 @@ pub(super) fn format_posting(posting: &Posting, config: &FormatConfig) -> String
 }
 
 /// Format an incomplete amount.
-pub fn format_incomplete_amount(amount: &IncompleteAmount) -> String {
+pub fn format_incomplete_amount(amount: &IncompleteAmount, config: &FormatConfig) -> String {
     match amount {
-        IncompleteAmount::Complete(a) => format!("{} {}", a.number, a.currency),
+        IncompleteAmount::Complete(a) => format!(
+            "{} {}",
+            super::render_number(a.number, a.currency.as_str(), config),
+            a.currency
+        ),
         IncompleteAmount::NumberOnly(n) => n.to_string(),
         IncompleteAmount::CurrencyOnly(c) => c.to_string(),
     }

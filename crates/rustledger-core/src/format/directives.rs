@@ -33,13 +33,16 @@ pub(super) fn metadata_lines(meta: &Metadata, indent: &str, out: &mut Vec<Format
 /// Split an [`Amount`] into its number token and currency, so the aligner
 /// can move the number independently (matching `bean-format`, which aligns
 /// the bare number and treats the currency as part of the suffix).
-fn amount_split(amount: &Amount) -> (String, String) {
-    (amount.number.to_string(), amount.currency.to_string())
+fn amount_split(amount: &Amount, config: &FormatConfig) -> (String, String) {
+    (
+        super::render_number(amount.number, amount.currency.as_str(), config),
+        amount.currency.to_string(),
+    )
 }
 
 /// Render a balance directive into format lines.
 pub fn format_balance_lines(bal: &Balance, config: &FormatConfig) -> Vec<FormatLine> {
-    let (number, mut suffix) = amount_split(&bal.amount);
+    let (number, mut suffix) = amount_split(&bal.amount, config);
     if let Some(tol) = &bal.tolerance {
         write!(suffix, " ~ {tol}").expect("write to String is infallible");
     }
@@ -54,7 +57,7 @@ pub fn format_balance_lines(bal: &Balance, config: &FormatConfig) -> Vec<FormatL
 
 /// Render a price directive into format lines.
 pub fn format_price_lines(price: &Price, config: &FormatConfig) -> Vec<FormatLine> {
-    let (number, suffix) = amount_split(&price.amount);
+    let (number, suffix) = amount_split(&price.amount, config);
     let mut lines = vec![FormatLine::Aligned {
         prefix: format!("{} price {}", price.date, price.currency),
         number,

@@ -158,20 +158,10 @@ impl PriceSource for RatesApiSource {
     }
 
     fn fetch_window(&self, pair: &PricePair, window: DateWindow) -> Result<Vec<PricePoint>> {
-        // Parity with main for a same-day request: --date <today>
-        // historically hit /latest — the canonical delegation keeps it
-        // that way, and the weekend clamp applies to ITS label too
-        // (round-2 review of #1803: the first delegation bypassed
-        // eu_reference_label, re-admitting weekend-dated directives on
-        // the exact arm round 1 added the clamp for).
-        if let Some(result) = super::same_day_latest_point(self, pair, window) {
-            let mut points = result?;
-            for point in &mut points {
-                point.date = Self::eu_reference_label(point.date);
-            }
-            return Ok(points);
-        }
-
+        // The dispatch routes requested==today to fetch_latest before
+        // the window path, so window.end here is always a COMPLETED
+        // day (round-3 review of #1803 removed the per-source same-day
+        // delegations along with the straddle).
         // The dated endpoint answers a single day; one request at the
         // window's end covers the dispatch's on-or-before selection.
         // The feed's date label is trusted EXCEPT when it echoes a

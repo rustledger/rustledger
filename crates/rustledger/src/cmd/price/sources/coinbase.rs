@@ -132,13 +132,10 @@ impl PriceSource for CoinbaseSource {
     }
 
     fn fetch_window(&self, pair: &PricePair, window: DateWindow) -> Result<Vec<PricePoint>> {
-        // Parity with main for a same-day request: --date <today>
-        // historically hit the LIVE spot endpoint — the canonical
-        // delegation keeps it that way (round-2 review of #1803).
-        if let Some(result) = super::same_day_latest_point(self, pair, window) {
-            return result;
-        }
-
+        // The dispatch routes requested==today to fetch_latest before
+        // the window path, so window.end here is always a COMPLETED
+        // day (round-3 review of #1803 removed the per-source same-day
+        // delegations along with the straddle).
         // Crypto trades every day, so the exact-date spot endpoint
         // answers for any past day: a single point at the window's end
         // satisfies the dispatch's on-or-before selection without

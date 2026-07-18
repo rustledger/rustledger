@@ -135,6 +135,17 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     run_with_writer(args, price_config, &mut stdout)
 }
 
+/// Dedup key for a `(symbol, quote-currency, date)` price identity: the
+/// currency is uppercased so `-c usd` and lowercase `price:` metadata
+/// match the ledger's uppercase commodities on every comparison site —
+/// the self-referential skips are case-insensitive for the same reason
+/// (round-3 deep review of #1803: the skips were fixed but the dedup
+/// lookups still compared raw case, forcing refetches and duplicate
+/// directives on mixed-case runs).
+fn dedup_key(symbol: &str, currency: &str, date: NaiveDate) -> (String, String, NaiveDate) {
+    (symbol.to_string(), currency.to_uppercase(), date)
+}
+
 /// Run the price command, writing fetched prices / plans / source listings
 /// to `out`.
 ///
@@ -244,9 +255,9 @@ pub fn run_with_writer<W: Write>(
         let mut existing = HashSet::new();
         for spanned in &ledger.directives {
             if let rustledger_core::Directive::Price(p) = &spanned.value {
-                existing.insert((
-                    p.currency.as_str().to_string(),
-                    p.amount.currency.as_str().to_string(),
+                existing.insert(dedup_key(
+                    p.currency.as_str(),
+                    p.amount.currency.as_str(),
                     p.date,
                 ));
             }
@@ -384,11 +395,7 @@ pub fn run_with_writer<W: Write>(
             // user re-runs `rledger price -f` and wants idempotent output.
             if !args.clobber {
                 let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
-                if existing_prices.contains(&(
-                    symbol.clone(),
-                    effective_currency.clone(),
-                    fetch_date,
-                )) {
+                if existing_prices.contains(&dedup_key(symbol, &effective_currency, fetch_date)) {
                     if args.verbose {
                         eprintln!(
                             "{symbol}: skipped (existing price for {fetch_date} {effective_currency}; pass --clobber to refetch)"
@@ -409,11 +416,7 @@ pub fn run_with_writer<W: Write>(
                 // price cached on Friday would re-emit the Friday `price`
                 // directive on Saturday and Sunday runs.
                 if !args.clobber
-                    && existing_prices.contains(&(
-                        symbol.clone(),
-                        cached.currency.clone(),
-                        cached.date,
-                    ))
+                    && existing_prices.contains(&dedup_key(symbol, &cached.currency, cached.date))
                 {
                     if args.verbose {
                         eprintln!(
@@ -480,9 +483,9 @@ pub fn run_with_writer<W: Write>(
                     // requested date, so duplicates can still slip through. Re-check
                     // here against the actual response date.
                     if !args.clobber
-                        && existing_prices.contains(&(
-                            symbol.clone(),
-                            response.currency.clone(),
+                        && existing_prices.contains(&dedup_key(
+                            symbol,
+                            &response.currency,
                             response.date,
                         ))
                     {
@@ -653,8 +656,10 @@ fn dump_fetch_plan(
         for (currency, per_spec_mapping) in per_quote_jobs {
             // Skip self-referential (base == quote) jobs so `--dry-run` matches
             // the fetch path: a commodity is never priced in itself. See the
-            // identical guard in the fetch loop above.
-            if &currency == symbol {
+            // identical guard in the fetch loop above — case-insensitive like
+            // it, or dry-run would plan fetches the real run skips (round-3
+            // deep review of #1803).
+            if currency.eq_ignore_ascii_case(symbol) {
                 continue;
             }
             // Apply the per-spec mapping override so describe_attempts shows
@@ -703,7 +708,7 @@ fn dump_fetch_plan(
             };
 
             let skipped = !args.clobber
-                && existing_prices.contains(&(symbol.clone(), currency.clone(), fetch_date));
+                && existing_prices.contains(&dedup_key(symbol, &currency, fetch_date));
             let suffix = if skipped {
                 "  [skip: existing price]"
             } else {
@@ -850,11 +855,7 @@ fn run_with_external_command<W: Write>(
             // is already in the file. Same rule as the network fetch path.
             if !args.clobber {
                 let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
-                if existing_prices.contains(&(
-                    symbol.clone(),
-                    effective_currency.clone(),
-                    fetch_date,
-                )) {
+                if existing_prices.contains(&dedup_key(symbol, &effective_currency, fetch_date)) {
                     if args.verbose {
                         eprintln!(
                             "{symbol}: skipped (existing price for {fetch_date} {effective_currency}; pass --clobber to refetch)"
@@ -877,9 +878,9 @@ fn run_with_external_command<W: Write>(
                     // the requested date. Skip writing if the actual response
                     // duplicates an existing directive.
                     if !args.clobber
-                        && existing_prices.contains(&(
-                            symbol.clone(),
-                            response.currency.clone(),
+                        && existing_prices.contains(&dedup_key(
+                            symbol,
+                            &response.currency,
                             response.date,
                         ))
                     {

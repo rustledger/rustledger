@@ -45,7 +45,9 @@ use exports::rustledger::ledger::ledger::{
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. 3.6 adds
+/// The Component-Model api-version this build implements. 3.7 adds
+/// `session.from-entries-with-options` (the session carries the
+/// ledger's options over the boundary, #1766); 3.6 added
 /// `importer.dedup` and `format.format-loaded` (the extract → review →
 /// save loop); 3.5 added the `importer` interface (identify / infer /
 /// extract — the `rledger extract` engine over the boundary); 3.4 added

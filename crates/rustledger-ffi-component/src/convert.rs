@@ -1495,6 +1495,27 @@ pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryR
 // the free functions: these run against the held *core* directives, so they
 // never re-parse source nor round-trip a directive list through the host.
 
+/// Replace empty `name-*` roots in host-supplied options with their
+/// defaults: an empty root can never classify an account, so a
+/// zero-initialized record from a guest language would silently break
+/// every `POSSIGN`/`ACCOUNT_SORTKEY` result with no diagnostic (deep
+/// review of #1805). Non-empty values pass through verbatim — including
+/// duplicates, which are the host's to avoid.
+fn sanitize_options(mut provided: wit::LedgerOptions) -> wit::LedgerOptions {
+    let defaults = options(ffi::LedgerOptions::default());
+    let fix = |field: &mut String, default: String| {
+        if field.is_empty() {
+            *field = default;
+        }
+    };
+    fix(&mut provided.name_assets, defaults.name_assets);
+    fix(&mut provided.name_liabilities, defaults.name_liabilities);
+    fix(&mut provided.name_equity, defaults.name_equity);
+    fix(&mut provided.name_income, defaults.name_income);
+    fix(&mut provided.name_expenses, defaults.name_expenses);
+    provided
+}
+
 /// Held state behind a `session` resource: the booked core directives + their
 /// per-directive provenance, plus the load metadata, normalized across the
 /// source and file load paths. Errors are pre-converted to WIT form (the file
@@ -1547,14 +1568,24 @@ impl SessionState {
     }
 
     /// `from_entries` with the ledger's options attached (WIT 3.7.0,
-    /// #1766): the session becomes the canonical options carrier, so
-    /// `query` builds its account classifier from the ledger's own
-    /// `name-*` roots and `info()` echoes what was provided. New
-    /// entry-consuming methods inherit the held options for free.
+    /// #1766). What the held options DO today: `query` builds its
+    /// account classifier from the `name-*` roots (BQL
+    /// `POSSIGN`/`ACCOUNT_SORTKEY` on renamed-root ledgers), and
+    /// `info()` echoes the full record. Booked-time options
+    /// (booking-method, tolerances) cannot re-apply — the entries are
+    /// already booked — and clamp/rendering do not consume options yet
+    /// (#1766 tracks both).
+    ///
+    /// Empty `name-*` fields are replaced with their defaults (an
+    /// empty root can never classify — a zero-initialized record from
+    /// a guest language would silently break every classification);
+    /// duplicated roots are the host's to avoid: classification
+    /// matches roots exactly, first match wins.
     pub fn from_entries_with_options(
         entries: &[wit::Directive],
         options: wit::LedgerOptions,
     ) -> Self {
+        let options = sanitize_options(options);
         // The one-time conversion is this API's whole reason to exist —
         // reserve up front so a large ledger doesn't reallocate through
         // the collect (review catch; drops are rare, over-reserving by
@@ -2282,17 +2313,37 @@ option \"name_income\" \"Einnahmen\"
 
         let with_options =
             SessionState::from_entries_with_options(&info.entries, info.options.clone());
+        let cell = first_cell(&with_options.query(query));
         assert!(
-            first_cell(&with_options.query(query)).contains("-100"),
-            "renamed income root must POSSIGN-negate: {:?}",
-            first_cell(&with_options.query(query))
+            cell.contains("-100"),
+            "renamed income root must POSSIGN-negate: {cell:?}"
         );
 
         let without_options = SessionState::from_entries(&info.entries);
         let cell = first_cell(&without_options.query(query));
+        // Positive AND negative: a bare negative would pass vacuously on
+        // an error/null cell (CLAUDE.md drift-guard rule).
         assert!(
-            !cell.contains("-100"),
+            cell.contains("100") && !cell.contains("-100"),
             "options-less entries default the classifier (documented, #1766): {cell:?}"
+        );
+    }
+
+    /// Empty `name-*` roots are replaced with defaults — a
+    /// zero-initialized options record must not silently break every
+    /// classification (deep review of #1805).
+    #[test]
+    fn empty_roots_fall_back_to_defaults() {
+        let loaded = SessionState::from_source(RENAMED);
+        let info = loaded.info();
+        let mut options = info.options.clone();
+        options.name_assets = String::new();
+        let session = SessionState::from_entries_with_options(&info.entries, options);
+        let echoed = session.info().options;
+        assert_eq!(echoed.name_assets, "Assets", "empty root falls back");
+        assert_eq!(
+            echoed.name_income, "Einnahmen",
+            "provided roots pass through"
         );
     }
 

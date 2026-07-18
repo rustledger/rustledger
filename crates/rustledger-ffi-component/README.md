@@ -69,14 +69,19 @@ opening-balance/summary boundary transactions get synthetic source locations.
 `query-entries` runs a typed BQL query directly against an already-loaded
 directive set — the counterpart to `filter`/`clamp`. The embedder passes the
 directives it holds (e.g. a filtered view) instead of source text, so there is
-no re-parse and no re-render to beancount text.
+no re-parse and no re-render to beancount text. It runs with DEFAULT ledger
+options (#1766); prefer `session.from-entries-with-options` + `session.query`,
+which carries the ledger's own account roots.
 
 **Batch** (`interface ledger`) — `batch` / `batch-file` (`query.batch`): load
 once, run several queries.
 
 **Session** (`interface ledger`, `resource session`) — a stateful, typed handle
 to a loaded, booked ledger held inside the component. The host constructs one
-(`constructor(source)` or the static `from-file(path, …)`), then runs
+(`constructor(source)`, the static `from-file(path, …)`, or — for a directive
+set the host already holds — `from-entries` / `from-entries-with-options(entries,
+options)`, the latter carrying the ledger's options so `query` classifies with
+its `name-*` roots, 3.7.0/#1766), then runs
 `info` (materialize the load result once), `query`, `filter`, and `clamp`
 against the *held* ledger. Because the booked core directives stay inside the
 component, these calls re-use the parse/booking with no re-parse and no

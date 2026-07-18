@@ -599,13 +599,15 @@ fn session_from_entries_with_options_carries_renamed_roots() -> Result<()> {
     let ledger = inst.rustledger_ledger_ledger();
     let session = ledger.session();
 
-    const RENAMED: &str = "option \"name_income\" \"Einnahmen\"\n\
-2024-01-01 open Einnahmen:Salary\n\
-2024-01-01 open Assets:Bank\n\
-\n\
-2024-01-02 * \"pay\"\n\
-  Assets:Bank  100.00 USD\n\
-  Einnahmen:Salary\n";
+    const RENAMED: &str = concat!(
+        "option \"name_income\" \"Einnahmen\"\n",
+        "2024-01-01 open Einnahmen:Salary\n",
+        "2024-01-01 open Assets:Bank\n",
+        "\n",
+        "2024-01-02 * \"pay\"\n",
+        "  Assets:Bank  100.00 USD\n",
+        "  Einnahmen:Salary\n",
+    );
     let loaded = session.call_constructor(&mut store, RENAMED)?;
     let info = session.call_info(&mut store, loaded)?;
     assert!(info.errors.is_empty(), "load errored: {:?}", info.errors);
@@ -625,9 +627,19 @@ fn session_from_entries_with_options_carries_renamed_roots() -> Result<()> {
 
     let without_options = session.call_from_entries(&mut store, &info.entries)?;
     let r = session.call_query(&mut store, without_options, q)?;
-    let cell = format!("{:?}", r.rows[0][0]);
+    assert!(r.errors.is_empty(), "query errored: {:?}", r.errors);
+    let cell = format!(
+        "{:?}",
+        r.rows
+            .first()
+            .and_then(|row| row.first())
+            .expect("query returns at least one row")
+    );
+    // Positive AND negative: the unflipped value must actually be there
+    // (a bare negative would pass vacuously on an error/null cell —
+    // CLAUDE.md drift-guard rule).
     assert!(
-        !cell.contains("-100"),
+        cell.contains("100") && !cell.contains("-100"),
         "options-less entries default the classifier (documented, #1766): {cell}"
     );
     Ok(())

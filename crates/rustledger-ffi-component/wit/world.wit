@@ -477,12 +477,18 @@ interface ledger {
     /// `from-entries-with-options` instead (#1766).
     from-entries: static func(entries: list<directive>) -> session;
     /// `from-entries` carrying the ledger's options (added in 3.7.0,
-    /// #1766): the session becomes the canonical carrier, so `query`
-    /// classifies accounts with the ledger's own `name-*` roots
-    /// (BQL `POSSIGN`/`ACCOUNT_SORTKEY` on renamed-root ledgers) and
-    /// `info()` echoes what was provided. Pass the options from the
-    /// original load's `info()`. New entry-consuming capability should
-    /// go resource-first and inherit these held options.
+    /// #1766). What the held options do TODAY: `query` classifies
+    /// accounts with the ledger's own `name-*` roots (BQL
+    /// `POSSIGN`/`ACCOUNT_SORTKEY` on renamed-root ledgers), and
+    /// `info()` echoes the full record. Booked-time options
+    /// (booking-method, tolerances) cannot re-apply to already-booked
+    /// entries, and `clamp`/rendering do not consume options yet —
+    /// both tracked in #1766. Pass the options from the original
+    /// load's `info()`; empty `name-*` fields fall back to the
+    /// defaults (an empty root can never classify), and classification
+    /// matches roots exactly. New entry-consuming capability should go
+    /// resource-first so it can consume these held options as it
+    /// grows support.
     from-entries-with-options: static func(entries: list<directive>, options: ledger-options) -> session;
 
     /// Everything the host needs at load time: entries, errors, options,

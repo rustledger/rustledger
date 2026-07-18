@@ -68,7 +68,9 @@ impl PriceSource for CoinMarketCapSource {
         // local day must carry the day the request was made, not a day
         // the clock rolled to during network I/O (round-4 deep review
         // of #1803 — the post-fetch read could poison the settled cache
-        // with a D+1-labeled entry under a D key).
+        // with a D+1-labeled entry under a D key; round-5 review: the
+        // round-4 edit had moved only this comment, not the read).
+        let date = jiff::Zoned::now().date();
         let api_key = Self::get_api_key()?;
         let url = self.build_url(&pair.ticker, &pair.currency);
 
@@ -125,8 +127,6 @@ impl PriceSource for CoinMarketCapSource {
 
         let price = crate::cmd::price::price_decimal_from_json(price_value)
             .with_context(|| format!("Invalid price format: {price_value}"))?;
-
-        let date = jiff::Zoned::now().date();
 
         Ok(PriceResponse {
             price,

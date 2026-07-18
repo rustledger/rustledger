@@ -311,9 +311,15 @@ pub trait PriceSource: Send + Sync {
             currency: request.currency.clone(),
         };
 
-        // 2. Undated → latest.
+        // 2. Undated → latest. The response currency is uppercased on
+        // the way out, like every other arm: feeds return uppercase,
+        // but sources that echo the raw request currency would let a
+        // lowercase `-c` value flow into an unparsable directive
+        // (round-5 deep review of #1803).
         let Some(requested) = request.date else {
-            return self.fetch_latest(&pair);
+            let mut response = self.fetch_latest(&pair)?;
+            response.currency = response.currency.to_uppercase();
+            return Ok(response);
         };
 
         let today = jiff::Zoned::now().date();
@@ -348,7 +354,9 @@ pub trait PriceSource: Send + Sync {
         // sources refuse the completed day honestly, and their refusal
         // names the alternative.
         if requested == today {
-            return self.fetch_latest(&pair);
+            let mut response = self.fetch_latest(&pair)?;
+            response.currency = response.currency.to_uppercase();
+            return Ok(response);
         }
 
         // 5. Covered past date → window + canonical selection.

@@ -784,10 +784,17 @@ fn write_price(
 ) -> Result<()> {
     if beancount {
         let date_str = response.date.to_string();
+        // The emitted commodity must be valid beancount: uppercase the
+        // symbol like dedup_key does, or `rledger price aapl -b` writes
+        // a lowercase commodity the grammar rejects (round-5 deep
+        // review of #1803). The plain (non-beancount) format below
+        // keeps the user's casing — it is display, not ledger syntax.
         writeln!(
             handle,
-            "{date_str} price {symbol} {} {}",
-            response.price, response.currency
+            "{date_str} price {} {} {}",
+            symbol.to_uppercase(),
+            response.price,
+            response.currency
         )?;
         // Opt-in provenance (see PriceArgs::source_meta): record the fetching
         // source as beancount metadata on the directive. Off by default so the

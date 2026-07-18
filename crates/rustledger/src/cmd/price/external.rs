@@ -201,7 +201,14 @@ impl PriceSource for ExternalCommandSource {
     }
 
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
-        self.fetch_price(&PriceRequest {
+        // Delegates to the INHERENT run_command, not the trait's
+        // fetch_price: routing through the trait would be mutual
+        // recursion held together only by this type's fetch_price
+        // override existing — deleting that override in a future
+        // refactor would turn every undated fetch into unbounded
+        // recursion with no compiler warning (round-5 deep review of
+        // #1803).
+        self.run_command(&PriceRequest {
             ticker: pair.ticker.clone(),
             currency: pair.currency.clone(),
             date: None,
@@ -215,6 +222,15 @@ impl PriceSource for ExternalCommandSource {
     }
 
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
+        self.run_command(request)
+    }
+}
+
+impl ExternalCommandSource {
+    /// Invoke the external command and parse its output — the shared
+    /// core behind both trait methods (see `fetch_latest`'s comment on
+    /// why they must not call each other through the trait).
+    fn run_command(&self, request: &PriceRequest) -> Result<PriceResponse> {
         // The ONE sanctioned override of the trait's canonical dispatch
         // (see `PriceSource::fetch_price`): the requested date is
         // forwarded to the external command via RLEDGER_DATE below, so

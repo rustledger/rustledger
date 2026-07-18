@@ -52,8 +52,12 @@ impl CoinbaseSource {
     }
 
     /// Shared fetch + parse for the spot endpoint (dated or not).
-    /// Returns `(price, currency)`.
-    fn fetch_spot(&self, url: &str, pair: &PricePair) -> Result<(Decimal, String)> {
+    /// Returns `(price, currency)` — currency is `None` when the feed
+    /// omits the field, so callers (and the dispatch's canonical
+    /// uppercase fallback) can distinguish feed truth from the raw
+    /// request value (round-5 deep review of #1803: wrapping the raw
+    /// fallback in `Some` shadowed the dispatch's normalization).
+    fn fetch_spot(&self, url: &str, pair: &PricePair) -> Result<(Decimal, Option<String>)> {
         let mut response = ureq::get(url)
             .header("User-Agent", user_agent())
             .call()
@@ -90,8 +94,7 @@ impl CoinbaseSource {
         let currency = data
             .get("currency")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or(&pair.currency)
-            .to_string();
+            .map(ToString::to_string);
 
         Ok((price, currency))
     }
@@ -119,7 +122,7 @@ impl PriceSource for CoinbaseSource {
 
         Ok(PriceResponse {
             price,
-            currency,
+            currency: currency.unwrap_or_else(|| pair.currency.clone()),
             date,
             source: self.name().to_string(),
         })
@@ -152,7 +155,9 @@ impl PriceSource for CoinbaseSource {
         Ok(vec![PricePoint {
             date: window.end,
             price,
-            currency: Some(currency),
+            // None when the feed omits it — the dispatch substitutes
+            // the request currency, uppercased.
+            currency,
         }])
     }
 }

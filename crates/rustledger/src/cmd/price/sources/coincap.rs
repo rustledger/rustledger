@@ -76,7 +76,9 @@ impl PriceSource for CoinCapSource {
         // local day must carry the day the request was made, not a day
         // the clock rolled to during network I/O (round-4 deep review
         // of #1803 — the post-fetch read could poison the settled cache
-        // with a D+1-labeled entry under a D key).
+        // with a D+1-labeled entry under a D key; round-5 review: the
+        // round-4 edit had moved only this comment, not the read).
+        let date = jiff::Zoned::now().date();
         let url = self.build_url(&pair.ticker);
 
         let mut response = ureq::get(&url)
@@ -106,8 +108,6 @@ impl PriceSource for CoinCapSource {
 
         let price = Decimal::from_str(price_str)
             .with_context(|| format!("Failed to parse price: {price_str}"))?;
-
-        let date = jiff::Zoned::now().date();
 
         // CoinCap only provides USD prices
         Ok(PriceResponse {

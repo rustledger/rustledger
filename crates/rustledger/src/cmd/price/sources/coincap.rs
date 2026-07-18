@@ -72,6 +72,11 @@ impl PriceSource for CoinCapSource {
     }
 
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
+        // Label read BEFORE the network fetch: a quote labeled with the
+        // local day must carry the day the request was made, not a day
+        // the clock rolled to during network I/O (round-4 deep review
+        // of #1803 — the post-fetch read could poison the settled cache
+        // with a D+1-labeled entry under a D key).
         let url = self.build_url(&pair.ticker);
 
         let mut response = ureq::get(&url)

@@ -380,7 +380,13 @@ pub trait PriceSource: Send + Sync {
             })?;
             return Ok(PriceResponse {
                 price: point.price,
-                currency: point.currency.unwrap_or_else(|| pair.currency.clone()),
+                // Uppercased like the identity arm: beancount
+                // commodities are uppercase, and a lowercase -c value
+                // must not flow into the emitted directive (round-4
+                // deep review of #1803).
+                currency: point
+                    .currency
+                    .unwrap_or_else(|| pair.currency.to_uppercase()),
                 date: point.date,
                 source: self.name().to_string(),
             });
@@ -389,10 +395,11 @@ pub trait PriceSource: Send + Sync {
         // 6. Refuse: mislabeling the latest quote with this date is the
         // #1794 corruption. The wording tracks the coverage — a Since
         // source is NOT latest-only, its history just starts later than
-        // the requested date (Copilot review). Neither message suggests
-        // a specific alternative source for Since refusals: which
-        // source covers a given asset/date pair is asset-specific
-        // (round-3 review: yahoo has no 2012 crypto either).
+        // the requested date (Copilot review). Only the None arm names
+        // an example alternative (yahoo); the Since arm deliberately
+        // does not, because which source covers a given asset/date pair
+        // is asset-specific (round-3 review: yahoo has no 2012 crypto
+        // either).
         match coverage {
             HistoricalCoverage::Since(s) => anyhow::bail!(
                 "the '{}' source has no history before {s} and cannot fetch {} for \
@@ -417,6 +424,12 @@ pub(crate) const fn user_agent() -> &'static str {
 }
 
 #[cfg(test)]
+// NOTE on clocks: the dispatch reads the wall clock internally (no
+// injection seam), so each today-arm test computes "today" separately
+// from the dispatch's own read. A CI run crossing local midnight
+// between the two reads can flake — a known, accepted sub-second
+// window (round-4 deep review of #1803); injecting a clock would
+// change the public trait for a test-only concern.
 mod dispatch_tests {
     use super::{
         DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, select_on_or_before,
@@ -669,11 +682,11 @@ mod dispatch_tests {
     }
 
     /// A feed genuinely ahead of the local clock (labels tomorrow's
-    /// civil day) passes through the dispatch UNTOUCHED — the clamp is
-    /// scoped to local-clock labels only (round-2 deep review of #1803:
-    /// the first clamp rewrote eastmoneyfund's China-day labels). The
-    /// clamp's positive case is pinned by the pure-function test
-    /// `clamp_only_rewrites_current_day_labels`.
+    /// civil day) passes through the dispatch UNTOUCHED: the response
+    /// always carries the quote's own claimed day — no clamping of any
+    /// kind exists since round 3 of the #1803 review deleted the
+    /// straddle machinery (round-2's scoped clamp had rewritten
+    /// eastmoneyfund's China-day labels).
     #[test]
     fn feed_ahead_of_local_clock_passes_through() {
         struct LabelsTomorrow;

@@ -254,7 +254,12 @@ pub fn cache_key(source: &str, ticker: &str, currency: &str, date: Option<NaiveD
         Some(d) => d.to_string(),
         None => "latest".to_string(),
     };
-    format!("{source}:{ticker}:{currency}:{date_part}")
+    // The currency segment is uppercased so `-c usd` and `-c USD` share
+    // one cache identity, matching `dedup_key` in price_cmd.rs (see the
+    // paired comment there; round-4 deep review of #1803). The TICKER
+    // stays raw: provider tickers can be case-significant (external
+    // command sources define their own ticker namespace).
+    format!("{source}:{ticker}:{}:{date_part}", currency.to_uppercase())
 }
 
 fn cache_file_path() -> PathBuf {

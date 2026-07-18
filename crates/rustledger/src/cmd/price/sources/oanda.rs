@@ -119,7 +119,15 @@ impl PriceSource for OandaSource {
         let price = Decimal::from_str(close_str)
             .with_context(|| format!("Failed to parse price: {close_str}"))?;
 
-        let date = jiff::Zoned::now().date();
+        // The candle's OWN day, never the local fetch day: OANDA's
+        // latest D-granularity candle on a weekend is Friday's, and the
+        // RFC3339 "time" field (requested via Accept-Datetime-Format)
+        // says so — its first 10 bytes are the date (round-4 deep
+        // review of #1803; the local-day label was the #1794 class).
+        let date = super::feed_date_or(
+            candle.get("time").and_then(serde_json::Value::as_str),
+            jiff::Zoned::now().date(),
+        );
 
         let target_currency = if instrument.contains('_') {
             instrument.split('_').next_back().unwrap_or(&pair.currency)

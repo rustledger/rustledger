@@ -144,7 +144,12 @@ impl PriceSource for RatesApiSource {
         Ok(PriceResponse {
             price,
             currency: pair.currency.clone(),
-            date,
+            // The weekend clamp applies to the LATEST path too: a
+            // Saturday-echoed /latest date over Friday's carried-forward
+            // rate must say Friday, exactly as the window path does
+            // (round-4 deep review of #1803 — the clamp existed on only
+            // one of the two paths).
+            date: Self::eu_reference_label(date),
             source: self.name().to_string(),
         })
     }

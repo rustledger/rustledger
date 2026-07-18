@@ -111,12 +111,20 @@ impl YahooFinanceSource {
             .with_context(|| format!("No price found for {ticker}"))?;
         let price = crate::cmd::price::price_decimal_from_json(price_value)
             .with_context(|| format!("Invalid price for {ticker}"))?;
+        // No regularMarketTime → no honest date for the quote → error,
+        // never a local-clock guess: a Saturday fetch would label
+        // Friday's price with Saturday (#1794-lite), and the --date
+        // <today> path now routes through here too (round-4 deep
+        // review of #1803). The field is present for every tradeable
+        // instrument in practice.
         let clock = Self::exchange_clock(result);
         let date = meta
             .and_then(|m| m.get("regularMarketTime"))
             .and_then(serde_json::Value::as_i64)
             .and_then(|secs| clock.civil_date(secs))
-            .unwrap_or_else(|| jiff::Zoned::now().date());
+            .with_context(|| {
+                format!("Yahoo response for {ticker} carried no regularMarketTime; cannot date the quote")
+            })?;
         Ok((price, currency, date))
     }
 
@@ -444,12 +452,30 @@ mod tests {
         assert_eq!(date, rustledger_core::naive_date(2026, 7, 10).unwrap());
     }
 
-    /// The latest path still reads regularMarketPrice.
+    /// The latest path reads regularMarketPrice and requires the
+    /// quote's own timestamp.
     #[test]
-    fn parse_latest_uses_regular_market_price() {
+    fn parse_latest_refuses_undatable_quotes() {
+        // No regularMarketTime → refuse rather than guess a local date
+        // (round-4 deep review of #1803: the local-today fallback was a
+        // #1794-lite residue newly reachable via --date <today>).
         let json: serde_json::Value = serde_json::json!({
             "chart": { "result": [{
                 "meta": { "currency": "USD", "regularMarketPrice": 243.85 }
+            }], "error": null }
+        });
+        let err = YahooFinanceSource::parse_latest(&json, "AAPL").expect_err("must refuse");
+        assert!(err.to_string().contains("regularMarketTime"), "{err}");
+
+        // With the timestamp present, price and currency parse as before.
+        let json: serde_json::Value = serde_json::json!({
+            "chart": { "result": [{
+                "meta": {
+                    "currency": "USD",
+                    "regularMarketPrice": 243.85,
+                    "regularMarketTime": 1_783_713_600_i64,
+                    "gmtoffset": -14400
+                }
             }], "error": null }
         });
         let (price, currency, _) = YahooFinanceSource::parse_latest(&json, "AAPL").expect("parses");

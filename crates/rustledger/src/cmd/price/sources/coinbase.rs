@@ -107,15 +107,20 @@ impl PriceSource for CoinbaseSource {
     }
 
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
+        // Label read BEFORE the network fetch: the spot endpoint
+        // carries no date field, and a live quote must carry the day
+        // the request was made — not a day the clock rolled to during
+        // network I/O (round-4 deep review of #1803: the post-fetch
+        // read could poison the settled cache with a D+1-labeled
+        // entry under a D key).
+        let date = jiff::Zoned::now().date();
         let url = self.build_url(&pair.ticker, &pair.currency, None);
         let (price, currency) = self.fetch_spot(&url, pair)?;
 
         Ok(PriceResponse {
             price,
             currency,
-            // The spot endpoint carries no date field; a dateless spot
-            // quote is a live quote for today.
-            date: jiff::Zoned::now().date(),
+            date,
             source: self.name().to_string(),
         })
     }

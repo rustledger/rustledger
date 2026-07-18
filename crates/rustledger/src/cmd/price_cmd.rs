@@ -135,15 +135,16 @@ pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     run_with_writer(args, price_config, &mut stdout)
 }
 
-/// Dedup key for a `(symbol, quote-currency, date)` price identity: the
-/// currency is uppercased so `-c usd` and lowercase `price:` metadata
-/// match the ledger's uppercase commodities on every comparison site —
-/// the self-referential skips are case-insensitive for the same reason
-/// (round-3 deep review of #1803: the skips were fixed but the dedup
-/// lookups still compared raw case, forcing refetches and duplicate
-/// directives on mixed-case runs).
+/// Dedup key for a `(symbol, quote-currency, date)` price identity:
+/// both symbol and currency are uppercased so `rledger price aapl` and
+/// `-c usd` match the ledger's grammar-uppercase commodities on every
+/// comparison site — the self-referential skips are case-insensitive
+/// for the same reason (rounds 3-4 deep review of #1803). The CACHE
+/// key (`cache_key` in cache.rs) normalizes its currency segment the
+/// same way but keeps the ticker raw — provider tickers can be
+/// case-significant; see the paired comment there.
 fn dedup_key(symbol: &str, currency: &str, date: NaiveDate) -> (String, String, NaiveDate) {
-    (symbol.to_string(), currency.to_uppercase(), date)
+    (symbol.to_uppercase(), currency.to_uppercase(), date)
 }
 
 /// Run the price command, writing fetched prices / plans / source listings
@@ -456,7 +457,16 @@ pub fn run_with_writer<W: Write>(
 
             match result {
                 Ok(response) => {
-                    if let Some(ref mut c) = cache {
+                    // Never cache a response dated AFTER its key date: a
+                    // dated key holding a later-dated quote is incoherent,
+                    // and the settled-cache rule (key day < fetch day →
+                    // immortal) would freeze a midnight-race live quote as
+                    // day D's price of record (round-4 deep review of
+                    // #1803). The response itself is still emitted.
+                    let cacheable = date.is_none_or(|d| response.date <= d);
+                    if let Some(ref mut c) = cache
+                        && cacheable
+                    {
                         // Use the actual source that responded (may differ from
                         // default due to fallback chains)
                         let actual_key =

@@ -117,31 +117,62 @@ fn select_on_or_before(points: Vec<PricePoint>, requested: NaiveDate) -> Option<
         .max_by_key(|p| p.date)
 }
 
-/// The civil day of this process's FIRST guarded fetch.
+/// The civil day and instant of this process's FIRST dated fetch —
+/// identity and covered fetches included (round-2 review of #1803: an
+/// all-identity or all-covered pre-midnight prefix must still latch for
+/// the uncovered sources the batch reaches after midnight).
 ///
 /// Used only to widen the guard by one day across a midnight straddle —
 /// see [`latest_date_window_ok`]. It deliberately does NOT replace the
-/// live clock (round-4 deep review: an unconditional process-wide latch
-/// froze "today" forever for long-lived library embedders, refusing
-/// every fetch after the first midnight).
-static FIRST_FETCH_DAY: std::sync::OnceLock<rustledger_core::NaiveDate> =
+/// live clock (#1801 round-4 review: an unconditional process-wide
+/// latch froze "today" forever for long-lived library embedders).
+static FIRST_DATED_FETCH: std::sync::OnceLock<(rustledger_core::NaiveDate, jiff::Timestamp)> =
     std::sync::OnceLock::new();
 
+/// How long after its first dated fetch a run keeps the midnight
+/// straddle open. A batch that crosses midnight finishes within
+/// minutes; six hours is generous slack — while a long-lived embedder
+/// that latched yesterday must NOT have yesterday's date re-accepted a
+/// day later (round-2 review of #1803: the day-granular latch let a
+/// day-old covered fetch unlock live quotes recorded under the old
+/// date).
+const STRADDLE_MAX_SECS: i64 = 6 * 3600;
+
 /// Pure decision for the latest-only guard: `date` is fetchable when it
-/// IS `today`, or when the run started on `date` and midnight has since
-/// passed (`date` is yesterday AND equals the first-fetch day). The
-/// second arm keeps a `--date $(date +%F)` batch working to its end
-/// when it straddles midnight (round-3 review), without letting a
-/// long-lived embedder replay its start day weeks later — the window
-/// never widens past one day (round-4 review).
+/// IS `today`, or during a midnight straddle — `date` is yesterday AND
+/// the run's first dated fetch happened on it AND that first fetch was
+/// recent ([`STRADDLE_MAX_SECS`]). The straddle keeps a
+/// `--date $(date +%F)` batch working to its end across midnight
+/// without letting a long-lived embedder replay its latch day later.
 fn latest_date_window_ok(
     date: rustledger_core::NaiveDate,
     today: rustledger_core::NaiveDate,
     first_fetch_day: rustledger_core::NaiveDate,
+    secs_since_first_fetch: i64,
 ) -> bool {
     date == today
         || (date == first_fetch_day
-            && today.checked_sub(jiff::Span::new().days(1)).ok() == Some(date))
+            && today.checked_sub(jiff::Span::new().days(1)).ok() == Some(date)
+            && secs_since_first_fetch <= STRADDLE_MAX_SECS)
+}
+
+/// The straddle-minute label clamp, pure for testability: a latest
+/// response labeled with the CURRENT local day while the request was
+/// for an earlier (straddle-accepted) day keeps the requested day —
+/// the local clock rolled mid-batch, not the feed. A feed label ahead
+/// of the LOCAL clock (eastmoneyfund's China civil day from a US
+/// evening) is genuine feed information and passes through untouched
+/// (round-2 review of #1803: the unconditional clamp rewrote those).
+fn clamp_local_label(
+    response_date: rustledger_core::NaiveDate,
+    requested: rustledger_core::NaiveDate,
+    today: rustledger_core::NaiveDate,
+) -> rustledger_core::NaiveDate {
+    if response_date > requested && response_date == today {
+        requested
+    } else {
+        response_date
+    }
 }
 
 /// Date label for a date-independent identity answer (X→X = 1.0).
@@ -199,6 +230,34 @@ pub(super) fn feed_date_or(
     raw.and_then(|s| s.get(..10))
         .and_then(|s| s.parse::<rustledger_core::NaiveDate>().ok())
         .unwrap_or(fallback)
+}
+
+/// Canonical same-day delegation for single-point window providers:
+/// when the window ends TODAY, answer from the latest endpoint instead
+/// of the dated one (parity with main's `--date <today>` behavior),
+/// returned as a window point. `None` means "not a same-day window —
+/// take the dated path".
+///
+/// The point's date is clamped to `window.end` so a midnight race
+/// between the dispatch's clock and this one cannot label the point
+/// after the requested day and get it discarded by the on-or-before
+/// selection as a spurious "no quote" error (round-2 review of #1803;
+/// the two per-source copies of this delegation had already drifted).
+pub(super) fn same_day_latest_point<S: PriceSource + ?Sized>(
+    source: &S,
+    pair: &PricePair,
+    window: DateWindow,
+) -> Option<Result<Vec<PricePoint>>> {
+    if window.end != jiff::Zoned::now().date() {
+        return None;
+    }
+    Some(source.fetch_latest(pair).map(|response| {
+        vec![PricePoint {
+            date: response.date.min(window.end),
+            price: response.price,
+            currency: Some(response.currency),
+        }]
+    }))
 }
 
 /// Trait for price data sources.
@@ -315,6 +374,17 @@ pub trait PriceSource: Send + Sync {
     /// requests the source cannot serve; "no quote on or before" when
     /// the fetched window is empty.
     fn fetch_price(&self, request: &PriceRequest) -> Result<PriceResponse> {
+        // The midnight-straddle latch initializes on the FIRST dated
+        // fetch of ANY kind — identity and covered fetches included —
+        // so a batch whose pre-midnight fetches are all identities or
+        // window-capable sources still latches its start day for the
+        // uncovered sources it reaches after midnight (round-1 and
+        // round-2 reviews of #1803 each caught a narrower latch).
+        if request.date.is_some() {
+            let _ = FIRST_DATED_FETCH
+                .get_or_init(|| (jiff::Zoned::now().date(), jiff::Timestamp::now()));
+        }
+
         // 1. Identity: X priced in X is 1.0 on any past-or-today date,
         // source-independent (hoisted out of per-source branches by the
         // #1801 reviews; future labels refuse). The currency is
@@ -339,14 +409,9 @@ pub trait PriceSource: Send + Sync {
             return self.fetch_latest(&pair);
         };
 
-        // The midnight-straddle latch initializes on the FIRST dated
-        // fetch of ANY kind — covered sources included — so a batch
-        // whose pre-midnight fetches all hit window-capable sources
-        // still latches its start day for the uncovered sources it
-        // reaches after midnight (deep review of #1803; the latch
-        // previously sat inside the uncovered arm only).
         let today = jiff::Zoned::now().date();
-        let first_fetch_day = *FIRST_FETCH_DAY.get_or_init(|| today);
+        let (first_fetch_day, first_fetch_at) =
+            *FIRST_DATED_FETCH.get_or_init(|| (today, jiff::Timestamp::now()));
 
         // A price for a day that hasn't happened cannot exist: refuse
         // FUTURE dates on every source, before any coverage routing.
@@ -406,20 +471,18 @@ pub trait PriceSource: Send + Sync {
 
         // 4. Uncovered date, but it is today (or a midnight straddle):
         // the latest quote IS a valid answer for today (#1801). A
-        // response the source labeled AFTER the requested day — the
-        // straddle minute, where a local-clock label has already
-        // rolled to the new day — is clamped back to the requested
-        // day, matching main's request-date labeling for the accepted
-        // window without giving sources date access (deep review of
-        // #1803: a 00:01 straddle fetch was labeled the NEW day,
-        // shifting the archive entry and colliding with the next
-        // night's run). Feed-supplied dates on or before the request
-        // (ECB's Friday on a weekend) pass through untouched.
-        if latest_date_window_ok(requested, today, first_fetch_day) {
+        // response the source labeled with the CURRENT local day while
+        // the request was for the straddle's earlier day is clamped
+        // back — the local clock rolled mid-batch, not the feed.
+        // Genuine feed labels — ECB's Friday on a weekend, or a feed
+        // already on the NEXT civil day (eastmoneyfund's China dates
+        // from a US evening) — pass through untouched (round-2 review
+        // of #1803: the unconditional clamp rewrote those).
+        let secs_since_first_fetch =
+            jiff::Timestamp::now().as_second() - first_fetch_at.as_second();
+        if latest_date_window_ok(requested, today, first_fetch_day, secs_since_first_fetch) {
             let mut response = self.fetch_latest(&pair)?;
-            if response.date > requested {
-                response.date = requested;
-            }
+            response.date = clamp_local_label(response.date, requested, today);
             return Ok(response);
         }
 
@@ -702,14 +765,14 @@ mod dispatch_tests {
         assert!(err.to_string().contains("future"), "{err}");
     }
 
-    /// The straddle-minute clamp: a latest response the source labeled
-    /// AFTER the requested day is clamped back to the requested day —
-    /// a 00:01 fetch in a batch that started before midnight must not
-    /// shift the archive entry onto the new day (deep review of #1803).
-    /// Feed dates on or before the request pass through untouched
-    /// (asserted by `latest_only_refuses_past_and_future_but_serves_today`).
+    /// A feed genuinely ahead of the local clock (labels tomorrow's
+    /// civil day) passes through the dispatch UNTOUCHED — the clamp is
+    /// scoped to local-clock labels only (round-2 deep review of #1803:
+    /// the first clamp rewrote eastmoneyfund's China-day labels). The
+    /// clamp's positive case is pinned by the pure-function test
+    /// `clamp_only_rewrites_current_day_labels`.
     #[test]
-    fn straddle_accepted_latest_is_clamped_to_requested_day() {
+    fn feed_ahead_of_local_clock_passes_through() {
         struct LabelsTomorrow;
         impl PriceSource for LabelsTomorrow {
             fn name(&self) -> &'static str {
@@ -731,12 +794,13 @@ mod dispatch_tests {
             }
         }
         let today = jiff::Zoned::now().date();
+        let tomorrow = today.checked_add(jiff::Span::new().days(1)).unwrap();
         let response = LabelsTomorrow
             .fetch_price(&request(Some(today)))
             .expect("today is accepted");
         assert_eq!(
-            response.date, today,
-            "a label after the requested day is clamped to it"
+            response.date, tomorrow,
+            "a genuine ahead-of-clock feed label is preserved"
         );
     }
 
@@ -797,33 +861,59 @@ mod dispatch_tests {
         assert!(select_on_or_before(vec![], d(12)).is_none());
     }
 
-    /// The acceptance window: today always; yesterday ONLY when the
-    /// run's first fetch happened on it (a genuine midnight straddle).
-    /// A long-lived process can never replay its start day later than
-    /// that, and future dates never pass (round-4 deep review).
+    /// The acceptance window: today always; yesterday ONLY during a
+    /// genuine midnight straddle — the run's first dated fetch happened
+    /// on it AND recently. A long-lived process can never replay its
+    /// latch day later (round-2 deep review of #1803: a day-granular
+    /// latch let a day-old covered fetch unlock live quotes recorded
+    /// under the old date), and future dates never pass.
     #[test]
     fn window_accepts_midnight_straddle_only() {
+        const RECENT: i64 = 1800; // 30 minutes into the batch
+        const DAY_OLD: i64 = 24 * 3600;
         let d = rustledger_core::naive_date(2026, 7, 16).unwrap();
         let next = d.checked_add(jiff::Span::new().days(1)).unwrap();
         let much_later = d.checked_add(jiff::Span::new().days(30)).unwrap();
 
-        assert!(super::latest_date_window_ok(d, d, d), "same day");
+        assert!(super::latest_date_window_ok(d, d, d, RECENT), "same day");
         assert!(
-            super::latest_date_window_ok(d, next, d),
-            "midnight straddle: run started on d, clock now d+1"
+            super::latest_date_window_ok(d, next, d, RECENT),
+            "midnight straddle: run started on d minutes ago, clock now d+1"
         );
         assert!(
-            !super::latest_date_window_ok(d, much_later, d),
+            !super::latest_date_window_ok(d, next, d, DAY_OLD),
+            "a latch from a day-old fetch must not reopen yesterday"
+        );
+        assert!(
+            !super::latest_date_window_ok(d, much_later, d, RECENT),
             "a daemon must not replay its start day weeks later"
         );
         assert!(
-            !super::latest_date_window_ok(d, next, next),
+            !super::latest_date_window_ok(d, next, next, RECENT),
             "yesterday is refused when the run did NOT start on it"
         );
         assert!(
-            !super::latest_date_window_ok(much_later, d, d),
+            !super::latest_date_window_ok(much_later, d, d, RECENT),
             "future dates never pass"
         );
+    }
+
+    /// The label clamp is scoped to local-clock labels: only a response
+    /// dated with the CURRENT day gets clamped down to the straddle's
+    /// requested day. A feed genuinely ahead of the local clock
+    /// (eastmoneyfund's China civil day from a US evening) passes
+    /// through (round-2 deep review of #1803).
+    #[test]
+    fn clamp_only_rewrites_current_day_labels() {
+        let d = |day| rustledger_core::naive_date(2026, 7, day).unwrap();
+        // Straddle minute: local clock rolled to the 17th mid-batch.
+        assert_eq!(super::clamp_local_label(d(17), d(16), d(17)), d(16));
+        // Feed ahead of the local clock: China's 18th from a US 17th.
+        assert_eq!(super::clamp_local_label(d(18), d(17), d(17)), d(18));
+        // Feed behind the request (ECB Friday on a weekend): untouched.
+        assert_eq!(super::clamp_local_label(d(15), d(17), d(17)), d(15));
+        // Label equals the request: untouched.
+        assert_eq!(super::clamp_local_label(d(17), d(17), d(17)), d(17));
     }
 
     /// Identity answers accept any past-or-today label but refuse a
@@ -939,15 +1029,23 @@ mod capability_wiring_tests {
         }
     }
 
-    /// The capable builtins declare their coverage as data — the
-    /// introspection callers (dry-run validation, fallback-chain
-    /// skipping) rely on these declarations being truthful.
+    /// The capable builtins declare their coverage as data. Today the
+    /// only consumer is the trait's canonical dispatch (refusal before
+    /// network I/O); future introspection callers — dry-run validation,
+    /// fallback-chain skipping — can rely on the same declarations once
+    /// wired (they are NOT wired yet; round-2 review of #1803 caught
+    /// this comment overclaiming).
     #[test]
     fn historical_capable_builtins_declare_coverage() {
         let registry = PriceSourceRegistry::new(&PriceConfig::default());
         let coverage = |name: &str| registry.get(name).expect(name).historical_coverage();
         assert_eq!(coverage("yahoo"), HistoricalCoverage::Full);
-        assert_eq!(coverage("coinbase"), HistoricalCoverage::Full);
+        // Coinbase launched January 2015; earlier dates get the clean
+        // capability refusal instead of a raw provider error.
+        assert_eq!(
+            coverage("coinbase"),
+            HistoricalCoverage::Since(rustledger_core::naive_date(2015, 1, 1).unwrap())
+        );
         // exchangerate.host serves EU-reference history from 1999-01-04.
         assert_eq!(
             coverage("ratesapi"),

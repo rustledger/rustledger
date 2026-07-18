@@ -371,7 +371,11 @@ pub fn run_with_writer<W: Write>(
             // cost currency) as a base candidate, whose resolved quote is then
             // itself. bean-price never fetches a currency against itself; left
             // unfiltered this emits a nonsensical `price USD … USD` directive.
-            if &effective_currency == symbol {
+            // Case-insensitive: the dispatch's identity arm matches
+            // case-insensitively too, so a `-c usd` run would otherwise
+            // slip past this skip and emit the self-pair anyway (round-2
+            // deep review of #1803).
+            if effective_currency.eq_ignore_ascii_case(symbol) {
                 continue;
             }
             // --clobber: pre-fetch skip when an explicit `price` directive for
@@ -837,8 +841,9 @@ fn run_with_external_command<W: Write>(
             // fetch and --dry-run paths: a commodity is never priced in itself
             // (guards against `--undeclared` picking up the operating/quote
             // currency as a base, which would emit a nonsensical `price USD …
-            // USD` directive).
-            if &effective_currency == symbol {
+            // USD` directive). Case-insensitive, matching the network path
+            // and the dispatch's identity arm (round-2 review of #1803).
+            if effective_currency.eq_ignore_ascii_case(symbol) {
                 continue;
             }
             // --clobber: skip when an existing price for this (symbol, currency, date)

@@ -103,6 +103,14 @@ impl RatesApiSource {
     /// published nothing (deep review of #1803). Weekday holidays are
     /// not detectable this way and pass through — a residual trust in
     /// the feed's labeling.
+    ///
+    /// Deliberate trade-off (round-2 review): some provider variants
+    /// serve weekend-computed blended rates, which this clamp would
+    /// relabel Friday. Spot FX does not reprice over the weekend — a
+    /// "Saturday rate" is a carried-forward Friday rate — and this
+    /// source models the EU reference series specifically; users who
+    /// want weekend-marked data should use a source that has it
+    /// natively (coinbase, yahoo).
     fn eu_reference_label(date: NaiveDate) -> NaiveDate {
         match date.weekday() {
             jiff::civil::Weekday::Saturday => {
@@ -150,16 +158,18 @@ impl PriceSource for RatesApiSource {
     }
 
     fn fetch_window(&self, pair: &PricePair, window: DateWindow) -> Result<Vec<PricePoint>> {
-        // Parity with main for a same-day request: the dated endpoint
-        // serves reference data, while --date <today> historically hit
-        // /latest — keep it that way (deep review of #1803).
-        if window.end == jiff::Zoned::now().date() {
-            let response = self.fetch_latest(pair)?;
-            return Ok(vec![PricePoint {
-                date: response.date,
-                price: response.price,
-                currency: None,
-            }]);
+        // Parity with main for a same-day request: --date <today>
+        // historically hit /latest — the canonical delegation keeps it
+        // that way, and the weekend clamp applies to ITS label too
+        // (round-2 review of #1803: the first delegation bypassed
+        // eu_reference_label, re-admitting weekend-dated directives on
+        // the exact arm round 1 added the clamp for).
+        if let Some(result) = super::same_day_latest_point(self, pair, window) {
+            let mut points = result?;
+            for point in &mut points {
+                point.date = Self::eu_reference_label(point.date);
+            }
+            return Ok(points);
         }
 
         // The dated endpoint answers a single day; one request at the

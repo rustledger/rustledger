@@ -121,21 +121,22 @@ impl PriceSource for CoinbaseSource {
     }
 
     fn historical_coverage(&self) -> HistoricalCoverage {
-        HistoricalCoverage::Full
+        // Coinbase the exchange launched in January 2015; earlier dated
+        // requests get the clean capability refusal instead of a raw
+        // provider error (round-2 review of #1803). Per-pair listing
+        // dates vary — later-listed pairs still surface provider errors
+        // for their pre-listing gap.
+        HistoricalCoverage::Since(
+            rustledger_core::naive_date(2015, 1, 1).expect("static date is valid"),
+        )
     }
 
     fn fetch_window(&self, pair: &PricePair, window: DateWindow) -> Result<Vec<PricePoint>> {
-        // Parity with main for a same-day request: the dated endpoint
-        // serves that day's reference price, while --date <today>
-        // historically hit the LIVE spot endpoint — keep it that way
-        // (deep review of #1803).
-        if window.end == jiff::Zoned::now().date() {
-            let response = self.fetch_latest(pair)?;
-            return Ok(vec![PricePoint {
-                date: response.date,
-                price: response.price,
-                currency: Some(response.currency),
-            }]);
+        // Parity with main for a same-day request: --date <today>
+        // historically hit the LIVE spot endpoint — the canonical
+        // delegation keeps it that way (round-2 review of #1803).
+        if let Some(result) = super::same_day_latest_point(self, pair, window) {
+            return result;
         }
 
         // Crypto trades every day, so the exact-date spot endpoint

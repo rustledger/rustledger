@@ -363,18 +363,24 @@ pub trait PriceSource: Send + Sync {
         }
 
         // 5. Refuse: mislabeling the latest quote with this date is the
-        // #1794 corruption.
-        let coverage_note = match coverage {
-            HistoricalCoverage::Since(s) => format!(" (its history begins {s})"),
-            _ => String::new(),
-        };
-        anyhow::bail!(
-            "the '{}' source only provides the latest quote{coverage_note} and cannot \
-             fetch {} for {requested}; drop --date, or use a source with historical \
-             support (e.g. yahoo)",
-            self.name(),
-            request.ticker
-        );
+        // #1794 corruption. The wording tracks the coverage — a Since
+        // source is NOT latest-only, its history just starts later than
+        // the requested date (Copilot review).
+        match coverage {
+            HistoricalCoverage::Since(s) => anyhow::bail!(
+                "the '{}' source has no history before {s} and cannot fetch {} for \
+                 {requested}; use a source with deeper history (e.g. yahoo)",
+                self.name(),
+                request.ticker
+            ),
+            _ => anyhow::bail!(
+                "the '{}' source only provides the latest quote and cannot fetch {} \
+                 for {requested}; drop --date, or use a source with historical \
+                 support (e.g. yahoo)",
+                self.name(),
+                request.ticker
+            ),
+        }
     }
 }
 
@@ -574,8 +580,12 @@ mod dispatch_tests {
         let err = SinceSource
             .fetch_price(&request(Some(too_early)))
             .expect_err("refuse");
+        assert!(err.to_string().contains("no history before"), "{err}");
         assert!(err.to_string().contains("1999-01-04"), "{err}");
-        assert!(err.to_string().contains("latest quote"), "{err}");
+        assert!(
+            !err.to_string().contains("latest quote"),
+            "a Since source is not latest-only; the message must not claim it is: {err}"
+        );
     }
 
     /// Identity pairs answer 1.0 for any past-or-today date without any

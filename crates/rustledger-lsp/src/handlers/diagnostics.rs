@@ -913,30 +913,11 @@ pub(crate) fn ledger_diagnostics_multi(
             .collect();
     };
 
-    // ---- Shared, file-independent setup (mirrors all_diagnostics' loaded-
-    // ledger branch). Build the overlaid directive set once. ----
-    let full_directives_raw = ledger_state.directives();
-    let booked_directives: Vec<Spanned<Directive>> =
-        if let Some(owned) = build_live_directive_overlay(overlay, full_directives_raw) {
-            owned
-        } else if let Some(full) = full_directives_raw {
-            full.to_vec()
-        } else {
-            Vec::new()
-        };
-
-    let base_dir = ledger
-        .source_map
-        .files()
-        .first()
-        .and_then(|f| f.path.parent())
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let validation_options =
-        build_validation_options_from_loader(&ledger.options, &ledger.source_map, base_dir);
-
     // Plugin set: ledger plugins with the primary (edited) file's plugins
     // replaced by its fresh parse (matches the single-file path). Unopened
-    // files aren't edited, so their ledger plugins remain current.
+    // files aren't edited, so their ledger plugins remain current. Built
+    // regardless of validation because the per-file plugin NOTES (E8006) are
+    // emitted from it even when validation is skipped.
     let primary_fid = primary_file_id.unwrap_or(0) as usize;
     let merged_plugins: Vec<Plugin> = ledger
         .plugins
@@ -955,9 +936,40 @@ pub(crate) fn ledger_diagnostics_multi(
         })
     };
 
-    // ---- ONE whole-ledger book + validate ----
-    let validation =
-        run_ledger_validation(booked_directives, validation_options, plugin_ctx.as_ref());
+    // ---- ONE whole-ledger book + validate, but ONLY if some target will use
+    // it. When every target fails `validation_would_run` (all have parse
+    // errors, or all exceed the size cap), the whole-ledger book + plugin +
+    // validate would be thrown away, so skip it entirely rather than block the
+    // main loop on discarded work (Copilot review). The expensive directive
+    // overlay is built inside this branch too. ----
+    let any_target_validates = targets
+        .iter()
+        .any(|t| validation_would_run(t.source, t.parse));
+    let validation = if any_target_validates {
+        let full_directives_raw = ledger_state.directives();
+        let booked_directives: Vec<Spanned<Directive>> =
+            if let Some(owned) = build_live_directive_overlay(overlay, full_directives_raw) {
+                owned
+            } else if let Some(full) = full_directives_raw {
+                full.to_vec()
+            } else {
+                Vec::new()
+            };
+        let base_dir = ledger
+            .source_map
+            .files()
+            .first()
+            .and_then(|f| f.path.parent())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let validation_options =
+            build_validation_options_from_loader(&ledger.options, &ledger.source_map, base_dir);
+        run_ledger_validation(booked_directives, validation_options, plugin_ctx.as_ref())
+    } else {
+        LedgerValidation {
+            errors: Vec::new(),
+            plugin_errors: Vec::new(),
+        }
+    };
 
     // ---- Map each target from the shared validation ----
     targets
@@ -2376,6 +2388,39 @@ plugin "auto_accounts"
             "must run exactly ONE whole-ledger validation for {} files (#1799), ran {}",
             targets.len(),
             after - before
+        );
+
+        // ...and ZERO validations when every target fails `validation_would_run`
+        // (here: all targets have parse errors), since the result would be
+        // discarded anyway (Copilot review).
+        let bad_source: Arc<str> = Arc::from("this is not valid @@@ beancount\n");
+        let bad_parse = parse(&bad_source);
+        assert!(
+            !bad_parse.errors.is_empty(),
+            "fixture must have parse errors"
+        );
+        let bad_targets: Vec<FileDiagTarget<'_>> = files
+            .iter()
+            .map(|(fid, _)| FileDiagTarget {
+                file_id: *fid,
+                source: &bad_source,
+                parse: &bad_parse,
+            })
+            .collect();
+        let before = LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
+        let _ = ledger_diagnostics_multi(
+            &ls,
+            Some(0),
+            &bad_parse,
+            &[],
+            &bad_targets,
+            PositionEncoding::Utf16,
+        );
+        let after = LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
+        assert_eq!(
+            after - before,
+            0,
+            "no target can use validation (all have parse errors), so it must not run"
         );
     }
 }

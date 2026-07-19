@@ -160,8 +160,12 @@ fn summary_transaction(
     synthetic_transaction(date, postings)
 }
 
-/// Close Income/Expenses P&L totals to `earnings`, balanced against
-/// `contra` (`ClampAccounts::previous_earnings` / `previous_balances`).
+/// Close Income/Expenses P&L totals to the earnings account, balanced
+/// against the opening-balances contra. `earnings` is
+/// `ClampAccounts::previous_earnings`; `contra` is
+/// `ClampAccounts::previous_balances` (the same account the opening-balance
+/// summaries balance against, so the two summary transactions net to zero
+/// on that account).
 fn earnings_transaction(
     pnl: &HashMap<String, Decimal>,
     date: NaiveDate,

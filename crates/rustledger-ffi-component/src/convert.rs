@@ -1457,15 +1457,23 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
         }
     }
 
-    rustledger_ops::clamp::clamp_indexed(&core, begin_date, end_date)
-        .into_iter()
-        .map(|(d, src)| match src.and_then(|j| orig_index.get(j)) {
-            // Pass-through: hand back the original WIT directive untouched.
-            Some(&i) => entries[i].clone(),
-            // Synthesized summary: build from core with the `<clamped>` source.
-            None => directive_from_core(&d, 0, "<clamped>"),
-        })
-        .collect()
+    // A bare directive list carries no ledger options, so classification and
+    // the synthesized-summary account names fall back to beancount defaults
+    // (#1806). The session's `clamp` uses the held options instead.
+    rustledger_ops::clamp::clamp_indexed(
+        &core,
+        begin_date,
+        end_date,
+        &rustledger_ops::clamp::ClampAccounts::default(),
+    )
+    .into_iter()
+    .map(|(d, src)| match src.and_then(|j| orig_index.get(j)) {
+        // Pass-through: hand back the original WIT directive untouched.
+        Some(&i) => entries[i].clone(),
+        // Synthesized summary: build from core with the `<clamped>` source.
+        None => directive_from_core(&d, 0, "<clamped>"),
+    })
+    .collect()
 }
 
 /// Run a BQL query against an already-loaded directive set (#1423).
@@ -1712,17 +1720,33 @@ impl SessionState {
         let directives = self
             .padded
             .get_or_init(|| rustledger_booking::merge_with_padding(&self.directives));
-        run_query(
-            directives,
-            query_str,
-            rustledger_core::AccountTypes {
-                assets: self.options.name_assets.clone(),
-                liabilities: self.options.name_liabilities.clone(),
-                equity: self.options.name_equity.clone(),
-                income: self.options.name_income.clone(),
-                expenses: self.options.name_expenses.clone(),
-            },
-        )
+        run_query(directives, query_str, self.account_types())
+    }
+
+    /// The held options' account-root classifier — the single place the
+    /// session turns its `name-*` roots into an [`AccountTypes`], shared by
+    /// `query` (BQL classification) and `clamp` (summary classification).
+    fn account_types(&self) -> rustledger_core::AccountTypes {
+        rustledger_core::AccountTypes {
+            assets: self.options.name_assets.clone(),
+            liabilities: self.options.name_liabilities.clone(),
+            equity: self.options.name_equity.clone(),
+            income: self.options.name_income.clone(),
+            expenses: self.options.name_expenses.clone(),
+        }
+    }
+
+    /// The held options' clamp configuration (#1806): the account-root
+    /// classifier plus the `account_previous_balances` / `_earnings`
+    /// summary account names. So `session.clamp` synthesizes opening
+    /// balances into the ledger's OWN accounts, where the options-less
+    /// builder free `clamp` falls back to beancount defaults.
+    fn clamp_accounts(&self) -> rustledger_ops::clamp::ClampAccounts {
+        rustledger_ops::clamp::ClampAccounts {
+            types: self.account_types(),
+            previous_balances: self.options.account_previous_balances.clone(),
+            previous_earnings: self.options.account_previous_earnings.clone(),
+        }
     }
 
     /// Keep only directives within `[begin, end)`. Reuses the free `filter`'s
@@ -1811,15 +1835,22 @@ impl SessionState {
         // synthesized opening-balance / earnings summaries fall back to the
         // `<clamped>` sentinel. (#1425 — restores provenance that the old
         // `clamp` -> `directive_to_json(d, 0, "<clamped>")` mapping dropped.)
-        rustledger_ops::clamp::clamp_indexed(&self.directives, begin_date, end_date)
-            .into_iter()
-            .map(|(d, src)| {
-                let (line, file) = src
-                    .and_then(|i| self.lines.get(i).copied().zip(self.files.get(i)))
-                    .map_or((0, "<clamped>"), |(line, file)| (line, file.as_str()));
-                directive_from_core(&d, line, file)
-            })
-            .collect()
+        // The held options drive classification + summary account names
+        // (#1806), so a renamed-root ledger clamps into its own accounts.
+        rustledger_ops::clamp::clamp_indexed(
+            &self.directives,
+            begin_date,
+            end_date,
+            &self.clamp_accounts(),
+        )
+        .into_iter()
+        .map(|(d, src)| {
+            let (line, file) = src
+                .and_then(|i| self.lines.get(i).copied().zip(self.files.get(i)))
+                .map_or((0, "<clamped>"), |(line, file)| (line, file.as_str()));
+            directive_from_core(&d, line, file)
+        })
+        .collect()
     }
 }
 
@@ -2397,6 +2428,69 @@ option \"name_income\" \"Einnahmen\"
                 .options
                 .name_income,
             "Income"
+        );
+    }
+
+    /// #1806: `session.clamp` drives classification and the synthesized
+    /// summary account names from the HELD options. A ledger renaming its
+    /// income root and its `account_previous_earnings` must roll pre-window
+    /// income into the configured account — where the options-less
+    /// `from_entries` path falls back to beancount defaults.
+    #[test]
+    fn clamp_honors_held_options_for_classification_and_summaries() {
+        const RENAMED_EARNINGS: &str = "\
+option \"name_income\" \"Einnahmen\"
+option \"account_previous_earnings\" \"Eigenkapital:Gewinn\"
+option \"account_previous_balances\" \"Eigenkapital:Anfang\"
+2023-01-01 open Assets:Bank
+2023-01-01 open Einnahmen:Lohn
+
+2023-06-01 * \"pre-window pay\"
+  Assets:Bank  100.00 EUR
+  Einnahmen:Lohn  -100.00 EUR
+";
+        let loaded = SessionState::from_source(RENAMED_EARNINGS);
+        let info = loaded.info();
+        assert!(
+            info.errors.is_empty(),
+            "fixture must load: {:?}",
+            info.errors
+        );
+
+        let mentions = |dirs: &[super::wit::Directive], account: &str| {
+            dirs.iter().any(|d| {
+                matches!(d, super::wit::Directive::Transaction(t)
+                    if t.postings.iter().any(|p| p.account == account))
+            })
+        };
+
+        // Held options: pre-window income (a RENAMED root) rolls up, and
+        // the summary legs use the configured equity accounts.
+        let held = SessionState::from_entries_with_options(&info.entries, info.options.clone());
+        let clamped = held.clamp("2024-01-01", "2024-12-31");
+        assert!(
+            mentions(&clamped, "Eigenkapital:Gewinn"),
+            "renamed income must roll into the configured earnings account"
+        );
+        assert!(
+            mentions(&clamped, "Eigenkapital:Anfang"),
+            "opening balance must use the configured contra account"
+        );
+        assert!(
+            !mentions(&clamped, "Equity:Opening-Balances")
+                && !mentions(&clamped, "Equity:Earnings:Previous"),
+            "no hardcoded default summary accounts on a renamed ledger"
+        );
+
+        // Options-less path: same entries, but classification falls back to
+        // defaults, so the renamed `Einnahmen` root is NOT income and no
+        // earnings rollup is synthesized.
+        let defaulted = SessionState::from_entries(&info.entries);
+        let clamped = defaulted.clamp("2024-01-01", "2024-12-31");
+        assert!(
+            !mentions(&clamped, "Eigenkapital:Gewinn")
+                && !mentions(&clamped, "Equity:Earnings:Previous"),
+            "default classifier does not treat Einnahmen as income, so no earnings summary"
         );
     }
 }

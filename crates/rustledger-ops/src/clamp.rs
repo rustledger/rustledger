@@ -8,20 +8,48 @@
 use std::collections::HashMap;
 
 use rustledger_core::{
-    Amount, CostNumber, CostSpec, Decimal, Directive, IncompleteAmount, Inventory, Metadata,
-    NaiveDate, Position, Posting, Span, Spanned, Transaction,
+    AccountTypes, Amount, CostNumber, CostSpec, Decimal, Directive, IncompleteAmount, Inventory,
+    Metadata, NaiveDate, Position, Posting, Span, Spanned, Transaction,
 };
 
-fn account_root(account: &str) -> &str {
-    account.split(':').next().unwrap_or("")
+/// Account configuration for clamp's synthesized summaries (#1806).
+///
+/// Two things clamp used to hardcode, both broken on a ledger that renames
+/// its roots or sets `account_previous_*`:
+///
+/// - **Classification** — which accounts are balance-sheet (carried forward
+///   as opening balances) vs income-statement (rolled into earnings). Uses
+///   the canonical [`AccountTypes`] rather than matching root strings, so a
+///   `option "name_assets" "Activa"` ledger classifies its accounts instead
+///   of silently summarizing nothing.
+/// - **Summary account names** — the contra leg of the opening-balance
+///   transaction (`account_previous_balances`) and the earnings rollup
+///   target (`account_previous_earnings`).
+///
+/// [`Default`] reproduces beancount's defaults (and rledger's prior
+/// hardcoded behavior), so a caller with no ledger options in hand — e.g.
+/// the builder free `clamp` over a bare directive list — gets exactly what
+/// it got before this config existed.
+#[derive(Debug, Clone)]
+pub struct ClampAccounts {
+    /// Root-name classifier (config-aware; never matches root strings).
+    pub types: AccountTypes,
+    /// Contra account for synthesized opening balances
+    /// (`account_previous_balances`).
+    pub previous_balances: String,
+    /// Rollup target for pre-window Income/Expenses P&L
+    /// (`account_previous_earnings`).
+    pub previous_earnings: String,
 }
 
-fn is_balance_sheet(account: &str) -> bool {
-    matches!(account_root(account), "Assets" | "Liabilities" | "Equity")
-}
-
-fn is_income_statement(account: &str) -> bool {
-    matches!(account_root(account), "Income" | "Expenses")
+impl Default for ClampAccounts {
+    fn default() -> Self {
+        Self {
+            types: AccountTypes::default(),
+            previous_balances: "Equity:Opening-Balances".to_string(),
+            previous_earnings: "Equity:Earnings:Previous".to_string(),
+        }
+    }
 }
 
 /// Type-priority tiebreaker for the final sort (mirrors `clamp_entries`).
@@ -99,8 +127,14 @@ fn position_cost_spec(position: &Position) -> Option<CostSpec> {
     })
 }
 
-/// One opening-balance transaction for an account's inventory.
-fn summary_transaction(account: &str, inventory: &Inventory, date: NaiveDate) -> Directive {
+/// One opening-balance transaction for an account's inventory. `contra` is
+/// the balancing account (`ClampAccounts::previous_balances`).
+fn summary_transaction(
+    account: &str,
+    inventory: &Inventory,
+    date: NaiveDate,
+    contra: &str,
+) -> Directive {
     let mut postings = Vec::new();
     for position in inventory.positions() {
         postings.push(synthetic_posting(
@@ -110,14 +144,14 @@ fn summary_transaction(account: &str, inventory: &Inventory, date: NaiveDate) ->
             position_cost_spec(position),
         ));
     }
-    // Balancing Equity:Opening-Balances posting per position. A held-at-cost lot
+    // Balancing opening-balances posting per position. A held-at-cost lot
     // MUST carry the same cost here so the opening transaction balances by weight
     // (#1656): the asset leg's weight is `N * cost` in the cost currency, so a
     // bare-units contra leaves that weight unoffset and any at-cost view of the
     // clamped ledger stops summing to zero.
     for position in inventory.positions() {
         postings.push(synthetic_posting(
-            "Equity:Opening-Balances",
+            contra,
             -position.units.number,
             &position.units.currency,
             position_cost_spec(position),
@@ -126,8 +160,14 @@ fn summary_transaction(account: &str, inventory: &Inventory, date: NaiveDate) ->
     synthetic_transaction(date, postings)
 }
 
-/// Close Income/Expenses P&L totals to Equity:Earnings:Previous.
-fn earnings_transaction(pnl: &HashMap<String, Decimal>, date: NaiveDate) -> Option<Directive> {
+/// Close Income/Expenses P&L totals to `earnings`, balanced against
+/// `contra` (`ClampAccounts::previous_earnings` / `previous_balances`).
+fn earnings_transaction(
+    pnl: &HashMap<String, Decimal>,
+    date: NaiveDate,
+    earnings: &str,
+    contra: &str,
+) -> Option<Directive> {
     let mut currencies: Vec<&String> = pnl.keys().collect();
     currencies.sort();
     let mut postings = Vec::new();
@@ -137,18 +177,8 @@ fn earnings_transaction(pnl: &HashMap<String, Decimal>, date: NaiveDate) -> Opti
             continue;
         }
         let cur: rustledger_core::Currency = currency.as_str().into();
-        postings.push(synthetic_posting(
-            "Equity:Earnings:Previous",
-            number,
-            &cur,
-            None,
-        ));
-        postings.push(synthetic_posting(
-            "Equity:Opening-Balances",
-            -number,
-            &cur,
-            None,
-        ));
+        postings.push(synthetic_posting(earnings, number, &cur, None));
+        postings.push(synthetic_posting(contra, -number, &cur, None));
     }
     if postings.is_empty() {
         return None;
@@ -158,9 +188,17 @@ fn earnings_transaction(pnl: &HashMap<String, Decimal>, date: NaiveDate) -> Opti
 
 /// Clamp `directives` to `[begin, end)`, synthesizing opening balances from
 /// pre-`begin` activity and carrying forward the latest prices.
+///
+/// `accounts` supplies the classification and synthesized-summary account
+/// names (#1806); pass [`ClampAccounts::default`] for beancount defaults.
 #[must_use]
-pub fn clamp(directives: &[Directive], begin: NaiveDate, end: NaiveDate) -> Vec<Directive> {
-    clamp_indexed(directives, begin, end)
+pub fn clamp(
+    directives: &[Directive],
+    begin: NaiveDate,
+    end: NaiveDate,
+    accounts: &ClampAccounts,
+) -> Vec<Directive> {
+    clamp_indexed(directives, begin, end, accounts)
         .into_iter()
         .map(|(d, _)| d)
         .collect()
@@ -180,6 +218,7 @@ pub fn clamp_indexed(
     directives: &[Directive],
     begin: NaiveDate,
     end: NaiveDate,
+    accounts: &ClampAccounts,
 ) -> Vec<(Directive, Option<usize>)> {
     let mut balances: HashMap<String, Inventory> = HashMap::new();
     let mut latest_prices: HashMap<(String, String), (NaiveDate, Directive, usize)> =
@@ -218,26 +257,36 @@ pub fn clamp_indexed(
     // Opening-balance summaries for balance-sheet accounts (sorted by name).
     let mut bs_accounts: Vec<(&String, &Inventory)> = balances
         .iter()
-        .filter(|(account, inv)| is_balance_sheet(account) && !inv.is_empty())
+        .filter(|(account, inv)| accounts.types.is_balance_sheet(account) && !inv.is_empty())
         .collect();
     bs_accounts.sort_by_key(|(account, _)| (*account).clone());
     // Synthesized summaries carry no source directive (`None`).
     let mut summaries: Vec<(Directive, Option<usize>)> = bs_accounts
         .into_iter()
-        .map(|(account, inv)| (summary_transaction(account, inv, begin), None))
+        .map(|(account, inv)| {
+            (
+                summary_transaction(account, inv, begin, &accounts.previous_balances),
+                None,
+            )
+        })
         .collect();
 
     // Earnings: roll up Income/Expenses P&L.
     let mut pnl: HashMap<String, Decimal> = HashMap::new();
     for (account, inv) in &balances {
-        if is_income_statement(account) {
+        if accounts.types.is_income_statement(account) {
             for position in inv.positions() {
                 *pnl.entry(position.units.currency.to_string()).or_default() +=
                     position.units.number;
             }
         }
     }
-    if let Some(earnings) = earnings_transaction(&pnl, begin) {
+    if let Some(earnings) = earnings_transaction(
+        &pnl,
+        begin,
+        &accounts.previous_earnings,
+        &accounts.previous_balances,
+    ) {
         summaries.push((earnings, None));
     }
 
@@ -287,6 +336,93 @@ mod tests {
             if t.postings.iter().any(|p| p.value.account.to_string() == account))
     }
 
+    /// #1806: on a ledger that renames its roots and its summary accounts,
+    /// clamp must classify AND synthesize against the configured names, not
+    /// the hardcoded `Assets`/`Equity:Opening-Balances` strings. This pins
+    /// both hardcodings at once — the classifier (a renamed asset root must
+    /// still be carried forward, which a string-match would silently drop,
+    /// producing NO summary) and the contra/earnings account names.
+    #[test]
+    fn clamp_honors_renamed_roots_and_summary_accounts() {
+        // Renamed roots: Activa (assets), Vermogen (equity), Inkomsten
+        // (income). Pre-window activity: an asset buy funded by income.
+        let src = "2023-01-01 open Activa:Bank\n\
+                   2023-01-01 open Inkomsten:Loon\n\n\
+                   2023-06-01 * \"pre-window pay\"\n  \
+                   Activa:Bank  100.00 EUR\n  \
+                   Inkomsten:Loon  -100.00 EUR\n";
+        let directives = dirs(src);
+        let accounts = ClampAccounts {
+            types: AccountTypes {
+                assets: "Activa".to_string(),
+                liabilities: "Passiva".to_string(),
+                equity: "Vermogen".to_string(),
+                income: "Inkomsten".to_string(),
+                expenses: "Uitgaven".to_string(),
+            },
+            previous_balances: "Vermogen:Beginsaldi".to_string(),
+            previous_earnings: "Vermogen:Winst:Vorig".to_string(),
+        };
+        let clamped = clamp(&directives, d(2024, 1, 1), d(2024, 12, 31), &accounts);
+
+        // The renamed asset account IS carried forward (string-match on
+        // "Assets" would have classified it as non-balance-sheet and
+        // synthesized nothing — the silent-empty failure).
+        let opening = clamped
+            .iter()
+            .find(|dd| is_summary(dd) && mentions(dd, "Activa:Bank"))
+            .expect("renamed asset root must produce an opening balance");
+        // ...balanced against the configured contra, NOT Equity:Opening-Balances.
+        assert!(
+            mentions(opening, "Vermogen:Beginsaldi"),
+            "opening balance must use the configured contra account"
+        );
+        assert!(
+            !clamped
+                .iter()
+                .any(|dd| mentions(dd, "Equity:Opening-Balances")),
+            "the hardcoded default contra must not appear on a renamed ledger"
+        );
+
+        // Pre-window income rolls up to the configured earnings account.
+        let earnings = clamped
+            .iter()
+            .find(|dd| is_summary(dd) && mentions(dd, "Vermogen:Winst:Vorig"))
+            .expect("renamed income root must roll into the configured earnings account");
+        assert!(
+            mentions(earnings, "Vermogen:Beginsaldi"),
+            "earnings rollup must balance against the configured contra"
+        );
+    }
+
+    /// The `Default` config reproduces the pre-#1806 hardcoded behavior
+    /// exactly, so existing callers (and the builder free `clamp`) are
+    /// unaffected.
+    #[test]
+    fn clamp_accounts_default_matches_legacy_hardcoding() {
+        let accounts = ClampAccounts::default();
+        assert_eq!(accounts.previous_balances, "Equity:Opening-Balances");
+        assert_eq!(accounts.previous_earnings, "Equity:Earnings:Previous");
+        let src = "2023-01-01 open Assets:Bank\n\
+                   2023-01-01 open Income:Salary\n\n\
+                   2023-06-01 * \"pay\"\n  \
+                   Assets:Bank  100.00 USD\n  \
+                   Income:Salary  -100.00 USD\n";
+        let clamped = clamp(&dirs(src), d(2024, 1, 1), d(2024, 12, 31), &accounts);
+        assert!(
+            clamped
+                .iter()
+                .any(|dd| is_summary(dd) && mentions(dd, "Equity:Opening-Balances")),
+            "default contra is Equity:Opening-Balances"
+        );
+        assert!(
+            clamped
+                .iter()
+                .any(|dd| is_summary(dd) && mentions(dd, "Equity:Earnings:Previous")),
+            "default earnings is Equity:Earnings:Previous"
+        );
+    }
+
     /// L2 regression: a pre-window lot bought at COMPOUND cost
     /// (`{a # b}`) must keep its cost basis in the clamped opening
     /// balance. The old hand-rolled per-unit ladder had no `Compound`
@@ -299,7 +435,12 @@ mod tests {
                    Assets:Broker  10 WIDGET {5.00 # 10.00 USD}\n  \
                    Assets:Cash  -60.00 USD\n";
         let directives = dirs(src);
-        let clamped = clamp(&directives, d(2024, 6, 1), d(2024, 12, 31));
+        let clamped = clamp(
+            &directives,
+            d(2024, 6, 1),
+            d(2024, 12, 31),
+            &ClampAccounts::default(),
+        );
         let summary = clamped
             .iter()
             .find(|dd| is_summary(dd) && mentions(dd, "Assets:Broker"))
@@ -332,7 +473,12 @@ mod tests {
             "2023-06-01 * \"old\"\n  Assets:Cash  100 USD\n  Equity:Opening-Balances  -100 USD\n\
              2024-02-01 * \"in range\"\n  Assets:Cash  -5 USD\n  Expenses:Food  5 USD\n",
         );
-        let out = clamp_indexed(&input, d(2024, 1, 1), d(2024, 12, 31));
+        let out = clamp_indexed(
+            &input,
+            d(2024, 1, 1),
+            d(2024, 12, 31),
+            &ClampAccounts::default(),
+        );
 
         // The in-range transaction is a pass-through pointing back at its input
         // (index 1), so a caller can restore its real filename/lineno.
@@ -355,7 +501,12 @@ mod tests {
         assert_eq!(summary.1, None, "synthesized summary has no source index");
 
         // `clamp` is exactly `clamp_indexed` with the indices dropped.
-        let plain = clamp(&input, d(2024, 1, 1), d(2024, 12, 31));
+        let plain = clamp(
+            &input,
+            d(2024, 1, 1),
+            d(2024, 12, 31),
+            &ClampAccounts::default(),
+        );
         let indexed: Vec<_> = out.into_iter().map(|(dir, _)| dir).collect();
         assert_eq!(
             plain, indexed,
@@ -369,7 +520,12 @@ mod tests {
             "2023-06-01 * \"old\"\n  Assets:Cash  100 USD\n  Equity:Opening-Balances  -100 USD\n\
              2024-02-01 * \"in range\"\n  Assets:Cash  -5 USD\n  Expenses:Food  5 USD\n",
         );
-        let out = clamp(&input, d(2024, 1, 1), d(2024, 12, 31));
+        let out = clamp(
+            &input,
+            d(2024, 1, 1),
+            d(2024, 12, 31),
+            &ClampAccounts::default(),
+        );
 
         // No pre-begin entries survive.
         assert!(out.iter().all(|dir| dir.date() >= d(2024, 1, 1)));
@@ -388,7 +544,12 @@ mod tests {
     #[test]
     fn drops_entries_after_end() {
         let input = dirs("2025-01-01 * \"future\"\n  Assets:Cash 1 USD\n  Expenses:X -1 USD\n");
-        let out = clamp(&input, d(2024, 1, 1), d(2024, 12, 31));
+        let out = clamp(
+            &input,
+            d(2024, 1, 1),
+            d(2024, 12, 31),
+            &ClampAccounts::default(),
+        );
         assert!(
             out.iter()
                 .all(|dir| !matches!(dir, Directive::Transaction(t)
@@ -399,7 +560,12 @@ mod tests {
     #[test]
     fn excludes_commodity_in_range() {
         let input = dirs("2024-03-01 commodity USD\n");
-        let out = clamp(&input, d(2024, 1, 1), d(2024, 12, 31));
+        let out = clamp(
+            &input,
+            d(2024, 1, 1),
+            d(2024, 12, 31),
+            &ClampAccounts::default(),
+        );
         assert!(
             out.iter()
                 .all(|dir| !matches!(dir, Directive::Commodity(_)))
@@ -409,7 +575,12 @@ mod tests {
     #[test]
     fn keeps_pre_begin_open() {
         let input = dirs("2020-01-01 open Assets:Cash USD\n");
-        let out = clamp(&input, d(2024, 1, 1), d(2024, 12, 31));
+        let out = clamp(
+            &input,
+            d(2024, 1, 1),
+            d(2024, 12, 31),
+            &ClampAccounts::default(),
+        );
         assert!(out.iter().any(|dir| matches!(dir, Directive::Open(_))));
     }
 
@@ -418,7 +589,12 @@ mod tests {
         // Pre-begin income produces an Equity:Earnings:Previous summary.
         let input =
             dirs("2023-05-01 * \"salary\"\n  Assets:Cash  1000 USD\n  Income:Salary  -1000 USD\n");
-        let out = clamp(&input, d(2024, 1, 1), d(2024, 12, 31));
+        let out = clamp(
+            &input,
+            d(2024, 1, 1),
+            d(2024, 12, 31),
+            &ClampAccounts::default(),
+        );
         assert!(
             out.iter()
                 .any(|dir| mentions(dir, "Equity:Earnings:Previous")),
@@ -440,7 +616,12 @@ mod tests {
              2000-01-03 * \"buy\"\n  Assets:MC    1 XYZ {50 USD}\n  Assets:MC  -50 USD\n",
         );
         // Clamp to a window AFTER all entries: everything becomes opening balance.
-        let out = clamp(&input, d(2014, 1, 1), d(2015, 1, 1));
+        let out = clamp(
+            &input,
+            d(2014, 1, 1),
+            d(2015, 1, 1),
+            &ClampAccounts::default(),
+        );
 
         let opening = out
             .iter()

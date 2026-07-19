@@ -185,27 +185,35 @@ fn corpus_loads_identically_via_native_and_component() -> Result<()> {
         let native = rustledger_ffi_wasi::helpers::load_source(&src);
         let loaded = ledger.call_load(&mut store, &src, "<corpus>", false)?;
 
-        // Feature-divergence skip (#1809). The component wasm is always
-        // built WITHOUT `python-plugins`/`wasm-plugins`, so a fixture that
-        // declares such a plugin gets the sentinel "requires the ...-plugins
-        // feature" error from the component. The NATIVE reference
-        // (`load_source`), however, is compiled into this test binary, and
-        // under `cargo test --workspace` cargo feature unification turns
-        // those features ON (the `rustledger` CLI enables them by default),
-        // so native actually ATTEMPTS the plugin and reports a different
-        // message — an artifact of comparing two differently-featured builds
-        // of the same function, not a real component regression. Such a
-        // fixture exercises a surface the featureless component cannot
-        // implement, so skip it (counted). Skipping on the component's
-        // sentinel — not on a source `plugin "..."` scan — keeps NATIVE-Rust
-        // plugins (which the featureless component DOES run) in the compared
-        // set.
-        const PLUGIN_FEATURE_SENTINEL: &str = "-plugins feature";
-        if loaded
-            .errors
-            .iter()
-            .any(|e| e.message.contains(PLUGIN_FEATURE_SENTINEL))
-        {
+        // Feature-divergence skip (#1809). The component wasm is always built
+        // WITHOUT `python-plugins`/`wasm-plugins`, so a fixture declaring such
+        // a plugin gets a `requires the …-plugins feature` error from the
+        // component. Under `cargo test --workspace`, cargo feature unification
+        // compiles the native reference (`load_source`) WITH those features
+        // (the `rustledger` CLI enables them by default), so native ATTEMPTS
+        // the plugin instead of gating it — same function, two feature builds.
+        //
+        // Skip only when the divergence is genuinely feature-driven: the
+        // component gated AND native did NOT gate. Both halves matter (deep
+        // review of this PR):
+        //   - Requiring `!native_gated` avoids over-skipping in a FEATURELESS
+        //     native build (`-p …-tests`, no unification): there both sides
+        //     emit the same gate message and legitimately compare EQUAL, so
+        //     the fixture stays covered instead of being dropped.
+        //   - Keying the skip on the exact `requires the …-plugins feature`
+        //     phrases (not a loose substring, not a source `plugin "…"` scan)
+        //     keeps native-Rust-plugin fixtures — which the featureless
+        //     component DOES run — in the compared set, and won't misfire on a
+        //     `Plugin not found: "…"` message that merely echoes a plugin name.
+        // A broad component regression that emitted the gate spuriously would
+        // spike `skipped_plugin_feature`, which is bounded by an assert below.
+        let gated = |msg: &str| {
+            msg.contains("requires the python-plugins feature")
+                || msg.contains("requires the wasm-plugins feature")
+        };
+        let component_gated = loaded.errors.iter().any(|e| gated(&e.message));
+        let native_gated = native.errors.iter().any(|e| gated(&e.message));
+        if component_gated && !native_gated {
             skipped += 1;
             skipped_plugin_feature += 1;
             continue;
@@ -275,6 +283,30 @@ fn corpus_loads_identically_via_native_and_component() -> Result<()> {
          files {}",
         files.len()
     );
+
+    // Collapse guards (deep review of this PR): the plugin-feature skip is
+    // decided partly from the component's OWN output, so a component-side
+    // regression that emitted the gate broadly could drive `compared` toward
+    // zero while `mismatches` stays empty — a silently-passing test. Only a
+    // handful of corpus fixtures declare Python/WASM plugins, so cap the skip
+    // count, and require most fixtures to actually be compared. Both bounds
+    // are far from the current values (skip ≈ 4, compared ≈ 301 of 322) yet
+    // trip long before a real collapse.
+    const MAX_PLUGIN_FEATURE_SKIPS: usize = 30;
+    assert!(
+        skipped_plugin_feature <= MAX_PLUGIN_FEATURE_SKIPS,
+        "plugin-feature skip count {skipped_plugin_feature} exceeds {MAX_PLUGIN_FEATURE_SKIPS} — \
+         the featureless component is gating far more fixtures than expected, which would \
+         silently shrink the compared set (possible component regression, or new plugin \
+         fixtures that need this bound raised)"
+    );
+    assert!(
+        compared >= files.len() / 2,
+        "only {compared} of {} corpus files were compared — too few; the parity check has \
+         been hollowed out by skips",
+        files.len()
+    );
+
     assert!(
         mismatches.is_empty(),
         "{} corpus file(s) diverge between native load and the component:\n{}",
@@ -285,6 +317,43 @@ fn corpus_loads_identically_via_native_and_component() -> Result<()> {
             .cloned()
             .collect::<Vec<_>>()
             .join("\n")
+    );
+    Ok(())
+}
+
+/// Drift guard (deep review of #1809 fix): the corpus parity skip keys off the
+/// exact `requires the {python,wasm}-plugins feature` phrases emitted by
+/// `rustledger-loader`'s plugin pass. If those messages are reworded, the
+/// substring match in `corpus_loads_identically_via_native_and_component`
+/// silently stops skipping and the corpus test fails spuriously on an
+/// unrelated PR. This pins the wording end-to-end: load a source declaring a
+/// Python plugin through the FEATURELESS component and assert it still emits
+/// the phrase the skip depends on, so a reword fails HERE, loudly, pointing at
+/// the coupling.
+#[test]
+fn plugin_feature_gate_message_is_stable() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    let ledger = inst.rustledger_ledger_ledger();
+    // A dotted module NOT in the native-Rust plugin registry: the featureless
+    // component treats it as a Python plugin and gates it. (A native plugin
+    // like `auto_accounts` would just run — no error — so it wouldn't pin the
+    // gate wording.)
+    let src = "plugin \"some.unknown.python.module\"\n\
+               2024-01-01 open Assets:Cash\n";
+    let loaded = ledger.call_load(&mut store, src, "<drift>", false)?;
+    assert!(
+        loaded
+            .errors
+            .iter()
+            .any(|e| e.message.contains("requires the python-plugins feature")),
+        "featureless component must still gate a Python plugin with the exact phrase the \
+         corpus skip matches; if this failed after a rustledger-loader reword, update the \
+         sentinel in corpus_loads_identically_via_native_and_component to match. Got: {:?}",
+        loaded.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
     Ok(())
 }

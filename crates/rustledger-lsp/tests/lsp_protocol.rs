@@ -1073,6 +1073,119 @@ fn included_file_diagnostics_are_cleared_when_fixed() {
     );
 }
 
+/// #1813 review: editing a buffer that is NOT part of the multi-file ledger
+/// (a scratch file) must not clear an unopened included file's genuine
+/// diagnostics. The single-pass refactor's initial cut fell through to a path
+/// that published an EMPTY cross-file set whenever `current_file_id` was
+/// `None`, silently erasing real errors in unopened files.
+#[test]
+fn editing_a_non_ledger_buffer_keeps_unopened_file_diagnostics() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let journal_path = tmp.path().join("journal.beancount");
+    let good_path = tmp.path().join("good.beancount");
+    let bad_path = tmp.path().join("bad.beancount");
+    let scratch_path = tmp.path().join("scratch.beancount"); // NOT included by the journal
+
+    std::fs::write(
+        &good_path,
+        "2024-01-01 open Assets:Cash USD\n2024-01-01 open Expenses:Food USD\n",
+    )
+    .expect("write good");
+    std::fs::write(
+        &bad_path,
+        "2024-02-01 * \"unbalanced\"\n  Assets:Cash   -5 USD\n  Expenses:Food   3 USD\n",
+    )
+    .expect("write bad");
+    std::fs::write(
+        &journal_path,
+        format!(
+            "include \"{}\"\ninclude \"{}\"\n",
+            good_path.display(),
+            bad_path.display()
+        ),
+    )
+    .expect("write journal");
+
+    let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
+    client.initialize();
+
+    let good_uri = format!("file://{}", good_path.display());
+    client.open_document(
+        &good_uri,
+        &std::fs::read_to_string(&good_path).expect("read good"),
+    );
+    let bad_uri = format!("file://{}", bad_path.display());
+
+    // Phase 1: wait until bad.beancount's error is published.
+    let wait_bad = |client: &mut LspTestClient, want_empty: bool| -> bool {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let Some(msg) = client.recv_with_timeout(remaining) else {
+                return false;
+            };
+            if let lsp_server::Message::Notification(n) = msg
+                && n.method == "textDocument/publishDiagnostics"
+            {
+                let p: lsp_types::PublishDiagnosticsParams =
+                    serde_json::from_value(n.params).expect("valid publishDiagnostics");
+                if p.uri.as_str() == bad_uri && p.diagnostics.is_empty() == want_empty {
+                    return true;
+                }
+            }
+        }
+    };
+    assert!(
+        wait_bad(&mut client, false),
+        "bad.beancount's error must publish first"
+    );
+
+    // Phase 2: open + edit a scratch buffer that is NOT part of the ledger.
+    let scratch_uri = format!("file://{}", scratch_path.display());
+    client.open_document(&scratch_uri, "; scratch\n");
+    client.notify::<lsp_types::notification::DidChangeTextDocument>(
+        lsp_types::DidChangeTextDocumentParams {
+            text_document: lsp_types::VersionedTextDocumentIdentifier {
+                uri: scratch_uri.parse().expect("scratch uri"),
+                version: 2,
+            },
+            content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "; scratch edited\n".to_string(),
+            }],
+        },
+    );
+
+    // The scratch edit must NOT clear bad.beancount: any bad.beancount publish
+    // we see after it must be NON-empty. Guard against a spurious empty publish
+    // for a bounded window.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let Some(msg) = client.recv_with_timeout(remaining) else {
+            break;
+        };
+        if let lsp_server::Message::Notification(n) = msg
+            && n.method == "textDocument/publishDiagnostics"
+        {
+            let p: lsp_types::PublishDiagnosticsParams =
+                serde_json::from_value(n.params).expect("valid publishDiagnostics");
+            assert!(
+                !(p.uri.as_str() == bad_uri && p.diagnostics.is_empty()),
+                "editing a non-ledger scratch buffer must not clear the unopened \
+                 included file's diagnostics (#1813 review)"
+            );
+        }
+    }
+}
+
 /// An async-dispatched request (`semanticTokens/full`) invalidated by a
 /// concurrent edit must still receive a response — previously the stale result
 /// was silently dropped, leaving a strict client waiting forever. The response

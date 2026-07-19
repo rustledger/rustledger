@@ -1871,10 +1871,11 @@ impl MainLoopState {
             .and_then(|ls| ls.ledger())
             .is_some_and(|l| l.source_map.files().len() > 1);
 
-        let (diagnostics, cross_file) = if is_multi_file && current_file_id.is_some() {
+        let (diagnostics, cross_file) = if is_multi_file {
             // Shared overlay for the one validation: the current file's fresh
-            // parse (only when clean — overlaying a partial parse would corrupt
-            // validation of the other files) then every other open buffer.
+            // parse (only when it's a ledger file AND clean — overlaying a
+            // partial parse would corrupt validation of the other files) then
+            // every other open buffer.
             let mut overlay: Vec<(u16, &[Spanned<Directive>])> =
                 Vec::with_capacity(1 + other_buffer_overlays.len());
             if let Some(fid) = current_file_id
@@ -1884,7 +1885,7 @@ impl MainLoopState {
             }
             overlay.extend_from_slice(&other_buffer_overlays);
 
-            let (current, cross) = self.multi_file_diagnostics(
+            let (current_from_multi, cross) = self.multi_file_diagnostics(
                 ledger_state.expect("is_multi_file implies a loaded ledger"),
                 current_canonical_path.as_deref(),
                 current_file_id,
@@ -1892,10 +1893,30 @@ impl MainLoopState {
                 text,
                 &overlay,
             );
+            // When the current buffer IS part of the ledger, its diagnostics
+            // come from the shared validation (`current_from_multi`). When it
+            // ISN'T (e.g. editing a scratch file while a multi-file ledger is
+            // loaded), the current buffer self-validates via the single-file
+            // path — but cross-file diagnostics for the ledger's unopened files
+            // must STILL be recomputed and republished, not cleared (they'd
+            // otherwise vanish whenever a non-ledger buffer is edited).
+            let current = if current_file_id.is_some() {
+                current_from_multi
+            } else {
+                all_diagnostics(
+                    &result,
+                    text,
+                    ledger_state,
+                    current_file_id,
+                    current_canonical_path.as_deref(),
+                    &other_buffer_overlays,
+                    self.position_encoding,
+                )
+            };
             (current, cross)
         } else {
-            // Single-file (or current file not part of the ledger): unchanged
-            // path — validate just the current file.
+            // Single-file (or no loaded ledger): unchanged path — validate just
+            // the current file.
             let diagnostics = all_diagnostics(
                 &result,
                 text,
@@ -2010,16 +2031,21 @@ impl MainLoopState {
             })
             .collect();
 
-        // Targets for the single validation: current file first, then unopened.
-        let current_fid =
-            current_file_id.expect("multi_file_diagnostics requires a ledger file id");
+        // Targets for the single validation. When the current buffer is part
+        // of the ledger it is targets[0] (its diagnostics come from the same
+        // validation); when it is NOT (`current_file_id == None`, e.g. a
+        // scratch buffer) only the unopened files are validated here and the
+        // caller handles the current buffer via the single-file path.
+        let has_current_target = current_file_id.is_some();
         let mut targets: Vec<crate::handlers::diagnostics::FileDiagTarget<'_>> =
-            Vec::with_capacity(1 + unopened.len());
-        targets.push(crate::handlers::diagnostics::FileDiagTarget {
-            file_id: current_fid,
-            source: current_source,
-            parse: current_parse,
-        });
+            Vec::with_capacity(usize::from(has_current_target) + unopened.len());
+        if let Some(current_fid) = current_file_id {
+            targets.push(crate::handlers::diagnostics::FileDiagTarget {
+                file_id: current_fid,
+                source: current_source,
+                parse: current_parse,
+            });
+        }
         targets.extend(
             unopened
                 .iter()
@@ -2039,11 +2065,12 @@ impl MainLoopState {
             self.position_encoding,
         );
 
-        // per_file[0] is the current file; the rest align with `unopened`.
-        let current_diags = if per_file.is_empty() {
-            Vec::new()
-        } else {
+        // If present, per_file[0] is the current file; the rest align 1:1
+        // with `unopened`.
+        let current_diags = if has_current_target && !per_file.is_empty() {
             per_file.remove(0)
+        } else {
+            Vec::new()
         };
         let cross_file: Vec<(Uri, Vec<lsp_types::Diagnostic>)> = unopened
             .into_iter()

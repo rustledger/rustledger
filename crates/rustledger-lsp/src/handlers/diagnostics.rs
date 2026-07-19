@@ -913,19 +913,31 @@ pub(crate) fn ledger_diagnostics_multi(
             .collect();
     };
 
-    // Plugin set: ledger plugins with the primary (edited) file's plugins
-    // replaced by its fresh parse (matches the single-file path). Unopened
-    // files aren't edited, so their ledger plugins remain current. Built
-    // regardless of validation because the per-file plugin NOTES (E8006) are
-    // emitted from it even when validation is skipped.
-    let primary_fid = primary_file_id.unwrap_or(0) as usize;
-    let merged_plugins: Vec<Plugin> = ledger
-        .plugins
-        .iter()
-        .filter(|p| p.file_id != primary_fid)
-        .cloned()
-        .chain(parse_result_to_plugins(&primary_parse.plugins, primary_fid))
-        .collect();
+    // Plugin set for the shared validation and the per-file plugin NOTES
+    // (E8006). Start from the ledger's stored plugins, and replace the
+    // primary (edited) file's plugins with its fresh parse ONLY when that file
+    // is part of the ledger AND parsed cleanly — mirroring the directive
+    // overlay's clean-parse guard. A broken current parse recovers a partial
+    // (or empty) `.plugins` list; injecting it would DROP the current file's
+    // plugins from the whole-ledger validation the clean unopened files run
+    // against, producing spurious diagnostics there (e.g. auto_accounts
+    // dropped ⇒ phantom E1001s). When the current buffer isn't a ledger file
+    // at all, its plugins must not be injected either. In both cases keep the
+    // ledger's stored plugins, matching the old per-file path (where the
+    // current file was never the primary in the unopened files' validations).
+    let merged_plugins: Vec<Plugin> = match primary_file_id {
+        Some(fid) if primary_parse.errors.is_empty() => {
+            let primary_fid = fid as usize;
+            ledger
+                .plugins
+                .iter()
+                .filter(|p| p.file_id != primary_fid)
+                .cloned()
+                .chain(parse_result_to_plugins(&primary_parse.plugins, primary_fid))
+                .collect()
+        }
+        _ => ledger.plugins.clone(),
+    };
     let plugin_ctx = if merged_plugins.is_empty() {
         None
     } else {
@@ -984,6 +996,14 @@ pub(crate) fn ledger_diagnostics_multi(
                     plugin_ctx.as_ref(),
                     encoding,
                 ));
+            } else if t.parse.errors.is_empty() && t.source.len() > MAX_VALIDATION_FILE_SIZE {
+                // Parity with `all_diagnostics`: the only human signal that a
+                // clean-but-too-large file silently skipped validation.
+                tracing::debug!(
+                    "Skipping validation for large file ({} bytes > {} limit)",
+                    t.source.len(),
+                    MAX_VALIDATION_FILE_SIZE
+                );
             }
             // Option warnings (E7001–E7006) are shown only in the main file to
             // avoid duplication across open documents.
@@ -2421,6 +2441,78 @@ plugin "auto_accounts"
             after - before,
             0,
             "no target can use validation (all have parse errors), so it must not run"
+        );
+    }
+
+    /// #1813 review: when the CURRENT file's fresh parse is broken, its plugins
+    /// must NOT be dropped from the whole-ledger validation the clean unopened
+    /// files run against. Otherwise `auto_accounts` (declared in the current
+    /// file) vanishes and the unopened files get phantom E1001s that neither
+    /// the old per-file path nor `rledger check` produce.
+    #[test]
+    fn broken_current_parse_keeps_stored_plugins_for_cross_file_validation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("main.beancount");
+        // b (unopened) uses accounts with no explicit `open`; auto_accounts
+        // (declared in main) must synthesize the opens so there's no E1001.
+        std::fs::write(
+            dir.path().join("b.beancount"),
+            "2024-01-02 * \"x\"\n  Assets:New  10 USD\n  Equity:Opening-Balances  -10 USD\n",
+        )
+        .expect("write b");
+        std::fs::write(&main, "plugin \"auto_accounts\"\ninclude \"b.beancount\"\n")
+            .expect("write main");
+
+        let mut ls = LedgerState::new();
+        ls.load(&main).expect("load ledger");
+        // Confirm the ledger recorded auto_accounts.
+        assert!(
+            ls.ledger()
+                .expect("ledger")
+                .plugins
+                .iter()
+                .any(|p| p.name == "auto_accounts"),
+            "fixture must record the auto_accounts plugin"
+        );
+        let (b_id, b_source): (u16, Arc<str>) = ls
+            .ledger()
+            .expect("ledger")
+            .source_map
+            .files()
+            .iter()
+            .find(|f| f.path.ends_with("b.beancount"))
+            .map(|f| (f.id as u16, f.source.clone()))
+            .expect("b in ledger");
+
+        // The current file (main, id 0) parses BROKEN — its recovered plugin
+        // list is empty, so injecting it would drop auto_accounts.
+        let broken_main = parse("@@@ not valid beancount\n");
+        assert!(!broken_main.errors.is_empty(), "fixture must be broken");
+        assert!(
+            broken_main.plugins.is_empty(),
+            "broken parse must recover no plugins (else the test proves nothing)"
+        );
+
+        let b_parse = parse(&b_source);
+        let targets = [FileDiagTarget {
+            file_id: b_id,
+            source: &b_source,
+            parse: &b_parse,
+        }];
+        let per_file = ledger_diagnostics_multi(
+            &ls,
+            Some(0),
+            &broken_main,
+            &[],
+            &targets,
+            PositionEncoding::Utf16,
+        );
+
+        let b_codes: Vec<_> = per_file[0].iter().map(get_code).collect();
+        assert!(
+            !b_codes.iter().any(|c| c == "E1001"),
+            "auto_accounts (from the ledger) must still synthesize opens for the \
+             unopened file even when the current file's parse is broken — got {b_codes:?}"
         );
     }
 }

@@ -1862,29 +1862,51 @@ impl MainLoopState {
                 Vec::new()
             };
 
-        // Convert parse errors and validation errors to LSP diagnostics
-        let diagnostics = all_diagnostics(
-            &result,
-            text,
-            ledger_state,
-            current_file_id,
-            current_canonical_path.as_deref(),
-            &other_buffer_overlays,
-            self.position_encoding,
-        );
+        // Is this a multi-file ledger? If so, and the current file is part of
+        // it, the current file's diagnostics AND every unopened file's
+        // diagnostics come from a SINGLE whole-ledger validation
+        // (`ledger_diagnostics_multi`) — the #1799 fix. Otherwise fall back to
+        // the single-file `all_diagnostics` path.
+        let is_multi_file = ledger_state
+            .and_then(|ls| ls.ledger())
+            .is_some_and(|l| l.source_map.files().len() > 1);
 
-        // Compute diagnostics for ledger files reachable via `include` that are
-        // NOT open in any buffer — otherwise validation errors that live in an
-        // unopened included file (e.g. an unbalanced transaction) never surface
-        // anywhere. Open files publish their own diagnostics via didOpen/
-        // didChange, so they're skipped here.
-        let cross_file = self.compute_unopened_ledger_diagnostics(
-            ledger_state,
-            current_canonical_path.as_deref(),
-            current_file_id,
-            &result,
-            &other_buffer_overlays,
-        );
+        let (diagnostics, cross_file) = if is_multi_file && current_file_id.is_some() {
+            // Shared overlay for the one validation: the current file's fresh
+            // parse (only when clean — overlaying a partial parse would corrupt
+            // validation of the other files) then every other open buffer.
+            let mut overlay: Vec<(u16, &[Spanned<Directive>])> =
+                Vec::with_capacity(1 + other_buffer_overlays.len());
+            if let Some(fid) = current_file_id
+                && result.errors.is_empty()
+            {
+                overlay.push((fid, result.directives.as_slice()));
+            }
+            overlay.extend_from_slice(&other_buffer_overlays);
+
+            let (current, cross) = self.multi_file_diagnostics(
+                ledger_state.expect("is_multi_file implies a loaded ledger"),
+                current_canonical_path.as_deref(),
+                current_file_id,
+                &result,
+                text,
+                &overlay,
+            );
+            (current, cross)
+        } else {
+            // Single-file (or current file not part of the ledger): unchanged
+            // path — validate just the current file.
+            let diagnostics = all_diagnostics(
+                &result,
+                text,
+                ledger_state,
+                current_file_id,
+                current_canonical_path.as_deref(),
+                &other_buffer_overlays,
+                self.position_encoding,
+            );
+            (diagnostics, Vec::new())
+        };
         drop(ledger_guard); // Release lock before sending
 
         tracing::debug!(
@@ -1902,33 +1924,35 @@ impl MainLoopState {
         self.publish_cross_file_diagnostics(cross_file);
     }
 
-    /// Compute diagnostics for every ledger file reachable via `include` that
-    /// is NOT currently open in a buffer. Each unopened file is validated
-    /// against the full ledger (reusing [`all_diagnostics`], filtered to that
-    /// file's id and mapped against that file's own source), with the open
-    /// buffers' fresh parses overlaid so unsaved edits are reflected.
+    /// Compute the current file's diagnostics AND every unopened included
+    /// file's diagnostics from a SINGLE whole-ledger validation (#1799).
     ///
-    /// Returns one `(uri, diagnostics)` per unopened ledger file (diagnostics
-    /// may be empty — the caller clears those it had previously reported).
-    /// Cost is O(unopened ledger files) validations; real-world ledgers have
-    /// few files, and this only runs when the ledger spans more than one file.
-    fn compute_unopened_ledger_diagnostics(
+    /// Returns `(current_file_diagnostics, cross_file)`, where `cross_file` is
+    /// one `(uri, diagnostics)` per unopened ledger file (diagnostics may be
+    /// empty — the caller clears those it had previously reported). This
+    /// replaces the old per-file `all_diagnostics` loop, which re-ran the whole
+    /// ledger's book+validate once per file: that O(files) cost per keystroke
+    /// starved the LSP main loop and made completions time out on large
+    /// multi-file ledgers.
+    ///
+    /// Only unopened files are cross-published; open buffers self-publish via
+    /// didOpen/didChange. `overlay` is the fresh parse of every clean open
+    /// buffer (current file included when clean).
+    fn multi_file_diagnostics(
         &self,
-        ledger_state: Option<&crate::ledger_state::LedgerState>,
+        ledger_state: &crate::ledger_state::LedgerState,
         current_canonical: Option<&std::path::Path>,
         current_file_id: Option<u16>,
         current_parse: &ParseResult,
-        other_buffer_overlays: &[(u16, &[Spanned<Directive>])],
-    ) -> Vec<(Uri, Vec<lsp_types::Diagnostic>)> {
-        let Some(ls) = ledger_state else {
-            return Vec::new();
+        current_source: &str,
+        overlay: &[(u16, &[Spanned<Directive>])],
+    ) -> (
+        Vec<lsp_types::Diagnostic>,
+        Vec<(Uri, Vec<lsp_types::Diagnostic>)>,
+    ) {
+        let Some(ledger) = ledger_state.ledger() else {
+            return (Vec::new(), Vec::new());
         };
-        let Some(ledger) = ls.ledger() else {
-            return Vec::new();
-        };
-        if ledger.source_map.files().len() <= 1 {
-            return Vec::new();
-        }
 
         // Canonical paths of all open buffers (so we skip files that
         // self-publish).
@@ -1937,60 +1961,96 @@ impl MainLoopState {
             vfs.paths().filter_map(|p| p.canonicalize().ok()).collect()
         };
 
-        // Overlay applied when validating an unopened file: every open buffer's
-        // fresh parse (current file first, then the others). The current
-        // buffer is overlaid only when its fresh parse is clean — overlaying a
-        // partial/invalid parse would corrupt the validation input for the
-        // other files (matching the parse-error skip applied to the `other`
-        // buffers in `publish_diagnostics`).
-        let mut overlay_all: Vec<(u16, &[Spanned<Directive>])> =
-            Vec::with_capacity(1 + other_buffer_overlays.len());
-        if let Some(fid) = current_file_id
-            && current_parse.errors.is_empty()
-        {
-            overlay_all.push((fid, current_parse.directives.as_slice()));
+        // Collect the unopened ledger files as (uri, file_id, source, parse).
+        // Parses are owned here so they outlive the `ledger_diagnostics_multi`
+        // call; sources borrow the held ledger snapshot. Parsing each unopened
+        // file is cheap next to the validation we now do only once.
+        struct Unopened<'a> {
+            uri: Uri,
+            file_id: u16,
+            source: &'a str,
+            parse: ParseResult,
         }
-        overlay_all.extend_from_slice(other_buffer_overlays);
+        let unopened: Vec<Unopened<'_>> = ledger
+            .source_map
+            .files()
+            .iter()
+            .filter_map(|f| {
+                let canonical = f.path.canonicalize().ok();
+                // Skip the current file and any open buffer — those self-publish.
+                if canonical.as_deref() == current_canonical {
+                    return None;
+                }
+                if let Some(c) = &canonical
+                    && open_canonical.contains(c)
+                {
+                    return None;
+                }
+                // NOTE: this `file://{path}` assembly matches the crate-wide
+                // convention (see `revalidate_open_documents`, `document_links`,
+                // and `uri_to_path`, which strips a plain `file://` prefix
+                // without percent-decoding). A path with characters that aren't
+                // URI-safe (spaces, `#`, `%`) would fail to parse; warn rather
+                // than drop it silently. A proper percent-encoding
+                // `path_to_uri` helper applied consistently across the crate is
+                // the broader fix.
+                let Ok(uri) = format!("file://{}", f.path.display()).parse::<Uri>() else {
+                    tracing::warn!(
+                        "skipping cross-file diagnostics for {}: path is not a valid file:// URI",
+                        f.path.display()
+                    );
+                    return None;
+                };
+                Some(Unopened {
+                    uri,
+                    file_id: f.id as u16,
+                    source: f.source.as_ref(),
+                    parse: parse(&f.source),
+                })
+            })
+            .collect();
 
-        let mut out = Vec::new();
-        for f in ledger.source_map.files() {
-            let canonical = f.path.canonicalize().ok();
-            // Skip the current file and any open buffer — those self-publish.
-            if canonical.as_deref() == current_canonical {
-                continue;
-            }
-            if let Some(c) = &canonical
-                && open_canonical.contains(c)
-            {
-                continue;
-            }
-            // NOTE: this `file://{path}` assembly matches the crate-wide
-            // convention (see `revalidate_open_documents`, `document_links`,
-            // and `uri_to_path`, which strips a plain `file://` prefix without
-            // percent-decoding). A path with characters that aren't URI-safe
-            // (spaces, `#`, `%`) would fail to parse; warn rather than drop it
-            // silently. A proper percent-encoding `path_to_uri` helper applied
-            // consistently across the crate is the broader fix.
-            let Ok(uri) = format!("file://{}", f.path.display()).parse::<Uri>() else {
-                tracing::warn!(
-                    "skipping cross-file diagnostics for {}: path is not a valid file:// URI",
-                    f.path.display()
-                );
-                continue;
-            };
-            let parsed = parse(&f.source);
-            let diags = all_diagnostics(
-                &parsed,
-                &f.source,
-                ledger_state,
-                Some(f.id as u16),
-                Some(f.path.as_path()),
-                &overlay_all,
-                self.position_encoding,
-            );
-            out.push((uri, diags));
-        }
-        out
+        // Targets for the single validation: current file first, then unopened.
+        let current_fid =
+            current_file_id.expect("multi_file_diagnostics requires a ledger file id");
+        let mut targets: Vec<crate::handlers::diagnostics::FileDiagTarget<'_>> =
+            Vec::with_capacity(1 + unopened.len());
+        targets.push(crate::handlers::diagnostics::FileDiagTarget {
+            file_id: current_fid,
+            source: current_source,
+            parse: current_parse,
+        });
+        targets.extend(
+            unopened
+                .iter()
+                .map(|u| crate::handlers::diagnostics::FileDiagTarget {
+                    file_id: u.file_id,
+                    source: u.source,
+                    parse: &u.parse,
+                }),
+        );
+
+        let mut per_file = crate::handlers::diagnostics::ledger_diagnostics_multi(
+            ledger_state,
+            current_file_id,
+            current_parse,
+            overlay,
+            &targets,
+            self.position_encoding,
+        );
+
+        // per_file[0] is the current file; the rest align with `unopened`.
+        let current_diags = if per_file.is_empty() {
+            Vec::new()
+        } else {
+            per_file.remove(0)
+        };
+        let cross_file: Vec<(Uri, Vec<lsp_types::Diagnostic>)> = unopened
+            .into_iter()
+            .zip(per_file)
+            .map(|(u, diags)| (u.uri, diags))
+            .collect();
+        (current_diags, cross_file)
     }
 
     /// Publish or clear diagnostics for unopened included files.

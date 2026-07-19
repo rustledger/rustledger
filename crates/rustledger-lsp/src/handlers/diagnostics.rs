@@ -124,6 +124,31 @@ pub struct PluginContext<'a> {
     pub source_map: &'a SourceMap,
 }
 
+/// Convert a `ParseResult`'s plugin declarations into loader `Plugin` structs,
+/// tagged with `file_id`. The `python:` prefix forces the Python runtime.
+fn parse_result_to_plugins(
+    plugins: &[(String, Option<String>, Span)],
+    file_id: usize,
+) -> Vec<Plugin> {
+    plugins
+        .iter()
+        .map(|(name, config, span)| {
+            let (actual_name, force_python) = name
+                .strip_prefix("python:")
+                .map_or((name.clone(), false), |stripped| {
+                    (stripped.to_string(), true)
+                });
+            Plugin {
+                name: actual_name,
+                config: config.clone(),
+                span: *span,
+                file_id,
+                force_python,
+            }
+        })
+        .collect()
+}
+
 /// Run validation on parsed directives and convert errors to LSP diagnostics.
 ///
 /// The `rledger check` pipeline is:
@@ -170,15 +195,60 @@ pub struct PluginContext<'a> {
 /// `file_id` matches (or is `None`, for global errors like duplicate
 /// account opens across files).
 pub fn validation_errors_to_diagnostics(
-    mut booked_directives: Vec<Spanned<Directive>>,
+    booked_directives: Vec<Spanned<Directive>>,
     source: &str,
     validation_options: ValidationOptions,
     current_file_id: Option<u16>,
     plugin_ctx: Option<&PluginContext<'_>>,
     encoding: PositionEncoding,
 ) -> Vec<Diagnostic> {
-    let line_index = LineIndex::new(source, encoding);
-    let mut extra_diagnostics = Vec::new();
+    // Run the file-independent booking + validation ONCE, then map the result
+    // to this one file. `validation_errors_to_diagnostics` is the single-file
+    // entry point; the multi-file path ([`ledger_diagnostics_multi`]) shares
+    // one `run_ledger_validation` across every file instead of re-running it
+    // per file (#1799).
+    let validation = run_ledger_validation(booked_directives, validation_options, plugin_ctx);
+    map_validation_to_diagnostics(&validation, source, current_file_id, plugin_ctx, encoding)
+}
+
+/// The file-INDEPENDENT, expensive half of LSP validation, computed once per
+/// ledger snapshot: sort into booking order, book + interpolate every
+/// transaction, run both plugin passes, then the Early + Late validation
+/// passes. The resulting errors span every file (each tagged with its
+/// `file_id`); per-file diagnostics are derived from this by
+/// [`map_validation_to_diagnostics`].
+///
+/// Splitting this out is the fix for #1799: the cross-file diagnostics path
+/// used to call [`all_diagnostics`] once per ledger file, each re-running this
+/// whole-ledger book+validate just to keep one file's errors — O(files) full
+/// validations per keystroke, which starved the single-threaded LSP main loop
+/// and made completions time out on large multi-file ledgers.
+pub(crate) struct LedgerValidation {
+    /// Validation errors across ALL files (unfiltered; each carries `file_id`).
+    errors: Vec<ValidationError>,
+    /// Loader plugin errors (they carry no `file_id`), pre-converted to
+    /// `(severity, code, message)`. Shown only in the main file (file 0).
+    plugin_errors: Vec<(DiagnosticSeverity, String, String)>,
+}
+
+// Per-thread count of `run_ledger_validation` invocations, for the #1799
+// regression test that asserts ONE whole-ledger validation regardless of file
+// count. Thread-local (not a global atomic) so parallel tests don't pollute
+// each other's count — `run_ledger_validation` runs synchronously on the
+// caller's thread.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LEDGER_VALIDATION_RUNS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn run_ledger_validation(
+    mut booked_directives: Vec<Spanned<Directive>>,
+    validation_options: ValidationOptions,
+    plugin_ctx: Option<&PluginContext<'_>>,
+) -> LedgerValidation {
+    #[cfg(test)]
+    LEDGER_VALIDATION_RUNS.with(|c| c.set(c.get() + 1));
 
     // Booking order via the canonical comparator — the SINGLE source for
     // (date, priority, cost-reduction-last), shared with the loader and
@@ -200,14 +270,87 @@ pub fn validation_errors_to_diagnostics(
         // If booking fails, we leave the transaction as-is and let validation catch it
     }
 
+    let mut plugin_errors_out = Vec::new();
+
     // LSP runs both plugin passes — synth then regular — on already-booked
     // directives. The loader's process::process() splits these around its
     // own Early/Late validation phases; the LSP collapses validation into
     // a single step but still needs both plugin passes to fire so that
     // synth-injected Opens (auto_accounts) suppress spurious E1001s and
     // regular plugins (effective_date, etc.) transform directives before
-    // validation. See validation_errors_to_diagnostics for the LSP's
-    // pipeline rationale and trade-offs.
+    // validation.
+    if let Some(ctx) = plugin_ctx {
+        let load_options = LoadOptions::default();
+        let mut plugin_errors = Vec::new();
+        // Run synth pass first so auto_accounts can synthesize Opens
+        // for accounts referenced without explicit declaration; this
+        // suppresses spurious E1001 diagnostics in the LSP.
+        let synth_result = rustledger_loader::run_plugins(
+            &mut booked_directives,
+            ctx.plugins,
+            ctx.file_options,
+            &load_options,
+            ctx.source_map,
+            &mut plugin_errors,
+            rustledger_loader::PluginPass::PreBookingSynth,
+        );
+        match synth_result.and_then(|()| {
+            rustledger_loader::run_plugins(
+                &mut booked_directives,
+                ctx.plugins,
+                ctx.file_options,
+                &load_options,
+                ctx.source_map,
+                &mut plugin_errors,
+                rustledger_loader::PluginPass::PostBooking,
+            )
+        }) {
+            Ok(()) => {
+                for err in &plugin_errors {
+                    let severity = match err.severity {
+                        rustledger_loader::ErrorSeverity::Error => DiagnosticSeverity::ERROR,
+                        rustledger_loader::ErrorSeverity::Warning => DiagnosticSeverity::WARNING,
+                    };
+                    plugin_errors_out.push((severity, err.code.clone(), err.message.clone()));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Plugin execution failed in LSP: {e}");
+            }
+        }
+    }
+
+    // LSP receives already-booked directives, so it has no booking step
+    // to interleave between phases. Run Early + Late back-to-back
+    // against the same input. See `rustledger_validate::Phase` for the
+    // architecture rationale.
+    let today = jiff::Zoned::now().date();
+    let session = ValidationSession::new(validation_options);
+    let (session, mut errors) = session.run_early_spanned(&booked_directives, today);
+    let (session, late_errs) = session.run_late_spanned(&booked_directives, today);
+    errors.extend(late_errs);
+    errors.extend(session.finalize());
+
+    LedgerValidation {
+        errors,
+        plugin_errors: plugin_errors_out,
+    }
+}
+
+/// Map a shared [`LedgerValidation`] to the diagnostics for ONE file: the
+/// validation errors whose `file_id` matches (plus global `None`-file errors),
+/// mapped to positions in this file's `source`, plus this file's non-native
+/// plugin info notes and (in the main file only) the loader plugin errors.
+pub(crate) fn map_validation_to_diagnostics(
+    validation: &LedgerValidation,
+    source: &str,
+    current_file_id: Option<u16>,
+    plugin_ctx: Option<&PluginContext<'_>>,
+    encoding: PositionEncoding,
+) -> Vec<Diagnostic> {
+    let line_index = LineIndex::new(source, encoding);
+    let mut extra_diagnostics = Vec::new();
+
     if let Some(ctx) = plugin_ctx {
         // Emit info diagnostics for non-native plugins. The loader's run_plugins()
         // only executes native plugins — Python/WASM plugins are not run in the LSP.
@@ -249,95 +392,40 @@ pub fn validation_errors_to_diagnostics(
             }
         }
 
-        let load_options = LoadOptions::default();
-        let mut plugin_errors = Vec::new();
-        // Run synth pass first so auto_accounts can synthesize Opens
-        // for accounts referenced without explicit declaration; this
-        // suppresses spurious E1001 diagnostics in the LSP.
-        let synth_result = rustledger_loader::run_plugins(
-            &mut booked_directives,
-            ctx.plugins,
-            ctx.file_options,
-            &load_options,
-            ctx.source_map,
-            &mut plugin_errors,
-            rustledger_loader::PluginPass::PreBookingSynth,
-        );
-        match synth_result.and_then(|()| {
-            rustledger_loader::run_plugins(
-                &mut booked_directives,
-                ctx.plugins,
-                ctx.file_options,
-                &load_options,
-                ctx.source_map,
-                &mut plugin_errors,
-                rustledger_loader::PluginPass::PostBooking,
-            )
-        }) {
-            Ok(()) => {
-                // Convert plugin errors to diagnostics.
-                // Plugin errors don't carry file_id, so we only show them
-                // in the main file (file_id 0) to avoid duplication across
-                // open documents in multi-file mode.
-                let show_plugin_errors = current_file_id.is_none() || current_file_id == Some(0);
-                if show_plugin_errors {
-                    for err in &plugin_errors {
-                        let severity = match err.severity {
-                            rustledger_loader::ErrorSeverity::Error => DiagnosticSeverity::ERROR,
-                            rustledger_loader::ErrorSeverity::Warning => {
-                                DiagnosticSeverity::WARNING
-                            }
-                        };
-                        extra_diagnostics.push(Diagnostic {
-                            range: Range {
-                                start: Position::new(0, 0),
-                                end: Position::new(0, 0),
-                            },
-                            severity: Some(severity),
-                            code: Some(lsp_types::NumberOrString::String(err.code.clone())),
-                            source: Some("rustledger".to_string()),
-                            message: err.message.clone(),
-                            related_information: None,
-                            tags: None,
-                            code_description: None,
-                            data: None,
-                        });
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Plugin execution failed in LSP: {e}");
+        // Plugin errors don't carry file_id, so we only show them in the main
+        // file (file_id 0) to avoid duplication across open documents.
+        let show_plugin_errors = current_file_id.is_none() || current_file_id == Some(0);
+        if show_plugin_errors {
+            for (severity, code, message) in &validation.plugin_errors {
+                extra_diagnostics.push(Diagnostic {
+                    range: Range {
+                        start: Position::new(0, 0),
+                        end: Position::new(0, 0),
+                    },
+                    severity: Some(*severity),
+                    code: Some(lsp_types::NumberOrString::String(code.clone())),
+                    source: Some("rustledger".to_string()),
+                    message: message.clone(),
+                    related_information: None,
+                    tags: None,
+                    code_description: None,
+                    data: None,
+                });
             }
         }
     }
 
-    // LSP receives already-booked directives, so it has no booking step
-    // to interleave between phases. Run Early + Late back-to-back
-    // against the same input. See `rustledger_validate::Phase` for the
-    // architecture rationale.
-    let today = jiff::Zoned::now().date();
-    let session = ValidationSession::new(validation_options);
-    let (session, mut validation_errors) = session.run_early_spanned(&booked_directives, today);
-    let (session, late_errs) = session.run_late_spanned(&booked_directives, today);
-    validation_errors.extend(late_errs);
-    validation_errors.extend(session.finalize());
-
     // Filter errors to only those in the current file (if file_id filtering is enabled).
     // Also include errors with file_id == None, as these are global errors (e.g., duplicate
     // account opens across files) that should be shown to the user.
-    let filtered_errors: Vec<_> = if let Some(file_id) = current_file_id {
-        validation_errors
-            .into_iter()
-            .filter(|e| e.file_id == Some(file_id) || e.file_id.is_none())
-            .collect()
-    } else {
-        validation_errors
-    };
-
     let mut result: Vec<Diagnostic> = extra_diagnostics;
     result.extend(
-        filtered_errors
+        validation
+            .errors
             .iter()
+            .filter(|e| {
+                current_file_id.is_none_or(|fid| e.file_id == Some(fid) || e.file_id.is_none())
+            })
             .map(|e| validation_error_to_diagnostic(e, source, &line_index)),
     );
     result
@@ -633,29 +721,6 @@ pub fn all_diagnostics(
         // unsaved edits to plugin directives take effect immediately).
         // Single-file: build entirely from ParseResult's plugin declarations.
         //
-        // Helper closure to convert ParseResult plugins to Plugin structs.
-        let parse_result_to_plugins =
-            |plugins: &[(String, Option<String>, Span)], file_id: usize| -> Vec<Plugin> {
-                plugins
-                    .iter()
-                    .map(|(name, config, span)| {
-                        let (actual_name, force_python) =
-                            if let Some(stripped) = name.strip_prefix("python:") {
-                                (stripped.to_string(), true)
-                            } else {
-                                (name.clone(), false)
-                            };
-                        Plugin {
-                            name: actual_name,
-                            config: config.clone(),
-                            span: *span,
-                            file_id,
-                            force_python,
-                        }
-                    })
-                    .collect()
-            };
-
         let merged_plugins: Vec<Plugin>;
         let single_file_options: LoaderOptions;
         let single_file_source_map: SourceMap;
@@ -790,6 +855,153 @@ pub fn all_diagnostics(
     ));
 
     diagnostics
+}
+
+/// A file to emit diagnostics for in the multi-file path.
+pub(crate) struct FileDiagTarget<'a> {
+    /// The file's id in the ledger source map.
+    pub file_id: u16,
+    /// The file's source text (for parse-error + validation-error position
+    /// mapping).
+    pub source: &'a str,
+    /// A fresh parse of `source` (for parse-error and import diagnostics, and
+    /// the per-file validation gate).
+    pub parse: &'a ParseResult,
+}
+
+/// Compute diagnostics for MANY ledger files from a SINGLE whole-ledger
+/// book + validate — the fix for #1799.
+///
+/// The old cross-file path called [`all_diagnostics`] once per ledger file,
+/// and each call re-ran the entire book + plugin + validate pipeline over the
+/// whole ledger just to keep one file's errors (O(files) full validations per
+/// keystroke). Because `didChange` is handled synchronously on the LSP main
+/// loop, that blocked completion requests and made them time out on large
+/// multi-file ledgers.
+///
+/// Here the file-independent work — building the overlaid directive set, the
+/// validation options, the plugin set, and running booking + both plugin
+/// passes + Early/Late validation — is done **once** via
+/// [`run_ledger_validation`]. Each target's diagnostics are then derived
+/// cheaply: parse errors, the shared validation errors filtered to that file
+/// and mapped against its own source, the per-file plugin notes, plus (in the
+/// main file) option warnings, and per-file import-review hints. The result is
+/// aligned 1:1 with `targets`.
+///
+/// `overlay` is the fresh parse of every clean open buffer (current file
+/// included when clean), applied to the ledger snapshot so unsaved edits are
+/// reflected — the same overlay the current-file [`all_diagnostics`] path
+/// builds. `primary_parse` / `primary_file_id` identify the file being edited,
+/// whose fresh plugin declarations replace the ledger's for that file (mirrors
+/// the single-file path); unopened files are not edited, so their ledger
+/// plugins are already current.
+///
+/// Requires a loaded ledger; falls back to parse-only diagnostics otherwise
+/// (the caller only uses this path for multi-file ledgers).
+pub(crate) fn ledger_diagnostics_multi(
+    ledger_state: &LedgerState,
+    primary_file_id: Option<u16>,
+    primary_parse: &ParseResult,
+    overlay: &[(u16, &[Spanned<Directive>])],
+    targets: &[FileDiagTarget<'_>],
+    encoding: PositionEncoding,
+) -> Vec<Vec<Diagnostic>> {
+    let Some(ledger) = ledger_state.ledger() else {
+        return targets
+            .iter()
+            .map(|t| parse_errors_to_diagnostics(t.parse, t.source, encoding))
+            .collect();
+    };
+
+    // ---- Shared, file-independent setup (mirrors all_diagnostics' loaded-
+    // ledger branch). Build the overlaid directive set once. ----
+    let full_directives_raw = ledger_state.directives();
+    let booked_directives: Vec<Spanned<Directive>> =
+        if let Some(owned) = build_live_directive_overlay(overlay, full_directives_raw) {
+            owned
+        } else if let Some(full) = full_directives_raw {
+            full.to_vec()
+        } else {
+            Vec::new()
+        };
+
+    let base_dir = ledger
+        .source_map
+        .files()
+        .first()
+        .and_then(|f| f.path.parent())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let validation_options =
+        build_validation_options_from_loader(&ledger.options, &ledger.source_map, base_dir);
+
+    // Plugin set: ledger plugins with the primary (edited) file's plugins
+    // replaced by its fresh parse (matches the single-file path). Unopened
+    // files aren't edited, so their ledger plugins remain current.
+    let primary_fid = primary_file_id.unwrap_or(0) as usize;
+    let merged_plugins: Vec<Plugin> = ledger
+        .plugins
+        .iter()
+        .filter(|p| p.file_id != primary_fid)
+        .cloned()
+        .chain(parse_result_to_plugins(&primary_parse.plugins, primary_fid))
+        .collect();
+    let plugin_ctx = if merged_plugins.is_empty() {
+        None
+    } else {
+        Some(PluginContext {
+            plugins: &merged_plugins,
+            file_options: &ledger.options,
+            source_map: &ledger.source_map,
+        })
+    };
+
+    // ---- ONE whole-ledger book + validate ----
+    let validation =
+        run_ledger_validation(booked_directives, validation_options, plugin_ctx.as_ref());
+
+    // ---- Map each target from the shared validation ----
+    targets
+        .iter()
+        .map(|t| {
+            let mut diags = parse_errors_to_diagnostics(t.parse, t.source, encoding);
+            if validation_would_run(t.source, t.parse) {
+                diags.extend(map_validation_to_diagnostics(
+                    &validation,
+                    t.source,
+                    Some(t.file_id),
+                    plugin_ctx.as_ref(),
+                    encoding,
+                ));
+            }
+            // Option warnings (E7001–E7006) are shown only in the main file to
+            // avoid duplication across open documents.
+            if t.file_id == 0 {
+                for warning in ledger.options.warnings.as_slice() {
+                    diags.push(Diagnostic {
+                        range: Range {
+                            start: Position::new(0, 0),
+                            end: Position::new(0, 0),
+                        },
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        code: Some(lsp_types::NumberOrString::String(warning.code.to_string())),
+                        source: Some("rustledger".to_string()),
+                        message: warning.message.clone(),
+                        related_information: None,
+                        tags: None,
+                        code_description: None,
+                        data: None,
+                    });
+                }
+            }
+            // Per-file import-review diagnostics.
+            diags.extend(super::import::import_diagnostics(
+                &t.parse.directives,
+                t.source,
+                encoding,
+            ));
+            diags
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2090,6 +2302,80 @@ plugin "auto_accounts"
         assert!(
             !codes.iter().any(|c| c == "E1001"),
             "auto_accounts should still auto-generate opens. Got: {codes:?}"
+        );
+    }
+
+    /// #1799 regression: `ledger_diagnostics_multi` must run the whole-ledger
+    /// book+validate EXACTLY ONCE regardless of how many files it emits
+    /// diagnostics for. The pre-fix cross-file path called `all_diagnostics`
+    /// (which re-validated the entire ledger) once per file — O(files)
+    /// validations per keystroke — starving the LSP main loop and timing out
+    /// completions on large multi-file ledgers.
+    #[test]
+    fn ledger_diagnostics_multi_validates_once_for_all_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("main.beancount");
+        std::fs::write(dir.path().join("a.beancount"), "2024-01-01 open Assets:A\n")
+            .expect("write a");
+        std::fs::write(dir.path().join("b.beancount"), "2024-01-01 open Assets:B\n")
+            .expect("write b");
+        std::fs::write(
+            &main,
+            "include \"a.beancount\"\ninclude \"b.beancount\"\n2024-01-02 open Assets:C\n",
+        )
+        .expect("write main");
+
+        let mut ls = LedgerState::new();
+        ls.load(&main).expect("load multi-file ledger");
+        let files: Vec<(u16, Arc<str>)> = ls
+            .ledger()
+            .expect("ledger loaded")
+            .source_map
+            .files()
+            .iter()
+            .map(|f| (f.id as u16, f.source.clone()))
+            .collect();
+        assert!(
+            files.len() >= 3,
+            "fixture must be a multi-file ledger, got {} files",
+            files.len()
+        );
+
+        let parses: Vec<ParseResult> = files.iter().map(|(_, s)| parse(s)).collect();
+        let targets: Vec<FileDiagTarget<'_>> = files
+            .iter()
+            .zip(&parses)
+            .map(|((fid, src), p)| FileDiagTarget {
+                file_id: *fid,
+                source: src,
+                parse: p,
+            })
+            .collect();
+
+        // Measure validation runs on THIS thread across the call (thread-local
+        // counter, so parallel tests don't interfere).
+        let before = LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
+        let per_file = ledger_diagnostics_multi(
+            &ls,
+            Some(0),
+            &parses[0],
+            &[],
+            &targets,
+            PositionEncoding::Utf16,
+        );
+        let after = LEDGER_VALIDATION_RUNS.with(std::cell::Cell::get);
+
+        assert_eq!(
+            per_file.len(),
+            targets.len(),
+            "one diagnostic set per target file"
+        );
+        assert_eq!(
+            after - before,
+            1,
+            "must run exactly ONE whole-ledger validation for {} files (#1799), ran {}",
+            targets.len(),
+            after - before
         );
     }
 }

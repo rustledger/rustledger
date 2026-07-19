@@ -115,7 +115,6 @@ impl PythonRuntime {
     /// # Arguments
     ///
     /// * `quiet_warning` - If true, suppress the performance warning message.
-    #[allow(unsafe_code)] // Module::deserialize is unsafe but we load our own compiled code
     pub fn with_options(quiet_warning: bool) -> Result<Self, PythonError> {
         if !quiet_warning {
             eprintln!("⚠️  Loading Python plugin runtime...");
@@ -130,23 +129,8 @@ impl PythonRuntime {
 
         let engine = Arc::new(Engine::new(&engine_config()).map_err(PythonError::Wasm)?);
 
-        // Try to load precompiled module from cache, or compile and cache it
         let cache_path = python_wasm.with_extension("cwasm");
-        let module = if cache_path.exists() {
-            // Load precompiled module (fast)
-            // SAFETY: We compiled this module ourselves with the same engine config
-            unsafe { Module::deserialize_file(&engine, &cache_path).map_err(PythonError::Wasm)? }
-        } else {
-            // First run: compile and cache
-            eprintln!("⚠️  Compiling Python WASM module (first run only, ~30 seconds)...");
-            let module = Module::from_file(&engine, &python_wasm).map_err(PythonError::Wasm)?;
-
-            // Cache the compiled module for next time
-            if let Ok(bytes) = module.serialize() {
-                let _ = std::fs::write(&cache_path, bytes);
-            }
-            module
-        };
+        let module = load_or_compile_cached_module(&engine, &python_wasm, &cache_path)?;
 
         Ok(Self {
             engine,
@@ -454,6 +438,58 @@ fn engine_config() -> Config {
     config
 }
 
+/// Load the compiled CPython-WASI `Module` from the `.cwasm` cache, or
+/// compile it from `source_wasm` and (best-effort) write the cache.
+///
+/// A cache that exists but fails to deserialize is **discarded and
+/// recompiled**, not propagated as an error (#1809). wasmtime's serialized
+/// module format is explicitly version-specific, so a warm cache written by
+/// an older wasmtime is rejected by `deserialize_file` after a wasmtime
+/// upgrade — and the workspace bumps wasmtime regularly. Before this, that
+/// rejection surfaced as a hard `Python runtime unavailable: failed
+/// deserialization for .../python.cwasm`, bricking every python-plugin load
+/// until the user manually deleted the cache file. A truncated prior write
+/// (process killed mid-`fs::write`) fails the same way and self-heals the
+/// same way.
+///
+/// # Safety
+///
+/// `Module::deserialize_file` is `unsafe` because wasmtime cannot validate
+/// that the bytes are a trustworthy compiled artifact. We only ever read a
+/// `.cwasm` this code path itself produced via `Module::serialize` with the
+/// same `engine_config`; a deserialize failure is treated as "not ours,
+/// recompile" rather than trusted.
+#[allow(unsafe_code)]
+fn load_or_compile_cached_module(
+    engine: &Engine,
+    source_wasm: &std::path::Path,
+    cache_path: &std::path::Path,
+) -> Result<Module, PythonError> {
+    if cache_path.exists() {
+        // SAFETY: see the `# Safety` section above.
+        match unsafe { Module::deserialize_file(engine, cache_path) } {
+            Ok(module) => return Ok(module),
+            Err(e) => {
+                eprintln!(
+                    "⚠️  Ignoring unusable Python WASM cache at {} ({e});",
+                    cache_path.display()
+                );
+                eprintln!("⚠️  recompiling — this is expected after a wasmtime upgrade.");
+            }
+        }
+    } else {
+        eprintln!("⚠️  Compiling Python WASM module (first run only, ~30 seconds)...");
+    }
+
+    let module = Module::from_file(engine, source_wasm).map_err(PythonError::Wasm)?;
+    // Best-effort cache write: a failure here (read-only cache dir, disk
+    // full) only means the next run recompiles — never a load failure.
+    if let Ok(bytes) = module.serialize() {
+        let _ = std::fs::write(cache_path, bytes);
+    }
+    Ok(module)
+}
+
 /// Classify a Python plugin reference as a FILE path vs a dotted module name.
 ///
 /// A file when it ends in `.py` (case-insensitive) or contains a path separator.
@@ -724,6 +760,57 @@ mod tests {
     fn test_engine_config_satisfies_async_stack_constraint() {
         Engine::new(&engine_config())
             .expect("engine_config must satisfy wasmtime stack constraints");
+    }
+
+    /// #1809: `load_or_compile_cached_module` must self-heal a `.cwasm`
+    /// cache it can't deserialize (stale after a wasmtime bump, or a
+    /// truncated write) by recompiling and overwriting it — never
+    /// propagate the deserialize error. Hermetic: uses a 1-instruction
+    /// synthetic module, not the 50+ MiB `CPython` download, so it exercises
+    /// the cache logic without `ensure_runtime`.
+    #[test]
+    fn cached_module_recompiles_when_cache_is_unusable() {
+        use std::io::Write;
+
+        let engine = Engine::new(&engine_config()).expect("engine builds");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_wasm = dir.path().join("mod.wasm");
+        let cache_path = dir.path().join("mod.cwasm");
+
+        // A trivial valid module, written as real `.wasm` bytes so
+        // `Module::from_file` (the recompile path) has a source to read.
+        let wasm_bytes = wat::parse_str("(module (func (export \"noop\")))")
+            .expect("wat compiles to wasm bytes");
+        std::fs::write(&source_wasm, &wasm_bytes).expect("write source wasm");
+
+        // 1. Cold cache: compiles from source and writes the cache.
+        let module = load_or_compile_cached_module(&engine, &source_wasm, &cache_path)
+            .expect("cold path compiles");
+        assert!(module.get_export("noop").is_some());
+        assert!(cache_path.exists(), "cold path must populate the cache");
+
+        // 2. Warm cache: the fast deserialize path returns the module.
+        load_or_compile_cached_module(&engine, &source_wasm, &cache_path)
+            .expect("warm path loads from cache");
+
+        // 3. Corrupt the cache (a wasmtime-bump/truncation stand-in) and
+        //    assert we recover by recompiling instead of surfacing the
+        //    deserialize error — the exact #1809 failure.
+        {
+            let mut f = std::fs::File::create(&cache_path).expect("truncate cache");
+            f.write_all(b"not a valid cwasm header")
+                .expect("write garbage");
+        }
+        let recovered = load_or_compile_cached_module(&engine, &source_wasm, &cache_path)
+            .expect("unusable cache must recompile, not error");
+        assert!(
+            recovered.get_export("noop").is_some(),
+            "recompiled module must be functional"
+        );
+        // The recompile rewrote the cache with valid bytes, so it now
+        // deserializes cleanly again.
+        load_or_compile_cached_module(&engine, &source_wasm, &cache_path)
+            .expect("cache is healthy again after recompile");
     }
 
     /// End-to-end regression for issue #1234: build a real

@@ -331,9 +331,10 @@ fn select_importer(registry: &ImporterRegistry, file: &Path, args: &Args) -> Arc
 }
 
 fn importers_config_not_found_message() -> anyhow::Error {
-    let user_path = crate::config::user_config_file("importers.toml")
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "the user config directory".to_string());
+    let user_path = crate::config::user_config_file("importers.toml").map_or_else(
+        || "the user config directory".to_string(),
+        |p| p.display().to_string(),
+    );
     anyhow!("No importers.toml found. Create one in the current directory or at {user_path}")
 }
 

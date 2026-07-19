@@ -14,11 +14,20 @@ use std::io;
 use std::path::PathBuf;
 
 /// Get the history file path.
+///
+/// Lives under the shared `…/beanquery/` app directory (NOT rledger's own
+/// config dir), matching the Python `beanquery` REPL so the two tools share a
+/// history/init. This is deliberately OUTSIDE `RLEDGER_CONFIG_DIR` — do not
+/// relocate it into rledger's config dir in a future config-relocation pass.
 fn get_history_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("beanquery").join("history"))
 }
 
 /// Get the init file path.
+///
+/// See [`get_history_path`]: the `…/beanquery/` location is shared with the
+/// Python `beanquery` REPL on purpose and is intentionally not covered by
+/// `RLEDGER_CONFIG_DIR`.
 fn get_init_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("beanquery").join("init"))
 }

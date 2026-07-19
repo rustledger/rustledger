@@ -99,3 +99,48 @@ default_expense = "Expenses:Unknown"
          stdout: {stdout}\nstderr: {stderr}"
     );
 }
+
+/// The deprecated `RLEDGER_CONFIG` must be INERT (its config is never loaded)
+/// and must emit a deprecation warning — the core behavior of this breaking
+/// change (#1795). Without this, a future refactor could silently make
+/// `RLEDGER_CONFIG` load again with nothing failing.
+#[test]
+fn deprecated_rledger_config_is_inert_and_warns() {
+    let bin = require_rledger!();
+
+    // A config.toml carrying a distinctive marker, pointed at by the OLD
+    // `RLEDGER_CONFIG` var. If the var were still honored, the marker would
+    // appear in `config show`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let old_config = dir.path().join("config.toml");
+    std::fs::write(
+        &old_config,
+        "[default]\nfile = \"ZZ_INERT_MARKER.beancount\"\n",
+    )
+    .expect("write config");
+
+    let output = Command::new(bin)
+        .args(["config", "show", "--raw"])
+        // Neither cwd nor RLEDGER_CONFIG_DIR provides the marker; PROGRAMDATA
+        // shields the Windows system-config path. The marker can ONLY leak in
+        // if the deprecated RLEDGER_CONFIG were (wrongly) honored.
+        .current_dir(dir.path())
+        .env("PROGRAMDATA", dir.path())
+        .env("RLEDGER_CONFIG", &old_config)
+        .env_remove("RLEDGER_CONFIG_DIR")
+        .output()
+        .expect("run rledger config show");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout.contains("ZZ_INERT_MARKER"),
+        "RLEDGER_CONFIG must be inert — its config.toml must NOT load.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("RLEDGER_CONFIG is no longer supported"),
+        "setting RLEDGER_CONFIG must print a deprecation warning.\n\
+         stderr: {stderr}"
+    );
+}

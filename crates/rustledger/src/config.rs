@@ -776,6 +776,11 @@ fn warn_if_rledger_config_set() {
 
 /// Pure resolution of a user config file from the platform-native default —
 /// separated from the env/`dirs` reads so it is unit-testable. See [`user_config_path`].
+// Not a `const fn`: on macOS the body queries the filesystem (`Path::exists`)
+// for the XDG fallback. clippy only sees the non-macOS body (which reduces to
+// returning `native`) and suggests `const`, but that would fail to compile on
+// macOS, so allow the lint rather than cfg-splitting the signature.
+#[allow(clippy::missing_const_for_fn)]
 fn resolve_user_config_path(native: Option<PathBuf>, filename: &str) -> Option<PathBuf> {
     // macOS: honor an XDG-style config when the native location is absent, so a
     // shared `~/.config/rledger/<filename>` works there too (#1616).

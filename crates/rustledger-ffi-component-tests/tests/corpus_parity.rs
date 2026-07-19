@@ -156,6 +156,10 @@ fn corpus_loads_identically_via_native_and_component() -> Result<()> {
 
     let mut compared = 0usize;
     let mut skipped = 0usize;
+    // Subset of `skipped` attributable to the featureless component's
+    // plugin-feature gate (#1809) — surfaced separately so the drop is
+    // visible rather than folded silently into the generic skip count.
+    let mut skipped_plugin_feature = 0usize;
     let mut mismatches: Vec<String> = Vec::new();
 
     for path in &files {
@@ -180,6 +184,32 @@ fn corpus_loads_identically_via_native_and_component() -> Result<()> {
 
         let native = rustledger_ffi_wasi::helpers::load_source(&src);
         let loaded = ledger.call_load(&mut store, &src, "<corpus>", false)?;
+
+        // Feature-divergence skip (#1809). The component wasm is always
+        // built WITHOUT `python-plugins`/`wasm-plugins`, so a fixture that
+        // declares such a plugin gets the sentinel "requires the ...-plugins
+        // feature" error from the component. The NATIVE reference
+        // (`load_source`), however, is compiled into this test binary, and
+        // under `cargo test --workspace` cargo feature unification turns
+        // those features ON (the `rustledger` CLI enables them by default),
+        // so native actually ATTEMPTS the plugin and reports a different
+        // message — an artifact of comparing two differently-featured builds
+        // of the same function, not a real component regression. Such a
+        // fixture exercises a surface the featureless component cannot
+        // implement, so skip it (counted). Skipping on the component's
+        // sentinel — not on a source `plugin "..."` scan — keeps NATIVE-Rust
+        // plugins (which the featureless component DOES run) in the compared
+        // set.
+        const PLUGIN_FEATURE_SENTINEL: &str = "-plugins feature";
+        if loaded
+            .errors
+            .iter()
+            .any(|e| e.message.contains(PLUGIN_FEATURE_SENTINEL))
+        {
+            skipped += 1;
+            skipped_plugin_feature += 1;
+            continue;
+        }
         compared += 1;
 
         let rel = path.display().to_string();
@@ -222,14 +252,14 @@ fn corpus_loads_identically_via_native_and_component() -> Result<()> {
             continue;
         }
 
-        for (i, (nd, wd)) in native
+        for (i, (native_dir, wit_dir)) in native
             .directives
             .iter()
             .zip(loaded.entries.iter())
             .enumerate()
         {
-            let (nk, ndate) = native_kind(nd);
-            let (wk, wdate) = wit_kind(wd);
+            let (nk, ndate) = native_kind(native_dir);
+            let (wk, wdate) = wit_kind(wit_dir);
             if nk != wk || ndate != wdate {
                 mismatches.push(format!(
                     "{rel}: entry {i} native=({nk}, {ndate}) component=({wk}, {wdate})"
@@ -240,7 +270,9 @@ fn corpus_loads_identically_via_native_and_component() -> Result<()> {
     }
 
     println!(
-        "corpus parity: compared {compared}, skipped {skipped}, files {}",
+        "corpus parity: compared {compared}, skipped {skipped} \
+         (of which {skipped_plugin_feature} for the component's plugin-feature gate), \
+         files {}",
         files.len()
     );
     assert!(

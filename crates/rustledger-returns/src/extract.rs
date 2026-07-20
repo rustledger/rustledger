@@ -566,9 +566,13 @@ pub fn twr(
     let mut first_date: Option<NaiveDate> = None;
     for (&date, &contribution) in &net_by_date {
         first_date.get_or_insert(date);
-        let v_i = investment_value_at(directives, scope, reporting_currency, prices, date)?
-            .to_f64()
-            .unwrap_or(0.0);
+        // A Decimal that can't be represented as f64 makes the return undefined
+        // (report n/a), never a silent 0 — which would fabricate a wrong rate.
+        let Some(v_i) =
+            investment_value_at(directives, scope, reporting_currency, prices, date)?.to_f64()
+        else {
+            return Ok(None);
+        };
         if let Some(vp) = v_prev {
             if vp <= 0.0 {
                 // Portfolio was non-positive at the *previous* flow (fully
@@ -576,7 +580,9 @@ pub fn twr(
                 // chaining across a zero is undefined — a documented limitation.
                 return Ok(None);
             }
-            let f = contribution.to_f64().unwrap_or(0.0);
+            let Some(f) = contribution.to_f64() else {
+                return Ok(None);
+            };
             let r = (v_i - f) / vp;
             if r <= 0.0 {
                 return Ok(None); // sub-period wiped the portfolio out
@@ -591,9 +597,11 @@ pub fn twr(
     // and contributes no return — the whole-period figure is already in
     // `cumulative`, so a position closed out on the report date still yields its
     // holding-period TWR rather than `None`.
-    let v_end = investment_value_at(directives, scope, reporting_currency, prices, end_date)?
-        .to_f64()
-        .unwrap_or(0.0);
+    let Some(v_end) =
+        investment_value_at(directives, scope, reporting_currency, prices, end_date)?.to_f64()
+    else {
+        return Ok(None);
+    };
     match v_prev {
         Some(vp) if vp > 0.0 => {
             let r = v_end / vp;

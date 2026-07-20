@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
-wasmtime = { version = "46", features = ["component-model"] }
+wasmtime = { version = "47", features = ["component-model"] }
 wasmtime-wasi = "46"
 anyhow = "1"
 tempfile.workspace = true

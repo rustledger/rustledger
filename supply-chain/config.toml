@@ -356,7 +356,7 @@ version = "1.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.imbl]]
-version = "7.0.0"
+version = "7.0.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.imbl-sized-chunks]]
@@ -381,6 +381,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.itertools]]
 version = "0.14.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.jiff-core]]
+version = "0.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.js-sys]]
@@ -691,8 +695,20 @@ criteria = "safe-to-deploy"
 version = "1.2.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.serde]]
+version = "1.0.229"
+criteria = "safe-to-deploy"
+
 [[exemptions.serde-wasm-bindgen]]
 version = "0.6.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde_core]]
+version = "1.0.229"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde_derive]]
+version = "1.0.229"
 criteria = "safe-to-deploy"
 
 [[exemptions.sha1]]

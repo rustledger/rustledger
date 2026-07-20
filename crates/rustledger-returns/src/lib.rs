@@ -51,9 +51,20 @@ impl CashFlow {
 /// Day-count basis: actual days over a 365-day year, matching the convention
 /// used by spreadsheet `XIRR` and beangrow.
 const DAYS_PER_YEAR: f64 = 365.0;
-/// Absolute NPV below which a rate is accepted as a root (reporting-currency
-/// units).
-const NPV_TOLERANCE: f64 = 1e-7;
+/// A rate is accepted as a root when `|NPV|` is within this **fraction of the
+/// gross flow magnitude**. A relative tolerance is essential: a fixed absolute
+/// threshold is unreachable for a million-dollar portfolio (so the solver would
+/// spin) and trivially satisfied for a sub-cent one (so it would accept any
+/// rate as a "root").
+const NPV_REL_TOLERANCE: f64 = 1e-9;
+/// Floor on the resolved absolute tolerance, so a near-zero gross magnitude
+/// can't drive it to 0.
+const NPV_ABS_FLOOR: f64 = 1e-12;
+/// Lower end of the bisection bracket: just above the `rate = -1` pole, so
+/// near-total-loss IRRs (down to ~-99.99999%) are still reachable.
+const RATE_LOWER_BOUND: f64 = -0.999_999_9;
+/// Newton step size below which iteration is treated as stalled.
+const STEP_EPSILON: f64 = 1e-12;
 /// Newton iterations before falling back to bisection.
 const NEWTON_MAX_ITER: usize = 100;
 /// Bisection steps once a sign-change bracket is found.
@@ -67,10 +78,19 @@ const BISECT_MAX_ITER: usize = 200;
 /// - fewer than two flows;
 /// - no sign change (every flow the same sign — e.g. only purchases, with no
 ///   sale or terminal valuation — has no IRR);
+/// - every flow falls on the same day (no time elapses, so no annual rate is
+///   defined — see below);
 /// - the result is non-finite.
 ///
 /// The rate is a fraction (`0.10` = 10% per year). The day count is actual/365
 /// from the earliest flow date.
+///
+/// # Degenerate series
+///
+/// If all flows share one date, NPV does not depend on the rate (it is either a
+/// nonzero constant — no root — or identically zero — where *every* rate is a
+/// "root"). Neither yields a meaningful annual return, so this returns `None`
+/// rather than fabricating one from the solver's seed.
 ///
 /// # Multiple roots
 ///
@@ -93,8 +113,13 @@ pub fn xirr(flows: &[CashFlow]) -> Option<f64> {
         return None;
     }
 
-    // Reduce to (years-from-first-flow, amount) pairs once.
     let origin = flows.iter().map(|f| f.date).min()?;
+    // Degenerate: all flows on one day → NPV is rate-independent → no rate.
+    if flows.iter().all(|f| f.date == origin) {
+        return None;
+    }
+
+    // Reduce to (years-from-first-flow, amount) pairs once.
     let series: Vec<(f64, f64)> = flows
         .iter()
         .map(|f| {
@@ -106,7 +131,11 @@ pub fn xirr(flows: &[CashFlow]) -> Option<f64> {
         })
         .collect();
 
-    newton(&series).or_else(|| bisect(&series))
+    // Relative tolerance scaled to the size of the flows (see NPV_REL_TOLERANCE).
+    let gross: f64 = series.iter().map(|&(_, a)| a.abs()).sum();
+    let tol = (gross * NPV_REL_TOLERANCE).max(NPV_ABS_FLOOR);
+
+    newton(&series, tol).or_else(|| bisect(&series, tol))
 }
 
 /// Net present value of the series at `rate`.
@@ -115,52 +144,71 @@ fn npv(series: &[(f64, f64)], rate: f64) -> f64 {
     series.iter().map(|&(t, a)| a / base.powf(t)).sum()
 }
 
-/// d(NPV)/d(rate).
-fn npv_derivative(series: &[(f64, f64)], rate: f64) -> f64 {
+/// NPV and its derivative at `rate` in a single pass. Newton needs both, and
+/// sharing the `base.powf(t)` halves the transcendental work per iteration.
+fn npv_and_derivative(series: &[(f64, f64)], rate: f64) -> (f64, f64) {
     let base = 1.0 + rate;
-    series
-        .iter()
-        .map(|&(t, a)| -t * a / base.powf(t + 1.0))
-        .sum()
+    let mut value = 0.0;
+    let mut slope = 0.0;
+    for &(t, a) in series {
+        let discount = base.powf(t);
+        value += a / discount;
+        slope += -t * a / (discount * base);
+    }
+    (value, slope)
 }
 
-/// Newton's method from a 10% seed. Bails to `None` (letting the caller fall
-/// back to bisection) if it leaves the valid domain (`rate <= -1`) or stalls.
-fn newton(series: &[(f64, f64)]) -> Option<f64> {
+/// Newton's method from a 10% seed. Returns `None` (letting the caller fall back
+/// to bisection) if it leaves the valid domain (`rate <= -1`), the derivative
+/// vanishes, or it stalls at a point that is not actually a root.
+fn newton(series: &[(f64, f64)], tol: f64) -> Option<f64> {
     let mut rate = 0.1;
     for _ in 0..NEWTON_MAX_ITER {
-        let value = npv(series, rate);
-        if value.abs() < NPV_TOLERANCE {
+        let (value, slope) = npv_and_derivative(series, rate);
+        if value.abs() < tol {
             return finite(rate);
         }
-        let slope = npv_derivative(series, rate);
-        if slope == 0.0 {
+        if slope == 0.0 || !slope.is_finite() {
             return None;
         }
         let next = rate - value / slope;
         if !next.is_finite() || next <= -1.0 {
             return None;
         }
-        if (next - rate).abs() < 1e-12 {
-            return finite(next);
+        if (next - rate).abs() < STEP_EPSILON {
+            // Stalled. Accept ONLY if it is genuinely a root; otherwise give up
+            // so bisection can try. (Without the NPV check, a step underflowing
+            // near the rate=-1 pole would be returned as a fake root.)
+            return if next.is_finite() && npv(series, next).abs() < tol {
+                Some(next)
+            } else {
+                None
+            };
         }
         rate = next;
     }
     None
 }
 
-/// Bracket a sign change on `(-0.9999, hi]` (growing `hi`) then bisect. Robust
-/// where Newton diverges, at the cost of speed.
-fn bisect(series: &[(f64, f64)]) -> Option<f64> {
-    let low = -0.999_9;
+/// Bracket a sign change on `[RATE_LOWER_BOUND, hi]` (growing `hi`) then bisect.
+/// Robust where Newton diverges, at the cost of speed.
+fn bisect(series: &[(f64, f64)], tol: f64) -> Option<f64> {
+    let low = RATE_LOWER_BOUND;
     let f_low = npv(series, low);
+    // A root sitting exactly on the lower bound.
+    if f_low.abs() < tol {
+        return finite(low);
+    }
 
-    // Grow the upper bound until it brackets a root with `low` (i.e. NPV
-    // changes sign between them). Bounded doubling; give up if no bracket.
+    // Grow the upper bound until it brackets a root with `low` (NPV changes
+    // sign between them). Bounded doubling; give up if no bracket.
     let mut high = 1.0;
     let mut f_high = npv(series, high);
     let mut bracketed = false;
     for _ in 0..60 {
+        if f_high.abs() < tol {
+            return finite(high); // a probed bound landed on a root
+        }
         if opposite_signs(f_low, f_high) {
             bracketed = true;
             break;
@@ -180,10 +228,12 @@ fn bisect(series: &[(f64, f64)]) -> Option<f64> {
     for _ in 0..BISECT_MAX_ITER {
         let mid = 0.5 * (a + b);
         let f_mid = npv(series, mid);
-        if f_mid.abs() < NPV_TOLERANCE || (b - a).abs() < 1e-12 {
+        if f_mid.abs() < tol || (b - a).abs() < STEP_EPSILON {
             return finite(mid);
         }
-        if f_a * f_mid < 0.0 {
+        // `opposite_signs`, not `f_a * f_mid < 0`: the product would overflow
+        // to ±inf for large NPV magnitudes and misclassify the sub-interval.
+        if opposite_signs(f_a, f_mid) {
             b = mid;
         } else {
             a = mid;
@@ -198,8 +248,9 @@ fn finite(rate: f64) -> Option<f64> {
     rate.is_finite().then_some(rate)
 }
 
-/// Whether two NPV values straddle zero (a sign-change bracket). Treats zero as
-/// non-negative so an exact root at a bound still brackets.
+/// Whether two NPV values straddle zero (a sign-change bracket). Exact roots
+/// sitting on a bound are handled separately by the endpoint checks in
+/// [`bisect`], so this treats `0.0` as non-negative.
 fn opposite_signs(a: f64, b: f64) -> bool {
     (a < 0.0) != (b < 0.0)
 }
@@ -216,6 +267,19 @@ mod tests {
 
     fn approx(a: f64, b: f64, eps: f64) -> bool {
         (a - b).abs() < eps
+    }
+
+    /// NPV of a flow list at `rate` — for asserting a returned rate is a root.
+    fn npv_at(flows: &[CashFlow], rate: f64) -> f64 {
+        let origin = flows.iter().map(|f| f.date).min().unwrap();
+        let series: Vec<(f64, f64)> = flows
+            .iter()
+            .map(|f| {
+                let days = f.date.since(origin).map_or(0, |s| s.get_days());
+                (f64::from(days) / DAYS_PER_YEAR, f.amount.to_f64().unwrap())
+            })
+            .collect();
+        npv(&series, rate)
     }
 
     #[test]
@@ -302,5 +366,73 @@ mod tests {
             CashFlow::new(d(2020, 6, 1), dec!(0)),
         ];
         assert_eq!(xirr(&flows), None);
+    }
+
+    #[test]
+    fn same_date_flows_return_none() {
+        // Same-day wash → NPV is rate-independent → no meaningful rate.
+        // (Before the degenerate guard this fabricated the 0.10 solver seed.)
+        assert_eq!(
+            xirr(&[
+                CashFlow::new(d(2020, 1, 1), dec!(1000)),
+                CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+            ]),
+            None
+        );
+        // Same day, net nonzero — still no elapsed time, so still undefined.
+        assert_eq!(
+            xirr(&[
+                CashFlow::new(d(2020, 1, 1), dec!(1000)),
+                CashFlow::new(d(2020, 1, 1), dec!(-600)),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn near_total_loss_is_found() {
+        // Lose ~99.995%: -1000 in, +0.05 back a year later → IRR ≈ -0.99995.
+        // The old bisection lower bound of -0.9999 could not reach this.
+        let flows = [
+            CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+            CashFlow::new(d(2020, 12, 31), dec!(0.05)),
+        ];
+        let r = xirr(&flows).expect("large-loss IRR must still be found");
+        assert!(approx(r, -0.99995, 1e-4), "expected ~-0.99995, got {r}");
+    }
+
+    #[test]
+    fn scale_invariance_large_and_tiny() {
+        // The 10% one-year shape scaled up 1e6 and down 1e-6 must both resolve
+        // to ~0.10 — the relative tolerance keeps the root check meaningful at
+        // any magnitude (an absolute tolerance failed one end or the other).
+        for scale in [dec!(1000000), dec!(0.000001)] {
+            let flows = [
+                CashFlow::new(d(2020, 1, 1), -scale),
+                CashFlow::new(d(2020, 12, 31), scale * dec!(1.1)),
+            ];
+            let r = xirr(&flows).unwrap_or_else(|| panic!("scale {scale} must resolve"));
+            assert!(
+                approx(r, 0.10, 1e-6),
+                "scale {scale}: expected ~0.10, got {r}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_sign_changes_returns_a_valid_root() {
+        // -100, +230, -132 has IRRs at exactly 10% and 20%. We return one root;
+        // assert it is a genuine root (NPV ≈ 0), not a specific one.
+        let flows = [
+            CashFlow::new(d(2020, 1, 1), dec!(-100)),
+            CashFlow::new(d(2020, 12, 31), dec!(230)),
+            CashFlow::new(d(2021, 12, 31), dec!(-132)),
+        ];
+        let r = xirr(&flows).expect("a root exists");
+        assert!(
+            npv_at(&flows, r).abs() < 1e-6,
+            "returned rate {r} must be a root, NPV = {}",
+            npv_at(&flows, r)
+        );
     }
 }

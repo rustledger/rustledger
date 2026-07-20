@@ -41,6 +41,19 @@ const LEDGER_NO_CCY: &str = r#"2020-01-01 open Assets:Bank
 2020-12-31 price AAPL 130 USD
 "#;
 
+/// An investment position seeded by `pad` + `balance` (no explicit buy). The
+/// returns report must value it, which only works if the pad-expanded
+/// `balance_view` reaches extraction — i.e. `Report::Returns` is in the
+/// `needs_balance_view` gate.
+const LEDGER_PAD: &str = r#"option "operating_currency" "USD"
+
+2019-12-31 open Assets:Broker:Cash
+2019-12-31 open Equity:Opening-Balances
+
+2019-12-31 pad Assets:Broker:Cash Equity:Opening-Balances
+2020-01-01 balance Assets:Broker:Cash 500 USD
+"#;
+
 fn write_fixture(source: &str) -> tempfile::NamedTempFile {
     let mut f = tempfile::Builder::new()
         .prefix("report-returns-")
@@ -235,5 +248,43 @@ fn missing_reporting_currency_is_an_actionable_error() {
     assert!(
         stderr.contains("reporting currency") && stderr.contains("--currency"),
         "error should name --currency / operating_currency: {stderr}",
+    );
+}
+
+#[test]
+fn pad_seeded_holding_is_valued() {
+    let bin = require_rledger!();
+    let f = write_fixture(LEDGER_PAD);
+    let path = f.path().to_str().unwrap();
+    let out = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--end",
+            "2020-12-31",
+            "--no-pager",
+        ],
+    );
+    // The pad seeds 500 USD in the broker cash account: an opening -500 flow
+    // paired with the +500 still held → 0% on untouched opening capital. This
+    // only works because the pad-expanded balance_view reaches extraction.
+    assert_eq!(
+        field(&out, "Invested"),
+        "500 USD",
+        "pad-seeded capital: {out}"
+    );
+    assert_eq!(
+        field(&out, "Current value"),
+        "500 USD",
+        "pad-seeded holding: {out}"
+    );
+    assert_eq!(
+        field(&out, "Money-weighted return"),
+        "0.00%",
+        "untouched → 0%: {out}"
     );
 }

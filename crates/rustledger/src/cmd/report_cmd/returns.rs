@@ -106,6 +106,11 @@ pub(super) fn report_returns<W: Write>(
         .sum();
     let current_value: Decimal = terminal.map_or(Decimal::ZERO, |t| t.amount);
 
+    // Combine into the series xirr consumes. This mirrors the engine's
+    // canonical `extract_cash_flows` (flows + terminal, date-sorted); we build it
+    // from the parts here only because the summary above needs `flows` and
+    // `terminal` separately. The `series_matches_extract_cash_flows` test pins
+    // this against the canonical so it can't drift.
     let mut series = flows;
     if let Some(t) = terminal {
         series.push(t);
@@ -118,7 +123,13 @@ pub(super) fn report_returns<W: Write>(
 
     let currency = reporting_currency.as_str();
     let money = |n: Decimal| ctx.format_amount_number(n, currency);
-    let rate_pct = |r: f64| format!("{:.2}", r * 100.0);
+    let rate_pct = |r: f64| {
+        let pct = r * 100.0;
+        // A 0% return (e.g. capital returned unchanged) converges to a tiny
+        // signed epsilon that would render as "-0.00"; show a clean "0.00".
+        let pct = if pct.abs() < 0.005 { 0.0 } else { pct };
+        format!("{pct:.2}")
+    };
 
     match format {
         OutputFormat::Csv => {
@@ -139,8 +150,9 @@ pub(super) fn report_returns<W: Write>(
             )?;
         }
         OutputFormat::Json => {
-            let rate_field =
-                rate.map_or_else(|| "null".to_string(), |r| format!("{:.4}", r * 100.0));
+            // Same 2-decimal precision as text/csv (a bare JSON number, `null`
+            // when undefined) so the rate agrees across every output format.
+            let rate_field = rate.map_or_else(|| "null".to_string(), rate_pct);
             writeln!(
                 writer,
                 r#"{{"reporting_currency": "{}", "as_of": "{}", "cash_flows": {}, "invested": "{}", "distributions": "{}", "current_value": "{}", "money_weighted_return_pct": {}}}"#,
@@ -257,5 +269,56 @@ mod tests {
         );
         // Sanity: 15 AAPL @ 150 = 2250 USD.
         assert_eq!(tv.amount, Decimal::from(2250));
+    }
+
+    /// Drift guard: `report_returns` builds the xirr series by hand from
+    /// `extract_flows` + `terminal_value` (it needs the parts for the summary
+    /// breakdown). That manual combine must stay equal to the engine's canonical
+    /// `extract_cash_flows`; if the engine changes how it assembles the series
+    /// (coalescing, a sort tie-break, …), this trips so the CLI is updated in
+    /// lockstep rather than silently drifting.
+    #[test]
+    fn series_matches_extract_cash_flows() {
+        let dirs = vec![
+            Directive::Transaction(
+                Transaction::new(d(2020, 1, 1), "buy")
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Broker:Stock",
+                        money(10, "AAPL"),
+                    ))
+                    .with_synthesized_posting(Posting::new("Assets:Bank", money(-1000, "USD"))),
+            ),
+            Directive::Transaction(
+                Transaction::new(d(2020, 6, 1), "dividend")
+                    .with_synthesized_posting(Posting::new("Assets:Bank", money(20, "USD")))
+                    .with_synthesized_posting(Posting::new("Income:Dividends", money(-20, "USD"))),
+            ),
+            Directive::Price(Price::new(d(2020, 12, 31), "AAPL", money(130, "USD"))),
+        ];
+        let end = d(2020, 12, 31);
+        let scope = Scope::new(
+            vec!["Assets:Broker".to_string()],
+            vec!["Income:Dividends".to_string()],
+        );
+        let price_db = PriceDatabase::from_directives(&dirs);
+        let oracle = PriceDbOracle(&price_db);
+
+        // Reproduce report_returns' hand-built series.
+        let flows = extract_flows(&dirs, &scope, "USD", &oracle, end).unwrap();
+        let terminal = terminal_value(&dirs, &scope, "USD", &oracle, end).unwrap();
+        let mut manual = flows;
+        if let Some(t) = terminal {
+            manual.push(t);
+        }
+        manual.sort_by_key(|f| f.date);
+
+        let canonical =
+            rustledger_returns::extract_cash_flows(&dirs, &scope, "USD", &oracle, end).unwrap();
+        assert_eq!(
+            manual, canonical,
+            "report_returns' manual combine drifted from extract_cash_flows",
+        );
+        // Guard against a vacuous pass: the series is the three expected flows.
+        assert_eq!(canonical.len(), 3);
     }
 }

@@ -1,0 +1,26 @@
+[package]
+name = "rustledger-returns"
+description = "Investment returns math for beancount ledgers — XIRR (money-weighted return) and, later, time-weighted return"
+version = "0.21.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["beancount", "accounting", "returns", "xirr", "irr"]
+categories = ["finance"]
+authors.workspace = true
+readme = "README.md"
+
+[lib]
+bench = false
+
+[dependencies]
+rustledger-core.workspace = true
+rust_decimal.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
+
+[lints]
+workspace = true

@@ -12,6 +12,7 @@ members = [
   "crates/rustledger-plugin-types",
   "crates/rustledger-importer",
   "crates/rustledger-ops",
+  "crates/rustledger-returns",
   "crates/rustledger",
   "crates/rustledger-wasm",
   "crates/rustledger-ffi-wasi",
@@ -32,6 +33,7 @@ default-members = [
   "crates/rustledger-plugin-types",
   "crates/rustledger-importer",
   "crates/rustledger-ops",
+  "crates/rustledger-returns",
   "crates/rustledger",
   "crates/rustledger-lsp",
 ]

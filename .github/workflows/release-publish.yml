@@ -85,6 +85,7 @@ jobs:
             rustledger-core
             rustledger-parser
             rustledger-booking
+            rustledger-returns
             rustledger-plugin-types
             rustledger-ops
             rustledger-plugin

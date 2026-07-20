@@ -3689,6 +3689,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustledger-returns"
+version = "0.21.0"
+dependencies = [
+ "rust_decimal",
+ "rust_decimal_macros",
+ "rustledger-core",
+]
+
+[[package]]
 name = "rustledger-validate"
 version = "0.21.0"
 dependencies = [

@@ -53,7 +53,7 @@ jobs:
       # allow-licenses in this PR won't take effect until merged. Nightly builds don't
       # benefit much from caching anyway since they run infrequently.
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
       - name: Install dependencies
@@ -1241,7 +1241,7 @@ jobs:
       # rust-cache intentionally omitted — see the note on the
       # compatibility-test job (LGPL-3.0 license-check interaction).
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
       - name: Install beancount and beanprice

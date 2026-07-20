@@ -3420,6 +3420,7 @@ dependencies = [
  "rustledger-parser",
  "rustledger-plugin",
  "rustledger-query",
+ "rustledger-returns",
  "rustledger-validate",
  "rustyline",
  "serde",

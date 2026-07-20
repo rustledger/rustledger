@@ -200,6 +200,7 @@ rustledger-loader = { version = "0.21.0", path = "crates/rustledger-loader" }
 rustledger-booking = { version = "0.21.0", path = "crates/rustledger-booking" }
 rustledger-validate = { version = "0.21.0", path = "crates/rustledger-validate" }
 rustledger-query = { version = "0.21.0", path = "crates/rustledger-query" }
+rustledger-returns = { version = "0.21.0", path = "crates/rustledger-returns" }
 rustledger-completion = { version = "0.21.0", path = "crates/rustledger-completion" }
 rustledger-plugin = { version = "0.21.0", path = "crates/rustledger-plugin", default-features = false }
 rustledger-plugin-types = { version = "0.21.0", path = "crates/rustledger-plugin-types" }

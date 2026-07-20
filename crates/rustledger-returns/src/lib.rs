@@ -119,17 +119,16 @@ pub fn xirr(flows: &[CashFlow]) -> Option<f64> {
         return None;
     }
 
-    // Reduce to (years-from-first-flow, amount) pairs once.
+    // Reduce to (years-from-first-flow, amount) pairs once. A `Decimal` that
+    // cannot be represented as `f64` propagates as `None` (no fabricated rate)
+    // rather than being silently zeroed, which would corrupt the result.
     let series: Vec<(f64, f64)> = flows
         .iter()
         .map(|f| {
             let days = f.date.since(origin).map_or(0, |span| span.get_days());
-            (
-                f64::from(days) / DAYS_PER_YEAR,
-                f.amount.to_f64().unwrap_or(0.0),
-            )
+            Some((f64::from(days) / DAYS_PER_YEAR, f.amount.to_f64()?))
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()?;
 
     // Relative tolerance scaled to the size of the flows (see NPV_REL_TOLERANCE).
     let gross: f64 = series.iter().map(|&(_, a)| a.abs()).sum();

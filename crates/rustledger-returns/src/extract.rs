@@ -23,9 +23,18 @@
 //! reporting currency at the transaction's date:
 //!
 //! ```text
-//! cashflow_t = Σ { p.amount : p.account is External }
-//!            = −Σ { p.amount : p.account is Investment or Income }   (equal, by double-entry)
+//! cashflow_t = Σ { p.units : p.account is External }
 //! ```
+//!
+//! For a plain transaction (no per-posting cost or price annotation) the
+//! postings' units sum to zero, so this equals `−Σ { units : Investment or
+//! Income }` — the boundary is crossed by exactly the external side. External
+//! postings are summed by their **units**, i.e. the money that actually moved
+//! through the outside account, which is what a cash flow is. (A transaction
+//! whose *external* leg carries its own `@`price or `{cost}` — an in-kind
+//! transfer across the boundary, or a cash leg with an explicit rate — is a
+//! documented edge: its units are valued through the oracle, not the stated
+//! weight. See [`extract_flows`].)
 //!
 //! With the investor-centric sign convention (see the [crate] docs) this gives
 //! the right answer for free:
@@ -51,6 +60,28 @@
 //! owns the price index) and the extraction logic is testable against a
 //! hand-specified rate table. The production consumer implements [`PriceOracle`]
 //! over its price database.
+//!
+//! # Input contract
+//!
+//! Both entry points take the **booked, pad-expanded** directive stream — costs
+//! resolved, amounts interpolated, and `pad`/`balance` directives already
+//! expanded into their synthesized transactions (the loader's
+//! `Ledger::balance_view` output, the same stream the canonical
+//! `report_cmd::account_balances` consumes). This crate is a leaf and cannot
+//! book or pad-expand a raw stream itself; handing it un-booked directives lets
+//! the booking engine silently realize the wrong inventory (unmatched reductions and
+//! elided-units postings are dropped), and handing it un-expanded directives
+//! drops any position seeded by a pad.
+//!
+//! Returns are computed **from ledger inception** — there is no analysis start
+//! date. An opening balance (a `pad`, or an explicit `Equity:Opening-Balances`
+//! posting) is therefore a genuine cash flow: the capital the investor already
+//! had in the position at the start. Its `Equity` leg classifies as External, so
+//! seeding `Assets:Broker:Cash 500 / Equity:Opening-Balances -500` yields a −500
+//! opening outflow that correctly pairs with the +500 that account contributes
+//! to the terminal value — net a 0% return on an untouched opening balance, as
+//! it should be. (A period-scoped model with a start date, valuing the position
+//! at that date as the opening basis, is future work; see the tracking issue.)
 
 use rust_decimal::Decimal;
 use rustledger_core::{Amount, Directive, NaiveDate, is_subaccount_or_equal};
@@ -172,6 +203,22 @@ pub enum ExtractError {
 /// the valuation date for the terminal flow. The returned series is sorted by
 /// date and ready to hand to [`xirr`](crate::xirr).
 ///
+/// # Input contract
+///
+/// `directives` must be the **booked, pad-expanded** stream — costs resolved,
+/// amounts interpolated, and `pad`/`balance` directives already expanded into
+/// their synthesized transactions (the loader's `Ledger::balance_view` output,
+/// the same stream `report_cmd::account_balances` consumes). This crate is a
+/// leaf and cannot book or pad-expand a raw stream: an un-booked stream lets the
+/// booking engine silently realize the wrong inventory, and an un-expanded stream
+/// drops pad-seeded positions.
+///
+/// Returns are computed **from ledger inception** — an opening balance (a `pad`,
+/// or an `Equity:Opening-Balances` posting) is a genuine flow, the capital
+/// already in the position at the start, and it correctly pairs with that
+/// account's contribution to the terminal value. See the module-level docs for
+/// the full rationale and the boundary-crossing model.
+///
 /// # Errors
 ///
 /// Returns [`ExtractError::MissingPrice`] if any external flow or held position
@@ -200,7 +247,16 @@ pub fn extract_cash_flows(
 /// external postings, converted to `reporting_currency` at the transaction's
 /// date. Transactions that touch no investment or income account, and those
 /// whose external postings net to zero (internal transfers), contribute
-/// nothing. Flows dated after `end_date` are excluded.
+/// nothing. Flows dated after `end_date` are excluded. Expects the booked,
+/// pad-expanded stream described in the module-level docs.
+///
+/// External postings are valued by their **units** (the money that moved
+/// through the outside account). A boundary-crossing external posting that
+/// carries its own `@`price or `{cost}` — an in-kind commodity transfer in or
+/// out, or a cash leg with an explicit rate — is valued through the oracle at
+/// its units, *not* its stated balance weight; if the two disagree the flow
+/// follows the oracle. This is a deliberate limitation for the common case
+/// (external legs are plain cash): honoring per-posting weights is future work.
 ///
 /// # Errors
 ///
@@ -238,20 +294,21 @@ pub fn extract_flows(
             continue;
         }
 
-        // The flow is the sum of the external postings, each converted at the
-        // transaction's date. By double-entry this equals the negation of the
-        // investment+income postings; summing the external side directly makes
-        // the sign land investor-centric (a purchase debits an external cash
-        // account negative → an outflow) without a manual negation.
+        // The flow is the sum of the external postings' units, each converted at
+        // the transaction's date. For a plain transaction the external side is
+        // exactly the negation of the investment+income side, so summing it
+        // directly makes the sign land investor-centric (a purchase debits an
+        // external cash account negative → an outflow) without a manual negation.
         let mut net = Decimal::ZERO;
         for posting in &txn.postings {
             if scope.classify(posting.account.as_str()) != AccountRole::External {
                 continue;
             }
-            // A booked, balanced transaction has complete units on every
-            // posting; an incomplete external posting cannot be valued, so skip
-            // it rather than guess. (In the production pipeline this never
-            // occurs — postings are interpolated before extraction.)
+            // The input-contract booked stream (module docs) fills units on every
+            // posting, so this skip is unreachable in practice; it is defensive,
+            // not a silent drop of a real flow (an un-booked stream is a contract
+            // violation the leaf crate cannot detect, exactly as `apply` and
+            // `account_balances` also require pre-booked input).
             let Some(amount) = posting.amount() else {
                 continue;
             };
@@ -278,10 +335,18 @@ pub fn extract_flows(
 /// would realize by liquidating), or `None` if nothing is held.
 ///
 /// Holdings are realized through the booking engine — so lots keep their cost
-/// and reductions match the account's booking method, exactly as the loader's
-/// book phase does — over every transaction dated on or before `end_date`, then
-/// each position's units are valued at market via `prices`. Only accounts the
+/// and reductions match the account's booking method — over every transaction
+/// dated on or before `end_date`, then each position's units are valued at
+/// **market** (`position.units`, not cost basis) via `prices`. Only accounts the
 /// `scope` classifies as [`Investment`](AccountRole::Investment) are counted.
+/// Positions seeded by a `pad` are realized only if the input stream is
+/// pad-expanded, as [`extract_cash_flows`]' input contract requires; on the
+/// `Ledger::balance_view` stream this matches `report_cmd::account_balances`.
+///
+/// A net-short position (negative units) values negatively, correctly reducing
+/// the terminal flow. A position whose currency is already the reporting
+/// currency (uninvested broker cash) needs no price — [`PriceOracle`]
+/// implementations must return same-currency amounts unchanged.
 ///
 /// # Errors
 ///
@@ -737,6 +802,87 @@ mod tests {
         .unwrap();
         // Same-currency, no rate needed: 250 USD held.
         assert_eq!(terminal, Some(CashFlow::new(d(2020, 12, 31), dec!(250))));
+    }
+
+    #[test]
+    fn opening_balance_pairs_with_terminal_to_a_zero_return() {
+        // A pad-expanded opening balance: `Assets:Broker:Cash 500 /
+        // Equity:Opening-Balances -500`, the synthesized transaction the loader's
+        // balance_view produces. The Equity leg is External, so the opening
+        // capital registers as a -500 flow — and that flow must PAIR with the
+        // +500 the account contributes to the terminal value. An untouched
+        // opening balance is a 0% return, not an undefined one; dropping the
+        // opening flow (e.g. by extracting flows from a non-pad-expanded stream)
+        // would leave a +500 terminal with no offsetting outlay.
+        let dirs = vec![txn(
+            d(2020, 1, 1),
+            vec![
+                Posting::new("Assets:Broker:Cash", amt(dec!(500), "USD")),
+                Posting::new("Equity:Opening-Balances", amt(dec!(-500), "USD")),
+            ],
+        )];
+        let flows = extract_cash_flows(
+            &dirs,
+            &invest_scope(),
+            "USD",
+            &MockPrices::default(),
+            d(2020, 12, 31),
+        )
+        .unwrap();
+        assert_eq!(
+            flows,
+            vec![
+                CashFlow::new(d(2020, 1, 1), dec!(-500)),
+                CashFlow::new(d(2020, 12, 31), dec!(500)),
+            ]
+        );
+        let rate = crate::xirr(&flows).unwrap();
+        assert!(
+            rate.abs() < 1e-6,
+            "untouched opening balance must be ~0%, got {rate}"
+        );
+    }
+
+    #[test]
+    fn opening_balance_then_internal_growth_is_a_positive_return() {
+        // Open with 500, receive a 50 dividend into broker cash from an in-scope
+        // income account (stays inside — no external flow), end worth 550.
+        // Return is computed on the 500 opening capital: +10%.
+        let dirs = vec![
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:Cash", amt(dec!(500), "USD")),
+                    Posting::new("Equity:Opening-Balances", amt(dec!(-500), "USD")),
+                ],
+            ),
+            txn(
+                d(2020, 12, 31),
+                vec![
+                    Posting::new("Assets:Broker:Cash", amt(dec!(50), "USD")),
+                    Posting::new("Income:Dividends", amt(dec!(-50), "USD")),
+                ],
+            ),
+        ];
+        let flows = extract_cash_flows(
+            &dirs,
+            &invest_scope(),
+            "USD",
+            &MockPrices::default(),
+            d(2020, 12, 31),
+        )
+        .unwrap();
+        // Only the opening -500 and the +550 terminal are flows; the dividend
+        // stays inside the boundary.
+        assert_eq!(
+            flows,
+            vec![
+                CashFlow::new(d(2020, 1, 1), dec!(-500)),
+                CashFlow::new(d(2020, 12, 31), dec!(550)),
+            ]
+        );
+        let rate = crate::xirr(&flows).unwrap();
+        assert!((rate - 0.10).abs() < 0.001, "expected ~10%, got {rate}");
     }
 
     #[test]

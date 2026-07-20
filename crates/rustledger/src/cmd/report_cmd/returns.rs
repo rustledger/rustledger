@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use rustledger_core::{Amount, Directive, DisplayContext, NaiveDate};
 use rustledger_query::PriceDatabase;
-use rustledger_returns::{PriceOracle, Scope, extract_flows, terminal_value, xirr};
+use rustledger_returns::{PriceOracle, Scope, extract_flows, terminal_value, twr, xirr};
 use std::io::Write;
 
 /// Adapts the query engine's [`PriceDatabase`] to the returns engine's
@@ -120,6 +120,10 @@ pub(super) fn report_returns<W: Write>(
     // xirr is `None` when the series has no sign change or is otherwise
     // degenerate — a genuinely undefined return, reported as "n/a".
     let rate = xirr(&series);
+    // Time-weighted return: the investments' performance independent of
+    // contribution timing (MWR is the headline). `None` when undefined.
+    let twr_rate = twr(directives, &scope, &reporting_currency, &oracle, end_date)
+        .context("computing the time-weighted return")?;
 
     let currency = reporting_currency.as_str();
     let money = |n: Decimal| ctx.format_amount_number(n, currency);
@@ -135,11 +139,11 @@ pub(super) fn report_returns<W: Write>(
         OutputFormat::Csv => {
             writeln!(
                 writer,
-                "reporting_currency,as_of,cash_flows,invested,distributions,current_value,money_weighted_return_pct"
+                "reporting_currency,as_of,cash_flows,invested,distributions,current_value,money_weighted_return_pct,time_weighted_return_pct"
             )?;
             writeln!(
                 writer,
-                "{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{}",
                 currency,
                 end_date,
                 flow_count,
@@ -147,15 +151,17 @@ pub(super) fn report_returns<W: Write>(
                 csv_escape(&money(distributions)),
                 csv_escape(&money(current_value)),
                 rate.map_or_else(|| "n/a".to_string(), rate_pct),
+                twr_rate.map_or_else(|| "n/a".to_string(), rate_pct),
             )?;
         }
         OutputFormat::Json => {
             // Same 2-decimal precision as text/csv (a bare JSON number, `null`
             // when undefined) so the rate agrees across every output format.
             let rate_field = rate.map_or_else(|| "null".to_string(), rate_pct);
+            let twr_field = twr_rate.map_or_else(|| "null".to_string(), rate_pct);
             writeln!(
                 writer,
-                r#"{{"reporting_currency": "{}", "as_of": "{}", "cash_flows": {}, "invested": "{}", "distributions": "{}", "current_value": "{}", "money_weighted_return_pct": {}}}"#,
+                r#"{{"reporting_currency": "{}", "as_of": "{}", "cash_flows": {}, "invested": "{}", "distributions": "{}", "current_value": "{}", "money_weighted_return_pct": {}, "time_weighted_return_pct": {}}}"#,
                 json_escape(currency),
                 end_date,
                 flow_count,
@@ -163,6 +169,7 @@ pub(super) fn report_returns<W: Write>(
                 money(distributions),
                 money(current_value),
                 rate_field,
+                twr_field,
             )?;
         }
         OutputFormat::Text => {
@@ -196,6 +203,10 @@ pub(super) fn report_returns<W: Write>(
                     "{:24}n/a (undefined — need at least one inflow and one outflow)",
                     "Money-weighted return"
                 )?,
+            }
+            match twr_rate {
+                Some(r) => writeln!(writer, "{:24}{}%", "Time-weighted return", rate_pct(r))?,
+                None => writeln!(writer, "{:24}n/a", "Time-weighted return")?,
             }
         }
     }

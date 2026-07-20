@@ -22,10 +22,15 @@ re-deriving it.
   `PriceOracle` + end date → the `CashFlow` series, with structural
   internal-transfer exclusion and a terminal market valuation of the position
   still held.
-- [ ] Dividend / ex-dividend breakout (total vs. ex-income return).
-- [ ] Time-weighted return (Modified Dietz / true TWR) — needs per-date
-  portfolio valuations, built on the same realization primitive as
+- [x] `twr` — annualized time-weighted return via the unit-value (NAV) method:
+  values the portfolio at each cash-flow date and chains the sub-period returns,
+  so it measures the investments' performance independent of contribution
+  timing. Shares the `investment_value_at` realization primitive with
   `terminal_value`.
+- [ ] Dividend / ex-dividend breakout (total vs. ex-income return).
+- [ ] Per-commodity / named-group breakdown ([#1820]).
+
+[#1820]: https://github.com/rustledger/rustledger/issues/1820
 
 ## Sign convention
 

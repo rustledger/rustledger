@@ -54,6 +54,26 @@ const LEDGER_PAD: &str = r#"option "operating_currency" "USD"
 2020-01-01 balance Assets:Broker:Cash 500 USD
 "#;
 
+/// A flat first half then a big contribution right before a +20% second half:
+/// the money-weighted and time-weighted returns diverge (good contribution
+/// timing lifts MWR above the investments' own TWR).
+const LEDGER_TIMING: &str = r#"option "operating_currency" "USD"
+
+2021-01-01 open Assets:Bank
+2021-01-01 open Assets:Broker:Stock
+
+2021-01-01 * "Buy"
+  Assets:Broker:Stock  10 AAPL {100 USD}
+  Assets:Bank         -1000 USD
+
+2021-07-01 price AAPL 100 USD
+2021-07-01 * "Buy more before the rally"
+  Assets:Broker:Stock  10 AAPL {100 USD}
+  Assets:Bank         -1000 USD
+
+2022-01-01 price AAPL 120 USD
+"#;
+
 fn write_fixture(source: &str) -> tempfile::NamedTempFile {
     let mut f = tempfile::Builder::new()
         .prefix("report-returns-")
@@ -219,6 +239,7 @@ fn json_format_emits_the_expected_fields() {
         "distributions",
         "current_value",
         "money_weighted_return_pct",
+        "time_weighted_return_pct",
     ] {
         assert!(out.contains(key), "json missing `{key}`: {out}");
     }
@@ -290,5 +311,41 @@ fn pad_seeded_holding_is_valued() {
         field(&out, "Money-weighted return"),
         "0.00%",
         "untouched → 0%: {out}"
+    );
+}
+
+#[test]
+fn time_weighted_return_diverges_from_money_weighted_on_timing() {
+    let bin = require_rledger!();
+    let f = write_fixture(LEDGER_TIMING);
+    let path = f.path().to_str().unwrap();
+    let out = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--end",
+            "2022-01-01",
+            "--no-pager",
+        ],
+    );
+    // The investments went flat (0%) then +20% → TWR is exactly 20%, regardless
+    // of when money went in. MWR is higher because the second 1000 was invested
+    // only for the winning half.
+    assert_eq!(
+        field(&out, "Time-weighted return"),
+        "20.00%",
+        "TWR should be 20% (flat then +20%, timing-independent): {out}"
+    );
+    let mwr: f64 = field(&out, "Money-weighted return")
+        .trim_end_matches('%')
+        .parse()
+        .expect("parse MWR");
+    assert!(
+        mwr > 25.0,
+        "MWR should exceed TWR given the good contribution timing: {out}"
     );
 }

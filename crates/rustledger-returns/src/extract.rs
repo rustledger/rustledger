@@ -84,6 +84,7 @@
 //! at that date as the opening basis, is future work; see the tracking issue.)
 
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rustledger_core::{Amount, Directive, NaiveDate, is_subaccount_or_equal};
 
 use crate::CashFlow;
@@ -401,24 +402,48 @@ pub fn terminal_value(
     prices: &impl PriceOracle,
     end_date: NaiveDate,
 ) -> Result<Option<CashFlow>, ExtractError> {
-    // Realize per-account inventories via the booking engine, applying only
-    // transactions up to the valuation date. Opens carry booking methods
-    // regardless of date, so the engine is registered with the full stream.
-    //
-    // This realization loop mirrors `report_cmd::account_balances`
-    // (crates/rustledger/src/cmd/report_cmd/mod.rs) plus the `<= end_date`
-    // filter — the leaf crate cannot call that CLI-side helper. Kept aligned by
-    // hand until a shared realization primitive lands; the returns CLI PR is
-    // the place to add a cross-crate drift-guard test comparing the two on the
-    // same ledger. Like that helper, inventories are collected into a `BTreeMap`
-    // so iteration order is account-sorted and stable across runs (an
-    // `FxHashMap` would make which currency a `MissingPrice` names depend on
-    // hash order — and differ between 32- and 64-bit targets).
+    let total = investment_value_at(directives, scope, reporting_currency, prices, end_date)?;
+    // Only a nonzero market value becomes a terminal flow. A zero total — whether
+    // from an empty portfolio or a net-flat/worthless holding — yields no flow:
+    // emitting a zero flow on `end_date` is not neutral, it defeats xirr's
+    // all-same-date degenerate guard and would fabricate a return (see the fn
+    // docs). `total` can only be nonzero if some position was valued, so this
+    // also covers the "nothing held" case.
+    if total.is_zero() {
+        Ok(None)
+    } else {
+        Ok(Some(CashFlow::new(end_date, total)))
+    }
+}
+
+/// Market value (in `reporting_currency`) of the investment-scope holdings as of
+/// `date`: the inventory realized from every transaction dated on or before
+/// `date`, with each held position valued at **market** at `date`.
+///
+/// This is the shared realization primitive behind [`terminal_value`] (the
+/// value at the report end date) and [`twr`] (the value at each cash-flow date).
+/// It mirrors `report_cmd::account_balances`
+/// (`crates/rustledger/src/cmd/report_cmd/mod.rs`) plus the `<= date` filter — the
+/// leaf crate cannot call that CLI-side helper. Kept aligned by hand; the returns
+/// CLI has a cross-crate drift-guard test comparing the two on the same ledger.
+/// Like that helper, inventories are collected into a `BTreeMap` so iteration
+/// order is stable across runs (an `FxHashMap` would make which currency a
+/// `MissingPrice` names depend on hash order, and differ between 32- and 64-bit
+/// targets).
+fn investment_value_at(
+    directives: &[Directive],
+    scope: &Scope,
+    reporting_currency: &str,
+    prices: &impl PriceOracle,
+    date: NaiveDate,
+) -> Result<Decimal, ExtractError> {
+    // Opens carry booking methods regardless of date, so register with the full
+    // stream but apply only transactions up to the valuation date.
     let mut engine = rustledger_booking::BookingEngine::new();
     engine.register_account_methods(directives.iter());
     for directive in directives {
         if let Directive::Transaction(txn) = directive
-            && txn.date <= end_date
+            && txn.date <= date
         {
             engine.apply(txn);
         }
@@ -436,26 +461,132 @@ pub fn terminal_value(
                 continue;
             }
             let converted = prices
-                .convert(&position.units, reporting_currency, end_date)
+                .convert(&position.units, reporting_currency, date)
                 .ok_or_else(|| ExtractError::MissingPrice {
                     currency: position.units.currency.to_string(),
-                    date: end_date,
+                    date,
                 })?;
             total += converted.number;
         }
     }
+    Ok(total)
+}
 
-    // Only a nonzero market value becomes a terminal flow. A zero total — whether
-    // from an empty portfolio or a net-flat/worthless holding — yields no flow:
-    // emitting a zero flow on `end_date` is not neutral, it defeats xirr's
-    // all-same-date degenerate guard and would fabricate a return (see the fn
-    // docs). `total` can only be nonzero if some position was valued, so this
-    // also covers the "nothing held" case.
-    if total.is_zero() {
-        Ok(None)
-    } else {
-        Ok(Some(CashFlow::new(end_date, total)))
+/// Annualized **time-weighted return** (TWR) for `scope`, in `reporting_currency`,
+/// from ledger inception to `end_date` — or `None` when it is undefined.
+///
+/// TWR measures how the *investments themselves* performed, independent of the
+/// investor's contribution timing (the GIPS / manager-comparison metric). It
+/// complements the money-weighted [`xirr`](crate::xirr), which answers "what did *I* earn
+/// given when I moved money". Report both, MWR as the headline.
+///
+/// # Method
+///
+/// The unit-value (mutual-fund NAV) method. The portfolio is valued at every
+/// external cash-flow date; the sub-period return between two consecutive
+/// valuations is the market change of the holdings that were present, and the
+/// whole-period return is those sub-periods chained geometrically, then
+/// annualized. Because each contribution/withdrawal is netted out at its date,
+/// only market movement — and income the holdings generate (reinvested
+/// dividends, internal reshuffling, which are not external flows) — drives the
+/// result; the *timing* of the investor's money does not, which is exactly what
+/// distinguishes TWR from MWR.
+///
+/// Concretely, with the portfolio value `Vᵢ` at flow date `dᵢ`
+/// (`investment_value_at`, holdings ≤ `dᵢ` at `dᵢ` prices) and the net
+/// contribution `Fᵢ` into the portfolio at `dᵢ`, the sub-period return since the
+/// previous valuation `Vₚ` is `(Vᵢ − Fᵢ) / Vₚ` — the holdings priced just before
+/// the flow, over their value just after the previous one. (`Vᵢ − Fᵢ` assumes a
+/// contribution buys assets worth its cash value; an off-market purchase price
+/// introduces a small approximation, as in most TWR tools.)
+///
+/// # Returns `None`
+///
+/// When the return is undefined: no cash flows; the whole span is a single day
+/// (nothing to annualize); or the portfolio value is non-positive at a valuation
+/// point (a fully-realized or net-short position, where unit accounting breaks
+/// down — a documented limitation of this MVP).
+///
+/// # Errors
+///
+/// [`ExtractError::MissingPrice`] if a held commodity cannot be valued at a flow
+/// date or at `end_date`. TWR needs a price at *every* flow date, not just the
+/// end — a purchase supplies an implicit price at its own date, and
+/// [`PriceOracle`] resolves the most recent price on or before a date, so a
+/// dividend date with no same-day price still resolves from an earlier one.
+///
+/// # Panics
+///
+/// Same booked, pad-expanded input requirement as [`extract_cash_flows`].
+pub fn twr(
+    directives: &[Directive],
+    scope: &Scope,
+    reporting_currency: &str,
+    prices: &impl PriceOracle,
+    end_date: NaiveDate,
+) -> Result<Option<f64>, ExtractError> {
+    // External boundary flows drive the sub-period boundaries. Net them per date
+    // and flip to portfolio-centric sign (a contribution INTO the portfolio is
+    // positive; CashFlow is investor-centric, so negate). BTreeMap keeps dates
+    // ordered.
+    let flows = extract_flows(directives, scope, reporting_currency, prices, end_date)?;
+    if flows.is_empty() {
+        return Ok(None);
     }
+    let mut net_by_date: std::collections::BTreeMap<NaiveDate, Decimal> =
+        std::collections::BTreeMap::new();
+    for flow in &flows {
+        *net_by_date.entry(flow.date).or_default() += -flow.amount;
+    }
+
+    // Chain the sub-period returns via unit accounting. `v_prev` is the portfolio
+    // value just after the previous valuation; on the first flow date it is only
+    // established (that flow is the opening capital, not a return).
+    let mut cumulative = 1.0_f64;
+    let mut v_prev: Option<f64> = None;
+    let first_date = *net_by_date.keys().next().expect("non-empty");
+    for (&date, &contribution) in &net_by_date {
+        let v_i = investment_value_at(directives, scope, reporting_currency, prices, date)?
+            .to_f64()
+            .unwrap_or(0.0);
+        if let Some(vp) = v_prev {
+            if vp <= 0.0 {
+                return Ok(None); // portfolio non-positive: unit chaining undefined
+            }
+            let f = contribution.to_f64().unwrap_or(0.0);
+            let r = (v_i - f) / vp;
+            if r <= 0.0 {
+                return Ok(None); // sub-period wiped the portfolio out
+            }
+            cumulative *= r;
+        }
+        v_prev = Some(v_i);
+    }
+
+    // Final sub-period: last flow date → end_date, with no flow.
+    let v_end = investment_value_at(directives, scope, reporting_currency, prices, end_date)?
+        .to_f64()
+        .unwrap_or(0.0);
+    match v_prev {
+        Some(vp) if vp > 0.0 => {
+            let r = v_end / vp;
+            if r <= 0.0 {
+                return Ok(None);
+            }
+            cumulative *= r;
+        }
+        _ => return Ok(None),
+    }
+
+    // Annualize the total return over [first_date, end_date] (actual/365, the
+    // same day count as `xirr`). A zero-length span cannot be annualized.
+    let days = end_date.since(first_date).map_or(0, |s| s.get_days());
+    if days <= 0 {
+        return Ok(None);
+    }
+    let years = f64::from(days) / crate::DAYS_PER_YEAR;
+    let annualized = cumulative.powf(1.0 / years) - 1.0;
+    Ok(annualized.is_finite().then_some(annualized))
 }
 
 #[cfg(test)]
@@ -1150,5 +1281,104 @@ mod tests {
         let rate = crate::xirr(&flows).unwrap();
         // 1500 back on 1000 over ~1yr → ~50%.
         assert!((rate - 0.50).abs() < 0.01, "expected ~50%, got {rate}");
+    }
+
+    #[test]
+    fn twr_single_flow_is_the_holding_period_return() {
+        // One purchase held for a year, +10% → TWR 10% (matches MWR when there
+        // is a single flow).
+        let dirs = vec![txn(
+            d(2021, 1, 1),
+            vec![
+                Posting::new("Assets:Broker:Stock", amt(dec!(10), "AAPL")),
+                Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+            ],
+        )];
+        let prices = MockPrices::default()
+            .with("AAPL", "USD", d(2021, 1, 1), dec!(100))
+            .with("AAPL", "USD", d(2022, 1, 1), dec!(110));
+        let rate = twr(&dirs, &invest_scope(), "USD", &prices, d(2022, 1, 1))
+            .unwrap()
+            .expect("defined");
+        assert!((rate - 0.10).abs() < 1e-9, "expected 10%, got {rate}");
+    }
+
+    #[test]
+    fn twr_neutralizes_contribution_timing_unlike_mwr() {
+        // A small position sits flat for the first half-year (0%), then a large
+        // contribution goes in right before a +20% second half. TWR reflects the
+        // investments' performance (0% then 20%, chained = 20%); MWR is pulled
+        // much higher because most of the money was present only for the gain.
+        let dirs = vec![
+            txn(
+                d(2021, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(1), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(-100), "USD")),
+                ],
+            ),
+            txn(
+                d(2021, 7, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(10), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+                ],
+            ),
+        ];
+        let prices = MockPrices::default()
+            .with("AAPL", "USD", d(2021, 1, 1), dec!(100))
+            .with("AAPL", "USD", d(2021, 7, 1), dec!(100)) // flat first half
+            .with("AAPL", "USD", d(2022, 1, 1), dec!(120)); // +20% second half
+        let end = d(2022, 1, 1);
+
+        let tw = twr(&dirs, &invest_scope(), "USD", &prices, end)
+            .unwrap()
+            .expect("defined");
+        // 1.0 (flat) * 1.2 (+20%) over 365 days → 20%.
+        assert!((tw - 0.20).abs() < 1e-9, "expected TWR 20%, got {tw}");
+
+        // MWR on the same ledger is materially higher (good contribution timing).
+        let series = extract_cash_flows(&dirs, &invest_scope(), "USD", &prices, end).unwrap();
+        let mw = crate::xirr(&series).unwrap();
+        assert!(
+            mw > tw + 0.10,
+            "MWR ({mw}) should far exceed TWR ({tw}) given the timing",
+        );
+    }
+
+    #[test]
+    fn twr_is_none_without_flows() {
+        // No transaction touches the investment scope → no flows → undefined.
+        let dirs = vec![txn(
+            d(2021, 1, 1),
+            vec![
+                Posting::new("Expenses:Food", amt(dec!(5), "USD")),
+                Posting::new("Assets:Bank", amt(dec!(-5), "USD")),
+            ],
+        )];
+        let rate = twr(
+            &dirs,
+            &invest_scope(),
+            "USD",
+            &MockPrices::default(),
+            d(2021, 12, 31),
+        )
+        .unwrap();
+        assert_eq!(rate, None);
+    }
+
+    #[test]
+    fn twr_over_a_single_day_is_none() {
+        // Buy and report on the same day: no elapsed time to annualize.
+        let dirs = vec![txn(
+            d(2021, 1, 1),
+            vec![
+                Posting::new("Assets:Broker:Stock", amt(dec!(10), "AAPL")),
+                Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+            ],
+        )];
+        let prices = MockPrices::default().with("AAPL", "USD", d(2021, 1, 1), dec!(100));
+        let rate = twr(&dirs, &invest_scope(), "USD", &prices, d(2021, 1, 1)).unwrap();
+        assert_eq!(rate, None);
     }
 }

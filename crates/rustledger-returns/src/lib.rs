@@ -7,17 +7,18 @@
 //! ONE implementation rather than re-deriving it (the repo's canonical-function
 //! discipline).
 //!
-//! Two layers live here:
+//! The layers:
 //!
-//! - [`xirr`] — the money-weighted return over a [`CashFlow`] series.
+//! - [`xirr`] — the money-weighted return (MWR) over a [`CashFlow`] series.
 //! - [`extract_cash_flows`] — turning a booked ledger into that series: which
 //!   postings cross an investment's boundary, terminal market valuation, and
 //!   conversion to one reporting currency. Prices are supplied through the
 //!   [`PriceOracle`] trait, so the crate stays a leaf (it does no ledger
 //!   loading, owns no price index, and does no I/O — those remain the caller's).
-//!
-//! Time-weighted return (Modified Dietz / true TWR) needs per-date portfolio
-//! valuations and lands next, building on the same extraction primitives.
+//! - [`twr`] — the time-weighted return, which values the portfolio at each
+//!   cash-flow date and chains the sub-period returns, so it measures the
+//!   *investments'* performance independent of contribution timing (the
+//!   GIPS / manager-comparison metric). Report both, MWR as the headline.
 //!
 //! # Sign convention
 //!
@@ -36,7 +37,7 @@ use rustledger_core::NaiveDate;
 mod extract;
 pub use extract::{
     AccountRole, ExtractError, PriceOracle, Scope, extract_cash_flows, extract_flows,
-    terminal_value,
+    terminal_value, twr,
 };
 
 /// A single dated cash flow in one reporting currency.

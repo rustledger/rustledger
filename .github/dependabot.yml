@@ -29,6 +29,15 @@ updates:
     labels:
       - "dependencies"
     open-pull-requests-limit: 5
+    groups:
+      # init and analyze are two actions in the same github/codeql-action repo
+      # and MUST move to the same commit SHA together — mixed versions fail with
+      # "Loaded a configuration file for version X, but running version Y". Group
+      # them into one PR so Dependabot never bumps one without the other (#1822
+      # bumped analyze alone and broke every CodeQL run).
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
   # npm — MCP server. The MCP spec moves fast (2026-07-28 restructures the
   # protocol core); without this entry the @modelcontextprotocol/sdk pin
   # never gets update PRs and spec adoption stalls silently (issue #1767).

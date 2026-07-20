@@ -5,14 +5,19 @@
 //! price database, no I/O — so that every consumer (the CLI `report returns`
 //! command, and later the query engine, the FFI component, and rustfava) reuses
 //! ONE implementation rather than re-deriving it (the repo's canonical-function
-//! discipline). Cash-flow *extraction* from a ledger — which postings cross an
-//! investment's boundary, dividend classification, currency conversion, and the
-//! terminal market valuation — is the caller's job; this crate takes the
-//! resulting [`CashFlow`] series and returns a rate.
+//! discipline).
 //!
-//! This first cut ships the money-weighted return ([`xirr`]). Time-weighted
-//! return (Modified Dietz / true TWR) needs per-date portfolio valuations that
-//! only the extraction layer can supply, so it lands alongside that layer.
+//! Two layers live here:
+//!
+//! - [`xirr`] — the money-weighted return over a [`CashFlow`] series.
+//! - [`extract_cash_flows`] — turning a booked ledger into that series: which
+//!   postings cross an investment's boundary, terminal market valuation, and
+//!   conversion to one reporting currency. Prices are supplied through the
+//!   [`PriceOracle`] trait, so the crate stays a leaf (it does no ledger
+//!   loading, owns no price index, and does no I/O — those remain the caller's).
+//!
+//! Time-weighted return (Modified Dietz / true TWR) needs per-date portfolio
+//! valuations and lands next, building on the same extraction primitives.
 //!
 //! # Sign convention
 //!
@@ -27,6 +32,12 @@
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use rustledger_core::NaiveDate;
+
+mod extract;
+pub use extract::{
+    AccountRole, ExtractError, PriceOracle, Scope, extract_cash_flows, extract_flows,
+    terminal_value,
+};
 
 /// A single dated cash flow in one reporting currency.
 ///

@@ -3,22 +3,29 @@
 Investment returns math for beancount ledgers — the shared, pure computation
 engine behind `rledger`'s returns reporting ([#1814]).
 
-This crate owns only the math. It has no ledger loading, no price database, and
-no I/O, so every consumer (the CLI `report returns` command, and later the query
+This crate owns the returns *math* and the *extraction* that feeds it — turning
+a booked ledger into the dated, single-currency cash-flow series a return is
+computed from (deciding which postings cross an investment's boundary, excluding
+internal transfers, valuing the position still held at the report end date, and
+converting to one reporting currency). It has no ledger loading, no price index,
+and no I/O: prices arrive through the `PriceOracle` trait, so the crate stays a
+leaf and every consumer (the CLI `report returns` command, and later the query
 engine, the FFI component, and rustfava) reuses one implementation instead of
-re-deriving it. Cash-flow *extraction* from a ledger — deciding which postings
-cross an investment's boundary, classifying dividends, converting to a single
-reporting currency, and valuing the position still held at the report end date —
-is the caller's job.
+re-deriving it.
 
 ## Status
 
 - [x] `xirr` — money-weighted return (annualized internal rate of return) over
-  an irregularly-spaced cash-flow series, via Newton's method with a bisection
-  fallback. Actual/365 day count, matching spreadsheet `XIRR` and beangrow.
-- [ ] Time-weighted return (Modified Dietz / true TWR) — lands with the
-  cash-flow extraction layer, which supplies the per-date portfolio valuations
-  it needs.
+  an irregularly-spaced cash-flow series, via Newton's method with a Brent's
+  method fallback. Actual/365 day count, matching spreadsheet `XIRR` and beangrow.
+- [x] `extract_cash_flows` — booked ledger + account-role `Scope` +
+  `PriceOracle` + end date → the `CashFlow` series, with structural
+  internal-transfer exclusion and a terminal market valuation of the position
+  still held.
+- [ ] Dividend / ex-dividend breakout (total vs. ex-income return).
+- [ ] Time-weighted return (Modified Dietz / true TWR) — needs per-date
+  portfolio valuations, built on the same realization primitive as
+  `terminal_value`.
 
 ## Sign convention
 

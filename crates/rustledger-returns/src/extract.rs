@@ -511,11 +511,12 @@ fn investment_value_at(
 /// # Returns `None`
 ///
 /// When the return is undefined: no cash flows; the whole span is a single day
-/// (nothing to annualize); or the portfolio value is non-positive at an
-/// *intermediate* valuation point (a mid-stream full liquidation-then-refund, or
-/// a net-short position, where unit accounting across a zero breaks down — a
-/// documented limitation of this MVP). A position simply **closed out on the
-/// report date** is *not* `None`: its holding-period return is reported.
+/// (nothing to annualize); a **net-short** portfolio (negative value, at any
+/// valuation point) where unit accounting is undefined; or a mid-stream full
+/// **liquidation-then-refund** (a zero value between two flows, breaking the
+/// chain) — both documented limitations of this MVP. A position simply **closed
+/// out on the report date** (value zero only at the very end) is *not* `None`:
+/// its holding-period return is reported.
 ///
 /// # Performance
 ///
@@ -601,7 +602,14 @@ pub fn twr(
             }
             cumulative *= r;
         }
-        Some(_) => {} // fully liquidated at the last flow: no final-segment return
+        // Net short (negative value): unit accounting across a non-positive value
+        // is undefined — return None, consistent with the in-loop guard that
+        // returns None for a mid-stream vp <= 0. (Not the same as a clean close.)
+        Some(vp) if vp < 0.0 => return Ok(None),
+        // Exactly zero: fully liquidated at the last flow, so the final span holds
+        // nothing and contributes no return — the whole-period figure is already
+        // in `cumulative` (a position closed out on the report date keeps its TWR).
+        Some(_) => {}
         None => return Ok(None), // unreachable: `flows` non-empty ⇒ the loop ran
     }
 
@@ -1440,5 +1448,60 @@ mod tests {
             .expect("a closed-out position still has a defined TWR");
         // Bought at 1000-worth, sold for 1100 → ~10% over ~1yr.
         assert!((rate - 0.10).abs() < 0.001, "expected ~10%, got {rate}");
+    }
+
+    #[test]
+    fn twr_of_a_net_short_position_is_none() {
+        // A held short position leaves the portfolio value negative at the report
+        // date. Unit accounting across a non-positive value is undefined, so TWR
+        // is None — NOT a fabricated 0% (regression: the closed-out fix must not
+        // treat a negative value the same as a fully-liquidated zero).
+        let dirs = vec![txn(
+            d(2021, 1, 1),
+            vec![
+                Posting::new("Assets:Broker:Stock", amt(dec!(-10), "AAPL")),
+                Posting::new("Assets:Bank", amt(dec!(1000), "USD")),
+            ],
+        )];
+        let prices = MockPrices::default()
+            .with("AAPL", "USD", d(2021, 1, 1), dec!(100))
+            .with("AAPL", "USD", d(2021, 12, 31), dec!(100));
+        let rate = twr(&dirs, &invest_scope(), "USD", &prices, d(2021, 12, 31)).unwrap();
+        assert_eq!(rate, None);
+    }
+
+    #[test]
+    fn twr_credits_a_dividend_to_bank_as_return() {
+        // Marquee TWR path: a cash dividend paid OUT to the bank leaves the
+        // holdings' units unchanged but IS return the investment generated. It
+        // must be credited exactly once, in its sub-period.
+        //   Jan–Jul: 10 AAPL flat at 100 (1000→1000) but a 50 dividend paid out
+        //            → sub-period return (1000 + 50)/1000 = 1.05
+        //   Jul–Jan: 100 → 110 → 1.10
+        //   chained: 1.05 * 1.10 = 1.155 → 15.5% over the year.
+        let dirs = vec![
+            txn(
+                d(2021, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(10), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+                ],
+            ),
+            txn(
+                d(2021, 7, 1),
+                vec![
+                    Posting::new("Assets:Bank", amt(dec!(50), "USD")),
+                    Posting::new("Income:Dividends", amt(dec!(-50), "USD")),
+                ],
+            ),
+        ];
+        let prices = MockPrices::default()
+            .with("AAPL", "USD", d(2021, 1, 1), dec!(100))
+            .with("AAPL", "USD", d(2021, 7, 1), dec!(100)) // flat: sub-period 1 is the dividend
+            .with("AAPL", "USD", d(2022, 1, 1), dec!(110)); // +10% second half
+        let rate = twr(&dirs, &invest_scope(), "USD", &prices, d(2022, 1, 1))
+            .unwrap()
+            .expect("defined");
+        assert!((rate - 0.155).abs() < 0.001, "expected ~15.5%, got {rate}");
     }
 }

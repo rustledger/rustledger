@@ -97,7 +97,19 @@ const BISECT_MAX_ITER: usize = 200;
 /// A cash-flow series with more than one sign change can have several
 /// mathematically valid IRRs. Like spreadsheet `XIRR` and beangrow, this
 /// returns a single root (the one the solver converges to); for the
-/// conventional "outflows then inflows" shape there is exactly one.
+/// conventional "outflows then inflows" shape there is exactly one. A
+/// series whose only roots have even multiplicity within the search range
+/// (the NPV curve touches zero without crossing) may not be bracketed and can
+/// return `None`.
+///
+/// # Extreme losses
+///
+/// IRRs at or below roughly **-99.99999%/year** — a near-total annual loss,
+/// where the rate sits against the `rate = -1` pole — are treated as
+/// unresolvable and return `None`. The result is never a fabricated or garbage
+/// rate: every returned value is verified to be a genuine root (`|NPV|` within
+/// tolerance) before it is surfaced, so a solver path corrupted by a non-finite
+/// NPV near the pole yields `None`, not a wrong number.
 #[must_use]
 pub fn xirr(flows: &[CashFlow]) -> Option<f64> {
     if flows.len() < 2 {
@@ -134,7 +146,15 @@ pub fn xirr(flows: &[CashFlow]) -> Option<f64> {
     let gross: f64 = series.iter().map(|&(_, a)| a.abs()).sum();
     let tol = (gross * NPV_REL_TOLERANCE).max(NPV_ABS_FLOOR);
 
-    newton(&series, tol).or_else(|| bisect(&series, tol))
+    let candidate = newton(&series, tol).or_else(|| bisect(&series, tol))?;
+    // Final guard: NEVER surface a non-root. A solver path that terminated on
+    // an iteration limit, a stalled Newton step, or a bracket corrupted by a
+    // non-finite NPV near the rate=-1 pole (a far-dated flow whose discount
+    // underflows) could otherwise return a rate that isn't actually an IRR.
+    // Verifying `|NPV| <= tol` reduces every such case to `None`. Genuine
+    // bisection results sit well within `tol` (their rate is pinned to ~1e-12),
+    // so this never rejects a valid root.
+    (candidate.is_finite() && npv(&series, candidate).abs() <= tol).then_some(candidate)
 }
 
 /// Net present value of the series at `rate`.
@@ -401,21 +421,45 @@ mod tests {
     }
 
     #[test]
-    fn scale_invariance_large_and_tiny() {
-        // The 10% one-year shape scaled up 1e6 and down 1e-6 must both resolve
-        // to ~0.10 — the relative tolerance keeps the root check meaningful at
-        // any magnitude (an absolute tolerance failed one end or the other).
-        for scale in [dec!(1000000), dec!(0.000001)] {
-            let flows = [
-                CashFlow::new(d(2020, 1, 1), -scale),
-                CashFlow::new(d(2020, 12, 31), scale * dec!(1.1)),
-            ];
-            let r = xirr(&flows).unwrap_or_else(|| panic!("scale {scale} must resolve"));
-            assert!(
-                approx(r, 0.10, 1e-6),
-                "scale {scale}: expected ~0.10, got {r}"
-            );
-        }
+    fn large_magnitude_resolves() {
+        // The 10% one-year shape at million-scale must still resolve to ~0.10.
+        // An absolute NPV tolerance of 1e-7 is unreachable at this magnitude;
+        // the relative tolerance makes it work.
+        let flows = [
+            CashFlow::new(d(2020, 1, 1), dec!(-1000000)),
+            CashFlow::new(d(2020, 12, 31), dec!(1100000)),
+        ];
+        let r = xirr(&flows).expect("million-scale series must resolve");
+        assert!(approx(r, 0.10, 1e-6), "expected ~0.10, got {r}");
+    }
+
+    #[test]
+    fn tiny_magnitude_requires_relative_tolerance() {
+        // Flows ~1e-8 in magnitude with a ~50% return. Under an ABSOLUTE 1e-7
+        // NPV tolerance, |NPV| is below 1e-7 for every rate, so the solver would
+        // accept the 0.10 seed as a bogus root on iteration 0. The relative
+        // tolerance keeps the check meaningful and finds the true ~49.8% rate.
+        let flows = [
+            CashFlow::new(d(2020, 1, 1), dec!(-0.00000002)),
+            CashFlow::new(d(2021, 1, 1), dec!(0.00000003)),
+        ];
+        let r = xirr(&flows).expect("tiny-magnitude series must still resolve");
+        assert!(
+            approx(r, 0.498, 3e-3),
+            "expected the true ~0.498, not the 0.10 seed, got {r}"
+        );
+    }
+
+    #[test]
+    fn extreme_loss_below_supported_range_returns_none() {
+        // IRR ≈ -99.99999% sits below the resolvable range (against the rate=-1
+        // pole). The final root check makes the result a graceful None — never a
+        // fabricated or garbage rate.
+        let flows = [
+            CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+            CashFlow::new(d(2020, 12, 31), dec!(0.00005)),
+        ];
+        assert_eq!(xirr(&flows), None);
     }
 
     #[test]

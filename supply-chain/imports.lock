@@ -963,8 +963,8 @@ user-login = "Manishearth"
 user-name = "Manish Goregaokar"
 
 [[publisher.tokio]]
-version = "1.53.0"
-when = "2026-07-17"
+version = "1.53.1"
+when = "2026-07-20"
 user-id = 6741
 user-login = "Darksonn"
 user-name = "Alice Ryhl"
@@ -1115,6 +1115,11 @@ version = "0.253.0"
 when = "2026-07-07"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
+[[publisher.wasm-encoder]]
+version = "0.254.0"
+when = "2026-07-20"
+trusted-publisher = "github:bytecodealliance/wasm-tools"
+
 [[publisher.wasm-metadata]]
 version = "0.236.0"
 when = "2025-07-28"
@@ -1139,6 +1144,11 @@ trusted-publisher = "github:bytecodealliance/wasm-tools"
 [[publisher.wasmparser]]
 version = "0.253.0"
 when = "2026-07-07"
+trusted-publisher = "github:bytecodealliance/wasm-tools"
+
+[[publisher.wasmparser]]
+version = "0.254.0"
+when = "2026-07-20"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmprinter]]
@@ -1222,13 +1232,13 @@ when = "2026-06-24"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wast]]
-version = "253.0.0"
-when = "2026-07-07"
+version = "254.0.0"
+when = "2026-07-20"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wat]]
-version = "1.253.0"
-when = "2026-07-07"
+version = "1.254.0"
+when = "2026-07-20"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wiggle]]

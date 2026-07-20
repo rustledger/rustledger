@@ -103,6 +103,12 @@ pub trait PriceOracle {
     ///
     /// Returns `None` when no conversion path exists — a same-currency
     /// conversion must return the amount unchanged (rate 1), never `None`.
+    ///
+    /// The conversion must be **linear in the amount** — a fixed rate applied to
+    /// `amount.number`, so `convert(-x) == -convert(x)`. Extraction relies on
+    /// this to value a net-short holding (negative units) as a negative terminal
+    /// flow; an implementation that clamped or took the absolute value would
+    /// invert a short position's contribution.
     fn convert(&self, amount: &Amount, to_currency: &str, date: NaiveDate) -> Option<Amount>;
 }
 
@@ -129,10 +135,13 @@ pub enum AccountRole {
 ///
 /// Matching is segment-aware (via [`is_subaccount_or_equal`]): the prefix
 /// `Assets:Broker` matches `Assets:Broker` and `Assets:Broker:Cash` but not
-/// `Assets:Brokerage`. An account is **Investment** if it is at or under any
-/// investment prefix; otherwise **Income** if it is at or under any income
-/// prefix; otherwise **External**. Investment therefore wins when an account
-/// would match both (an unusual configuration).
+/// `Assets:Brokerage`. An account takes the role of the **longest** (most
+/// specific) prefix it matches across both lists, so nesting resolves the
+/// intuitive way: with investment `Assets:Broker` and income
+/// `Assets:Broker:Dividends`, the dividend subaccount is Income (the longer
+/// match) while the rest of the broker tree is Investment. An account matching
+/// neither list is **External**. On an exact-length tie (the same string in both
+/// lists — a misconfiguration) Investment wins.
 ///
 /// The `income` prefixes are the investment's **P&L** (income *and* related
 /// expenses): dividend and gain accounts, and also the broker fees / commissions
@@ -156,22 +165,29 @@ impl Scope {
     }
 
     /// Classify a single account.
+    ///
+    /// The account takes the role of the longest matching prefix across both
+    /// lists (most-specific wins), so an income account nested under an
+    /// investment prefix still classifies as Income. Investment breaks an
+    /// exact-length tie.
     #[must_use]
     pub fn classify(&self, account: &str) -> AccountRole {
-        if self
-            .investment
-            .iter()
-            .any(|p| is_subaccount_or_equal(account, p))
-        {
-            AccountRole::Investment
-        } else if self
-            .income
-            .iter()
-            .any(|p| is_subaccount_or_equal(account, p))
-        {
-            AccountRole::Income
-        } else {
-            AccountRole::External
+        // Longest matching prefix wins. Track the best match length for each
+        // role; on a tie (`>=` for investment, `>` for income) Investment wins.
+        let longest = |prefixes: &[String]| -> Option<usize> {
+            prefixes
+                .iter()
+                .filter(|p| is_subaccount_or_equal(account, p))
+                .map(String::len)
+                .max()
+        };
+        let investment = longest(&self.investment);
+        let income = longest(&self.income);
+        match (investment, income) {
+            (Some(inv), Some(inc)) if inc > inv => AccountRole::Income,
+            (Some(_), _) => AccountRole::Investment,
+            (None, Some(_)) => AccountRole::Income,
+            (None, None) => AccountRole::External,
         }
     }
 }
@@ -223,6 +239,12 @@ pub enum ExtractError {
 ///
 /// Returns [`ExtractError::MissingPrice`] if any external flow or held position
 /// cannot be converted to `reporting_currency` on the date it is needed.
+///
+/// # Panics
+///
+/// See [`terminal_value`]: a stream that violates the booked input contract can
+/// make the booking engine `debug_assert` (debug builds) instead of returning
+/// `Err`.
 pub fn extract_cash_flows(
     directives: &[Directive],
     scope: &Scope,
@@ -279,17 +301,30 @@ pub fn extract_flows(
             continue;
         }
 
-        // Relevance gate: only transactions that touch the portfolio (an
-        // investment or income account) can produce a flow. Classification is
-        // by account name alone, so this needs no amounts — and checking it
-        // first means an irrelevant transaction never triggers a spurious
+        // One classification pass over the postings: collect the external legs'
+        // amounts and note whether any posting touches the portfolio (an
+        // investment or income account). Only a transaction that touches the
+        // portfolio can produce a flow, and deferring conversion until after that
+        // check means an irrelevant transaction never triggers a spurious
         // MissingPrice on an unrelated currency.
-        let touches_portfolio = txn.postings.iter().any(|posting| {
-            !matches!(
-                scope.classify(posting.account.as_str()),
-                AccountRole::External
-            )
-        });
+        let mut touches_portfolio = false;
+        let mut externals: Vec<&Amount> = Vec::new();
+        for posting in &txn.postings {
+            match scope.classify(posting.account.as_str()) {
+                AccountRole::External => {
+                    // The input-contract booked stream (module docs) fills units
+                    // on every posting, so a None here is unreachable in practice;
+                    // skipping is defensive, not a silent drop of a real flow (an
+                    // un-booked stream is a contract violation the leaf crate
+                    // cannot detect, exactly as `apply`/`account_balances` also
+                    // require pre-booked input).
+                    if let Some(amount) = posting.amount() {
+                        externals.push(amount);
+                    }
+                }
+                AccountRole::Investment | AccountRole::Income => touches_portfolio = true,
+            }
+        }
         if !touches_portfolio {
             continue;
         }
@@ -300,18 +335,7 @@ pub fn extract_flows(
         // directly makes the sign land investor-centric (a purchase debits an
         // external cash account negative → an outflow) without a manual negation.
         let mut net = Decimal::ZERO;
-        for posting in &txn.postings {
-            if scope.classify(posting.account.as_str()) != AccountRole::External {
-                continue;
-            }
-            // The input-contract booked stream (module docs) fills units on every
-            // posting, so this skip is unreachable in practice; it is defensive,
-            // not a silent drop of a real flow (an un-booked stream is a contract
-            // violation the leaf crate cannot detect, exactly as `apply` and
-            // `account_balances` also require pre-booked input).
-            let Some(amount) = posting.amount() else {
-                continue;
-            };
+        for amount in externals {
             let converted = prices
                 .convert(amount, reporting_currency, txn.date)
                 .ok_or_else(|| ExtractError::MissingPrice {
@@ -331,27 +355,40 @@ pub fn extract_flows(
 
 /// Value the position still held in investment accounts as of `end_date`.
 ///
-/// Returns it as a single positive terminal cash flow (the money the investor
-/// would realize by liquidating), or `None` if nothing is held.
+/// Returns it as a single terminal cash flow (the money the investor would
+/// realize by liquidating) dated `end_date`, or `None` only when **no** position
+/// is held. A held position is always reported, even if its market value nets to
+/// exactly zero, so the series distinguishes "still holding, net-flat" from
+/// "fully liquidated".
 ///
-/// Holdings are realized through the booking engine — so lots keep their cost
-/// and reductions match the account's booking method — over every transaction
-/// dated on or before `end_date`, then each position's units are valued at
-/// **market** (`position.units`, not cost basis) via `prices`. Only accounts the
-/// `scope` classifies as [`Investment`](AccountRole::Investment) are counted.
-/// Positions seeded by a `pad` are realized only if the input stream is
-/// pad-expanded, as [`extract_cash_flows`]' input contract requires; on the
-/// `Ledger::balance_view` stream this matches `report_cmd::account_balances`.
+/// Holdings are realized through the booking engine — lots keep their cost and
+/// reductions match the account's booking method — over every transaction dated
+/// on or before `end_date`, then each position's units are valued at **market**
+/// (`position.units`, not cost basis) via `prices`. Because market value is
+/// `units × price` and every lot of a commodity shares one market price, the
+/// terminal value depends only on total held units, not on which lots a
+/// reduction matched; the booking method affects realized-gain reporting (a
+/// later concern), not this figure. Only accounts the `scope` classifies as
+/// [`Investment`](AccountRole::Investment) are counted. Positions seeded by a
+/// `pad` are realized only if the input stream is pad-expanded, as
+/// [`extract_cash_flows`]' input contract requires.
 ///
 /// A net-short position (negative units) values negatively, correctly reducing
-/// the terminal flow. A position whose currency is already the reporting
-/// currency (uninvested broker cash) needs no price — [`PriceOracle`]
-/// implementations must return same-currency amounts unchanged.
+/// the terminal flow (see the [`PriceOracle`] linearity requirement). A position
+/// whose currency is already the reporting currency (uninvested broker cash)
+/// needs no price.
 ///
 /// # Errors
 ///
 /// Returns [`ExtractError::MissingPrice`] if a held commodity has no price in
 /// `reporting_currency` on `end_date`.
+///
+/// # Panics
+///
+/// Requires the booked input stream of [`extract_cash_flows`]' contract. On a
+/// contract-violating (un-booked) stream, the booking engine may `debug_assert`
+/// in debug builds when a reduction has no matching lot; the leaf crate cannot
+/// detect this, so an un-booked stream can abort rather than return `Err`.
 pub fn terminal_value(
     directives: &[Directive],
     scope: &Scope,
@@ -359,10 +396,19 @@ pub fn terminal_value(
     prices: &impl PriceOracle,
     end_date: NaiveDate,
 ) -> Result<Option<CashFlow>, ExtractError> {
-    // Realize per-account inventories via the booking engine (the canonical
-    // realization, shared with `report_cmd::account_balances`), applying only
+    // Realize per-account inventories via the booking engine, applying only
     // transactions up to the valuation date. Opens carry booking methods
     // regardless of date, so the engine is registered with the full stream.
+    //
+    // This realization loop mirrors `report_cmd::account_balances`
+    // (crates/rustledger/src/cmd/report_cmd/mod.rs) plus the `<= end_date`
+    // filter — the leaf crate cannot call that CLI-side helper. Kept aligned by
+    // hand until a shared realization primitive lands; the returns CLI PR is
+    // the place to add a cross-crate drift-guard test comparing the two on the
+    // same ledger. Like that helper, inventories are collected into a `BTreeMap`
+    // so iteration order is account-sorted and stable across runs (an
+    // `FxHashMap` would make which currency a `MissingPrice` names depend on
+    // hash order — and differ between 32- and 64-bit targets).
     let mut engine = rustledger_booking::BookingEngine::new();
     engine.register_account_methods(directives.iter());
     for directive in directives {
@@ -372,7 +418,8 @@ pub fn terminal_value(
             engine.apply(txn);
         }
     }
-    let inventories = engine.into_inventories();
+    let inventories: std::collections::BTreeMap<_, _> =
+        engine.into_inventories().into_iter().collect();
 
     let mut total = Decimal::ZERO;
     let mut held = false;
@@ -395,8 +442,10 @@ pub fn terminal_value(
         }
     }
 
-    // A position valued at exactly zero (or none at all) contributes no flow.
-    if held && !total.is_zero() {
+    // A held position is always reported — even one whose market value nets to
+    // exactly zero — so the caller can tell "still holding, net-flat" from
+    // "fully liquidated". Only a genuinely empty portfolio yields no terminal.
+    if held {
         Ok(Some(CashFlow::new(end_date, total)))
     } else {
         Ok(None)
@@ -901,5 +950,154 @@ mod tests {
         assert_eq!(scope.classify("Income:Dividends"), AccountRole::Income);
         assert_eq!(scope.classify("Income:Salary"), AccountRole::External);
         assert_eq!(scope.classify("Assets:Bank"), AccountRole::External);
+    }
+
+    #[test]
+    fn classify_prefers_the_longer_prefix_when_income_nests_under_investment() {
+        // Income scoped to a subaccount of the investment prefix: the more
+        // specific (longer) match wins, so the dividend account is Income even
+        // though "Assets:Broker" also matches it.
+        let scope = Scope::new(
+            vec!["Assets:Broker".to_string()],
+            vec!["Assets:Broker:Dividends".to_string()],
+        );
+        assert_eq!(
+            scope.classify("Assets:Broker:Dividends"),
+            AccountRole::Income
+        );
+        assert_eq!(
+            scope.classify("Assets:Broker:Dividends:Foreign"),
+            AccountRole::Income
+        );
+        assert_eq!(
+            scope.classify("Assets:Broker:Cash"),
+            AccountRole::Investment
+        );
+        assert_eq!(scope.classify("Assets:Broker"), AccountRole::Investment);
+    }
+
+    #[test]
+    fn nested_income_account_does_not_cancel_terminal_value() {
+        // Regression for the overlapping-prefix bug: a reinvested dividend booked
+        // into an in-scope broker cash account against an income account nested
+        // under the investment prefix. Longest-prefix classification keeps the
+        // income leg out of the terminal so the +5 asset it created survives.
+        let scope = Scope::new(
+            vec!["Assets:Broker".to_string()],
+            vec!["Assets:Broker:Dividends".to_string()],
+        );
+        let dirs = vec![txn(
+            d(2020, 6, 1),
+            vec![
+                Posting::new("Assets:Broker:Cash", amt(dec!(5), "USD")),
+                Posting::new("Assets:Broker:Dividends", amt(dec!(-5), "USD")),
+            ],
+        )];
+        let terminal = terminal_value(
+            &dirs,
+            &scope,
+            "USD",
+            &MockPrices::default(),
+            d(2020, 12, 31),
+        )
+        .unwrap();
+        // Broker:Cash (+5, Investment) counted; Broker:Dividends (-5, Income)
+        // excluded. Were both Investment, this would wrongly net to 0.
+        assert_eq!(terminal, Some(CashFlow::new(d(2020, 12, 31), dec!(5))));
+    }
+
+    #[test]
+    fn terminal_value_of_a_short_position_is_negative() {
+        // A short sale leaves -10 AAPL held; its terminal value is negative.
+        let dirs = vec![txn(
+            d(2020, 1, 1),
+            vec![
+                Posting::new("Assets:Broker:Stock", amt(dec!(-10), "AAPL")),
+                Posting::new("Assets:Bank", amt(dec!(1500), "USD")),
+            ],
+        )];
+        let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(150));
+        let terminal =
+            terminal_value(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31)).unwrap();
+        // -10 AAPL * 150 = -1500 USD.
+        assert_eq!(terminal, Some(CashFlow::new(d(2020, 12, 31), dec!(-1500))));
+    }
+
+    #[test]
+    fn terminal_value_sums_multiple_held_positions() {
+        // Two distinct commodities held in the same investment account are two
+        // positions; the terminal must sum both, not value only the first.
+        let dirs = vec![txn(
+            d(2020, 1, 1),
+            vec![
+                Posting::new("Assets:Broker:Stock", amt(dec!(10), "AAPL")),
+                Posting::new("Assets:Broker:Stock", amt(dec!(5), "GOOG")),
+                Posting::new("Assets:Bank", amt(dec!(-2500), "USD")),
+            ],
+        )];
+        let prices = MockPrices::default()
+            .with("AAPL", "USD", d(2020, 12, 31), dec!(150))
+            .with("GOOG", "USD", d(2020, 12, 31), dec!(200));
+        let terminal =
+            terminal_value(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31)).unwrap();
+        // 10*150 + 5*200 = 1500 + 1000 = 2500.
+        assert_eq!(terminal, Some(CashFlow::new(d(2020, 12, 31), dec!(2500))));
+    }
+
+    #[test]
+    fn net_flat_held_portfolio_still_reports_a_terminal() {
+        // Two positions whose market values cancel: still holding, so a terminal
+        // flow of 0 is reported (distinct from a fully-liquidated None).
+        let dirs = vec![txn(
+            d(2020, 1, 1),
+            vec![
+                Posting::new("Assets:Broker:Stock", amt(dec!(10), "AAPL")),
+                Posting::new("Assets:Broker:Stock", amt(dec!(-10), "GOOG")),
+                Posting::new("Assets:Bank", amt(dec!(0), "USD")),
+            ],
+        )];
+        let prices = MockPrices::default()
+            .with("AAPL", "USD", d(2020, 12, 31), dec!(150))
+            .with("GOOG", "USD", d(2020, 12, 31), dec!(150));
+        let terminal =
+            terminal_value(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31)).unwrap();
+        assert_eq!(terminal, Some(CashFlow::new(d(2020, 12, 31), dec!(0))));
+    }
+
+    #[test]
+    fn a_flow_and_the_terminal_can_share_the_end_date() {
+        // Partial sale ON the end date plus the residual terminal ON the end date
+        // — two flows share a date. xirr must still resolve a sensible rate.
+        let dirs = vec![
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(10), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+                ],
+            ),
+            txn(
+                d(2020, 12, 31),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(-4), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(600), "USD")),
+                ],
+            ),
+        ];
+        let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(150));
+        let flows =
+            extract_cash_flows(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31)).unwrap();
+        // -1000 @ open; +600 sale and +900 residual (6 AAPL * 150) both @ end.
+        assert_eq!(
+            flows,
+            vec![
+                CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+                CashFlow::new(d(2020, 12, 31), dec!(600)),
+                CashFlow::new(d(2020, 12, 31), dec!(900)),
+            ]
+        );
+        let rate = crate::xirr(&flows).unwrap();
+        // 1500 back on 1000 over ~1yr → ~50%.
+        assert!((rate - 0.50).abs() < 0.01, "expected ~50%, got {rate}");
     }
 }

@@ -464,6 +464,12 @@ fn render<W: io::Write>(
 /// cost-less `5 AAPL`. Two lots at different costs stay separate
 /// (`10 AAPL {150}` + `10 AAPL {200}`), matching beancount.
 ///
+/// `rustledger_returns::terminal_value` re-derives this realization loop (it is
+/// a leaf crate and cannot call this CLI-side helper), adding an `<= end_date`
+/// filter, to value a portfolio at the report date. If the realization here
+/// changes, update that copy in lockstep; the returns CLI PR should add a
+/// drift-guard test comparing the two on the same ledger.
+///
 /// [`apply`]: rustledger_booking::BookingEngine::apply
 pub(super) fn account_balances(
     directives: &[rustledger_core::Directive],

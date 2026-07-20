@@ -301,30 +301,20 @@ pub fn extract_flows(
             continue;
         }
 
-        // One classification pass over the postings: collect the external legs'
-        // amounts and note whether any posting touches the portfolio (an
-        // investment or income account). Only a transaction that touches the
-        // portfolio can produce a flow, and deferring conversion until after that
-        // check means an irrelevant transaction never triggers a spurious
-        // MissingPrice on an unrelated currency.
-        let mut touches_portfolio = false;
-        let mut externals: Vec<&Amount> = Vec::new();
-        for posting in &txn.postings {
-            match scope.classify(posting.account.as_str()) {
-                AccountRole::External => {
-                    // The input-contract booked stream (module docs) fills units
-                    // on every posting, so a None here is unreachable in practice;
-                    // skipping is defensive, not a silent drop of a real flow (an
-                    // un-booked stream is a contract violation the leaf crate
-                    // cannot detect, exactly as `apply`/`account_balances` also
-                    // require pre-booked input).
-                    if let Some(amount) = posting.amount() {
-                        externals.push(amount);
-                    }
-                }
-                AccountRole::Investment | AccountRole::Income => touches_portfolio = true,
-            }
-        }
+        // Relevance gate first: only a transaction that touches the portfolio
+        // (an investment or income account) can produce a flow. Classifying for
+        // relevance up front — and short-circuiting on the first in-scope
+        // posting — means an irrelevant transaction (the common case) costs only
+        // this scan: no conversion, no allocation, and never a spurious
+        // MissingPrice on an unrelated currency. Relevant transactions are a
+        // small minority, so re-classifying their postings in the sum below is
+        // cheaper than allocating a per-transaction buffer for every directive.
+        let touches_portfolio = txn.postings.iter().any(|posting| {
+            !matches!(
+                scope.classify(posting.account.as_str()),
+                AccountRole::External
+            )
+        });
         if !touches_portfolio {
             continue;
         }
@@ -335,7 +325,18 @@ pub fn extract_flows(
         // directly makes the sign land investor-centric (a purchase debits an
         // external cash account negative → an outflow) without a manual negation.
         let mut net = Decimal::ZERO;
-        for amount in externals {
+        for posting in &txn.postings {
+            if scope.classify(posting.account.as_str()) != AccountRole::External {
+                continue;
+            }
+            // The input-contract booked stream (module docs) fills units on every
+            // posting, so a None here is unreachable in practice; skipping is
+            // defensive, not a silent drop of a real flow (an un-booked stream is
+            // a contract violation the leaf crate cannot detect, exactly as
+            // `apply`/`account_balances` also require pre-booked input).
+            let Some(amount) = posting.amount() else {
+                continue;
+            };
             let converted = prices
                 .convert(amount, reporting_currency, txn.date)
                 .ok_or_else(|| ExtractError::MissingPrice {
@@ -356,10 +357,14 @@ pub fn extract_flows(
 /// Value the position still held in investment accounts as of `end_date`.
 ///
 /// Returns it as a single terminal cash flow (the money the investor would
-/// realize by liquidating) dated `end_date`, or `None` only when **no** position
-/// is held. A held position is always reported, even if its market value nets to
-/// exactly zero, so the series distinguishes "still holding, net-flat" from
-/// "fully liquidated".
+/// realize by liquidating) dated `end_date`, or `None` when nothing is held **or
+/// the held position's market value is exactly zero**. A zero-valued terminal is
+/// deliberately *not* emitted: it is not neutral to [`xirr`](crate::xirr) — a
+/// zero flow on a date later than the real flows defeats xirr's all-same-date
+/// degenerate guard, which would turn a genuinely-undefined series (e.g. a
+/// same-date deposit/withdrawal wash with a worthless residual holding) into a
+/// fabricated return. A consumer that needs to distinguish "still holding,
+/// net-flat" from "fully liquidated" must not learn it from a zero cash flow.
 ///
 /// Holdings are realized through the booking engine — lots keep their cost and
 /// reductions match the account's booking method — over every transaction dated
@@ -422,7 +427,6 @@ pub fn terminal_value(
         engine.into_inventories().into_iter().collect();
 
     let mut total = Decimal::ZERO;
-    let mut held = false;
     for (account, inventory) in &inventories {
         if scope.classify(account.as_str()) != AccountRole::Investment {
             continue;
@@ -431,7 +435,6 @@ pub fn terminal_value(
             if position.units.number.is_zero() {
                 continue;
             }
-            held = true;
             let converted = prices
                 .convert(&position.units, reporting_currency, end_date)
                 .ok_or_else(|| ExtractError::MissingPrice {
@@ -442,13 +445,16 @@ pub fn terminal_value(
         }
     }
 
-    // A held position is always reported — even one whose market value nets to
-    // exactly zero — so the caller can tell "still holding, net-flat" from
-    // "fully liquidated". Only a genuinely empty portfolio yields no terminal.
-    if held {
-        Ok(Some(CashFlow::new(end_date, total)))
-    } else {
+    // Only a nonzero market value becomes a terminal flow. A zero total — whether
+    // from an empty portfolio or a net-flat/worthless holding — yields no flow:
+    // emitting a zero flow on `end_date` is not neutral, it defeats xirr's
+    // all-same-date degenerate guard and would fabricate a return (see the fn
+    // docs). `total` can only be nonzero if some position was valued, so this
+    // also covers the "nothing held" case.
+    if total.is_zero() {
         Ok(None)
+    } else {
+        Ok(Some(CashFlow::new(end_date, total)))
     }
 }
 
@@ -1045,9 +1051,11 @@ mod tests {
     }
 
     #[test]
-    fn net_flat_held_portfolio_still_reports_a_terminal() {
-        // Two positions whose market values cancel: still holding, so a terminal
-        // flow of 0 is reported (distinct from a fully-liquidated None).
+    fn net_flat_held_portfolio_yields_no_terminal_flow() {
+        // Two positions whose market values cancel to exactly zero. Even though a
+        // position is still held, no terminal flow is emitted: a zero flow on a
+        // later date is NOT neutral to xirr (it defeats the all-same-date
+        // degenerate guard). None is correct here.
         let dirs = vec![txn(
             d(2020, 1, 1),
             vec![
@@ -1061,7 +1069,50 @@ mod tests {
             .with("GOOG", "USD", d(2020, 12, 31), dec!(150));
         let terminal =
             terminal_value(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31)).unwrap();
-        assert_eq!(terminal, Some(CashFlow::new(d(2020, 12, 31), dec!(0))));
+        assert_eq!(terminal, None);
+    }
+
+    #[test]
+    fn worthless_holding_with_a_same_date_wash_does_not_fabricate_a_return() {
+        // Regression: a zero-valued terminal flow used to be emitted for a held
+        // but worthless position. Combined with a same-date deposit/withdrawal
+        // wash it defeated xirr's degenerate guard and fabricated a +10% return
+        // (xirr's Newton seed) for a genuinely-undefined series. With no zero
+        // terminal, the two same-date flows are all that remain and xirr
+        // correctly reports None.
+        let dirs = vec![
+            // Buy a stock that ends up worthless (priced 0 at end_date): -1000 out.
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(10), "FOO")),
+                    Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+                ],
+            ),
+            // Same-day dividend to the bank: +1000 in. Together with the buy this
+            // is a sign-changing wash on 2020-01-01.
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:Bank", amt(dec!(1000), "USD")),
+                    Posting::new("Income:Dividends", amt(dec!(-1000), "USD")),
+                ],
+            ),
+        ];
+        // FOO is worthless at the horizon.
+        let prices = MockPrices::default().with("FOO", "USD", d(2020, 12, 31), dec!(0));
+        let flows =
+            extract_cash_flows(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31)).unwrap();
+        // Only the two same-date flows; no zero terminal.
+        assert_eq!(
+            flows,
+            vec![
+                CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+                CashFlow::new(d(2020, 1, 1), dec!(1000)),
+            ]
+        );
+        // All flows share a date → the return is undefined, not +10%.
+        assert_eq!(crate::xirr(&flows), None);
     }
 
     #[test]

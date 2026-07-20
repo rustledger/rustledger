@@ -71,6 +71,15 @@ const NEWTON_MAX_ITER: usize = 100;
 /// superlinearly, so this is generous.
 const BRENT_MAX_ITER: usize = 100;
 
+// Per-thread count of accepted inverse-quadratic-interpolation steps, so a test
+// can prove Brent's IQI branch is actually exercised (not silently masked by
+// its bisection safeguard). Thread-local: solving runs synchronously on the
+// caller's thread, so parallel tests don't interfere.
+#[cfg(test)]
+thread_local! {
+    static IQI_ACCEPTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Money-weighted return: the annualized internal rate of return (XIRR) of an
 /// irregularly-spaced cash-flow series.
 ///
@@ -105,12 +114,14 @@ const BRENT_MAX_ITER: usize = 100;
 ///
 /// # Extreme losses
 ///
-/// IRRs at or below roughly **-99.99999%/year** — a near-total annual loss,
-/// where the rate sits against the `rate = -1` pole — are treated as
-/// unresolvable and return `None`. The result is never a fabricated or garbage
-/// rate: every returned value is verified to be a genuine root (`|NPV|` within
-/// tolerance) before it is surfaced, so a solver path corrupted by a non-finite
-/// NPV near the pole yields `None`, not a wrong number.
+/// IRRs below roughly **-99.99999%/year** — a near-total annual loss whose rate
+/// falls below the search bracket's lower bound, against the `rate = -1` pole —
+/// return `None`. The result is never a fabricated or garbage rate: both solvers
+/// return only a genuinely-converged root (Newton re-checks NPV at a stalled
+/// step; Brent returns only a root proven by a converged, finite,
+/// sign-changing bracket), and a bracket corrupted by a non-finite NPV near the
+/// pole is rejected before refinement — so such cases yield `None`, not a wrong
+/// number.
 #[must_use]
 pub fn xirr(flows: &[CashFlow]) -> Option<f64> {
     if flows.len() < 2 {
@@ -147,15 +158,16 @@ pub fn xirr(flows: &[CashFlow]) -> Option<f64> {
     let gross: f64 = series.iter().map(|&(_, a)| a.abs()).sum();
     let tol = (gross * NPV_REL_TOLERANCE).max(NPV_ABS_FLOOR);
 
+    // Both solvers self-verify: `newton` returns only a genuine root (its
+    // stall branch re-checks NPV) or `None`; `brent` returns only a root proven
+    // by a converged, finite, sign-changing bracket (IVT) or `None`. So a
+    // non-root can never reach here — no NPV re-check on the result. Crucially
+    // we do NOT re-verify `|NPV| <= tol`: near the rate=-1 pole the NPV
+    // derivative is enormous, so a rate pinned to full f64 precision can still
+    // have `|NPV|` a little above `tol`; that is a *genuine* root (the rate is
+    // correct), and an NPV re-check would wrongly reject it.
     let candidate = newton(&series, tol).or_else(|| brent(&series, tol))?;
-    // Final guard: NEVER surface a non-root. A solver path that terminated on
-    // an iteration limit, a stalled Newton step, or a bracket corrupted by a
-    // non-finite NPV near the rate=-1 pole (a far-dated flow whose discount
-    // underflows) could otherwise return a rate that isn't actually an IRR.
-    // Verifying `|NPV| <= tol` reduces every such case to `None`. Genuine
-    // Brent's results sit well within `tol` (their rate is pinned to ~1e-12),
-    // so this never rejects a valid root.
-    (candidate.is_finite() && npv(&series, candidate).abs() <= tol).then_some(candidate)
+    candidate.is_finite().then_some(candidate)
 }
 
 /// Net present value of the series at `rate`.
@@ -224,8 +236,17 @@ fn newton(series: &[(f64, f64)], tol: f64) -> Option<f64> {
 #[allow(clippy::many_single_char_names)]
 fn brent(series: &[(f64, f64)], tol: f64) -> Option<f64> {
     // ---- Bracket a sign change (`low` and a grown `high` straddle a root). ----
+    // A non-finite NPV at a bound (a far-dated flow whose discount overflows
+    // right against the rate=-1 pole) means we cannot form a *trustworthy*
+    // bracket — `opposite_signs` on an inf/NaN could misfire. Reject it so a
+    // corrupted bracket never reaches the refinement loop and produce `None`,
+    // rather than a garbage rate. This is why the caller needs no NPV re-check:
+    // every bracket that survives here is finite and genuinely sign-changing.
     let low = RATE_LOWER_BOUND;
     let f_low = npv(series, low);
+    if !f_low.is_finite() {
+        return None;
+    }
     if f_low.abs() < tol {
         return finite(low); // a root sitting exactly on the lower bound
     }
@@ -234,6 +255,9 @@ fn brent(series: &[(f64, f64)], tol: f64) -> Option<f64> {
     let mut f_high = npv(series, high);
     let mut bracketed = false;
     for _ in 0..60 {
+        if !f_high.is_finite() {
+            return None;
+        }
         if f_high.abs() < tol {
             return finite(high); // a probed bound landed on a root
         }
@@ -298,6 +322,13 @@ fn brent(series: &[(f64, f64)], tol: f64) -> Option<f64> {
             s = 0.5 * (a + b);
         }
         used_bisection = bisect;
+        #[cfg(test)]
+        if !bisect && distinct {
+            // Observability (canonical-function discipline): count accepted
+            // inverse-quadratic steps so a test can prove the IQI branch is
+            // actually taken, not silently masked by the bisection safeguard.
+            IQI_ACCEPTED.with(|c| c.set(c.get() + 1));
+        }
 
         let fs = npv(series, s);
         d = c;
@@ -317,7 +348,11 @@ fn brent(series: &[(f64, f64)], tol: f64) -> Option<f64> {
             std::mem::swap(&mut fa, &mut fb);
         }
     }
-    finite(b)
+    // Exhausted the iteration budget without the bracket collapsing — treat as
+    // non-convergence (`None`) rather than surfacing an unconverged `b`. Brent
+    // converges superlinearly, so a legitimate bracket always exits the loop
+    // above; reaching here means a pathological input, not a valid root.
+    None
 }
 
 /// Guard: reject NaN/inf so callers never surface a garbage rate.
@@ -519,9 +554,44 @@ mod tests {
     }
 
     #[test]
+    fn deep_loss_within_bracket_is_found() {
+        // #1815 round-3 review: a ~-99.99995% loss (-1000 in, +0.0005 out a year
+        // later; IRR ≈ -0.9999995) is INSIDE the search bracket. Brent pins the
+        // rate to full precision, but near the pole the NPV derivative is huge,
+        // so |NPV| stays a hair above `tol`. The result must still be the rate —
+        // an NPV re-check used to wrongly reject it as None.
+        let flows = [
+            CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+            CashFlow::new(d(2020, 12, 31), dec!(0.0005)),
+        ];
+        let r = xirr(&flows).expect("a deep-but-in-bracket loss must resolve");
+        assert!(
+            approx(r, -0.999_999_5, 1e-6),
+            "expected ~-0.9999995, got {r}"
+        );
+    }
+
+    #[test]
+    fn brent_exercises_inverse_quadratic_interpolation() {
+        // Prove the IQI branch actually runs, so a corrupted IQI formula can't
+        // hide behind the bisection safeguard (canonical-function discipline).
+        IQI_ACCEPTED.with(|c| c.set(0));
+        // A smooth, well-conditioned bracket: after the first (secant) step the
+        // three NPVs are distinct and the interpolated point is accepted.
+        let series = [(0.0, -1000.0), (0.5, 100.0), (1.0, 1050.0)];
+        let r = brent(&series, 1e-9).expect("bracketed root");
+        assert!((-1.0..2.0).contains(&r), "sane root, got {r}");
+        assert!(
+            IQI_ACCEPTED.with(std::cell::Cell::get) > 0,
+            "Brent must exercise inverse-quadratic interpolation, not only its \
+             bisection safeguard"
+        );
+    }
+
+    #[test]
     fn extreme_loss_below_supported_range_returns_none() {
-        // IRR ≈ -99.99999% sits below the resolvable range (against the rate=-1
-        // pole). The final root check makes the result a graceful None — never a
+        // IRR ≈ -99.99999% sits BELOW the bracket's lower bound (-0.9999999), so
+        // no bracket forms and the result is a graceful None — never a
         // fabricated or garbage rate.
         let flows = [
             CashFlow::new(d(2020, 1, 1), dec!(-1000)),

@@ -121,9 +121,12 @@ pub(super) fn report_returns<W: Write>(
     // degenerate — a genuinely undefined return, reported as "n/a".
     let rate = xirr(&series);
     // Time-weighted return: the investments' performance independent of
-    // contribution timing (MWR is the headline). `None` when undefined.
-    let twr_rate = twr(directives, &scope, &reporting_currency, &oracle, end_date)
-        .context("computing the time-weighted return")?;
+    // contribution timing (MWR is the headline). TWR values the portfolio at
+    // EVERY cash-flow date, so it needs more prices than MWR (which only needs
+    // them at transaction dates and the end date). If an intermediate valuation
+    // can't be priced, degrade TWR to n/a rather than failing the whole report —
+    // the money-weighted return above is already computed and is the headline.
+    let twr_rate = twr(directives, &scope, &reporting_currency, &oracle, end_date).unwrap_or(None);
 
     let currency = reporting_currency.as_str();
     let money = |n: Decimal| ctx.format_amount_number(n, currency);

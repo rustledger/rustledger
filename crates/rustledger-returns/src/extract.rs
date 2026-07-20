@@ -425,7 +425,9 @@ pub fn terminal_value(
 /// It mirrors `report_cmd::account_balances`
 /// (`crates/rustledger/src/cmd/report_cmd/mod.rs`) plus the `<= date` filter — the
 /// leaf crate cannot call that CLI-side helper. Kept aligned by hand; the returns
-/// CLI has a cross-crate drift-guard test comparing the two on the same ledger.
+/// CLI's `terminal_value_matches_account_balances_realization` test guards it (it
+/// values `account_balances`' inventories and compares to [`terminal_value`],
+/// which delegates here — so this realization is covered end to end).
 /// Like that helper, inventories are collected into a `BTreeMap` so iteration
 /// order is stable across runs (an `FxHashMap` would make which currency a
 /// `MissingPrice` names depend on hash order, and differ between 32- and 64-bit
@@ -500,12 +502,28 @@ fn investment_value_at(
 /// contribution buys assets worth its cash value; an off-market purchase price
 /// introduces a small approximation, as in most TWR tools.)
 ///
+/// The whole-period return is **annualized** (`total^(365/days) − 1`), matching
+/// hledger. Over a span **shorter than a year this extrapolates**: a +10% return
+/// realized in one month reports as ≈ +214%/year. That is the standard
+/// convention, but a returns report run a few weeks after the first purchase can
+/// show an implausibly large figure for that reason.
+///
 /// # Returns `None`
 ///
 /// When the return is undefined: no cash flows; the whole span is a single day
-/// (nothing to annualize); or the portfolio value is non-positive at a valuation
-/// point (a fully-realized or net-short position, where unit accounting breaks
-/// down — a documented limitation of this MVP).
+/// (nothing to annualize); or the portfolio value is non-positive at an
+/// *intermediate* valuation point (a mid-stream full liquidation-then-refund, or
+/// a net-short position, where unit accounting across a zero breaks down — a
+/// documented limitation of this MVP). A position simply **closed out on the
+/// report date** is *not* `None`: its holding-period return is reported.
+///
+/// # Performance
+///
+/// The portfolio is re-realized from scratch at each distinct flow date (a fresh
+/// booking pass over the directives ≤ that date), so cost is roughly
+/// `O(flow_dates × directives)`. Fine for typical ledgers; for a large, very
+/// active portfolio this is a follow-up to make incremental (a single forward
+/// pass snapshotting value at each flow date).
 ///
 /// # Errors
 ///
@@ -544,14 +562,18 @@ pub fn twr(
     // established (that flow is the opening capital, not a return).
     let mut cumulative = 1.0_f64;
     let mut v_prev: Option<f64> = None;
-    let first_date = *net_by_date.keys().next().expect("non-empty");
+    let mut first_date: Option<NaiveDate> = None;
     for (&date, &contribution) in &net_by_date {
+        first_date.get_or_insert(date);
         let v_i = investment_value_at(directives, scope, reporting_currency, prices, date)?
             .to_f64()
             .unwrap_or(0.0);
         if let Some(vp) = v_prev {
             if vp <= 0.0 {
-                return Ok(None); // portfolio non-positive: unit chaining undefined
+                // Portfolio was non-positive at the *previous* flow (fully
+                // liquidated then re-funded mid-stream, or a net short): unit
+                // chaining across a zero is undefined — a documented limitation.
+                return Ok(None);
             }
             let f = contribution.to_f64().unwrap_or(0.0);
             let r = (v_i - f) / vp;
@@ -563,7 +585,11 @@ pub fn twr(
         v_prev = Some(v_i);
     }
 
-    // Final sub-period: last flow date → end_date, with no flow.
+    // Final sub-period: last flow date → end_date, with no flow. If the position
+    // was fully closed at the last flow (`v_prev == 0`), this span holds nothing
+    // and contributes no return — the whole-period figure is already in
+    // `cumulative`, so a position closed out on the report date still yields its
+    // holding-period TWR rather than `None`.
     let v_end = investment_value_at(directives, scope, reporting_currency, prices, end_date)?
         .to_f64()
         .unwrap_or(0.0);
@@ -575,11 +601,15 @@ pub fn twr(
             }
             cumulative *= r;
         }
-        _ => return Ok(None),
+        Some(_) => {} // fully liquidated at the last flow: no final-segment return
+        None => return Ok(None), // unreachable: `flows` non-empty ⇒ the loop ran
     }
 
     // Annualize the total return over [first_date, end_date] (actual/365, the
     // same day count as `xirr`). A zero-length span cannot be annualized.
+    let Some(first_date) = first_date else {
+        return Ok(None); // unreachable: `flows` non-empty
+    };
     let days = end_date.since(first_date).map_or(0, |s| s.get_days());
     if days <= 0 {
         return Ok(None);
@@ -1380,5 +1410,35 @@ mod tests {
         let prices = MockPrices::default().with("AAPL", "USD", d(2021, 1, 1), dec!(100));
         let rate = twr(&dirs, &invest_scope(), "USD", &prices, d(2021, 1, 1)).unwrap();
         assert_eq!(rate, None);
+    }
+
+    #[test]
+    fn twr_of_a_position_closed_out_on_the_report_date() {
+        // Buy 10 AAPL @100, sell all @110 on the end date. The position is fully
+        // liquidated at the last flow, so v_prev hits 0 — but the ~10% return was
+        // already captured before the sale, and must not be discarded as None.
+        // This also exercises the withdrawal (outflow) sign path.
+        let dirs = vec![
+            txn(
+                d(2021, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(10), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+                ],
+            ),
+            txn(
+                d(2021, 12, 31),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(-10), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(1100), "USD")),
+                ],
+            ),
+        ];
+        let prices = MockPrices::default().with("AAPL", "USD", d(2021, 1, 1), dec!(100));
+        let rate = twr(&dirs, &invest_scope(), "USD", &prices, d(2021, 12, 31))
+            .unwrap()
+            .expect("a closed-out position still has a defined TWR");
+        // Bought at 1000-worth, sold for 1100 → ~10% over ~1yr.
+        assert!((rate - 0.10).abs() < 0.001, "expected ~10%, got {rate}");
     }
 }

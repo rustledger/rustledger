@@ -179,9 +179,13 @@ fn reporting_currency_defaults_to_operating_currency() {
             "--no-pager",
         ],
     );
-    assert!(
-        out.contains("USD"),
-        "should default reporting currency to USD: {out}"
+    // Assert on the reporting-currency line specifically — a bare
+    // `contains("USD")` would pass on the fixture's other USD literals even if
+    // the default were wrong.
+    assert_eq!(
+        field(&out, "Reporting currency").split_whitespace().next(),
+        Some("USD"),
+        "reporting currency should default to the operating currency USD: {out}"
     );
 }
 

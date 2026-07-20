@@ -129,7 +129,7 @@ jobs:
       # Node for the prettier pass in `scripts/regen-bindings.sh`
       # (#1226). Read from `.nvmrc` to keep the version in one place --
       # matches the convention in `wasm.yml` (single source of truth).
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: '.nvmrc'
       # Python for the `datamodel-code-generator` invocation that

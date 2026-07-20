@@ -60,15 +60,16 @@ const NPV_REL_TOLERANCE: f64 = 1e-9;
 /// Floor on the resolved absolute tolerance, so a near-zero gross magnitude
 /// can't drive it to 0.
 const NPV_ABS_FLOOR: f64 = 1e-12;
-/// Lower end of the bisection bracket: just above the `rate = -1` pole, so
+/// Lower end of the root-search bracket: just above the `rate = -1` pole, so
 /// near-total-loss IRRs (down to ~-99.99999%) are still reachable.
 const RATE_LOWER_BOUND: f64 = -0.999_999_9;
-/// Newton step size below which iteration is treated as stalled.
+/// Step / bracket width below which a root is considered pinned (in rate units).
 const STEP_EPSILON: f64 = 1e-12;
-/// Newton iterations before falling back to bisection.
+/// Newton iterations before falling back to Brent's method.
 const NEWTON_MAX_ITER: usize = 100;
-/// Bisection steps once a sign-change bracket is found.
-const BISECT_MAX_ITER: usize = 200;
+/// Brent iterations once a sign-change bracket is found. Brent converges
+/// superlinearly, so this is generous.
+const BRENT_MAX_ITER: usize = 100;
 
 /// Money-weighted return: the annualized internal rate of return (XIRR) of an
 /// irregularly-spaced cash-flow series.
@@ -146,13 +147,13 @@ pub fn xirr(flows: &[CashFlow]) -> Option<f64> {
     let gross: f64 = series.iter().map(|&(_, a)| a.abs()).sum();
     let tol = (gross * NPV_REL_TOLERANCE).max(NPV_ABS_FLOOR);
 
-    let candidate = newton(&series, tol).or_else(|| bisect(&series, tol))?;
+    let candidate = newton(&series, tol).or_else(|| brent(&series, tol))?;
     // Final guard: NEVER surface a non-root. A solver path that terminated on
     // an iteration limit, a stalled Newton step, or a bracket corrupted by a
     // non-finite NPV near the rate=-1 pole (a far-dated flow whose discount
     // underflows) could otherwise return a rate that isn't actually an IRR.
     // Verifying `|NPV| <= tol` reduces every such case to `None`. Genuine
-    // bisection results sit well within `tol` (their rate is pinned to ~1e-12),
+    // Brent's results sit well within `tol` (their rate is pinned to ~1e-12),
     // so this never rejects a valid root.
     (candidate.is_finite() && npv(&series, candidate).abs() <= tol).then_some(candidate)
 }
@@ -178,7 +179,7 @@ fn npv_and_derivative(series: &[(f64, f64)], rate: f64) -> (f64, f64) {
 }
 
 /// Newton's method from a 10% seed. Returns `None` (letting the caller fall back
-/// to bisection) if it leaves the valid domain (`rate <= -1`), the derivative
+/// to Brent) if it leaves the valid domain (`rate <= -1`), the derivative
 /// vanishes, or it stalls at a point that is not actually a root.
 fn newton(series: &[(f64, f64)], tol: f64) -> Option<f64> {
     let mut rate = 0.1;
@@ -196,7 +197,7 @@ fn newton(series: &[(f64, f64)], tol: f64) -> Option<f64> {
         }
         if (next - rate).abs() < STEP_EPSILON {
             // Stalled. Accept ONLY if it is genuinely a root; otherwise give up
-            // so bisection can try. (Without the NPV check, a step underflowing
+            // so Brent can try. (Without the NPV check, a step underflowing
             // near the rate=-1 pole would be returned as a fake root.)
             return if next.is_finite() && npv(series, next).abs() < tol {
                 Some(next)
@@ -209,18 +210,26 @@ fn newton(series: &[(f64, f64)], tol: f64) -> Option<f64> {
     None
 }
 
-/// Bracket a sign change on `[RATE_LOWER_BOUND, hi]` (growing `hi`) then bisect.
-/// Robust where Newton diverges, at the cost of speed.
-fn bisect(series: &[(f64, f64)], tol: f64) -> Option<f64> {
+/// Bracket a sign change on `[RATE_LOWER_BOUND, hi]` (growing `hi`) then refine
+/// with **Brent's method** — the robust fallback for when Newton diverges.
+///
+/// Brent keeps bisection's guaranteed convergence (a bracket is always
+/// maintained) but reaches the root superlinearly by preferring inverse
+/// quadratic interpolation, then the secant step, and only bisecting when those
+/// would step outside the bracket or fail to shrink it fast enough. This is the
+/// method `scipy.optimize.brentq` uses and is the standard best-in-class 1-D
+/// bracketing root-finder.
+// `a`, `b`, `c`, `d`, `s` are the canonical Brent variable names (Wikipedia,
+// Numerical Recipes, scipy); renaming them would obscure the reference algorithm.
+#[allow(clippy::many_single_char_names)]
+fn brent(series: &[(f64, f64)], tol: f64) -> Option<f64> {
+    // ---- Bracket a sign change (`low` and a grown `high` straddle a root). ----
     let low = RATE_LOWER_BOUND;
     let f_low = npv(series, low);
-    // A root sitting exactly on the lower bound.
     if f_low.abs() < tol {
-        return finite(low);
+        return finite(low); // a root sitting exactly on the lower bound
     }
 
-    // Grow the upper bound until it brackets a root with `low` (NPV changes
-    // sign between them). Bounded doubling; give up if no bracket.
     let mut high = 1.0;
     let mut f_high = npv(series, high);
     let mut bracketed = false;
@@ -242,24 +251,73 @@ fn bisect(series: &[(f64, f64)], tol: f64) -> Option<f64> {
         return None;
     }
 
+    // ---- Brent's method on the bracket [a, b]. ----
+    // Invariant: `b` is the running best estimate (smaller |f|), `a` the
+    // opposite-signed contra-point; `c`/`d` are the two previous iterates.
     let (mut a, mut b) = (low, high);
-    let mut f_a = f_low;
-    for _ in 0..BISECT_MAX_ITER {
-        let mid = 0.5 * (a + b);
-        let f_mid = npv(series, mid);
-        if f_mid.abs() < tol || (b - a).abs() < STEP_EPSILON {
-            return finite(mid);
+    let (mut fa, mut fb) = (f_low, f_high);
+    if fa.abs() < fb.abs() {
+        std::mem::swap(&mut a, &mut b);
+        std::mem::swap(&mut fa, &mut fb);
+    }
+    let mut c = a;
+    let mut fc = fa;
+    let mut d = c; // only read once `used_bisection` is false (guarded below)
+    let mut used_bisection = true;
+
+    for _ in 0..BRENT_MAX_ITER {
+        if fb.abs() < tol || (b - a).abs() < STEP_EPSILON {
+            return finite(b);
         }
-        // `opposite_signs`, not `f_a * f_mid < 0`: the product would overflow
-        // to ±inf for large NPV magnitudes and misclassify the sub-interval.
-        if opposite_signs(f_a, f_mid) {
-            b = mid;
+
+        // Propose the next point: inverse quadratic interpolation when the three
+        // NPVs are distinct (`> 0.0` differences, not `!=`, keeps the float
+        // lint happy and rejects an exact tie), else the secant step.
+        let distinct = (fa - fc).abs() > 0.0 && (fb - fc).abs() > 0.0;
+        let mut s = if distinct {
+            a * fb * fc / ((fa - fb) * (fa - fc))
+                + b * fa * fc / ((fb - fa) * (fb - fc))
+                + c * fa * fb / ((fc - fa) * (fc - fb))
         } else {
-            a = mid;
-            f_a = f_mid;
+            b - fb * (b - a) / (fb - fa)
+        };
+
+        // Reject the interpolated `s` and bisect instead when it steps outside
+        // [(3a+b)/4, b], or fails to shrink the interval fast enough, or isn't
+        // finite — the safeguards that give Brent its bisection guarantee.
+        let bound = a.mul_add(3.0, b) / 4.0;
+        let (blo, bhi) = if bound <= b { (bound, b) } else { (b, bound) };
+        let bisect = !s.is_finite()
+            || s < blo
+            || s > bhi
+            || (used_bisection && (s - b).abs() >= (b - c).abs() / 2.0)
+            || (!used_bisection && (s - b).abs() >= (c - d).abs() / 2.0)
+            || (used_bisection && (b - c).abs() < STEP_EPSILON)
+            || (!used_bisection && (c - d).abs() < STEP_EPSILON);
+        if bisect {
+            s = 0.5 * (a + b);
+        }
+        used_bisection = bisect;
+
+        let fs = npv(series, s);
+        d = c;
+        c = b;
+        fc = fb;
+        // Keep the sub-interval that still straddles the root.
+        if opposite_signs(fa, fs) {
+            b = s;
+            fb = fs;
+        } else {
+            a = s;
+            fa = fs;
+        }
+        // Restore the invariant that `b` is the better estimate.
+        if fa.abs() < fb.abs() {
+            std::mem::swap(&mut a, &mut b);
+            std::mem::swap(&mut fa, &mut fb);
         }
     }
-    finite(0.5 * (a + b))
+    finite(b)
 }
 
 /// Guard: reject NaN/inf so callers never surface a garbage rate.
@@ -269,7 +327,7 @@ fn finite(rate: f64) -> Option<f64> {
 
 /// Whether two NPV values straddle zero (a sign-change bracket). Exact roots
 /// sitting on a bound are handled separately by the endpoint checks in
-/// [`bisect`], so this treats `0.0` as non-negative.
+/// [`brent`], so this treats `0.0` as non-negative.
 fn opposite_signs(a: f64, b: f64) -> bool {
     (a < 0.0) != (b < 0.0)
 }
@@ -338,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn newton_and_bisection_agree() {
+    fn newton_and_brent_agree() {
         // Sanity: the NPV at the returned rate is ~0 (whichever solver won).
         let flows = [
             CashFlow::new(d(2019, 6, 15), dec!(-5000)),
@@ -411,7 +469,7 @@ mod tests {
     #[test]
     fn near_total_loss_is_found() {
         // Lose ~99.995%: -1000 in, +0.05 back a year later → IRR ≈ -0.99995.
-        // The old bisection lower bound of -0.9999 could not reach this.
+        // The old lower bound of -0.9999 could not reach this.
         let flows = [
             CashFlow::new(d(2020, 1, 1), dec!(-1000)),
             CashFlow::new(d(2020, 12, 31), dec!(0.05)),
@@ -448,6 +506,16 @@ mod tests {
             approx(r, 0.498, 3e-3),
             "expected the true ~0.498, not the 0.10 seed, got {r}"
         );
+    }
+
+    #[test]
+    fn brent_solves_a_bracketed_root_precisely() {
+        // Exercise the Brent fallback directly on a clean root (10% one-year:
+        // -1000 + 1100/(1+r) = 0 → r = 0.10). Confirms the interpolation
+        // converges to full precision, not merely within the accept tolerance.
+        let series = [(0.0, -1000.0), (1.0, 1100.0)];
+        let r = brent(&series, 1e-9).expect("bracketed root");
+        assert!((r - 0.10).abs() < 1e-9, "Brent must nail 0.10, got {r}");
     }
 
     #[test]

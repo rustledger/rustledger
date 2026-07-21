@@ -169,6 +169,18 @@ impl BookingEngine {
         self.inventories
     }
 
+    /// Borrow the realized per-account inventories without consuming the engine.
+    ///
+    /// The borrowing counterpart to [`into_inventories`](Self::into_inventories),
+    /// for callers that must read the realization *mid-walk* and keep applying —
+    /// e.g. snapshotting portfolio value at successive dates in one forward pass
+    /// (`rustledger-returns`' single-pass TWR). Iteration order is the underlying
+    /// `FxHashMap`'s (unspecified); collect into a `BTreeMap` if a stable order
+    /// matters.
+    pub fn inventories(&self) -> impl Iterator<Item = (&rustledger_core::Account, &Inventory)> {
+        self.inventories.iter()
+    }
+
     /// Book a transaction: fill in empty cost specs and calculate gains.
     ///
     /// This does NOT modify the internal inventories - call `apply` for that.

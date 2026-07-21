@@ -311,6 +311,16 @@ fn fmt_rate(rate: Option<f64>) -> String {
     )
 }
 
+/// A rate for the grouped **text** table: the numeric rate carries its own `%`,
+/// but an undefined rate is `n/a` (not `n/a%`). Matches `render_single`'s
+/// single-scope text output, where the `%` hangs off the value, not the column.
+fn fmt_rate_pct(rate: Option<f64>) -> String {
+    match rate {
+        Some(_) => format!("{}%", fmt_rate(rate)),
+        None => "n/a".to_string(),
+    }
+}
+
 /// The single whole-scope summary (no grouping) — the original report shape.
 fn render_single<W: Write>(
     r: &GroupResult,
@@ -480,10 +490,10 @@ fn render_grouped<W: Write>(
             let row = |w: &mut W, r: &GroupResult| -> Result<()> {
                 writeln!(
                     w,
-                    "{:32}{:>8}%{:>8}%{:>12}{:>12}",
+                    "{:32}{:>9}{:>9}{:>12}{:>12}",
                     truncate(&r.label, 32),
-                    fmt_rate(r.mwr),
-                    fmt_rate(r.twr),
+                    fmt_rate_pct(r.mwr),
+                    fmt_rate_pct(r.twr),
                     money(r.invested),
                     money(r.current_value),
                 )?;
@@ -527,6 +537,15 @@ mod tests {
 
     fn money(n: i64, ccy: &str) -> Amount {
         Amount::new(Decimal::from(n), ccy)
+    }
+
+    /// An undefined rate renders as `n/a`, not `n/a%`: the `%` hangs off the
+    /// value (as in `render_single`), so the grouped text table stays consistent
+    /// with the single-scope output.
+    #[test]
+    fn undefined_rate_renders_without_a_percent_sign() {
+        assert_eq!(fmt_rate_pct(None), "n/a");
+        assert_eq!(fmt_rate_pct(Some(0.3236)), "32.36%");
     }
 
     /// Drift guard (CLAUDE.md Canonical-Function Discipline): `terminal_value`

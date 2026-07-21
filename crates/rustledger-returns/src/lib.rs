@@ -155,6 +155,23 @@ pub fn xirr(flows: &[CashFlow]) -> Option<f64> {
         return None;
     }
 
+    // Degenerate: the flows on *every* date net to zero. Then NPV(r) =
+    // Σ Sₜ/(1+r)ᵗ with every date-net Sₜ = 0, i.e. NPV is *identically* zero at
+    // every rate — no rate is distinguished, so the IRR is undefined. This slips
+    // past the all-same-date guard when there are ≥2 dates (e.g. same-day
+    // deposit/withdrawal washes on two different days); without this check
+    // Newton's iteration-0 `|NPV| < tol` succeeds at the seed and returns 0.10, a
+    // fabricated return. Checked exactly in `Decimal` (the `(1+r)⁻ᵗ` for distinct
+    // t are linearly independent, so identically-zero NPV ⟺ every Sₜ = 0).
+    let mut net_by_date: std::collections::BTreeMap<NaiveDate, Decimal> =
+        std::collections::BTreeMap::new();
+    for f in flows {
+        *net_by_date.entry(f.date).or_default() += f.amount;
+    }
+    if net_by_date.values().all(rust_decimal::Decimal::is_zero) {
+        return None;
+    }
+
     // Reduce to (years-from-first-flow, amount) pairs once. A `Decimal` that
     // cannot be represented as `f64` propagates as `None` (no fabricated rate)
     // rather than being silently zeroed, which would corrupt the result.
@@ -511,6 +528,35 @@ mod tests {
             ]),
             None
         );
+    }
+
+    #[test]
+    fn every_date_netting_to_zero_is_none_not_a_fabricated_rate() {
+        // #1817: two same-day washes on two DIFFERENT dates. The flows change
+        // sign and span >1 day, so this slips past the sign and all-same-date
+        // guards, but every date nets to zero → NPV is identically zero at every
+        // rate → the return is undefined. Before the fix, Newton's iteration-0
+        // check succeeded at the seed and xirr fabricated 0.10.
+        let flows = [
+            CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+            CashFlow::new(d(2020, 1, 1), dec!(1000)),
+            CashFlow::new(d(2020, 6, 1), dec!(-500)),
+            CashFlow::new(d(2020, 6, 1), dec!(500)),
+        ];
+        assert_eq!(xirr(&flows), None);
+    }
+
+    #[test]
+    fn undiscounted_sum_zero_but_time_structured_is_still_solved() {
+        // Guard against over-firing: the UNDISCOUNTED total is zero here
+        // (-1000 + 1000), but the dates differ, so NPV is zero only at r=0 (not
+        // identically) — a genuine 0% return, which must still be solved.
+        let flows = [
+            CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+            CashFlow::new(d(2020, 12, 31), dec!(1000)),
+        ];
+        let r = xirr(&flows).expect("a 0% return is defined");
+        assert!(approx(r, 0.0, 1e-6), "expected ~0%, got {r}");
     }
 
     #[test]

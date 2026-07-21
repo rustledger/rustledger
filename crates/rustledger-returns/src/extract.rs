@@ -522,7 +522,8 @@ fn value_investment_scope<'a>(
 /// in-range transaction, so this falls back to the order-independent per-date
 /// [`investment_value_at`] — the result then matches `investment_value_at` for
 /// *any* booked input, never silently wrong. The
-/// `investment_values_at_matches_per_date{,_unsorted}` tests pin both paths.
+/// `investment_values_at_matches_per_date` and
+/// `investment_values_at_matches_per_date_when_unsorted` tests pin both paths.
 fn investment_values_at(
     directives: &[Directive],
     scope: &Scope,

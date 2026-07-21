@@ -10,8 +10,10 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
-wasmtime = { version = "47", features = ["component-model"] }
-wasmtime-wasi = "47"
+# Track the workspace wasmtime version (adds the component-model feature on top)
+# so these pins can't drift from the root Cargo.toml.
+wasmtime = { workspace = true, features = ["component-model"] }
+wasmtime-wasi.workspace = true
 anyhow = "1"
 tempfile.workspace = true
 rustledger-core.workspace = true

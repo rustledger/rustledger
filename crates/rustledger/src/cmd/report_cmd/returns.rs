@@ -87,9 +87,10 @@ struct GroupResult {
 /// Compute the return summary for one scope.
 ///
 /// Delegates to the engine's `compute_returns`, which extracts the boundary flows
-/// and realizes the portfolio ONCE (rather than this consumer calling
-/// `extract_flows` + `terminal_value` + `twr` separately, each re-extracting and
-/// re-realizing). This adds only the row `label`.
+/// and realizes the portfolio ONCE. Previously this consumer composed
+/// `extract_flows` + `terminal_value` + `twr`, and `twr` itself re-ran
+/// `extract_flows` and a second realization — so each group did ~2 extractions and
+/// ~2 realizations. This adds only the row `label`.
 fn compute_group(
     directives: &[Directive],
     scope: &Scope,

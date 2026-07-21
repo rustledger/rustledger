@@ -786,14 +786,16 @@ pub struct Returns {
     pub time_weighted: Option<f64>,
 }
 
-/// Compute a scope's full return summary from ONE flow extraction and ONE
-/// realization pass.
+/// Compute a scope's full return summary from a single flow extraction and a
+/// single portfolio realization.
 ///
 /// Folds [`extract_flows`], [`terminal_value`], [`xirr`](crate::xirr), and
-/// [`twr`] into a single walk: the boundary flows are extracted once, and the
+/// [`twr`] into one computation: the boundary flows are extracted once, and the
 /// portfolio is valued at every flow date and at `end_date` in one forward
-/// realization, then reused for the terminal value, the money-weighted series, and
-/// the time-weighted chaining. A caller needing every figure (the `report returns`
+/// realization pass (on the date-sorted fast path — the report's stream is; an
+/// unsorted stream falls back to per-date valuation, see `investment_values_at`),
+/// then reused for the terminal value, the money-weighted series, and the
+/// time-weighted chaining. A caller needing every figure (the `report returns`
 /// breakdown, one call per group) thus avoids the ~2× extraction and ~2×
 /// realization of invoking those functions separately. The result is identical to
 /// composing them by hand — pinned by `compute_returns_matches_manual_composition`.
@@ -811,7 +813,9 @@ pub struct Returns {
 ///
 /// # Panics
 ///
-/// Same booked, pad-expanded, date-sorted input requirement as [`twr`].
+/// Same booked, pad-expanded input requirement as [`twr`]. (Date-sorted input is
+/// a fast path, not a correctness requirement — an unsorted stream falls back to
+/// the order-independent per-date valuation.)
 pub fn compute_returns(
     directives: &[Directive],
     scope: &Scope,

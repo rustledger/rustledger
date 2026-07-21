@@ -170,8 +170,13 @@ fn compute_group(
 ///   rest of the portfolio, so its flows count an internal transfer as a
 ///   contribution/withdrawal.
 ///
+/// Bounded by `end_date`, exactly as extraction is: an `open` (or a transaction,
+/// for the self-containment check) dated after the report horizon is ignored, so
+/// a historical report shows no group for an account that does not exist yet.
+///
 /// An empty result means no in-scope account carried a usable tag; the caller
-/// then reports the plain total.
+/// still emits the grouped output shape (an empty group list plus the
+/// whole-portfolio total), just with no group rows.
 fn build_groups(
     directives: &[Directive],
     whole_scope: &Scope,

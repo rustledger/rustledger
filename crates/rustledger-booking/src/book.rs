@@ -177,6 +177,7 @@ impl BookingEngine {
     /// (`rustledger-returns`' single-pass TWR). Iteration order is the underlying
     /// `FxHashMap`'s (unspecified); collect into a `BTreeMap` if a stable order
     /// matters.
+    // (No `#[must_use]`: the returned `impl Iterator` already carries it.)
     pub fn inventories(&self) -> impl Iterator<Item = (&rustledger_core::Account, &Inventory)> {
         self.inventories.iter()
     }

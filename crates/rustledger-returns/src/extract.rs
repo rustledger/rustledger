@@ -475,10 +475,10 @@ fn value_investment_scope<'a>(
     prices: &impl PriceOracle,
     date: NaiveDate,
 ) -> Result<Decimal, ExtractError> {
-    // Only the Investment-scope accounts are valued, so filter before collecting —
-    // the `BTreeMap` (for deterministic `MissingPrice` selection) then holds just
-    // those, keeping the per-date cost proportional to in-scope accounts, not the
-    // whole chart.
+    // Classify every realized account, but collect only the Investment-scope ones
+    // into the `BTreeMap` (kept for deterministic `MissingPrice` selection) — so
+    // the sort and the price conversions scale with the in-scope positions, while
+    // the classify scan is still over the whole chart.
     let ordered: std::collections::BTreeMap<_, _> = inventories
         .filter(|(account, _)| scope.classify(account.as_str()) == AccountRole::Investment)
         .collect();
@@ -511,7 +511,8 @@ fn value_investment_scope<'a>(
 /// # Fast path vs. fallback
 ///
 /// When `directives` is **date-sorted** (the report's booked stream is), a single
-/// forward pass suffices — `O(directives + dates × in-scope accounts)` versus the
+/// forward pass suffices — `O(directives + dates × accounts)`, each date classifying
+/// the realized accounts and pricing the in-scope positions, versus the
 /// `O(dates × directives)` of a per-date rescan — because the per-date realization
 /// applies transactions in directive order, which *is* date order, so a cursor
 /// that snapshots as it crosses each target date agrees exactly (all same-date
@@ -536,18 +537,16 @@ fn investment_values_at(
 
     // The single-pass cursor is only equivalent to the per-date realization when
     // transactions are in date order; otherwise fall back to the (order-independent)
-    // per-date path so the result is correct for any booked stream.
-    let txns = directives.iter().filter_map(|directive| match directive {
-        Directive::Transaction(txn) => Some(txn),
-        _ => None,
-    });
-    let mut prev: Option<NaiveDate> = None;
-    let date_sorted = txns.clone().all(|txn| {
-        let ok = prev.is_none_or(|p| p <= txn.date);
-        prev = Some(txn.date);
-        ok
-    });
-    if !date_sorted {
+    // per-date path so the result is correct for any booked stream. The check is a
+    // cheap O(transactions) date-comparison scan, dominated by the booking pass it
+    // guards; the report's input is always sorted, so the fast path is the norm.
+    let transactions = || {
+        directives.iter().filter_map(|directive| match directive {
+            Directive::Transaction(txn) => Some(txn),
+            _ => None,
+        })
+    };
+    if !transactions().is_sorted_by_key(|txn| txn.date) {
         return dates
             .iter()
             .map(|&date| investment_value_at(directives, scope, reporting_currency, prices, date))
@@ -556,7 +555,7 @@ fn investment_values_at(
 
     let mut engine = rustledger_booking::BookingEngine::new();
     engine.register_account_methods(directives.iter());
-    let mut txns = txns.peekable();
+    let mut txns = transactions().peekable();
     let mut values = Vec::with_capacity(dates.len());
     for &date in dates {
         // Apply every transaction on or before this date (dates and txns both
@@ -630,9 +629,9 @@ fn investment_values_at(
 /// is valued at every flow date and at `end_date` in a **single forward
 /// realization pass** (`investment_values_at`): one booking walk of the stream,
 /// snapshotting value as it crosses each date, so cost is
-/// `O(directives + flow_dates × in-scope accounts)` — linear in the ledger. An
-/// unsorted stream falls back to a per-date realization (`O(flow_dates ×
-/// directives)`), still correct; see `investment_values_at`.
+/// `O(directives + flow_dates × accounts)` — linear in the ledger. An unsorted
+/// stream falls back to a per-date realization (`O(flow_dates × directives)`),
+/// still correct; see `investment_values_at`.
 ///
 /// # Errors
 ///
@@ -1544,6 +1543,40 @@ mod tests {
         let prices = MockPrices::default().with("AAPL", "USD", d(2021, 1, 1), dec!(100));
         let rate = twr(&dirs, &invest_scope(), "USD", &prices, d(2021, 1, 1)).unwrap();
         assert_eq!(rate, None);
+    }
+
+    #[test]
+    fn twr_missing_price_after_an_undefined_subperiod_is_none_not_err() {
+        // The single-pass rework values every date up front but must preserve the
+        // old LAZY short-circuit: an early sub-period already made the return
+        // undefined (here the portfolio is net short, so the second flow trips the
+        // `vp <= 0` guard → Ok(None)), so a MissingPrice at the report end date
+        // must NOT surface — twr returns Ok(None), never Err(MissingPrice).
+        // Regression guard: if `investment_values_at`'s per-date results were ever
+        // `?`-propagated eagerly, this would flip to Err and the test would fail.
+        let dirs = vec![
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(-10), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(1000), "USD")),
+                ],
+            ),
+            txn(
+                d(2020, 6, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(-1), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(100), "USD")),
+                ],
+            ),
+        ];
+        // Priced at the two flow dates, but NOT at the 2020-12-31 report date.
+        let prices = MockPrices::default()
+            .with("AAPL", "USD", d(2020, 1, 1), dec!(100))
+            .with("AAPL", "USD", d(2020, 6, 1), dec!(100));
+        let result = twr(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31))
+            .expect("must be Ok(None), not Err(MissingPrice) — the end price is never reached");
+        assert_eq!(result, None);
     }
 
     #[test]

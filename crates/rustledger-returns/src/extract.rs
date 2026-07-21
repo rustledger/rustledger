@@ -580,6 +580,84 @@ fn investment_values_at(
     values
 }
 
+/// Value SEVERAL scopes at their (each ascending) dates in ONE booking pass over
+/// the whole ledger.
+///
+/// The booking forward pass is **scope-independent** — it applies every
+/// transaction once and realizes every account — so N scopes share a single
+/// realization; only the per-date valuation ([`value_investment_scope`]) filters
+/// by scope. The engine state at any date is exactly `transactions ≤ date`,
+/// identical to what per-scope [`investment_values_at`] would build, so each
+/// scope's values match `investment_values_at` for that scope — but the O(N)
+/// booking is paid once instead of once per scope. Returns, per scope (in input
+/// order), its value at each of its dates. Falls back to per-scope
+/// `investment_values_at` on an unsorted stream, matching that function's own
+/// fallback. Pinned by `investment_values_multi_matches_per_scope`.
+fn investment_values_multi(
+    directives: &[Directive],
+    scoped_dates: &[(&Scope, &[NaiveDate])],
+    reporting_currency: &str,
+    prices: &impl PriceOracle,
+) -> Vec<Vec<Result<Decimal, ExtractError>>> {
+    let transactions = || {
+        directives.iter().filter_map(|directive| match directive {
+            Directive::Transaction(txn) => Some(txn),
+            _ => None,
+        })
+    };
+    if !transactions().is_sorted_by_key(|txn| txn.date) {
+        return scoped_dates
+            .iter()
+            .map(|(scope, dates)| {
+                investment_values_at(directives, scope, reporting_currency, prices, dates)
+            })
+            .collect();
+    }
+
+    // Snapshot points are the union of every scope's dates; each scope's dates are
+    // a sorted subset, so a per-scope cursor advances monotonically across it.
+    let union: std::collections::BTreeSet<NaiveDate> = scoped_dates
+        .iter()
+        .flat_map(|(_, dates)| dates.iter().copied())
+        .collect();
+
+    let mut engine = rustledger_booking::BookingEngine::new();
+    engine.register_account_methods(directives.iter());
+    let mut txns = transactions().peekable();
+    let mut values: Vec<Vec<Result<Decimal, ExtractError>>> = scoped_dates
+        .iter()
+        .map(|(_, dates)| Vec::with_capacity(dates.len()))
+        .collect();
+    let mut cursors = vec![0usize; scoped_dates.len()];
+
+    for &date in &union {
+        while let Some(txn) = txns.peek() {
+            if txn.date <= date {
+                engine.apply(txn);
+                txns.next();
+            } else {
+                break;
+            }
+        }
+        for (i, (scope, dates)) in scoped_dates.iter().enumerate() {
+            // Emit a value for every occurrence of this date in the scope's list
+            // (a scope may list `end_date` twice when it coincides with the last
+            // flow date), then leave the cursor at the next, later date.
+            while cursors[i] < dates.len() && dates[cursors[i]] == date {
+                values[i].push(value_investment_scope(
+                    engine.inventories(),
+                    scope,
+                    reporting_currency,
+                    prices,
+                    date,
+                ));
+                cursors[i] += 1;
+            }
+        }
+    }
+    values
+}
+
 /// Annualized **time-weighted return** (TWR) for `scope`, in `reporting_currency`,
 /// from ledger inception to `end_date` — or `None` when it is undefined.
 ///
@@ -878,6 +956,115 @@ pub fn compute_returns(
         money_weighted,
         time_weighted,
     })
+}
+
+/// Compute [`compute_returns`] for SEVERAL scopes while realizing the portfolio
+/// only ONCE.
+///
+/// `report returns --by-group` computes one summary for the whole scope plus one
+/// per group; calling [`compute_returns`] for each re-runs the booking pass every
+/// time even though the booking is scope-independent. This shares a single
+/// realization across all scopes (see `investment_values_multi`), turning the
+/// per-group booking cost from `O(scopes × directives)` into `O(directives)`.
+/// Flow extraction and valuation are still per scope (they must be), so the
+/// result for each scope is **identical** to `compute_returns(that scope)` —
+/// pinned by `compute_returns_multi_matches_per_scope`. Returns one result per
+/// input scope, in order; a scope's error (e.g. an unpriceable flow or end-date
+/// valuation) is independent and does not affect the others.
+pub fn compute_returns_multi(
+    directives: &[Directive],
+    scopes: &[Scope],
+    reporting_currency: &str,
+    prices: &impl PriceOracle,
+    end_date: NaiveDate,
+) -> Vec<Result<Returns, ExtractError>> {
+    /// Per-scope work computed before the shared realization.
+    struct Prep {
+        flows: Vec<CashFlow>,
+        invested: Decimal,
+        distributions: Decimal,
+        net_by_date: std::collections::BTreeMap<NaiveDate, Decimal>,
+        dates: Vec<NaiveDate>,
+    }
+
+    // Extract flows and derive the per-date net for each scope. Extraction can
+    // fail per scope (an unpriceable boundary flow); such a scope is reported as
+    // that error and sits out the shared valuation.
+    let preps: Vec<Result<Prep, ExtractError>> = scopes
+        .iter()
+        .map(|scope| {
+            let flows = extract_flows(directives, scope, reporting_currency, prices, end_date)?;
+            let mut invested = Decimal::ZERO;
+            let mut distributions = Decimal::ZERO;
+            let mut net_by_date: std::collections::BTreeMap<NaiveDate, Decimal> =
+                std::collections::BTreeMap::new();
+            for flow in &flows {
+                if flow.amount.is_sign_negative() {
+                    invested += -flow.amount;
+                } else {
+                    distributions += flow.amount;
+                }
+                *net_by_date.entry(flow.date).or_default() += -flow.amount;
+            }
+            let mut dates: Vec<NaiveDate> = net_by_date.keys().copied().collect();
+            dates.push(end_date);
+            Ok(Prep {
+                flows,
+                invested,
+                distributions,
+                net_by_date,
+                dates,
+            })
+        })
+        .collect();
+
+    // ONE realization pass over the union of the ready scopes' dates.
+    let scoped_dates: Vec<(&Scope, &[NaiveDate])> = preps
+        .iter()
+        .zip(scopes)
+        .filter_map(|(prep, scope)| prep.as_ref().ok().map(|p| (scope, p.dates.as_slice())))
+        .collect();
+    let mut shared_values =
+        investment_values_multi(directives, &scoped_dates, reporting_currency, prices).into_iter();
+
+    // Assemble each scope's `Returns` from its shared values. The failed preps are
+    // skipped here exactly as they were skipped when building `scoped_dates`, so
+    // `shared_values` stays aligned with the ready scopes in order.
+    preps
+        .into_iter()
+        .map(|prep| {
+            let prep = prep?;
+            let mut values = shared_values
+                .next()
+                .expect("one value vector per ready scope");
+            let end_value = values.pop().expect("dates always includes end_date");
+            let current_value = end_value?;
+
+            let mut series = prep.flows;
+            if !current_value.is_zero() {
+                series.push(CashFlow::new(end_date, current_value));
+            }
+            series.sort_by_key(|f| f.date);
+            let cash_flows = series.len();
+            let money_weighted = crate::xirr(&series);
+
+            let time_weighted = if prep.invested.is_zero() && current_value.is_zero() {
+                None
+            } else {
+                twr_from_values(&prep.net_by_date, values, Ok(current_value), end_date)
+                    .unwrap_or(None)
+            };
+
+            Ok(Returns {
+                cash_flows,
+                invested: prep.invested,
+                distributions: prep.distributions,
+                current_value,
+                money_weighted,
+                time_weighted,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2074,6 +2261,119 @@ mod tests {
         assert!(
             compute_returns(&dirs, &scope, "USD", &prices, end).is_err(),
             "a missing end-date price must error, matching terminal_value"
+        );
+    }
+
+    /// Drift guard: the shared-realization `investment_values_multi` must return,
+    /// per scope, exactly what per-scope `investment_values_at` returns — the
+    /// booking is shared, but each scope's values are unchanged. Two scopes with
+    /// overlapping but different date sets.
+    #[test]
+    fn investment_values_multi_matches_per_scope() {
+        let dirs = vec![
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:AAPL", amt(dec!(10), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+                ],
+            ),
+            txn(
+                d(2020, 6, 1),
+                vec![
+                    Posting::new("Assets:Broker:MSFT", amt(dec!(10), "MSFT")),
+                    Posting::new("Assets:Bank", amt(dec!(-500), "USD")),
+                ],
+            ),
+        ];
+        let prices = MockPrices::default()
+            .with("AAPL", "USD", d(2020, 1, 1), dec!(100))
+            .with("AAPL", "USD", d(2020, 6, 1), dec!(110))
+            .with("AAPL", "USD", d(2020, 12, 31), dec!(130))
+            .with("MSFT", "USD", d(2020, 6, 1), dec!(50))
+            .with("MSFT", "USD", d(2020, 12, 31), dec!(55));
+        let s1 = Scope::new(vec!["Assets:Broker:AAPL".to_string()], vec![]);
+        let s2 = Scope::new(vec!["Assets:Broker:MSFT".to_string()], vec![]);
+        let dates1 = [d(2020, 1, 1), d(2020, 6, 1), d(2020, 12, 31)];
+        let dates2 = [d(2020, 6, 1), d(2020, 12, 31)];
+
+        let multi =
+            investment_values_multi(&dirs, &[(&s1, &dates1), (&s2, &dates2)], "USD", &prices);
+        let unwrap = |v: &[Result<Decimal, ExtractError>]| {
+            v.iter().map(|r| r.clone().unwrap()).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            unwrap(&multi[0]),
+            unwrap(&investment_values_at(&dirs, &s1, "USD", &prices, &dates1))
+        );
+        assert_eq!(
+            unwrap(&multi[1]),
+            unwrap(&investment_values_at(&dirs, &s2, "USD", &prices, &dates2))
+        );
+        // Not vacuous: AAPL 1000→1100→1300, MSFT 500→550.
+        assert_eq!(unwrap(&multi[0]), vec![dec!(1000), dec!(1100), dec!(1300)]);
+        assert_eq!(unwrap(&multi[1]), vec![dec!(500), dec!(550)]);
+    }
+
+    /// Drift guard (CLAUDE.md Canonical-Function Discipline): `compute_returns_multi`
+    /// shares one realization, but each scope's result MUST equal calling
+    /// `compute_returns` for that scope alone. Covers a happy single-holding scope,
+    /// a scope whose EUR flow can't be priced (an independent error, skipped from
+    /// the shared pass), and an income-only scope — so the error-skip alignment and
+    /// the zero-capital branch are exercised, not just the happy path.
+    #[test]
+    fn compute_returns_multi_matches_per_scope() {
+        let dirs = vec![
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:BrokerUS:AAPL", amt(dec!(10), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+                ],
+            ),
+            // The external EUR leg has no EUR->USD price, so extract_flows errors
+            // for a scope that includes this holding.
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:BrokerEU:BND", amt(dec!(10), "BND")),
+                    Posting::new("Assets:BankEUR", amt(dec!(-500), "EUR")),
+                ],
+            ),
+            txn(
+                d(2020, 6, 1),
+                vec![
+                    Posting::new("Assets:Bank", amt(dec!(20), "USD")),
+                    Posting::new("Income:Dividends", amt(dec!(-20), "USD")),
+                ],
+            ),
+        ];
+        let prices = MockPrices::default()
+            .with("AAPL", "USD", d(2020, 1, 1), dec!(100))
+            .with("AAPL", "USD", d(2020, 12, 31), dec!(130)); // no EUR / BND prices
+        let end = d(2020, 12, 31);
+        let scopes = vec![
+            Scope::new(vec!["Assets:BrokerUS".to_string()], vec![]), // ok: single holding
+            Scope::new(vec!["Assets:BrokerEU".to_string()], vec![]), // err: EUR flow unpriceable
+            Scope::new(vec![], vec!["Income:Dividends".to_string()]), // ok: income-only
+        ];
+
+        let multi = compute_returns_multi(&dirs, &scopes, "USD", &prices, end);
+        assert_eq!(multi.len(), scopes.len());
+        for (i, scope) in scopes.iter().enumerate() {
+            let single = compute_returns(&dirs, scope, "USD", &prices, end);
+            assert_eq!(multi[i], single, "scope {i} diverged from compute_returns");
+        }
+        // Not vacuous: the middle scope errors, the others succeed with real values.
+        assert_eq!(multi[0].as_ref().unwrap().current_value, dec!(1300));
+        assert!(
+            multi[1].is_err(),
+            "the EUR scope must error on the unpriceable flow"
+        );
+        assert_eq!(
+            multi[2].as_ref().unwrap().time_weighted,
+            None,
+            "income-only scope has no capital → TWR None"
         );
     }
 }

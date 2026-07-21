@@ -36,8 +36,8 @@ use rustledger_core::NaiveDate;
 
 mod extract;
 pub use extract::{
-    AccountRole, ExtractError, PriceOracle, Returns, Scope, compute_returns, extract_cash_flows,
-    extract_flows, terminal_value, twr,
+    AccountRole, ExtractError, PriceOracle, Returns, Scope, compute_returns, compute_returns_multi,
+    extract_cash_flows, extract_flows, terminal_value, twr,
 };
 
 /// A single dated cash flow in one reporting currency.

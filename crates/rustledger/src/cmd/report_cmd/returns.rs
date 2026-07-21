@@ -51,7 +51,7 @@ use rustledger_core::{
     Amount, Directive, DisplayContext, MetaValue, NaiveDate, is_subaccount_or_equal,
 };
 use rustledger_query::PriceDatabase;
-use rustledger_returns::{AccountRole, PriceOracle, Scope, compute_returns};
+use rustledger_returns::{AccountRole, PriceOracle, Scope, compute_returns, compute_returns_multi};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -348,17 +348,16 @@ pub(super) fn report_returns<W: Write>(
     let price_db = PriceDatabase::from_directives(directives);
     let oracle = PriceDbOracle(&price_db);
 
-    let total = compute_group(
-        directives,
-        &whole_scope,
-        &reporting_currency,
-        &oracle,
-        end_date,
-        "TOTAL".to_string(),
-    )?;
-
     let currency = reporting_currency.as_str();
     if !by_group {
+        let total = compute_group(
+            directives,
+            &whole_scope,
+            &reporting_currency,
+            &oracle,
+            end_date,
+            "TOTAL".to_string(),
+        )?;
         return render_single(&total, currency, end_date, ctx, format, writer);
     }
 
@@ -374,24 +373,50 @@ pub(super) fn report_returns<W: Write>(
         eprintln!(
             "warning: --by-group but no in-scope `returns-group:` metadata found; reporting only the whole-portfolio total"
         );
+        let total = compute_group(
+            directives,
+            &whole_scope,
+            &reporting_currency,
+            &oracle,
+            end_date,
+            "TOTAL".to_string(),
+        )?;
         return render_grouped(&[], &total, currency, end_date, ctx, format, writer);
     }
 
-    let groups: Vec<GroupResult> = group_scopes
-        .iter()
-        .map(|(label, scope)| {
-            compute_group(
-                directives,
-                scope,
-                &reporting_currency,
-                &oracle,
-                end_date,
-                label.clone(),
-            )
-        })
-        .collect::<Result<_>>()?;
+    // Compute the whole-portfolio TOTAL and every group in ONE shared realization:
+    // the booking pass is scope-independent, so `compute_returns_multi` pays it
+    // once for all scopes instead of once per group. Scope order is TOTAL first,
+    // then the groups; the results come back in the same order.
+    let mut labels: Vec<String> = Vec::with_capacity(group_scopes.len() + 1);
+    let mut scopes: Vec<Scope> = Vec::with_capacity(group_scopes.len() + 1);
+    labels.push("TOTAL".to_string());
+    scopes.push(whole_scope);
+    for (label, scope) in group_scopes {
+        labels.push(label);
+        scopes.push(scope);
+    }
+    let computed =
+        compute_returns_multi(directives, &scopes, &reporting_currency, &oracle, end_date);
 
-    render_grouped(&groups, &total, currency, end_date, ctx, format, writer)
+    let mut rows: Vec<GroupResult> = Vec::with_capacity(computed.len());
+    for (result, label) in computed.into_iter().zip(labels) {
+        let r = result.with_context(|| format!("computing investment returns for {label}"))?;
+        rows.push(GroupResult {
+            label,
+            flow_count: r.cash_flows,
+            invested: r.invested,
+            distributions: r.distributions,
+            current_value: r.current_value,
+            mwr: r.money_weighted,
+            twr: r.time_weighted,
+        });
+    }
+    let (total, groups) = rows
+        .split_first()
+        .expect("scopes always contains the whole-portfolio TOTAL");
+
+    render_grouped(groups, total, currency, end_date, ctx, format, writer)
 }
 
 /// Format a rate as a 2-decimal percentage string, or `"n/a"` when undefined.

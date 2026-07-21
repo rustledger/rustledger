@@ -791,12 +791,23 @@ fn by_group_text_output_renders_rows_and_total() {
         ],
     );
     assert!(out.contains("Tech") && out.contains("Bonds"), "{out}");
+    // The text table carries the Distributions column (parity with single-scope
+    // output), and Tech's $20 dividend shows in it.
+    assert!(
+        out.contains("Distributions"),
+        "text table needs Distributions: {out}"
+    );
     // TOTAL line present with the whole-portfolio current value.
     let total = out
         .lines()
         .find(|l| l.starts_with("TOTAL"))
         .unwrap_or_else(|| panic!("no TOTAL row: {out}"));
     assert!(total.contains("1850"), "TOTAL row: {total}");
+    // A footnote makes clear the TOTAL is not the sum of the group rows.
+    assert!(
+        out.contains("not the sum of the groups"),
+        "expected the non-sum TOTAL footnote: {out}"
+    );
 }
 
 #[test]

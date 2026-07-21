@@ -564,25 +564,27 @@ fn render_grouped<W: Write>(
             )?;
         }
         OutputFormat::Text => {
-            // Rule width must match the column layout below: 32+9+9+12+12.
-            const RULE: usize = 32 + 9 + 9 + 12 + 12;
+            // Rule width must match the column layout below (kept under 80 cols;
+            // the Distributions column is 14 so its header keeps a leading gap).
+            const RULE: usize = 23 + 9 + 9 + 12 + 14 + 12;
             writeln!(writer, "Returns  ({currency}, as of {end_date})")?;
             writeln!(writer, "{}", "=".repeat(RULE))?;
             writeln!(writer)?;
             writeln!(
                 writer,
-                "{:32}{:>9}{:>9}{:>12}{:>12}",
-                "Group", "MWR", "TWR", "Invested", "Current"
+                "{:23}{:>9}{:>9}{:>12}{:>14}{:>12}",
+                "Group", "MWR", "TWR", "Invested", "Distributions", "Current"
             )?;
             writeln!(writer, "{}", "-".repeat(RULE))?;
             let row = |w: &mut W, r: &GroupResult| -> Result<()> {
                 writeln!(
                     w,
-                    "{:32}{:>9}{:>9}{:>12}{:>12}",
-                    truncate(&r.label, 32),
+                    "{:23}{:>9}{:>9}{:>12}{:>14}{:>12}",
+                    truncate(&r.label, 23),
                     fmt_rate_pct(r.mwr),
                     fmt_rate_pct(r.twr),
                     money(r.invested),
+                    money(r.distributions),
                     money(r.current_value),
                 )?;
                 Ok(())
@@ -592,6 +594,12 @@ fn render_grouped<W: Write>(
             }
             writeln!(writer, "{}", "-".repeat(RULE))?;
             row(writer, total)?;
+            // The TOTAL is the whole portfolio, not the sum of the group rows
+            // (groups are independent and untagged holdings are omitted).
+            writeln!(
+                writer,
+                "Note: TOTAL is the whole portfolio, not the sum of the groups."
+            )?;
         }
     }
     Ok(())

@@ -272,7 +272,9 @@ fn build_groups(
 /// (U+2028/U+2029) with a space. A `returns-group:` label is arbitrary
 /// user-controlled text; on the human-facing surfaces (the text table, CSV, and
 /// stderr warnings) such bytes could inject terminal escapes or extra lines, so
-/// they are neutralized. JSON escapes them losslessly (`\uXXXX`) instead.
+/// they are neutralized. The JSON path does not use this — it keeps the label
+/// intact and valid via `escape_json` (C0 control bytes become `\uXXXX`;
+/// U+2028/U+2029 stay as-is, which is already valid inside a JSON string).
 fn sanitize_display(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -650,10 +652,9 @@ fn render_grouped<W: Write>(
 
 /// Truncate a label to fit a text column (keeps the informative tail).
 ///
-/// Control characters (e.g. a newline in a quoted `returns-group:` value) are
-/// replaced with a space first, so a label can neither split the fixed-width row
-/// across lines nor inject a spoofed second line into the text report. The JSON
-/// and CSV paths escape the raw label; only the text table needs this.
+/// The label is first run through `sanitize_display` (control chars → space),
+/// so it can neither split the fixed-width row across lines nor inject a spoofed
+/// second line into the text report.
 fn truncate(s: &str, width: usize) -> String {
     let s = sanitize_display(s);
     let s = s.as_str();

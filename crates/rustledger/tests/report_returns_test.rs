@@ -190,6 +190,24 @@ const LEDGER_INCOME_ONLY_GROUP: &str = r#"option "operating_currency" "USD"
 2020-12-31 price AAPL 130 USD
 "#;
 
+/// A tagged parent account (`Assets:Broker`, group `All`) that is an ancestor of
+/// a tagged child (`Assets:Broker:AAPL`, group `Tech`). Because `Scope` matches
+/// by prefix, `All` also captures AAPL — a cross-group overlap that must warn.
+const LEDGER_PREFIX_OVERLAP: &str = r#"option "operating_currency" "USD"
+
+2020-01-01 open Assets:Broker
+  returns-group: "All"
+2020-01-01 open Assets:Broker:AAPL
+  returns-group: "Tech"
+2020-01-01 open Assets:Bank
+
+2020-01-01 * "buy aapl"
+  Assets:Broker:AAPL  10 AAPL {100 USD}
+  Assets:Bank        -1000 USD
+
+2020-12-31 price AAPL 130 USD
+"#;
+
 fn write_fixture(source: &str) -> tempfile::NamedTempFile {
     let mut f = tempfile::Builder::new()
         .prefix("report-returns-")
@@ -652,7 +670,7 @@ fn by_group_warns_when_a_group_is_not_self_contained() {
     // attributed, so it must be surfaced as a warning (not silently misreported).
     let f = write_fixture(LEDGER_SHARED_CASH);
     let path = f.path().to_str().unwrap();
-    let (_out, err) = run_split(
+    let (out, err) = run_split(
         &bin,
         &[
             "report",
@@ -669,6 +687,43 @@ fn by_group_warns_when_a_group_is_not_self_contained() {
     assert!(
         err.contains("Tech is not self-contained") && err.contains("Assets:Broker:Cash"),
         "expected a self-contained warning naming the shared account: {err}"
+    );
+    // The warning is advisory: the group's standalone figures are STILL rendered
+    // on stdout (not suppressed or errored).
+    assert!(
+        out.contains("Tech") && out.contains("Bonds"),
+        "warned groups must still appear in the report: {out}"
+    );
+}
+
+#[test]
+fn by_group_warns_on_cross_group_prefix_overlap() {
+    let bin = require_rledger!();
+    // A tagged parent (`Assets:Broker`, group All) is an ancestor of a tagged
+    // child (`Assets:Broker:AAPL`, group Tech). `Scope` matches by prefix, so the
+    // parent's group also values the child's holding — a double count that must
+    // be surfaced.
+    let f = write_fixture(LEDGER_PREFIX_OVERLAP);
+    let path = f.path().to_str().unwrap();
+    let (_out, err) = run_split(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--by-group",
+            "--end",
+            "2020-12-31",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        err.contains("overlap by prefix")
+            && err.contains("Assets:Broker")
+            && err.contains("Assets:Broker:AAPL"),
+        "expected a prefix-overlap warning naming both accounts: {err}"
     );
 }
 
@@ -778,5 +833,12 @@ fn by_group_income_only_group_is_valued_without_panicking() {
         json_group_field(&out, "Payouts", "money_weighted_return_pct"),
         "null",
         "income-only group has no outlay → undefined MWR: {out}"
+    );
+    // TWR is likewise undefined: with no invested capital there is no holding
+    // period to weight. It must be null, not a fabricated flat 0.00%.
+    assert_eq!(
+        json_group_field(&out, "Payouts", "time_weighted_return_pct"),
+        "null",
+        "income-only group has no capital → undefined TWR (not 0%): {out}"
     );
 }

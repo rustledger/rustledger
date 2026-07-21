@@ -125,8 +125,16 @@ fn compute_group(
     series.sort_by_key(|f| f.date);
     let flow_count = series.len();
     let mwr = xirr(&series);
-    // TWR needs a price at every flow date; degrade to n/a rather than error.
-    let twr_rate = twr(directives, scope, reporting_currency, prices, end_date).unwrap_or(None);
+    // A scope that never held investment capital (an income-only group, or a
+    // holding opened but never bought) has no holding period to weight: TWR is
+    // undefined, not a flat 0%. `twr`'s unit-chaining would otherwise return
+    // `Some(0.0)` over the empty position. (`xirr` already yields `None` here.)
+    let twr_rate = if invested.is_zero() && current_value.is_zero() {
+        None
+    } else {
+        // TWR needs a price at every flow date; degrade to n/a rather than error.
+        twr(directives, scope, reporting_currency, prices, end_date).unwrap_or(None)
+    };
 
     Ok(GroupResult {
         label,
@@ -230,6 +238,15 @@ fn build_groups(
     // transfers as flows, so its return is a standalone view that will not agree
     // with the total. We can't attribute the pooled flow, so we name it.
     for (name, scope) in &rows {
+        // `TOTAL` is the label of the whole-portfolio row; a group of the same
+        // name is indistinguishable from it in the text and CSV output (JSON
+        // keeps them structurally separate).
+        if name == "TOTAL" {
+            warn(
+                "group named \"TOTAL\" collides with the whole-portfolio total row in text/CSV output"
+                    .to_string(),
+            );
+        }
         if let Some(shared) = first_shared_inscope_account(directives, scope, whole_scope) {
             warn(format!(
                 "group {name} is not self-contained: it shares in-scope account {shared} with the \
@@ -547,15 +564,17 @@ fn render_grouped<W: Write>(
             )?;
         }
         OutputFormat::Text => {
+            // Rule width must match the column layout below: 32+9+9+12+12.
+            const RULE: usize = 32 + 9 + 9 + 12 + 12;
             writeln!(writer, "Returns  ({currency}, as of {end_date})")?;
-            writeln!(writer, "{}", "=".repeat(72))?;
+            writeln!(writer, "{}", "=".repeat(RULE))?;
             writeln!(writer)?;
             writeln!(
                 writer,
                 "{:32}{:>9}{:>9}{:>12}{:>12}",
                 "Group", "MWR", "TWR", "Invested", "Current"
             )?;
-            writeln!(writer, "{}", "-".repeat(72))?;
+            writeln!(writer, "{}", "-".repeat(RULE))?;
             let row = |w: &mut W, r: &GroupResult| -> Result<()> {
                 writeln!(
                     w,
@@ -571,7 +590,7 @@ fn render_grouped<W: Write>(
             for r in groups {
                 row(writer, r)?;
             }
-            writeln!(writer, "{}", "-".repeat(72))?;
+            writeln!(writer, "{}", "-".repeat(RULE))?;
             row(writer, total)?;
         }
     }
@@ -579,7 +598,17 @@ fn render_grouped<W: Write>(
 }
 
 /// Truncate a label to fit a text column (keeps the informative tail).
+///
+/// Control characters (e.g. a newline in a quoted `returns-group:` value) are
+/// replaced with a space first, so a label can neither split the fixed-width row
+/// across lines nor inject a spoofed second line into the text report. The JSON
+/// and CSV paths escape the raw label; only the text table needs this.
 fn truncate(s: &str, width: usize) -> String {
+    let s: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let s = s.as_str();
     if s.chars().count() <= width {
         s.to_string()
     } else {

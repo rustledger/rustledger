@@ -361,10 +361,13 @@ pub(super) fn report_returns<W: Write>(
     // groups) go to stderr so they never pollute the report on stdout.
     let group_scopes = build_groups(directives, &whole_scope, &mut |w| eprintln!("warning: {w}"));
     if group_scopes.is_empty() {
+        // Still emit the grouped shape (an empty `groups` list plus the TOTAL):
+        // `--by-group` must produce one stable schema regardless of ledger
+        // content, so a JSON/CSV consumer never has to branch on it.
         eprintln!(
-            "warning: --by-group but no in-scope `returns-group:` metadata found; reporting the whole-portfolio total"
+            "warning: --by-group but no in-scope `returns-group:` metadata found; reporting only the whole-portfolio total"
         );
-        return render_single(&total, currency, end_date, ctx, format, writer);
+        return render_grouped(&[], &total, currency, end_date, ctx, format, writer);
     }
 
     let groups: Vec<GroupResult> = group_scopes
@@ -612,9 +615,18 @@ fn render_grouped<W: Write>(
 /// across lines nor inject a spoofed second line into the text report. The JSON
 /// and CSV paths escape the raw label; only the text table needs this.
 fn truncate(s: &str, width: usize) -> String {
+    // `is_control` catches the C0/C1 control chars but not the Unicode line and
+    // paragraph separators (U+2028/U+2029), which a pager may still render as a
+    // line break; neutralize those too.
     let s: String = s
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     let s = s.as_str();
     if s.chars().count() <= width {

@@ -853,3 +853,72 @@ fn by_group_income_only_group_is_valued_without_panicking() {
         "income-only group has no capital → undefined TWR (not 0%): {out}"
     );
 }
+
+#[test]
+fn by_group_emits_grouped_schema_even_with_no_tags() {
+    let bin = require_rledger!();
+    // `--by-group` must yield ONE stable schema regardless of ledger content:
+    // with no in-scope `returns-group:` tags the output is still the grouped
+    // shape (an empty `groups` array plus `total`), not the single-summary
+    // object — so a JSON consumer never has to branch on ledger content.
+    let f = write_fixture(LEDGER); // no returns-group metadata
+    let path = f.path().to_str().unwrap();
+    let (out, _err) = run_split(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--income",
+            "Income:Dividends",
+            "--by-group",
+            "--end",
+            "2020-12-31",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        out.contains("\"groups\": []") && out.contains("\"total\":"),
+        "no-tags --by-group must still emit the grouped schema: {out}"
+    );
+}
+
+#[test]
+fn by_group_json_escapes_control_chars_in_a_label() {
+    let bin = require_rledger!();
+    // A returns-group value may carry a raw control byte the parser preserves;
+    // the JSON label must be escaped (\uXXXX), not emitted raw, so the output
+    // stays valid JSON. The label here contains an ESC (U+001B).
+    let fixture = "option \"operating_currency\" \"USD\"\n\
+        2020-01-01 open Assets:Broker:AAPL\n  returns-group: \"A\u{1b}B\"\n\
+        2020-01-01 open Assets:Bank\n\
+        2020-01-01 * \"buy\"\n  Assets:Broker:AAPL 10 AAPL {100 USD}\n  Assets:Bank -1000 USD\n\
+        2020-12-31 price AAPL 130 USD\n";
+    let f = write_fixture(fixture);
+    let path = f.path().to_str().unwrap();
+    let (out, _err) = run_split(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--by-group",
+            "--end",
+            "2020-12-31",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    // The raw ESC byte must NOT appear; its  escape must.
+    assert!(
+        !out.contains('\u{1b}') && out.contains("\\u001b"),
+        "control char in a group label must be JSON-escaped: {out:?}"
+    );
+}

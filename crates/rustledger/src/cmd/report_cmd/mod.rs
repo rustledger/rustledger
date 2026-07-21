@@ -553,7 +553,7 @@ pub(super) fn account_balances(
 // exact set the old hand-chained `json_escape` did (backslash, quote, \n,
 // \r, \t), so the alias is behavior-identical.
 pub(super) use rustledger_core::format::escape_csv as csv_escape;
-pub(super) use rustledger_core::format::escape_string as json_escape;
+pub(super) use rustledger_core::format::escape_json as json_escape;
 
 #[derive(Default)]
 pub(super) struct LedgerStats {

@@ -175,6 +175,7 @@ fn compute_group(
 fn build_groups(
     directives: &[Directive],
     whole_scope: &Scope,
+    end_date: NaiveDate,
     warn: &mut dyn FnMut(String),
 ) -> Vec<(String, Scope)> {
     // group name -> (investment accounts, income accounts)
@@ -186,6 +187,12 @@ fn build_groups(
         let Directive::Open(open) = directive else {
             continue;
         };
+        // Bound grouping by the report horizon, exactly as flow extraction and
+        // valuation are: an account opened after `--end` does not exist yet in
+        // the reported period, so it must not form a (spurious, all-zero) group.
+        if open.date > end_date {
+            continue;
+        }
         let account = open.account.to_string();
         let name = match open.meta.get("returns-group") {
             Some(MetaValue::String(name)) => name.clone(),
@@ -220,6 +227,7 @@ fn build_groups(
         for (b, group_b) in &tagged[i + 1..] {
             if group_a != group_b && (is_subaccount_or_equal(a, b) || is_subaccount_or_equal(b, a))
             {
+                let (group_a, group_b) = (sanitize_display(group_a), sanitize_display(group_b));
                 warn(format!(
                     "accounts {a} (group {group_a}) and {b} (group {group_b}) overlap by prefix; \
                      the shared holding is counted in both groups"
@@ -247,7 +255,9 @@ fn build_groups(
                     .to_string(),
             );
         }
-        if let Some(shared) = first_shared_inscope_account(directives, scope, whole_scope) {
+        if let Some(shared) = first_shared_inscope_account(directives, scope, whole_scope, end_date)
+        {
+            let name = sanitize_display(name);
             warn(format!(
                 "group {name} is not self-contained: it shares in-scope account {shared} with the \
                  rest of the portfolio, so its return counts internal transfers as flows"
@@ -256,6 +266,23 @@ fn build_groups(
     }
 
     rows
+}
+
+/// Replace control characters and the Unicode line/paragraph separators
+/// (U+2028/U+2029) with a space. A `returns-group:` label is arbitrary
+/// user-controlled text; on the human-facing surfaces (the text table, CSV, and
+/// stderr warnings) such bytes could inject terminal escapes or extra lines, so
+/// they are neutralized. JSON escapes them losslessly (`\uXXXX`) instead.
+fn sanitize_display(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// The first account, if any, that makes `group_scope` not self-contained: an
@@ -267,11 +294,17 @@ fn first_shared_inscope_account(
     directives: &[Directive],
     group_scope: &Scope,
     whole_scope: &Scope,
+    end_date: NaiveDate,
 ) -> Option<String> {
     for directive in directives {
         let Directive::Transaction(txn) = directive else {
             continue;
         };
+        // Only activity within the report horizon can affect the reported
+        // figures, so a post-`--end` transfer must not raise a false warning.
+        if txn.date > end_date {
+            continue;
+        }
         let touches_group = txn
             .postings
             .iter()
@@ -359,7 +392,9 @@ pub(super) fn report_returns<W: Write>(
 
     // Grouping is opt-in; warnings (bad tags, overlaps, non-self-contained
     // groups) go to stderr so they never pollute the report on stdout.
-    let group_scopes = build_groups(directives, &whole_scope, &mut |w| eprintln!("warning: {w}"));
+    let group_scopes = build_groups(directives, &whole_scope, end_date, &mut |w| {
+        eprintln!("warning: {w}")
+    });
     if group_scopes.is_empty() {
         // Still emit the grouped shape (an empty `groups` list plus the TOTAL):
         // `--by-group` must produce one stable schema regardless of ledger
@@ -531,7 +566,7 @@ fn render_grouped<W: Write>(
                 writeln!(
                     writer,
                     "{},{},{},{},{},{},{},{},{}",
-                    csv_escape(&r.label),
+                    csv_escape(&sanitize_display(&r.label)),
                     end_date,
                     currency,
                     r.flow_count,
@@ -620,19 +655,7 @@ fn render_grouped<W: Write>(
 /// across lines nor inject a spoofed second line into the text report. The JSON
 /// and CSV paths escape the raw label; only the text table needs this.
 fn truncate(s: &str, width: usize) -> String {
-    // `is_control` catches the C0/C1 control chars but not the Unicode line and
-    // paragraph separators (U+2028/U+2029), which a pager may still render as a
-    // line break; neutralize those too.
-    let s: String = s
-        .chars()
-        .map(|c| {
-            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect();
+    let s = sanitize_display(s);
     let s = s.as_str();
     if s.chars().count() <= width {
         s.to_string()

@@ -208,6 +208,27 @@ const LEDGER_PREFIX_OVERLAP: &str = r#"option "operating_currency" "USD"
 2020-12-31 price AAPL 130 USD
 "#;
 
+/// A `Tech` group active from 2020, plus a `Crypto` group whose account is opened
+/// (and only transacts) in 2022. A report as of 2020 must not show Crypto.
+const LEDGER_FUTURE_GROUP: &str = r#"option "operating_currency" "USD"
+
+2020-01-01 open Assets:Broker:AAPL
+  returns-group: "Tech"
+2020-01-01 open Assets:Bank
+
+2020-01-01 * "buy aapl"
+  Assets:Broker:AAPL  10 AAPL {100 USD}
+  Assets:Bank        -1000 USD
+
+2022-01-01 open Assets:Broker:CRYPTO
+  returns-group: "Crypto"
+2022-06-01 * "buy crypto"
+  Assets:Broker:CRYPTO  1 BTC {30000 USD}
+  Assets:Bank          -30000 USD
+
+2020-12-31 price AAPL 130 USD
+"#;
+
 fn write_fixture(source: &str) -> tempfile::NamedTempFile {
     let mut f = tempfile::Builder::new()
         .prefix("report-returns-")
@@ -913,6 +934,40 @@ fn by_group_emits_grouped_schema_even_with_no_tags() {
     assert!(
         rules.windows(2).all(|w| w[1] != w[0] + 1),
         "no-groups text output must not have adjacent rules:\n{text}"
+    );
+}
+
+#[test]
+fn by_group_respects_the_end_horizon() {
+    let bin = require_rledger!();
+    // Grouping must be bounded by --end exactly as extraction is: a group whose
+    // account opens after the horizon must not appear as a spurious row.
+    let f = write_fixture(LEDGER_FUTURE_GROUP);
+    let path = f.path().to_str().unwrap();
+    let (out, _err) = run_split(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--by-group",
+            "--end",
+            "2020-12-31",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    assert_eq!(
+        json_group_field(&out, "Tech", "current_value"),
+        "1300",
+        "{out}"
+    );
+    assert!(
+        !out.contains("Crypto"),
+        "a group opened after --end must not appear: {out}"
     );
 }
 

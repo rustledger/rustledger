@@ -74,6 +74,32 @@ const LEDGER_TIMING: &str = r#"option "operating_currency" "USD"
 2022-01-01 price AAPL 120 USD
 "#;
 
+/// Two `returns-group:`-tagged holdings; the Tech group also tags its dividend
+/// income account, so Tech's return is dividend-inclusive.
+const LEDGER_GROUPS: &str = r#"option "operating_currency" "USD"
+
+2020-01-01 open Assets:Broker:AAPL
+  returns-group: "Tech"
+2020-01-01 open Assets:Broker:BND
+  returns-group: "Bonds"
+2020-01-01 open Assets:Bank
+2020-01-01 open Income:Dividends
+  returns-group: "Tech"
+
+2020-01-01 * "buy aapl"
+  Assets:Broker:AAPL  10 AAPL {100 USD}
+  Assets:Bank        -1000 USD
+2020-01-01 * "buy bnd"
+  Assets:Broker:BND  10 BND {50 USD}
+  Assets:Bank        -500 USD
+2020-06-01 * "aapl dividend"
+  Assets:Bank         20 USD
+  Income:Dividends   -20 USD
+
+2020-12-31 price AAPL 130 USD
+2020-12-31 price BND 55 USD
+"#;
+
 fn write_fixture(source: &str) -> tempfile::NamedTempFile {
     let mut f = tempfile::Builder::new()
         .prefix("report-returns-")
@@ -347,5 +373,117 @@ fn time_weighted_return_diverges_from_money_weighted_on_timing() {
     assert!(
         mwr > 25.0,
         "MWR should exceed TWR given the good contribution timing: {out}"
+    );
+}
+
+/// Extract a group object's field from the grouped JSON output. Naive but
+/// sufficient for the test fixtures (no nested braces inside a group object).
+fn json_group_field(out: &str, group: &str, field: &str) -> String {
+    let marker = format!(r#""group": "{group}""#);
+    let start = out
+        .find(&marker)
+        .unwrap_or_else(|| panic!("group {group} not in {out}"));
+    let obj_end = out[start..].find('}').map_or(out.len(), |e| start + e);
+    let obj = &out[start..obj_end];
+    let key = format!(r#""{field}": "#);
+    let fs = obj
+        .find(&key)
+        .unwrap_or_else(|| panic!("field {field} not in {obj}"))
+        + key.len();
+    obj[fs..]
+        .split([',', '}'])
+        .next()
+        .unwrap()
+        .trim()
+        .trim_matches('"')
+        .to_string()
+}
+
+#[test]
+fn returns_group_metadata_breaks_down_dividend_inclusive() {
+    let bin = require_rledger!();
+    let f = write_fixture(LEDGER_GROUPS);
+    let path = f.path().to_str().unwrap();
+    let out = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--income",
+            "Income:Dividends",
+            "--end",
+            "2020-12-31",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    // Tech: 1000 in, +20 dividend (its income account is tagged Tech →
+    // dividend-INCLUSIVE), worth 1300 → 32.36%.
+    assert_eq!(
+        json_group_field(&out, "Tech", "money_weighted_return_pct"),
+        "32.36",
+        "{out}"
+    );
+    assert_eq!(
+        json_group_field(&out, "Tech", "distributions"),
+        "20",
+        "dividend included: {out}"
+    );
+    assert_eq!(
+        json_group_field(&out, "Tech", "current_value"),
+        "1300",
+        "{out}"
+    );
+    // Bonds: 500 in, worth 550 → 10%.
+    assert_eq!(
+        json_group_field(&out, "Bonds", "money_weighted_return_pct"),
+        "10.00",
+        "{out}"
+    );
+    // The whole-scope TOTAL is present too.
+    assert_eq!(
+        json_group_field(&out, "TOTAL", "current_value"),
+        "1850",
+        "{out}"
+    );
+}
+
+#[test]
+fn by_account_breaks_down_per_investment_account() {
+    let bin = require_rledger!();
+    // LEDGER has no returns-group metadata, so --by-account drives the breakdown.
+    let f = write_fixture(LEDGER);
+    let path = f.path().to_str().unwrap();
+    let out = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--by-account",
+            "--end",
+            "2020-12-31",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    // LEDGER holds only Assets:Broker:Stock → one per-account row (ex-dividend,
+    // 30%) plus the TOTAL.
+    assert_eq!(
+        json_group_field(&out, "Assets:Broker:Stock", "money_weighted_return_pct"),
+        "30.00",
+        "{out}"
+    );
+    assert_eq!(
+        json_group_field(&out, "TOTAL", "current_value"),
+        "1300",
+        "{out}"
     );
 }

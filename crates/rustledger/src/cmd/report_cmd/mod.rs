@@ -178,6 +178,11 @@ pub enum Report {
         /// Defaults to today.
         #[arg(short, long)]
         end: Option<String>,
+        /// Break the return down per investment account (ex-dividend), in
+        /// addition to the total. Ignored when the ledger declares
+        /// `returns-group:` groups, which take precedence.
+        #[arg(long)]
+        by_account: bool,
     },
 }
 
@@ -478,14 +483,17 @@ fn render<W: io::Write>(
             income,
             currency,
             end,
+            by_account,
         } => {
             returns::report_returns(
                 balance_input,
                 &loaded.operating_currency,
+                &loaded.account_types,
                 investments,
                 income,
                 currency.as_deref(),
                 end.as_deref(),
+                *by_account,
                 &loaded.display_context,
                 format,
                 writer,

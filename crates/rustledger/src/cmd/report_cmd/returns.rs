@@ -1,21 +1,37 @@
-//! Returns report — the money-weighted (XIRR) investment return for an account
-//! scope.
+//! Returns report — money-weighted (XIRR) and time-weighted (TWR) investment
+//! return for an account scope, optionally broken down per group.
 //!
 //! This is the CLI consumer of the `rustledger-returns` engine. It defines the
 //! portfolio boundary from `--investments` / `--income` account prefixes, builds
-//! a price index from the ledger, and reports the annualized money-weighted
-//! return along with the supporting figures (capital invested, distributions
-//! received, and current market value).
+//! a price index from the ledger, and reports the annualized returns plus the
+//! supporting figures (capital invested, distributions received, current market
+//! value).
 //!
-//! Time-weighted return and per-commodity grouping are not yet implemented; this
-//! reports a single money-weighted return for the whole scope (see #1814).
+//! # Grouping (#1820)
+//!
+//! By default the report is the whole-scope total. Two breakdowns are offered:
+//!
+//! - **`returns-group:` metadata** (the default when present): tag `open`
+//!   directives with `returns-group: "Name"` to declare named groups. Each
+//!   group's member accounts are split by account *type* — balance-sheet
+//!   accounts form the group's investment scope, income-statement accounts its
+//!   income scope — so a group that includes its dividend account reports a
+//!   **dividend-inclusive** return. This is beangrow's group model, declared in
+//!   the ledger (not an external config file).
+//! - **`--by-account`**: one row per investment account with no income scope, so
+//!   the per-account figures are a **price return** (ex-dividend). Handy for a
+//!   quick per-holding view without tagging the ledger. Ignored when
+//!   `returns-group:` groups are declared.
 
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, Directive, DisplayContext, NaiveDate};
+use rustledger_core::{AccountTypes, Amount, Directive, DisplayContext, MetaValue, NaiveDate};
 use rustledger_query::PriceDatabase;
-use rustledger_returns::{PriceOracle, Scope, extract_flows, terminal_value, twr, xirr};
+use rustledger_returns::{
+    AccountRole, PriceOracle, Scope, extract_flows, terminal_value, twr, xirr,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 /// Adapts the query engine's [`PriceDatabase`] to the returns engine's
@@ -34,11 +50,134 @@ impl PriceOracle for PriceDbOracle<'_> {
     }
 }
 
+/// The computed return figures for one scope (a group, or the whole portfolio).
+struct GroupResult {
+    label: String,
+    flow_count: usize,
+    invested: Decimal,
+    distributions: Decimal,
+    current_value: Decimal,
+    /// Money-weighted return (annualized XIRR); `None` when undefined.
+    mwr: Option<f64>,
+    /// Time-weighted return (annualized); `None` when undefined or unpriceable.
+    twr: Option<f64>,
+}
+
+/// Compute the return summary for one scope.
+///
+/// Extracts the boundary flows and terminal value separately (so the summary can
+/// report capital-in / distributions / current-value), then runs xirr over the
+/// combined, date-sorted series and twr over the same directives. The manual
+/// flows+terminal combine mirrors the engine's canonical `extract_cash_flows`
+/// and is pinned by the `series_matches_extract_cash_flows` test.
+fn compute_group(
+    directives: &[Directive],
+    scope: &Scope,
+    reporting_currency: &str,
+    prices: &impl PriceOracle,
+    end_date: NaiveDate,
+    label: String,
+) -> Result<GroupResult> {
+    let flows = extract_flows(directives, scope, reporting_currency, prices, end_date)
+        .context("extracting investment cash flows")?;
+    let terminal = terminal_value(directives, scope, reporting_currency, prices, end_date)
+        .context("valuing the held position at the report date")?;
+
+    let invested: Decimal = flows
+        .iter()
+        .filter(|f| f.amount.is_sign_negative())
+        .map(|f| -f.amount)
+        .sum();
+    let distributions: Decimal = flows
+        .iter()
+        .filter(|f| f.amount.is_sign_positive())
+        .map(|f| f.amount)
+        .sum();
+    let current_value: Decimal = terminal.map_or(Decimal::ZERO, |t| t.amount);
+
+    let mut series = flows;
+    if let Some(t) = terminal {
+        series.push(t);
+    }
+    series.sort_by_key(|f| f.date);
+    let flow_count = series.len();
+    let mwr = xirr(&series);
+    // TWR needs a price at every flow date; degrade to n/a rather than error.
+    let twr_rate = twr(directives, scope, reporting_currency, prices, end_date).unwrap_or(None);
+
+    Ok(GroupResult {
+        label,
+        flow_count,
+        invested,
+        distributions,
+        current_value,
+        mwr,
+        twr: twr_rate,
+    })
+}
+
+/// Groups declared in the ledger via `returns-group:` metadata on `open`
+/// directives, sorted by name. Each group's member accounts are partitioned by
+/// account *type*: income-statement accounts (Income/Expenses) become the
+/// group's income scope, everything else (balance-sheet) its investment scope.
+/// A group that tags its dividend account therefore reports a dividend-inclusive
+/// return (the beangrow model, in-ledger). Returns empty if no account is tagged.
+fn groups_from_metadata(
+    directives: &[Directive],
+    account_types: &AccountTypes,
+) -> Vec<(String, Scope)> {
+    // group name -> (investment accounts, income accounts)
+    let mut members: BTreeMap<String, (Vec<String>, Vec<String>)> = BTreeMap::new();
+    for directive in directives {
+        if let Directive::Open(open) = directive
+            && let Some(MetaValue::String(name)) = open.meta.get("returns-group")
+        {
+            let account = open.account.to_string();
+            let entry = members.entry(name.clone()).or_default();
+            if account_types.is_income_statement(&account) {
+                entry.1.push(account);
+            } else {
+                entry.0.push(account);
+            }
+        }
+    }
+    members
+        .into_iter()
+        .map(|(name, (investment, income))| (name, Scope::new(investment, income)))
+        .collect()
+}
+
+/// Every distinct account the whole scope classifies as Investment, in account
+/// order, each becoming its own single-account group with **no** income scope —
+/// so the per-account figures are a price return (ex-dividend). Dividends booked
+/// to a shared cash/income account cannot be attributed to a single holding, so
+/// they are excluded here; use `returns-group:` for dividend-inclusive groups.
+fn accounts_as_groups(directives: &[Directive], whole_scope: &Scope) -> Vec<(String, Scope)> {
+    let mut accounts: BTreeSet<String> = BTreeSet::new();
+    for directive in directives {
+        if let Directive::Transaction(txn) = directive {
+            for posting in &txn.postings {
+                let account = posting.account.as_str();
+                if whole_scope.classify(account) == AccountRole::Investment {
+                    accounts.insert(account.to_string());
+                }
+            }
+        }
+    }
+    accounts
+        .into_iter()
+        .map(|a| (a.clone(), Scope::new(vec![a], Vec::new())))
+        .collect()
+}
+
 /// Generate the returns report.
 ///
 /// `directives` must be the booked, pad-expanded stream (the returns engine's
 /// input contract); the dispatcher passes `balance_input` for exactly this
-/// reason.
+/// reason. When the ledger declares `returns-group:` groups they are reported
+/// (dividend-inclusive) and `by_account` is ignored; otherwise `by_account`
+/// requests a per-account (ex-dividend) breakdown. Either way the whole-scope
+/// TOTAL is reported.
 ///
 /// # Errors
 ///
@@ -50,10 +189,12 @@ impl PriceOracle for PriceDbOracle<'_> {
 pub(super) fn report_returns<W: Write>(
     directives: &[Directive],
     operating_currency: &[String],
+    account_types: &AccountTypes,
     investments: &[String],
     income: &[String],
     currency_arg: Option<&str>,
     end_arg: Option<&str>,
+    by_account: bool,
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
@@ -76,68 +217,77 @@ pub(super) fn report_returns<W: Write>(
         None => jiff::Zoned::now().date(),
     };
 
-    let scope = Scope::new(investments.to_vec(), income.to_vec());
+    let whole_scope = Scope::new(investments.to_vec(), income.to_vec());
     // Price index built from the same stream, so implicit transaction prices and
     // explicit `price` directives both feed the valuation.
     let price_db = PriceDatabase::from_directives(directives);
     let oracle = PriceDbOracle(&price_db);
 
-    // Extract boundary flows and the terminal value separately, so the summary
-    // can report capital-in / distributions / current-value independently. xirr
-    // then runs over the combined, date-sorted series.
-    let flows = extract_flows(directives, &scope, &reporting_currency, &oracle, end_date)
-        .context("extracting investment cash flows")?;
-    let terminal = terminal_value(directives, &scope, &reporting_currency, &oracle, end_date)
-        .context("valuing the held position at the report date")?;
+    let total = compute_group(
+        directives,
+        &whole_scope,
+        &reporting_currency,
+        &oracle,
+        end_date,
+        "TOTAL".to_string(),
+    )?;
 
-    // Supporting figures, all in the reporting currency:
-    //   invested      — capital the investor put in (magnitude of outflows)
-    //   distributions — cash received during the period (dividends, sale proceeds)
-    //   current_value — market value of the position still held (terminal)
-    let invested: Decimal = flows
+    // Groups: declared metadata groups take precedence over --by-account.
+    let group_scopes = {
+        let declared = groups_from_metadata(directives, account_types);
+        if !declared.is_empty() {
+            declared
+        } else if by_account {
+            accounts_as_groups(directives, &whole_scope)
+        } else {
+            Vec::new()
+        }
+    };
+    let groups: Vec<GroupResult> = group_scopes
         .iter()
-        .filter(|f| f.amount.is_sign_negative())
-        .map(|f| -f.amount)
-        .sum();
-    let distributions: Decimal = flows
-        .iter()
-        .filter(|f| f.amount.is_sign_positive())
-        .map(|f| f.amount)
-        .sum();
-    let current_value: Decimal = terminal.map_or(Decimal::ZERO, |t| t.amount);
-
-    // Combine into the series xirr consumes. This mirrors the engine's
-    // canonical `extract_cash_flows` (flows + terminal, date-sorted); we build it
-    // from the parts here only because the summary above needs `flows` and
-    // `terminal` separately. The `series_matches_extract_cash_flows` test pins
-    // this against the canonical so it can't drift.
-    let mut series = flows;
-    if let Some(t) = terminal {
-        series.push(t);
-    }
-    series.sort_by_key(|f| f.date);
-    let flow_count = series.len();
-    // xirr is `None` when the series has no sign change or is otherwise
-    // degenerate — a genuinely undefined return, reported as "n/a".
-    let rate = xirr(&series);
-    // Time-weighted return: the investments' performance independent of
-    // contribution timing (MWR is the headline). TWR values the portfolio at
-    // EVERY cash-flow date, so it needs more prices than MWR (which only needs
-    // them at transaction dates and the end date). If an intermediate valuation
-    // can't be priced, degrade TWR to n/a rather than failing the whole report —
-    // the money-weighted return above is already computed and is the headline.
-    let twr_rate = twr(directives, &scope, &reporting_currency, &oracle, end_date).unwrap_or(None);
+        .map(|(label, scope)| {
+            compute_group(
+                directives,
+                scope,
+                &reporting_currency,
+                &oracle,
+                end_date,
+                label.clone(),
+            )
+        })
+        .collect::<Result<_>>()?;
 
     let currency = reporting_currency.as_str();
-    let money = |n: Decimal| ctx.format_amount_number(n, currency);
-    let rate_pct = |r: f64| {
-        let pct = r * 100.0;
-        // A 0% return (e.g. capital returned unchanged) converges to a tiny
-        // signed epsilon that would render as "-0.00"; show a clean "0.00".
-        let pct = if pct.abs() < 0.005 { 0.0 } else { pct };
-        format!("{pct:.2}")
-    };
+    if groups.is_empty() {
+        render_single(&total, currency, end_date, ctx, format, writer)
+    } else {
+        render_grouped(&groups, &total, currency, end_date, ctx, format, writer)
+    }
+}
 
+/// Format a rate as a 2-decimal percentage string, or `"n/a"` when undefined.
+/// A rate rounding to zero renders a clean `"0.00"` (not `"-0.00"`).
+fn fmt_rate(rate: Option<f64>) -> String {
+    rate.map_or_else(
+        || "n/a".to_string(),
+        |r| {
+            let pct = r * 100.0;
+            let pct = if pct.abs() < 0.005 { 0.0 } else { pct };
+            format!("{pct:.2}")
+        },
+    )
+}
+
+/// The single whole-scope summary (no grouping) — the original report shape.
+fn render_single<W: Write>(
+    r: &GroupResult,
+    currency: &str,
+    end_date: NaiveDate,
+    ctx: &DisplayContext,
+    format: &OutputFormat,
+    writer: &mut W,
+) -> Result<()> {
+    let money = |n: Decimal| ctx.format_amount_number(n, currency);
     match format {
         OutputFormat::Csv => {
             writeln!(
@@ -149,30 +299,26 @@ pub(super) fn report_returns<W: Write>(
                 "{},{},{},{},{},{},{},{}",
                 currency,
                 end_date,
-                flow_count,
-                csv_escape(&money(invested)),
-                csv_escape(&money(distributions)),
-                csv_escape(&money(current_value)),
-                rate.map_or_else(|| "n/a".to_string(), rate_pct),
-                twr_rate.map_or_else(|| "n/a".to_string(), rate_pct),
+                r.flow_count,
+                csv_escape(&money(r.invested)),
+                csv_escape(&money(r.distributions)),
+                csv_escape(&money(r.current_value)),
+                fmt_rate(r.mwr),
+                fmt_rate(r.twr),
             )?;
         }
         OutputFormat::Json => {
-            // Same 2-decimal precision as text/csv (a bare JSON number, `null`
-            // when undefined) so the rate agrees across every output format.
-            let rate_field = rate.map_or_else(|| "null".to_string(), rate_pct);
-            let twr_field = twr_rate.map_or_else(|| "null".to_string(), rate_pct);
             writeln!(
                 writer,
                 r#"{{"reporting_currency": "{}", "as_of": "{}", "cash_flows": {}, "invested": "{}", "distributions": "{}", "current_value": "{}", "money_weighted_return_pct": {}, "time_weighted_return_pct": {}}}"#,
                 json_escape(currency),
                 end_date,
-                flow_count,
-                money(invested),
-                money(distributions),
-                money(current_value),
-                rate_field,
-                twr_field,
+                r.flow_count,
+                money(r.invested),
+                money(r.distributions),
+                money(r.current_value),
+                json_rate(r.mwr),
+                json_rate(r.twr),
             )?;
         }
         OutputFormat::Text => {
@@ -181,40 +327,160 @@ pub(super) fn report_returns<W: Write>(
             writeln!(writer)?;
             writeln!(
                 writer,
-                "{:24}{} (as of {end_date})",
-                "Reporting currency", currency
+                "{:24}{currency} (as of {end_date})",
+                "Reporting currency"
             )?;
-            writeln!(writer, "{:24}{flow_count}", "Cash flows")?;
-            writeln!(writer, "{:24}{} {currency}", "Invested", money(invested))?;
+            writeln!(writer, "{:24}{}", "Cash flows", r.flow_count)?;
+            writeln!(writer, "{:24}{} {currency}", "Invested", money(r.invested))?;
             writeln!(
                 writer,
                 "{:24}{} {currency}",
                 "Distributions",
-                money(distributions)
+                money(r.distributions)
             )?;
             writeln!(
                 writer,
                 "{:24}{} {currency}",
                 "Current value",
-                money(current_value)
+                money(r.current_value)
             )?;
             writeln!(writer)?;
-            match rate {
-                Some(r) => writeln!(writer, "{:24}{}%", "Money-weighted return", rate_pct(r))?,
+            match r.mwr {
+                Some(rate) => writeln!(
+                    writer,
+                    "{:24}{}%",
+                    "Money-weighted return",
+                    fmt_rate(Some(rate))
+                )?,
                 None => writeln!(
                     writer,
                     "{:24}n/a (undefined — need at least one inflow and one outflow)",
                     "Money-weighted return"
                 )?,
             }
-            match twr_rate {
-                Some(r) => writeln!(writer, "{:24}{}%", "Time-weighted return", rate_pct(r))?,
+            match r.twr {
+                Some(rate) => writeln!(
+                    writer,
+                    "{:24}{}%",
+                    "Time-weighted return",
+                    fmt_rate(Some(rate))
+                )?,
                 None => writeln!(writer, "{:24}n/a", "Time-weighted return")?,
             }
         }
     }
-
     Ok(())
+}
+
+/// A JSON rate field: a bare 2-decimal number, or `null` when undefined.
+fn json_rate(rate: Option<f64>) -> String {
+    rate.map_or_else(|| "null".to_string(), |r| fmt_rate(Some(r)))
+}
+
+/// Per-group rows plus a TOTAL, when grouping is active.
+fn render_grouped<W: Write>(
+    groups: &[GroupResult],
+    total: &GroupResult,
+    currency: &str,
+    end_date: NaiveDate,
+    ctx: &DisplayContext,
+    format: &OutputFormat,
+    writer: &mut W,
+) -> Result<()> {
+    let money = |n: Decimal| ctx.format_amount_number(n, currency);
+    let rows = groups.iter().chain(std::iter::once(total));
+    match format {
+        OutputFormat::Csv => {
+            writeln!(
+                writer,
+                "group,as_of,reporting_currency,cash_flows,invested,distributions,current_value,money_weighted_return_pct,time_weighted_return_pct"
+            )?;
+            for r in rows {
+                writeln!(
+                    writer,
+                    "{},{},{},{},{},{},{},{},{}",
+                    csv_escape(&r.label),
+                    end_date,
+                    currency,
+                    r.flow_count,
+                    csv_escape(&money(r.invested)),
+                    csv_escape(&money(r.distributions)),
+                    csv_escape(&money(r.current_value)),
+                    fmt_rate(r.mwr),
+                    fmt_rate(r.twr),
+                )?;
+            }
+        }
+        OutputFormat::Json => {
+            let obj = |r: &GroupResult| {
+                format!(
+                    r#"{{"group": "{}", "cash_flows": {}, "invested": "{}", "distributions": "{}", "current_value": "{}", "money_weighted_return_pct": {}, "time_weighted_return_pct": {}}}"#,
+                    json_escape(&r.label),
+                    r.flow_count,
+                    money(r.invested),
+                    money(r.distributions),
+                    money(r.current_value),
+                    json_rate(r.mwr),
+                    json_rate(r.twr),
+                )
+            };
+            let group_objs: Vec<String> = groups.iter().map(obj).collect();
+            writeln!(
+                writer,
+                r#"{{"reporting_currency": "{}", "as_of": "{}", "groups": [{}], "total": {}}}"#,
+                json_escape(currency),
+                end_date,
+                group_objs.join(", "),
+                obj(total),
+            )?;
+        }
+        OutputFormat::Text => {
+            writeln!(writer, "Returns  ({currency}, as of {end_date})")?;
+            writeln!(writer, "{}", "=".repeat(72))?;
+            writeln!(writer)?;
+            writeln!(
+                writer,
+                "{:32}{:>9}{:>9}{:>12}{:>12}",
+                "Group", "MWR", "TWR", "Invested", "Current"
+            )?;
+            writeln!(writer, "{}", "-".repeat(72))?;
+            let row = |w: &mut W, r: &GroupResult| -> Result<()> {
+                writeln!(
+                    w,
+                    "{:32}{:>8}%{:>8}%{:>12}{:>12}",
+                    truncate(&r.label, 32),
+                    fmt_rate(r.mwr),
+                    fmt_rate(r.twr),
+                    money(r.invested),
+                    money(r.current_value),
+                )?;
+                Ok(())
+            };
+            for r in groups {
+                row(writer, r)?;
+            }
+            writeln!(writer, "{}", "-".repeat(72))?;
+            row(writer, total)?;
+        }
+    }
+    Ok(())
+}
+
+/// Truncate a label to fit a text column (keeps the informative tail).
+fn truncate(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        s.to_string()
+    } else {
+        let tail: String = s
+            .chars()
+            .rev()
+            .take(width - 1)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("…{tail}")
+    }
 }
 
 #[cfg(test)]

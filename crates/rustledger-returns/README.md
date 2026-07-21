@@ -28,7 +28,11 @@ re-deriving it.
   timing. Shares the `investment_value_at` realization primitive with
   `terminal_value`.
 - [ ] Dividend / ex-dividend breakout (total vs. ex-income return).
-- [ ] Per-commodity / named-group breakdown ([#1820]).
+- [x] Named-group / per-account breakdown — the CLI runs the engine per
+  sub-scope (`returns-group:` metadata groups, dividend-inclusive; or
+  `--by-account`, ex-dividend) plus the total ([#1820]). True per-commodity
+  attribution within a single account, and `commodity`-directive tagging,
+  remain follow-ups.
 
 [#1820]: https://github.com/rustledger/rustledger/issues/1820
 

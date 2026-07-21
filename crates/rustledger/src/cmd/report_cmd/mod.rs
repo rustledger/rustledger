@@ -178,9 +178,10 @@ pub enum Report {
         /// Defaults to today.
         #[arg(short, long)]
         end: Option<String>,
-        /// Break the return down per `returns-group:` group (declared on `open`
-        /// directives), plus an "(ungrouped)" residual and the total. Grouping
-        /// is opt-in so the default output shape is unchanged.
+        /// Add one row per `returns-group:` group (declared on `open`
+        /// directives), each an independent sub-portfolio, alongside the
+        /// whole-portfolio total. Grouping is opt-in so the default output shape
+        /// is unchanged.
         #[arg(long)]
         by_group: bool,
     },

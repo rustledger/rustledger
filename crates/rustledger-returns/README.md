@@ -28,12 +28,15 @@ re-deriving it.
   timing. Shares the `investment_value_at` realization primitive with
   `terminal_value`.
 - [ ] Dividend / ex-dividend breakout (total vs. ex-income return).
-- [x] Named-group breakdown — with `--by-group` the CLI runs the engine per
+- [x] Named-group breakdown — with `--by-group` the CLI runs the engine once per
   `returns-group:` group (declared on `open` directives, dividend-inclusive when
-  the group tags its income account), plus an `(ungrouped)` residual for in-scope
-  holdings left untagged and the whole-scope total, so the rows reconcile
-  ([#1820]). Grouping is opt-in. True per-commodity attribution within a single
-  account, and `commodity`-directive tagging, remain follow-ups.
+  the group tags its income account) as an **independent sub-portfolio**, plus the
+  whole-scope total ([#1820]). Groups are deliberately not claimed to sum to the
+  total — a flow into a shared in-scope account (e.g. pooled settlement cash)
+  can't be attributed to one group — and non-self-contained groups, out-of-scope
+  tags, and prefix overlaps are surfaced as warnings. Grouping is opt-in. True
+  per-commodity attribution within a single account, and `commodity`-directive
+  tagging, remain follow-ups.
 
 [#1820]: https://github.com/rustledger/rustledger/issues/1820
 

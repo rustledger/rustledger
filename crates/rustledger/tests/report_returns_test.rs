@@ -101,8 +101,8 @@ const LEDGER_GROUPS: &str = r#"option "operating_currency" "USD"
 "#;
 
 /// Like `LEDGER_GROUPS` but only AAPL (+ its dividend account) is tagged; MSFT is
-/// an in-scope holding left untagged, so it must collect into the `(ungrouped)`
-/// residual and the group rows must still reconcile with the whole-scope TOTAL.
+/// an in-scope holding left untagged, so it is omitted from the breakdown while
+/// still contributing to the whole-scope TOTAL.
 const LEDGER_GROUPS_PARTIAL: &str = r#"option "operating_currency" "USD"
 
 2020-01-01 open Assets:Broker:AAPL
@@ -126,6 +126,70 @@ const LEDGER_GROUPS_PARTIAL: &str = r#"option "operating_currency" "USD"
 2020-12-31 price MSFT 55 USD
 "#;
 
+/// Two groups funded from a shared in-scope settlement-cash account
+/// (`Assets:Broker:Cash`, under `--investments Assets:Broker`). Each group's buy
+/// draws on the pooled cash, so neither group is self-contained.
+const LEDGER_SHARED_CASH: &str = r#"option "operating_currency" "USD"
+
+2020-01-01 open Assets:Broker:Cash
+2020-01-01 open Assets:Broker:AAPL
+  returns-group: "Tech"
+2020-01-01 open Assets:Broker:BND
+  returns-group: "Bonds"
+2020-01-01 open Equity:Opening
+
+2020-01-01 * "fund the brokerage"
+  Assets:Broker:Cash  1500 USD
+  Equity:Opening     -1500 USD
+2020-01-01 * "buy aapl"
+  Assets:Broker:AAPL  10 AAPL {100 USD}
+  Assets:Broker:Cash -1000 USD
+2020-01-01 * "buy bnd"
+  Assets:Broker:BND  10 BND {50 USD}
+  Assets:Broker:Cash -500 USD
+
+2020-12-31 price AAPL 130 USD
+2020-12-31 price BND 55 USD
+"#;
+
+/// A real holding tagged `Tech`, plus two malformed tags: an Equity account
+/// (out of scope) and a numeric (non-string) value.
+const LEDGER_BAD_TAGS: &str = r#"option "operating_currency" "USD"
+
+2020-01-01 open Assets:Broker:AAPL
+  returns-group: "Tech"
+2020-01-01 open Assets:Broker:MSFT
+  returns-group: 5
+2020-01-01 open Assets:Bank
+2020-01-01 open Equity:Opening
+  returns-group: "Tech"
+
+2020-01-01 * "buy aapl"
+  Assets:Broker:AAPL  10 AAPL {100 USD}
+  Assets:Bank        -1000 USD
+
+2020-12-31 price AAPL 130 USD
+"#;
+
+/// A group (`Payouts`) that tags only an income account — no holding, so its
+/// investment scope is empty.
+const LEDGER_INCOME_ONLY_GROUP: &str = r#"option "operating_currency" "USD"
+
+2020-01-01 open Assets:Broker:AAPL
+2020-01-01 open Assets:Bank
+2020-01-01 open Income:Dividends
+  returns-group: "Payouts"
+
+2020-01-01 * "buy aapl"
+  Assets:Broker:AAPL  10 AAPL {100 USD}
+  Assets:Bank        -1000 USD
+2020-06-01 * "dividend"
+  Assets:Bank         20 USD
+  Income:Dividends   -20 USD
+
+2020-12-31 price AAPL 130 USD
+"#;
+
 fn write_fixture(source: &str) -> tempfile::NamedTempFile {
     let mut f = tempfile::Builder::new()
         .prefix("report-returns-")
@@ -147,6 +211,23 @@ fn run(binary: &PathBuf, args: &[&str]) -> String {
         String::from_utf8_lossy(&out.stderr),
     );
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Run and return `(stdout, stderr)` — the grouping warnings are on stderr.
+fn run_split(binary: &PathBuf, args: &[&str]) -> (String, String) {
+    let out = Command::new(binary)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("run rledger {args:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "rledger {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 /// The value on a labeled text-report line (`"Label      value"`), trimmed.
@@ -480,12 +561,14 @@ fn returns_group_metadata_breaks_down_dividend_inclusive() {
 }
 
 #[test]
-fn by_group_collects_untagged_holdings_into_reconciling_ungrouped_residual() {
+fn by_group_omits_untagged_holdings_no_residual() {
     let bin = require_rledger!();
-    // AAPL is tagged Tech; MSFT is an untagged in-scope holding.
+    // AAPL is tagged Tech; MSFT is an untagged in-scope holding. Under the
+    // independent-sub-portfolio model, MSFT is simply omitted from the breakdown
+    // (no `(ungrouped)` residual) — it still contributes to the whole-scope TOTAL.
     let f = write_fixture(LEDGER_GROUPS_PARTIAL);
     let path = f.path().to_str().unwrap();
-    let out = run(
+    let (out, _err) = run_split(
         &bin,
         &[
             "report",
@@ -509,20 +592,19 @@ fn by_group_collects_untagged_holdings_into_reconciling_ungrouped_residual() {
         "1300",
         "{out}"
     );
-    // MSFT, left untagged, lands in the residual — not silently dropped.
-    assert_eq!(
-        json_group_field(&out, "(ungrouped)", "current_value"),
-        "550",
-        "{out}"
+    // No residual row: untagged MSFT is omitted from the breakdown entirely.
+    assert!(
+        !out.contains("(ungrouped)"),
+        "there must be no residual row: {out}"
     );
-    // And the rows partition the total: 1300 + 550 = 1850, invested 1000 + 500 =
-    // 1500. Every in-scope holding is in exactly one row.
+    // The TOTAL is still the whole portfolio (Tech's 1300 + MSFT's 550), NOT the
+    // sum of the group rows — 1850 > the single Tech row, proving MSFT is counted
+    // in the total though it has no group of its own.
     assert_eq!(
         json_group_field(&out, "TOTAL", "current_value"),
         "1850",
         "{out}"
     );
-    assert_eq!(json_group_field(&out, "TOTAL", "invested"), "1500", "{out}");
 }
 
 #[test]
@@ -549,9 +631,152 @@ fn without_by_group_output_is_the_single_summary() {
             "--no-pager",
         ],
     );
-    // The single-summary schema has no "groups" array.
+    // Positively pin the single-summary schema (a top-level object with the
+    // return fields), AND that it is not the grouped schema (no `groups` array) —
+    // a negative-only check could pass on truncated/altered output.
+    assert!(
+        out.contains("\"money_weighted_return_pct\"") && out.contains("\"reporting_currency\""),
+        "default output must be the single-summary schema: {out}"
+    );
     assert!(
         !out.contains("\"groups\""),
-        "default output must be the single summary, not grouped: {out}"
+        "default output must not be the grouped schema: {out}"
+    );
+}
+
+#[test]
+fn by_group_warns_when_a_group_is_not_self_contained() {
+    let bin = require_rledger!();
+    // Both groups draw on a shared in-scope settlement-cash account, so each
+    // group's return counts an intra-portfolio transfer as a flow. That can't be
+    // attributed, so it must be surfaced as a warning (not silently misreported).
+    let f = write_fixture(LEDGER_SHARED_CASH);
+    let path = f.path().to_str().unwrap();
+    let (_out, err) = run_split(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--by-group",
+            "--end",
+            "2020-12-31",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        err.contains("Tech is not self-contained") && err.contains("Assets:Broker:Cash"),
+        "expected a self-contained warning naming the shared account: {err}"
+    );
+}
+
+#[test]
+fn by_group_warns_on_out_of_scope_and_non_string_tags() {
+    let bin = require_rledger!();
+    let f = write_fixture(LEDGER_BAD_TAGS);
+    let path = f.path().to_str().unwrap();
+    let (out, err) = run_split(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--by-group",
+            "--end",
+            "2020-12-31",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    // Equity account tagged → out of scope, dropped (never valued as a holding).
+    assert!(
+        err.contains("Equity:Opening ignored")
+            && err.contains("not under --investments or --income"),
+        "expected an out-of-scope warning: {err}"
+    );
+    // Numeric tag value → dropped with a distinct warning.
+    assert!(
+        err.contains("must be a quoted string"),
+        "expected a non-string-value warning: {err}"
+    );
+    // The out-of-scope Equity account is not valued: only the real holding shows.
+    assert_eq!(
+        json_group_field(&out, "Tech", "current_value"),
+        "1300",
+        "{out}"
+    );
+}
+
+#[test]
+fn by_group_text_output_renders_rows_and_total() {
+    let bin = require_rledger!();
+    // Exercise the text (non-JSON) grouped path: it must print a group row and a
+    // TOTAL row with aligned columns.
+    let f = write_fixture(LEDGER_GROUPS);
+    let path = f.path().to_str().unwrap();
+    let out = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--income",
+            "Income:Dividends",
+            "--by-group",
+            "--end",
+            "2020-12-31",
+            "--no-pager",
+        ],
+    );
+    assert!(out.contains("Tech") && out.contains("Bonds"), "{out}");
+    // TOTAL line present with the whole-portfolio current value.
+    let total = out
+        .lines()
+        .find(|l| l.starts_with("TOTAL"))
+        .unwrap_or_else(|| panic!("no TOTAL row: {out}"));
+    assert!(total.contains("1850"), "TOTAL row: {total}");
+}
+
+#[test]
+fn by_group_income_only_group_is_valued_without_panicking() {
+    let bin = require_rledger!();
+    // A group with only an income account (no holding) has an empty investment
+    // scope: current value 0, undefined MWR (only distributions, no outlay).
+    let f = write_fixture(LEDGER_INCOME_ONLY_GROUP);
+    let path = f.path().to_str().unwrap();
+    let out = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--income",
+            "Income:Dividends",
+            "--by-group",
+            "--end",
+            "2020-12-31",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    assert_eq!(
+        json_group_field(&out, "Payouts", "current_value"),
+        "0",
+        "{out}"
+    );
+    assert_eq!(
+        json_group_field(&out, "Payouts", "money_weighted_return_pct"),
+        "null",
+        "income-only group has no outlay → undefined MWR: {out}"
     );
 }

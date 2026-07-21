@@ -10,18 +10,33 @@
 //! # Grouping (#1820)
 //!
 //! By default the report is the single whole-scope summary. With **`--by-group`**
-//! it breaks down per `returns-group:` group: tag `open` directives with
-//! `returns-group: "Name"`, and each group's members are classified by the whole
-//! scope — accounts under `--investments` form the group's investment scope,
-//! accounts under `--income` its income scope — so a group that tags its dividend
-//! account reports a **dividend-inclusive** return. This is beangrow's group
-//! model, declared in the ledger rather than an external config file.
+//! it additionally reports one row per `returns-group:` group: tag `open`
+//! directives with `returns-group: "Name"`, and each group's members are
+//! classified by the whole scope — accounts under `--investments` form the
+//! group's investment scope, accounts under `--income` its income scope — so a
+//! group that tags its dividend account reports a **dividend-inclusive** return.
+//! This is beangrow's group model, declared in the ledger rather than an external
+//! config file.
 //!
-//! Groups are constrained to the scope and reconcile with the total: a tagged
-//! account outside `--investments`/`--income` (or an Equity/Liability account) is
-//! ignored with a warning, and in-scope accounts left untagged collect into an
-//! `(ungrouped)` residual, so every in-scope holding appears in exactly one row.
-//! Grouping is opt-in, so the default output shape is unchanged.
+//! Each group is an **independent sub-portfolio**: its return is computed over
+//! just that group's accounts, exactly as if you had run the report with
+//! `--investments`/`--income` narrowed to them. This matches how beangrow and
+//! hledger `roi` present grouped returns — and, deliberately, the groups are
+//! **not** claimed to sum to the TOTAL. They can't be in general: whenever two
+//! groups share an in-scope account (most often a pooled settlement-cash account
+//! under `--investments`), the boundary flow into that shared account cannot be
+//! attributed to one group, so a partition into reconciling slices is not
+//! well-defined. The TOTAL row is the whole-portfolio figure (every in-scope
+//! account), reported alongside for reference, not as the sum of the rows above.
+//!
+//! Grouping is opt-in, so the default output shape is unchanged. Only tagged
+//! accounts appear; an untagged in-scope holding is simply omitted from the
+//! breakdown (it is still in the TOTAL). Warnings (to stderr) flag the cases a
+//! reader would otherwise misread: a tag on an out-of-scope account, a non-string
+//! tag value, two groups whose accounts overlap by prefix (the shared holding is
+//! counted in both), and a group that is not self-contained (it shares an
+//! in-scope account with the rest of the portfolio, so its return counts an
+//! internal transfer as a flow).
 //!
 //! Auto per-account and true per-commodity attribution are deliberately *not*
 //! offered: a dividend booked to a shared cash/income account cannot be
@@ -32,7 +47,9 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, Directive, DisplayContext, MetaValue, NaiveDate};
+use rustledger_core::{
+    Amount, Directive, DisplayContext, MetaValue, NaiveDate, is_subaccount_or_equal,
+};
 use rustledger_query::PriceDatabase;
 use rustledger_returns::{
     AccountRole, PriceOracle, Scope, extract_flows, terminal_value, twr, xirr,
@@ -123,95 +140,148 @@ fn compute_group(
 }
 
 /// Build the `--by-group` breakdown from `returns-group:` metadata on `open`
-/// directives, sorted by group name, plus an `(ungrouped)` residual.
+/// directives, one [`Scope`] per group, sorted by group name.
 ///
 /// Each tagged account is classified by the **whole scope** — accounts under
 /// `--investments` form their group's investment scope, accounts under
 /// `--income` its income scope — so a group that tags its dividend account is
-/// dividend-inclusive (the beangrow model, in-ledger). Two things make the rows
-/// coherent with the TOTAL:
+/// dividend-inclusive (the beangrow model, in-ledger). Every group is an
+/// independent sub-portfolio; only tagged accounts appear (there is no residual),
+/// and the rows are deliberately not a partition of the total (see the module
+/// docs). Warns — but still returns the group — for the cases a reader would
+/// otherwise misread:
 ///
-/// - Groups are constrained to the scope: a tagged account that is neither
-///   investment nor income (an Equity/Liability account, or one outside
-///   `--investments`/`--income`) is **out of scope** and ignored (with a
-///   warning), never valued as a holding.
-/// - In-scope accounts left untagged collect into `(ungrouped)`, so every
-///   in-scope holding appears in exactly one row and the group rows partition
-///   the total.
+/// - a `returns-group:` tag on an account that is neither investment nor income
+///   (an Equity/Liability account, or one outside `--investments`/`--income`) —
+///   out of scope, dropped so it is never valued as a phantom holding;
+/// - a non-string `returns-group:` value;
+/// - two groups whose accounts overlap by prefix — `Scope` matches by prefix, so
+///   a tagged ancestor (or a duplicate `open`) values another group's holding
+///   twice;
+/// - a group that is not self-contained: it shares an in-scope account with the
+///   rest of the portfolio, so its flows count an internal transfer as a
+///   contribution/withdrawal.
 ///
-/// A non-string `returns-group:` value is ignored with a warning. Returns
-/// `(rows, any_declared)`; `any_declared` is false when no in-scope account
-/// carried a usable tag, in which case the caller reports the plain total.
+/// An empty result means no in-scope account carried a usable tag; the caller
+/// then reports the plain total.
 fn build_groups(
     directives: &[Directive],
     whole_scope: &Scope,
     warn: &mut dyn FnMut(String),
-) -> (Vec<(String, Scope)>, bool) {
+) -> Vec<(String, Scope)> {
     // group name -> (investment accounts, income accounts)
     let mut groups: BTreeMap<String, (Vec<String>, Vec<String>)> = BTreeMap::new();
-    let mut ungrouped: (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
-    let mut any_declared = false;
+    // (account, group) for every tagged in-scope account, for the overlap check.
+    let mut tagged: Vec<(String, String)> = Vec::new();
 
     for directive in directives {
         let Directive::Open(open) = directive else {
             continue;
         };
         let account = open.account.to_string();
-        let role = whole_scope.classify(&account);
-        if role == AccountRole::External {
-            if open.meta.contains_key("returns-group") {
-                warn(format!(
-                    "returns-group on {account} ignored: not under --investments or --income"
-                ));
-            }
-            continue;
-        }
-        let tag = match open.meta.get("returns-group") {
-            Some(MetaValue::String(name)) => Some(name.clone()),
+        let name = match open.meta.get("returns-group") {
+            Some(MetaValue::String(name)) => name.clone(),
             Some(_) => {
                 warn(format!(
                     "returns-group on {account} ignored: value must be a quoted string"
                 ));
-                None
+                continue;
             }
-            None => None,
+            None => continue,
         };
-        let bucket = match tag {
-            Some(name) => {
-                any_declared = true;
-                groups.entry(name).or_default()
-            }
-            None => &mut ungrouped,
-        };
+        let role = whole_scope.classify(&account);
+        if role == AccountRole::External {
+            warn(format!(
+                "returns-group on {account} ignored: not under --investments or --income"
+            ));
+            continue;
+        }
+        let bucket = groups.entry(name.clone()).or_default();
         if role == AccountRole::Income {
-            bucket.1.push(account);
+            bucket.1.push(account.clone());
         } else {
-            bucket.0.push(account);
+            bucket.0.push(account.clone());
+        }
+        tagged.push((account, name));
+    }
+
+    // Cross-group prefix overlap: `Scope` classifies by prefix, so a tagged
+    // account that is an ancestor of (or identical to) another group's tagged
+    // account silently values the same holding in both groups.
+    for (i, (a, group_a)) in tagged.iter().enumerate() {
+        for (b, group_b) in &tagged[i + 1..] {
+            if group_a != group_b && (is_subaccount_or_equal(a, b) || is_subaccount_or_equal(b, a))
+            {
+                warn(format!(
+                    "accounts {a} (group {group_a}) and {b} (group {group_b}) overlap by prefix; \
+                     the shared holding is counted in both groups"
+                ));
+            }
         }
     }
 
-    let mut rows: Vec<(String, Scope)> = groups
+    let rows: Vec<(String, Scope)> = groups
         .into_iter()
         .map(|(name, (investment, income))| (name, Scope::new(investment, income)))
         .collect();
-    // The residual only makes sense once at least one group was declared.
-    if any_declared && (!ungrouped.0.is_empty() || !ungrouped.1.is_empty()) {
-        rows.push((
-            "(ungrouped)".to_string(),
-            Scope::new(ungrouped.0, ungrouped.1),
-        ));
+
+    // Self-containment: a group that shares an in-scope account with the rest of
+    // the portfolio (typically a pooled cash account) counts intra-portfolio
+    // transfers as flows, so its return is a standalone view that will not agree
+    // with the total. We can't attribute the pooled flow, so we name it.
+    for (name, scope) in &rows {
+        if let Some(shared) = first_shared_inscope_account(directives, scope, whole_scope) {
+            warn(format!(
+                "group {name} is not self-contained: it shares in-scope account {shared} with the \
+                 rest of the portfolio, so its return counts internal transfers as flows"
+            ));
+        }
     }
-    (rows, any_declared)
+
+    rows
+}
+
+/// The first account, if any, that makes `group_scope` not self-contained: an
+/// account that some transaction touching the group also touches, which is
+/// external to the group but still in the whole portfolio scope. Such an account
+/// (a shared cash/settlement account under `--investments`, say) turns an
+/// intra-portfolio transfer into a boundary flow for the group.
+fn first_shared_inscope_account(
+    directives: &[Directive],
+    group_scope: &Scope,
+    whole_scope: &Scope,
+) -> Option<String> {
+    for directive in directives {
+        let Directive::Transaction(txn) = directive else {
+            continue;
+        };
+        let touches_group = txn
+            .postings
+            .iter()
+            .any(|p| group_scope.classify(p.account.as_str()) != AccountRole::External);
+        if !touches_group {
+            continue;
+        }
+        for posting in &txn.postings {
+            let account = posting.account.as_str();
+            if group_scope.classify(account) == AccountRole::External
+                && whole_scope.classify(account) != AccountRole::External
+            {
+                return Some(account.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Generate the returns report.
 ///
 /// `directives` must be the booked, pad-expanded stream (the returns engine's
 /// input contract); the dispatcher passes `balance_input` for exactly this
-/// reason. With `by_group`, the report breaks down per `returns-group:` group
-/// (constrained to `--investments`/`--income`) plus an `(ungrouped)` residual
-/// and the TOTAL; otherwise it is the single whole-scope summary. Grouping is
-/// opt-in, so the default output shape never changes.
+/// reason. With `by_group`, the report adds one independent-sub-portfolio row per
+/// `returns-group:` group (constrained to `--investments`/`--income`) alongside
+/// the whole-portfolio TOTAL; otherwise it is the single whole-scope summary.
+/// Grouping is opt-in, so the default output shape never changes.
 ///
 /// # Errors
 ///
@@ -270,13 +340,12 @@ pub(super) fn report_returns<W: Write>(
         return render_single(&total, currency, end_date, ctx, format, writer);
     }
 
-    // Grouping is opt-in; warnings (bad tags, out-of-scope tags) go to stderr so
-    // they never pollute the report on stdout.
-    let (group_scopes, any_declared) =
-        build_groups(directives, &whole_scope, &mut |w| eprintln!("warning: {w}"));
-    if !any_declared {
+    // Grouping is opt-in; warnings (bad tags, overlaps, non-self-contained
+    // groups) go to stderr so they never pollute the report on stdout.
+    let group_scopes = build_groups(directives, &whole_scope, &mut |w| eprintln!("warning: {w}"));
+    if group_scopes.is_empty() {
         eprintln!(
-            "warning: --by-group but no in-scope `returns-group:` metadata found; reporting the ungrouped total"
+            "warning: --by-group but no in-scope `returns-group:` metadata found; reporting the whole-portfolio total"
         );
         return render_single(&total, currency, end_date, ctx, format, writer);
     }

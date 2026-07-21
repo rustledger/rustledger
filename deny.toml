@@ -102,6 +102,7 @@ skip = [
   { crate = "getrandom" },        # 0.2 (via ring/rustls/ureq TLS stack) vs 0.3 vs 0.4
   { crate = "gimli" },            # addr2line / object skew
   { crate = "hashbrown" },        # 3 versions: stdlib's, wasmtime's, our deps
+  { crate = "io-lifetimes" },     # wasmtime 47 (cap-std 4.x) drags a 2nd version
   { crate = "linux-raw-sys" },    # rustix skew
   { crate = "object" },           # backtrace vs gimli
   { crate = "rand" },             # 0.8 (num-complex via faer/ferrolearn-bayes) vs 0.9 (faer's own) vs 0.10 (wasmtime 45 stack)

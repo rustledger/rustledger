@@ -223,9 +223,9 @@ impl LspTestClient {
             .expect("send to server");
 
         let resp = self.expect_response(&id);
-        let result = match resp.response_kind {
-            lsp_server::ResponseKind::Ok { result } => result,
-            lsp_server::ResponseKind::Err { error } => {
+        let result = match resp.response_result {
+            Ok(result) => result,
+            Err(error) => {
                 panic!("server returned error on {}: {error:?}", R::METHOD)
             }
         };
@@ -479,20 +479,14 @@ pub fn test_uri(name: &str) -> String {
     format!("file:///{}", name)
 }
 
-/// lsp-server 0.9 moved `result`/`error` into the `ResponseKind` enum
-/// (rust-analyzer/lsp-server@0.9.0); these give tests back the 0.8-style
-/// `Option` views.
+/// `Option` views of the response's result/error. lsp-server 0.10 stores these
+/// as a flat `response_result: Result<Value, ResponseError>`
+/// (rust-analyzer/lsp-server@0.10.0 reverted the 0.9 `ResponseKind` enum).
 pub fn response_ok(resp: Response) -> Option<serde_json::Value> {
-    match resp.response_kind {
-        lsp_server::ResponseKind::Ok { result } => Some(result),
-        lsp_server::ResponseKind::Err { .. } => None,
-    }
+    resp.response_result.ok()
 }
 
 /// The error half of [`response_ok`].
 pub fn response_err(resp: Response) -> Option<lsp_server::ResponseError> {
-    match resp.response_kind {
-        lsp_server::ResponseKind::Ok { .. } => None,
-        lsp_server::ResponseKind::Err { error } => Some(error),
-    }
+    resp.response_result.err()
 }

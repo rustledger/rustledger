@@ -10,8 +10,8 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
-wasmtime = { version = "46", features = ["component-model"] }
-wasmtime-wasi = "46"
+wasmtime = { version = "47", features = ["component-model"] }
+wasmtime-wasi = "47"
 anyhow = "1"
 tempfile.workspace = true
 rustledger-core.workspace = true

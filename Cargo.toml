@@ -115,8 +115,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # WASM
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
-wasmtime = "46.0.0"
-wasmtime-wasi = "46.0.0"
+wasmtime = "47.0.0"
+wasmtime-wasi = "47.0.0"
 wat = "1"
 # WIT / Component Model guest bindings (rustledger-ffi-component, #1384)
 wit-bindgen = "0.59"
@@ -177,7 +177,7 @@ tokio = { version = "1", features = ["full"] }
 getrandom = { version = "0.2", features = ["js"] }
 
 # LSP
-lsp-server = "0.9"
+lsp-server = "0.10"
 lsp-types = "0.97"
 # Pin to `cr_lines` feature only (no `unicode_lines`) so ropey's line
 # breaks match `similar::TextDiff::from_lines` semantics: LF, CRLF, bare

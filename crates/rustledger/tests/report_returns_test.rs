@@ -100,6 +100,32 @@ const LEDGER_GROUPS: &str = r#"option "operating_currency" "USD"
 2020-12-31 price BND 55 USD
 "#;
 
+/// Like `LEDGER_GROUPS` but only AAPL (+ its dividend account) is tagged; MSFT is
+/// an in-scope holding left untagged, so it must collect into the `(ungrouped)`
+/// residual and the group rows must still reconcile with the whole-scope TOTAL.
+const LEDGER_GROUPS_PARTIAL: &str = r#"option "operating_currency" "USD"
+
+2020-01-01 open Assets:Broker:AAPL
+  returns-group: "Tech"
+2020-01-01 open Assets:Broker:MSFT
+2020-01-01 open Assets:Bank
+2020-01-01 open Income:Dividends
+  returns-group: "Tech"
+
+2020-01-01 * "buy aapl"
+  Assets:Broker:AAPL  10 AAPL {100 USD}
+  Assets:Bank        -1000 USD
+2020-01-01 * "buy msft"
+  Assets:Broker:MSFT  10 MSFT {50 USD}
+  Assets:Bank        -500 USD
+2020-06-01 * "aapl dividend"
+  Assets:Bank         20 USD
+  Income:Dividends   -20 USD
+
+2020-12-31 price AAPL 130 USD
+2020-12-31 price MSFT 55 USD
+"#;
+
 fn write_fixture(source: &str) -> tempfile::NamedTempFile {
     let mut f = tempfile::Builder::new()
         .prefix("report-returns-")
@@ -414,6 +440,7 @@ fn returns_group_metadata_breaks_down_dividend_inclusive() {
             "Assets:Broker",
             "--income",
             "Income:Dividends",
+            "--by-group",
             "--end",
             "2020-12-31",
             "--format",
@@ -453,10 +480,10 @@ fn returns_group_metadata_breaks_down_dividend_inclusive() {
 }
 
 #[test]
-fn by_account_breaks_down_per_investment_account() {
+fn by_group_collects_untagged_holdings_into_reconciling_ungrouped_residual() {
     let bin = require_rledger!();
-    // LEDGER has no returns-group metadata, so --by-account drives the breakdown.
-    let f = write_fixture(LEDGER);
+    // AAPL is tagged Tech; MSFT is an untagged in-scope holding.
+    let f = write_fixture(LEDGER_GROUPS_PARTIAL);
     let path = f.path().to_str().unwrap();
     let out = run(
         &bin,
@@ -466,7 +493,9 @@ fn by_account_breaks_down_per_investment_account() {
             "returns",
             "--investments",
             "Assets:Broker",
-            "--by-account",
+            "--income",
+            "Income:Dividends",
+            "--by-group",
             "--end",
             "2020-12-31",
             "--format",
@@ -474,16 +503,55 @@ fn by_account_breaks_down_per_investment_account() {
             "--no-pager",
         ],
     );
-    // LEDGER holds only Assets:Broker:Stock → one per-account row (ex-dividend,
-    // 30%) plus the TOTAL.
+    // Tech: 1000 in, +20 dividend, worth 1300.
     assert_eq!(
-        json_group_field(&out, "Assets:Broker:Stock", "money_weighted_return_pct"),
-        "30.00",
-        "{out}"
-    );
-    assert_eq!(
-        json_group_field(&out, "TOTAL", "current_value"),
+        json_group_field(&out, "Tech", "current_value"),
         "1300",
         "{out}"
+    );
+    // MSFT, left untagged, lands in the residual — not silently dropped.
+    assert_eq!(
+        json_group_field(&out, "(ungrouped)", "current_value"),
+        "550",
+        "{out}"
+    );
+    // And the rows partition the total: 1300 + 550 = 1850, invested 1000 + 500 =
+    // 1500. Every in-scope holding is in exactly one row.
+    assert_eq!(
+        json_group_field(&out, "TOTAL", "current_value"),
+        "1850",
+        "{out}"
+    );
+    assert_eq!(json_group_field(&out, "TOTAL", "invested"), "1500", "{out}");
+}
+
+#[test]
+fn without_by_group_output_is_the_single_summary() {
+    let bin = require_rledger!();
+    // Even with `returns-group:` metadata present, the default (no --by-group)
+    // output is the unchanged single summary — grouping is strictly opt-in.
+    let f = write_fixture(LEDGER_GROUPS);
+    let path = f.path().to_str().unwrap();
+    let out = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--income",
+            "Income:Dividends",
+            "--end",
+            "2020-12-31",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    // The single-summary schema has no "groups" array.
+    assert!(
+        !out.contains("\"groups\""),
+        "default output must be the single summary, not grouped: {out}"
     );
 }

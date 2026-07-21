@@ -938,6 +938,49 @@ fn by_group_emits_grouped_schema_even_with_no_tags() {
 }
 
 #[test]
+fn by_group_csv_output_has_header_group_and_total_rows() {
+    let bin = require_rledger!();
+    // Exercise the grouped CSV path (only JSON and text were covered).
+    let f = write_fixture(LEDGER_GROUPS);
+    let path = f.path().to_str().unwrap();
+    let out = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--income",
+            "Income:Dividends",
+            "--by-group",
+            "--end",
+            "2020-12-31",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    // Header row with the group column first.
+    assert!(
+        out.lines().next().unwrap_or_default().starts_with(
+            "group,as_of,reporting_currency,cash_flows,invested,distributions,current_value,"
+        ),
+        "CSV header: {out}"
+    );
+    // A group data row and the TOTAL row (the whole-portfolio current value).
+    assert!(
+        out.lines().any(|l| l.starts_with("Tech,")),
+        "expected a Tech group row: {out}"
+    );
+    let total = out
+        .lines()
+        .find(|l| l.starts_with("TOTAL,"))
+        .unwrap_or_else(|| panic!("no TOTAL row: {out}"));
+    assert!(total.contains(",1850,"), "TOTAL row current value: {total}");
+}
+
+#[test]
 fn by_group_respects_the_end_horizon() {
     let bin = require_rledger!();
     // Grouping must be bounded by --end exactly as extraction is: a group whose

@@ -722,12 +722,15 @@ mod tests {
         assert_eq!(tv.amount, Decimal::from(2250));
     }
 
-    /// Drift guard: `report_returns` builds the xirr series by hand from
-    /// `extract_flows` + `terminal_value` (it needs the parts for the summary
-    /// breakdown). That manual combine must stay equal to the engine's canonical
-    /// `extract_cash_flows`; if the engine changes how it assembles the series
-    /// (coalescing, a sort tie-break, …), this trips so the CLI is updated in
-    /// lockstep rather than silently drifting.
+    /// Drift guard for the money-weighted series assembly `flows + terminal + sort`.
+    ///
+    /// The production series now lives in the engine's `compute_returns` (which
+    /// open-codes this combine to avoid re-extracting); that copy is pinned against
+    /// `extract_cash_flows` by the engine's own
+    /// `compute_returns_matches_manual_composition`. This test keeps a second,
+    /// independent check that the canonical `extract_cash_flows` assembler itself
+    /// still equals `flows + terminal + sort` — the shape both the engine and any
+    /// future consumer rely on.
     #[test]
     fn series_matches_extract_cash_flows() {
         let dirs = vec![

@@ -969,8 +969,20 @@ pub fn compute_returns(
 /// Flow extraction and valuation are still per scope (they must be), so the
 /// result for each scope is **identical** to `compute_returns(that scope)` —
 /// pinned by `compute_returns_multi_matches_per_scope`. Returns one result per
-/// input scope, in order; a scope's error (e.g. an unpriceable flow or end-date
-/// valuation) is independent and does not affect the others.
+/// input scope, in order.
+///
+/// # Errors
+///
+/// Each scope's result is independent: a scope's [`ExtractError::MissingPrice`]
+/// (an unpriceable boundary flow or `end_date` valuation) is reported in that
+/// scope's slot and does not affect the others. There is no whole-call error.
+///
+/// # Panics
+///
+/// Same booked, pad-expanded input requirement as [`compute_returns`]/[`twr`]
+/// (date-sorted is a fast path, not a requirement — an unsorted stream falls back
+/// to per-scope valuation).
+#[must_use]
 pub fn compute_returns_multi(
     directives: &[Directive],
     scopes: &[Scope],
@@ -2375,5 +2387,56 @@ mod tests {
             None,
             "income-only scope has no capital → TWR None"
         );
+    }
+
+    /// The riskiest paths in the shared pass, still equal to per-scope: a scope
+    /// with a flow ON `end_date` (so its `dates` list carries `end_date` twice and
+    /// the union collapses it — the cursor must emit BOTH values), and a scope with
+    /// no activity at all (empty flows → `dates` is just `[end_date]`).
+    #[test]
+    fn compute_returns_multi_matches_per_scope_edge_cases() {
+        let dirs = vec![
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:AAPL", amt(dec!(10), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+                ],
+            ),
+            // Sale ON the report end date → a flow whose date == end_date, so the
+            // scope's `dates` = [2020-01-01, 2020-12-31, 2020-12-31].
+            txn(
+                d(2020, 12, 31),
+                vec![
+                    Posting::new("Assets:Broker:AAPL", amt(dec!(-10), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(1300), "USD")),
+                ],
+            ),
+        ];
+        let prices = MockPrices::default().with("AAPL", "USD", d(2020, 1, 1), dec!(100));
+        let end = d(2020, 12, 31);
+        let scopes = vec![
+            Scope::new(vec!["Assets:Broker:AAPL".to_string()], vec![]), // flow on end_date
+            Scope::new(vec!["Assets:Broker:NONE".to_string()], vec![]), // no activity: empty flows
+        ];
+
+        let multi = compute_returns_multi(&dirs, &scopes, "USD", &prices, end);
+        for (i, scope) in scopes.iter().enumerate() {
+            assert_eq!(
+                multi[i],
+                compute_returns(&dirs, scope, "USD", &prices, end),
+                "scope {i} diverged from compute_returns"
+            );
+        }
+        // Not vacuous: the AAPL scope closed out (invested 1000, current 0, defined
+        // TWR), and the empty scope is all-none.
+        let aapl = multi[0].as_ref().unwrap();
+        assert_eq!(aapl.invested, dec!(1000));
+        assert_eq!(aapl.current_value, dec!(0));
+        assert!(aapl.time_weighted.is_some());
+        let empty = multi[1].as_ref().unwrap();
+        assert_eq!(empty.cash_flows, 0);
+        assert_eq!(empty.money_weighted, None);
+        assert_eq!(empty.time_weighted, None);
     }
 }

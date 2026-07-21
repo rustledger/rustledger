@@ -100,7 +100,7 @@ fn compute_group(
     label: String,
 ) -> Result<GroupResult> {
     let r = compute_returns(directives, scope, reporting_currency, prices, end_date)
-        .context("computing investment returns for the scope")?;
+        .with_context(|| format!("computing investment returns for {label}"))?;
     Ok(GroupResult {
         label,
         flow_count: r.cash_flows,

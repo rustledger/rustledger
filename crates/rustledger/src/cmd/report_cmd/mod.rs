@@ -549,9 +549,12 @@ pub(super) fn account_balances(
     engine.into_inventories().into_iter().collect()
 }
 
-// CSV/JSON escaping: single-sourced in core. `escape_string` escapes the
-// exact set the old hand-chained `json_escape` did (backslash, quote, \n,
-// \r, \t), so the alias is behavior-identical.
+// CSV/JSON escaping: single-sourced in core. `escape_json` is the RFC-8259
+// string escaper — the required escapes plus `\uXXXX` for every other C0
+// control byte — so report JSON stays valid even when a field carries a raw
+// control char (e.g. from metadata). Do NOT revert this to `escape_string`
+// (the beancount-source escaper leaves control bytes other than \n\t\r raw,
+// which is invalid JSON).
 pub(super) use rustledger_core::format::escape_csv as csv_escape;
 pub(super) use rustledger_core::format::escape_json as json_escape;
 

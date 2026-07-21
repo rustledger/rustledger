@@ -595,7 +595,12 @@ fn render_grouped<W: Write>(
             for r in groups {
                 row(writer, r)?;
             }
-            writeln!(writer, "{}", "-".repeat(RULE))?;
+            // Separate the group rows from the TOTAL — but not when there are no
+            // group rows (the no-tags case), which would print two rules back to
+            // back.
+            if !groups.is_empty() {
+                writeln!(writer, "{}", "-".repeat(RULE))?;
+            }
             row(writer, total)?;
             // The TOTAL is the whole portfolio, not the sum of the group rows
             // (groups are independent and untagged holdings are omitted).

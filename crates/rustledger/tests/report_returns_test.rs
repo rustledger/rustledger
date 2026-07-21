@@ -885,6 +885,35 @@ fn by_group_emits_grouped_schema_even_with_no_tags() {
         out.contains("\"groups\": []") && out.contains("\"total\":"),
         "no-tags --by-group must still emit the grouped schema: {out}"
     );
+
+    // The text path for the same no-groups case must not print two horizontal
+    // rules back to back (there are no group rows to separate from the TOTAL).
+    let (text, _err) = run_split(
+        &bin,
+        &[
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--income",
+            "Income:Dividends",
+            "--by-group",
+            "--end",
+            "2020-12-31",
+            "--no-pager",
+        ],
+    );
+    let rules: Vec<usize> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("---"))
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        rules.windows(2).all(|w| w[1] != w[0] + 1),
+        "no-groups text output must not have adjacent rules:\n{text}"
+    );
 }
 
 #[test]

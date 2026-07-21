@@ -393,7 +393,7 @@ pub(super) fn report_returns<W: Write>(
     // Grouping is opt-in; warnings (bad tags, overlaps, non-self-contained
     // groups) go to stderr so they never pollute the report on stdout.
     let group_scopes = build_groups(directives, &whole_scope, end_date, &mut |w| {
-        eprintln!("warning: {w}")
+        eprintln!("warning: {w}");
     });
     if group_scopes.is_empty() {
         // Still emit the grouped shape (an empty `groups` list plus the TOTAL):

@@ -214,8 +214,11 @@ fn build_groups(
     // Self-containment: a group that shares an in-scope account with the rest of
     // the portfolio (typically a pooled cash account) counts intra-portfolio
     // transfers as flows, so its return is a standalone view that will not agree
-    // with the total. We can't attribute the pooled flow, so we name it.
-    for (name, scope) in &rows {
+    // with the total. We can't attribute the pooled flow, so we name it. The check
+    // for every group runs in ONE pass over the transactions (rather than
+    // re-walking the stream per group).
+    let shared = shared_inscope_accounts(directives, &rows, whole_scope, end_date);
+    for (index, (name, _)) in rows.iter().enumerate() {
         // `TOTAL` is the label of the whole-portfolio row; a group of the same
         // name is indistinguishable from it in the text and CSV output (JSON
         // keeps them structurally separate).
@@ -225,11 +228,10 @@ fn build_groups(
                     .to_string(),
             );
         }
-        if let Some(shared) = first_shared_inscope_account(directives, scope, whole_scope, end_date)
-        {
+        if let Some(account) = &shared[index] {
             let name = sanitize_display(name);
             warn(format!(
-                "group {name} is not self-contained: it shares in-scope account {shared} with the \
+                "group {name} is not self-contained: it shares in-scope account {account} with the \
                  rest of the portfolio, so its return counts internal transfers as flows"
             ));
         }
@@ -257,11 +259,65 @@ fn sanitize_display(s: &str) -> String {
         .collect()
 }
 
+/// The first shared in-scope account for EACH group in `rows`, computed in ONE
+/// pass over the transactions instead of re-walking the directive stream once per
+/// group. Entry `i` is `Some(account)` when some transaction touching `rows[i]`
+/// also touches an account external to that group but still in the whole portfolio
+/// scope (see `first_shared_inscope_account`, the per-group reference this
+/// reproduces; pinned by `shared_inscope_accounts_matches_per_group`).
+fn shared_inscope_accounts(
+    directives: &[Directive],
+    rows: &[(String, Scope)],
+    whole_scope: &Scope,
+    end_date: NaiveDate,
+) -> Vec<Option<String>> {
+    let mut shared: Vec<Option<String>> = vec![None; rows.len()];
+    let mut unresolved = rows.len();
+    for directive in directives {
+        if unresolved == 0 {
+            break;
+        }
+        let Directive::Transaction(txn) = directive else {
+            continue;
+        };
+        // Only activity within the report horizon can affect the reported figures,
+        // so a post-`--end` transfer must not raise a false warning.
+        if txn.date > end_date {
+            continue;
+        }
+        for (index, (_, scope)) in rows.iter().enumerate() {
+            if shared[index].is_some() {
+                continue; // this group is already resolved
+            }
+            let touches_group = txn
+                .postings
+                .iter()
+                .any(|p| scope.classify(p.account.as_str()) != AccountRole::External);
+            if !touches_group {
+                continue;
+            }
+            if let Some(posting) = txn.postings.iter().find(|p| {
+                let account = p.account.as_str();
+                scope.classify(account) == AccountRole::External
+                    && whole_scope.classify(account) != AccountRole::External
+            }) {
+                shared[index] = Some(posting.account.to_string());
+                unresolved -= 1;
+            }
+        }
+    }
+    shared
+}
+
 /// The first account, if any, that makes `group_scope` not self-contained: an
 /// account that some transaction touching the group also touches, which is
 /// external to the group but still in the whole portfolio scope. Such an account
 /// (a shared cash/settlement account under `--investments`, say) turns an
 /// intra-portfolio transfer into a boundary flow for the group.
+///
+/// The per-group reference for the batched `shared_inscope_accounts` (which the
+/// production path uses); kept as the drift-guard oracle.
+#[cfg(test)]
 fn first_shared_inscope_account(
     directives: &[Directive],
     group_scope: &Scope,
@@ -800,5 +856,73 @@ mod tests {
         );
         // Guard against a vacuous pass: the series is the three expected flows.
         assert_eq!(canonical.len(), 3);
+    }
+
+    /// Drift guard (CLAUDE.md Canonical-Function Discipline): the batched
+    /// `shared_inscope_accounts` (one pass over the transactions, used in
+    /// production) must return, per group, exactly what the per-group
+    /// `first_shared_inscope_account` reference returns. Two groups share a pooled
+    /// cash account (not self-contained); a third is funded from outside the whole
+    /// scope (self-contained) — so the batch covers resolved and unresolved groups.
+    #[test]
+    fn shared_inscope_accounts_matches_per_group() {
+        let dirs = vec![
+            Directive::Transaction(
+                Transaction::new(d(2020, 1, 1), "fund the brokerage")
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Broker:Cash",
+                        money(1500, "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new("Equity:Open", money(-1500, "USD"))),
+            ),
+            Directive::Transaction(
+                Transaction::new(d(2020, 1, 2), "buy aapl from pooled cash")
+                    .with_synthesized_posting(Posting::new("Assets:Broker:AAPL", money(10, "AAPL")))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Broker:Cash",
+                        money(-1000, "USD"),
+                    )),
+            ),
+            Directive::Transaction(
+                Transaction::new(d(2020, 1, 3), "buy bnd from pooled cash")
+                    .with_synthesized_posting(Posting::new("Assets:Broker:BND", money(10, "BND")))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Broker:Cash",
+                        money(-500, "USD"),
+                    )),
+            ),
+            Directive::Transaction(
+                Transaction::new(d(2020, 1, 4), "buy msft from an outside bank")
+                    .with_synthesized_posting(Posting::new("Assets:Broker:MSFT", money(10, "MSFT")))
+                    .with_synthesized_posting(Posting::new("Assets:Bank", money(-500, "USD"))),
+            ),
+        ];
+        let whole = Scope::new(vec!["Assets:Broker".to_string()], vec![]);
+        let rows = vec![
+            (
+                "Tech".to_string(),
+                Scope::new(vec!["Assets:Broker:AAPL".to_string()], vec![]),
+            ),
+            (
+                "Bonds".to_string(),
+                Scope::new(vec!["Assets:Broker:BND".to_string()], vec![]),
+            ),
+            (
+                "Solo".to_string(),
+                Scope::new(vec!["Assets:Broker:MSFT".to_string()], vec![]),
+            ),
+        ];
+        let end = d(2020, 12, 31);
+
+        let batch = shared_inscope_accounts(&dirs, &rows, &whole, end);
+        let reference: Vec<Option<String>> = rows
+            .iter()
+            .map(|(_, scope)| first_shared_inscope_account(&dirs, scope, &whole, end))
+            .collect();
+        assert_eq!(batch, reference, "batched fold diverged from per-group");
+        // Not vacuous: Tech and Bonds share the pooled cash; Solo is self-contained.
+        assert_eq!(batch[0], Some("Assets:Broker:Cash".to_string()));
+        assert_eq!(batch[1], Some("Assets:Broker:Cash".to_string()));
+        assert_eq!(batch[2], None);
     }
 }

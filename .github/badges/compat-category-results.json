@@ -9,20 +9,20 @@
     "check_match": 3,
     "full_match": 3
   },
-  "synthetic-bean-example": {
-    "total": 3,
-    "check_match": 3,
-    "full_match": 3
-  },
   "synthetic-edge-cases": {
     "total": 7,
     "check_match": 7,
     "full_match": 7
   },
+  "synthetic-bean-example": {
+    "total": 3,
+    "check_match": 3,
+    "full_match": 3
+  },
   "synthetic-proptest": {
-    "total": 50,
-    "check_match": 50,
-    "full_match": 50
+    "total": 500,
+    "check_match": 500,
+    "full_match": 500
   },
   "regressions": {
     "total": 26,

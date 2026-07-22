@@ -843,6 +843,46 @@ mod tests {
         assert_eq!(canonical.len(), 3);
     }
 
+    /// The CLI `report returns` path (compute_group -> scope_returns) must
+    /// return a clean error, NOT trap, when the loaded ledger carries a
+    /// booking-failed (un-booked, re-merged) transaction — the pre-existing CLI
+    /// exposure the #1849 third review flagged, now closed by the returns
+    /// engine's fallible `try_apply`. Over-reduce an empty-cost lot (sell 10 of a
+    /// 5-lot); without the fix this native test would abort.
+    #[test]
+    fn compute_group_errors_on_unbooked_oversell_not_traps() {
+        use rustledger_core::{CostNumber, CostSpec};
+        let dirs = vec![
+            Directive::Transaction(
+                Transaction::new(d(2020, 1, 1), "buy")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Broker:Stock", money(5, "AAPL")).with_cost(
+                            CostSpec::empty()
+                                .with_number(CostNumber::PerUnit {
+                                    value: Decimal::from(100),
+                                })
+                                .with_currency("USD"),
+                        ),
+                    )
+                    .with_synthesized_posting(Posting::new("Assets:Bank", money(-500, "USD"))),
+            ),
+            Directive::Transaction(
+                Transaction::new(d(2020, 6, 1), "oversell")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Broker:Stock", money(-10, "AAPL"))
+                            .with_cost(CostSpec::empty()),
+                    )
+                    .with_synthesized_posting(Posting::new("Assets:Bank", money(1000, "USD"))),
+            ),
+        ];
+        let scope = Scope::new(vec!["Assets:Broker".to_string()], vec![]);
+        let r = compute_group(&dirs, &scope, "USD", d(2020, 12, 31), "TOTAL".to_string());
+        assert!(
+            r.is_err(),
+            "the CLI report path must error (not trap) on an un-booked over-sell"
+        );
+    }
+
     /// Drift guard (CLAUDE.md Canonical-Function Discipline): the batched
     /// `shared_inscope_accounts` (one pass over the transactions, used in
     /// production) must return, per group, exactly what the per-group

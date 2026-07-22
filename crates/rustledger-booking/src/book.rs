@@ -524,6 +524,46 @@ impl BookingEngine {
         })
     }
 
+    /// Apply one posting to the running inventories. The per-posting core shared
+    /// by [`Self::apply`] (which ignores a reduction failure, per its booked-input
+    /// contract) and [`Self::try_apply`] (which surfaces it).
+    ///
+    /// # Errors
+    /// Returns the reduce error when the posting reduces a lot that is not held
+    /// (an over-sell / unbooked-input contract violation).
+    fn apply_posting(
+        &mut self,
+        posting: &Posting,
+        date: rustledger_core::NaiveDate,
+    ) -> Result<(), BookingError> {
+        let Some(IncompleteAmount::Complete(units)) = &posting.units else {
+            return Ok(());
+        };
+        // Resolve the per-account booking method before mutably borrowing the
+        // inventories map.
+        let method = self.method_for(&posting.account);
+        let inv = self.inventories.entry(posting.account.clone()).or_default();
+
+        // Reduction vs augmentation — the single source for this decision
+        // (`Inventory::is_booking_reduction`), shared with the Late validator so
+        // the two can't drift (including the #1182 NONE gate that previously had
+        // to be maintained in both crates).
+        if inv.is_booking_reduction(units, posting.cost.as_ref(), method) {
+            // `reduce` only errors when the lot it would match is missing — a
+            // "must book first" precondition violation.
+            inv.reduce(units, posting.cost.as_ref(), method)
+                .map_err(|e| convert_core_booking_error(e, &posting.account))?;
+        } else {
+            // Add to inventory via the canonical cost-resolve shared with the Late
+            // validator, `build_balances`, and the query engine (see
+            // `CostSpec::resolve`). `apply`'s callers book first, which fills the
+            // inferred currency into `cost_spec.currency`; direct-`apply` tests use
+            // explicit-currency fixtures, which need no inference.
+            inv.add(Position::from_posting(units, posting.cost.as_ref(), date));
+        }
+        Ok(())
+    }
+
     /// Apply a transaction's postings to the running inventories (update
     /// balances).
     ///
@@ -533,60 +573,46 @@ impl BookingEngine {
     /// units and resolved costs, as produced by [`Self::book_and_interpolate`]
     /// or the free [`book`](crate::book) function. Applying an *unbooked*
     /// transaction can silently over-sell an inventory: a reduction with no
-    /// matching lot yet is dropped (its `reduce` error is otherwise ignored).
-    /// The loader pipeline guarantees this ordering; the in-loop `debug_assert`
-    /// below catches a violating caller in debug builds.
+    /// matching lot yet is dropped (its `reduce` error is ignored, historical
+    /// release behavior). The loader pipeline guarantees this ordering; the
+    /// in-loop `debug_assert` below catches a violating caller in debug builds.
+    /// A caller that CANNOT guarantee booked input (e.g. valuing a returns scope
+    /// over a ledger whose loader re-merged a booking-failed transaction) must
+    /// use [`Self::try_apply`] instead, which surfaces the failure as an `Err`.
     pub fn apply(&mut self, txn: &Transaction) {
         for posting in &txn.postings {
-            if let Some(IncompleteAmount::Complete(units)) = &posting.units {
-                // Resolve the per-account booking method before mutably
-                // borrowing the inventories map.
-                let method = self.method_for(&posting.account);
-                let inv = self.inventories.entry(posting.account.clone()).or_default();
-
-                // Reduction vs augmentation — the single source for this decision
-                // (`Inventory::is_booking_reduction`), shared with the Late
-                // validator so the two can't drift (including the #1182 NONE gate
-                // that previously had to be maintained in both crates).
-                let is_reduction = inv.is_booking_reduction(units, posting.cost.as_ref(), method);
-
-                if is_reduction {
-                    // Reduce from inventory. `reduce` only errors when the lot
-                    // it would match is missing — a "must book first" precondition
-                    // violation (see the fn-level doc). In release builds the
-                    // historical behavior (ignore) is kept; in debug builds we
-                    // surface the unbooked-apply bug instead of silently
-                    // over-selling.
-                    let reduced = inv.reduce(units, posting.cost.as_ref(), method);
-                    debug_assert!(
-                        reduced.is_ok(),
-                        "apply() reduction failed — the transaction must be booked \
-                         before apply() (postings filled, costs resolved); applying \
-                         an unbooked reduction silently over-sells inventory"
-                    );
-                    // `reduced` is consumed only by the debug assertion above;
-                    // release builds keep the historical ignore-the-Result behavior.
-                    let _ = reduced;
-                } else {
-                    // Add to inventory via the canonical cost-resolve shared with
-                    // the Late validator, `build_balances`, and the query engine.
-                    // Its per-unit / date / label handling matches the block this
-                    // replaced (see `CostSpec::resolve`). The old inline price /
-                    // cross-posting cost-currency inference is unnecessary here:
-                    // `apply` is contracted to run on *booked* transactions (the
-                    // `debug_assert` above; the production pipeline always
-                    // `book_and_interpolate`s first), and booking fills the
-                    // inferred currency into `cost_spec.currency`. Tests that call
-                    // `apply` directly use explicit-currency fixtures, which need
-                    // no inference.
-                    inv.add(Position::from_posting(
-                        units,
-                        posting.cost.as_ref(),
-                        txn.date,
-                    ));
-                }
-            }
+            let reduced = self.apply_posting(posting, txn.date);
+            debug_assert!(
+                reduced.is_ok(),
+                "apply() reduction failed — the transaction must be booked \
+                 before apply() (postings filled, costs resolved); applying an \
+                 unbooked reduction silently over-sells inventory. Use \
+                 try_apply() if the input may be unbooked."
+            );
+            // Release builds keep the historical ignore-and-continue behavior.
+            let _ = reduced;
         }
+    }
+
+    /// Fallible [`Self::apply`]: apply a transaction's postings, but return an
+    /// error the moment a reduction has no matching lot instead of
+    /// `debug_assert`-ing (debug) or silently over-selling (release).
+    ///
+    /// For consumers that realize inventory over a stream they cannot guarantee
+    /// is booked — the returns engine values a scope over `Ledger.directives`,
+    /// which the loader re-merges booking-FAILED transactions into in their
+    /// un-booked shape — so the failure becomes a clean `Err` at the boundary
+    /// rather than a wasm trap or a wrong figure.
+    ///
+    /// # Errors
+    /// Returns [`BookingError::Inventory`] on the first posting that reduces a
+    /// lot not held. Postings before it have already been applied (the caller is
+    /// expected to discard the engine on error).
+    pub fn try_apply(&mut self, txn: &Transaction) -> Result<(), BookingError> {
+        for posting in &txn.postings {
+            self.apply_posting(posting, txn.date)?;
+        }
+        Ok(())
     }
 
     /// Book and interpolate a transaction.

@@ -2974,4 +2974,62 @@ option \"operating_currency\" \"USD\"
             "returns must refuse (not trap) on a booking-errored ledger"
         );
     }
+
+    #[test]
+    fn returns_from_entries_oversell_errors_not_traps() {
+        // A `from_entries` session holds directives UN-booked with `errors:
+        // vec![]`, so the load-error guard is bypassed (the #1849 third-review
+        // gap). The engine-level `try_apply` fix is what closes this path: an
+        // over-sell (reduce 10 of an empty-cost lot only 5 were bought into)
+        // makes compute_returns — hence returns() — return a clean Err instead of
+        // trapping. This native test would abort without that fix.
+        use rustledger_core::{Amount, CostNumber, CostSpec, Decimal, Posting, Transaction};
+        let dt = |m, day| rustledger_core::naive_date(2020, m, day).unwrap();
+        let buy = Transaction::new(dt(1, 1), "buy")
+            .with_synthesized_posting(
+                Posting::new(
+                    "Assets:Invest:Broker",
+                    Amount::new(Decimal::from(5), "ACME"),
+                )
+                .with_cost(
+                    CostSpec::empty()
+                        .with_number(CostNumber::PerUnit {
+                            value: Decimal::from(100),
+                        })
+                        .with_currency("USD"),
+                ),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(Decimal::from(-500), "USD"),
+            ));
+        let sell = Transaction::new(dt(6, 1), "oversell")
+            .with_synthesized_posting(
+                Posting::new(
+                    "Assets:Invest:Broker",
+                    Amount::new(Decimal::from(-10), "ACME"),
+                )
+                .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(Decimal::from(1000), "USD"),
+            ));
+        let core = [
+            rustledger_core::Directive::Transaction(buy),
+            rustledger_core::Directive::Transaction(sell),
+        ];
+        let wit: Vec<_> = core
+            .iter()
+            .map(|d| super::directive_from_core(d, 0, "<test>"))
+            .collect();
+        let state = SessionState::from_entries(&wit);
+        // The guard cannot help here — from_entries carries no load errors.
+        assert!(state.info().errors.is_empty());
+        let (inv, inc) = scope_args();
+        assert!(
+            state.returns(&inv, &inc, "USD", "2020-12-31").is_err(),
+            "engine fix must make an un-booked from_entries session err, not trap"
+        );
+    }
 }

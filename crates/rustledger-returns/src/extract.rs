@@ -210,6 +210,14 @@ pub enum ExtractError {
         /// The date whose rate was missing.
         date: NaiveDate,
     },
+    /// A reduction posting referenced a lot that was never held — the input
+    /// stream is not booked. The loader re-merges booking-FAILED transactions
+    /// into `Ledger.directives` in their un-booked shape; realizing one would
+    /// over-sell inventory (and `debug_assert`-trap the booking engine in debug
+    /// builds), so extraction refuses with this error rather than return a wrong
+    /// valuation. Carries the underlying booking error's message.
+    #[error("cannot compute returns over an unbooked ledger ({0}); fix the booking error first")]
+    UnbookedInput(String),
 }
 
 /// Extract the full cash-flow series (external boundary-crossing flows plus the
@@ -239,13 +247,9 @@ pub enum ExtractError {
 /// # Errors
 ///
 /// Returns [`ExtractError::MissingPrice`] if any external flow or held position
-/// cannot be converted to `reporting_currency` on the date it is needed.
-///
-/// # Panics
-///
-/// See [`terminal_value`]: a stream that violates the booked input contract can
-/// make the booking engine `debug_assert` (debug builds) instead of returning
-/// `Err`.
+/// cannot be converted to `reporting_currency` on the date it is needed, or
+/// [`ExtractError::UnbookedInput`] if the stream violates the booked input
+/// contract (a re-merged booking-failed transaction) — see [`terminal_value`].
 pub fn extract_cash_flows(
     directives: &[Directive],
     scope: &Scope,
@@ -387,14 +391,11 @@ pub fn extract_flows(
 /// # Errors
 ///
 /// Returns [`ExtractError::MissingPrice`] if a held commodity has no price in
-/// `reporting_currency` on `end_date`.
-///
-/// # Panics
-///
-/// Requires the booked input stream of [`extract_cash_flows`]' contract. On a
-/// contract-violating (un-booked) stream, the booking engine may `debug_assert`
-/// in debug builds when a reduction has no matching lot; the leaf crate cannot
-/// detect this, so an un-booked stream can abort rather than return `Err`.
+/// `reporting_currency` on `end_date`, or [`ExtractError::UnbookedInput`] if the
+/// stream violates the booked input contract — a reduction with no matching lot
+/// (the loader re-merges booking-failed transactions in un-booked shape). The
+/// realization surfaces that as an `Err` via the booking engine's fallible
+/// `try_apply`, rather than over-selling inventory or trapping.
 pub fn terminal_value(
     directives: &[Directive],
     scope: &Scope,
@@ -447,7 +448,9 @@ fn investment_value_at(
         if let Directive::Transaction(txn) = directive
             && txn.date <= date
         {
-            engine.apply(txn);
+            engine
+                .try_apply(txn)
+                .map_err(|e| ExtractError::UnbookedInput(e.to_string()))?;
         }
     }
     value_investment_scope(
@@ -563,7 +566,16 @@ fn investment_values_at(
         // ascend, so the cursor only moves forward across the whole batch).
         while let Some(txn) = txns.peek() {
             if txn.date <= date {
-                engine.apply(txn);
+                if let Err(e) = engine.try_apply(txn) {
+                    // Contract-violating (unbooked) stream: value every remaining
+                    // date as the same error rather than over-sell. Dates already
+                    // pushed (strictly before this transaction) stay correct.
+                    let err = ExtractError::UnbookedInput(e.to_string());
+                    while values.len() < dates.len() {
+                        values.push(Err(err.clone()));
+                    }
+                    return values;
+                }
                 txns.next();
             } else {
                 break;
@@ -633,7 +645,17 @@ fn investment_values_multi(
     for &date in &union {
         while let Some(txn) = txns.peek() {
             if txn.date <= date {
-                engine.apply(txn);
+                if let Err(e) = engine.try_apply(txn) {
+                    // Contract-violating (unbooked) stream: fill every scope's
+                    // remaining dates with the same error rather than over-sell.
+                    let err = ExtractError::UnbookedInput(e.to_string());
+                    for (i, (_, dates)) in scoped_dates.iter().enumerate() {
+                        while values[i].len() < dates.len() {
+                            values[i].push(Err(err.clone()));
+                        }
+                    }
+                    return values;
+                }
                 txns.next();
             } else {
                 break;
@@ -720,9 +742,9 @@ fn investment_values_multi(
 /// [`PriceOracle`] resolves the most recent price on or before a date, so a
 /// dividend date with no same-day price still resolves from an earlier one.
 ///
-/// # Panics
-///
-/// Same booked, pad-expanded input requirement as [`extract_cash_flows`].
+/// The booked, pad-expanded input contract of [`extract_cash_flows`] applies: an
+/// un-booked reduction surfaces as [`ExtractError::UnbookedInput`] (not a panic),
+/// while an un-pad-expanded stream silently omits pad-seeded positions.
 pub fn twr(
     directives: &[Directive],
     scope: &Scope,
@@ -889,11 +911,10 @@ pub struct Returns {
 /// flow date degrades TWR to `None` rather than erroring — the summary itself is
 /// still well-defined.
 ///
-/// # Panics
-///
-/// Same booked, pad-expanded input requirement as [`twr`]. (Date-sorted input is
-/// a fast path, not a correctness requirement — an unsorted stream falls back to
-/// the order-independent per-date valuation.)
+/// The booked, pad-expanded input contract of [`twr`] applies: an un-booked
+/// reduction surfaces as [`ExtractError::UnbookedInput`] rather than panicking.
+/// (Date-sorted input is a fast path, not a correctness requirement — an unsorted
+/// stream falls back to the order-independent per-date valuation.)
 pub fn compute_returns(
     directives: &[Directive],
     scope: &Scope,
@@ -977,11 +998,11 @@ pub fn compute_returns(
 /// (an unpriceable boundary flow or `end_date` valuation) is reported in that
 /// scope's slot and does not affect the others. There is no whole-call error.
 ///
-/// # Panics
-///
-/// Same booked, pad-expanded input requirement as [`compute_returns`]/[`twr`]
-/// (date-sorted is a fast path, not a requirement — an unsorted stream falls back
-/// to per-scope valuation).
+/// The booked, pad-expanded input contract of [`compute_returns`]/[`twr`]
+/// applies: an un-booked reduction surfaces (per scope) as
+/// [`ExtractError::UnbookedInput`] rather than panicking. (Date-sorted is a fast
+/// path, not a requirement — an unsorted stream falls back to per-scope
+/// valuation.)
 #[must_use]
 pub fn compute_returns_multi(
     directives: &[Directive],
@@ -1136,6 +1157,48 @@ mod tests {
             vec!["Assets:Broker".to_string()],
             vec!["Income:Dividends".to_string()],
         )
+    }
+
+    /// The engine-level guard against realizing an un-booked stream. The loader
+    /// re-merges booking-FAILED transactions in their un-booked shape, so a
+    /// returns consumer can hand `compute_returns` a reduction of more units than
+    /// were ever held. That must surface as [`ExtractError::UnbookedInput`] (via
+    /// the booking engine's fallible `try_apply`), NOT `debug_assert`-trap — this
+    /// native test would abort — nor over-sell into a wrong figure. Closes the
+    /// #1849 third-review finding at the source, for every consumer.
+    #[test]
+    fn unbooked_oversell_errors_not_traps() {
+        use rustledger_core::{CostNumber, CostSpec};
+        // Buy 5 at a cost lot, then reduce 10 with an empty cost `{}` that forces
+        // a lot match — over-reducing a held lot. This is the shape the loader
+        // fails to book and re-merges un-booked; realizing it must NOT trap.
+        let dirs = vec![
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(5), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number(CostNumber::PerUnit { value: dec!(100) })
+                            .with_currency("USD"),
+                    ),
+                    Posting::new("Assets:Bank", amt(dec!(-500), "USD")),
+                ],
+            ),
+            txn(
+                d(2020, 6, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(-10), "AAPL"))
+                        .with_cost(CostSpec::empty()),
+                    Posting::new("Assets:Bank", amt(dec!(1000), "USD")),
+                ],
+            ),
+        ];
+        let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(120));
+        let r = compute_returns(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31));
+        assert!(
+            matches!(r, Err(ExtractError::UnbookedInput(_))),
+            "over-reducing an empty-cost lot must yield UnbookedInput, got {r:?}"
+        );
     }
 
     #[test]

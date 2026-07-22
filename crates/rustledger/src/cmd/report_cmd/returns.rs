@@ -843,7 +843,7 @@ mod tests {
         assert_eq!(canonical.len(), 3);
     }
 
-    /// The CLI `report returns` path (compute_group -> scope_returns) must
+    /// The CLI `report returns` path (`compute_group` -> `scope_returns`) must
     /// return a clean error, NOT trap, when the loaded ledger carries a
     /// booking-failed (un-booked, re-merged) transaction — the pre-existing CLI
     /// exposure the #1849 third review flagged, now closed by the returns

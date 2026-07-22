@@ -68,10 +68,12 @@
 //! expanded into their synthesized transactions (the loader's
 //! `Ledger::balance_view` output, the same stream the canonical
 //! `report_cmd::account_balances` consumes). This crate is a leaf and cannot
-//! book or pad-expand a raw stream itself; handing it un-booked directives lets
-//! the booking engine silently realize the wrong inventory (unmatched reductions and
-//! elided-units postings are dropped), and handing it un-expanded directives
-//! drops any position seeded by a pad.
+//! book or pad-expand a raw stream itself. It defends the booked half of the
+//! contract: an un-booked directive — an unmatched reduction, or a posting with
+//! elided/uninterpolated units — surfaces as [`ExtractError::UnbookedInput`]
+//! rather than a silently wrong figure. It cannot defend the pad half, though:
+//! handing it an un-expanded stream silently drops any position seeded by a pad,
+//! so callers must pad-expand first.
 //!
 //! Returns are computed **from ledger inception** — there is no analysis start
 //! date. An opening balance (a `pad`, or an explicit `Equity:Opening-Balances`
@@ -85,7 +87,7 @@
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
-use rustledger_core::{Amount, Directive, NaiveDate, is_subaccount_or_equal};
+use rustledger_core::{Amount, Directive, IncompleteAmount, NaiveDate, is_subaccount_or_equal};
 
 use crate::CashFlow;
 
@@ -448,9 +450,7 @@ fn investment_value_at(
         if let Directive::Transaction(txn) = directive
             && txn.date <= date
         {
-            engine
-                .try_apply(txn)
-                .map_err(|e| ExtractError::UnbookedInput(e.to_string()))?;
+            apply_booked(&mut engine, txn)?;
         }
     }
     value_investment_scope(
@@ -460,6 +460,34 @@ fn investment_value_at(
         prices,
         date,
     )
+}
+
+/// Apply a whole transaction to `engine`, surfacing an un-booked stream as
+/// [`ExtractError::UnbookedInput`] instead of a wrong figure.
+///
+/// The realization requires the booked, pad-expanded input contract. Two ways a
+/// re-merged booking-failed transaction violates it, both caught here: an
+/// unmatched reduction (via the booking engine's fallible
+/// [`try_apply`](rustledger_booking::BookingEngine::try_apply)), and a posting
+/// with elided/uninterpolated units (booking fills these) — which `try_apply`
+/// would otherwise silently skip, understating the position.
+fn apply_booked(
+    engine: &mut rustledger_booking::BookingEngine,
+    txn: &rustledger_core::Transaction,
+) -> Result<(), ExtractError> {
+    if txn
+        .postings
+        .iter()
+        .any(|p| !matches!(p.units, Some(IncompleteAmount::Complete(_))))
+    {
+        return Err(ExtractError::UnbookedInput(format!(
+            "transaction on {} has an un-booked (elided) posting",
+            txn.date
+        )));
+    }
+    engine
+        .try_apply(txn)
+        .map_err(|e| ExtractError::UnbookedInput(e.to_string()))
 }
 
 /// Total market value (in `reporting_currency`, at `date`) of the
@@ -566,11 +594,10 @@ fn investment_values_at(
         // ascend, so the cursor only moves forward across the whole batch).
         while let Some(txn) = txns.peek() {
             if txn.date <= date {
-                if let Err(e) = engine.try_apply(txn) {
+                if let Err(err) = apply_booked(&mut engine, txn) {
                     // Contract-violating (un-booked) stream: value every remaining
                     // date as the same error rather than over-sell. Dates already
                     // pushed (strictly before this transaction) stay correct.
-                    let err = ExtractError::UnbookedInput(e.to_string());
                     while values.len() < dates.len() {
                         values.push(Err(err.clone()));
                     }
@@ -645,11 +672,10 @@ fn investment_values_multi(
     for &date in &union {
         while let Some(txn) = txns.peek() {
             if txn.date <= date {
-                if let Err(e) = engine.try_apply(txn) {
+                if let Err(err) = apply_booked(&mut engine, txn) {
                     // Contract-violating (un-booked) stream: the shared pass can't
                     // produce any scope's values past here, so fill every scope's
                     // remaining dates with the same error.
-                    let err = ExtractError::UnbookedInput(e.to_string());
                     for (i, (_, dates)) in scoped_dates.iter().enumerate() {
                         while values[i].len() < dates.len() {
                             values[i].push(Err(err.clone()));
@@ -777,6 +803,19 @@ pub fn twr(
     // Split off the `end_date` valuation; `values` then has exactly one entry per
     // flow date, in `net_by_date` order.
     let end_value = values.pop().expect("dates always includes end_date");
+    // A contract-violating (un-booked) stream is more severe than an undefined
+    // sub-period: surface `UnbookedInput` EAGERLY, before `twr_from_values`' lazy
+    // short-circuits (`v_prev <= 0`, `r <= 0`) could return `Ok(None)` at an
+    // earlier flow and mask a later un-booked value. `MissingPrice` stays lazy (a
+    // later price gap is irrelevant once the chain is undefined), but a broken
+    // ledger is never silently "n/a". `compute_returns` needs no such scan — it
+    // surfaces `UnbookedInput` via its eager `end_value?` — so this lives here, on
+    // the standalone public path, not in the shared `twr_from_values` hot path.
+    for value in values.iter().chain(std::iter::once(&end_value)) {
+        if let Err(e @ ExtractError::UnbookedInput(_)) = value {
+            return Err(e.clone());
+        }
+    }
     twr_from_values(&net_by_date, values, end_value, end_date)
 }
 
@@ -796,22 +835,6 @@ fn twr_from_values(
     end_value: Result<Decimal, ExtractError>,
     end_date: NaiveDate,
 ) -> Result<Option<f64>, ExtractError> {
-    // A contract-violating (un-booked) stream is more severe than an undefined
-    // sub-period: surface `UnbookedInput` EAGERLY, before the lazy short-circuits
-    // below (`v_prev <= 0`, `r <= 0`) could return `Ok(None)` at an earlier flow
-    // and mask a later un-booked value. `MissingPrice` stays lazy — a later price
-    // gap is genuinely irrelevant once the chain is already undefined — but a
-    // broken ledger is never silently reported as "n/a".
-    //
-    // This matters only for the STANDALONE public [`twr`]: [`compute_returns`]
-    // already surfaces `UnbookedInput` via its eager `end_value?` and discards
-    // this fn's `Err` with `unwrap_or(None)`. Kept so the public `twr` honors its
-    // documented contract regardless of that caller-side protection.
-    for value in flow_values.iter().chain(std::iter::once(&end_value)) {
-        if let Err(e @ ExtractError::UnbookedInput(_)) = value {
-            return Err(e.clone());
-        }
-    }
     // `v_prev` is the portfolio value just after the previous valuation; on the
     // first flow date it is only established (that flow is the opening capital,
     // not a return).
@@ -1219,25 +1242,62 @@ mod tests {
         );
     }
 
-    /// `twr`'s lazy short-circuit (an earlier `r <= 0` sub-period returns
-    /// `Ok(None)`) must NOT mask a later `UnbookedInput`: a broken ledger is never
-    /// silently "n/a". Here the first sub-period wipes out (r = 0), which
-    /// pre-fix returned `Ok(None)` before the loop reached the un-booked
-    /// `end_value`; the eager scan surfaces it.
+    /// The OTHER un-booked shape: a transaction with an elided/uninterpolated
+    /// posting (booking would have filled it). `try_apply` silently skips a
+    /// non-Complete leg, which would understate the position — strict-clean must
+    /// surface it as `UnbookedInput`, not report a wrong figure.
     #[test]
-    fn twr_surfaces_unbooked_despite_earlier_short_circuit() {
-        let net: std::collections::BTreeMap<NaiveDate, Decimal> =
-            [(d(2020, 1, 1), dec!(100)), (d(2020, 6, 1), dec!(0))]
-                .into_iter()
-                .collect();
-        // Sub-period 0→1: r = (0 - 0) / 100 = 0 ⇒ the loop short-circuits to
-        // Ok(None) at flow 1, never reaching end_value below without the fix.
-        let flow_values = vec![Ok(dec!(100)), Ok(dec!(0))];
-        let end_value = Err(ExtractError::UnbookedInput("over-sell".into()));
-        let r = twr_from_values(&net, flow_values, end_value, d(2020, 12, 31));
+    fn unbooked_elided_posting_errors_not_understates() {
+        let dirs = vec![txn(
+            d(2020, 1, 1),
+            vec![
+                // Elided in-scope investment leg (no units) — un-booked input.
+                Posting::auto("Assets:Broker:Stock"),
+                Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+            ],
+        )];
+        let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(120));
+        let r = compute_returns(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31));
         assert!(
             matches!(r, Err(ExtractError::UnbookedInput(_))),
-            "must surface UnbookedInput, not swallow it to {r:?}"
+            "an elided posting must yield UnbookedInput, got {r:?}"
+        );
+    }
+
+    /// The public `twr` surfaces an un-booked reduction as `UnbookedInput` via
+    /// its eager scan, rather than masking it as `Ok(None)` through
+    /// `twr_from_values`' lazy short-circuits. (`compute_returns` is protected
+    /// separately by its eager terminal valuation.)
+    #[test]
+    fn twr_surfaces_unbooked_input() {
+        use rustledger_core::{CostNumber, CostSpec};
+        // Buy 5, then over-reduce 10 with an empty cost — an un-booked reduction.
+        let dirs = vec![
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(5), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number(CostNumber::PerUnit { value: dec!(100) })
+                            .with_currency("USD"),
+                    ),
+                    Posting::new("Assets:Bank", amt(dec!(-500), "USD")),
+                ],
+            ),
+            txn(
+                d(2020, 6, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(-10), "AAPL"))
+                        .with_cost(CostSpec::empty()),
+                    Posting::new("Assets:Bank", amt(dec!(1000), "USD")),
+                ],
+            ),
+        ];
+        let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(120));
+        let r = twr(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31));
+        assert!(
+            matches!(r, Err(ExtractError::UnbookedInput(_))),
+            "twr must surface UnbookedInput, not swallow it to {r:?}"
         );
     }
 

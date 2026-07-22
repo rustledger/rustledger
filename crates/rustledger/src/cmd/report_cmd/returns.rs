@@ -303,6 +303,9 @@ fn shared_inscope_accounts(
             }) {
                 shared[index] = Some(posting.account.to_string());
                 unresolved -= 1;
+                if unresolved == 0 {
+                    break; // every group resolved; skip the rest of this txn's groups
+                }
             }
         }
     }

@@ -1831,25 +1831,24 @@ impl SessionState {
     /// pad-expanded stream `query` builds (reused via the `padded` cell), so the
     /// two surfaces cannot compute different figures for one ledger.
     ///
-    /// Refuses (a clean `Err`, never a trap) when the held ledger has load
-    /// errors — the same guard `query` applies. Unlike `format`, which only
-    /// renders directive text, returns REALIZES inventory, and the loader
-    /// re-merges a booking-failed transaction into the held directives in its
-    /// un-booked shape; realizing that contract-violating stream can
-    /// `debug_assert`-trap the booking engine (over-sell with no matching lot).
-    /// The resource contract is "load failures surface via `info().errors`, not
-    /// a trap" — so a realizing op surfaces them as an `Err` rather than risk the
-    /// trap the convention forbids. (`format`/`filter`/`clamp` don't realize, so
-    /// they proceed.)
+    /// Does NOT refuse on load errors — it computes over the held (possibly
+    /// error-recovered) directives exactly as the CLI's `report returns` renders
+    /// over them, the beancount/fava model where a report renders over
+    /// loaded-with-errors entries and the errors surface separately (here via
+    /// `info().errors`). This is safe because the returns engine realizes through
+    /// the booking engine's fallible `try_apply`: an un-booked reduction in a
+    /// VALUED account surfaces as `err` (never a trap), while a booking error in
+    /// an account outside the returns scope is skipped, not fatal. So a host
+    /// gets the same figures as the CLI for one ledger, broken or not.
     ///
     /// `investments`/`income` are the scope's account-name prefixes; `currency`
     /// is the single reporting currency (empty → the ledger's first
     /// `operating_currency`); `end` is the horizon + terminal-valuation date.
     ///
     /// # Errors
-    /// `Err(message)` when the held ledger has load errors, `end` is
-    /// empty/unparseable, no reporting currency resolves (empty `currency` and
-    /// no `operating_currency`), or a boundary/terminal flow cannot be priced.
+    /// `Err(message)` when `end` is empty/unparseable, no reporting currency
+    /// resolves (empty `currency` and no `operating_currency`), or an in-scope
+    /// boundary/terminal flow cannot be priced or is un-booked.
     pub fn returns(
         &self,
         investments: &[String],
@@ -1857,14 +1856,6 @@ impl SessionState {
         currency: &str,
         end: &str,
     ) -> Result<out::ReturnsResult, String> {
-        // See the doc comment: returns realizes inventory, so — like `query`, and
-        // unlike the text-only `format` — it must not run over a load-errored
-        // (possibly un-booked) stream. Surface the errors as a clean Err.
-        if !self.errors.is_empty() {
-            return Err(
-                "ledger has load errors; cannot compute returns (see info().errors)".to_string(),
-            );
-        }
         let end_date: NaiveDate = end
             .parse()
             .map_err(|_| format!("invalid end-date {end:?} (expected YYYY-MM-DD)"))?;
@@ -2927,11 +2918,12 @@ option \"operating_currency\" \"USD\"
     }
 
     #[test]
-    fn returns_refuses_on_load_errors() {
-        // returns realizes inventory, so — like `query` and unlike text-only
-        // `format` — it must refuse (clean Err) on a load-errored ledger rather
-        // than realize a contract-violating (possibly un-booked) stream. A parse
-        // error triggers the guard:
+    fn returns_proceeds_over_recovered_load_error() {
+        // Like the CLI report (beancount/fava model), returns does NOT refuse on
+        // a recovered load error — it computes over the held directives, and the
+        // error surfaces separately via info().errors. Here a garbage line is a
+        // recovered parse error with no investment activity, so returns is a clean
+        // (empty) result, not an Err.
         const PARSE_ERR: &str = "\
 option \"operating_currency\" \"USD\"
 2020-01-01 open Assets:Invest:Broker
@@ -2940,18 +2932,20 @@ this line is not a valid directive @#$
         let state = SessionState::from_source(PARSE_ERR);
         assert!(!state.info().errors.is_empty(), "fixture must load-error");
         let (inv, inc) = scope_args();
-        assert!(state.returns(&inv, &inc, "USD", "2021-01-01").is_err());
+        assert!(
+            state.returns(&inv, &inc, "USD", "2021-01-01").is_ok(),
+            "a recovered parse error must not block the report (errors are in info())"
+        );
     }
 
     #[test]
-    fn returns_refuses_on_booking_error_without_trapping() {
-        // The dangerous case the guard exists for: a booking-FAILED transaction
-        // (here selling 10 units when only 5 were bought, empty cost forcing a
-        // lot match) is re-merged into the held directives in its un-booked
-        // shape. Realizing that would `debug_assert`-trap the booking engine
-        // (over-sell) — this native test would ABORT without the guard. With it,
-        // the load error is caught first and returns cleanly errs. (Regression
-        // guard for the #1849 second-review finding.)
+    fn returns_errors_on_in_scope_booking_error() {
+        // A booking-FAILED transaction (selling 10 units when only 5 were bought,
+        // empty cost forcing a lot match) is re-merged into the held directives
+        // UN-booked. Realizing it would `debug_assert`-trap the booking engine
+        // (over-sell) — this native test would ABORT without the engine's fallible
+        // `try_apply`. With it, an IN-SCOPE over-sell surfaces as a clean Err (no
+        // guard involved). Regression guard for the #1849 second-review finding.
         const OVERSELL: &str = "\
 option \"operating_currency\" \"USD\"
 2020-01-01 open Assets:Invest:Broker
@@ -2971,7 +2965,7 @@ option \"operating_currency\" \"USD\"
         let (inv, inc) = scope_args();
         assert!(
             state.returns(&inv, &inc, "USD", "2021-01-01").is_err(),
-            "returns must refuse (not trap) on a booking-errored ledger"
+            "an in-scope over-sell must surface as a clean Err, not trap"
         );
     }
 

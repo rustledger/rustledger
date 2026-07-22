@@ -559,14 +559,16 @@ interface ledger {
     /// `end-date` (`YYYY-MM-DD`) is both the horizon (later flows are excluded)
     /// and the terminal-valuation date; unlike the CLI it is required, since a
     /// component has no reliable clock. Prices come from the held entries'
-    /// `price` directives and implicit transaction prices. Because returns
-    /// REALIZES inventory (unlike the text-only `format`), a load-errored ledger
-    /// can carry an un-booked, booking-failed transaction that would trap the
-    /// engine — so, like `query`, this refuses on load errors with a clean
-    /// `err` rather than risk the trap the contract forbids (inspect them via
-    /// `info().errors`). Fallible: returns `err(message)` on held load errors, an
-    /// empty/unparseable `end-date`, no resolvable reporting currency, or a
-    /// boundary/terminal flow that cannot be priced.
+    /// `price` directives and implicit transaction prices. This computes over the
+    /// held (possibly error-recovered) directives just as the CLI's `report
+    /// returns` renders over them — the beancount/fava model, where a report
+    /// renders over loaded-with-errors entries and errors surface separately (via
+    /// `info().errors`). It stays safe because the engine realizes through a
+    /// fallible path: an un-booked reduction in a VALUED account surfaces as
+    /// `err` (never a trap), and a booking error outside the returns scope is
+    /// skipped. Fallible: returns `err(message)` on an empty/unparseable
+    /// `end-date`, no resolvable reporting currency, or an in-scope
+    /// boundary/terminal flow that cannot be priced or is un-booked.
     returns: func(investments: list<string>, income: list<string>, currency: string, end-date: string) -> result<returns-result, string>;
   }
 }

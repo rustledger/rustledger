@@ -448,9 +448,9 @@ fn investment_value_at(
         if let Directive::Transaction(txn) = directive
             && txn.date <= date
         {
-            engine
-                .try_apply(txn)
-                .map_err(|e| ExtractError::UnbookedInput(e.to_string()))?;
+            apply_scoped(&mut engine, txn, |a| {
+                scope.classify(a) == AccountRole::Investment
+            })?;
         }
     }
     value_investment_scope(
@@ -460,6 +460,31 @@ fn investment_value_at(
         prices,
         date,
     )
+}
+
+/// Apply the postings of `txn` whose account `is_relevant` accepts — the accounts
+/// a realization will actually value (`Investment`-scope) — surfacing an over-sell
+/// as [`ExtractError::UnbookedInput`].
+///
+/// Postings to accounts this realization never values (an unrelated account whose
+/// over-sell the loader re-merged un-booked) are skipped, so a booking error
+/// OUTSIDE the returns scope never aborts an in-scope report. This matches the
+/// beancount/fava model — reports render over loaded-with-errors entries, with
+/// errors surfaced separately (`rledger check`) — while an over-sell IN a valued
+/// account still surfaces (its valuation would otherwise be wrong).
+fn apply_scoped(
+    engine: &mut rustledger_booking::BookingEngine,
+    txn: &rustledger_core::Transaction,
+    is_relevant: impl Fn(&str) -> bool,
+) -> Result<(), ExtractError> {
+    for posting in &txn.postings {
+        if is_relevant(posting.account.as_str()) {
+            engine
+                .try_apply_posting(posting, txn.date)
+                .map_err(|e| ExtractError::UnbookedInput(e.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Total market value (in `reporting_currency`, at `date`) of the
@@ -566,13 +591,14 @@ fn investment_values_at(
         // ascend, so the cursor only moves forward across the whole batch).
         while let Some(txn) = txns.peek() {
             if txn.date <= date {
-                if let Err(e) = engine.try_apply(txn) {
-                    // Contract-violating (unbooked) stream: value every remaining
+                if let Err(e) = apply_scoped(&mut engine, txn, |a| {
+                    scope.classify(a) == AccountRole::Investment
+                }) {
+                    // An in-scope reduction is un-booked: value every remaining
                     // date as the same error rather than over-sell. Dates already
                     // pushed (strictly before this transaction) stay correct.
-                    let err = ExtractError::UnbookedInput(e.to_string());
                     while values.len() < dates.len() {
-                        values.push(Err(err.clone()));
+                        values.push(Err(e.clone()));
                     }
                     return values;
                 }
@@ -645,13 +671,20 @@ fn investment_values_multi(
     for &date in &union {
         while let Some(txn) = txns.peek() {
             if txn.date <= date {
-                if let Err(e) = engine.try_apply(txn) {
-                    // Contract-violating (unbooked) stream: fill every scope's
-                    // remaining dates with the same error rather than over-sell.
-                    let err = ExtractError::UnbookedInput(e.to_string());
+                // Relevant = valued by ANY scope; the shared pass books the union
+                // of every scope's investment accounts, so an over-sell outside
+                // all of them is skipped, not aborted.
+                if let Err(e) = apply_scoped(&mut engine, txn, |a| {
+                    scoped_dates
+                        .iter()
+                        .any(|(scope, _)| scope.classify(a) == AccountRole::Investment)
+                }) {
+                    // An in-scope reduction is un-booked: the shared realization
+                    // can't produce any scope's values past here, so fill every
+                    // scope's remaining dates with the same error.
                     for (i, (_, dates)) in scoped_dates.iter().enumerate() {
                         while values[i].len() < dates.len() {
-                            values[i].push(Err(err.clone()));
+                            values[i].push(Err(e.clone()));
                         }
                     }
                     return values;
@@ -801,6 +834,11 @@ fn twr_from_values(
     // and mask a later un-booked value. `MissingPrice` stays lazy — a later price
     // gap is genuinely irrelevant once the chain is already undefined — but a
     // broken ledger is never silently reported as "n/a".
+    //
+    // This matters only for the STANDALONE public [`twr`]: [`compute_returns`]
+    // already surfaces `UnbookedInput` via its eager `end_value?` and discards
+    // this fn's `Err` with `unwrap_or(None)`. Kept so the public `twr` honors its
+    // documented contract regardless of that caller-side protection.
     for value in flow_values.iter().chain(std::iter::once(&end_value)) {
         if let Err(e @ ExtractError::UnbookedInput(_)) = value {
             return Err(e.clone());
@@ -1211,6 +1249,52 @@ mod tests {
             matches!(r, Err(ExtractError::UnbookedInput(_))),
             "over-reducing an empty-cost lot must yield UnbookedInput, got {r:?}"
         );
+    }
+
+    /// An over-sell OUTSIDE the returns scope must NOT abort the report — the
+    /// realization books only the accounts it values, matching beancount/fava
+    /// (reports render over loaded-with-errors entries). Here a clean in-scope
+    /// holding coexists with an un-booked over-sell in an unrelated broker.
+    #[test]
+    fn out_of_scope_oversell_does_not_abort_report() {
+        use rustledger_core::{CostNumber, CostSpec};
+        let dirs = vec![
+            // In-scope (Assets:Broker) — a clean buy, valued at end.
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:Stock", amt(dec!(10), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+                ],
+            ),
+            // OUT-of-scope (Assets:Other) — buy 5 then over-reduce 10 with empty
+            // cost: the loader would re-merge this un-booked, but it is never valued.
+            txn(
+                d(2020, 2, 1),
+                vec![
+                    Posting::new("Assets:Other:Stock", amt(dec!(5), "ZZZ")).with_cost(
+                        CostSpec::empty()
+                            .with_number(CostNumber::PerUnit { value: dec!(1) })
+                            .with_currency("USD"),
+                    ),
+                    Posting::new("Assets:Bank", amt(dec!(-5), "USD")),
+                ],
+            ),
+            txn(
+                d(2020, 6, 1),
+                vec![
+                    Posting::new("Assets:Other:Stock", amt(dec!(-10), "ZZZ"))
+                        .with_cost(CostSpec::empty()),
+                    Posting::new("Assets:Bank", amt(dec!(10), "USD")),
+                ],
+            ),
+        ];
+        let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(120));
+        let scope = Scope::new(vec!["Assets:Broker".to_string()], vec![]);
+        let r = compute_returns(&dirs, &scope, "USD", &prices, d(2020, 12, 31));
+        let returns = r.expect("out-of-scope over-sell must not abort the in-scope report");
+        // In-scope figure is correct and unaffected: 10 AAPL @ 120 = 1200.
+        assert_eq!(returns.current_value, dec!(1200));
     }
 
     /// `twr`'s lazy short-circuit (an earlier `r <= 0` sub-period returns

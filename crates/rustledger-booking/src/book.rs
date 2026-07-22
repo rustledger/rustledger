@@ -524,14 +524,21 @@ impl BookingEngine {
         })
     }
 
-    /// Apply one posting to the running inventories. The per-posting core shared
-    /// by [`Self::apply`] (which ignores a reduction failure, per its booked-input
-    /// contract) and [`Self::try_apply`] (which surfaces it).
+    /// Apply ONE posting to the running inventories, returning an error if it
+    /// reduces a lot that is not held.
+    ///
+    /// The per-posting core shared by [`Self::apply`] (which ignores a reduction
+    /// failure, per its booked-input contract) and [`Self::try_apply`] (which
+    /// surfaces it). Public so a consumer that realizes only a SUBSET of a
+    /// transaction's postings — e.g. the returns engine valuing only its
+    /// in-scope investment accounts — can book exactly those and leave an
+    /// unrelated account's over-sell (which the loader may have re-merged
+    /// un-booked) untouched, rather than aborting on a posting it never values.
     ///
     /// # Errors
     /// Returns the reduce error when the posting reduces a lot that is not held
     /// (an over-sell / unbooked-input contract violation).
-    fn apply_posting(
+    pub fn try_apply_posting(
         &mut self,
         posting: &Posting,
         date: rustledger_core::NaiveDate,
@@ -581,7 +588,7 @@ impl BookingEngine {
     /// use [`Self::try_apply`] instead, which surfaces the failure as an `Err`.
     pub fn apply(&mut self, txn: &Transaction) {
         for posting in &txn.postings {
-            let reduced = self.apply_posting(posting, txn.date);
+            let reduced = self.try_apply_posting(posting, txn.date);
             debug_assert!(
                 reduced.is_ok(),
                 "apply() reduction failed — the transaction must be booked \
@@ -610,7 +617,7 @@ impl BookingEngine {
     /// expected to discard the engine on error).
     pub fn try_apply(&mut self, txn: &Transaction) -> Result<(), BookingError> {
         for posting in &txn.postings {
-            self.apply_posting(posting, txn.date)?;
+            self.try_apply_posting(posting, txn.date)?;
         }
         Ok(())
     }

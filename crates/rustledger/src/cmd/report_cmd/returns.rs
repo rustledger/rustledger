@@ -289,19 +289,24 @@ fn shared_inscope_accounts(
             if shared[index].is_some() {
                 continue; // this group is already resolved
             }
-            let touches_group = txn
-                .postings
-                .iter()
-                .any(|p| scope.classify(p.account.as_str()) != AccountRole::External);
-            if !touches_group {
-                continue;
-            }
-            if let Some(posting) = txn.postings.iter().find(|p| {
-                let account = p.account.as_str();
-                scope.classify(account) == AccountRole::External
+            // One pass over the postings: the group is touched if any posting is
+            // non-external to it, and the shared account is the first posting that
+            // is external to the group but still in the whole scope. Resolve only
+            // when both hold (a group with no in-group posting isn't touched).
+            let mut touches_group = false;
+            let mut shared_account: Option<&str> = None;
+            for posting in &txn.postings {
+                let account = posting.account.as_str();
+                if scope.classify(account) != AccountRole::External {
+                    touches_group = true;
+                } else if shared_account.is_none()
                     && whole_scope.classify(account) != AccountRole::External
-            }) {
-                shared[index] = Some(posting.account.to_string());
+                {
+                    shared_account = Some(account);
+                }
+            }
+            if touches_group && let Some(account) = shared_account {
+                shared[index] = Some(account.to_string());
                 unresolved -= 1;
                 if unresolved == 0 {
                     break; // every group resolved; skip the rest of this txn's groups

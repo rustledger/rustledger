@@ -449,6 +449,75 @@ mod tests {
     }
 
     #[test]
+    fn xirr_matches_independent_reference() {
+        // Cross-validation against an INDEPENDENT solver. Each expected value
+        // below was computed by a pure-Python bisection root-finder of the same
+        // canonical definition rledger implements — NPV(r) = Σ cfᵢ/(1+r)^(dᵢ/365),
+        // dᵢ = actual days from the earliest flow — where bisection is a
+        // deliberately different algorithm than rledger's Newton/Brent, so
+        // agreement rules out a solver-specific bug rather than a shared one.
+        // The reference is itself anchored: a clean 365-day −1000/+1100 series
+        // yields exactly 0.10 under it, matching spreadsheet XIRR. Where the
+        // `excel_xirr_reference_example` above pins ONE canonical shape, these
+        // broaden coverage to an intermediate distribution, an outright loss, a
+        // second contribution, and a sub-year (annualization-extrapolated) hold.
+        // Reference script (re-runnable, stdlib-only): the sibling
+        // `reference/xirr_reference.py`, which regenerates every value below.
+        let cases = [
+            (
+                "one_year_gain",
+                vec![
+                    CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+                    CashFlow::new(d(2021, 1, 1), dec!(1100)),
+                ],
+                0.099_713_585_9_f64,
+            ),
+            (
+                "dividend_then_sale",
+                vec![
+                    CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+                    CashFlow::new(d(2020, 7, 1), dec!(30)),
+                    CashFlow::new(d(2021, 1, 1), dec!(1080)),
+                ],
+                0.111_318_036_5,
+            ),
+            (
+                "loss_over_18_months",
+                vec![
+                    CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+                    CashFlow::new(d(2021, 6, 1), dec!(800)),
+                ],
+                -0.145_756_061_8,
+            ),
+            (
+                "two_buys_one_sale",
+                vec![
+                    CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+                    CashFlow::new(d(2020, 6, 1), dec!(-500)),
+                    CashFlow::new(d(2021, 1, 1), dec!(1700)),
+                ],
+                0.155_363_472_5,
+            ),
+            (
+                "sub_year_annualized",
+                vec![
+                    CashFlow::new(d(2020, 1, 1), dec!(-1000)),
+                    CashFlow::new(d(2020, 4, 1), dec!(1050)),
+                ],
+                0.216_158_125_3,
+            ),
+        ];
+        for (name, flows, expected) in &cases {
+            let r = xirr(flows).unwrap_or_else(|| panic!("{name}: expected a rate"));
+            assert!(
+                approx(r, *expected, 1e-6),
+                "{name}: independent reference {expected}, rledger {r} (Δ {:.2e})",
+                (r - *expected).abs()
+            );
+        }
+    }
+
+    #[test]
     fn negative_return_is_found() {
         // Put in 1000, get back 900 a year later → -10%.
         let flows = [

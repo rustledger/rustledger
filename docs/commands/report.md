@@ -162,9 +162,12 @@ Money-weighted return   6.43%
 Time-weighted return    6.24%
 ```
 
-> **Prices are required.** The return needs a market value for every commodity
-> still held at `--end` (and at each cash-flow date for TWR). Provide `price`
-> directives, or the report errors naming the missing commodity and date.
+> **Prices are required.** The report errors — naming the missing commodity and
+> date — if it can't value the position still held at `--end`, or convert a
+> boundary cash flow to the reporting currency. (A missing price at an
+> *intermediate* cash-flow date is less fatal: it degrades the time-weighted
+> return to `n/a` while the rest of the summary is still reported.) Provide
+> `price` directives to cover your holdings at the report date.
 
 #### Per-group breakdown
 
@@ -216,11 +219,17 @@ Notes on grouping:
   counted in TOTAL but appear in no group.) Two groups that share a cash account,
   for instance, can't be added up cleanly.
 - **Warnings.** rledger prints a `warning:` to stderr for cases that would
-  otherwise mislead: a `returns-group:` tag on an account outside
-  `--investments`/`--income`, a non-string tag value, two groups whose accounts
-  overlap by prefix, and a group that is **not self-contained** (it shares an
-  in-scope account — typically pooled settlement cash — with the rest of the
-  portfolio, so its return counts an internal transfer as a flow).
+  otherwise mislead:
+  - a `returns-group:` tag on an account outside `--investments`/`--income`;
+  - a non-string `returns-group:` value;
+  - two groups whose accounts overlap by prefix (the shared holding is counted
+    in both);
+  - a group that is **not self-contained** — it shares an in-scope account
+    (typically pooled settlement cash) with the rest of the portfolio, so its
+    return counts an internal transfer as a flow;
+  - a group named `TOTAL` (it collides with the total row in text/CSV output);
+  - `--by-group` with no in-scope `returns-group:` tags (the report then shows
+    only the TOTAL row).
 
 See [`returns-group:` metadata](../reference/syntax.md#returns-group-metadata) for
 the tagging syntax.

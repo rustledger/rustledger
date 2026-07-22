@@ -3445,6 +3445,7 @@ dependencies = [
  "rustledger-ops",
  "rustledger-parser",
  "rustledger-query",
+ "rustledger-returns",
  "rustledger-validate",
  "serde_json",
  "wit-bindgen 0.59.0",
@@ -3455,10 +3456,13 @@ name = "rustledger-ffi-component-tests"
 version = "0.21.0"
 dependencies = [
  "anyhow",
+ "rustledger-booking",
  "rustledger-core",
  "rustledger-ffi-wasi",
  "rustledger-importer",
  "rustledger-ops",
+ "rustledger-query",
+ "rustledger-returns",
  "tempfile",
  "wasmtime",
  "wasmtime-wasi",

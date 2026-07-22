@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.8.0;
+package rustledger:ledger@3.9.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -392,6 +392,23 @@ interface ledger {
     errors: list<error>,
   }
 
+  /// Investment returns for one scope, as computed by `rledger report returns`
+  /// (money-weighted XIRR + time-weighted TWR) — see `session.returns`
+  /// (WIT 3.9.0, #1847). The three amount fields are decimal strings (matching
+  /// `amount.number`) to preserve full precision; `cash-flows` is the number of
+  /// dated boundary flows the return was computed over. The two rates are
+  /// annualized fractions (0.1 = 10%) and `none` when undefined — money-weighted
+  /// when there are fewer than two flows or no sign change; time-weighted when a
+  /// sub-period cannot be priced.
+  record returns-result {
+    cash-flows: u32,
+    invested: string,
+    distributions: string,
+    current-value: string,
+    money-weighted: option<f64>,
+    time-weighted: option<f64>,
+  }
+
   /// Load + run several queries in one parse (replaces `query.batch`).
   record batch-result {
     load: load-result,
@@ -528,6 +545,23 @@ interface ledger {
     /// remains a report/query rendering concern). Fallible: a held entry
     /// that cannot be re-rendered fails the call.
     format: func() -> result<string, string>;
+    /// Investment returns over the held ledger (WIT 3.9.0, #1847) — the
+    /// `rledger report returns` engine over the boundary, so a host UI can
+    /// chart returns without re-deriving cash-flow extraction or the XIRR/TWR
+    /// math. `investments` and `income` are account-name prefixes defining the
+    /// scope boundary (mirroring the CLI's `--investments`/`--income`): money
+    /// leaving the investment accounts for income/external is a return, while a
+    /// transfer between two in-scope accounts is not. `currency` is the single
+    /// reporting currency every flow and the terminal valuation are converted
+    /// to; pass "" to fall back to the ledger's first `operating_currency`.
+    /// `end-date` (`YYYY-MM-DD`) is both the horizon (later flows are excluded)
+    /// and the terminal-valuation date; unlike the CLI it is required, since a
+    /// component has no reliable clock. Prices come from the held entries'
+    /// `price` directives and implicit transaction prices. Fallible: returns
+    /// `err(message)` on an empty/unparseable `end-date`, no resolvable
+    /// reporting currency, held load errors, or a boundary/terminal flow that
+    /// cannot be priced.
+    returns: func(investments: list<string>, income: list<string>, currency: string, end-date: string) -> result<returns-result, string>;
   }
 }
 

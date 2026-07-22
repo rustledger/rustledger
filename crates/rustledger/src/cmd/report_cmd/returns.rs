@@ -63,6 +63,12 @@ use std::io::Write;
 /// meet — deliberately: `rustledger-returns` stays a leaf (no dependency on the
 /// query engine that owns the price index), and `rustledger-query` stays free of
 /// a returns dependency.
+///
+/// A byte-identical twin exists at the component's composition root
+/// (`PriceDbOracle` in `rustledger-ffi-component/src/convert.rs`, for
+/// `session.returns`) for the same leaf-crate reason. Both are pure
+/// pass-throughs to [`PriceDatabase::convert`], so the compiler enforces
+/// agreement; if a third consumer appears, hoist the adapter into a shared home.
 pub(super) struct PriceDbOracle<'a>(pub(super) &'a PriceDatabase);
 
 impl PriceOracle for PriceDbOracle<'_> {

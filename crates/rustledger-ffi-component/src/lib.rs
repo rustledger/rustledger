@@ -41,11 +41,13 @@ use exports::rustledger::ledger::format::Guest as FormatGuest;
 use exports::rustledger::ledger::importer::{ExtractResult, Guest as ImporterGuest};
 use exports::rustledger::ledger::ledger::{
     BatchResult, Guest as LedgerGuest, GuestSession, LedgerOptions, LoadResult, QueryResult,
-    Session, ValidateResult,
+    ReturnsResult, Session, ValidateResult,
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. 3.8 adds
+/// The Component-Model api-version this build implements. 3.9 adds
+/// `session.returns` (investment returns — money-weighted XIRR +
+/// time-weighted TWR — over the held ledger, #1847); 3.8 adds
 /// `session.format` (render the held entries honoring the ledger's
 /// `display-precision`, #1766); 3.7 added
 /// `session.from-entries-with-options` (the session carries the
@@ -58,7 +60,7 @@ use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 /// encrypted (`.gpg`/`.asc`) ledgers can be decrypted by the host (#1667);
 /// 3.1 added the `diff` field on `balance-dir` (#1663); 3.0 was the breaking
 /// `expand-pads` parameter on `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.8";
+const API_VERSION: &str = "3.9";
 
 struct Component;
 
@@ -153,6 +155,17 @@ impl GuestSession for LedgerSession {
 
     fn format(&self) -> Result<String, String> {
         self.state.format()
+    }
+
+    fn returns(
+        &self,
+        investments: Vec<String>,
+        income: Vec<String>,
+        currency: String,
+        end_date: String,
+    ) -> Result<ReturnsResult, String> {
+        self.state
+            .returns(&investments, &income, &currency, &end_date)
     }
 }
 

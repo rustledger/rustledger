@@ -709,24 +709,13 @@ mod tests {
     use super::*;
     use rustledger_core::{Amount, Posting, Price, Transaction, naive_date};
     use rustledger_query::PriceDatabase;
-    // The drift guards below compare against the engine's individual primitives,
-    // which the production path no longer imports (it uses the shared
-    // `rustledger_query::scope_returns`). `PriceOracle` is needed in scope both
-    // to implement `TestOracle` and to call `.convert` on it directly.
+    // The drift guards below exercise the engine's individual primitives
+    // (`terminal_value` / `extract_flows` / `extract_cash_flows`), which the
+    // production path no longer imports (it uses the shared
+    // `rustledger_query::scope_returns`). They obtain a `PriceOracle` from the
+    // canonical `PriceDatabase::as_oracle()`; `PriceOracle` is in scope to call
+    // `.convert` on it directly.
     use rustledger_returns::{PriceOracle, extract_flows, terminal_value};
-
-    /// Test-only price oracle. Production returns now route through
-    /// `rustledger_query::scope_returns` (which owns the sole `PriceDatabase` →
-    /// `PriceOracle` adapter), but these lower-level drift guards exercise the
-    /// engine primitives (`terminal_value` / `extract_flows` /
-    /// `extract_cash_flows`) directly, which need a bare `PriceOracle` the helper
-    /// does not expose.
-    struct TestOracle<'a>(&'a PriceDatabase);
-    impl rustledger_returns::PriceOracle for TestOracle<'_> {
-        fn convert(&self, amount: &Amount, to: &str, date: NaiveDate) -> Option<Amount> {
-            self.0.convert(amount, to, date)
-        }
-    }
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         naive_date(y, m, day).unwrap()
@@ -771,7 +760,7 @@ mod tests {
         ];
         let end = d(2020, 12, 31);
         let price_db = PriceDatabase::from_directives(&dirs);
-        let oracle = TestOracle(&price_db);
+        let oracle = price_db.as_oracle();
 
         // Independently value `account_balances`' inventories at market for the
         // same scope, then compare to `terminal_value`.
@@ -833,7 +822,7 @@ mod tests {
             vec!["Income:Dividends".to_string()],
         );
         let price_db = PriceDatabase::from_directives(&dirs);
-        let oracle = TestOracle(&price_db);
+        let oracle = price_db.as_oracle();
 
         // Reproduce report_returns' hand-built series.
         let flows = extract_flows(&dirs, &scope, "USD", &oracle, end).unwrap();

@@ -559,12 +559,14 @@ interface ledger {
     /// `end-date` (`YYYY-MM-DD`) is both the horizon (later flows are excluded)
     /// and the terminal-valuation date; unlike the CLI it is required, since a
     /// component has no reliable clock. Prices come from the held entries'
-    /// `price` directives and implicit transaction prices. Like `format`, this
-    /// does NOT trap on recovered load errors (they surface via `info().errors`;
-    /// returns is computed over the held directives, as the CLI report renders
-    /// over them). Fallible: returns `err(message)` on an empty/unparseable
-    /// `end-date`, no resolvable reporting currency, or a boundary/terminal flow
-    /// that cannot be priced.
+    /// `price` directives and implicit transaction prices. Because returns
+    /// REALIZES inventory (unlike the text-only `format`), a load-errored ledger
+    /// can carry an un-booked, booking-failed transaction that would trap the
+    /// engine — so, like `query`, this refuses on load errors with a clean
+    /// `err` rather than risk the trap the contract forbids (inspect them via
+    /// `info().errors`). Fallible: returns `err(message)` on held load errors, an
+    /// empty/unparseable `end-date`, no resolvable reporting currency, or a
+    /// boundary/terminal flow that cannot be priced.
     returns: func(investments: list<string>, income: list<string>, currency: string, end-date: string) -> result<returns-result, string>;
   }
 }

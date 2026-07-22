@@ -2,7 +2,7 @@
 //! engine.
 //!
 //! [`rustledger_returns::compute_returns`] is the canonical returns math, but it
-//! takes a [`PriceOracle`] rather than a
+//! takes a [`PriceOracle`](rustledger_returns::PriceOracle) rather than a
 //! concrete price index — so every consumer must still build a [`PriceDatabase`]
 //! from the ledger, adapt it to the trait, and construct the [`Scope`]. That
 //! wiring was duplicated at the CLI (`report returns`) and the component
@@ -16,24 +16,10 @@
 //! `rustledger-returns` deliberately stays a leaf (no dependency on the price
 //! index), reaching prices only through its `PriceOracle` trait.
 
-use rustledger_core::{Amount, Directive, NaiveDate};
-use rustledger_returns::{
-    ExtractError, PriceOracle, Returns, Scope, compute_returns, compute_returns_multi,
-};
+use rustledger_core::{Directive, NaiveDate};
+use rustledger_returns::{ExtractError, Returns, Scope, compute_returns, compute_returns_multi};
 
 use crate::PriceDatabase;
-
-/// Adapts the query engine's [`PriceDatabase`] to the returns engine's
-/// [`PriceOracle`] trait. A pure pass-through to [`PriceDatabase::convert`] —
-/// the single copy now that the CLI and component both route their returns
-/// through this module.
-struct PriceDbOracle<'a>(&'a PriceDatabase);
-
-impl PriceOracle for PriceDbOracle<'_> {
-    fn convert(&self, amount: &Amount, to_currency: &str, date: NaiveDate) -> Option<Amount> {
-        self.0.convert(amount, to_currency, date)
-    }
-}
 
 /// Compute one scope's investment returns from a booked, pad-expanded stream.
 ///
@@ -56,16 +42,25 @@ pub fn scope_returns(
     end_date: NaiveDate,
 ) -> Result<Returns, ExtractError> {
     let price_db = PriceDatabase::from_directives(directives);
-    let oracle = PriceDbOracle(&price_db);
-    compute_returns(directives, scope, reporting_currency, &oracle, end_date)
+    compute_returns(
+        directives,
+        scope,
+        reporting_currency,
+        &price_db.as_oracle(),
+        end_date,
+    )
 }
 
 /// Compute several scopes' returns in ONE shared realization.
 ///
 /// Via [`compute_returns_multi`]: the booking pass is scope-independent, so the
 /// price index and realization are paid once for all scopes rather than once per
-/// scope. Results come back per scope in the input order; each is independent
-/// (one scope's missing price degrades only that scope, never the rest).
+/// scope. Results come back per scope in the input order.
+///
+/// # Errors
+/// Each element is independent: a scope whose boundary flow or terminal
+/// valuation cannot be priced in `reporting_currency` fails with
+/// [`ExtractError::MissingPrice`] for that scope only, never failing the others.
 ///
 /// # Panics
 /// See [`compute_returns_multi`]: `directives` must be the booked, pad-expanded
@@ -78,6 +73,11 @@ pub fn scopes_returns(
     end_date: NaiveDate,
 ) -> Vec<Result<Returns, ExtractError>> {
     let price_db = PriceDatabase::from_directives(directives);
-    let oracle = PriceDbOracle(&price_db);
-    compute_returns_multi(directives, scopes, reporting_currency, &oracle, end_date)
+    compute_returns_multi(
+        directives,
+        scopes,
+        reporting_currency,
+        &price_db.as_oracle(),
+        end_date,
+    )
 }

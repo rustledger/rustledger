@@ -1831,19 +1831,25 @@ impl SessionState {
     /// pad-expanded stream `query` builds (reused via the `padded` cell), so the
     /// two surfaces cannot compute different figures for one ledger.
     ///
-    /// Like `session.format`, this does NOT trap on recovered load errors: per
-    /// the resource's contract those surface via `info().errors`, and returns is
-    /// computed over the held (possibly error-recovered) directives exactly as
-    /// the CLI report renders over them.
+    /// Refuses (a clean `Err`, never a trap) when the held ledger has load
+    /// errors — the same guard `query` applies. Unlike `format`, which only
+    /// renders directive text, returns REALIZES inventory, and the loader
+    /// re-merges a booking-failed transaction into the held directives in its
+    /// un-booked shape; realizing that contract-violating stream can
+    /// `debug_assert`-trap the booking engine (over-sell with no matching lot).
+    /// The resource contract is "load failures surface via `info().errors`, not
+    /// a trap" — so a realizing op surfaces them as an `Err` rather than risk the
+    /// trap the convention forbids. (`format`/`filter`/`clamp` don't realize, so
+    /// they proceed.)
     ///
     /// `investments`/`income` are the scope's account-name prefixes; `currency`
     /// is the single reporting currency (empty → the ledger's first
     /// `operating_currency`); `end` is the horizon + terminal-valuation date.
     ///
     /// # Errors
-    /// `Err(message)` when `end` is empty/unparseable, no reporting currency
-    /// resolves (empty `currency` and no `operating_currency`), or a
-    /// boundary/terminal flow cannot be priced.
+    /// `Err(message)` when the held ledger has load errors, `end` is
+    /// empty/unparseable, no reporting currency resolves (empty `currency` and
+    /// no `operating_currency`), or a boundary/terminal flow cannot be priced.
     pub fn returns(
         &self,
         investments: &[String],
@@ -1851,6 +1857,14 @@ impl SessionState {
         currency: &str,
         end: &str,
     ) -> Result<out::ReturnsResult, String> {
+        // See the doc comment: returns realizes inventory, so — like `query`, and
+        // unlike the text-only `format` — it must not run over a load-errored
+        // (possibly un-booked) stream. Surface the errors as a clean Err.
+        if !self.errors.is_empty() {
+            return Err(
+                "ledger has load errors; cannot compute returns (see info().errors)".to_string(),
+            );
+        }
         let end_date: NaiveDate = end
             .parse()
             .map_err(|_| format!("invalid end-date {end:?} (expected YYYY-MM-DD)"))?;
@@ -2913,35 +2927,51 @@ option \"operating_currency\" \"USD\"
     }
 
     #[test]
-    fn returns_computes_despite_recovered_load_errors() {
-        // Per the resource contract (see `from-file`: load failures surface via
-        // `info().errors`, not a trap) and matching `session.format`, returns
-        // does NOT refuse on a recovered load error — it computes over the held
-        // directives exactly as the CLI `report returns` renders over them. Here
-        // a garbage line is a recovered parse error; the surrounding investment
-        // activity still loads and still produces a return.
-        const RECOVERED: &str = "\
+    fn returns_refuses_on_load_errors() {
+        // returns realizes inventory, so — like `query` and unlike text-only
+        // `format` — it must refuse (clean Err) on a load-errored ledger rather
+        // than realize a contract-violating (possibly un-booked) stream. A parse
+        // error triggers the guard:
+        const PARSE_ERR: &str = "\
+option \"operating_currency\" \"USD\"
+2020-01-01 open Assets:Invest:Broker
+this line is not a valid directive @#$
+";
+        let state = SessionState::from_source(PARSE_ERR);
+        assert!(!state.info().errors.is_empty(), "fixture must load-error");
+        let (inv, inc) = scope_args();
+        assert!(state.returns(&inv, &inc, "USD", "2021-01-01").is_err());
+    }
+
+    #[test]
+    fn returns_refuses_on_booking_error_without_trapping() {
+        // The dangerous case the guard exists for: a booking-FAILED transaction
+        // (here selling 10 units when only 5 were bought, empty cost forcing a
+        // lot match) is re-merged into the held directives in its un-booked
+        // shape. Realizing that would `debug_assert`-trap the booking engine
+        // (over-sell) — this native test would ABORT without the guard. With it,
+        // the load error is caught first and returns cleanly errs. (Regression
+        // guard for the #1849 second-review finding.)
+        const OVERSELL: &str = "\
 option \"operating_currency\" \"USD\"
 2020-01-01 open Assets:Invest:Broker
 2020-01-01 open Assets:Cash
-this line is not a valid directive @#$
-2020-01-01 * \"Buy 10 ACME\"
-  Assets:Invest:Broker  10 ACME {100 USD}
+2020-01-01 * \"Buy 5 ACME\"
+  Assets:Invest:Broker  5 ACME {100 USD}
   Assets:Cash
-2021-01-01 price ACME  120 USD
+2020-06-01 * \"Sell 10 — more than held\"
+  Assets:Invest:Broker  -10 ACME {}
+  Assets:Cash  1000 USD
 ";
-        let state = SessionState::from_source(RECOVERED);
+        let state = SessionState::from_source(OVERSELL);
         assert!(
             !state.info().errors.is_empty(),
-            "fixture must produce a recovered load error"
+            "over-sell must surface as a booking load error"
         );
         let (inv, inc) = scope_args();
-        let r = state
-            .returns(&inv, &inc, "USD", "2021-01-01")
-            .expect("returns computes over the recovered directives");
         assert!(
-            r.money_weighted.is_some(),
-            "the recovered investment activity must still yield a return"
+            state.returns(&inv, &inc, "USD", "2021-01-01").is_err(),
+            "returns must refuse (not trap) on a booking-errored ledger"
         );
     }
 }

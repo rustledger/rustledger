@@ -79,6 +79,21 @@ struct RawPrice {
     rate: Decimal,
 }
 
+/// The [`PriceDatabase`] → [`PriceOracle`](rustledger_returns::PriceOracle)
+/// adapter returned by [`PriceDatabase::as_oracle`].
+///
+/// A pure pass-through to [`PriceDatabase::convert`] — the codebase's single
+/// such adapter (the CLI's `report returns`, the component's `session.returns`,
+/// and the shared `crate::returns` helpers all reach the returns engine through
+/// it).
+pub struct PriceDbOracle<'a>(&'a PriceDatabase);
+
+impl rustledger_returns::PriceOracle for PriceDbOracle<'_> {
+    fn convert(&self, amount: &Amount, to_currency: &str, date: NaiveDate) -> Option<Amount> {
+        self.0.convert(amount, to_currency, date)
+    }
+}
+
 impl PriceDatabase {
     /// Create a new empty price database.
     pub fn new() -> Self {
@@ -529,6 +544,19 @@ impl PriceDatabase {
 
         self.get_price(&amount.currency, to_currency, date)
             .map(|price| Amount::new(amount.number * price, to_currency))
+    }
+
+    /// Adapt this price index to the returns engine's
+    /// [`PriceOracle`](rustledger_returns::PriceOracle) trait.
+    ///
+    /// The single `PriceDatabase` → `PriceOracle` bridge in the codebase, so
+    /// `rustledger-returns` stays a leaf (it reaches prices only through the
+    /// trait) and no consumer re-derives the adapter. Used by
+    /// [`crate::returns::scope_returns`] / [`crate::returns::scopes_returns`] and
+    /// the CLI/component returns paths.
+    #[must_use]
+    pub const fn as_oracle(&self) -> PriceDbOracle<'_> {
+        PriceDbOracle(self)
     }
 
     /// Convert an amount using the latest available price.

@@ -394,9 +394,11 @@ interface ledger {
 
   /// Investment returns for one scope, as computed by `rledger report returns`
   /// (money-weighted XIRR + time-weighted TWR) — see `session.returns`
-  /// (WIT 3.9.0, #1847). The three amount fields are decimal strings (matching
-  /// `amount.number`) to preserve full precision; `cash-flows` is the number of
-  /// dated boundary flows the return was computed over. The two rates are
+  /// (WIT 3.9.0, #1847). The three amount fields are RAW, full-precision decimal
+  /// strings (matching `amount.number`) — NOT display-formatted: no thousands
+  /// separators and no display-precision padding, unlike the CLI's rendered
+  /// report. A host formats them for its own locale. `cash-flows` is the number
+  /// of dated boundary flows the return was computed over. The two rates are
   /// annualized fractions (0.1 = 10%) and `none` when undefined — money-weighted
   /// when there are fewer than two flows or no sign change; time-weighted when a
   /// sub-period cannot be priced.
@@ -557,10 +559,12 @@ interface ledger {
     /// `end-date` (`YYYY-MM-DD`) is both the horizon (later flows are excluded)
     /// and the terminal-valuation date; unlike the CLI it is required, since a
     /// component has no reliable clock. Prices come from the held entries'
-    /// `price` directives and implicit transaction prices. Fallible: returns
-    /// `err(message)` on an empty/unparseable `end-date`, no resolvable
-    /// reporting currency, held load errors, or a boundary/terminal flow that
-    /// cannot be priced.
+    /// `price` directives and implicit transaction prices. Like `format`, this
+    /// does NOT trap on recovered load errors (they surface via `info().errors`;
+    /// returns is computed over the held directives, as the CLI report renders
+    /// over them). Fallible: returns `err(message)` on an empty/unparseable
+    /// `end-date`, no resolvable reporting currency, or a boundary/terminal flow
+    /// that cannot be priced.
     returns: func(investments: list<string>, income: list<string>, currency: string, end-date: string) -> result<returns-result, string>;
   }
 }

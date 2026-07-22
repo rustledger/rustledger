@@ -714,12 +714,13 @@ fn session_format_honors_display_precision() -> Result<()> {
 }
 
 /// `session.returns` (WIT 3.9.0, #1847): the component's returns over the held
-/// ledger must equal a NATIVE `rustledger_returns::compute_returns` over the
-/// same booked, pad-expanded stream + price index (the CLI's exact composition).
-/// Drift guard across the wasm boundary — the decimal fields (rust_decimal, pure
-/// integer arithmetic) must match byte-for-byte; the two `f64` rates are
-/// compared within a tolerance, since wasm and native float can differ by an ULP
-/// in the XIRR/TWR iteration.
+/// ledger must equal the NATIVE `rustledger_query::scope_returns` over the same
+/// booked, pad-expanded stream — the SAME composition the CLI's `report returns`
+/// calls, so this pins the wasm surface against the CLI's returns path, not a
+/// private re-implementation. Drift guard across the wasm boundary: the decimal
+/// fields (rust_decimal, pure integer arithmetic) must match byte-for-byte; the
+/// two `f64` rates are compared within a tolerance, since wasm and native float
+/// can differ by an ULP in the XIRR/TWR iteration.
 #[test]
 fn session_returns_matches_native_engine() -> Result<()> {
     if !component_path().exists() {
@@ -758,18 +759,7 @@ option \"operating_currency\" \"USD\"
         .map_err(|e| anyhow::anyhow!("returns failed: {e}"))?;
     handle.resource_drop(&mut store)?;
 
-    // Native reference: the exact engine + inputs the CLI uses.
-    struct Oracle<'a>(&'a rustledger_query::PriceDatabase);
-    impl rustledger_returns::PriceOracle for Oracle<'_> {
-        fn convert(
-            &self,
-            amount: &rustledger_core::Amount,
-            to_currency: &str,
-            date: rustledger_core::NaiveDate,
-        ) -> Option<rustledger_core::Amount> {
-            self.0.convert(amount, to_currency, date)
-        }
-    }
+    // Native reference: the shared helper both the CLI and the component call.
     let native = rustledger_ffi_wasi::helpers::load_source(LEDGER);
     assert!(
         native.errors.is_empty(),
@@ -778,9 +768,8 @@ option \"operating_currency\" \"USD\"
     );
     let padded = rustledger_booking::merge_with_padding(&native.directives);
     let scope = rustledger_returns::Scope::new(investments.clone(), income.clone());
-    let db = rustledger_query::PriceDatabase::from_directives(&padded);
     let end = "2021-01-01".parse().expect("date");
-    let direct = rustledger_returns::compute_returns(&padded, &scope, "USD", &Oracle(&db), end)
+    let direct = rustledger_query::scope_returns(&padded, &scope, "USD", end)
         .expect("native engine computes");
 
     // Decimal fields: exact (rust_decimal is deterministic across targets).

@@ -32,6 +32,7 @@ pub mod error;
 pub mod executor;
 pub mod parser;
 pub mod price;
+pub mod returns;
 
 // AST types are accessed via `rustledger_query::ast::*` rather than re-exported
 // at the crate root. The previous `pub use ast::*;` glob exposed 22 names —
@@ -42,3 +43,4 @@ pub use error::{ParseError, QueryError};
 pub use executor::{Executor, Interval, IntervalUnit, QueryResult, Value};
 pub use parser::parse;
 pub use price::PriceDatabase;
+pub use returns::{scope_returns, scopes_returns};

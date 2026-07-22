@@ -3651,6 +3651,7 @@ dependencies = [
  "rustledger-core",
  "rustledger-loader",
  "rustledger-parser",
+ "rustledger-returns",
  "serde_json",
  "thiserror 2.0.19",
 ]

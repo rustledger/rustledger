@@ -20,6 +20,7 @@ rustledger-core.workspace = true
 rustledger-booking.workspace = true
 rustledger-parser.workspace = true
 rustledger-loader.workspace = true
+rustledger-returns.workspace = true
 chumsky.workspace = true
 rust_decimal.workspace = true
 jiff.workspace = true

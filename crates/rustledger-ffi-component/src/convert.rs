@@ -13,9 +13,9 @@
 //! cases. (Custom-directive arguments additionally carry their `value-type` tag
 //! via the WIT `typed-value` record.)
 
-use rustledger_core::{Amount, Directive, MetaValue, Metadata, NaiveDate};
+use rustledger_core::{Directive, MetaValue, Metadata, NaiveDate};
 use rustledger_ffi_wasi as ffi;
-use rustledger_query::{Executor, IntervalUnit, PriceDatabase, Value, parse as parse_query};
+use rustledger_query::{Executor, IntervalUnit, Value, parse as parse_query};
 use serde_json::Value as Json;
 
 use crate::exports::rustledger::ledger::ledger as out;
@@ -1535,26 +1535,6 @@ fn sanitize_options(mut provided: wit::LedgerOptions) -> wit::LedgerOptions {
 /// per-directive provenance, plus the load metadata, normalized across the
 /// source and file load paths. Errors are pre-converted to WIT form (the file
 /// path's failure case has only a message, not a rich `ffi::Error`).
-/// Adapts the query engine's [`PriceDatabase`] to the returns engine's
-/// [`rustledger_returns::PriceOracle`] trait, so `session.returns` prices flows
-/// from the held ledger's `price` directives + implicit transaction prices.
-///
-/// Deliberate duplicate of the CLI's `PriceDbOracle`
-/// (`crates/rustledger/src/cmd/report_cmd/returns.rs`): that one is
-/// `pub(super)` and unreachable from here, and `rustledger-returns` is a leaf
-/// crate (no `rustledger-query` dependency) so the adapter cannot live beside
-/// the trait it implements. The body is a pure pass-through to
-/// [`PriceDatabase::convert`], so the compiler enforces agreement — a signature
-/// change on either canonical surface fails to build rather than drifting
-/// silently. If a third consumer appears, hoist this into a shared home.
-struct PriceDbOracle<'a>(&'a PriceDatabase);
-
-impl rustledger_returns::PriceOracle for PriceDbOracle<'_> {
-    fn convert(&self, amount: &Amount, to_currency: &str, date: NaiveDate) -> Option<Amount> {
-        self.0.convert(amount, to_currency, date)
-    }
-}
-
 pub struct SessionState {
     directives: Vec<rustledger_core::Directive>,
     lines: Vec<u32>,
@@ -1844,22 +1824,26 @@ impl SessionState {
     }
 
     /// Investment returns over the held ledger (WIT 3.9.0, #1847): the
-    /// `rledger report returns` engine ([`rustledger_returns::compute_returns`])
-    /// over the boundary, so a host charts returns without re-deriving the
-    /// cash-flow extraction or the XIRR/TWR math. Runs on the same booked,
-    /// pad-expanded stream `query` builds (the returns engine's documented input
-    /// contract, reused via the `padded` cell) and builds the price index the
-    /// same way the CLI's `report returns` does — the boundary shares the exact
-    /// engine and inputs the CLI uses, so the two cannot drift.
+    /// `rledger report returns` engine over the boundary, so a host charts
+    /// returns without re-deriving the cash-flow extraction or the XIRR/TWR
+    /// math. Delegates to [`rustledger_query::scope_returns`] — the *same*
+    /// composition the CLI's `report returns` calls — over the same booked,
+    /// pad-expanded stream `query` builds (reused via the `padded` cell), so the
+    /// two surfaces cannot compute different figures for one ledger.
+    ///
+    /// Like `session.format`, this does NOT trap on recovered load errors: per
+    /// the resource's contract those surface via `info().errors`, and returns is
+    /// computed over the held (possibly error-recovered) directives exactly as
+    /// the CLI report renders over them.
     ///
     /// `investments`/`income` are the scope's account-name prefixes; `currency`
     /// is the single reporting currency (empty → the ledger's first
     /// `operating_currency`); `end` is the horizon + terminal-valuation date.
     ///
     /// # Errors
-    /// `Err(message)` when the held ledger has load errors, `end` is
-    /// empty/unparseable, no reporting currency resolves (empty `currency` and
-    /// no `operating_currency`), or a boundary/terminal flow cannot be priced.
+    /// `Err(message)` when `end` is empty/unparseable, no reporting currency
+    /// resolves (empty `currency` and no `operating_currency`), or a
+    /// boundary/terminal flow cannot be priced.
     pub fn returns(
         &self,
         investments: &[String],
@@ -1867,9 +1851,6 @@ impl SessionState {
         currency: &str,
         end: &str,
     ) -> Result<out::ReturnsResult, String> {
-        if !self.errors.is_empty() {
-            return Err("ledger has load errors; cannot compute returns".to_string());
-        }
         let end_date: NaiveDate = end
             .parse()
             .map_err(|_| format!("invalid end-date {end:?} (expected YYYY-MM-DD)"))?;
@@ -1892,17 +1873,13 @@ impl SessionState {
             .padded
             .get_or_init(|| rustledger_booking::merge_with_padding(&self.directives));
         let scope = rustledger_returns::Scope::new(investments.to_vec(), income.to_vec());
-        let price_db = PriceDatabase::from_directives(directives);
-        let oracle = PriceDbOracle(&price_db);
-        let returns = rustledger_returns::compute_returns(
-            directives,
-            &scope,
-            &reporting_currency,
-            &oracle,
-            end_date,
-        )
-        .map_err(|e| e.to_string())?;
+        let returns =
+            rustledger_query::scope_returns(directives, &scope, &reporting_currency, end_date)
+                .map_err(|e| e.to_string())?;
         Ok(out::ReturnsResult {
+            // usize -> u32: a cash-flow count is one per boundary-crossing
+            // posting, so it cannot approach u32::MAX in any real ledger; the
+            // saturating clamp is unreachable defensive code, not a lossy path.
             cash_flows: u32::try_from(returns.cash_flows).unwrap_or(u32::MAX),
             invested: returns.invested.to_string(),
             distributions: returns.distributions.to_string(),
@@ -2812,7 +2789,7 @@ mod importer_tests {
 /// `session.returns` (WIT 3.9.0, #1847): the returns engine over the boundary.
 #[cfg(test)]
 mod returns_tests {
-    use super::{PriceDatabase, PriceDbOracle, SessionState};
+    use super::SessionState;
 
     const LEDGER: &str = "\
 option \"operating_currency\" \"USD\"
@@ -2839,13 +2816,12 @@ option \"operating_currency\" \"USD\"
     }
 
     /// Drift guard (canonical-function discipline): `session.returns` must equal
-    /// a direct [`rustledger_returns::compute_returns`] over the SAME booked,
-    /// pad-expanded stream + price index. The session op only wires the scope /
-    /// currency / horizon and maps the `Returns` struct, so any divergence in
-    /// that wiring — wrong stream, dropped scope arg, a wrongly mapped field —
-    /// trips this.
+    /// [`rustledger_query::scope_returns`] over the same booked, pad-expanded
+    /// stream. That helper is the SAME composition the CLI's `report returns`
+    /// calls, so equality here pins the component against the CLI's returns path
+    /// — not merely against a private copy of the engine wiring.
     #[test]
-    fn returns_matches_direct_engine() {
+    fn returns_matches_shared_helper() {
         let state = SessionState::from_source(LEDGER);
         assert!(
             state.info().errors.is_empty(),
@@ -2858,20 +2834,19 @@ option \"operating_currency\" \"USD\"
             .returns(&inv, &inc, "USD", "2021-01-01")
             .expect("returns computes");
 
-        // Recompute directly through the engine over identical inputs.
+        // The shared helper both surfaces route through (CLI report_returns and
+        // session.returns), so agreement here == CLI parity, not a self-check.
         let padded = rustledger_booking::merge_with_padding(&state.directives);
         let scope = rustledger_returns::Scope::new(inv, inc);
-        let db = PriceDatabase::from_directives(&padded);
-        let oracle = PriceDbOracle(&db);
         let end = "2021-01-01".parse().expect("date");
-        let direct = rustledger_returns::compute_returns(&padded, &scope, "USD", &oracle, end)
-            .expect("direct engine computes");
+        let shared = rustledger_query::scope_returns(&padded, &scope, "USD", end)
+            .expect("shared helper computes");
 
         // Decimal fields (rust_decimal → deterministic) are exact strings.
-        assert_eq!(via.cash_flows, u32::try_from(direct.cash_flows).unwrap());
-        assert_eq!(via.invested, direct.invested.to_string());
-        assert_eq!(via.distributions, direct.distributions.to_string());
-        assert_eq!(via.current_value, direct.current_value.to_string());
+        assert_eq!(via.cash_flows, u32::try_from(shared.cash_flows).unwrap());
+        assert_eq!(via.invested, shared.invested.to_string());
+        assert_eq!(via.distributions, shared.distributions.to_string());
+        assert_eq!(via.current_value, shared.current_value.to_string());
         // Rates are the same in-process computation, so identical; compare with
         // a tolerance anyway (clippy forbids exact float `==`).
         let same_rate = |a: Option<f64>, b: Option<f64>| match (a, b) {
@@ -2879,8 +2854,8 @@ option \"operating_currency\" \"USD\"
             (None, None) => true,
             _ => false,
         };
-        assert!(same_rate(via.money_weighted, direct.money_weighted));
-        assert!(same_rate(via.time_weighted, direct.time_weighted));
+        assert!(same_rate(via.money_weighted, shared.money_weighted));
+        assert!(same_rate(via.time_weighted, shared.time_weighted));
 
         // Value anchors (numeric parse tolerates 1000 vs 1000.00 formatting).
         assert!((via.invested.parse::<f64>().unwrap() - 1000.0).abs() < 1e-9);
@@ -2938,23 +2913,35 @@ option \"operating_currency\" \"USD\"
     }
 
     #[test]
-    fn returns_surfaces_load_errors() {
-        // A parse error surfaces at load (`load_source` runs parse + book), so
-        // returns refuses rather than reporting a bogus number over a broken
-        // ledger. Mirrors `query`'s guard on `self.errors`; semantic checks
-        // (imbalance, unopened accounts) are `ledger.validate`'s job and are
-        // deliberately not run on this surface.
-        const BAD: &str = "\
+    fn returns_computes_despite_recovered_load_errors() {
+        // Per the resource contract (see `from-file`: load failures surface via
+        // `info().errors`, not a trap) and matching `session.format`, returns
+        // does NOT refuse on a recovered load error — it computes over the held
+        // directives exactly as the CLI `report returns` renders over them. Here
+        // a garbage line is a recovered parse error; the surrounding investment
+        // activity still loads and still produces a return.
+        const RECOVERED: &str = "\
 option \"operating_currency\" \"USD\"
 2020-01-01 open Assets:Invest:Broker
+2020-01-01 open Assets:Cash
 this line is not a valid directive @#$
+2020-01-01 * \"Buy 10 ACME\"
+  Assets:Invest:Broker  10 ACME {100 USD}
+  Assets:Cash
+2021-01-01 price ACME  120 USD
 ";
-        let state = SessionState::from_source(BAD);
+        let state = SessionState::from_source(RECOVERED);
         assert!(
             !state.info().errors.is_empty(),
-            "fixture must produce a load error"
+            "fixture must produce a recovered load error"
         );
         let (inv, inc) = scope_args();
-        assert!(state.returns(&inv, &inc, "USD", "2021-01-01").is_err());
+        let r = state
+            .returns(&inv, &inc, "USD", "2021-01-01")
+            .expect("returns computes over the recovered directives");
+        assert!(
+            r.money_weighted.is_some(),
+            "the recovered investment activity must still yield a return"
+        );
     }
 }

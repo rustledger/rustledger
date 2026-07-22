@@ -527,18 +527,14 @@ impl BookingEngine {
     /// Apply ONE posting to the running inventories, returning an error if it
     /// reduces a lot that is not held.
     ///
-    /// The per-posting core of [`Self::apply`] (which ignores a reduction
-    /// failure, per its booked-input contract; this method surfaces it). Public
-    /// so a consumer that realizes only a SUBSET of a transaction's postings —
-    /// e.g. the returns engine valuing only its in-scope investment accounts —
-    /// can book exactly those and leave an unrelated account's over-sell (which
-    /// the loader may have re-merged un-booked) untouched, rather than aborting
-    /// on a posting it never values.
+    /// The per-posting core shared by [`Self::apply`] (which ignores a reduction
+    /// failure, per its booked-input contract) and [`Self::try_apply`] (which
+    /// surfaces it).
     ///
     /// # Errors
     /// Returns the reduce error when the posting reduces a lot that is not held
     /// (an over-sell / unbooked-input contract violation).
-    pub fn try_apply_posting(
+    fn try_apply_posting(
         &mut self,
         posting: &Posting,
         date: rustledger_core::NaiveDate,
@@ -585,8 +581,7 @@ impl BookingEngine {
     /// in-loop `debug_assert` below catches a violating caller in debug builds.
     /// A caller that CANNOT guarantee booked input (e.g. valuing a returns scope
     /// over a ledger whose loader re-merged a booking-failed transaction) must
-    /// apply per posting with [`Self::try_apply_posting`], which surfaces the
-    /// failure as an `Err`.
+    /// use [`Self::try_apply`] instead, which surfaces the failure as an `Err`.
     pub fn apply(&mut self, txn: &Transaction) {
         for posting in &txn.postings {
             let reduced = self.try_apply_posting(posting, txn.date);
@@ -595,11 +590,32 @@ impl BookingEngine {
                 "apply() reduction failed — the transaction must be booked \
                  before apply() (postings filled, costs resolved); applying an \
                  unbooked reduction silently over-sells inventory. Use \
-                 try_apply_posting() if the input may be unbooked."
+                 try_apply() if the input may be unbooked."
             );
             // Release builds keep the historical ignore-and-continue behavior.
             let _ = reduced;
         }
+    }
+
+    /// Fallible [`Self::apply`]: apply a transaction's postings, but return an
+    /// error the moment a reduction has no matching lot instead of
+    /// `debug_assert`-ing (debug) or silently over-selling (release).
+    ///
+    /// For consumers that realize inventory over a stream they cannot guarantee
+    /// is booked — the returns engine values a scope over `Ledger.directives`,
+    /// which the loader re-merges booking-FAILED transactions into in their
+    /// un-booked shape — so the failure becomes a clean `Err` at the boundary
+    /// rather than a wasm trap or a wrong figure.
+    ///
+    /// # Errors
+    /// Returns [`BookingError::Inventory`] on the first posting that reduces a
+    /// lot not held. Postings before it have already been applied (the caller is
+    /// expected to discard the engine on error).
+    pub fn try_apply(&mut self, txn: &Transaction) -> Result<(), BookingError> {
+        for posting in &txn.postings {
+            self.try_apply_posting(posting, txn.date)?;
+        }
+        Ok(())
     }
 
     /// Book and interpolate a transaction.

@@ -559,16 +559,15 @@ interface ledger {
     /// `end-date` (`YYYY-MM-DD`) is both the horizon (later flows are excluded)
     /// and the terminal-valuation date; unlike the CLI it is required, since a
     /// component has no reliable clock. Prices come from the held entries'
-    /// `price` directives and implicit transaction prices. This computes over the
-    /// held (possibly error-recovered) directives just as the CLI's `report
-    /// returns` renders over them — the beancount/fava model, where a report
-    /// renders over loaded-with-errors entries and errors surface separately (via
-    /// `info().errors`). It stays safe because the engine realizes through a
-    /// fallible path: an un-booked reduction in a VALUED account surfaces as
-    /// `err` (never a trap), and a booking error outside the returns scope is
-    /// skipped. Fallible: returns `err(message)` on an empty/unparseable
-    /// `end-date`, no resolvable reporting currency, or an in-scope
-    /// boundary/terminal flow that cannot be priced or is un-booked.
+    /// `price` directives and implicit transaction prices. A parse-recovered load
+    /// error does not block it — it computes over the held directives like the
+    /// CLI's `report returns` (errors surface via `info().errors`) — but a BOOKING
+    /// error (un-booked reduction) is fatal: the engine realizes through a
+    /// fallible path and returns a clean `err` rather than trap or report a figure
+    /// over a contract-violating stream (stricter than beangrow, deliberately —
+    /// run `rledger check`). Fallible: returns `err(message)` on an
+    /// empty/unparseable `end-date`, no resolvable reporting currency, a
+    /// boundary/terminal flow that cannot be priced, or a booking error.
     returns: func(investments: list<string>, income: list<string>, currency: string, end-date: string) -> result<returns-result, string>;
   }
 }

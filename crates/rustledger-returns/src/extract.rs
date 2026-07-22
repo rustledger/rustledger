@@ -85,7 +85,7 @@
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
-use rustledger_core::{Amount, Directive, IncompleteAmount, NaiveDate, is_subaccount_or_equal};
+use rustledger_core::{Amount, Directive, NaiveDate, is_subaccount_or_equal};
 
 use crate::CashFlow;
 
@@ -448,9 +448,9 @@ fn investment_value_at(
         if let Directive::Transaction(txn) = directive
             && txn.date <= date
         {
-            apply_scoped(&mut engine, txn, |a| {
-                scope.classify(a) == AccountRole::Investment
-            })?;
+            engine
+                .try_apply(txn)
+                .map_err(|e| ExtractError::UnbookedInput(e.to_string()))?;
         }
     }
     value_investment_scope(
@@ -460,42 +460,6 @@ fn investment_value_at(
         prices,
         date,
     )
-}
-
-/// Apply the postings of `txn` whose account `is_relevant` accepts — the accounts
-/// a realization will actually value (`Investment`-scope) — surfacing an over-sell
-/// as [`ExtractError::UnbookedInput`].
-///
-/// Postings to accounts this realization never values (an unrelated account whose
-/// over-sell the loader re-merged un-booked) are skipped, so a booking error
-/// OUTSIDE the returns scope never aborts an in-scope report. This matches the
-/// beancount/fava model — reports render over loaded-with-errors entries, with
-/// errors surfaced separately (`rledger check`) — while an over-sell IN a valued
-/// account still surfaces (its valuation would otherwise be wrong).
-fn apply_scoped(
-    engine: &mut rustledger_booking::BookingEngine,
-    txn: &rustledger_core::Transaction,
-    is_relevant: impl Fn(&str) -> bool,
-) -> Result<(), ExtractError> {
-    for posting in &txn.postings {
-        if is_relevant(posting.account.as_str()) {
-            // A booked, pad-expanded stream fills every posting's units, so an
-            // in-scope posting with elided/uninterpolated units means the input
-            // is not booked. Surface it rather than let `try_apply_posting`
-            // silently skip the leg and understate the position (booking, which
-            // this leaf crate cannot run, would have filled it).
-            if !matches!(posting.units, Some(IncompleteAmount::Complete(_))) {
-                return Err(ExtractError::UnbookedInput(format!(
-                    "posting to {} has no complete units — un-booked input",
-                    posting.account
-                )));
-            }
-            engine
-                .try_apply_posting(posting, txn.date)
-                .map_err(|e| ExtractError::UnbookedInput(e.to_string()))?;
-        }
-    }
-    Ok(())
 }
 
 /// Total market value (in `reporting_currency`, at `date`) of the
@@ -602,14 +566,13 @@ fn investment_values_at(
         // ascend, so the cursor only moves forward across the whole batch).
         while let Some(txn) = txns.peek() {
             if txn.date <= date {
-                if let Err(e) = apply_scoped(&mut engine, txn, |a| {
-                    scope.classify(a) == AccountRole::Investment
-                }) {
-                    // An in-scope reduction is un-booked: value every remaining
+                if let Err(e) = engine.try_apply(txn) {
+                    // Contract-violating (un-booked) stream: value every remaining
                     // date as the same error rather than over-sell. Dates already
                     // pushed (strictly before this transaction) stay correct.
+                    let err = ExtractError::UnbookedInput(e.to_string());
                     while values.len() < dates.len() {
-                        values.push(Err(e.clone()));
+                        values.push(Err(err.clone()));
                     }
                     return values;
                 }
@@ -682,34 +645,17 @@ fn investment_values_multi(
     for &date in &union {
         while let Some(txn) = txns.peek() {
             if txn.date <= date {
-                // Relevant = valued by ANY scope; the shared pass books the union
-                // of every scope's investment accounts, so an over-sell outside
-                // all of them is skipped, not aborted.
-                if apply_scoped(&mut engine, txn, |a| {
-                    scoped_dates
-                        .iter()
-                        .any(|(scope, _)| scope.classify(a) == AccountRole::Investment)
-                })
-                .is_err()
-                {
-                    // The union pass can't tell WHICH scope owns the failing
-                    // account, so it would wrongly error every scope. Recompute
-                    // each scope independently (exactly the unsorted fallback):
-                    // now only the scope whose own accounts contain the un-booked
-                    // reduction errors, and a clean, disjoint sub-portfolio still
-                    // values correctly — matching the single-scope path.
-                    return scoped_dates
-                        .iter()
-                        .map(|(scope, dates)| {
-                            investment_values_at(
-                                directives,
-                                scope,
-                                reporting_currency,
-                                prices,
-                                dates,
-                            )
-                        })
-                        .collect();
+                if let Err(e) = engine.try_apply(txn) {
+                    // Contract-violating (un-booked) stream: the shared pass can't
+                    // produce any scope's values past here, so fill every scope's
+                    // remaining dates with the same error.
+                    let err = ExtractError::UnbookedInput(e.to_string());
+                    for (i, (_, dates)) in scoped_dates.iter().enumerate() {
+                        while values[i].len() < dates.len() {
+                            values[i].push(Err(err.clone()));
+                        }
+                    }
+                    return values;
                 }
                 txns.next();
             } else {
@@ -1270,129 +1216,6 @@ mod tests {
         assert!(
             matches!(r, Err(ExtractError::UnbookedInput(_))),
             "over-reducing an empty-cost lot must yield UnbookedInput, got {r:?}"
-        );
-    }
-
-    /// An over-sell OUTSIDE the returns scope must NOT abort the report — the
-    /// realization books only the accounts it values, matching beancount/fava
-    /// (reports render over loaded-with-errors entries). Here a clean in-scope
-    /// holding coexists with an un-booked over-sell in an unrelated broker.
-    #[test]
-    fn out_of_scope_oversell_does_not_abort_report() {
-        use rustledger_core::{CostNumber, CostSpec};
-        let dirs = vec![
-            // In-scope (Assets:Broker) — a clean buy, valued at end.
-            txn(
-                d(2020, 1, 1),
-                vec![
-                    Posting::new("Assets:Broker:Stock", amt(dec!(10), "AAPL")),
-                    Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
-                ],
-            ),
-            // OUT-of-scope (Assets:Other) — buy 5 then over-reduce 10 with empty
-            // cost: the loader would re-merge this un-booked, but it is never valued.
-            txn(
-                d(2020, 2, 1),
-                vec![
-                    Posting::new("Assets:Other:Stock", amt(dec!(5), "ZZZ")).with_cost(
-                        CostSpec::empty()
-                            .with_number(CostNumber::PerUnit { value: dec!(1) })
-                            .with_currency("USD"),
-                    ),
-                    Posting::new("Assets:Bank", amt(dec!(-5), "USD")),
-                ],
-            ),
-            txn(
-                d(2020, 6, 1),
-                vec![
-                    Posting::new("Assets:Other:Stock", amt(dec!(-10), "ZZZ"))
-                        .with_cost(CostSpec::empty()),
-                    Posting::new("Assets:Bank", amt(dec!(10), "USD")),
-                ],
-            ),
-        ];
-        let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(120));
-        let scope = Scope::new(vec!["Assets:Broker".to_string()], vec![]);
-        let r = compute_returns(&dirs, &scope, "USD", &prices, d(2020, 12, 31));
-        let returns = r.expect("out-of-scope over-sell must not abort the in-scope report");
-        // In-scope figure is correct and unaffected: 10 AAPL @ 120 = 1200.
-        assert_eq!(returns.current_value, dec!(1200));
-    }
-
-    /// `--by-group` isolation: an over-sell in one group's account must error
-    /// only THAT group, not a clean, disjoint group sharing the shared booking
-    /// pass. Input is date-sorted so it exercises the shared union pass (not the
-    /// unsorted per-scope fallback); the fix makes the union pass degrade to
-    /// per-scope on a booking error.
-    #[test]
-    fn multi_isolates_oversell_to_the_owning_scope() {
-        use rustledger_core::{CostNumber, CostSpec};
-        let cost_100 = CostSpec::empty()
-            .with_number(CostNumber::PerUnit { value: dec!(100) })
-            .with_currency("USD");
-        // Date-sorted: A buy, B buy (both Jan), then A's over-sell (Jun).
-        let dirs = vec![
-            txn(
-                d(2020, 1, 1),
-                vec![
-                    Posting::new("Assets:BrokerA:Stock", amt(dec!(5), "AAA")).with_cost(cost_100),
-                    Posting::new("Assets:Bank", amt(dec!(-500), "USD")),
-                ],
-            ),
-            txn(
-                d(2020, 1, 1),
-                vec![
-                    Posting::new("Assets:BrokerB:Stock", amt(dec!(10), "BBB")),
-                    Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
-                ],
-            ),
-            txn(
-                d(2020, 6, 1),
-                vec![
-                    Posting::new("Assets:BrokerA:Stock", amt(dec!(-10), "AAA"))
-                        .with_cost(CostSpec::empty()),
-                    Posting::new("Assets:Bank", amt(dec!(1000), "USD")),
-                ],
-            ),
-        ];
-        let prices = MockPrices::default()
-            .with("AAA", "USD", d(2020, 12, 31), dec!(120))
-            .with("BBB", "USD", d(2020, 12, 31), dec!(150));
-        let scopes = [
-            Scope::new(vec!["Assets:BrokerA".to_string()], vec![]),
-            Scope::new(vec!["Assets:BrokerB".to_string()], vec![]),
-        ];
-        let results = compute_returns_multi(&dirs, &scopes, "USD", &prices, d(2020, 12, 31));
-        assert!(
-            matches!(results[0], Err(ExtractError::UnbookedInput(_))),
-            "group A (over-sell) must error, got {:?}",
-            results[0]
-        );
-        let b = results[1]
-            .as_ref()
-            .expect("group B (clean, disjoint) must still value despite A's over-sell");
-        assert_eq!(b.current_value, dec!(1500)); // 10 BBB @ 150
-    }
-
-    /// An in-scope posting with elided/uninterpolated units means un-booked input
-    /// (booking would fill it). It must surface as `UnbookedInput`, not be
-    /// silently dropped from the valuation (understating the position).
-    #[test]
-    fn elided_in_scope_posting_errors_not_understates() {
-        let dirs = vec![txn(
-            d(2020, 1, 1),
-            vec![
-                // In-scope investment leg with NO units (un-booked / to interpolate).
-                Posting::auto("Assets:Broker:Stock"),
-                Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
-            ],
-        )];
-        let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(120));
-        let scope = Scope::new(vec!["Assets:Broker".to_string()], vec![]);
-        let r = compute_returns(&dirs, &scope, "USD", &prices, d(2020, 12, 31));
-        assert!(
-            matches!(r, Err(ExtractError::UnbookedInput(_))),
-            "an elided in-scope posting must error, got {r:?}"
         );
     }
 

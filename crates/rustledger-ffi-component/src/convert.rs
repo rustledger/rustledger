@@ -1831,15 +1831,15 @@ impl SessionState {
     /// pad-expanded stream `query` builds (reused via the `padded` cell), so the
     /// two surfaces cannot compute different figures for one ledger.
     ///
-    /// Does NOT refuse on load errors — it computes over the held (possibly
-    /// error-recovered) directives exactly as the CLI's `report returns` renders
-    /// over them, the beancount/fava model where a report renders over
-    /// loaded-with-errors entries and the errors surface separately (here via
-    /// `info().errors`). This is safe because the returns engine realizes through
-    /// the booking engine's fallible `try_apply`: an un-booked reduction in a
-    /// VALUED account surfaces as `err` (never a trap), while a booking error in
-    /// an account outside the returns scope is skipped, not fatal. So a host
-    /// gets the same figures as the CLI for one ledger, broken or not.
+    /// A parse-recovered load error does not block it — it computes over the held
+    /// directives just as the CLI's `report returns` renders over them (errors
+    /// surface separately, here via `info().errors`). But a BOOKING error (an
+    /// un-booked reduction the loader re-merged) is fatal: the returns engine
+    /// realizes through the booking engine's fallible path, so it returns a clean
+    /// `err` rather than trap or emit a figure computed over a contract-violating
+    /// stream. This is stricter than beangrow (which discards errors and reports
+    /// a number regardless) — deliberately: run `rledger check` to find the
+    /// booking error, then re-run. The CLI and this op agree on every ledger.
     ///
     /// `investments`/`income` are the scope's account-name prefixes; `currency`
     /// is the single reporting currency (empty → the ledger's first
@@ -1847,8 +1847,9 @@ impl SessionState {
     ///
     /// # Errors
     /// `Err(message)` when `end` is empty/unparseable, no reporting currency
-    /// resolves (empty `currency` and no `operating_currency`), or an in-scope
-    /// boundary/terminal flow cannot be priced or is un-booked.
+    /// resolves (empty `currency` and no `operating_currency`), a boundary/
+    /// terminal flow cannot be priced, or the ledger has a booking error
+    /// (un-booked reduction).
     pub fn returns(
         &self,
         investments: &[String],

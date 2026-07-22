@@ -861,9 +861,11 @@ mod tests {
     /// Drift guard (CLAUDE.md Canonical-Function Discipline): the batched
     /// `shared_inscope_accounts` (one pass over the transactions, used in
     /// production) must return, per group, exactly what the per-group
-    /// `first_shared_inscope_account` reference returns. Two groups share a pooled
-    /// cash account (not self-contained); a third is funded from outside the whole
-    /// scope (self-contained) — so the batch covers resolved and unresolved groups.
+    /// `first_shared_inscope_account` reference returns. Covers the order-sensitive
+    /// cases: two groups resolved at their first touching transaction (pooled cash),
+    /// one never resolved (funded from outside the scope), and one (`Mixed`) whose
+    /// first touching transaction is self-contained so it must resolve at a LATER
+    /// transaction — whose two qualifying postings also pin first-match selection.
     #[test]
     fn shared_inscope_accounts_matches_per_group() {
         let dirs = vec![
@@ -896,6 +898,26 @@ mod tests {
                     .with_synthesized_posting(Posting::new("Assets:Broker:MSFT", money(10, "MSFT")))
                     .with_synthesized_posting(Posting::new("Assets:Bank", money(-500, "USD"))),
             ),
+            // The `Mixed` group's FIRST touching transaction is self-contained
+            // (funded from the outside bank, no in-scope account outside the
+            // group), so it must NOT resolve here — only at the later transaction.
+            Directive::Transaction(
+                Transaction::new(d(2020, 1, 5), "buy mix from an outside bank")
+                    .with_synthesized_posting(Posting::new("Assets:Broker:MIX", money(10, "MIX")))
+                    .with_synthesized_posting(Posting::new("Assets:Bank", money(-300, "USD"))),
+            ),
+            // A LATER transaction shares the pooled cash. It has TWO qualifying
+            // postings (Cash and Cash2, both in the whole scope, both external to
+            // `Mixed`); the first in posting order (Cash) must be the one named.
+            Directive::Transaction(
+                Transaction::new(d(2020, 1, 6), "rebalance mix into pooled cash")
+                    .with_synthesized_posting(Posting::new("Assets:Broker:MIX", money(-4, "MIX")))
+                    .with_synthesized_posting(Posting::new("Assets:Broker:Cash", money(80, "USD")))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Broker:Cash2",
+                        money(40, "USD"),
+                    )),
+            ),
         ];
         let whole = Scope::new(vec!["Assets:Broker".to_string()], vec![]);
         let rows = vec![
@@ -911,6 +933,10 @@ mod tests {
                 "Solo".to_string(),
                 Scope::new(vec!["Assets:Broker:MSFT".to_string()], vec![]),
             ),
+            (
+                "Mixed".to_string(),
+                Scope::new(vec!["Assets:Broker:MIX".to_string()], vec![]),
+            ),
         ];
         let end = d(2020, 12, 31);
 
@@ -920,9 +946,12 @@ mod tests {
             .map(|(_, scope)| first_shared_inscope_account(&dirs, scope, &whole, end))
             .collect();
         assert_eq!(batch, reference, "batched fold diverged from per-group");
-        // Not vacuous: Tech and Bonds share the pooled cash; Solo is self-contained.
-        assert_eq!(batch[0], Some("Assets:Broker:Cash".to_string()));
-        assert_eq!(batch[1], Some("Assets:Broker:Cash".to_string()));
-        assert_eq!(batch[2], None);
+        // Not vacuous, and pins the order-sensitive cases:
+        assert_eq!(batch[0], Some("Assets:Broker:Cash".to_string())); // Tech shares Cash
+        assert_eq!(batch[1], Some("Assets:Broker:Cash".to_string())); // Bonds shares Cash
+        assert_eq!(batch[2], None); // Solo self-contained
+        // Mixed: resolved at the LATER rebalance txn, naming Cash (the FIRST of that
+        // txn's two qualifying postings) — not the earlier self-contained buy.
+        assert_eq!(batch[3], Some("Assets:Broker:Cash".to_string()));
     }
 }

@@ -293,6 +293,28 @@ tag-value: #tagname
 boolean-value: TRUE
 ```
 
+### `returns-group:` metadata
+
+A `returns-group: "Name"` string on an `open` directive assigns that account to a
+group for the [`report returns --by-group`](../commands/report.md#per-group-breakdown)
+breakdown. Give the accounts you want reported together the same group name; tag a
+group's income account too for a dividend-inclusive return.
+
+```beancount
+2022-01-01 open Assets:Brokerage:AAPL
+  returns-group: "Stocks"
+2022-01-01 open Assets:Brokerage:VOO
+  returns-group: "Stocks"
+2022-01-01 open Assets:Brokerage:BND
+  returns-group: "Bonds"
+2022-01-01 open Income:Dividends
+  returns-group: "Stocks"
+```
+
+The value must be a quoted string, and the account must be within the report's
+`--investments`/`--income` scope; otherwise the tag is ignored with a warning. The
+metadata has no effect unless `--by-group` is passed.
+
 ## Account Names
 
 ### Structure

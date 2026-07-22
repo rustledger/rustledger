@@ -70,10 +70,15 @@ SCENARIOS = {
 
 def main():
     s = xirr(SANITY)
+    # None means the NPV never crossed zero on the bracket (a degenerate/edited
+    # series). Guard so that failure reads clearly instead of a TypeError from
+    # arithmetic on None.
+    assert s is not None, "sanity series did not bracket a rate"
     assert abs(s - 0.10) < 1e-9, f"sanity must be exactly 0.10, got {s}"
     print(f"# sanity (365d, +10%): {s:.10f}  ✓ matches spreadsheet =XIRR()")
     for name, flows in SCENARIOS.items():
         r = xirr(flows)
+        assert r is not None, f"{name}: series did not bracket a rate"
         # Self-consistency: NPV at the returned rate must be ~0.
         resid = npv(r, flows)
         assert abs(resid) < 1e-9, f"{name}: NPV at solved rate = {resid}"

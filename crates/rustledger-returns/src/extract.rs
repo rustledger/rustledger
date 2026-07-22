@@ -795,6 +795,17 @@ fn twr_from_values(
     end_value: Result<Decimal, ExtractError>,
     end_date: NaiveDate,
 ) -> Result<Option<f64>, ExtractError> {
+    // A contract-violating (un-booked) stream is more severe than an undefined
+    // sub-period: surface `UnbookedInput` EAGERLY, before the lazy short-circuits
+    // below (`v_prev <= 0`, `r <= 0`) could return `Ok(None)` at an earlier flow
+    // and mask a later un-booked value. `MissingPrice` stays lazy — a later price
+    // gap is genuinely irrelevant once the chain is already undefined — but a
+    // broken ledger is never silently reported as "n/a".
+    for value in flow_values.iter().chain(std::iter::once(&end_value)) {
+        if let Err(e @ ExtractError::UnbookedInput(_)) = value {
+            return Err(e.clone());
+        }
+    }
     // `v_prev` is the portfolio value just after the previous valuation; on the
     // first flow date it is only established (that flow is the opening capital,
     // not a return).
@@ -994,15 +1005,16 @@ pub fn compute_returns(
 ///
 /// # Errors
 ///
-/// Each scope's result is independent: a scope's [`ExtractError::MissingPrice`]
-/// (an unpriceable boundary flow or `end_date` valuation) is reported in that
-/// scope's slot and does not affect the others. There is no whole-call error.
+/// A [`ExtractError::MissingPrice`] (an unpriceable boundary flow or `end_date`
+/// valuation) is per-scope independent: it is reported in that scope's slot and
+/// does not affect the others.
 ///
-/// The booked, pad-expanded input contract of [`compute_returns`]/[`twr`]
-/// applies: an un-booked reduction surfaces (per scope) as
-/// [`ExtractError::UnbookedInput`] rather than panicking. (Date-sorted is a fast
-/// path, not a requirement — an unsorted stream falls back to per-scope
-/// valuation.)
+/// An [`ExtractError::UnbookedInput`] is NOT per-scope: the booking forward pass
+/// is shared across every scope, so a reduction with no matching lot (an
+/// un-booked, re-merged booking-failure) fails EVERY scope's slot — a broken
+/// ledger yields no returns for any scope rather than a partial report, and
+/// surfaces as `Err` rather than panicking. (Date-sorted is a fast path, not a
+/// requirement — an unsorted stream falls back to per-scope valuation.)
 #[must_use]
 pub fn compute_returns_multi(
     directives: &[Directive],
@@ -1198,6 +1210,28 @@ mod tests {
         assert!(
             matches!(r, Err(ExtractError::UnbookedInput(_))),
             "over-reducing an empty-cost lot must yield UnbookedInput, got {r:?}"
+        );
+    }
+
+    /// `twr`'s lazy short-circuit (an earlier `r <= 0` sub-period returns
+    /// `Ok(None)`) must NOT mask a later `UnbookedInput`: a broken ledger is never
+    /// silently "n/a". Here the first sub-period wipes out (r = 0), which
+    /// pre-fix returned `Ok(None)` before the loop reached the un-booked
+    /// `end_value`; the eager scan surfaces it.
+    #[test]
+    fn twr_surfaces_unbooked_despite_earlier_short_circuit() {
+        let net: std::collections::BTreeMap<NaiveDate, Decimal> =
+            [(d(2020, 1, 1), dec!(100)), (d(2020, 6, 1), dec!(0))]
+                .into_iter()
+                .collect();
+        // Sub-period 0→1: r = (0 - 0) / 100 = 0 ⇒ the loop short-circuits to
+        // Ok(None) at flow 1, never reaching end_value below without the fix.
+        let flow_values = vec![Ok(dec!(100)), Ok(dec!(0))];
+        let end_value = Err(ExtractError::UnbookedInput("over-sell".into()));
+        let r = twr_from_values(&net, flow_values, end_value, d(2020, 12, 31));
+        assert!(
+            matches!(r, Err(ExtractError::UnbookedInput(_))),
+            "must surface UnbookedInput, not swallow it to {r:?}"
         );
     }
 

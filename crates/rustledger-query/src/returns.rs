@@ -30,11 +30,11 @@ use crate::PriceDatabase;
 /// it here is what stops those two surfaces from drifting.
 ///
 /// # Errors
-/// Propagates [`ExtractError`] from the engine — e.g. a boundary flow, or the
-/// `end_date` terminal valuation, that cannot be priced in `reporting_currency`.
-///
-/// # Panics
-/// See [`compute_returns`]: `directives` must be the booked, pad-expanded stream.
+/// Propagates [`ExtractError`] from the engine: [`ExtractError::MissingPrice`]
+/// when a boundary flow or the `end_date` terminal valuation cannot be priced in
+/// `reporting_currency`, or [`ExtractError::UnbookedInput`] when `directives`
+/// violate the booked, pad-expanded contract (a re-merged booking-failed
+/// transaction) — the engine surfaces that as an `Err`, it does not panic.
 pub fn scope_returns(
     directives: &[Directive],
     scope: &Scope,
@@ -58,13 +58,12 @@ pub fn scope_returns(
 /// scope. Results come back per scope in the input order.
 ///
 /// # Errors
-/// Each element is independent: a scope whose boundary flow or terminal
-/// valuation cannot be priced in `reporting_currency` fails with
-/// [`ExtractError::MissingPrice`] for that scope only, never failing the others.
-///
-/// # Panics
-/// See [`compute_returns_multi`]: `directives` must be the booked, pad-expanded
-/// stream.
+/// [`ExtractError::MissingPrice`] is per-scope independent: a scope whose flow or
+/// terminal valuation cannot be priced fails alone, never the others. An
+/// [`ExtractError::UnbookedInput`] is different — the shared booking pass is
+/// contract-violating for the whole ledger, so it fails EVERY scope (a broken
+/// ledger yields no returns for any scope, not a partial report). The engine
+/// surfaces both as `Err`; neither panics.
 #[must_use]
 pub fn scopes_returns(
     directives: &[Directive],

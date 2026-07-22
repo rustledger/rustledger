@@ -475,14 +475,14 @@ fn apply_booked(
     engine: &mut rustledger_booking::BookingEngine,
     txn: &rustledger_core::Transaction,
 ) -> Result<(), ExtractError> {
-    if txn
+    if let Some(elided) = txn
         .postings
         .iter()
-        .any(|p| !matches!(p.units, Some(IncompleteAmount::Complete(_))))
+        .find(|p| !matches!(p.units, Some(IncompleteAmount::Complete(_))))
     {
         return Err(ExtractError::UnbookedInput(format!(
-            "transaction on {} has an un-booked (elided) posting",
-            txn.date
+            "posting to {} on {} has un-booked (elided) units",
+            elided.account, txn.date
         )));
     }
     engine

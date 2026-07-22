@@ -607,6 +607,12 @@ impl BookingEngine {
     /// un-booked shape — so the failure becomes a clean `Err` at the boundary
     /// rather than a wasm trap or a wrong figure.
     ///
+    /// This catches the ONE un-booked shape the booking engine can detect: a
+    /// reduction with no matching lot. A posting with elided/uninterpolated units
+    /// is still SKIPPED (as in [`Self::apply`]) — interpolation is a separate
+    /// pass this engine does not run — so a caller that must also reject elided
+    /// input checks `units` for [`IncompleteAmount::Complete`] itself.
+    ///
     /// # Errors
     /// Returns [`BookingError::Inventory`] on the first posting that reduces a
     /// lot not held. Postings before it have already been applied (the caller is

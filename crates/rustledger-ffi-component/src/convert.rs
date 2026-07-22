@@ -1868,8 +1868,7 @@ impl SessionState {
                 .first()
                 .cloned()
                 .ok_or_else(|| {
-                    "no reporting currency: pass a currency or set \
-                 `option \"operating_currency\" \"…\"`"
+                    "no reporting currency: pass a currency or set `option \"operating_currency\"`"
                         .to_string()
                 })?
         } else {

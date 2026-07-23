@@ -21,7 +21,8 @@ use rustledger_returns::{ExtractError, Returns, Scope, compute_returns, compute_
 
 use crate::PriceDatabase;
 
-/// Compute one scope's investment returns from a booked, pad-expanded stream.
+/// Compute one scope's investment returns from an interpolated, pad-expanded
+/// stream (booking is not required — net units are valued at market).
 ///
 /// Builds the price index from the same stream — so implicit transaction prices
 /// and explicit `price` directives both feed the valuation — adapts it to the
@@ -37,9 +38,10 @@ use crate::PriceDatabase;
 /// # Errors
 /// Propagates [`ExtractError`] from the engine: [`ExtractError::MissingPrice`]
 /// when a boundary flow or the `end_date` terminal valuation cannot be priced in
-/// `reporting_currency`, or [`ExtractError::UnbookedInput`] when an in-scope
-/// account carries an elided/uninterpolated posting (its net units are unknown —
-/// the one shape net-units cannot value). The engine surfaces both as an `Err`, it
+/// `reporting_currency`, or [`ExtractError::UnbookedInput`] when an
+/// elided/uninterpolated posting leaves a scope-relevant quantity unknown — an
+/// in-scope holding, or an external boundary leg whose cash flow is unknown (the
+/// one shape net-units cannot value). The engine surfaces both as an `Err`, it
 /// does not panic.
 pub fn scope_returns(
     directives: &[Directive],
@@ -68,8 +70,10 @@ pub fn scope_returns(
 /// scope's slot without affecting the others, because valuation runs per scope
 /// over the shared accumulation. [`ExtractError::MissingPrice`] names a scope whose
 /// flow or terminal valuation cannot be priced; [`ExtractError::UnbookedInput`]
-/// names a scope whose in-scope accounts include one with an elided/uninterpolated
-/// posting. A cost-basis/lot error affects no scope (net units valued at market).
+/// names a scope with an elided/uninterpolated posting leaving a scope-relevant
+/// quantity unknown (an in-scope holding, or an external boundary leg of one of
+/// its transactions). A cost-basis/lot error affects no scope (net units valued at
+/// market).
 /// This per-scope isolation is what lets `report returns --by-group` render a
 /// partial report (#1850 §4). The engine surfaces both as `Err`; neither panics.
 #[must_use]

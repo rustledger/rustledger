@@ -489,10 +489,11 @@ pub(super) fn report_returns<W: Write>(
             }
         }
     }
-    if rows
+    let unvaluable = rows
         .iter()
-        .all(|r| matches!(r, GroupRow::Unvaluable { .. }))
-    {
+        .filter(|r| matches!(r, GroupRow::Unvaluable { .. }))
+        .count();
+    if unvaluable == rows.len() {
         // Nothing is computable — surface the TOTAL's reason as the failure.
         let reason = match rows.first() {
             Some(GroupRow::Unvaluable { reason, .. }) => reason.clone(),
@@ -504,7 +505,22 @@ pub(super) fn report_returns<W: Write>(
         .split_first()
         .expect("scopes always contains the whole-portfolio TOTAL");
 
-    render_grouped(groups, total, currency, end_date, ctx, format, writer)
+    render_grouped(groups, total, currency, end_date, ctx, format, writer)?;
+
+    // The partial report was emitted above (computable rows + `n/a` markers). Exit
+    // NON-ZERO so a pipeline gating on exit status does not treat an incomplete
+    // report as a full success — the CSV/text formats carry no error column, so the
+    // exit code is their only machine-readable "incomplete" signal (JSON also has a
+    // per-row `error` field). Mirrors the single-scope path, which errors outright.
+    if unvaluable > 0 {
+        anyhow::bail!(
+            "returns report is incomplete: {unvaluable} of {} {} could not be valued \
+             (see the n/a rows and the warnings above)",
+            rows.len(),
+            if rows.len() == 1 { "scope" } else { "scopes" },
+        );
+    }
+    Ok(())
 }
 
 /// Format a rate as a 2-decimal percentage string, or `"n/a"` when undefined.
@@ -1115,7 +1131,9 @@ mod tests {
     /// unvaluable group (an elided in-scope posting) renders the valuable group's
     /// figures and marks the unvaluable one — and the whole-portfolio TOTAL, which
     /// includes the elided account — `n/a`, instead of aborting on the first error
-    /// (the pre-fix `?`). The report still succeeds because a group computed.
+    /// (the pre-fix `?`). The partial report IS still written to the writer, but the
+    /// call returns `Err` so the CLI exits non-zero to signal it is incomplete
+    /// (review pass 2, finding [0]).
     #[test]
     fn report_returns_by_group_partial_renders() {
         use rustledger_core::{Metadata, Open};
@@ -1162,11 +1180,16 @@ mod tests {
             &OutputFormat::Text,
             &mut out,
         );
-        assert!(r.is_ok(), "partial report must not abort: {r:?}");
+        // Incomplete report → non-zero exit (Err), but the partial output is still
+        // written (render happens before the bail).
+        assert!(
+            r.is_err(),
+            "a partial report must signal incompleteness via Err: {r:?}"
+        );
         let out = String::from_utf8(out).unwrap();
         assert!(
             out.contains("1300"),
-            "valuable Tech group renders its figures:\n{out}"
+            "the valuable Tech group is still rendered despite the Err:\n{out}"
         );
         let broken = out
             .lines()

@@ -599,6 +599,73 @@ fn returns_group_metadata_breaks_down_dividend_inclusive() {
     );
 }
 
+/// #1850 §4 + review pass 2, finding [0]: a `--by-group` report where one group
+/// cannot be valued (here Bonds holds BND priced only in EUR, with no EUR→USD
+/// rate, so its boundary flow is unpriceable) must (a) still RENDER the computable
+/// groups + `n/a` rows, and (b) exit NON-ZERO so a pipeline gating on exit status
+/// does not treat the incomplete report as a full success. The Tech group is
+/// fully priced and unaffected.
+#[test]
+fn by_group_partial_report_renders_but_exits_nonzero() {
+    const LEDGER: &str = r#"option "operating_currency" "USD"
+2020-01-01 open Assets:Bank
+2020-01-01 open Assets:Broker:Tech
+  returns-group: "Tech"
+2020-01-01 open Assets:Broker:Bonds
+  returns-group: "Bonds"
+2020-01-02 * "buy tech"
+  Assets:Broker:Tech  10 AAPL {100 USD}
+  Assets:Bank
+2020-01-03 * "buy bonds, priced only in EUR"
+  Assets:Broker:Bonds  5 BND {100 EUR}
+  Assets:Bank  -500 EUR
+2020-12-31 price AAPL 130 USD
+"#;
+    let bin = require_rledger!();
+    let f = write_fixture(LEDGER);
+    let path = f.path().to_str().unwrap();
+    let out = Command::new(&bin)
+        .args([
+            "report",
+            path,
+            "returns",
+            "--investments",
+            "Assets:Broker",
+            "--by-group",
+            "--end",
+            "2020-12-31",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run rledger");
+
+    // (b) Non-zero exit — the incomplete-report signal for pipelines.
+    assert!(
+        !out.status.success(),
+        "a partial by-group report must exit non-zero; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    // (a) The partial report is still written to stdout: Tech's figures render,
+    // and the unvaluable Bonds + TOTAL rows are `n/a`.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Tech"),
+        "computable group rendered:\n{stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("Bonds") && l.contains("n/a")),
+        "unvaluable Bonds row is n/a:\n{stdout}"
+    );
+    // The reason and the incompleteness are on stderr.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("incomplete") || stderr.contains("unavailable"),
+        "stderr explains the incompleteness:\n{stderr}"
+    );
+}
+
 #[test]
 fn by_group_omits_untagged_holdings_no_residual() {
     let bin = require_rledger!();

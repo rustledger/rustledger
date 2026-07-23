@@ -29,12 +29,18 @@ use crate::PriceDatabase;
 /// CLI's `report returns` and the component's `session.returns` share; keeping
 /// it here is what stops those two surfaces from drifting.
 ///
+/// The engine values **net units at market**, so a cost-basis/lot error (an
+/// over-sell, an empty-cost `{}` sale with no matching lot — the common state of
+/// imported brokerage data) does NOT fail the report; it nets the units, possibly
+/// negative, and values at market. `rledger check` remains the validator (#1850).
+///
 /// # Errors
 /// Propagates [`ExtractError`] from the engine: [`ExtractError::MissingPrice`]
 /// when a boundary flow or the `end_date` terminal valuation cannot be priced in
-/// `reporting_currency`, or [`ExtractError::UnbookedInput`] when `directives`
-/// violate the booked, pad-expanded contract (a re-merged booking-failed
-/// transaction) — the engine surfaces that as an `Err`, it does not panic.
+/// `reporting_currency`, or [`ExtractError::UnbookedInput`] when an in-scope
+/// account carries an elided/uninterpolated posting (its net units are unknown —
+/// the one shape net-units cannot value). The engine surfaces both as an `Err`, it
+/// does not panic.
 pub fn scope_returns(
     directives: &[Directive],
     scope: &Scope,
@@ -51,19 +57,21 @@ pub fn scope_returns(
     )
 }
 
-/// Compute several scopes' returns in ONE shared realization.
+/// Compute several scopes' returns in ONE shared accumulation.
 ///
-/// Via [`compute_returns_multi`]: the booking pass is scope-independent, so the
-/// price index and realization are paid once for all scopes rather than once per
-/// scope. Results come back per scope in the input order.
+/// Via [`compute_returns_multi`]: the net-units accumulation is scope-independent,
+/// so the price index and the forward pass are paid once for all scopes rather
+/// than once per scope. Results come back per scope in the input order.
 ///
 /// # Errors
-/// [`ExtractError::MissingPrice`] is per-scope independent: a scope whose flow or
-/// terminal valuation cannot be priced fails alone, never the others. An
-/// [`ExtractError::UnbookedInput`] is different — the shared booking pass is
-/// contract-violating for the whole ledger, so it fails EVERY scope (a broken
-/// ledger yields no returns for any scope, not a partial report). The engine
-/// surfaces both as `Err`; neither panics.
+/// Both error kinds are **per-scope independent** — reported in the offending
+/// scope's slot without affecting the others, because valuation runs per scope
+/// over the shared accumulation. [`ExtractError::MissingPrice`] names a scope whose
+/// flow or terminal valuation cannot be priced; [`ExtractError::UnbookedInput`]
+/// names a scope whose in-scope accounts include one with an elided/uninterpolated
+/// posting. A cost-basis/lot error affects no scope (net units valued at market).
+/// This per-scope isolation is what lets `report returns --by-group` render a
+/// partial report (#1850 §4). The engine surfaces both as `Err`; neither panics.
 #[must_use]
 pub fn scopes_returns(
     directives: &[Directive],

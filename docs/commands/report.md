@@ -192,10 +192,16 @@ What this means in practice:
   treated as errors.
 - **Losing portfolios** produce a real **negative** rate (e.g. `-42.10%`), never a
   crash or a silent `n/a`.
-- **Only two things** actually stop a figure: no **price** for a held commodity at
-  the date it's needed (or an unconvertible boundary flow), and a posting whose
-  **units are elided** and could not be interpolated (so the held quantity is
-  unknown). Both errors name exactly what is missing.
+- Because returns ignore cost basis, they can **disagree with `report balances` /
+  `report holdings`** (which lot-match) on an *un-booked* ledger — e.g. an over-sell
+  shows as a negative net position here but is ignored there. That is a signal the
+  ledger's bookkeeping is broken; run [`rledger check`](check.md) to find and fix
+  the booking error.
+- **Only two things** actually stop a figure: no **price** for a commodity at the
+  date it's needed (a held position, or an unconvertible boundary flow), and a
+  posting whose **units are elided** and could not be interpolated — either a held
+  quantity (unknown holding) or a boundary cash leg (unknown flow). Both errors name
+  exactly what is missing.
 
 #### Per-group breakdown
 
@@ -260,11 +266,17 @@ Notes on grouping:
     only the TOTAL row).
 - **Partial reports.** Because each group is valued independently, a group (or the
   `TOTAL`) that hits one of the two blockers above — an unpriced commodity or an
-  elided in-scope posting — shows `n/a` across its row, with a `warning:` naming the
-  reason, while the other groups still report their figures. The report fails
-  outright only when *every* row is unvaluable. In `--format json` an unvaluable row
-  carries an `"error"` field (with `null` figures); a computed row's `"error"` is
-  `null`, so the schema is the same for both.
+  elided posting — shows `n/a` across its row, with a `warning:` naming the reason,
+  while the other groups still report their figures. The rows are always rendered;
+  only when *every* row is unvaluable is nothing shown. In `--format json` an
+  unvaluable row carries an `"error"` field (with `null` figures); a computed row's
+  `"error"` is `null`, so the schema is the same for both.
+
+  **Exit status.** When any row is unvaluable, `rledger` **exits non-zero** even
+  though it still prints the partial report — an incomplete report is not a full
+  success, so a script gating on the exit code (`rledger ... && …`) stops rather
+  than consuming a report with silent `n/a` holes. For CSV and text (which have no
+  error column) the exit code is the only machine-readable "incomplete" signal.
 
 See [`returns-group:` metadata](../reference/syntax.md#returns-group-metadata) for
 the tagging syntax.

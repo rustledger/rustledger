@@ -193,15 +193,16 @@ What this means in practice:
 - **Losing portfolios** produce a real **negative** rate (e.g. `-42.10%`), never a
   crash or a silent `n/a`.
 - Because returns ignore cost basis, they can **disagree with `report balances` /
-  `report holdings`** (which lot-match) on an *un-booked* ledger — e.g. an over-sell
-  shows as a negative net position here but is ignored there. That is a signal the
-  ledger's bookkeeping is broken; run [`rledger check`](check.md) to find and fix
-  the booking error.
-- **Only two things** actually stop a figure: no **price** for a commodity at the
-  date it's needed (a held position, or an unconvertible boundary flow), and a
-  posting whose **units are elided** and could not be interpolated — either a held
-  quantity (unknown holding) or a boundary cash leg (unknown flow). Both errors name
-  exactly what is missing.
+  `report holdings`** (which lot-match) on a ledger with **booking / lot errors**
+  (e.g. an over-sell that does not book cleanly) — the over-sell shows as a negative
+  net position here but is ignored there. That is a signal the ledger's bookkeeping
+  is broken; run [`rledger check`](check.md) to find and fix it.
+- **Only two things** actually stop a figure. First, a missing **price** for a
+  *held position at `--end`* or an *unconvertible boundary flow* — note a missing
+  price at an intermediate cash-flow date is **not** fatal (it degrades only TWR to
+  `n/a`, per the callout above). Second, a posting whose **units are elided** and
+  could not be interpolated — either a held quantity (unknown holding) or a boundary
+  cash leg (unknown flow). Both errors name exactly what is missing.
 
 #### Per-group breakdown
 
@@ -274,7 +275,7 @@ Notes on grouping:
 
   **Exit status.** When any row is unvaluable, `rledger` **exits non-zero** even
   though it still prints the partial report — an incomplete report is not a full
-  success, so a script gating on the exit code (`rledger ... && …`) stops rather
+  success, so a script gating on the exit code (`rledger ... && ...`) stops rather
   than consuming a report with silent `n/a` holes. For CSV and text (which have no
   error column) the exit code is the only machine-readable "incomplete" signal.
 

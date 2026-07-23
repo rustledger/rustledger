@@ -1068,19 +1068,47 @@ mod tests {
         )
         .unwrap();
         let json = String::from_utf8(json).unwrap();
-        assert!(json.contains(r#""group": "Tech""#));
+        // Parse structurally so the assertions pin the `error` FIELD, not a
+        // substring floating anywhere in the blob (CLAUDE.md: assert the exact
+        // observable, not a proxy).
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("render_grouped must emit valid JSON");
+        let rows = parsed["groups"].as_array().expect("groups array");
+        let tech = &rows[0];
+        let broken = &rows[1];
+        let reason = "cannot compute returns: account Assets:Broker:Broken has an un-booked (elided) posting";
+
+        // Computed row: figures present, `error` explicitly null.
+        assert_eq!(tech["group"], "Tech");
         assert!(
-            json.contains(r#""error": null"#),
-            "computed row error is null:\n{json}"
+            tech["current_value"].is_string(),
+            "computed figure present: {tech}"
         );
         assert!(
-            json.contains(r#""current_value": null"#),
-            "unvaluable figures null:\n{json}"
+            tech["error"].is_null(),
+            "computed row error must be null: {tech}"
+        );
+
+        // Unvaluable row: the reason is on the `error` FIELD, and every figure is
+        // null — the stable schema a consumer branches on.
+        assert_eq!(broken["group"], "Broken");
+        assert_eq!(
+            broken["error"].as_str(),
+            Some(reason),
+            "reason on the error field: {broken}"
         );
         assert!(
-            json.contains(r#""error": "cannot compute returns"#) || json.contains("un-booked"),
-            "unvaluable row carries the reason:\n{json}"
+            broken["current_value"].is_null(),
+            "unvaluable figures null: {broken}"
         );
+        assert!(
+            broken["cash_flows"].is_null(),
+            "unvaluable figures null: {broken}"
+        );
+
+        // The TOTAL row is likewise unvaluable, same schema.
+        assert_eq!(parsed["total"]["error"].as_str(), Some(reason));
+        assert!(parsed["total"]["current_value"].is_null());
     }
 
     /// #1850 §4 end-to-end: a `--by-group` report with one valuable group and one

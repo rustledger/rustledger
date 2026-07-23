@@ -486,7 +486,7 @@ fn render<W: io::Write>(
             end,
             by_group,
         } => {
-            returns::report_returns(
+            let outcome = returns::report_returns(
                 balance_input,
                 &loaded.operating_currency,
                 investments,
@@ -498,6 +498,17 @@ fn render<W: io::Write>(
                 format,
                 writer,
             )?;
+            // The report is already written. A partial `--by-group` report exits
+            // non-zero so a pipeline gating on exit status does not treat an
+            // incomplete report as a success. The exit-code policy lives here, at
+            // the CLI boundary, not inside the report producer.
+            if let returns::ReturnsOutcome::Partial { unvaluable, total } = outcome {
+                anyhow::bail!(
+                    "returns report is incomplete: {unvaluable} of {total} {} could not be valued \
+                     (see the n/a rows and the warnings above)",
+                    if total == 1 { "scope" } else { "scopes" },
+                );
+            }
         }
     }
 

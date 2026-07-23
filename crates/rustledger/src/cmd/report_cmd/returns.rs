@@ -358,21 +358,45 @@ fn first_shared_inscope_account(
     None
 }
 
+/// Whether a rendered returns report covered every scope, or left some as `n/a`.
+///
+/// The report is written to the `writer` regardless; this only reports the
+/// *completeness* of what was written, so the CLI boundary can decide the process
+/// exit code. Keeping the exit-code policy at the call site (rather than having
+/// `report_returns` return `Err` after it has already produced output) separates
+/// "produce the report" from "decide the exit status".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReturnsOutcome {
+    /// Every scope was valued.
+    Complete,
+    /// `unvaluable` of `total` scopes could not be valued and rendered as `n/a`.
+    /// The report was still written; the caller should exit non-zero.
+    Partial { unvaluable: usize, total: usize },
+}
+
 /// Generate the returns report.
 ///
-/// `directives` must be the booked, pad-expanded stream (the returns engine's
-/// input contract); the dispatcher passes `balance_input` for exactly this
-/// reason. With `by_group`, the report adds one independent-sub-portfolio row per
+/// `directives` must be the interpolated, pad-expanded stream (the returns
+/// engine's input contract; booking is not required, net units are valued at
+/// market); the dispatcher passes `balance_input` for exactly this reason. With
+/// `by_group`, the report adds one independent-sub-portfolio row per
 /// `returns-group:` group (constrained to `--investments`/`--income`) alongside
 /// the whole-portfolio TOTAL; otherwise it is the single whole-scope summary.
 /// Grouping is opt-in, so the default output shape never changes.
+///
+/// # Returns
+///
+/// [`ReturnsOutcome`], reporting whether the written report covered every scope
+/// or left some `--by-group` rows as `n/a`. The report is written to `writer`
+/// either way; the caller maps [`ReturnsOutcome::Partial`] to a non-zero exit.
 ///
 /// # Errors
 ///
 /// Returns an error if no reporting currency can be determined (neither
 /// `--currency` nor an `operating_currency` option), if `--end` is not a valid
 /// `YYYY-MM-DD` date, or if a cash flow or held position cannot be priced in the
-/// reporting currency (a [`rustledger_returns::ExtractError`]).
+/// reporting currency (a [`rustledger_returns::ExtractError`]). Also errors if
+/// *every* scope is unvaluable (there is nothing to render).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn report_returns<W: Write>(
     directives: &[Directive],
@@ -385,7 +409,7 @@ pub(super) fn report_returns<W: Write>(
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
-) -> Result<()> {
+) -> Result<ReturnsOutcome> {
     // Reporting currency: --currency, else the ledger's first operating currency,
     // else an actionable error (the return is single-currency by construction).
     let reporting_currency: String = match currency_arg {
@@ -414,7 +438,8 @@ pub(super) fn report_returns<W: Write>(
             end_date,
             "TOTAL".to_string(),
         )?;
-        return render_single(&total, currency, end_date, ctx, format, writer);
+        render_single(&total, currency, end_date, ctx, format, writer)?;
+        return Ok(ReturnsOutcome::Complete);
     }
 
     // Grouping is opt-in; warnings (bad tags, overlaps, non-self-contained
@@ -438,7 +463,7 @@ pub(super) fn report_returns<W: Write>(
             end_date,
             "TOTAL".to_string(),
         )?;
-        return render_grouped(
+        render_grouped(
             &[],
             &GroupRow::Ok(total),
             currency,
@@ -446,7 +471,8 @@ pub(super) fn report_returns<W: Write>(
             ctx,
             format,
             writer,
-        );
+        )?;
+        return Ok(ReturnsOutcome::Complete);
     }
 
     // Compute the whole-portfolio TOTAL and every group in ONE shared realization:
@@ -515,20 +541,20 @@ pub(super) fn report_returns<W: Write>(
 
     render_grouped(groups, total, currency, end_date, ctx, format, writer)?;
 
-    // The partial report was emitted above (computable rows + `n/a` markers). Exit
-    // NON-ZERO so a pipeline gating on exit status does not treat an incomplete
-    // report as a full success — the CSV/text formats carry no error column, so the
-    // exit code is their only machine-readable "incomplete" signal (JSON also has a
-    // per-row `error` field). Mirrors the single-scope path, which errors outright.
+    // The report is written (computable rows + `n/a` markers). Report completeness
+    // to the caller as data rather than erroring after producing output; the CLI
+    // boundary maps `Partial` to a non-zero exit so a pipeline gating on exit
+    // status does not treat an incomplete report as a full success (the CSV/text
+    // formats carry no error column, so the exit code is their only machine-readable
+    // "incomplete" signal; JSON also has a per-row `error` field).
     if unvaluable > 0 {
-        anyhow::bail!(
-            "returns report is incomplete: {unvaluable} of {} {} could not be valued \
-             (see the n/a rows and the warnings above)",
-            rows.len(),
-            if rows.len() == 1 { "scope" } else { "scopes" },
-        );
+        Ok(ReturnsOutcome::Partial {
+            unvaluable,
+            total: rows.len(),
+        })
+    } else {
+        Ok(ReturnsOutcome::Complete)
     }
-    Ok(())
 }
 
 /// Format a rate as a 2-decimal percentage string, or `"n/a"` when undefined.
@@ -1139,9 +1165,9 @@ mod tests {
     /// unvaluable group (an elided in-scope posting) renders the valuable group's
     /// figures and marks the unvaluable one — and the whole-portfolio TOTAL, which
     /// includes the elided account — `n/a`, instead of aborting on the first error
-    /// (the pre-fix `?`). The partial report IS still written to the writer, but the
-    /// call returns `Err` so the CLI exits non-zero to signal it is incomplete
-    /// (review pass 2, finding [0]).
+    /// (the pre-fix `?`). The partial report IS still written to the writer, and the
+    /// call returns `Ok(ReturnsOutcome::Partial)`; the CLI boundary maps that to a
+    /// non-zero exit (review pass 2, finding [0]).
     #[test]
     fn report_returns_by_group_partial_renders() {
         use rustledger_core::{Metadata, Open};
@@ -1188,16 +1214,21 @@ mod tests {
             &OutputFormat::Text,
             &mut out,
         );
-        // Incomplete report → non-zero exit (Err), but the partial output is still
-        // written (render happens before the bail).
-        assert!(
-            r.is_err(),
-            "a partial report must signal incompleteness via Err: {r:?}"
+        // The report is written AND the outcome reports it is partial (2 of 3
+        // scopes unvaluable: Broken and TOTAL). The non-zero exit is the CLI
+        // boundary's job, mapped from this outcome; here we assert the producer's
+        // contract directly, without an Err-after-write.
+        assert_eq!(
+            r.expect("a partial report is Ok(Partial), not Err"),
+            ReturnsOutcome::Partial {
+                unvaluable: 2,
+                total: 3
+            },
         );
         let out = String::from_utf8(out).unwrap();
         assert!(
             out.contains("1300"),
-            "the valuable Tech group is still rendered despite the Err:\n{out}"
+            "the valuable Tech group is still rendered:\n{out}"
         );
         let broken = out
             .lines()

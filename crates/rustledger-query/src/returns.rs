@@ -38,7 +38,7 @@ use crate::PriceDatabase;
 /// # Errors
 /// Propagates [`ExtractError`] from the engine: [`ExtractError::MissingPrice`]
 /// when a boundary flow or the `end_date` terminal valuation cannot be priced in
-/// `reporting_currency`, or [`ExtractError::UnbookedInput`] when an
+/// `reporting_currency`, or [`ExtractError::UnvaluableInput`] when an
 /// elided/uninterpolated posting leaves a scope-relevant quantity unknown — an
 /// in-scope holding, or an external boundary leg whose cash flow is unknown (the
 /// one shape net-units cannot value). The engine surfaces both as an `Err`, it
@@ -69,7 +69,7 @@ pub fn scope_returns(
 /// Both error kinds are **per-scope independent** — reported in the offending
 /// scope's slot without affecting the others, because valuation runs per scope
 /// over the shared accumulation. [`ExtractError::MissingPrice`] names a scope whose
-/// flow or terminal valuation cannot be priced; [`ExtractError::UnbookedInput`]
+/// flow or terminal valuation cannot be priced; [`ExtractError::UnvaluableInput`]
 /// names a scope with an elided/uninterpolated posting leaving a scope-relevant
 /// quantity unknown (an in-scope holding, or an external boundary leg of one of
 /// its transactions). A cost-basis/lot error affects no scope (net units valued at

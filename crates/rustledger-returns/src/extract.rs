@@ -80,7 +80,7 @@
 //! valued at market — like beancount + beangrow. `rledger check` remains the
 //! validator (see #1850). The one shape it genuinely cannot value is an in-scope
 //! account with an elided/uninterpolated posting — its net units are unknown —
-//! which surfaces as [`ExtractError::UnbookedInput`] rather than a silently
+//! which surfaces as [`ExtractError::UnvaluableInput`] rather than a silently
 //! understated figure. It cannot defend the pad half either: handing it an
 //! un-expanded stream silently drops any position seeded by a pad, so callers must
 //! pad-expand first.
@@ -233,7 +233,7 @@ pub enum ExtractError {
     /// Extraction refuses rather than silently understate the position or drop the
     /// flow. Carries a human-readable description.
     #[error("cannot compute returns: {0}")]
-    UnbookedInput(String),
+    UnvaluableInput(String),
 }
 
 /// Extract the full cash-flow series (external boundary-crossing flows plus the
@@ -265,7 +265,7 @@ pub enum ExtractError {
 ///
 /// Returns [`ExtractError::MissingPrice`] if any external flow or held position
 /// cannot be converted to `reporting_currency` on the date it is needed, or
-/// [`ExtractError::UnbookedInput`] if an elided/uninterpolated posting leaves a
+/// [`ExtractError::UnvaluableInput`] if an elided/uninterpolated posting leaves a
 /// scope-relevant quantity unknown — an in-scope holding (see [`terminal_value`])
 /// or an external boundary leg (see [`extract_flows`]).
 pub fn extract_cash_flows(
@@ -308,7 +308,7 @@ pub fn extract_cash_flows(
 ///
 /// Returns [`ExtractError::MissingPrice`] if an external posting of a relevant
 /// transaction cannot be converted to `reporting_currency` on its date, or
-/// [`ExtractError::UnbookedInput`] if such a posting has elided/uninterpolated
+/// [`ExtractError::UnvaluableInput`] if such a posting has elided/uninterpolated
 /// units (its cash flow is unknown — the flows counterpart of an elided holding).
 pub fn extract_flows(
     directives: &[Directive],
@@ -359,12 +359,12 @@ pub fn extract_flows(
             // transaction is a boundary cash flow of UNKNOWN magnitude — the flows
             // counterpart of an elided in-scope holding (see `value_investment_scope`).
             // Net-units tolerates a cost-basis/lot error, but it cannot invent a
-            // flow it can't see, so surface it as `UnbookedInput` rather than
+            // flow it can't see, so surface it as `UnvaluableInput` rather than
             // silently drop the contribution (which would understate `invested` and
             // report a wrong money-weighted return). A fully interpolated stream
             // never hits this; a re-merged booking-failed transaction can.
             let Some(amount) = posting.amount() else {
-                return Err(ExtractError::UnbookedInput(format!(
+                return Err(ExtractError::UnvaluableInput(format!(
                     "posting to {} on {} has elided/uninterpolated units; cannot compute its cash flow",
                     posting.account, txn.date
                 )));
@@ -417,7 +417,7 @@ pub fn extract_flows(
 /// # Errors
 ///
 /// Returns [`ExtractError::MissingPrice`] if a held commodity has no price in
-/// `reporting_currency` on `end_date`, or [`ExtractError::UnbookedInput`] if an
+/// `reporting_currency` on `end_date`, or [`ExtractError::UnvaluableInput`] if an
 /// in-scope account carries an elided/uninterpolated posting (its net units are
 /// unknown — the one shape net-units cannot value).
 pub fn terminal_value(
@@ -524,7 +524,7 @@ impl NetUnits {
 ///
 /// # Errors
 /// [`ExtractError::MissingPrice`] when an in-scope commodity has no price in
-/// `reporting_currency` on `date`, or [`ExtractError::UnbookedInput`] when an
+/// `reporting_currency` on `date`, or [`ExtractError::UnvaluableInput`] when an
 /// in-scope account carried an elided/uninterpolated posting (its net units are
 /// incomplete — the one shape net-units cannot value).
 fn value_investment_scope(
@@ -541,7 +541,7 @@ fn value_investment_scope(
     // ONLY with an elided leg and so never entered `per_account`.
     for account in &holdings.unvaluable {
         if scope.classify(account.as_str()) == AccountRole::Investment {
-            return Err(ExtractError::UnbookedInput(format!(
+            return Err(ExtractError::UnvaluableInput(format!(
                 "account {account} has an elided/uninterpolated posting; cannot value returns"
             )));
         }
@@ -791,7 +791,7 @@ fn investment_values_multi(
 ///
 /// The interpolated, pad-expanded input contract of [`extract_cash_flows`] applies:
 /// an in-scope account with an elided/uninterpolated posting surfaces as
-/// [`ExtractError::UnbookedInput`] (not a panic), while an un-pad-expanded stream
+/// [`ExtractError::UnvaluableInput`] (not a panic), while an un-pad-expanded stream
 /// silently omits pad-seeded positions. A cost-basis/lot error is tolerated (net
 /// units valued at market).
 pub fn twr(
@@ -826,15 +826,15 @@ pub fn twr(
     // flow date, in `net_by_date` order.
     let end_value = values.pop().expect("dates always includes end_date");
     // An unvaluable (elided-in-scope) stream is more severe than an undefined
-    // sub-period: surface `UnbookedInput` EAGERLY, before `twr_from_values`' lazy
+    // sub-period: surface `UnvaluableInput` EAGERLY, before `twr_from_values`' lazy
     // short-circuits (`v_prev <= 0`, `r <= 0`) could return `Ok(None)` at an
     // earlier flow and mask a later unvaluable value. `MissingPrice` stays lazy (a
     // later price gap is irrelevant once the chain is undefined), but an unvaluable
     // ledger is never silently "n/a". `compute_returns` needs no such scan — it
-    // surfaces `UnbookedInput` via its eager `end_value?` — so this lives here, on
+    // surfaces `UnvaluableInput` via its eager `end_value?` — so this lives here, on
     // the standalone public path, not in the shared `twr_from_values` hot path.
     for value in values.iter().chain(std::iter::once(&end_value)) {
-        if let Err(e @ ExtractError::UnbookedInput(_)) = value {
+        if let Err(e @ ExtractError::UnvaluableInput(_)) = value {
             return Err(e.clone());
         }
     }
@@ -975,7 +975,7 @@ pub struct Returns {
 ///
 /// The interpolated, pad-expanded input contract of [`twr`] applies: an in-scope
 /// account with an elided/uninterpolated posting surfaces as
-/// [`ExtractError::UnbookedInput`] rather than panicking; a cost-basis/lot error is
+/// [`ExtractError::UnvaluableInput`] rather than panicking; a cost-basis/lot error is
 /// tolerated (net units valued at market). (Date-sorted input is a fast path, not a
 /// correctness requirement — an unsorted stream falls back to the order-independent
 /// per-date valuation.)
@@ -1062,7 +1062,7 @@ pub fn compute_returns(
 /// scope's slot without affecting the others — because valuation runs per scope
 /// over the shared accumulation. A [`ExtractError::MissingPrice`] names an
 /// unpriceable boundary flow or `end_date` valuation. An
-/// [`ExtractError::UnbookedInput`] names a scope whose Investment accounts include
+/// [`ExtractError::UnvaluableInput`] names a scope whose Investment accounts include
 /// one with an elided/uninterpolated posting; a scope that does not classify that
 /// account as Investment is unaffected. A cost-basis/lot error affects no scope
 /// (net units valued at market). (Date-sorted is a fast path, not a requirement —
@@ -1259,13 +1259,13 @@ mod tests {
         let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(120));
         let r = compute_returns(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31))
             .expect("net-units valuation tolerates an over-sell");
-        // Net −5 AAPL × 120 = −600; not a trap, not an UnbookedInput refusal.
+        // Net −5 AAPL × 120 = −600; not a trap, not an UnvaluableInput refusal.
         assert_eq!(r.current_value, dec!(-600));
     }
 
     /// The one shape net-units genuinely cannot value: an in-scope account with an
     /// elided/uninterpolated posting (booking would have filled it). Its net units
-    /// are incomplete, so valuing it must surface as [`ExtractError::UnbookedInput`]
+    /// are incomplete, so valuing it must surface as [`ExtractError::UnvaluableInput`]
     /// rather than silently understate the position. This is distinct from a
     /// cost-basis error (tolerated, see `oversell_nets_negative_valued_at_market`) —
     /// here the units themselves are unknown.
@@ -1282,14 +1282,14 @@ mod tests {
         let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(120));
         let r = compute_returns(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31));
         assert!(
-            matches!(r, Err(ExtractError::UnbookedInput(_))),
-            "an elided in-scope posting must yield UnbookedInput, got {r:?}"
+            matches!(r, Err(ExtractError::UnvaluableInput(_))),
+            "an elided in-scope posting must yield UnvaluableInput, got {r:?}"
         );
     }
 
     /// The FLOWS counterpart: an elided **external** (boundary cash) leg of a
     /// portfolio-touching transaction is a contribution of unknown magnitude. It
-    /// must surface as [`ExtractError::UnbookedInput`], NOT be silently dropped —
+    /// must surface as [`ExtractError::UnvaluableInput`], NOT be silently dropped —
     /// dropping it would value the (complete) investment leg at market with no
     /// matching outflow, understating `invested` and reporting a wrong
     /// money-weighted return while exiting `Ok`. The investment leg here is
@@ -1308,20 +1308,20 @@ mod tests {
         let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(120));
         let flows = extract_flows(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31));
         assert!(
-            matches!(flows, Err(ExtractError::UnbookedInput(_))),
-            "an elided external leg must yield UnbookedInput, got {flows:?}"
+            matches!(flows, Err(ExtractError::UnvaluableInput(_))),
+            "an elided external leg must yield UnvaluableInput, got {flows:?}"
         );
         // And the whole summary errors rather than reporting a wrong figure.
         let r = compute_returns(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31));
         assert!(
-            matches!(r, Err(ExtractError::UnbookedInput(_))),
+            matches!(r, Err(ExtractError::UnvaluableInput(_))),
             "compute_returns must not report a figure over a dropped flow, got {r:?}"
         );
     }
 
     /// Per-scope isolation — what `--by-group` partial rendering relies on. Over
     /// ONE shared accumulation, [`compute_returns_multi`] returns
-    /// [`ExtractError::UnbookedInput`] for a scope whose Investment accounts include
+    /// [`ExtractError::UnvaluableInput`] for a scope whose Investment accounts include
     /// an elided posting, while a DISJOINT scope that excludes that account still
     /// computes `Ok`. (The elided account is marked unvaluable globally, but a scope
     /// errors only if it classifies that account as `Investment`.)
@@ -1355,13 +1355,13 @@ mod tests {
             "net 10 AAPL × 130",
         );
         assert!(
-            matches!(out[1], Err(ExtractError::UnbookedInput(_))),
+            matches!(out[1], Err(ExtractError::UnvaluableInput(_))),
             "the elided scope fails alone: {:?}",
             out[1]
         );
     }
 
-    /// The public `twr` surfaces an elided-in-scope posting as `UnbookedInput` via
+    /// The public `twr` surfaces an elided-in-scope posting as `UnvaluableInput` via
     /// its eager scan, rather than masking it as `Ok(None)` through
     /// `twr_from_values`' lazy short-circuits. The first flow date values cleanly
     /// (net 5 AAPL priced), so only the eager scan reaches the later elided date.
@@ -1395,8 +1395,8 @@ mod tests {
             .with("AAPL", "USD", d(2020, 12, 31), dec!(120));
         let r = twr(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31));
         assert!(
-            matches!(r, Err(ExtractError::UnbookedInput(_))),
-            "twr must surface UnbookedInput, not swallow it to {r:?}"
+            matches!(r, Err(ExtractError::UnvaluableInput(_))),
+            "twr must surface UnvaluableInput, not swallow it to {r:?}"
         );
     }
 

@@ -230,7 +230,7 @@ fn missing_intermediate_price_degrades_twr_not_mwr() {
 
 /// Per-scope isolation at the shared-composition level (what `--by-group` relies
 /// on, #1850 §4): one scope with an elided in-scope posting fails alone
-/// (`UnbookedInput`), while a clean scope computes — over ONE shared accumulation.
+/// (`UnvaluableInput`), while a clean scope computes — over ONE shared accumulation.
 /// A cost-basis/lot error in one scope never touches another.
 #[test]
 fn scopes_are_isolated_one_unvaluable_others_compute() {
@@ -265,7 +265,7 @@ fn scopes_are_isolated_one_unvaluable_others_compute() {
         dec!(1300),
     );
     assert!(
-        matches!(results[1], Err(ExtractError::UnbookedInput(_))),
+        matches!(results[1], Err(ExtractError::UnvaluableInput(_))),
         "the elided scope fails alone: {:?}",
         results[1]
     );

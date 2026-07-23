@@ -481,7 +481,15 @@ pub(super) fn report_returns<W: Write>(
                 twr: r.time_weighted,
             })),
             Err(e) => {
-                eprintln!("warning: returns for {label} are unavailable: {e}");
+                // `label` is a user-controlled `returns-group` value; sanitize it
+                // for this stderr warning so it cannot inject control chars / extra
+                // lines (same guard the grouping warnings use). The error text is
+                // grammar-constrained (account names / currencies), so it needs no
+                // sanitizing.
+                eprintln!(
+                    "warning: returns for {} are unavailable: {e}",
+                    sanitize_display(&label)
+                );
                 rows.push(GroupRow::Unvaluable {
                     label,
                     reason: e.to_string(),

@@ -169,6 +169,34 @@ Time-weighted return    6.24%
 > return to `n/a` while the rest of the summary is still reported.) Provide
 > `price` directives to cover your holdings at the report date.
 
+#### What the report computes over
+
+Both returns are derived from two things: your **cash flows** — money crossing the
+portfolio boundary, i.e. contributions in and withdrawals/dividends out — and the
+**market value** of the position still held at `--end` (`net units × price`). They
+do **not** depend on cost basis or lot matching. Cost lots matter for *realized
+capital gains*, which these figures don't use.
+
+A practical consequence: an **imperfect or freshly-imported ledger still reports.**
+Brokerage imports routinely leave cost-basis gaps — an empty-cost `{}` sale with no
+matching lot, a sale of more units than the ledger records buying, or a holding
+whose opening purchase predates the import. `report returns` sums the *net* units
+(a net-short position simply values **negative** at market) and reports the return;
+it does not refuse. Validate the bookkeeping itself — unmatched lots, unbalanced
+transactions — separately with [`rledger check`](check.md) (the equivalent of
+`bean-check`). **`report returns` is a reporting tool, not a validator.**
+
+What this means in practice:
+
+- **Short / negative positions** value at market (negatively) and are reported, not
+  treated as errors.
+- **Losing portfolios** produce a real **negative** rate (e.g. `-42.10%`), never a
+  crash or a silent `n/a`.
+- **Only two things** actually stop a figure: no **price** for a held commodity at
+  the date it's needed (or an unconvertible boundary flow), and a posting whose
+  **units are elided** and could not be interpolated (so the held quantity is
+  unknown). Both errors name exactly what is missing.
+
 #### Per-group breakdown
 
 To see the return of each part of your portfolio with `--by-group`, tag the relevant `open`
@@ -230,6 +258,13 @@ Notes on grouping:
   - a group named `TOTAL` (it collides with the total row in text/CSV output);
   - `--by-group` with no in-scope `returns-group:` tags (the report then shows
     only the TOTAL row).
+- **Partial reports.** Because each group is valued independently, a group (or the
+  `TOTAL`) that hits one of the two blockers above — an unpriced commodity or an
+  elided in-scope posting — shows `n/a` across its row, with a `warning:` naming the
+  reason, while the other groups still report their figures. The report fails
+  outright only when *every* row is unvaluable. In `--format json` an unvaluable row
+  carries an `"error"` field (with `null` figures); a computed row's `"error"` is
+  `null`, so the schema is the same for both.
 
 See [`returns-group:` metadata](../reference/syntax.md#returns-group-metadata) for
 the tagging syntax.

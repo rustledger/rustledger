@@ -66,6 +66,24 @@ struct GroupResult {
     twr: Option<f64>,
 }
 
+/// One row of the `--by-group` report: either computed figures, or a marker that
+/// the scope hit an unvaluable input.
+///
+/// Net-units valuation isolates scopes — each sums only its own accounts — so one
+/// group hitting an unvaluable input (an in-scope account with an elided posting,
+/// or a commodity with no price) leaves the others computable. The report renders
+/// the computable rows and marks the unvaluable ones with `n/a`, rather than
+/// aborting the whole report on the first error (#1850 §4).
+enum GroupRow {
+    Ok(GroupResult),
+    /// The scope could not be valued; carries its label and the reason (shown as a
+    /// stderr warning, and — in JSON — on the row itself).
+    Unvaluable {
+        label: String,
+        reason: String,
+    },
+}
+
 /// Compute the return summary for one scope.
 ///
 /// Delegates to [`rustledger_query::scope_returns`] — the composition shared with
@@ -411,6 +429,8 @@ pub(super) fn report_returns<W: Write>(
         eprintln!(
             "warning: --by-group but no in-scope `returns-group:` metadata found; reporting only the whole-portfolio total"
         );
+        // No groups to partially render, so an unvaluable TOTAL still fails loudly
+        // (via `?`), matching the all-unvaluable rule below.
         let total = compute_group(
             directives,
             &whole_scope,
@@ -418,7 +438,15 @@ pub(super) fn report_returns<W: Write>(
             end_date,
             "TOTAL".to_string(),
         )?;
-        return render_grouped(&[], &total, currency, end_date, ctx, format, writer);
+        return render_grouped(
+            &[],
+            &GroupRow::Ok(total),
+            currency,
+            end_date,
+            ctx,
+            format,
+            writer,
+        );
     }
 
     // Compute the whole-portfolio TOTAL and every group in ONE shared realization:
@@ -435,18 +463,42 @@ pub(super) fn report_returns<W: Write>(
     }
     let computed = scopes_returns(directives, &scopes, &reporting_currency, end_date);
 
-    let mut rows: Vec<GroupResult> = Vec::with_capacity(computed.len());
+    // Each scope is valued independently (net-units isolates them), so a scope that
+    // hits an unvaluable input becomes an `n/a` row with a stderr warning rather
+    // than aborting the whole report — figures for the computable groups still
+    // render (#1850 §4). Only if EVERY row (TOTAL included) is unvaluable is there
+    // nothing to show, and the report fails loudly.
+    let mut rows: Vec<GroupRow> = Vec::with_capacity(computed.len());
     for (result, label) in computed.into_iter().zip(labels) {
-        let r = result.with_context(|| format!("computing investment returns for {label}"))?;
-        rows.push(GroupResult {
-            label,
-            flow_count: r.cash_flows,
-            invested: r.invested,
-            distributions: r.distributions,
-            current_value: r.current_value,
-            mwr: r.money_weighted,
-            twr: r.time_weighted,
-        });
+        match result {
+            Ok(r) => rows.push(GroupRow::Ok(GroupResult {
+                label,
+                flow_count: r.cash_flows,
+                invested: r.invested,
+                distributions: r.distributions,
+                current_value: r.current_value,
+                mwr: r.money_weighted,
+                twr: r.time_weighted,
+            })),
+            Err(e) => {
+                eprintln!("warning: returns for {label} are unavailable: {e}");
+                rows.push(GroupRow::Unvaluable {
+                    label,
+                    reason: e.to_string(),
+                });
+            }
+        }
+    }
+    if rows
+        .iter()
+        .all(|r| matches!(r, GroupRow::Unvaluable { .. }))
+    {
+        // Nothing is computable — surface the TOTAL's reason as the failure.
+        let reason = match rows.first() {
+            Some(GroupRow::Unvaluable { reason, .. }) => reason.clone(),
+            _ => "no valuable scope".to_string(),
+        };
+        anyhow::bail!("no returns could be computed: {reason}");
     }
     let (total, groups) = rows
         .split_first()
@@ -578,9 +630,13 @@ fn json_rate(rate: Option<f64>) -> String {
 }
 
 /// Per-group rows plus a TOTAL, when grouping is active.
+///
+/// A row that hit an unvaluable input renders `n/a` figures rather than aborting
+/// the report (#1850 §4); in JSON it also carries an `error` field (`null` on a
+/// computed row) so the failure is machine-distinguishable.
 fn render_grouped<W: Write>(
-    groups: &[GroupResult],
-    total: &GroupResult,
+    groups: &[GroupRow],
+    total: &GroupRow,
     currency: &str,
     end_date: NaiveDate,
     ctx: &DisplayContext,
@@ -595,26 +651,37 @@ fn render_grouped<W: Write>(
                 writer,
                 "group,as_of,reporting_currency,cash_flows,invested,distributions,current_value,money_weighted_return_pct,time_weighted_return_pct"
             )?;
-            for r in rows {
-                writeln!(
-                    writer,
-                    "{},{},{},{},{},{},{},{},{}",
-                    csv_escape(&sanitize_display(&r.label)),
-                    end_date,
-                    currency,
-                    r.flow_count,
-                    csv_escape(&money(r.invested)),
-                    csv_escape(&money(r.distributions)),
-                    csv_escape(&money(r.current_value)),
-                    fmt_rate(r.mwr),
-                    fmt_rate(r.twr),
-                )?;
+            for row in rows {
+                match row {
+                    GroupRow::Ok(r) => writeln!(
+                        writer,
+                        "{},{},{},{},{},{},{},{},{}",
+                        csv_escape(&sanitize_display(&r.label)),
+                        end_date,
+                        currency,
+                        r.flow_count,
+                        csv_escape(&money(r.invested)),
+                        csv_escape(&money(r.distributions)),
+                        csv_escape(&money(r.current_value)),
+                        fmt_rate(r.mwr),
+                        fmt_rate(r.twr),
+                    )?,
+                    // An unvaluable row keeps the column count stable with `n/a` in
+                    // every figure column; the reason is on stderr.
+                    GroupRow::Unvaluable { label, .. } => writeln!(
+                        writer,
+                        "{},{},{},n/a,n/a,n/a,n/a,n/a,n/a",
+                        csv_escape(&sanitize_display(label)),
+                        end_date,
+                        currency,
+                    )?,
+                }
             }
         }
         OutputFormat::Json => {
-            let obj = |r: &GroupResult| {
-                format!(
-                    r#"{{"group": "{}", "cash_flows": {}, "invested": "{}", "distributions": "{}", "current_value": "{}", "money_weighted_return_pct": {}, "time_weighted_return_pct": {}}}"#,
+            let obj = |row: &GroupRow| match row {
+                GroupRow::Ok(r) => format!(
+                    r#"{{"group": "{}", "cash_flows": {}, "invested": "{}", "distributions": "{}", "current_value": "{}", "money_weighted_return_pct": {}, "time_weighted_return_pct": {}, "error": null}}"#,
                     json_escape(&r.label),
                     r.flow_count,
                     money(r.invested),
@@ -622,7 +689,13 @@ fn render_grouped<W: Write>(
                     money(r.current_value),
                     json_rate(r.mwr),
                     json_rate(r.twr),
-                )
+                ),
+                // Stable schema: same keys, figures `null`, plus the reason string.
+                GroupRow::Unvaluable { label, reason } => format!(
+                    r#"{{"group": "{}", "cash_flows": null, "invested": null, "distributions": null, "current_value": null, "money_weighted_return_pct": null, "time_weighted_return_pct": null, "error": "{}"}}"#,
+                    json_escape(label),
+                    json_escape(reason),
+                ),
             };
             let group_objs: Vec<String> = groups.iter().map(obj).collect();
             writeln!(
@@ -647,17 +720,30 @@ fn render_grouped<W: Write>(
                 "Group", "MWR", "TWR", "Invested", "Distributions", "Current"
             )?;
             writeln!(writer, "{}", "-".repeat(RULE))?;
-            let row = |w: &mut W, r: &GroupResult| -> Result<()> {
-                writeln!(
-                    w,
-                    "{:23}{:>9}{:>9}{:>12}{:>14}{:>12}",
-                    truncate(&r.label, 23),
-                    fmt_rate_pct(r.mwr),
-                    fmt_rate_pct(r.twr),
-                    money(r.invested),
-                    money(r.distributions),
-                    money(r.current_value),
-                )?;
+            let row = |w: &mut W, row: &GroupRow| -> Result<()> {
+                match row {
+                    GroupRow::Ok(r) => writeln!(
+                        w,
+                        "{:23}{:>9}{:>9}{:>12}{:>14}{:>12}",
+                        truncate(&r.label, 23),
+                        fmt_rate_pct(r.mwr),
+                        fmt_rate_pct(r.twr),
+                        money(r.invested),
+                        money(r.distributions),
+                        money(r.current_value),
+                    )?,
+                    // `n/a` in every figure column; the reason is on stderr.
+                    GroupRow::Unvaluable { label, .. } => writeln!(
+                        w,
+                        "{:23}{:>9}{:>9}{:>12}{:>14}{:>12}",
+                        truncate(label, 23),
+                        "n/a",
+                        "n/a",
+                        "n/a",
+                        "n/a",
+                        "n/a",
+                    )?,
+                }
                 Ok(())
             };
             for r in groups {
@@ -904,6 +990,172 @@ mod tests {
             .expect("the CLI report path values net units, tolerating an over-sell");
         // Net −5 AAPL × 120 = −600; not a trap, not a refusal.
         assert_eq!(r.current_value, Decimal::from(-600));
+    }
+
+    /// #1850 §4: `render_grouped` marks an unvaluable row `n/a` (never aborts) and,
+    /// in JSON, carries a machine-readable `error` on that row while a computed
+    /// row's `error` is `null` — the schema stays stable across both shapes.
+    #[test]
+    fn render_grouped_marks_unvaluable_rows() {
+        let ctx = DisplayContext::new();
+        let end = d(2020, 12, 31);
+        let groups = vec![
+            GroupRow::Ok(GroupResult {
+                label: "Tech".to_string(),
+                flow_count: 2,
+                invested: Decimal::from(1000),
+                distributions: Decimal::ZERO,
+                current_value: Decimal::from(1300),
+                mwr: Some(0.30),
+                twr: Some(0.30),
+            }),
+            GroupRow::Unvaluable {
+                label: "Broken".to_string(),
+                reason: "cannot compute returns: account Assets:Broker:Broken has an un-booked (elided) posting".to_string(),
+            },
+        ];
+        let total = GroupRow::Unvaluable {
+            label: "TOTAL".to_string(),
+            reason: "cannot compute returns: account Assets:Broker:Broken has an un-booked (elided) posting".to_string(),
+        };
+
+        // Text: Tech's figures render; the Broken and TOTAL rows are `n/a`.
+        let mut text = Vec::new();
+        render_grouped(
+            &groups,
+            &total,
+            "USD",
+            end,
+            &ctx,
+            &OutputFormat::Text,
+            &mut text,
+        )
+        .unwrap();
+        let text = String::from_utf8(text).unwrap();
+        assert!(
+            text.contains("1300"),
+            "computed group renders its figures:\n{text}"
+        );
+        let broken = text
+            .lines()
+            .find(|l| l.starts_with("Broken"))
+            .expect("Broken row");
+        assert!(
+            broken.contains("n/a"),
+            "unvaluable group is n/a: {broken:?}"
+        );
+        assert!(!broken.contains("1300"));
+        let total_line = text
+            .lines()
+            .find(|l| l.starts_with("TOTAL"))
+            .expect("TOTAL row");
+        assert!(
+            total_line.contains("n/a"),
+            "unvaluable TOTAL is n/a: {total_line:?}"
+        );
+
+        // JSON: stable schema — computed row `error: null`, unvaluable row carries
+        // the reason with `null` figures.
+        let mut json = Vec::new();
+        render_grouped(
+            &groups,
+            &total,
+            "USD",
+            end,
+            &ctx,
+            &OutputFormat::Json,
+            &mut json,
+        )
+        .unwrap();
+        let json = String::from_utf8(json).unwrap();
+        assert!(json.contains(r#""group": "Tech""#));
+        assert!(
+            json.contains(r#""error": null"#),
+            "computed row error is null:\n{json}"
+        );
+        assert!(
+            json.contains(r#""current_value": null"#),
+            "unvaluable figures null:\n{json}"
+        );
+        assert!(
+            json.contains(r#""error": "cannot compute returns"#) || json.contains("un-booked"),
+            "unvaluable row carries the reason:\n{json}"
+        );
+    }
+
+    /// #1850 §4 end-to-end: a `--by-group` report with one valuable group and one
+    /// unvaluable group (an elided in-scope posting) renders the valuable group's
+    /// figures and marks the unvaluable one — and the whole-portfolio TOTAL, which
+    /// includes the elided account — `n/a`, instead of aborting on the first error
+    /// (the pre-fix `?`). The report still succeeds because a group computed.
+    #[test]
+    fn report_returns_by_group_partial_renders() {
+        use rustledger_core::{Metadata, Open};
+        let group_meta = |name: &str| {
+            let mut m = Metadata::default();
+            m.insert(
+                "returns-group".to_string(),
+                MetaValue::String(name.to_string()),
+            );
+            m
+        };
+        let dirs = vec![
+            Directive::Open(
+                Open::new(d(2020, 1, 1), "Assets:Broker:Tech").with_meta(group_meta("Tech")),
+            ),
+            Directive::Open(
+                Open::new(d(2020, 1, 1), "Assets:Broker:Broken").with_meta(group_meta("Broken")),
+            ),
+            Directive::Transaction(
+                Transaction::new(d(2020, 1, 2), "buy")
+                    .with_synthesized_posting(Posting::new("Assets:Broker:Tech", money(10, "AAPL")))
+                    .with_synthesized_posting(Posting::new("Assets:Bank", money(-1000, "USD"))),
+            ),
+            // Elided in-scope leg → net units unknown → this group (and TOTAL) can't
+            // be valued, but the Tech group is untouched.
+            Directive::Transaction(
+                Transaction::new(d(2020, 3, 1), "elided")
+                    .with_synthesized_posting(Posting::auto("Assets:Broker:Broken"))
+                    .with_synthesized_posting(Posting::new("Assets:Bank", money(-500, "USD"))),
+            ),
+            Directive::Price(Price::new(d(2020, 12, 31), "AAPL", money(130, "USD"))),
+        ];
+        let ctx = DisplayContext::new();
+        let mut out = Vec::new();
+        let r = report_returns(
+            &dirs,
+            &["USD".to_string()],
+            &["Assets:Broker".to_string()],
+            &[],
+            None,
+            Some("2020-12-31"),
+            true,
+            &ctx,
+            &OutputFormat::Text,
+            &mut out,
+        );
+        assert!(r.is_ok(), "partial report must not abort: {r:?}");
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("1300"),
+            "valuable Tech group renders its figures:\n{out}"
+        );
+        let broken = out
+            .lines()
+            .find(|l| l.starts_with("Broken"))
+            .expect("Broken row");
+        assert!(
+            broken.contains("n/a"),
+            "unvaluable group is n/a: {broken:?}"
+        );
+        let total_line = out
+            .lines()
+            .find(|l| l.starts_with("TOTAL"))
+            .expect("TOTAL row");
+        assert!(
+            total_line.contains("n/a"),
+            "unvaluable TOTAL is n/a: {total_line:?}"
+        );
     }
 
     /// Drift guard (CLAUDE.md Canonical-Function Discipline): the batched

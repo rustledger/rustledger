@@ -568,8 +568,9 @@ interface ledger {
     /// market, like beancount + beangrow; `rledger check` remains the validator.
     /// Fallible: returns `err(message)` on an empty/unparseable `end-date`, no
     /// resolvable reporting currency, a boundary or terminal flow that cannot be
-    /// priced, or an in-scope account with an elided/uninterpolated posting (its
-    /// units are unknown — the one shape net-units cannot value; a cost-basis/lot
+    /// priced, or an elided/uninterpolated posting that leaves a scope-relevant
+    /// quantity unknown — an in-scope holding, or an external boundary leg whose
+    /// cash flow is unknown (the one shape net-units cannot value; a cost-basis/lot
     /// error is not fatal).
     returns: func(investments: list<string>, income: list<string>, currency: string, end-date: string) -> result<returns-result, string>;
   }

@@ -1,9 +1,10 @@
-//! Cash-flow extraction: turn a booked ledger into the [`CashFlow`] series that
+//! Cash-flow extraction: turn a ledger into the [`CashFlow`] series that
 //! [`xirr`](crate::xirr) consumes.
 //!
-//! This is the correctness core of returns reporting. Given a booked directive
-//! stream and a [`Scope`] that classifies accounts, it produces the dated,
-//! single-currency cash-flow series an investor's money-weighted return is
+//! This is the correctness core of returns reporting. Given an interpolated,
+//! pad-expanded directive stream (see the input contract below — it does *not*
+//! require booking) and a [`Scope`] that classifies accounts, it produces the
+//! dated, single-currency cash-flow series an investor's money-weighted return is
 //! computed from.
 //!
 //! # The boundary-crossing model
@@ -221,12 +222,16 @@ pub enum ExtractError {
         /// The date whose rate was missing.
         date: NaiveDate,
     },
-    /// An in-scope account carried an elided/uninterpolated posting, so its net
-    /// units are unknown and cannot be valued. This is the ONE input the net-units
-    /// method genuinely cannot handle — unlike a cost-basis/lot error (an
-    /// over-sell, an empty-cost `{}` sale with no matching lot), which nets the
-    /// units and values at market. Extraction refuses with this error rather than
-    /// silently understate the position. Carries a human-readable description.
+    /// A posting with elided/uninterpolated units left a scope-relevant quantity
+    /// unknown, so the figure cannot be computed. Two shapes: an **in-scope
+    /// holding** whose net units are unknown (valuation side), and an
+    /// **external/boundary leg of a portfolio-touching transaction** whose cash
+    /// flow is unknown (flows side — [`extract_flows`]). This is the ONE class of
+    /// input net-units genuinely
+    /// cannot handle — unlike a cost-basis/lot error (an over-sell, an empty-cost
+    /// `{}` sale with no matching lot), which nets the units and values at market.
+    /// Extraction refuses rather than silently understate the position or drop the
+    /// flow. Carries a human-readable description.
     #[error("cannot compute returns: {0}")]
     UnbookedInput(String),
 }
@@ -260,8 +265,9 @@ pub enum ExtractError {
 ///
 /// Returns [`ExtractError::MissingPrice`] if any external flow or held position
 /// cannot be converted to `reporting_currency` on the date it is needed, or
-/// [`ExtractError::UnbookedInput`] if an in-scope account carries an
-/// elided/uninterpolated posting — see [`terminal_value`].
+/// [`ExtractError::UnbookedInput`] if an elided/uninterpolated posting leaves a
+/// scope-relevant quantity unknown — an in-scope holding (see [`terminal_value`])
+/// or an external boundary leg (see [`extract_flows`]).
 pub fn extract_cash_flows(
     directives: &[Directive],
     scope: &Scope,
@@ -286,8 +292,9 @@ pub fn extract_cash_flows(
 /// external postings, converted to `reporting_currency` at the transaction's
 /// date. Transactions that touch no investment or income account, and those
 /// whose external postings net to zero (internal transfers), contribute
-/// nothing. Flows dated after `end_date` are excluded. Expects the booked,
-/// pad-expanded stream described in the module-level docs.
+/// nothing. Flows dated after `end_date` are excluded. Expects the interpolated,
+/// pad-expanded stream described in the module-level docs (booking is not
+/// required — a cost-basis/lot error does not affect the flows).
 ///
 /// External postings are valued by their **units** (the money that moved
 /// through the outside account). A boundary-crossing external posting that

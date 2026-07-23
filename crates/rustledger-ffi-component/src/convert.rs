@@ -1827,9 +1827,10 @@ impl SessionState {
     /// `rledger report returns` engine over the boundary, so a host charts
     /// returns without re-deriving the cash-flow extraction or the XIRR/TWR
     /// math. Delegates to [`rustledger_query::scope_returns`] — the *same*
-    /// composition the CLI's `report returns` calls — over the same booked,
-    /// pad-expanded stream `query` builds (reused via the `padded` cell), so the
-    /// two surfaces cannot compute different figures for one ledger.
+    /// composition the CLI's `report returns` calls — over the same interpolated,
+    /// pad-expanded stream `query` builds (reused via the `padded` cell; booking is
+    /// not required — net units are valued at market), so the two surfaces cannot
+    /// compute different figures for one ledger.
     ///
     /// A parse-recovered load error does not block it — it computes over the held
     /// directives just as the CLI's `report returns` renders over them (errors
@@ -1848,9 +1849,10 @@ impl SessionState {
     /// # Errors
     /// `Err(message)` when `end` is empty/unparseable, no reporting currency
     /// resolves (empty `currency` and no `operating_currency`), a boundary or
-    /// terminal flow cannot be priced, or an in-scope account carries an
-    /// elided/uninterpolated posting (its units are unknown — the one shape
-    /// net-units cannot value). A cost-basis/lot error is NOT an error here.
+    /// terminal flow cannot be priced, or an elided/uninterpolated posting leaves a
+    /// scope-relevant quantity unknown — an in-scope holding, or an external
+    /// boundary leg whose cash flow is unknown (the one shape net-units cannot
+    /// value). A cost-basis/lot error is NOT an error here.
     pub fn returns(
         &self,
         investments: &[String],
@@ -2822,7 +2824,7 @@ option \"operating_currency\" \"USD\"
     }
 
     /// Drift guard (canonical-function discipline): `session.returns` must equal
-    /// [`rustledger_query::scope_returns`] over the same booked, pad-expanded
+    /// [`rustledger_query::scope_returns`] over the same interpolated, pad-expanded
     /// stream. That helper is the SAME composition the CLI's `report returns`
     /// calls, so equality here pins the component against the CLI's returns path
     /// — not merely against a private copy of the engine wiring.

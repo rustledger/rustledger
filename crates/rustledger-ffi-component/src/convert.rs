@@ -1833,13 +1833,13 @@ impl SessionState {
     ///
     /// A parse-recovered load error does not block it — it computes over the held
     /// directives just as the CLI's `report returns` renders over them (errors
-    /// surface separately, here via `info().errors`). But a BOOKING error (an
-    /// un-booked reduction the loader re-merged) is fatal: the returns engine
-    /// realizes through the booking engine's fallible path, so it returns a clean
-    /// `err` rather than trap or emit a figure computed over a contract-violating
-    /// stream. This is stricter than beangrow (which discards errors and reports
-    /// a number regardless) — deliberately: run `rledger check` to find the
-    /// booking error, then re-run. The CLI and this op agree on every ledger.
+    /// surface separately, here via `info().errors`). It values **net units at
+    /// market**, so a cost-basis / lot error (an over-sell, an empty-cost `{}` sale
+    /// with no matching lot — the common state of imported brokerage data) does NOT
+    /// block the report: the units net (possibly negative) and value at market,
+    /// like beancount + beangrow. `rledger check` remains the validator. The only
+    /// genuinely-unvaluable inputs error (see below). The CLI and this op agree on
+    /// every ledger.
     ///
     /// `investments`/`income` are the scope's account-name prefixes; `currency`
     /// is the single reporting currency (empty → the ledger's first
@@ -1847,9 +1847,10 @@ impl SessionState {
     ///
     /// # Errors
     /// `Err(message)` when `end` is empty/unparseable, no reporting currency
-    /// resolves (empty `currency` and no `operating_currency`), a boundary/
-    /// terminal flow cannot be priced, or the ledger has a booking error
-    /// (un-booked reduction).
+    /// resolves (empty `currency` and no `operating_currency`), a boundary or
+    /// terminal flow cannot be priced, or an in-scope account carries an
+    /// elided/uninterpolated posting (its units are unknown — the one shape
+    /// net-units cannot value). A cost-basis/lot error is NOT an error here.
     pub fn returns(
         &self,
         investments: &[String],

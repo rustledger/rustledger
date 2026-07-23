@@ -300,7 +300,9 @@ pub fn extract_cash_flows(
 /// # Errors
 ///
 /// Returns [`ExtractError::MissingPrice`] if an external posting of a relevant
-/// transaction cannot be converted to `reporting_currency` on its date.
+/// transaction cannot be converted to `reporting_currency` on its date, or
+/// [`ExtractError::UnbookedInput`] if such a posting has elided/uninterpolated
+/// units (its cash flow is unknown — the flows counterpart of an elided holding).
 pub fn extract_flows(
     directives: &[Directive],
     scope: &Scope,
@@ -346,13 +348,19 @@ pub fn extract_flows(
             if scope.classify(posting.account.as_str()) != AccountRole::External {
                 continue;
             }
-            // The input-contract interpolated stream (module docs) fills units on
-            // every posting, so a None here is unreachable in practice; skipping is
-            // defensive, not a silent drop of a real flow (an un-interpolated
-            // stream is a contract violation the leaf crate cannot detect, exactly
-            // as `account_balances` also requires interpolated input).
+            // An elided/uninterpolated external leg of a portfolio-touching
+            // transaction is a boundary cash flow of UNKNOWN magnitude — the flows
+            // counterpart of an elided in-scope holding (see `value_investment_scope`).
+            // Net-units tolerates a cost-basis/lot error, but it cannot invent a
+            // flow it can't see, so surface it as `UnbookedInput` rather than
+            // silently drop the contribution (which would understate `invested` and
+            // report a wrong money-weighted return). A fully interpolated stream
+            // never hits this; a re-merged booking-failed transaction can.
             let Some(amount) = posting.amount() else {
-                continue;
+                return Err(ExtractError::UnbookedInput(format!(
+                    "posting to {} on {} has un-booked (elided) units; cannot compute its cash flow",
+                    posting.account, txn.date
+                )));
             };
             let converted = prices
                 .convert(amount, reporting_currency, txn.date)
@@ -1269,6 +1277,38 @@ mod tests {
         assert!(
             matches!(r, Err(ExtractError::UnbookedInput(_))),
             "an elided in-scope posting must yield UnbookedInput, got {r:?}"
+        );
+    }
+
+    /// The FLOWS counterpart: an elided **external** (boundary cash) leg of a
+    /// portfolio-touching transaction is a contribution of unknown magnitude. It
+    /// must surface as [`ExtractError::UnbookedInput`], NOT be silently dropped —
+    /// dropping it would value the (complete) investment leg at market with no
+    /// matching outflow, understating `invested` and reporting a wrong
+    /// money-weighted return while exiting `Ok`. The investment leg here is
+    /// complete, so only the elided external leg triggers the error.
+    #[test]
+    fn elided_external_leg_errors_not_dropped() {
+        let dirs = vec![txn(
+            d(2020, 1, 1),
+            vec![
+                // Complete in-scope buy...
+                Posting::new("Assets:Broker:Stock", amt(dec!(10), "AAPL")),
+                // ...but the boundary cash leg is elided (interpolation failed).
+                Posting::auto("Assets:Bank"),
+            ],
+        )];
+        let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(120));
+        let flows = extract_flows(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31));
+        assert!(
+            matches!(flows, Err(ExtractError::UnbookedInput(_))),
+            "an elided external leg must yield UnbookedInput, got {flows:?}"
+        );
+        // And the whole summary errors rather than reporting a wrong figure.
+        let r = compute_returns(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31));
+        assert!(
+            matches!(r, Err(ExtractError::UnbookedInput(_))),
+            "compute_returns must not report a figure over a dropped flow, got {r:?}"
         );
     }
 

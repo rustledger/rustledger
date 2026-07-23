@@ -561,13 +561,16 @@ interface ledger {
     /// component has no reliable clock. Prices come from the held entries'
     /// `price` directives and implicit transaction prices. A parse-recovered load
     /// error does not block it — it computes over the held directives like the
-    /// CLI's `report returns` (errors surface via `info().errors`) — but a BOOKING
-    /// error (un-booked reduction) is fatal: the engine realizes through a
-    /// fallible path and returns a clean `err` rather than trap or report a figure
-    /// over a contract-violating stream (stricter than beangrow, deliberately —
-    /// run `rledger check`). Fallible: returns `err(message)` on an
-    /// empty/unparseable `end-date`, no resolvable reporting currency, a
-    /// boundary/terminal flow that cannot be priced, or a booking error.
+    /// CLI's `report returns` (errors surface via `info().errors`). It values NET
+    /// UNITS at market, so a cost-basis / lot error (an over-sell, an empty-cost
+    /// `{}` sale with no matching lot — the common state of imported brokerage
+    /// data) does NOT block the report: units net (possibly negative) and value at
+    /// market, like beancount + beangrow; `rledger check` remains the validator.
+    /// Fallible: returns `err(message)` on an empty/unparseable `end-date`, no
+    /// resolvable reporting currency, a boundary or terminal flow that cannot be
+    /// priced, or an in-scope account with an elided/uninterpolated posting (its
+    /// units are unknown — the one shape net-units cannot value; a cost-basis/lot
+    /// error is not fatal).
     returns: func(investments: list<string>, income: list<string>, currency: string, end-date: string) -> result<returns-result, string>;
   }
 }

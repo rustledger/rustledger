@@ -735,26 +735,48 @@ mod tests {
     }
 
     /// Drift guard (CLAUDE.md Canonical-Function Discipline): `terminal_value`
-    /// deliberately re-derives `report_cmd::account_balances`' realization loop
-    /// (a leaf crate cannot call this CLI-side helper). Pin that the two still
-    /// agree — the returns terminal value must equal the market valuation of
-    /// `account_balances`' inventories for the same scope and date. If the
-    /// realization in either place changes, this trips.
+    /// (net units) deliberately re-derives `report_cmd::account_balances`'
+    /// lot-matching realization (a leaf crate cannot call this CLI-side helper).
+    /// Pin that the two still agree — the returns terminal value must equal the
+    /// market valuation of `account_balances`' inventories for the same scope and
+    /// date. Includes a **reduction** (an empty-cost `{}` sell that lot-matches):
+    /// that is the exact shape where net-units and the lot-matching engine keep
+    /// different intermediate state, so a buy-only fixture could not catch a
+    /// divergence on the reduction path. If either realization changes, this trips.
     #[test]
     fn terminal_value_matches_account_balances_realization() {
+        use rustledger_core::{CostNumber, CostSpec};
+        let cost = |n: i64| {
+            CostSpec::empty()
+                .with_number(CostNumber::PerUnit {
+                    value: Decimal::from(n),
+                })
+                .with_currency("USD")
+        };
         let dirs = vec![
             Directive::Transaction(
                 Transaction::new(d(2020, 1, 1), "buy lot 1")
-                    .with_synthesized_posting(Posting::new(
-                        "Assets:Broker:Stock",
-                        money(10, "AAPL"),
-                    ))
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Broker:Stock", money(10, "AAPL")).with_cost(cost(100)),
+                    )
                     .with_synthesized_posting(Posting::new("Assets:Bank", money(-1000, "USD"))),
             ),
             Directive::Transaction(
                 Transaction::new(d(2020, 3, 1), "buy lot 2")
-                    .with_synthesized_posting(Posting::new("Assets:Broker:Stock", money(5, "AAPL")))
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Broker:Stock", money(5, "AAPL")).with_cost(cost(120)),
+                    )
                     .with_synthesized_posting(Posting::new("Assets:Bank", money(-600, "USD"))),
+            ),
+            // Reduction: sell 4 with an empty cost that lot-matches lot 1 (FIFO).
+            // Net units and the lot-matching engine must agree the residual is 11.
+            Directive::Transaction(
+                Transaction::new(d(2020, 6, 1), "sell 4")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Broker:Stock", money(-4, "AAPL"))
+                            .with_cost(CostSpec::empty()),
+                    )
+                    .with_synthesized_posting(Posting::new("Assets:Bank", money(600, "USD"))),
             ),
             Directive::Price(Price::new(d(2020, 12, 31), "AAPL", money(150, "USD"))),
         ];
@@ -785,8 +807,8 @@ mod tests {
             tv.amount, ab_total,
             "terminal_value drifted from account_balances realization",
         );
-        // Sanity: 15 AAPL @ 150 = 2250 USD.
-        assert_eq!(tv.amount, Decimal::from(2250));
+        // Sanity: net 10 + 5 − 4 = 11 AAPL @ 150 = 1650 USD.
+        assert_eq!(tv.amount, Decimal::from(1650));
     }
 
     /// Drift guard for the money-weighted series assembly `flows + terminal + sort`.

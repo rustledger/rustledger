@@ -590,8 +590,9 @@ impl BookingEngine {
                 reduced.is_ok(),
                 "apply() reduction failed — the transaction must be booked \
                  before apply() (postings filled, costs resolved); applying an \
-                 unbooked reduction silently over-sells inventory. Use \
-                 try_apply() if the input may be unbooked."
+                 unbooked reduction silently over-sells inventory. A caller that \
+                 cannot guarantee booked input must not derive a figure from this \
+                 realization (e.g. returns values net units at market instead)."
             );
             // Release builds keep the historical ignore-and-continue behavior.
             let _ = reduced;

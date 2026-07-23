@@ -227,9 +227,9 @@ pub enum ExtractError {
     /// holding** whose net units are unknown (valuation side), and an
     /// **external/boundary leg of a portfolio-touching transaction** whose cash
     /// flow is unknown (flows side — [`extract_flows`]). This is the ONE class of
-    /// input net-units genuinely
-    /// cannot handle — unlike a cost-basis/lot error (an over-sell, an empty-cost
-    /// `{}` sale with no matching lot), which nets the units and values at market.
+    /// input that net-units genuinely cannot handle — unlike a cost-basis/lot error
+    /// (an over-sell, an empty-cost `{}` sale with no matching lot), which nets the
+    /// units and values at market.
     /// Extraction refuses rather than silently understate the position or drop the
     /// flow. Carries a human-readable description.
     #[error("cannot compute returns: {0}")]
@@ -365,7 +365,7 @@ pub fn extract_flows(
             // never hits this; a re-merged booking-failed transaction can.
             let Some(amount) = posting.amount() else {
                 return Err(ExtractError::UnbookedInput(format!(
-                    "posting to {} on {} has un-booked (elided) units; cannot compute its cash flow",
+                    "posting to {} on {} has elided/uninterpolated units; cannot compute its cash flow",
                     posting.account, txn.date
                 )));
             };
@@ -542,7 +542,7 @@ fn value_investment_scope(
     for account in &holdings.unvaluable {
         if scope.classify(account.as_str()) == AccountRole::Investment {
             return Err(ExtractError::UnbookedInput(format!(
-                "account {account} has an un-booked (elided) posting; cannot value returns"
+                "account {account} has an elided/uninterpolated posting; cannot value returns"
             )));
         }
     }
@@ -1316,6 +1316,48 @@ mod tests {
         assert!(
             matches!(r, Err(ExtractError::UnbookedInput(_))),
             "compute_returns must not report a figure over a dropped flow, got {r:?}"
+        );
+    }
+
+    /// Per-scope isolation — what `--by-group` partial rendering relies on. Over
+    /// ONE shared accumulation, [`compute_returns_multi`] returns
+    /// [`ExtractError::UnbookedInput`] for a scope whose Investment accounts include
+    /// an elided posting, while a DISJOINT scope that excludes that account still
+    /// computes `Ok`. (The elided account is marked unvaluable globally, but a scope
+    /// errors only if it classifies that account as `Investment`.)
+    #[test]
+    fn compute_returns_multi_isolates_an_unvaluable_scope() {
+        let dirs = vec![
+            // Clean group: a complete, priceable buy.
+            txn(
+                d(2020, 1, 1),
+                vec![
+                    Posting::new("Assets:Broker:Clean", amt(dec!(10), "AAPL")),
+                    Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
+                ],
+            ),
+            // Broken group: an elided in-scope leg → net units unknown.
+            txn(
+                d(2020, 3, 1),
+                vec![
+                    Posting::auto("Assets:Broker:Broken"),
+                    Posting::new("Assets:Bank", amt(dec!(-500), "USD")),
+                ],
+            ),
+        ];
+        let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(130));
+        let clean = Scope::new(vec!["Assets:Broker:Clean".to_string()], vec![]);
+        let broken = Scope::new(vec!["Assets:Broker:Broken".to_string()], vec![]);
+        let out = compute_returns_multi(&dirs, &[clean, broken], "USD", &prices, d(2020, 12, 31));
+        assert_eq!(
+            out[0].as_ref().expect("clean scope computes").current_value,
+            dec!(1300),
+            "net 10 AAPL × 130",
+        );
+        assert!(
+            matches!(out[1], Err(ExtractError::UnbookedInput(_))),
+            "the elided scope fails alone: {:?}",
+            out[1]
         );
     }
 

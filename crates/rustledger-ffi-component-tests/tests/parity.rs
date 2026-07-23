@@ -715,7 +715,7 @@ fn session_format_honors_display_precision() -> Result<()> {
 
 /// `session.returns` (WIT 3.9.0, #1847): the component's returns over the held
 /// ledger must equal the NATIVE `rustledger_query::scope_returns` over the same
-/// booked, pad-expanded stream — the SAME composition the CLI's `report returns`
+/// interpolated, pad-expanded stream — the SAME composition the CLI's `report returns`
 /// calls, so this pins the wasm surface against the CLI's returns path, not a
 /// private re-implementation. Drift guard across the wasm boundary: the decimal
 /// fields (rust_decimal, pure integer arithmetic) must match byte-for-byte; the

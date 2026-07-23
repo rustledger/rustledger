@@ -843,14 +843,15 @@ mod tests {
         assert_eq!(canonical.len(), 3);
     }
 
-    /// The CLI `report returns` path (`compute_group` -> `scope_returns`) must
-    /// return a clean error, NOT trap, when the loaded ledger carries a
-    /// booking-failed (un-booked, re-merged) transaction — the pre-existing CLI
-    /// exposure the #1849 third review flagged, now closed by the returns
-    /// engine's fallible `try_apply`. Over-reduce an empty-cost lot (sell 10 of a
-    /// 5-lot); without the fix this native test would abort.
+    /// The CLI `report returns` path (`compute_group` -> `scope_returns`) values
+    /// **net units at market**, so a booking-failed (un-booked, re-merged)
+    /// transaction — the common state of imported brokerage data — must NOT trap
+    /// and must NOT refuse the report. Over-reducing an empty-cost lot (sell 10 of
+    /// a 5-lot) nets to −5 units, valued at the terminal price. `rledger check`
+    /// remains the validator (see #1850); without the net-units rewrite this native
+    /// test would abort in the lot-matching booking engine.
     #[test]
-    fn compute_group_errors_on_unbooked_oversell_not_traps() {
+    fn compute_group_tolerates_unbooked_oversell_not_traps() {
         use rustledger_core::{CostNumber, CostSpec};
         let dirs = vec![
             Directive::Transaction(
@@ -874,13 +875,13 @@ mod tests {
                     )
                     .with_synthesized_posting(Posting::new("Assets:Bank", money(1000, "USD"))),
             ),
+            Directive::Price(Price::new(d(2020, 12, 31), "AAPL", money(120, "USD"))),
         ];
         let scope = Scope::new(vec!["Assets:Broker".to_string()], vec![]);
-        let r = compute_group(&dirs, &scope, "USD", d(2020, 12, 31), "TOTAL".to_string());
-        assert!(
-            r.is_err(),
-            "the CLI report path must error (not trap) on an un-booked over-sell"
-        );
+        let r = compute_group(&dirs, &scope, "USD", d(2020, 12, 31), "TOTAL".to_string())
+            .expect("the CLI report path values net units, tolerating an over-sell");
+        // Net −5 AAPL × 120 = −600; not a trap, not a refusal.
+        assert_eq!(r.current_value, Decimal::from(-600));
     }
 
     /// Drift guard (CLAUDE.md Canonical-Function Discipline): the batched

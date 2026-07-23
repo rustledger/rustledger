@@ -2939,13 +2939,16 @@ this line is not a valid directive @#$
     }
 
     #[test]
-    fn returns_errors_on_in_scope_booking_error() {
+    fn returns_tolerates_in_scope_booking_error() {
         // A booking-FAILED transaction (selling 10 units when only 5 were bought,
         // empty cost forcing a lot match) is re-merged into the held directives
-        // UN-booked. Realizing it would `debug_assert`-trap the booking engine
-        // (over-sell) — this native test would ABORT without the engine's fallible
-        // `try_apply`. With it, an IN-SCOPE over-sell surfaces as a clean Err (no
-        // guard involved). Regression guard for the #1849 second-review finding.
+        // UN-booked — the common state of imported brokerage data. Returns value
+        // NET UNITS at market (never cost-basis lots), so this must NOT trap and
+        // must NOT refuse the report: the over-sell nets to −5 ACME, valued at the
+        // terminal price (−5 × 120 = −600). The booking error still surfaces via
+        // info().errors; `rledger check` remains the validator (see #1850). Without
+        // the net-units rewrite this native test would ABORT in the lot-matching
+        // booking engine.
         const OVERSELL: &str = "\
 option \"operating_currency\" \"USD\"
 2020-01-01 open Assets:Invest:Broker
@@ -2956,6 +2959,7 @@ option \"operating_currency\" \"USD\"
 2020-06-01 * \"Sell 10 — more than held\"
   Assets:Invest:Broker  -10 ACME {}
   Assets:Cash  1000 USD
+2021-01-01 price ACME  120 USD
 ";
         let state = SessionState::from_source(OVERSELL);
         assert!(
@@ -2963,21 +2967,22 @@ option \"operating_currency\" \"USD\"
             "over-sell must surface as a booking load error"
         );
         let (inv, inc) = scope_args();
-        assert!(
-            state.returns(&inv, &inc, "USD", "2021-01-01").is_err(),
-            "an in-scope over-sell must surface as a clean Err, not trap"
-        );
+        let r = state
+            .returns(&inv, &inc, "USD", "2021-01-01")
+            .expect("net-units returns tolerate an in-scope over-sell");
+        assert_eq!(r.current_value, "-600", "net −5 ACME × 120");
     }
 
     #[test]
-    fn returns_from_entries_oversell_errors_not_traps() {
+    fn returns_from_entries_oversell_tolerated_not_traps() {
         // A `from_entries` session holds directives UN-booked with `errors:
-        // vec![]`, so the load-error guard is bypassed (the #1849 third-review
-        // gap). The engine-level `try_apply` fix is what closes this path: an
-        // over-sell (reduce 10 of an empty-cost lot only 5 were bought into)
-        // makes compute_returns — hence returns() — return a clean Err instead of
-        // trapping. This native test would abort without that fix.
-        use rustledger_core::{Amount, CostNumber, CostSpec, Decimal, Posting, Transaction};
+        // vec![]`, so no load-error guard is involved at all. Returns value net
+        // units at market, so an over-sell (reduce 10 of an empty-cost lot only 5
+        // were bought into) nets to −5 ACME and is valued at the terminal price
+        // (−5 × 120 = −600) — compute_returns, hence returns(), yields a clean Ok,
+        // never a trap or refusal. This native test would abort without the
+        // net-units rewrite (see #1850).
+        use rustledger_core::{Amount, CostNumber, CostSpec, Decimal, Posting, Price, Transaction};
         let dt = |m, day| rustledger_core::naive_date(2020, m, day).unwrap();
         let buy = Transaction::new(dt(1, 1), "buy")
             .with_synthesized_posting(
@@ -3009,21 +3014,23 @@ option \"operating_currency\" \"USD\"
                 "Assets:Cash",
                 Amount::new(Decimal::from(1000), "USD"),
             ));
+        let price = Price::new(dt(12, 31), "ACME", Amount::new(Decimal::from(120), "USD"));
         let core = [
             rustledger_core::Directive::Transaction(buy),
             rustledger_core::Directive::Transaction(sell),
+            rustledger_core::Directive::Price(price),
         ];
         let wit: Vec<_> = core
             .iter()
             .map(|d| super::directive_from_core(d, 0, "<test>"))
             .collect();
         let state = SessionState::from_entries(&wit);
-        // The guard cannot help here — from_entries carries no load errors.
+        // from_entries carries no load errors; net-units tolerance is what matters.
         assert!(state.info().errors.is_empty());
         let (inv, inc) = scope_args();
-        assert!(
-            state.returns(&inv, &inc, "USD", "2020-12-31").is_err(),
-            "engine fix must make an un-booked from_entries session err, not trap"
-        );
+        let r = state
+            .returns(&inv, &inc, "USD", "2020-12-31")
+            .expect("net-units returns tolerate an un-booked from_entries over-sell");
+        assert_eq!(r.current_value, "-600", "net −5 ACME × 120");
     }
 }

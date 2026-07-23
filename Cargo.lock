@@ -3662,7 +3662,6 @@ version = "0.21.0"
 dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
- "rustledger-booking",
  "rustledger-core",
  "thiserror 2.0.19",
 ]

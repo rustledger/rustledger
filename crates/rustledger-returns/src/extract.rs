@@ -63,17 +63,26 @@
 //!
 //! # Input contract
 //!
-//! Both entry points take the **booked, pad-expanded** directive stream — costs
-//! resolved, amounts interpolated, and `pad`/`balance` directives already
-//! expanded into their synthesized transactions (the loader's
-//! `Ledger::balance_view` output, the same stream the canonical
-//! `report_cmd::account_balances` consumes). This crate is a leaf and cannot
-//! book or pad-expand a raw stream itself. It defends the booked half of the
-//! contract: an un-booked directive — an unmatched reduction, or a posting with
-//! elided/uninterpolated units — surfaces as [`ExtractError::UnbookedInput`]
-//! rather than a silently wrong figure. It cannot defend the pad half, though:
-//! handing it an un-expanded stream silently drops any position seeded by a pad,
-//! so callers must pad-expand first.
+//! Both entry points take the **interpolated, pad-expanded** directive stream —
+//! amounts interpolated and `pad`/`balance` directives already expanded into their
+//! synthesized transactions (the loader's `Ledger::balance_view` output, the same
+//! stream the canonical `report_cmd::account_balances` consumes). This crate is a
+//! leaf and cannot interpolate or pad-expand a raw stream itself.
+//!
+//! It does **not** require a *booked* stream. Money-weighted (XIRR) and
+//! time-weighted returns depend on cash flows and terminal **market** value
+//! (`net units × price`), never on cost-basis lots, so this crate values **net
+//! units** — the running sum of each account's complete posting units — without
+//! lot-matching. A cost-basis/lot error therefore does not affect the report: an
+//! over-sell or an empty-cost `{}` sale with no matching lot (the common state of
+//! imported brokerage data) simply nets the units, possibly negative, and is
+//! valued at market — like beancount + beangrow. `rledger check` remains the
+//! validator (see #1850). The one shape it genuinely cannot value is an in-scope
+//! account with an elided/uninterpolated posting — its net units are unknown —
+//! which surfaces as [`ExtractError::UnbookedInput`] rather than a silently
+//! understated figure. It cannot defend the pad half either: handing it an
+//! un-expanded stream silently drops any position seeded by a pad, so callers must
+//! pad-expand first.
 //!
 //! Returns are computed **from ledger inception** — there is no analysis start
 //! date. An opening balance (a `pad`, or an explicit `Equity:Opening-Balances`
@@ -212,13 +221,13 @@ pub enum ExtractError {
         /// The date whose rate was missing.
         date: NaiveDate,
     },
-    /// A reduction posting referenced a lot that was never held — the input
-    /// stream is not booked. The loader re-merges booking-FAILED transactions
-    /// into `Ledger.directives` in their un-booked shape; realizing one would
-    /// over-sell inventory (and `debug_assert`-trap the booking engine in debug
-    /// builds), so extraction refuses with this error rather than return a wrong
-    /// valuation. Carries the underlying booking error's message.
-    #[error("cannot compute returns over an unbooked ledger ({0}); fix the booking error first")]
+    /// An in-scope account carried an elided/uninterpolated posting, so its net
+    /// units are unknown and cannot be valued. This is the ONE input the net-units
+    /// method genuinely cannot handle — unlike a cost-basis/lot error (an
+    /// over-sell, an empty-cost `{}` sale with no matching lot), which nets the
+    /// units and values at market. Extraction refuses with this error rather than
+    /// silently understate the position. Carries a human-readable description.
+    #[error("cannot compute returns: {0}")]
     UnbookedInput(String),
 }
 
@@ -232,13 +241,14 @@ pub enum ExtractError {
 ///
 /// # Input contract
 ///
-/// `directives` must be the **booked, pad-expanded** stream — costs resolved,
-/// amounts interpolated, and `pad`/`balance` directives already expanded into
-/// their synthesized transactions (the loader's `Ledger::balance_view` output,
-/// the same stream `report_cmd::account_balances` consumes). This crate is a
-/// leaf and cannot book or pad-expand a raw stream: an un-booked stream lets the
-/// booking engine silently realize the wrong inventory, and an un-expanded stream
-/// drops pad-seeded positions.
+/// `directives` must be the **interpolated, pad-expanded** stream — amounts
+/// interpolated and `pad`/`balance` directives already expanded into their
+/// synthesized transactions (the loader's `Ledger::balance_view` output, the same
+/// stream `report_cmd::account_balances` consumes). This crate is a leaf and
+/// cannot interpolate or pad-expand a raw stream. It does **not** require a booked
+/// stream: it values net units at market, so a cost-basis/lot error nets the units
+/// rather than realizing a wrong inventory (see the module docs). An un-expanded
+/// stream still drops pad-seeded positions, though.
 ///
 /// Returns are computed **from ledger inception** — an opening balance (a `pad`,
 /// or an `Equity:Opening-Balances` posting) is a genuine flow, the capital
@@ -250,8 +260,8 @@ pub enum ExtractError {
 ///
 /// Returns [`ExtractError::MissingPrice`] if any external flow or held position
 /// cannot be converted to `reporting_currency` on the date it is needed, or
-/// [`ExtractError::UnbookedInput`] if the stream violates the booked input
-/// contract (a re-merged booking-failed transaction) — see [`terminal_value`].
+/// [`ExtractError::UnbookedInput`] if an in-scope account carries an
+/// elided/uninterpolated posting — see [`terminal_value`].
 pub fn extract_cash_flows(
     directives: &[Directive],
     scope: &Scope,
@@ -336,11 +346,11 @@ pub fn extract_flows(
             if scope.classify(posting.account.as_str()) != AccountRole::External {
                 continue;
             }
-            // The input-contract booked stream (module docs) fills units on every
-            // posting, so a None here is unreachable in practice; skipping is
-            // defensive, not a silent drop of a real flow (an un-booked stream is
-            // a contract violation the leaf crate cannot detect, exactly as
-            // `apply`/`account_balances` also require pre-booked input).
+            // The input-contract interpolated stream (module docs) fills units on
+            // every posting, so a None here is unreachable in practice; skipping is
+            // defensive, not a silent drop of a real flow (an un-interpolated
+            // stream is a contract violation the leaf crate cannot detect, exactly
+            // as `account_balances` also requires interpolated input).
             let Some(amount) = posting.amount() else {
                 continue;
             };
@@ -373,17 +383,16 @@ pub fn extract_flows(
 /// fabricated return. A consumer that needs to distinguish "still holding,
 /// net-flat" from "fully liquidated" must not learn it from a zero cash flow.
 ///
-/// Holdings are realized through the booking engine — lots keep their cost and
-/// reductions match the account's booking method — over every transaction dated
-/// on or before `end_date`, then each position's units are valued at **market**
-/// (`position.units`, not cost basis) via `prices`. Because market value is
-/// `units × price` and every lot of a commodity shares one market price, the
-/// terminal value depends only on total held units, not on which lots a
-/// reduction matched; the booking method affects realized-gain reporting (a
-/// later concern), not this figure. Only accounts the `scope` classifies as
-/// [`Investment`](AccountRole::Investment) are counted. Positions seeded by a
-/// `pad` are realized only if the input stream is pad-expanded, as
-/// [`extract_cash_flows`]' input contract requires.
+/// Holdings are the **net units** per `(account, commodity)` — the running sum of
+/// each account's complete posting units over every transaction dated on or before
+/// `end_date`, **without lot-matching** — valued at **market** via `prices`. Market
+/// value is `units × price` and every lot of a commodity shares one market price,
+/// so the terminal value depends only on total held units, never on which lots a
+/// reduction matched or on cost basis; a cost-basis/lot error (an over-sell, an
+/// empty-cost `{}` sale with no matching lot) simply nets the units. Only accounts
+/// the `scope` classifies as [`Investment`](AccountRole::Investment) are counted.
+/// Positions seeded by a `pad` are counted only if the input stream is pad-expanded,
+/// as [`extract_cash_flows`]' input contract requires.
 ///
 /// A net-short position (negative units) values negatively, correctly reducing
 /// the terminal flow (see the [`PriceOracle`] linearity requirement). A position
@@ -393,11 +402,9 @@ pub fn extract_flows(
 /// # Errors
 ///
 /// Returns [`ExtractError::MissingPrice`] if a held commodity has no price in
-/// `reporting_currency` on `end_date`, or [`ExtractError::UnbookedInput`] if the
-/// stream violates the booked input contract — a reduction with no matching lot
-/// (the loader re-merges booking-failed transactions in un-booked shape). The
-/// realization surfaces that as an `Err` via the booking engine's fallible
-/// `try_apply`, rather than over-selling inventory or trapping.
+/// `reporting_currency` on `end_date`, or [`ExtractError::UnbookedInput`] if an
+/// in-scope account carries an elided/uninterpolated posting (its net units are
+/// unknown — the one shape net-units cannot value).
 pub fn terminal_value(
     directives: &[Directive],
     scope: &Scope,
@@ -420,21 +427,19 @@ pub fn terminal_value(
 }
 
 /// Market value (in `reporting_currency`) of the investment-scope holdings as of
-/// `date`: the inventory realized from every transaction dated on or before
-/// `date`, with each held position valued at **market** at `date`.
+/// `date`: the **net units** accumulated from every transaction dated on or before
+/// `date`, each commodity valued at **market** at `date`.
 ///
-/// This is the shared realization primitive behind [`terminal_value`] (the
-/// value at the report end date) and [`twr`] (the value at each cash-flow date).
-/// It mirrors `report_cmd::account_balances`
-/// (`crates/rustledger/src/cmd/report_cmd/mod.rs`) plus the `<= date` filter — the
-/// leaf crate cannot call that CLI-side helper. Kept aligned by hand; the returns
-/// CLI's `terminal_value_matches_account_balances_realization` test guards it (it
-/// values `account_balances`' inventories and compares to [`terminal_value`],
-/// which delegates here — so this realization is covered end to end).
-/// Like that helper, inventories are collected into a `BTreeMap` so iteration
-/// order is stable across runs (an `FxHashMap` would make which currency a
-/// `MissingPrice` names depend on hash order, and differ between 32- and 64-bit
-/// targets).
+/// This is the shared valuation primitive behind [`terminal_value`] (the value at
+/// the report end date) and [`twr`] (the value at each cash-flow date). On a
+/// booked stream the net units per commodity equal the total units
+/// `report_cmd::account_balances` (`crates/rustledger/src/cmd/report_cmd/mod.rs`)
+/// realizes, so the market value agrees; the returns CLI's
+/// `terminal_value_matches_account_balances_realization` test guards that
+/// agreement (it values `account_balances`' inventories and compares to
+/// [`terminal_value`], which delegates here). Net units are held in a `BTreeMap`
+/// so iteration order — hence which currency a `MissingPrice` names — is stable
+/// across runs and between 32- and 64-bit targets (an `FxHashMap` would not be).
 fn investment_value_at(
     directives: &[Directive],
     scope: &Scope,
@@ -442,87 +447,107 @@ fn investment_value_at(
     prices: &impl PriceOracle,
     date: NaiveDate,
 ) -> Result<Decimal, ExtractError> {
-    // Opens carry booking methods regardless of date, so register with the full
-    // stream but apply only transactions up to the valuation date.
-    let mut engine = rustledger_booking::BookingEngine::new();
-    engine.register_account_methods(directives.iter());
+    let mut holdings = NetUnits::default();
     for directive in directives {
         if let Directive::Transaction(txn) = directive
             && txn.date <= date
         {
-            apply_booked(&mut engine, txn)?;
+            holdings.apply(txn);
         }
     }
-    value_investment_scope(
-        engine.inventories(),
-        scope,
-        reporting_currency,
-        prices,
-        date,
-    )
+    value_investment_scope(&holdings, scope, reporting_currency, prices, date)
 }
 
-/// Apply a whole transaction to `engine`, surfacing an un-booked stream as
-/// [`ExtractError::UnbookedInput`] instead of a wrong figure.
+/// Net units held per `(account, commodity)`, accumulated by summing complete
+/// posting units — **without lot-matching**.
 ///
-/// The realization requires the booked, pad-expanded input contract. Two ways a
-/// re-merged booking-failed transaction violates it, both caught here: an
-/// unmatched reduction (via the booking engine's fallible
-/// [`try_apply`](rustledger_booking::BookingEngine::try_apply)), and a posting
-/// with elided/uninterpolated units (booking fills these) — which `try_apply`
-/// would otherwise silently skip, understating the position.
-fn apply_booked(
-    engine: &mut rustledger_booking::BookingEngine,
-    txn: &rustledger_core::Transaction,
-) -> Result<(), ExtractError> {
-    if let Some(elided) = txn
-        .postings
-        .iter()
-        .find(|p| !matches!(p.units, Some(IncompleteAmount::Complete(_))))
-    {
-        return Err(ExtractError::UnbookedInput(format!(
-            "posting to {} on {} has un-booked (elided) units",
-            elided.account, txn.date
-        )));
+/// Market valuation for returns (XIRR/TWR) is `net units × price`; it never needs
+/// cost-basis lots. So a lot-matching/cost-basis error — an over-sell with no
+/// matching lot, an empty-cost `{}` sale (the common state of imported brokerage
+/// data) — simply nets the units (possibly negative) and is valued at market,
+/// rather than trapping or refusing the report. `rledger check` remains the
+/// validator; the returns report computes over what loaded, like beancount +
+/// beangrow (see #1850). `BTreeMap`s keep `MissingPrice` selection deterministic
+/// across runs and target word sizes.
+#[derive(Default)]
+struct NetUnits {
+    per_account: std::collections::BTreeMap<
+        rustledger_core::Account,
+        std::collections::BTreeMap<rustledger_core::Currency, Decimal>,
+    >,
+    /// Accounts with an elided/uninterpolated posting: a leg's units are unknown,
+    /// so the account's net units are incomplete. This is the ONE input the
+    /// net-units method genuinely cannot value — valuing such an in-scope account
+    /// errors rather than silently understating it.
+    unvaluable: std::collections::BTreeSet<rustledger_core::Account>,
+}
+
+impl NetUnits {
+    fn apply(&mut self, txn: &rustledger_core::Transaction) {
+        for posting in &txn.postings {
+            if let Some(IncompleteAmount::Complete(amount)) = &posting.units {
+                *self
+                    .per_account
+                    .entry(posting.account.clone())
+                    .or_default()
+                    .entry(amount.currency.clone())
+                    .or_default() += amount.number;
+            } else {
+                self.unvaluable.insert(posting.account.clone());
+            }
+        }
     }
-    engine
-        .try_apply(txn)
-        .map_err(|e| ExtractError::UnbookedInput(e.to_string()))
 }
 
 /// Total market value (in `reporting_currency`, at `date`) of the
-/// `Investment`-scope positions among `inventories`.
+/// `Investment`-scope net holdings.
 ///
-/// The single valuation implementation shared by [`investment_value_at`] (one
-/// date, a fresh realization) and [`investment_values_at`] (a batch of dates over
-/// one realization pass), so the two cannot drift. Collects into a `BTreeMap`
-/// first so iteration — and hence which currency a [`ExtractError::MissingPrice`]
-/// names — is deterministic across runs and target word sizes (the engine's
-/// `FxHashMap` order is neither).
-fn value_investment_scope<'a>(
-    inventories: impl Iterator<Item = (&'a rustledger_core::Account, &'a rustledger_core::Inventory)>,
+/// The single valuation shared by [`investment_value_at`] and the batch
+/// [`investment_values_at`] / [`investment_values_multi`], so they cannot drift.
+/// Iterates the deterministic `BTreeMap` so which currency a
+/// [`ExtractError::MissingPrice`] names is stable.
+///
+/// # Errors
+/// [`ExtractError::MissingPrice`] when an in-scope commodity has no price in
+/// `reporting_currency` on `date`, or [`ExtractError::UnbookedInput`] when an
+/// in-scope account carried an elided/uninterpolated posting (its net units are
+/// incomplete — the one shape net-units cannot value).
+fn value_investment_scope(
+    holdings: &NetUnits,
     scope: &Scope,
     reporting_currency: &str,
     prices: &impl PriceOracle,
     date: NaiveDate,
 ) -> Result<Decimal, ExtractError> {
-    // Classify every realized account, but collect only the Investment-scope ones
-    // into the `BTreeMap` (kept for deterministic `MissingPrice` selection) — so
-    // the sort and the price conversions scale with the in-scope positions, while
-    // the classify scan is still over the whole chart.
-    let ordered: std::collections::BTreeMap<_, _> = inventories
-        .filter(|(account, _)| scope.classify(account.as_str()) == AccountRole::Investment)
-        .collect();
+    // An in-scope account carrying an elided/uninterpolated posting has incomplete
+    // net units — the one shape net-units cannot value — so error rather than
+    // understate it. Scanned over the whole `unvaluable` set (a `BTreeSet`, so the
+    // choice of named account is deterministic), including accounts that appear
+    // ONLY with an elided leg and so never entered `per_account`.
+    for account in &holdings.unvaluable {
+        if scope.classify(account.as_str()) == AccountRole::Investment {
+            return Err(ExtractError::UnbookedInput(format!(
+                "account {account} has an un-booked (elided) posting; cannot value returns"
+            )));
+        }
+    }
     let mut total = Decimal::ZERO;
-    for inventory in ordered.values() {
-        for position in inventory.positions() {
-            if position.units.number.is_zero() {
+    for (account, commodities) in &holdings.per_account {
+        if scope.classify(account.as_str()) != AccountRole::Investment {
+            continue;
+        }
+        for (commodity, units) in commodities {
+            if units.is_zero() {
                 continue;
             }
             let converted = prices
-                .convert(&position.units, reporting_currency, date)
+                .convert(
+                    &Amount::new(*units, commodity.clone()),
+                    reporting_currency,
+                    date,
+                )
                 .ok_or_else(|| ExtractError::MissingPrice {
-                    currency: position.units.currency.to_string(),
+                    currency: commodity.to_string(),
                     date,
                 })?;
             total += converted.number;
@@ -541,18 +566,18 @@ fn value_investment_scope<'a>(
 ///
 /// # Fast path vs. fallback
 ///
-/// When `directives` is **date-sorted** (the report's booked stream is), a single
-/// forward pass suffices — `O(directives + dates × accounts)`, each date classifying
-/// the realized accounts and pricing the in-scope positions, versus the
-/// `O(dates × directives)` of a per-date rescan — because the per-date realization
-/// applies transactions in directive order, which *is* date order, so a cursor
-/// that snapshots as it crosses each target date agrees exactly (all same-date
-/// transactions applied before that date's snapshot).
+/// When `directives` is **date-sorted** (the report's stream is), a single
+/// forward pass suffices — `O(directives + dates × accounts)`, each date pricing
+/// the in-scope net units, versus the `O(dates × directives)` of a per-date
+/// rescan — because the per-date accumulation applies transactions in directive
+/// order, which *is* date order, so a cursor that snapshots as it crosses each
+/// target date agrees exactly (all same-date transactions applied before that
+/// date's snapshot).
 ///
 /// When it is **not** date-sorted, the single pass would skip a later-appearing
 /// in-range transaction, so this falls back to the order-independent per-date
 /// [`investment_value_at`] — the result then matches `investment_value_at` for
-/// *any* booked input, never silently wrong. The
+/// *any* input, never silently wrong. The
 /// `investment_values_at_matches_per_date` and
 /// `investment_values_at_matches_per_date_when_unsorted` tests pin both paths.
 fn investment_values_at(
@@ -567,10 +592,10 @@ fn investment_values_at(
         "investment_values_at requires ascending dates"
     );
 
-    // The single-pass cursor is only equivalent to the per-date realization when
+    // The single-pass cursor is only equivalent to the per-date accumulation when
     // transactions are in date order; otherwise fall back to the (order-independent)
-    // per-date path so the result is correct for any booked stream. The check is a
-    // cheap O(transactions) date-comparison scan, dominated by the booking pass it
+    // per-date path so the result is correct for any stream. The check is a cheap
+    // O(transactions) date-comparison scan, dominated by the accumulation pass it
     // guards; the report's input is always sorted, so the fast path is the norm.
     let transactions = || {
         directives.iter().filter_map(|directive| match directive {
@@ -585,31 +610,22 @@ fn investment_values_at(
             .collect();
     }
 
-    let mut engine = rustledger_booking::BookingEngine::new();
-    engine.register_account_methods(directives.iter());
+    let mut holdings = NetUnits::default();
     let mut txns = transactions().peekable();
     let mut values = Vec::with_capacity(dates.len());
     for &date in dates {
-        // Apply every transaction on or before this date (dates and txns both
+        // Accumulate every transaction on or before this date (dates and txns both
         // ascend, so the cursor only moves forward across the whole batch).
         while let Some(txn) = txns.peek() {
             if txn.date <= date {
-                if let Err(err) = apply_booked(&mut engine, txn) {
-                    // Contract-violating (un-booked) stream: value every remaining
-                    // date as the same error rather than over-sell. Dates already
-                    // pushed (strictly before this transaction) stay correct.
-                    while values.len() < dates.len() {
-                        values.push(Err(err.clone()));
-                    }
-                    return values;
-                }
+                holdings.apply(txn);
                 txns.next();
             } else {
                 break;
             }
         }
         values.push(value_investment_scope(
-            engine.inventories(),
+            &holdings,
             scope,
             reporting_currency,
             prices,
@@ -619,19 +635,19 @@ fn investment_values_at(
     values
 }
 
-/// Value SEVERAL scopes at their (each ascending) dates in ONE booking pass over
-/// the whole ledger.
+/// Value SEVERAL scopes at their (each ascending) dates in ONE accumulation pass
+/// over the whole ledger.
 ///
-/// The booking forward pass is **scope-independent** — it applies every
-/// transaction once and realizes every account — so N scopes share a single
-/// realization; only the per-date valuation ([`value_investment_scope`]) filters
-/// by scope. The engine state at any date is exactly `transactions ≤ date`,
+/// The net-units forward pass is **scope-independent** — it sums every
+/// transaction's units once for every account — so N scopes share a single
+/// accumulation; only the per-date valuation ([`value_investment_scope`]) filters
+/// by scope. The net-units state at any date is exactly `transactions ≤ date`,
 /// identical to what per-scope [`investment_values_at`] would build, so each
-/// scope's values match `investment_values_at` for that scope — but the O(N)
-/// booking is paid once instead of once per scope. Returns, per scope (in input
-/// order), its value at each of its dates. Falls back to per-scope
-/// `investment_values_at` on an unsorted stream, matching that function's own
-/// fallback. Pinned by `investment_values_multi_matches_per_scope`.
+/// scope's values match `investment_values_at` for that scope — but the O(N) pass
+/// is paid once instead of once per scope. Returns, per scope (in input order),
+/// its value at each of its dates. Falls back to per-scope `investment_values_at`
+/// on an unsorted stream, matching that function's own fallback. Pinned by
+/// `investment_values_multi_matches_per_scope`.
 fn investment_values_multi(
     directives: &[Directive],
     scoped_dates: &[(&Scope, &[NaiveDate])],
@@ -660,8 +676,7 @@ fn investment_values_multi(
         .flat_map(|(_, dates)| dates.iter().copied())
         .collect();
 
-    let mut engine = rustledger_booking::BookingEngine::new();
-    engine.register_account_methods(directives.iter());
+    let mut holdings = NetUnits::default();
     let mut txns = transactions().peekable();
     let mut values: Vec<Vec<Result<Decimal, ExtractError>>> = scoped_dates
         .iter()
@@ -672,17 +687,7 @@ fn investment_values_multi(
     for &date in &union {
         while let Some(txn) = txns.peek() {
             if txn.date <= date {
-                if let Err(err) = apply_booked(&mut engine, txn) {
-                    // Contract-violating (un-booked) stream: the shared pass can't
-                    // produce any scope's values past here, so fill every scope's
-                    // remaining dates with the same error.
-                    for (i, (_, dates)) in scoped_dates.iter().enumerate() {
-                        while values[i].len() < dates.len() {
-                            values[i].push(Err(err.clone()));
-                        }
-                    }
-                    return values;
-                }
+                holdings.apply(txn);
                 txns.next();
             } else {
                 break;
@@ -694,7 +699,7 @@ fn investment_values_multi(
             // flow date), then leave the cursor at the next, later date.
             while cursors[i] < dates.len() && dates[cursors[i]] == date {
                 values[i].push(value_investment_scope(
-                    engine.inventories(),
+                    &holdings,
                     scope,
                     reporting_currency,
                     prices,
@@ -753,13 +758,13 @@ fn investment_values_multi(
 ///
 /// # Performance
 ///
-/// When the booked stream is date-sorted (the report's input is), the portfolio
-/// is valued at every flow date and at `end_date` in a **single forward
-/// realization pass** (`investment_values_at`): one booking walk of the stream,
-/// snapshotting value as it crosses each date, so cost is
-/// `O(directives + flow_dates × accounts)` — linear in the ledger. An unsorted
-/// stream falls back to a per-date realization (`O(flow_dates × directives)`),
-/// still correct; see `investment_values_at`.
+/// When the stream is date-sorted (the report's input is), the portfolio is
+/// valued at every flow date and at `end_date` in a **single forward accumulation
+/// pass** (`investment_values_at`): one net-units walk of the stream, snapshotting
+/// value as it crosses each date, so cost is `O(directives + flow_dates ×
+/// accounts)` — linear in the ledger. An unsorted stream falls back to a per-date
+/// accumulation (`O(flow_dates × directives)`), still correct; see
+/// `investment_values_at`.
 ///
 /// # Errors
 ///
@@ -769,9 +774,11 @@ fn investment_values_multi(
 /// [`PriceOracle`] resolves the most recent price on or before a date, so a
 /// dividend date with no same-day price still resolves from an earlier one.
 ///
-/// The booked, pad-expanded input contract of [`extract_cash_flows`] applies: an
-/// un-booked reduction surfaces as [`ExtractError::UnbookedInput`] (not a panic),
-/// while an un-pad-expanded stream silently omits pad-seeded positions.
+/// The interpolated, pad-expanded input contract of [`extract_cash_flows`] applies:
+/// an in-scope account with an elided/uninterpolated posting surfaces as
+/// [`ExtractError::UnbookedInput`] (not a panic), while an un-pad-expanded stream
+/// silently omits pad-seeded positions. A cost-basis/lot error is tolerated (net
+/// units valued at market).
 pub fn twr(
     directives: &[Directive],
     scope: &Scope,
@@ -794,7 +801,7 @@ pub fn twr(
     }
 
     // Value the portfolio at every flow date and at `end_date` in ONE forward
-    // realization pass (rather than a fresh booking pass per date). Flows are all
+    // accumulation pass (rather than a fresh pass per date). Flows are all
     // `<= end_date`, so appending `end_date` keeps the date list ascending; the
     // trailing entry is the end valuation.
     let mut dates: Vec<NaiveDate> = net_by_date.keys().copied().collect();
@@ -803,11 +810,11 @@ pub fn twr(
     // Split off the `end_date` valuation; `values` then has exactly one entry per
     // flow date, in `net_by_date` order.
     let end_value = values.pop().expect("dates always includes end_date");
-    // A contract-violating (un-booked) stream is more severe than an undefined
+    // An unvaluable (elided-in-scope) stream is more severe than an undefined
     // sub-period: surface `UnbookedInput` EAGERLY, before `twr_from_values`' lazy
     // short-circuits (`v_prev <= 0`, `r <= 0`) could return `Ok(None)` at an
-    // earlier flow and mask a later un-booked value. `MissingPrice` stays lazy (a
-    // later price gap is irrelevant once the chain is undefined), but a broken
+    // earlier flow and mask a later unvaluable value. `MissingPrice` stays lazy (a
+    // later price gap is irrelevant once the chain is undefined), but an unvaluable
     // ledger is never silently "n/a". `compute_returns` needs no such scan — it
     // surfaces `UnbookedInput` via its eager `end_value?` — so this lives here, on
     // the standalone public path, not in the shared `twr_from_values` hot path.
@@ -819,11 +826,11 @@ pub fn twr(
     twr_from_values(&net_by_date, values, end_value, end_date)
 }
 
-/// Chain the sub-period returns from portfolio valuations already realized.
+/// Chain the sub-period returns from portfolio valuations already computed.
 ///
 /// The unit-value core of [`twr`], factored out so it can run over values
 /// snapshotted in a SINGLE forward pass — shared with [`compute_returns`], which
-/// derives MWR and the terminal value from the same realization. `flow_values[i]`
+/// derives MWR and the terminal value from the same valuations. `flow_values[i]`
 /// is the portfolio value at the i-th flow date (in `net_by_date` order);
 /// `end_value` is the value at `end_date`. Each value is a `Result` so a
 /// `MissingPrice` at a later date is propagated only if the chain actually reaches
@@ -927,18 +934,18 @@ pub struct Returns {
 }
 
 /// Compute a scope's full return summary from a single flow extraction and a
-/// single portfolio realization.
+/// single portfolio valuation.
 ///
 /// Folds [`extract_flows`], [`terminal_value`], [`xirr`](crate::xirr), and
 /// [`twr`] into one computation: the boundary flows are extracted once, and the
 /// portfolio is valued at every flow date and at `end_date` in one forward
-/// realization pass (on the date-sorted fast path — the report's stream is; an
+/// accumulation pass (on the date-sorted fast path — the report's stream is; an
 /// unsorted stream falls back to per-date valuation, see `investment_values_at`),
 /// then reused for the terminal value, the money-weighted series, and the
 /// time-weighted chaining. A caller needing every figure (the `report returns`
-/// breakdown, one call per group) thus avoids the ~2× extraction and ~2×
-/// realization of invoking those functions separately. The result is identical to
-/// composing them by hand — pinned by `compute_returns_matches_manual_composition`.
+/// breakdown, one call per group) thus avoids the ~2× extraction and ~2× valuation
+/// of invoking those functions separately. The result is identical to composing
+/// them by hand — pinned by `compute_returns_matches_manual_composition`.
 ///
 /// TWR is `None` for a scope that never held investment capital (an income-only
 /// group, or a holding opened but never bought): with no capital there is no
@@ -951,10 +958,12 @@ pub struct Returns {
 /// flow date degrades TWR to `None` rather than erroring — the summary itself is
 /// still well-defined.
 ///
-/// The booked, pad-expanded input contract of [`twr`] applies: an un-booked
-/// reduction surfaces as [`ExtractError::UnbookedInput`] rather than panicking.
-/// (Date-sorted input is a fast path, not a correctness requirement — an unsorted
-/// stream falls back to the order-independent per-date valuation.)
+/// The interpolated, pad-expanded input contract of [`twr`] applies: an in-scope
+/// account with an elided/uninterpolated posting surfaces as
+/// [`ExtractError::UnbookedInput`] rather than panicking; a cost-basis/lot error is
+/// tolerated (net units valued at market). (Date-sorted input is a fast path, not a
+/// correctness requirement — an unsorted stream falls back to the order-independent
+/// per-date valuation.)
 pub fn compute_returns(
     directives: &[Directive],
     scope: &Scope,
@@ -980,7 +989,7 @@ pub fn compute_returns(
         *net_by_date.entry(flow.date).or_default() += -flow.amount;
     }
 
-    // One forward realization pass: value at every flow date and at `end_date`.
+    // One forward accumulation pass: value at every flow date and at `end_date`.
     let mut dates: Vec<NaiveDate> = net_by_date.keys().copied().collect();
     dates.push(end_date);
     let mut values = investment_values_at(directives, scope, reporting_currency, prices, &dates);
@@ -1019,31 +1028,30 @@ pub fn compute_returns(
     })
 }
 
-/// Compute [`compute_returns`] for SEVERAL scopes while realizing the portfolio
+/// Compute [`compute_returns`] for SEVERAL scopes while accumulating the portfolio
 /// only ONCE.
 ///
 /// `report returns --by-group` computes one summary for the whole scope plus one
-/// per group; calling [`compute_returns`] for each re-runs the booking pass every
-/// time even though the booking is scope-independent. This shares a single
-/// realization across all scopes (see `investment_values_multi`), turning the
-/// per-group booking cost from `O(scopes × directives)` into `O(directives)`.
-/// Flow extraction and valuation are still per scope (they must be), so the
-/// result for each scope is **identical** to `compute_returns(that scope)` —
-/// pinned by `compute_returns_multi_matches_per_scope`. Returns one result per
-/// input scope, in order.
+/// per group; calling [`compute_returns`] for each re-runs the accumulation pass
+/// every time even though it is scope-independent. This shares a single net-units
+/// accumulation across all scopes (see `investment_values_multi`), turning the
+/// per-group cost from `O(scopes × directives)` into `O(directives)`. Flow
+/// extraction and valuation are still per scope (they must be), so the result for
+/// each scope is **identical** to `compute_returns(that scope)` — pinned by
+/// `compute_returns_multi_matches_per_scope`. Returns one result per input scope,
+/// in order.
 ///
 /// # Errors
 ///
-/// A [`ExtractError::MissingPrice`] (an unpriceable boundary flow or `end_date`
-/// valuation) is per-scope independent: it is reported in that scope's slot and
-/// does not affect the others.
-///
-/// An [`ExtractError::UnbookedInput`] is NOT per-scope: the booking forward pass
-/// is shared across every scope, so a reduction with no matching lot (an
-/// un-booked, re-merged booking-failure) fails EVERY scope's slot — a broken
-/// ledger yields no returns for any scope rather than a partial report, and
-/// surfaces as `Err` rather than panicking. (Date-sorted is a fast path, not a
-/// requirement — an unsorted stream falls back to per-scope valuation.)
+/// Both error kinds are **per-scope independent** — reported in the offending
+/// scope's slot without affecting the others — because valuation runs per scope
+/// over the shared accumulation. A [`ExtractError::MissingPrice`] names an
+/// unpriceable boundary flow or `end_date` valuation. An
+/// [`ExtractError::UnbookedInput`] names a scope whose Investment accounts include
+/// one with an elided/uninterpolated posting; a scope that does not classify that
+/// account as Investment is unaffected. A cost-basis/lot error affects no scope
+/// (net units valued at market). (Date-sorted is a fast path, not a requirement —
+/// an unsorted stream falls back to per-scope valuation.)
 #[must_use]
 pub fn compute_returns_multi(
     directives: &[Directive],
@@ -1052,7 +1060,7 @@ pub fn compute_returns_multi(
     prices: &impl PriceOracle,
     end_date: NaiveDate,
 ) -> Vec<Result<Returns, ExtractError>> {
-    /// Per-scope work computed before the shared realization.
+    /// Per-scope work computed before the shared accumulation.
     struct Prep {
         flows: Vec<CashFlow>,
         invested: Decimal,
@@ -1092,7 +1100,7 @@ pub fn compute_returns_multi(
         })
         .collect();
 
-    // ONE realization pass over the union of the ready scopes' dates.
+    // ONE accumulation pass over the union of the ready scopes' dates.
     let scoped_dates: Vec<(&Scope, &[NaiveDate])> = preps
         .iter()
         .zip(scopes)
@@ -1200,19 +1208,18 @@ mod tests {
         )
     }
 
-    /// The engine-level guard against realizing an un-booked stream. The loader
-    /// re-merges booking-FAILED transactions in their un-booked shape, so a
-    /// returns consumer can hand `compute_returns` a reduction of more units than
-    /// were ever held. That must surface as [`ExtractError::UnbookedInput`] (via
-    /// the booking engine's fallible `try_apply`), NOT `debug_assert`-trap — this
-    /// native test would abort — nor over-sell into a wrong figure. Closes the
-    /// #1849 third-review finding at the source, for every consumer.
+    /// Net-units valuation tolerates a cost-basis/lot error. The loader re-merges
+    /// booking-FAILED transactions in their un-booked shape, so a returns consumer
+    /// can hand `compute_returns` a reduction of more units than were ever held —
+    /// the common state of imported brokerage data (empty-cost `{}` sales, no
+    /// matching lot). Because returns value **net units at market** (never
+    /// cost-basis lots), this must NOT trap, refuse the report, nor understate:
+    /// buying 5 then reducing 10 nets to −5 units, valued at the terminal price.
+    /// `rledger check` remains the validator; the returns report computes over
+    /// what loaded (like beancount + beangrow). See #1850.
     #[test]
-    fn unbooked_oversell_errors_not_traps() {
+    fn oversell_nets_negative_valued_at_market() {
         use rustledger_core::{CostNumber, CostSpec};
-        // Buy 5 at a cost lot, then reduce 10 with an empty cost `{}` that forces
-        // a lot match — over-reducing a held lot. This is the shape the loader
-        // fails to book and re-merges un-booked; realizing it must NOT trap.
         let dirs = vec![
             txn(
                 d(2020, 1, 1),
@@ -1235,23 +1242,24 @@ mod tests {
             ),
         ];
         let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(120));
-        let r = compute_returns(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31));
-        assert!(
-            matches!(r, Err(ExtractError::UnbookedInput(_))),
-            "over-reducing an empty-cost lot must yield UnbookedInput, got {r:?}"
-        );
+        let r = compute_returns(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31))
+            .expect("net-units valuation tolerates an over-sell");
+        // Net −5 AAPL × 120 = −600; not a trap, not an UnbookedInput refusal.
+        assert_eq!(r.current_value, dec!(-600));
     }
 
-    /// The OTHER un-booked shape: a transaction with an elided/uninterpolated
-    /// posting (booking would have filled it). `try_apply` silently skips a
-    /// non-Complete leg, which would understate the position — strict-clean must
-    /// surface it as `UnbookedInput`, not report a wrong figure.
+    /// The one shape net-units genuinely cannot value: an in-scope account with an
+    /// elided/uninterpolated posting (booking would have filled it). Its net units
+    /// are incomplete, so valuing it must surface as [`ExtractError::UnbookedInput`]
+    /// rather than silently understate the position. This is distinct from a
+    /// cost-basis error (tolerated, see `oversell_nets_negative_valued_at_market`) —
+    /// here the units themselves are unknown.
     #[test]
-    fn unbooked_elided_posting_errors_not_understates() {
+    fn elided_in_scope_posting_errors_not_understates() {
         let dirs = vec![txn(
             d(2020, 1, 1),
             vec![
-                // Elided in-scope investment leg (no units) — un-booked input.
+                // Elided in-scope investment leg (no units) — its net units are unknown.
                 Posting::auto("Assets:Broker:Stock"),
                 Posting::new("Assets:Bank", amt(dec!(-1000), "USD")),
             ],
@@ -1260,18 +1268,18 @@ mod tests {
         let r = compute_returns(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31));
         assert!(
             matches!(r, Err(ExtractError::UnbookedInput(_))),
-            "an elided posting must yield UnbookedInput, got {r:?}"
+            "an elided in-scope posting must yield UnbookedInput, got {r:?}"
         );
     }
 
-    /// The public `twr` surfaces an un-booked reduction as `UnbookedInput` via
+    /// The public `twr` surfaces an elided-in-scope posting as `UnbookedInput` via
     /// its eager scan, rather than masking it as `Ok(None)` through
-    /// `twr_from_values`' lazy short-circuits. (`compute_returns` is protected
-    /// separately by its eager terminal valuation.)
+    /// `twr_from_values`' lazy short-circuits. The first flow date values cleanly
+    /// (net 5 AAPL priced), so only the eager scan reaches the later elided date.
+    /// (`compute_returns` is protected separately by its eager terminal valuation.)
     #[test]
     fn twr_surfaces_unbooked_input() {
         use rustledger_core::{CostNumber, CostSpec};
-        // Buy 5, then over-reduce 10 with an empty cost — an un-booked reduction.
         let dirs = vec![
             txn(
                 d(2020, 1, 1),
@@ -1287,13 +1295,15 @@ mod tests {
             txn(
                 d(2020, 6, 1),
                 vec![
-                    Posting::new("Assets:Broker:Stock", amt(dec!(-10), "AAPL"))
-                        .with_cost(CostSpec::empty()),
-                    Posting::new("Assets:Bank", amt(dec!(1000), "USD")),
+                    // Elided in-scope leg — net units become unknown from here.
+                    Posting::auto("Assets:Broker:Stock"),
+                    Posting::new("Assets:Bank", amt(dec!(-100), "USD")),
                 ],
             ),
         ];
-        let prices = MockPrices::default().with("AAPL", "USD", d(2020, 12, 31), dec!(120));
+        let prices = MockPrices::default()
+            .with("AAPL", "USD", d(2020, 1, 1), dec!(100))
+            .with("AAPL", "USD", d(2020, 12, 31), dec!(120));
         let r = twr(&dirs, &invest_scope(), "USD", &prices, d(2020, 12, 31));
         assert!(
             matches!(r, Err(ExtractError::UnbookedInput(_))),

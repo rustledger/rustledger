@@ -527,9 +527,9 @@ impl BookingEngine {
     /// Apply ONE posting to the running inventories, returning an error if it
     /// reduces a lot that is not held.
     ///
-    /// The per-posting core shared by [`Self::apply`] (which ignores a reduction
-    /// failure, per its booked-input contract) and [`Self::try_apply`] (which
-    /// surfaces it).
+    /// The per-posting core of [`Self::apply`], which ignores a reduction failure
+    /// per its booked-input contract; the fallible signature keeps the over-sell
+    /// detectable by the `debug_assert` there.
     ///
     /// # Errors
     /// Returns the reduce error when the posting reduces a lot that is not held
@@ -579,9 +579,10 @@ impl BookingEngine {
     /// matching lot yet is dropped (its `reduce` error is ignored, historical
     /// release behavior). The loader pipeline guarantees this ordering; the
     /// in-loop `debug_assert` below catches a violating caller in debug builds.
-    /// A caller that CANNOT guarantee booked input (e.g. valuing a returns scope
-    /// over a ledger whose loader re-merged a booking-failed transaction) must
-    /// use [`Self::try_apply`] instead, which surfaces the failure as an `Err`.
+    /// A caller that CANNOT guarantee booked input must not derive a figure from
+    /// this lot-matching realization — e.g. the returns engine values **net units
+    /// at market** (`rustledger-returns`), never `apply`, so a re-merged
+    /// booking-failed transaction cannot over-sell it.
     pub fn apply(&mut self, txn: &Transaction) {
         for posting in &txn.postings {
             let reduced = self.try_apply_posting(posting, txn.date);
@@ -595,33 +596,6 @@ impl BookingEngine {
             // Release builds keep the historical ignore-and-continue behavior.
             let _ = reduced;
         }
-    }
-
-    /// Fallible [`Self::apply`]: apply a transaction's postings, but return an
-    /// error the moment a reduction has no matching lot instead of
-    /// `debug_assert`-ing (debug) or silently over-selling (release).
-    ///
-    /// For consumers that realize inventory over a stream they cannot guarantee
-    /// is booked — the returns engine values a scope over `Ledger.directives`,
-    /// which the loader re-merges booking-FAILED transactions into in their
-    /// un-booked shape — so the failure becomes a clean `Err` at the boundary
-    /// rather than a wasm trap or a wrong figure.
-    ///
-    /// This catches the ONE un-booked shape the booking engine can detect: a
-    /// reduction with no matching lot. A posting with elided/uninterpolated units
-    /// is still SKIPPED (as in [`Self::apply`]) — interpolation is a separate
-    /// pass this engine does not run — so a caller that must also reject elided
-    /// input checks `units` for [`IncompleteAmount::Complete`] itself.
-    ///
-    /// # Errors
-    /// Returns [`BookingError::Inventory`] on the first posting that reduces a
-    /// lot not held. Postings before it have already been applied (the caller is
-    /// expected to discard the engine on error).
-    pub fn try_apply(&mut self, txn: &Transaction) -> Result<(), BookingError> {
-        for posting in &txn.postings {
-            self.try_apply_posting(posting, txn.date)?;
-        }
-        Ok(())
     }
 
     /// Book and interpolate a transaction.

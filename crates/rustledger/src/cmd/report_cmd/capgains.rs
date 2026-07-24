@@ -119,7 +119,7 @@ struct Disposal {
 ///
 /// A **total loss** (`proceeds == 0`) is NOT excluded: its rate is exactly -100%
 /// (you cannot lose more than the whole basis, at any horizon), handled by
-/// [`lot_irr`]. Dropping it would silently flatter every pooled rate by hiding
+/// [`solve_irr`]. Dropping it would silently flatter every pooled rate by hiding
 /// capital that never came back.
 fn lot_flows(d: &Disposal) -> Option<[CashFlow; 2]> {
     if d.short_sale || d.cost_basis <= Decimal::ZERO || d.proceeds < Decimal::ZERO {
@@ -135,19 +135,36 @@ fn lot_flows(d: &Disposal) -> Option<[CashFlow; 2]> {
     ])
 }
 
-/// One lot's own annualized round-trip rate.
+/// Solve an annualized rate for one series of CLOSED round-trip flows.
 ///
-/// A **total loss** is the exact pole `-100%`: with `proceeds == 0` the series
-/// `[-basis, 0]` has no root the solver can bracket (NPV never crosses zero), yet
-/// the answer is not unknown — losing the entire basis is `-100%`/yr at any
-/// horizon. Returning it directly keeps the per-lot cell consistent with the
-/// pooled rate, which does include the lot's flows.
-fn lot_irr(d: &Disposal) -> Option<f64> {
-    let flows = lot_flows(d)?;
-    if d.proceeds.is_zero() {
+/// The single entry point for both the per-lot cell and the pooled aggregate, so
+/// the two can never answer differently for the same flows.
+///
+/// **Total loss** (`-100%`) is handled here rather than in the canonical
+/// [`xirr`], and deliberately so: `xirr` returns `None` for any series without a
+/// sign change, which is correct for its other caller — in `report returns` an
+/// all-negative series means "bought and still holding", NOT a loss, and reporting
+/// -100% there would be flatly wrong. Only THIS caller knows its series is a
+/// *closed* round trip, where nothing coming back really does mean the whole basis
+/// was lost, at any horizon. The knowledge is the caller's, so the special case
+/// belongs to the caller. (`rustledger-returns` pins the `None` contract in
+/// `no_sign_change_is_none` / `zero_flows_do_not_count_as_a_sign_change`; if that
+/// ever changes, revisit this.)
+fn solve_irr(flows: &[CashFlow]) -> Option<f64> {
+    if flows.is_empty() {
+        return None;
+    }
+    // Nothing came back from a closed round trip: the whole outlay was lost.
+    if flows.iter().all(|f| f.amount <= Decimal::ZERO) {
         return Some(-1.0);
     }
-    xirr(&flows)
+    xirr(flows)
+}
+
+/// One lot's own annualized round-trip rate (`None` when the lot has no defined
+/// round trip — see [`lot_flows`] — or when the rate is not solvable).
+fn lot_irr(d: &Disposal) -> Option<f64> {
+    solve_irr(&lot_flows(d)?)
 }
 
 /// Solve each row's own round-trip rate (the `--irr` pass). Rows whose rate is
@@ -202,7 +219,12 @@ fn aggregate_irr(rows: &[Disposal], currency: &str, term: Option<Term>) -> Poole
         .filter(|d| d.currency == currency && term.is_none_or(|t| d.term == t))
     {
         total += 1;
-        if let Some(f) = lot_flows(d) {
+        // Pool a lot ONLY if its own rate solved — the same predicate the per-lot
+        // cell uses. Pooling on flow-availability instead would let a lot that
+        // renders `n/a` silently drive the aggregate (and be counted as covered).
+        if lot_irr(d).is_some()
+            && let Some(f) = lot_flows(d)
+        {
             eligible += 1;
             flows.extend(f);
         }
@@ -216,7 +238,9 @@ fn aggregate_irr(rows: &[Disposal], currency: &str, term: Option<Term>) -> Poole
     }
     flows.sort_by_key(|f| f.date);
     PooledIrr {
-        rate: xirr(&flows),
+        // Same solver as the per-lot cell, so a bucket of one lot reports that
+        // lot's rate rather than contradicting it.
+        rate: solve_irr(&flows),
         eligible,
         total,
     }
@@ -448,8 +472,8 @@ fn render<W: Write>(
                     d.proceeds,
                     d.cost_basis,
                     d.gain,
-                    // Raw rate (e.g. `0.1042`), empty when undefined — the text
-                    // report owns percent formatting.
+                    // 2-decimal percent (e.g. `10.42`), empty when undefined or
+                    // beyond the reporting cap.
                     if with_irr {
                         format!(",{}", fmt_rate_machine(d.irr))
                     } else {
@@ -478,7 +502,7 @@ fn render<W: Write>(
                     // Numeric rate, or `null` when undefined; present only under
                     // `--irr` so the default schema is unchanged.
                     if with_irr {
-                        format!(r#", "irr_pct": {}"#, json_rate(d.irr))
+                        format!(r#", "irr_pct": {}"#, rate_json(d.irr))
                     } else {
                         String::new()
                     },
@@ -502,7 +526,7 @@ fn render<W: Write>(
                                     let p = aggregate_irr(rows, c, Some(term));
                                     format!(
                                         r#", "irr_pct": {}, "irr_lots": {}, "irr_lots_total": {}"#,
-                                        json_rate(p.rate),
+                                        rate_json(p.rate),
                                         p.eligible,
                                         p.total
                                     )
@@ -532,7 +556,7 @@ fn render<W: Write>(
                             format!(
                                 r#"{{"currency": "{}", "irr_pct": {}, "irr_lots": {}, "irr_lots_total": {}}}"#,
                                 json_escape(c),
-                                json_rate(p.rate),
+                                rate_json(p.rate),
                                 p.eligible,
                                 p.total
                             )
@@ -663,29 +687,53 @@ fn render<W: Write>(
     Ok(())
 }
 
-/// A rate for CSV: a 2-decimal **percent**, empty when undefined.
+/// A rate for CSV: a 2-decimal **percent**, empty when undefined or beyond
+/// [`RATE_REPORTING_CAP_PCT`].
 ///
 /// Deliberately the same unit and precision as the sibling `returns` report's
 /// `money_weighted_return_pct` (it shares [`fmt_rate`]): two reports emitting the
 /// same conceptual metric 100x apart would be a scripting trap. The `_pct` column
 /// name says the unit out loud.
 fn fmt_rate_machine(rate: Option<f64>) -> String {
-    rate.map_or_else(String::new, |r| fmt_rate(Some(r)))
+    match rate {
+        Some(r) if rate_is_reportable(r) => fmt_rate(Some(r)),
+        _ => String::new(),
+    }
 }
 
-/// Rate columns are capped in the fixed-width **text** table at this magnitude
-/// (percent). An annualized rate is unbounded — a one-day round trip compounds its
-/// gain 365 times, reaching `1e30`% — which would overflow the column and shift
-/// every later field out of alignment. Past this the cell shows `>9999%` /
-/// `<-9999%`; CSV and JSON still carry the exact value.
-const RATE_DISPLAY_CAP_PCT: f64 = 9999.0;
+/// A rate for JSON: a 2-decimal percent number, or `null` when undefined or beyond
+/// [`RATE_REPORTING_CAP_PCT`].
+fn rate_json(rate: Option<f64>) -> String {
+    match rate {
+        Some(r) if rate_is_reportable(r) => json_rate(Some(r)),
+        _ => "null".to_string(),
+    }
+}
 
-/// A rate for the fixed-width text column: [`fmt_rate_pct`], but clamped so an
-/// astronomically annualized short hold cannot break the table layout.
+/// Rates above this magnitude (percent) are not reported as a number.
+///
+/// An annualized rate is unbounded above: a one-day round trip compounds its gain
+/// 365 times, so a +20% day reaches ~8e30 %/yr. Such a figure is arithmetically
+/// true but financially meaningless, and printing it breaks both surfaces — it
+/// overflows the fixed-width text column, and at ~31 significant digits it exceeds
+/// what `rust_decimal` (this project's own numeric type, ~28-29 digits) can parse
+/// back. So past this cap the text cell shows `>9999%` and machine output is empty
+/// / `null`: no fabricated precision, and nothing a consumer cannot read.
+///
+/// There is no lower cap: a round trip cannot lose more than its basis, so no rate
+/// is below -100%.
+const RATE_REPORTING_CAP_PCT: f64 = 9999.0;
+
+/// Whether a rate is small enough to report as a number.
+fn rate_is_reportable(r: f64) -> bool {
+    r * 100.0 <= RATE_REPORTING_CAP_PCT
+}
+
+/// A rate for the fixed-width text column: [`fmt_rate_pct`], but an
+/// unreportably-large rate becomes `>9999%` so it cannot break the table layout.
 fn fmt_rate_cell(rate: Option<f64>) -> String {
     match rate {
-        Some(r) if r * 100.0 > RATE_DISPLAY_CAP_PCT => format!(">{RATE_DISPLAY_CAP_PCT:.0}%"),
-        Some(r) if r * 100.0 < -RATE_DISPLAY_CAP_PCT => format!("<-{RATE_DISPLAY_CAP_PCT:.0}%"),
+        Some(r) if !rate_is_reportable(r) => format!(">{RATE_REPORTING_CAP_PCT:.0}%"),
         other => fmt_rate_pct(other),
     }
 }
@@ -927,10 +975,13 @@ mod tests {
             rows.iter().any(|l| l.ends_with(",25.00")),
             "priced lot's percent rate: {csv}"
         );
-        assert!(
-            rows.iter().any(|l| l.ends_with(',')),
-            "short sale has an empty rate: {csv}"
-        );
+        let short_row = rows
+            .iter()
+            .find(|l| l.contains(",Assets:Broker:Stock,AAPL,5,"))
+            .expect("the short-sale row");
+        let cols: Vec<&str> = short_row.split(',').collect();
+        assert_eq!(cols.len(), 12, "all columns present: {short_row}");
+        assert_eq!(cols[11], "", "short sale's rate cell is empty: {short_row}");
 
         let json = render_as(&OutputFormat::Json);
         assert!(json.contains(r#""irr_pct": 25.00"#), "{json}");
@@ -952,6 +1003,61 @@ mod tests {
             txt.contains("(1 of 2 lots)"),
             "pooled coverage annotated: {txt}"
         );
+    }
+
+    /// A rate too large to report (a one-day round trip annualizes past the cap)
+    /// shows `>9999%` in text and is EMPTY/`null` in machine output — never a
+    /// 31-digit number that this project's own `Decimal` could not parse back.
+    #[test]
+    fn unreportably_large_rate_is_capped_in_text_and_omitted_in_machine_output() {
+        // 1 day, 1000 -> 1200: annualizes to ~8e30.
+        let huge = gain(
+            "Assets:Broker:Stock",
+            d(2020, 1, 2),
+            Some(d(2020, 1, 1)),
+            10,
+            1000,
+            1200,
+            false,
+        );
+        let (mut ds, _) = to_disposals(&[huge], None);
+        fill_lot_irr(&mut ds);
+        let r = ds[0].irr.expect("a (huge) rate is solved");
+        assert!(r > 1e20, "sanity: the rate really is astronomic: {r}");
+        assert!(!rate_is_reportable(r));
+        assert_eq!(fmt_rate_cell(Some(r)), ">9999%");
+        assert_eq!(fmt_rate_machine(Some(r)), "", "CSV cell is empty");
+        assert_eq!(rate_json(Some(r)), "null", "JSON is null");
+        // A normal rate is unaffected by the cap.
+        assert_eq!(fmt_rate_machine(Some(0.25)), "25.00");
+        assert_eq!(rate_json(Some(0.25)), "25.00");
+        assert_eq!(fmt_rate_cell(Some(0.25)), "25.00%");
+    }
+
+    /// A bucket whose lots are ALL total losses reports -100%, not `n/a`: the
+    /// pooled series has no inflow to bracket, but the answer is not unknown, and a
+    /// summary line must never contradict the single row it summarizes.
+    #[test]
+    fn all_total_loss_bucket_agrees_with_its_rows() {
+        let gains = vec![gain(
+            "Assets:Broker:Stock",
+            d(2020, 6, 1),
+            Some(d(2020, 1, 1)),
+            10,
+            1000,
+            0,
+            false,
+        )];
+        let (mut ds, _) = to_disposals(&gains, None);
+        fill_lot_irr(&mut ds);
+        assert_eq!(ds[0].irr, Some(-1.0), "the row is -100%");
+        let pooled = aggregate_irr(&ds, "USD", None);
+        assert_eq!(
+            pooled.rate,
+            Some(-1.0),
+            "the bucket must not read n/a while its only row reads -100%"
+        );
+        assert_eq!((pooled.eligible, pooled.total), (1, 1));
     }
 
     /// A total loss is the exact -100% pole, not `n/a` — and it stays in the pool,

@@ -61,10 +61,20 @@ struct Disposal {
 ///
 /// Each transaction is `book`ed (which computes the per-lot gains against the
 /// current inventory) then `apply`ed (which accumulates the lots) — the same
-/// two-step the loader and `book_transactions` use. Transactions are visited in
-/// booking order (`booking_sort_key`) so a same-date sell never books before the
-/// buy that seeds its lot. A transaction that fails to book (an un-booked ledger;
-/// `rledger check` flags it) is skipped rather than aborting the whole report.
+/// two-step the loader (`run_booking`) and `rustledger_booking::book_transactions`
+/// use. This deliberately re-derives that loop rather than calling the canonical
+/// `book`/`book_transactions` free functions, because they return only the booked
+/// directives and DROP the per-lot [`rustledger_booking::CapitalGain`]s this report
+/// exists to surface — the gains are reachable only via `BookingEngine::book`
+/// directly. To stay faithful to `rledger check`, this loop mirrors the loader
+/// exactly: the ledger's own booking method (below), canonical + booking-order
+/// sorting (the caller canonical-sorts; this sorts by `booking_sort_key`), and
+/// `interpolate`-then-`apply`. The end-to-end tests exercise the real binary path.
+///
+/// Transactions are visited in booking order (`booking_sort_key`) so a same-date
+/// sell never books before the buy that seeds its lot. A transaction that fails to
+/// book (an un-booked ledger; `rledger check` flags it) is skipped rather than
+/// aborting the whole report.
 fn collect_disposals(
     directives: &[Directive],
     method: BookingMethod,
@@ -89,15 +99,8 @@ fn collect_disposals(
             continue;
         };
         // `book` computes the per-lot gains against the CURRENT inventory but does
-        // NOT mutate it. Interpolate the booked transaction before `apply`,
-        // mirroring the loader's `book_and_interpolate` → `apply` pipeline: `apply`
-        // expects filled-in amounts (an elided balancing leg would otherwise be
-        // silently dropped), and a transaction that fails to interpolate would fail
-        // in the loader too, so skip it whole rather than record a partial gain.
+        // NOT mutate it.
         let Ok(booked) = engine.book(txn) else {
-            continue;
-        };
-        let Ok(interpolated) = rustledger_booking::interpolate(&booked.transaction) else {
             continue;
         };
         for g in &booked.gains {
@@ -114,31 +117,44 @@ fn collect_disposals(
                 held_days,
                 long_term: g
                     .acquired_date
-                    .is_some_and(|a| is_long_term(a, txn.date, long_term_days)),
+                    .is_some_and(|a| is_long_term(a, txn.date, held_days, long_term_days)),
                 proceeds: g.proceeds.number,
                 cost_basis: g.cost_basis.number,
                 gain: g.amount.number,
                 currency: g.amount.currency.to_string(),
             });
         }
-        engine.apply(&interpolated.transaction);
+        // Accumulate inventory. Interpolate first (fills elided legs) to mirror the
+        // loader's `book_and_interpolate` → `apply` pipeline; if interpolation fails,
+        // fall back to the booked transaction so a lot with explicit units still
+        // enters inventory and a later sale can match it — never silently drop a lot
+        // from an otherwise `rledger check`-clean ledger.
+        let applied = match rustledger_booking::interpolate(&booked.transaction) {
+            Ok(interp) => interp.transaction,
+            Err(_) => booked.transaction,
+        };
+        engine.apply(&applied);
     }
     out
 }
 
 /// Classify a holding period as long-term.
 ///
-/// `Some(n)`: held strictly more than `n` days. `None`: the calendar rule — the
-/// sale is more than one calendar year after acquisition. The calendar rule is
-/// leap-year correct (jiff anniversaries a Feb-29 acquisition to Feb-28), which a
-/// fixed 365-day count is not: a one-year holding spanning a leap day is 366 days
-/// and a raw `> 365` test would wrongly call it long-term.
-fn is_long_term(acquired: NaiveDate, sold: NaiveDate, long_term_days: Option<i64>) -> bool {
+/// `long_term_days = Some(n)`: held strictly more than `n` days (`held_days` is the
+/// already-computed `sold − acquired` span, so this reuses it rather than
+/// recomputing). `None`: the calendar rule — the sale is more than one calendar year
+/// after acquisition. The calendar rule is leap-year correct (jiff anniversaries a
+/// Feb-29 acquisition to Feb-28), which a fixed 365-day count is not: a one-year
+/// holding spanning a leap day is 366 days and a raw `> 365` test would wrongly call
+/// it long-term.
+fn is_long_term(
+    acquired: NaiveDate,
+    sold: NaiveDate,
+    held_days: Option<i64>,
+    long_term_days: Option<i64>,
+) -> bool {
     match long_term_days {
-        Some(n) => acquired
-            .until((jiff::Unit::Day, sold))
-            .ok()
-            .is_some_and(|s| i64::from(s.get_days()) > n),
+        Some(n) => held_days.is_some_and(|d| d > n),
         None => acquired
             .checked_add(jiff::Span::new().years(1))
             .is_ok_and(|one_year| sold > one_year),
@@ -217,6 +233,11 @@ fn render<W: Write>(
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
+    // TEXT is for humans, so it renders amounts through the ledger `DisplayContext`
+    // (display precision, thousands separators). CSV and JSON are machine-readable,
+    // so they emit the EXACT `Decimal` verbatim (via `Display`) — never the display
+    // formatter, which would round to display precision and inject `render_commas`
+    // separators, corrupting the exported figures.
     let money = |n: Decimal, ccy: &str| ctx.format_amount_number(n, ccy);
     // Summary: per currency, split short-term vs long-term.
     let mut short: BTreeMap<String, Totals> = BTreeMap::new();
@@ -234,20 +255,21 @@ fn render<W: Write>(
                 "sold,account,commodity,units,acquired,held_days,term,currency,proceeds,cost_basis,gain"
             )?;
             for d in rows {
+                // Raw `Decimal` (no separators, no rounding) for machine parsing.
                 writeln!(
                     writer,
                     "{},{},{},{},{},{},{},{},{},{},{}",
                     d.sold,
                     csv_escape(&d.account),
                     csv_escape(&d.commodity),
-                    csv_escape(&money(d.units, &d.commodity)),
+                    d.units,
                     d.acquired.map_or_else(String::new, |a| a.to_string()),
                     d.held_days.map_or_else(String::new, |h| h.to_string()),
                     term(d.long_term),
                     d.currency,
-                    csv_escape(&money(d.proceeds, &d.currency)),
-                    csv_escape(&money(d.cost_basis, &d.currency)),
-                    csv_escape(&money(d.gain, &d.currency)),
+                    d.proceeds,
+                    d.cost_basis,
+                    d.gain,
                 )?;
             }
         }
@@ -258,16 +280,16 @@ fn render<W: Write>(
                     d.sold,
                     json_escape(&d.account),
                     json_escape(&d.commodity),
-                    json_escape(&money(d.units, &d.commodity)),
+                    d.units,
                     d.acquired
                         .map_or_else(|| "null".to_string(), |a| format!("\"{a}\"")),
                     d.held_days
                         .map_or_else(|| "null".to_string(), |h| h.to_string()),
                     term(d.long_term),
                     json_escape(&d.currency),
-                    money(d.proceeds, &d.currency),
-                    money(d.cost_basis, &d.currency),
-                    money(d.gain, &d.currency),
+                    d.proceeds,
+                    d.cost_basis,
+                    d.gain,
                 )
             };
             let disposals: Vec<String> = rows.iter().map(obj).collect();
@@ -279,9 +301,9 @@ fn render<W: Write>(
                             r#"{{"currency": "{}", "disposals": {}, "proceeds": "{}", "cost_basis": "{}", "gain": "{}"}}"#,
                             json_escape(c),
                             t.count,
-                            money(t.proceeds, c),
-                            money(t.cost_basis, c),
-                            money(t.gain, c),
+                            t.proceeds,
+                            t.cost_basis,
+                            t.gain,
                         )
                     })
                     .collect();
@@ -490,6 +512,13 @@ mod tests {
         assert_eq!(disposals[0].gain, Decimal::from(200));
     }
 
+    /// Whole days between two dates (the `held_days` the report computes).
+    fn held(a: NaiveDate, s: NaiveDate) -> Option<i64> {
+        a.until((jiff::Unit::Day, s))
+            .ok()
+            .map(|sp| i64::from(sp.get_days()))
+    }
+
     /// The calendar long-term rule is leap-year correct: a holding from Jan 1 2020
     /// (a leap year) to Jan 1 2021 is 366 days but NOT more than one calendar year,
     /// so it is short-term — where a raw `> 365` day count would wrongly say long.
@@ -497,20 +526,47 @@ mod tests {
     fn long_term_calendar_rule_handles_leap_year() {
         // Exactly one year later — 366 days across the 2020 leap day.
         assert!(
-            !is_long_term(d(2020, 1, 1), d(2021, 1, 1), None),
+            !is_long_term(
+                d(2020, 1, 1),
+                d(2021, 1, 1),
+                held(d(2020, 1, 1), d(2021, 1, 1)),
+                None
+            ),
             "exactly one year is NOT long-term (need > 1 year)"
         );
         // One day past the anniversary is long-term.
-        assert!(is_long_term(d(2020, 1, 1), d(2021, 1, 2), None));
+        assert!(is_long_term(
+            d(2020, 1, 1),
+            d(2021, 1, 2),
+            held(d(2020, 1, 1), d(2021, 1, 2)),
+            None
+        ));
         // A fixed 365-day override, by contrast, calls the 366-day span long-term.
-        assert!(is_long_term(d(2020, 1, 1), d(2021, 1, 1), Some(365)));
+        assert!(is_long_term(
+            d(2020, 1, 1),
+            d(2021, 1, 1),
+            held(d(2020, 1, 1), d(2021, 1, 1)),
+            Some(365)
+        ));
     }
 
     /// `--long-term-days N` overrides the calendar rule with a fixed day count.
     #[test]
     fn long_term_days_override() {
-        assert!(is_long_term(d(2020, 1, 1), d(2020, 3, 1), Some(30))); // 60 days > 30
-        assert!(!is_long_term(d(2020, 1, 1), d(2020, 1, 20), Some(30))); // 19 days
+        // 60 days > 30.
+        assert!(is_long_term(
+            d(2020, 1, 1),
+            d(2020, 3, 1),
+            held(d(2020, 1, 1), d(2020, 3, 1)),
+            Some(30)
+        ));
+        // 19 days, not > 30.
+        assert!(!is_long_term(
+            d(2020, 1, 1),
+            d(2020, 1, 20),
+            held(d(2020, 1, 1), d(2020, 1, 20)),
+            Some(30)
+        ));
     }
 
     /// The `--year` filter compares the full `i32` year and does not silently drop

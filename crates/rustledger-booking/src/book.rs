@@ -406,59 +406,48 @@ impl BookingEngine {
                         if let Some(price) = &posting.price
                             && let Some(amt) =
                                 price.amount.as_ref().and_then(IncompleteAmount::as_amount)
-                            // Cross-currency disposals are out of scope: only record
-                            // gains when EVERY matched lot has a cost basis in the same
-                            // currency as the sale price, so `proceeds − cost_basis` is
-                            // meaningful. Otherwise record nothing for the whole
-                            // reduction rather than emit misleading partial rows.
-                            && booking_result.matched.iter().all(|m| {
-                                m.cost.as_ref().is_some_and(|c| c.currency == amt.currency)
-                            })
                         {
                             let total_units = units.number.abs();
-                            // Allocate proceeds across the matched lots. A `Unit` (`@`)
-                            // price is exact per unit. A `Total` (`@@`) price names the
-                            // proceeds for the WHOLE reduction, so it is pro-rated by
-                            // units — but the LAST lot absorbs the rounding residual so
-                            // the per-lot proceeds sum EXACTLY to the stated total. A
-                            // single-lot `@@` therefore records the stated total
-                            // verbatim (no `total / units × units` division tail), and a
-                            // multi-lot `@@` never over- or under-counts the sale.
-                            let mut allocated = Decimal::ZERO;
-                            let n = booking_result.matched.len();
-                            for (i, m) in booking_result.matched.iter().enumerate() {
+                            for m in &booking_result.matched {
+                                // Skip a lot whose cost basis is missing or is in a
+                                // DIFFERENT currency than the sale price: `proceeds −
+                                // cost_basis` across currencies is meaningless without
+                                // FX (out of scope). Skip only THAT lot — a same-currency
+                                // lot in the same sale is still a real, reportable
+                                // disposal, so a mixed-currency reduction records the
+                                // lots it can and drops only the ones it can't.
                                 let Some(cost) = &m.cost else { continue };
+                                if cost.currency != amt.currency {
+                                    continue;
+                                }
                                 let lot_units = m.units.number.abs();
                                 let cost_basis_num = lot_units * cost.number;
+                                // Per-lot proceeds. A `Unit` (`@`) price is exact per
+                                // unit. A `Total` (`@@`) price names the proceeds for the
+                                // whole reduction, pro-rated by units — multiplying
+                                // BEFORE dividing so it stays exact whenever the total
+                                // divides evenly (a single-lot `@@` is always exact:
+                                // `total × n / n`). A non-terminating split leaves an
+                                // immaterial sub-display residual on each lot.
                                 let proceeds_num = match price.kind {
                                     rustledger_core::PriceKind::Unit => amt.number * lot_units,
-                                    // Last lot: exact remainder, so the sum ties out.
-                                    rustledger_core::PriceKind::Total if i + 1 == n => {
-                                        amt.number - allocated
-                                    }
                                     rustledger_core::PriceKind::Total if !total_units.is_zero() => {
                                         amt.number * lot_units / total_units
                                     }
                                     rustledger_core::PriceKind::Total => Decimal::ZERO,
                                 };
-                                allocated += proceeds_num;
                                 gains.push(CapitalGain {
                                     account: posting.account.clone(),
                                     currency: units.currency.clone(),
                                     units: lot_units,
-                                    // Gain = proceeds − cost basis, denominated in the
-                                    // cost currency. These coincide for a normal
-                                    // same-currency disposal; cross-currency proceeds
-                                    // are out of scope (documented in the report module).
+                                    // Same currency by the guard above, so proceeds,
+                                    // basis, and gain are all in `cost.currency`.
                                     amount: Amount::new(
                                         proceeds_num - cost_basis_num,
                                         &cost.currency,
                                     ),
                                     cost_basis: Amount::new(cost_basis_num, &cost.currency),
-                                    // Proceeds carry the SALE price's currency — the
-                                    // truthful denomination even when it differs from the
-                                    // cost currency (rather than mislabeling it as cost).
-                                    proceeds: Amount::new(proceeds_num, &amt.currency),
+                                    proceeds: Amount::new(proceeds_num, &cost.currency),
                                     acquired_date: cost.date,
                                 });
                             }
@@ -1498,6 +1487,64 @@ mod tests {
             g.is_empty(),
             "cross-currency disposal records no gain: {g:?}"
         );
+    }
+
+    /// A sale that FIFO-matches lots held in DIFFERENT cost currencies records the
+    /// same-currency lot(s) and skips only the cross-currency one — it does NOT drop
+    /// the whole sale (an all-or-nothing guard would silently omit a real gain).
+    #[test]
+    fn test_book_mixed_currency_lots_records_only_matching() {
+        let mut engine = BookingEngine::new(); // FIFO
+        // Lot 1: 5 AAPL at 100 USD (2020). Lot 2: 5 AAPL at 90 EUR (2021).
+        engine.apply(
+            &Transaction::new(date(2020, 1, 1), "buy usd")
+                .with_synthesized_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(5), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(100) })
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-500), "USD"),
+                )),
+        );
+        engine.apply(
+            &Transaction::new(date(2021, 1, 1), "buy eur")
+                .with_synthesized_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(5), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(90) })
+                            .with_currency("EUR"),
+                    ),
+                )
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-450), "EUR"),
+                )),
+        );
+        // Sell 8 @ 150 USD: FIFO takes 5 from the USD lot, 3 from the EUR lot.
+        let sell = Transaction::new(date(2023, 1, 1), "sell")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-8), "AAPL"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(150), "USD"))),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1200), "USD")));
+        let g = engine.book(&sell).unwrap().gains;
+        // Only the USD lot is reported (5u, basis 500, proceeds 750, gain 250); the
+        // EUR-basis lot is skipped, not the whole sale.
+        assert_eq!(
+            g.len(),
+            1,
+            "same-currency lot recorded, EUR lot skipped: {g:?}"
+        );
+        assert_eq!(g[0].units, dec!(5));
+        assert_eq!(g[0].cost_basis.number, dec!(500));
+        assert_eq!(g[0].cost_basis.currency.as_ref(), "USD");
+        assert_eq!(g[0].proceeds.number, dec!(750));
+        assert_eq!(g[0].amount.number, dec!(250));
     }
 
     /// Test cost currency inference from other postings (issue #230).

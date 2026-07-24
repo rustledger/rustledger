@@ -350,9 +350,25 @@ fn load(file: &PathBuf, report: &Report, verbose: bool, no_cache: bool) -> Resul
     // The capgains report re-books the PRE-booking parsed stream itself (see
     // `LoadedReport::parsed_directives`), so snapshot it before `process` consumes
     // `raw`. Only clone for that report — every other report ignores the field.
+    //
+    // Canonical-sort by `(date, priority, file_id, span.start)` — exactly the
+    // loader's pre-booking sort — so the report's stable booking-order pass matches
+    // `rledger check`'s lot attribution even when the raw concatenation order differs
+    // from canonical order (e.g. a ledger split across `include`d files).
     let parsed_directives: Vec<rustledger_core::Directive> =
         if matches!(report, Report::Capgains { .. }) {
-            raw.directives.iter().map(|s| s.value.clone()).collect()
+            let mut keyed: Vec<_> = raw
+                .directives
+                .iter()
+                .map(|s| {
+                    (
+                        (s.value.date(), s.value.priority(), s.file_id, s.span.start),
+                        s.value.clone(),
+                    )
+                })
+                .collect();
+            keyed.sort_by_key(|(k, _)| *k);
+            keyed.into_iter().map(|(_, v)| v).collect()
         } else {
             Vec::new()
         };

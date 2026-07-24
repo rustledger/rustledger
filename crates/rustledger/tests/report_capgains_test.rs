@@ -64,6 +64,48 @@ const LEDGER_AMBIGUOUS: &str = r#"2020-01-01 open Assets:Broker:Stock
   Assets:Bank        1200 USD
 "#;
 
+/// Closing a short: sold 5 @ 100 (received 500), covered 5 @ 80 (paid 400) → +100
+/// gain, always short-term. The row's proceeds/basis are the short-open value and
+/// the cover cost (the mirror of a long disposal).
+const LEDGER_SHORT: &str = r#"option "booking_method" "FIFO"
+
+2019-01-01 open Assets:Broker:Stock
+2019-01-01 open Assets:Bank
+2019-01-01 open Income:Gains
+
+2020-01-01 * "open short"
+  Assets:Broker:Stock  -5 AAPL {100 USD}
+  Assets:Bank        500 USD
+
+2022-06-01 * "cover"
+  Assets:Broker:Stock   5 AAPL {} @ 80 USD
+  Assets:Bank       -400 USD
+  Income:Gains
+"#;
+
+/// AVERAGE booking merges lots and drops their acquisition dates, so the holding
+/// period is unknown — the report must say `unknown`, not silently `short`. The
+/// averaged basis (6 × 115 = 690) is still correct.
+const LEDGER_AVERAGE: &str = r#"option "booking_method" "AVERAGE"
+
+2019-01-01 open Assets:Broker:Stock
+2019-01-01 open Assets:Bank
+2019-01-01 open Income:Gains
+
+2020-01-01 * "buy 10 @ 100"
+  Assets:Broker:Stock  10 AAPL {100 USD}
+  Assets:Bank       -1000 USD
+
+2023-06-01 * "buy 10 @ 130"
+  Assets:Broker:Stock  10 AAPL {130 USD}
+  Assets:Bank       -1300 USD
+
+2024-01-01 * "sell 6 @ 150"
+  Assets:Broker:Stock  -6 AAPL {} @ 150 USD
+  Assets:Bank        900 USD
+  Income:Gains
+"#;
+
 fn write_fixture(source: &str) -> tempfile::NamedTempFile {
     let mut f = tempfile::Builder::new()
         .prefix("report-capgains-")
@@ -209,6 +251,41 @@ fn year_filter_keeps_only_that_years_disposals() {
         ],
     );
     assert_eq!(y2023.lines().count(), 1, "2023 header only: {y2023}");
+}
+
+#[test]
+fn short_sale_has_correct_sign_and_is_short_term() {
+    let bin = require_rledger!();
+    let f = write_fixture(LEDGER_SHORT);
+    let path = f.path().to_str().unwrap();
+    let out = run(&bin, &["report", path, "capgains", "--format", "csv"]);
+    let rows: Vec<&str> = out.lines().collect();
+    assert_eq!(rows.len(), 2, "header + one disposal: {out}");
+    // proceeds = short-open value 500, basis = cover cost 400, gain +100, short-term
+    // (even though the short was open > 1 year).
+    assert_eq!(
+        rows[1],
+        "2022-06-01,Assets:Broker:Stock,AAPL,5,2020-01-01,882,short,USD,500,400,100"
+    );
+}
+
+#[test]
+fn average_cost_disposal_has_unknown_term() {
+    let bin = require_rledger!();
+    let f = write_fixture(LEDGER_AVERAGE);
+    let path = f.path().to_str().unwrap();
+    let out = run(&bin, &["report", path, "capgains", "--format", "csv"]);
+    let rows: Vec<&str> = out.lines().collect();
+    assert_eq!(rows.len(), 2, "header + one disposal: {out}");
+    // Blank acquired/held_days, term=unknown, averaged basis 690 (6 × 115), gain 210.
+    assert_eq!(
+        rows[1],
+        "2024-01-01,Assets:Broker:Stock,AAPL,6,,,unknown,USD,900,690,210"
+    );
+    // The text summary shows an Unknown-term bucket, not Short/Long.
+    let txt = run(&bin, &["report", path, "capgains", "--no-pager"]);
+    assert!(txt.contains("Unknown-term"), "{txt}");
+    assert!(!txt.contains("Short-term"), "{txt}");
 }
 
 #[test]

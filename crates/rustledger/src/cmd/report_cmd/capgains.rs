@@ -20,6 +20,13 @@
 //! re-booking it would over-count. Booking the parsed stream instead lets `book`
 //! observe each sale's original `@@`/`@` price and record exact proceeds.
 //!
+//! **Short positions** are reported when covered: the lot's cost is the price the
+//! units were sold at when the short was opened, so proceeds are the short-open
+//! value and cost basis is the cover cost (the mirror of a long disposal), and the
+//! gain is always short-term (the US rule). **Unknown holding period**: a lot with
+//! no acquisition date — e.g. under `AVERAGE` booking, which merges lots and drops
+//! their dates — is classified `unknown`, not silently `short`.
+//!
 //! Gains are reported in each lot's **cost currency**; a multi-currency ledger is
 //! summarized per currency. Not a tax filing: wash-sale adjustment, currency-gain
 //! separation, lots seeded by `pad` (no well-defined cost basis), and jurisdiction
@@ -34,6 +41,36 @@ use rustledger_core::{BookingMethod, Directive, DisplayContext, NaiveDate};
 use std::collections::BTreeMap;
 use std::io::Write;
 
+/// Holding-period classification of a disposal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Term {
+    Short,
+    Long,
+    /// Holding period could not be determined — the lot carried no acquisition
+    /// date (e.g. an AVERAGE-cost lot, which merges lots and drops their dates).
+    /// Reported honestly as unknown rather than silently defaulted to short.
+    Unknown,
+}
+
+impl Term {
+    /// Machine-readable term (CSV / JSON).
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Short => "short",
+            Self::Long => "long",
+            Self::Unknown => "unknown",
+        }
+    }
+    /// Compact label for the text table.
+    const fn abbr(self) -> &'static str {
+        match self {
+            Self::Short => "ST",
+            Self::Long => "LT",
+            Self::Unknown => "??",
+        }
+    }
+}
+
 /// One realized disposal: a single tax lot sold.
 struct Disposal {
     sold: NaiveDate,
@@ -43,7 +80,7 @@ struct Disposal {
     acquired: Option<NaiveDate>,
     /// Whole days held (`sold - acquired`), `None` if the lot carried no date.
     held_days: Option<i64>,
-    long_term: bool,
+    term: Term,
     proceeds: Decimal,
     cost_basis: Decimal,
     gain: Decimal,
@@ -108,6 +145,18 @@ fn collect_disposals(
                 .acquired_date
                 .and_then(|a| a.until((jiff::Unit::Day, txn.date)).ok())
                 .map(|s| i64::from(s.get_days()));
+            // Short-sale gains are always short-term (US rule); otherwise a lot with
+            // no acquisition date has an unknown holding period; otherwise apply the
+            // threshold.
+            let term = if g.short_sale {
+                Term::Short
+            } else {
+                match g.acquired_date {
+                    None => Term::Unknown,
+                    Some(a) if is_long_term(a, txn.date, held_days, long_term_days) => Term::Long,
+                    Some(_) => Term::Short,
+                }
+            };
             out.push(Disposal {
                 sold: txn.date,
                 account: g.account.to_string(),
@@ -115,9 +164,7 @@ fn collect_disposals(
                 units: g.units,
                 acquired: g.acquired_date,
                 held_days,
-                long_term: g
-                    .acquired_date
-                    .is_some_and(|a| is_long_term(a, txn.date, held_days, long_term_days)),
+                term,
                 proceeds: g.proceeds.number,
                 cost_basis: g.cost_basis.number,
                 gain: g.amount.number,
@@ -239,14 +286,18 @@ fn render<W: Write>(
     // formatter, which would round to display precision and inject `render_commas`
     // separators, corrupting the exported figures.
     let money = |n: Decimal, ccy: &str| ctx.format_amount_number(n, ccy);
-    // Summary: per currency, split short-term vs long-term.
+    // Summary: per currency, split short-term / long-term / unknown.
     let mut short: BTreeMap<String, Totals> = BTreeMap::new();
     let mut long: BTreeMap<String, Totals> = BTreeMap::new();
+    let mut unknown: BTreeMap<String, Totals> = BTreeMap::new();
     for d in rows {
-        let bucket = if d.long_term { &mut long } else { &mut short };
+        let bucket = match d.term {
+            Term::Short => &mut short,
+            Term::Long => &mut long,
+            Term::Unknown => &mut unknown,
+        };
         bucket.entry(d.currency.clone()).or_default().add(d);
     }
-    let term = |lt: bool| if lt { "long" } else { "short" };
 
     match format {
         OutputFormat::Csv => {
@@ -265,7 +316,7 @@ fn render<W: Write>(
                     d.units,
                     d.acquired.map_or_else(String::new, |a| a.to_string()),
                     d.held_days.map_or_else(String::new, |h| h.to_string()),
-                    term(d.long_term),
+                    d.term.as_str(),
                     d.currency,
                     d.proceeds,
                     d.cost_basis,
@@ -285,7 +336,7 @@ fn render<W: Write>(
                         .map_or_else(|| "null".to_string(), |a| format!("\"{a}\"")),
                     d.held_days
                         .map_or_else(|| "null".to_string(), |h| h.to_string()),
-                    term(d.long_term),
+                    d.term.as_str(),
                     json_escape(&d.currency),
                     d.proceeds,
                     d.cost_basis,
@@ -311,10 +362,11 @@ fn render<W: Write>(
             };
             writeln!(
                 writer,
-                r#"{{"disposals": [{}], "short_term": {}, "long_term": {}}}"#,
+                r#"{{"disposals": [{}], "short_term": {}, "long_term": {}, "unknown_term": {}}}"#,
                 disposals.join(", "),
                 summ(&short),
                 summ(&long),
+                summ(&unknown),
             )?;
         }
         OutputFormat::Text => {
@@ -346,18 +398,26 @@ fn render<W: Write>(
                     money(d.units, &d.commodity),
                     d.acquired
                         .map_or_else(|| "  —".to_string(), |a| format!("  {a}")),
-                    if d.long_term { "LT" } else { "ST" },
+                    d.term.abbr(),
                     money(d.proceeds, &d.currency),
                     money(d.gain, &d.currency),
                 )?;
             }
             writeln!(writer, "{}", "-".repeat(RULE))?;
-            // Per-currency short-term then long-term totals, then net.
-            let mut currencies: Vec<&String> = short.keys().chain(long.keys()).collect();
+            // Per-currency short-term / long-term / unknown totals, then net.
+            let mut currencies: Vec<&String> = short
+                .keys()
+                .chain(long.keys())
+                .chain(unknown.keys())
+                .collect();
             currencies.sort_unstable();
             currencies.dedup();
             for c in currencies {
-                for (label, bucket) in [("Short-term", &short), ("Long-term", &long)] {
+                for (label, bucket) in [
+                    ("Short-term", &short),
+                    ("Long-term", &long),
+                    ("Unknown-term", &unknown),
+                ] {
                     if let Some(t) = bucket.get(c) {
                         writeln!(
                             writer,
@@ -369,7 +429,8 @@ fn render<W: Write>(
                     }
                 }
                 let net = short.get(c).map(|t| t.gain).unwrap_or_default()
-                    + long.get(c).map(|t| t.gain).unwrap_or_default();
+                    + long.get(c).map(|t| t.gain).unwrap_or_default()
+                    + unknown.get(c).map(|t| t.gain).unwrap_or_default();
                 writeln!(
                     writer,
                     "{:<12}net realized gain {:>12} {c}",

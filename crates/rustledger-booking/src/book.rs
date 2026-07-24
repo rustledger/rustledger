@@ -82,6 +82,11 @@ pub struct CapitalGain {
     /// Acquisition date of the lot, when the lot carried one (the holding-period
     /// start for short vs long term classification).
     pub acquired_date: Option<rustledger_core::NaiveDate>,
+    /// True when this disposal CLOSES A SHORT position (the matched lot had
+    /// negative units): the lot's cost is the price the units were sold at when
+    /// the short was opened, so `proceeds`/`cost_basis` are assigned accordingly.
+    /// US tax treats short-sale gains as always short-term.
+    pub short_sale: bool,
 }
 
 /// Booking engine that tracks inventory across transactions.
@@ -421,20 +426,31 @@ impl BookingEngine {
                                     continue;
                                 }
                                 let lot_units = m.units.number.abs();
-                                let cost_basis_num = lot_units * cost.number;
-                                // Per-lot proceeds. A `Unit` (`@`) price is exact per
-                                // unit. A `Total` (`@@`) price names the proceeds for the
-                                // whole reduction, pro-rated by units — multiplying
-                                // BEFORE dividing so it stays exact whenever the total
-                                // divides evenly (a single-lot `@@` is always exact:
-                                // `total × n / n`). A non-terminating split leaves an
-                                // immaterial sub-display residual on each lot.
-                                let proceeds_num = match price.kind {
+                                // The lot's cost value, and the reduction's sale value.
+                                // A `Unit` (`@`) price is exact per unit; a `Total` (`@@`)
+                                // price names the value for the whole reduction, pro-rated
+                                // by units — multiplying BEFORE dividing so it stays exact
+                                // whenever the total divides evenly (a single-lot `@@` is
+                                // always exact: `total × n / n`). A non-terminating split
+                                // leaves an immaterial sub-display residual per lot.
+                                let lot_value = lot_units * cost.number;
+                                let sale_value = match price.kind {
                                     rustledger_core::PriceKind::Unit => amt.number * lot_units,
                                     rustledger_core::PriceKind::Total if !total_units.is_zero() => {
                                         amt.number * lot_units / total_units
                                     }
                                     rustledger_core::PriceKind::Total => Decimal::ZERO,
+                                };
+                                // Closing a SHORT (matched lot has negative units) inverts
+                                // the roles: the lot's cost is the price the units were
+                                // SOLD at when the short was opened (the proceeds), and the
+                                // reduction's price is what is PAID to cover (the basis).
+                                // `gain = proceeds − cost_basis` holds for both directions.
+                                let short_sale = m.units.number.is_sign_negative();
+                                let (proceeds_num, cost_basis_num) = if short_sale {
+                                    (lot_value, sale_value)
+                                } else {
+                                    (sale_value, lot_value)
                                 };
                                 gains.push(CapitalGain {
                                     account: posting.account.clone(),
@@ -449,6 +465,7 @@ impl BookingEngine {
                                     cost_basis: Amount::new(cost_basis_num, &cost.currency),
                                     proceeds: Amount::new(proceeds_num, &cost.currency),
                                     acquired_date: cost.date,
+                                    short_sale,
                                 });
                             }
                         }
@@ -1545,6 +1562,52 @@ mod tests {
         assert_eq!(g[0].cost_basis.currency.as_ref(), "USD");
         assert_eq!(g[0].proceeds.number, dec!(750));
         assert_eq!(g[0].amount.number, dec!(250));
+    }
+
+    /// Closing a SHORT position: the gain sign and proceeds/basis are the mirror of
+    /// a long disposal — you profit when you cover BELOW the price you shorted at.
+    /// Sold 5 @ 100 (received 500), cover 5 @ 80 (paid 400) => +100 gain.
+    #[test]
+    fn test_book_short_cover_gain_sign_and_flag() {
+        let mut engine = BookingEngine::new();
+        // Open the short: sell 5 not held, at cost 100 (the price shorted at).
+        engine.apply(
+            &Transaction::new(date(2020, 1, 1), "open short")
+                .with_synthesized_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(100) })
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(500), "USD"),
+                )),
+        );
+        // Cover: buy 5 back at 80.
+        let cover = Transaction::new(date(2020, 6, 1), "cover")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(5), "AAPL"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(80), "USD"))),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-400), "USD")));
+        let g = engine.book(&cover).unwrap().gains;
+        assert_eq!(g.len(), 1);
+        assert!(g[0].short_sale, "closing a short is flagged");
+        assert_eq!(
+            g[0].proceeds.number,
+            dec!(500),
+            "short-open value is the proceeds"
+        );
+        assert_eq!(g[0].cost_basis.number, dec!(400), "cover cost is the basis");
+        assert_eq!(
+            g[0].amount.number,
+            dec!(100),
+            "gain = proceeds - basis = +100"
+        );
+        assert_eq!(g[0].acquired_date, Some(date(2020, 1, 1)));
     }
 
     /// Test cost currency inference from other postings (issue #230).

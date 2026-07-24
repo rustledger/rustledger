@@ -333,7 +333,13 @@ TOTAL       net realized gain          660 USD
 - **Short vs long term.** By default a lot is long-term when the sale is **more than
   one calendar year** after acquisition — the leap-year-correct US rule (a 366-day
   holding across a leap day is *not* yet long-term). `--long-term-days N` replaces
-  this with a fixed day count.
+  this with a fixed day count. A lot with **no acquisition date** — e.g. under
+  `AVERAGE` booking, which merges lots and drops their dates — has an indeterminate
+  holding period and is reported as **`unknown`**, never silently short.
+- **Short positions.** Covering a short is a disposal: the proceeds are what you
+  received opening the short and the cost basis is what you paid to cover (the
+  mirror of a long sale, so a cover *below* the short price is a gain). Short-sale
+  gains are always **short-term**.
 - **Lot matching** uses the ledger's own booking method (`option "booking_method"`,
   per-account `open ... "METHOD"`), so results match `rledger check`. A sale the
   ledger cannot book unambiguously (e.g. a bare `{}` reduction spanning

@@ -415,6 +415,10 @@ impl BookingEngine {
                         if let Some(price) = &posting.price
                             && let Some(amt) =
                                 price.amount.as_ref().and_then(IncompleteAmount::as_amount)
+                            // A zero-unit reduction is degenerate — no proceeds to
+                            // pro-rate — so record no disposal (guards the `@@`
+                            // division too).
+                            && !units.number.is_zero()
                         {
                             let total_units = units.number.abs();
                             for m in &booking_result.matched {

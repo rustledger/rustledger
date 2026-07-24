@@ -349,6 +349,25 @@ fn average_cost_disposal_has_unknown_term() {
 }
 
 #[test]
+fn negative_long_term_days_is_rejected() {
+    let bin = require_rledger!();
+    let f = write_fixture(LEDGER);
+    let path = f.path().to_str().unwrap();
+    // `=` form reaches the value; a bare `-1` is rejected by clap as a flag. Either
+    // way a negative threshold must not be accepted (it would call everything long).
+    let out = Command::new(&bin)
+        .args(["report", path, "capgains", "--long-term-days=-1"])
+        .output()
+        .expect("run");
+    assert!(!out.status.success(), "negative threshold must error");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("non-negative"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn ambiguous_strict_reduction_yields_no_rows() {
     let bin = require_rledger!();
     let f = write_fixture(LEDGER_AMBIGUOUS);

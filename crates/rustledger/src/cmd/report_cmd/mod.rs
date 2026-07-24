@@ -544,6 +544,11 @@ fn render<W: io::Write>(
             end,
             long_term_days,
         } => {
+            if let Some(n) = long_term_days
+                && *n < 0
+            {
+                anyhow::bail!("--long-term-days must be non-negative (got {n})");
+            }
             let end_date: Option<NaiveDate> = end
                 .as_deref()
                 .map(|s| {

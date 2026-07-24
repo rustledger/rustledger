@@ -94,3 +94,7 @@ packaging/arch/rustledger/.SRCINFO
 # file out of this ignore (e.g. `!templates/prompts/judge.md`) rather
 # than committing the full tree.
 templates/
+
+# cargo-mutants output (generated)
+mutants.out/
+mutants.out.old/

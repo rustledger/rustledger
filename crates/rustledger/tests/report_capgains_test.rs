@@ -200,9 +200,63 @@ fn text_report_shows_net_realized_gain() {
     let f = write_fixture(LEDGER);
     let path = f.path().to_str().unwrap();
     let out = run(&bin, &["report", path, "capgains", "--no-pager"]);
-    assert!(out.contains("net realized gain          660 USD"), "{out}");
-    assert!(out.contains("Long-term     2 disposals"), "{out}");
-    assert!(out.contains("Short-term    1 disposals"), "{out}");
+    // Substring-based (robust to column-width tweaks): the net total and the
+    // per-term disposal counts.
+    assert!(out.contains("net realized gain"), "{out}");
+    assert!(out.contains("660 USD"), "net total: {out}");
+    assert!(
+        out.contains("Long-term") && out.contains("2 disposals"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Short-term") && out.contains("1 disposals"),
+        "{out}"
+    );
+    // The row term abbreviations appear (LT for the long lots, ST for the short one).
+    assert!(out.contains("    LT "), "long row abbr: {out}");
+    assert!(out.contains("    ST "), "short row abbr: {out}");
+}
+
+#[test]
+fn end_filter_is_inclusive_of_the_boundary_date() {
+    let bin = require_rledger!();
+    let f = write_fixture(LEDGER);
+    let path = f.path().to_str().unwrap();
+    // `--end` on the first sale date INCLUDES that day's disposal.
+    let incl = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "capgains",
+            "--end",
+            "2024-03-01",
+            "--format",
+            "csv",
+        ],
+    );
+    assert!(
+        incl.contains("2024-03-01,"),
+        "boundary date included: {incl}"
+    );
+    assert!(
+        !incl.contains("2024-04-01,"),
+        "later disposal excluded: {incl}"
+    );
+    // One day before the first sale excludes everything.
+    let before = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "capgains",
+            "--end",
+            "2024-02-29",
+            "--format",
+            "csv",
+        ],
+    );
+    assert_eq!(before.lines().count(), 1, "header only: {before}");
 }
 
 #[test]
@@ -282,10 +336,16 @@ fn average_cost_disposal_has_unknown_term() {
         rows[1],
         "2024-01-01,Assets:Broker:Stock,AAPL,6,,,unknown,USD,900,690,210"
     );
-    // The text summary shows an Unknown-term bucket, not Short/Long.
+    // The text summary shows an Unknown-term bucket, not Short/Long, the row is
+    // marked `??`, and the net total includes the unknown-term gain (210).
     let txt = run(&bin, &["report", path, "capgains", "--no-pager"]);
     assert!(txt.contains("Unknown-term"), "{txt}");
     assert!(!txt.contains("Short-term"), "{txt}");
+    assert!(txt.contains("    ?? "), "unknown row abbr: {txt}");
+    assert!(
+        txt.contains("net realized gain") && txt.contains("210 USD"),
+        "net includes the unknown-term gain: {txt}"
+    );
 }
 
 #[test]

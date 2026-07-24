@@ -413,37 +413,52 @@ impl BookingEngine {
                                 price.amount.as_ref().and_then(IncompleteAmount::as_amount)
                         {
                             let total_units = units.number.abs();
-                            for m in &booking_result.matched {
-                                // Skip a lot whose cost basis is missing or is in a
-                                // DIFFERENT currency than the sale price: `proceeds −
-                                // cost_basis` across currencies is meaningless without
-                                // FX (out of scope). Skip only THAT lot — a same-currency
-                                // lot in the same sale is still a real, reportable
-                                // disposal, so a mixed-currency reduction records the
-                                // lots it can and drops only the ones it can't.
-                                let Some(cost) = &m.cost else { continue };
-                                if cost.currency != amt.currency {
-                                    continue;
-                                }
+                            // Eligible lots: cost present and in the SALE-price currency.
+                            // A cross-currency lot is skipped (proceeds − cost_basis
+                            // across currencies is meaningless without FX — out of scope);
+                            // a same-currency lot in the same sale is still reported, so a
+                            // mixed sale records what it can and drops only what it can't.
+                            let eligible: Vec<_> = booking_result
+                                .matched
+                                .iter()
+                                .filter(|m| {
+                                    m.cost.as_ref().is_some_and(|c| c.currency == amt.currency)
+                                })
+                                .collect();
+                            // A `Total` (`@@`) sale value is pro-rated across the lots and
+                            // rounded to the precision the total was written in, with the
+                            // LAST lot taking the exact remainder so the per-lot values sum
+                            // EXACTLY to the stated total (no unreconciled 28-digit tail in
+                            // the machine-readable export). The remainder trick is only exact
+                            // when every matched lot is eligible; a mixed-currency sale
+                            // (rare) falls back to plain pro-rata for the dropped share.
+                            let all_eligible = eligible.len() == booking_result.matched.len();
+                            let scale = amt.number.scale();
+                            let n = eligible.len();
+                            let mut allocated = Decimal::ZERO;
+                            for (i, m) in eligible.iter().enumerate() {
+                                let cost = m.cost.as_ref().expect("eligible lots carry a cost");
                                 let lot_units = m.units.number.abs();
-                                // The lot's cost value, and the reduction's sale value.
-                                // A `Unit` (`@`) price is exact per unit; a `Total` (`@@`)
-                                // price names the value for the whole reduction, pro-rated
-                                // by units — multiplying BEFORE dividing so it stays exact
-                                // whenever the total divides evenly (a single-lot `@@` is
-                                // always exact: `total × n / n`). A non-terminating split
-                                // leaves an immaterial sub-display residual per lot.
                                 let lot_value = lot_units * cost.number;
                                 let sale_value = match price.kind {
+                                    // `@` unit price: exact per unit.
                                     rustledger_core::PriceKind::Unit => amt.number * lot_units,
+                                    // Last eligible lot of an all-eligible `@@` sale: exact
+                                    // remainder so the lots sum to the stated total.
+                                    rustledger_core::PriceKind::Total
+                                        if all_eligible && i + 1 == n =>
+                                    {
+                                        amt.number - allocated
+                                    }
                                     rustledger_core::PriceKind::Total if !total_units.is_zero() => {
-                                        amt.number * lot_units / total_units
+                                        (amt.number * lot_units / total_units).round_dp(scale)
                                     }
                                     rustledger_core::PriceKind::Total => Decimal::ZERO,
                                 };
+                                allocated += sale_value;
                                 // Closing a SHORT (matched lot has negative units) inverts
-                                // the roles: the lot's cost is the price the units were
-                                // SOLD at when the short was opened (the proceeds), and the
+                                // the roles: the lot's cost is the price the units were SOLD
+                                // at when the short was opened (the proceeds), and the
                                 // reduction's price is what is PAID to cover (the basis).
                                 // `gain = proceeds − cost_basis` holds for both directions.
                                 let short_sale = m.units.number.is_sign_negative();
@@ -456,7 +471,7 @@ impl BookingEngine {
                                     account: posting.account.clone(),
                                     currency: units.currency.clone(),
                                     units: lot_units,
-                                    // Same currency by the guard above, so proceeds,
+                                    // Same currency by the eligibility filter, so proceeds,
                                     // basis, and gain are all in `cost.currency`.
                                     amount: Amount::new(
                                         proceeds_num - cost_basis_num,
@@ -1467,6 +1482,52 @@ mod tests {
             g[0].proceeds.number + g[1].proceeds.number,
             dec!(1200),
             "per-lot proceeds sum exactly to the stated total"
+        );
+    }
+
+    /// A multi-lot `@@` (total) sale whose total does NOT divide evenly across the
+    /// matched lots still has per-lot proceeds that sum EXACTLY to the stated total
+    /// (the last lot takes the remainder), with no 28-digit division tail.
+    #[test]
+    fn test_book_total_price_uneven_split_reconciles() {
+        let mut engine = BookingEngine::new(); // FIFO
+        let lot = |d, n, cost| {
+            Transaction::new(d, "buy")
+                .with_synthesized_posting(
+                    Posting::new("Assets:Stock", Amount::new(n, "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: cost })
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(-n * cost, "USD"),
+                ))
+        };
+        engine.apply(&lot(date(2020, 1, 1), dec!(1), dec!(10)));
+        engine.apply(&lot(date(2020, 6, 1), dec!(2), dec!(10)));
+        // Sell 3 for a TOTAL of 100 written to the cent: FIFO 1 + 2. 100/3 does not
+        // terminate, so pro-rata would tail; the report must still sum to 100.00.
+        let sell = Transaction::new(date(2021, 1, 1), "sell")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-3), "AAPL"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(PriceAnnotation::total(Amount::new(dec!(100.00), "USD"))),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(100.00), "USD"),
+            ));
+        let g = engine.book(&sell).unwrap().gains;
+        assert_eq!(g.len(), 2);
+        // Rounded to the total's 2dp; no 28-digit tail.
+        assert_eq!(g[0].proceeds.number, dec!(33.33));
+        assert_eq!(g[1].proceeds.number, dec!(66.67)); // remainder: 100.00 - 33.33
+        assert_eq!(
+            g[0].proceeds.number + g[1].proceeds.number,
+            dec!(100.00),
+            "per-lot proceeds sum EXACTLY to the stated total"
         );
     }
 

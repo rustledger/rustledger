@@ -345,6 +345,15 @@ TOTAL       net realized gain          660 USD
   ledger cannot book unambiguously (e.g. a bare `{}` reduction spanning
   different-cost lots under strict booking) is **skipped, not guessed** — run
   `rledger check` first to see those errors.
+- **Incomplete reports are flagged.** A transaction that cannot be booked or
+  interpolated — an unbalanced entry, or a sale of shares seeded by `pad` or by a
+  plugin (both out of scope, since the report books the pre-plugin stream) — is
+  skipped, and a `warning:` naming the count is printed to stderr so an incomplete
+  report is never mistaken for a complete one.
+- **Total prices reconcile.** For a multi-lot `@@` (total) sale whose total does not
+  divide evenly, the per-lot proceeds are allocated to the precision the total was
+  written in, with the last lot taking the remainder, so they sum **exactly** to the
+  stated total (no rounding drift in the CSV/JSON export).
 
 Not a tax filing: wash-sale adjustments, separating currency gains from asset
 gains, lots seeded by `pad` (no well-defined cost basis), and jurisdiction rules

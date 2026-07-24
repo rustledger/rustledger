@@ -110,13 +110,19 @@ struct Disposal {
 ///
 /// Transactions are visited in booking order (`booking_sort_key`) so a same-date
 /// sell never books before the buy that seeds its lot. A transaction that fails to
-/// book (an un-booked ledger; `rledger check` flags it) is skipped rather than
-/// aborting the whole report.
+/// book or interpolate (an un-booked ledger, or a pad-/plugin-seeded lot the
+/// pre-plugin stream can't resolve) is skipped rather than aborting the whole
+/// report; the returned count lets the caller warn that the report may be
+/// incomplete. Skipping — rather than applying a partially-booked transaction —
+/// matches the loader (`run_booking` moves such transactions to `failed` and does
+/// NOT apply them), so the report never realizes a lot `rledger check` rejects.
+///
+/// Returns the disposals plus the number of transactions skipped.
 fn collect_disposals(
     directives: &[Directive],
     method: BookingMethod,
     long_term_days: Option<i64>,
-) -> Vec<Disposal> {
+) -> (Vec<Disposal>, usize) {
     // Use the ledger's OWN booking method (not `BookingEngine::new`'s FIFO
     // default) so the report's lot-matching matches `rledger check`: a ledger
     // booked Strict where a bare-`{}` sale is ambiguous must fail to book here
@@ -131,20 +137,32 @@ fn collect_disposals(
     order.sort_by_key(|&i| rustledger_core::booking_sort_key(&directives[i]));
 
     let mut out = Vec::new();
+    let mut skipped = 0usize;
     for &i in &order {
         let Directive::Transaction(txn) = &directives[i] else {
             continue;
         };
         // `book` computes the per-lot gains against the CURRENT inventory but does
-        // NOT mutate it.
+        // NOT mutate it. Interpolate BEFORE recording anything: a transaction that
+        // fails to book OR interpolate is dropped by the loader (moved to `failed`,
+        // never applied), so drop it here too — recording its gains or applying its
+        // partially-resolved postings would diverge from `rledger check`.
         let Ok(booked) = engine.book(txn) else {
+            skipped += 1;
+            continue;
+        };
+        let Ok(interpolated) = rustledger_booking::interpolate(&booked.transaction) else {
+            skipped += 1;
             continue;
         };
         for g in &booked.gains {
             let held_days = g
                 .acquired_date
                 .and_then(|a| a.until((jiff::Unit::Day, txn.date)).ok())
-                .map(|s| i64::from(s.get_days()));
+                .map(|s| i64::from(s.get_days()))
+                // A lot "acquired" after the sale (a future-dated cost) yields a
+                // negative span — nonsensical as a holding period, so drop it.
+                .filter(|&d| d >= 0);
             // Short-sale gains are always short-term (US rule); otherwise a lot with
             // no acquisition date has an unknown holding period; otherwise apply the
             // threshold.
@@ -171,18 +189,10 @@ fn collect_disposals(
                 currency: g.amount.currency.to_string(),
             });
         }
-        // Accumulate inventory. Interpolate first (fills elided legs) to mirror the
-        // loader's `book_and_interpolate` → `apply` pipeline; if interpolation fails,
-        // fall back to the booked transaction so a lot with explicit units still
-        // enters inventory and a later sale can match it — never silently drop a lot
-        // from an otherwise `rledger check`-clean ledger.
-        let applied = match rustledger_booking::interpolate(&booked.transaction) {
-            Ok(interp) => interp.transaction,
-            Err(_) => booked.transaction,
-        };
-        engine.apply(&applied);
+        // Accumulate the interpolated transaction, exactly as the loader does.
+        engine.apply(&interpolated.transaction);
     }
-    out
+    (out, skipped)
 }
 
 /// Classify a holding period as long-term.
@@ -236,7 +246,20 @@ pub(super) fn report_capgains<W: Write>(
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
-    let mut rows: Vec<Disposal> = collect_disposals(directives, method, long_term_days)
+    let (disposals, skipped) = collect_disposals(directives, method, long_term_days);
+    // The report books the pre-plugin parsed stream itself, so a transaction that
+    // fails to book/interpolate (a pad- or plugin-seeded lot, or an unbookable
+    // entry) is dropped. Surface that on stderr so an incomplete report is never
+    // silently mistaken for a complete one.
+    if skipped > 0 {
+        eprintln!(
+            "warning: {skipped} transaction(s) could not be booked for the \
+             capital-gains report and were skipped (e.g. pad- or plugin-seeded \
+             lots, or an unbalanced entry); the report may be incomplete — run \
+             `rledger check`"
+        );
+    }
+    let mut rows: Vec<Disposal> = disposals
         .into_iter()
         .filter(|d| {
             filter
@@ -286,17 +309,21 @@ fn render<W: Write>(
     // formatter, which would round to display precision and inject `render_commas`
     // separators, corrupting the exported figures.
     let money = |n: Decimal, ccy: &str| ctx.format_amount_number(n, ccy);
-    // Summary: per currency, split short-term / long-term / unknown.
+    // Summary: per currency, split short-term / long-term / unknown. Only the TEXT
+    // and JSON renderers use these; the CSV renderer emits per-disposal rows only,
+    // so skip the buckets entirely for it.
     let mut short: BTreeMap<String, Totals> = BTreeMap::new();
     let mut long: BTreeMap<String, Totals> = BTreeMap::new();
     let mut unknown: BTreeMap<String, Totals> = BTreeMap::new();
-    for d in rows {
-        let bucket = match d.term {
-            Term::Short => &mut short,
-            Term::Long => &mut long,
-            Term::Unknown => &mut unknown,
-        };
-        bucket.entry(d.currency.clone()).or_default().add(d);
+    if !matches!(format, OutputFormat::Csv) {
+        for d in rows {
+            let bucket = match d.term {
+                Term::Short => &mut short,
+                Term::Long => &mut long,
+                Term::Unknown => &mut unknown,
+            };
+            bucket.entry(d.currency.clone()).or_default().add(d);
+        }
     }
 
     match format {
@@ -370,7 +397,9 @@ fn render<W: Write>(
             )?;
         }
         OutputFormat::Text => {
-            const RULE: usize = 79;
+            // Wide enough for millions with thousands separators (e.g.
+            // `1,500,000.00`) without the amount columns overflowing.
+            const RULE: usize = 91;
             writeln!(writer, "Realized capital gains")?;
             writeln!(writer, "{}", "=".repeat(RULE))?;
             writeln!(writer)?;
@@ -380,14 +409,14 @@ fn render<W: Write>(
             }
             writeln!(
                 writer,
-                "{:<11}{:<22}{:>8}{:<12}{:>6}{:>11}{:>11}",
+                "{:<11}{:<22}{:>10}{:<12}{:>6}{:>15}{:>15}",
                 "Sold", "Commodity / account", "Units", "  Acquired", "Term", "Proceeds", "Gain"
             )?;
             writeln!(writer, "{}", "-".repeat(RULE))?;
             for d in rows {
                 writeln!(
                     writer,
-                    "{:<11}{:<22}{:>8}{:<12}{:>6}{:>11}{:>11}",
+                    "{:<11}{:<22}{:>10}{:<12}{:>6}{:>15}{:>15}",
                     // `Date` `Display` ignores fmt width flags, so stringify first
                     // to keep the columns aligned.
                     d.sold.to_string(),
@@ -421,7 +450,7 @@ fn render<W: Write>(
                     if let Some(t) = bucket.get(c) {
                         writeln!(
                             writer,
-                            "{label:<12}{:>3} disposals   proceeds {:>12}   gain {:>12} {c}",
+                            "{label:<12}{:>3} disposals   proceeds {:>15}   gain {:>15} {c}",
                             t.count,
                             money(t.proceeds, c),
                             money(t.gain, c),
@@ -433,7 +462,7 @@ fn render<W: Write>(
                     + unknown.get(c).map(|t| t.gain).unwrap_or_default();
                 writeln!(
                     writer,
-                    "{:<12}net realized gain {:>12} {c}",
+                    "{:<12}net realized gain {:>15} {c}",
                     "TOTAL",
                     money(net, c)
                 )?;
@@ -514,7 +543,7 @@ mod tests {
             buy(d(2020, 1, 1), 10, 100),
             sell_at(d(2020, 6, 1), 4, PriceAnnotation::unit(money(150, "USD"))),
         ];
-        let disposals = collect_disposals(&dirs, BookingMethod::Fifo, None);
+        let (disposals, _skipped) = collect_disposals(&dirs, BookingMethod::Fifo, None);
         assert_eq!(disposals.len(), 1, "the sale must produce a disposal");
         let g = &disposals[0];
         assert_eq!(g.units, Decimal::from(4));
@@ -533,7 +562,7 @@ mod tests {
             buy(d(2020, 6, 1), 5, 120),
             sell_at(d(2021, 3, 1), 8, PriceAnnotation::unit(money(150, "USD"))),
         ];
-        let disposals = collect_disposals(&dirs, BookingMethod::Fifo, None);
+        let (disposals, _skipped) = collect_disposals(&dirs, BookingMethod::Fifo, None);
         assert_eq!(disposals.len(), 2);
         assert_eq!(disposals[0].acquired, Some(d(2020, 1, 1)));
         assert_eq!(disposals[0].units, Decimal::from(5));
@@ -549,7 +578,7 @@ mod tests {
             buy(d(2020, 1, 1), 3, 30),
             sell_at(d(2020, 6, 1), 3, PriceAnnotation::total(money(100, "USD"))),
         ];
-        let disposals = collect_disposals(&dirs, BookingMethod::Fifo, None);
+        let (disposals, _skipped) = collect_disposals(&dirs, BookingMethod::Fifo, None);
         assert_eq!(disposals.len(), 1);
         assert_eq!(
             disposals[0].proceeds,
@@ -568,7 +597,7 @@ mod tests {
             sell_at(d(2020, 1, 1), 4, PriceAnnotation::unit(money(150, "USD"))),
             buy(d(2020, 1, 1), 10, 100),
         ];
-        let disposals = collect_disposals(&dirs, BookingMethod::Fifo, None);
+        let (disposals, _skipped) = collect_disposals(&dirs, BookingMethod::Fifo, None);
         assert_eq!(disposals.len(), 1, "sell matches the same-date buy's lot");
         assert_eq!(disposals[0].gain, Decimal::from(200));
     }
@@ -628,6 +657,28 @@ mod tests {
             held(d(2020, 1, 1), d(2020, 1, 20)),
             Some(30)
         ));
+        // Boundary: held EXACTLY the threshold is NOT long (strictly more than N).
+        // 2020-01-01 -> 2020-01-31 is 30 days; with a 30-day threshold that is short.
+        assert_eq!(held(d(2020, 1, 1), d(2020, 1, 31)), Some(30));
+        assert!(!is_long_term(
+            d(2020, 1, 1),
+            d(2020, 1, 31),
+            Some(30),
+            Some(30)
+        ));
+    }
+
+    #[test]
+    fn short_account_returns_leaf() {
+        assert_eq!(short_account("Assets:Broker:AAPL"), "AAPL");
+        assert_eq!(short_account("Cash"), "Cash");
+    }
+
+    #[test]
+    fn truncate_keeps_head_and_marks_elision() {
+        assert_eq!(truncate("abc", 5), "abc"); // shorter than width: unchanged
+        assert_eq!(truncate("abcde", 5), "abcde"); // exactly width: unchanged
+        assert_eq!(truncate("abcdef", 5), "abcd…"); // over width: head + ellipsis
     }
 
     /// The `--year` filter compares the full `i32` year and does not silently drop

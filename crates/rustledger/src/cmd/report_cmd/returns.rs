@@ -563,7 +563,10 @@ pub(super) fn report_returns<W: Write>(
 
 /// Format a rate as a 2-decimal percentage string, or `"n/a"` when undefined.
 /// A rate rounding to zero renders a clean `"0.00"` (not `"-0.00"`).
-fn fmt_rate(rate: Option<f64>) -> String {
+///
+/// Shared with the capgains report's realized-IRR columns so every rate this CLI
+/// prints uses one unit (percent) and one precision.
+pub(super) fn fmt_rate(rate: Option<f64>) -> String {
     rate.map_or_else(
         || "n/a".to_string(),
         |r| {
@@ -682,7 +685,7 @@ fn render_single<W: Write>(
 }
 
 /// A JSON rate field: a bare 2-decimal number, or `null` when undefined.
-fn json_rate(rate: Option<f64>) -> String {
+pub(super) fn json_rate(rate: Option<f64>) -> String {
     rate.map_or_else(|| "null".to_string(), |r| fmt_rate(Some(r)))
 }
 

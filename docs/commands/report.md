@@ -333,19 +333,23 @@ rledger report ledger.beancount capgains --irr
 ```text
 Sold       Commodity / account        Units  Acquired    Term       Proceeds           Gain       IRR
 -----------------------------------------------------------------------------------------------------
-2020-12-31 AAA Stock                     10  2020-01-01    ST           1100            100    10.00%
-2021-12-31 BBB Stock                      5  2020-01-01    LT            605            105    10.00%
+2020-12-31 AAA Stock                     10  2020-01-01    ST           1250            250    25.00%
+2021-12-31 BBB Stock                     10  2020-01-01    LT           1440            440    20.00%
 -----------------------------------------------------------------------------------------------------
-Short-term    1 disposals   proceeds            1100   gain             100 USD   IRR 10.00%
-Long-term     1 disposals   proceeds             605   gain             105 USD   IRR 10.00%
-TOTAL       net realized gain             205 USD   IRR 10.00%
+Short-term    1 disposals   proceeds            1250   gain             250 USD   IRR 25.00%
+Long-term     1 disposals   proceeds            1440   gain             440 USD   IRR 20.00%
+TOTAL       net realized gain             690 USD   IRR 21.67%
 ```
 
-Note both lots read 10% even though the second gained 21% in total — the rate is
-*annualized*, so a 1.21× return over two years is 10%/year compounded. The summary
-rates pool every eligible lot's flows into one series and solve once (a
-money-weighted return over all the capital that cycled through), rather than
-averaging per-lot rates.
+The second lot gained 44% in total but reads 20% — the rate is *annualized*, so a
+1.44× return over two years is 20%/year compounded. The summary rates pool every
+eligible lot's flows into one series and solve once (a money-weighted return over
+all the capital that cycled through), which is why the TOTAL is 21.67% and not the
+22.50% average of the two rates.
+
+When some lots in a bucket have no defined rate, the summary says so explicitly —
+`IRR 25.00% (1 of 3 lots)` — because the disposal count, proceeds and gain on that
+line cover *every* lot while the rate can only cover the eligible ones.
 
 > **This is a realized-only return.** It can only see lots you actually closed, so
 > it is **not** your portfolio's total return — a position you still hold
@@ -358,9 +362,24 @@ A lot shows `n/a` (and is excluded from the pooled rates) when the rate is
 undefined: **short sales** (money-in-then-out makes an IRR unconventional and
 misleading), lots with **no acquisition date** (e.g. under `AVERAGE` booking, which
 merges lots and drops their dates), **same-day round trips** (a zero-day holding
-cannot be annualized), and a non-positive cost basis. In CSV/JSON the rate is the
-raw fraction (`0.1`, or empty/`null` when undefined); the percent formatting is
-text-only.
+cannot be annualized), a non-positive cost basis, and negative proceeds. A **total
+loss** is *not* undefined — it is exactly `-100.00%` at any horizon, and it stays in
+the pooled rate, since dropping it would flatter the result by hiding capital that
+never came back.
+
+In CSV and JSON the rate is a 2-decimal **percent** in an `irr_pct` field (empty /
+`null` when undefined) — the same unit as `report returns`' `money_weighted_return_pct`,
+so the two reports' rates are directly comparable. The JSON summaries also carry
+`irr_lots` / `irr_lots_total` (the rate's coverage). In the text table a rate beyond
+±9999% is shown as `>9999%` / `<-9999%` to keep the columns aligned; the exact value
+is always in CSV/JSON. (A very short hold can annualize to an enormous number — a
+one-day 20% gain compounds to about 8×10³⁰ %/yr — which is arithmetically true but
+rarely meaningful.)
+
+With `--year` or `--end`, the rate is computed from the flows of the lots that
+*closed* in the window; a lot bought in 2019 and sold in 2024 contributes its full
+five-year span to a `--year 2024` rate. The rate answers "what did the round trips
+I closed in this window earn, annualized", not "what did this window earn".
 
 **How it works.**
 

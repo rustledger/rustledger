@@ -330,6 +330,9 @@ fn load(file: &PathBuf, report: &Report, verbose: bool, no_cache: bool) -> Resul
     // would double up on a miss and mislead on a cache hit.
     let options = LoadOptions {
         validate: false, // Reports don't need validation
+        // Only the capgains report reads `Ledger::capital_gains`; opt in so no other
+        // report pays to retain the vector.
+        collect_capital_gains: matches!(report, Report::Capgains { .. }),
         ..Default::default()
     };
 

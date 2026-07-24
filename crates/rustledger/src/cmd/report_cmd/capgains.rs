@@ -92,13 +92,26 @@ struct Disposal {
 /// The gains are computed ONCE by the loader's own booking pass (in booking order,
 /// with the ledger's own method, before `@@` normalization) and exposed on the
 /// `Ledger` — this report consumes them directly rather than re-booking the stream,
-/// so it cannot drift from `rledger check`. All that remains here is holding-period
-/// classification: `long_term_days = Some(n)` means held strictly more than `n`
-/// days; `None` uses the leap-year-safe calendar rule.
-fn to_disposals(gains: &[CapitalGain], long_term_days: Option<i64>) -> Vec<Disposal> {
-    gains
+/// so it cannot drift from `rledger check`.
+///
+/// The realized gain is `proceeds − cost_basis`, which is only meaningful when the
+/// two are in the SAME currency. A **cross-currency** disposal — the sale price is
+/// in a different currency than the lot's cost basis, so the gain needs an FX rate
+/// this tool does not apply — is dropped from the rows and counted in the returned
+/// `cross_currency` total so the caller can surface it (rather than silently
+/// omitting it). `long_term_days = Some(n)` means held strictly more than `n` days;
+/// `None` uses the leap-year-safe calendar rule.
+fn to_disposals(gains: &[CapitalGain], long_term_days: Option<i64>) -> (Vec<Disposal>, usize) {
+    let mut cross_currency = 0usize;
+    let rows = gains
         .iter()
-        .map(|g| {
+        .filter_map(|g| {
+            // Cross-currency: proceeds and basis are in different currencies, so
+            // `proceeds − cost_basis` has no defined value. Count and drop.
+            if g.proceeds.currency != g.cost_basis.currency {
+                cross_currency += 1;
+                return None;
+            }
             let held_days = g
                 .acquired_date
                 .and_then(|a| a.until((jiff::Unit::Day, g.sale_date)).ok())
@@ -120,7 +133,7 @@ fn to_disposals(gains: &[CapitalGain], long_term_days: Option<i64>) -> Vec<Dispo
                     Some(_) => Term::Short,
                 }
             };
-            Disposal {
+            Some(Disposal {
                 sold: g.sale_date,
                 account: g.account.to_string(),
                 commodity: g.currency.to_string(),
@@ -130,11 +143,12 @@ fn to_disposals(gains: &[CapitalGain], long_term_days: Option<i64>) -> Vec<Dispo
                 term,
                 proceeds: g.proceeds.number,
                 cost_basis: g.cost_basis.number,
-                gain: g.amount.number,
-                currency: g.amount.currency.to_string(),
-            }
+                gain: g.proceeds.number - g.cost_basis.number,
+                currency: g.cost_basis.currency.to_string(),
+            })
         })
-        .collect()
+        .collect();
+    (rows, cross_currency)
 }
 
 /// Classify a holding period as long-term.
@@ -186,7 +200,17 @@ pub(super) fn report_capgains<W: Write>(
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
-    let mut rows: Vec<Disposal> = to_disposals(gains, long_term_days)
+    let (disposals, cross_currency) = to_disposals(gains, long_term_days);
+    // A cross-currency disposal (sale price in a different currency than the lot's
+    // cost basis) has no gain without an FX rate, so it is dropped from the rows.
+    // Surface the count on stderr rather than silently omitting it.
+    if cross_currency > 0 {
+        eprintln!(
+            "warning: {cross_currency} cross-currency disposal(s) omitted (sale price \
+             in a different currency than the cost basis; no FX conversion applied)"
+        );
+    }
+    let mut rows: Vec<Disposal> = disposals
         .into_iter()
         .filter(|d| {
             filter
@@ -444,7 +468,6 @@ mod tests {
             account: account.into(),
             currency: "AAPL".into(),
             units: Decimal::from(units),
-            amount: money(proceeds - basis, "USD"),
             cost_basis: money(basis, "USD"),
             proceeds: money(proceeds, "USD"),
             sale_date: sale,
@@ -502,7 +525,8 @@ mod tests {
                 true,
             ),
         ];
-        let ds = to_disposals(&gains, None);
+        let (ds, cross) = to_disposals(&gains, None);
+        assert_eq!(cross, 0);
         assert_eq!(ds[0].term.as_str(), "long"); // held ~4 years
         assert_eq!(ds[1].term.as_str(), "short"); // held ~1 month
         assert_eq!(ds[2].term.as_str(), "unknown"); // no acquisition date
@@ -510,6 +534,35 @@ mod tests {
         // A dateless lot has no held_days; a short still shows its span.
         assert_eq!(ds[2].held_days, None);
         assert_eq!(ds[3].held_days, held(d(2020, 1, 1), d(2024, 1, 1)));
+    }
+
+    /// A cross-currency disposal (proceeds and basis in different currencies) is
+    /// dropped from the rows and counted, so the caller can warn.
+    #[test]
+    fn cross_currency_disposal_is_dropped_and_counted() {
+        let same = gain(
+            "Assets:Broker:Stock",
+            d(2024, 1, 1),
+            Some(d(2020, 1, 1)),
+            5,
+            500,
+            750,
+            false,
+        );
+        let cross = CapitalGain {
+            account: "Assets:Broker:Stock".into(),
+            currency: "AAPL".into(),
+            units: Decimal::from(3),
+            cost_basis: money(270, "EUR"),
+            proceeds: money(450, "USD"), // different currency than the basis
+            sale_date: d(2024, 1, 1),
+            acquired_date: Some(d(2020, 1, 1)),
+            short_sale: false,
+        };
+        let (ds, cross_count) = to_disposals(&[same, cross], None);
+        assert_eq!(ds.len(), 1, "only the same-currency disposal is kept");
+        assert_eq!(cross_count, 1, "the cross-currency disposal is counted");
+        assert_eq!(ds[0].gain, Decimal::from(250));
     }
 
     #[test]
@@ -663,5 +716,62 @@ mod tests {
             "held > 1 year → long-term summary"
         );
         assert!(out.contains("net realized gain"));
+    }
+
+    /// The net total sums ALL three term buckets (short + long + unknown). Distinct
+    /// non-zero gains in each bucket pin the summation so no `+` can be flipped
+    /// without changing the printed net (127 = 100 + 20 + 7).
+    #[test]
+    fn text_net_sums_all_term_buckets() {
+        let gains = vec![
+            // Long: held > 1 year, gain 100.
+            gain(
+                "Assets:Broker:Stock",
+                d(2024, 1, 1),
+                Some(d(2020, 1, 1)),
+                1,
+                400,
+                500,
+                false,
+            ),
+            // Short: short sale, gain 20.
+            gain(
+                "Assets:Broker:Stock",
+                d(2024, 1, 1),
+                Some(d(2023, 12, 1)),
+                1,
+                400,
+                420,
+                true,
+            ),
+            // Unknown: no acquisition date, gain 7.
+            gain(
+                "Assets:Broker:Stock",
+                d(2024, 1, 1),
+                None,
+                1,
+                100,
+                107,
+                false,
+            ),
+        ];
+        let ctx = DisplayContext::new();
+        let filter = CapgainsFilter {
+            account: None,
+            year: None,
+            end: None,
+        };
+        let mut buf = Vec::new();
+        report_capgains(&gains, &filter, None, &ctx, &OutputFormat::Text, &mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("Short-term") && out.contains("Long-term") && out.contains("Unknown-term")
+        );
+        // Net = 100 + 20 + 7 = 127 (any dropped/negated bucket changes this).
+        let net_line = out
+            .lines()
+            .find(|l| l.starts_with("TOTAL"))
+            .expect("net line");
+        assert!(net_line.contains("127 USD"), "net line: {net_line}");
     }
 }

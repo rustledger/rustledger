@@ -39,6 +39,12 @@ pub struct LoadOptions {
     pub validate: bool,
     /// Enable path security (prevent include traversal).
     pub path_security: bool,
+    /// Collect realized capital gains into [`Ledger::capital_gains`] during the
+    /// booking pass (default: false). The gains are computed by booking regardless;
+    /// this only controls whether they are retained. Off by default so consumers
+    /// that never read them (`check`, BQL, holdings, the FFI component) don't carry
+    /// the vector — only the capgains report opts in.
+    pub collect_capital_gains: bool,
 }
 
 impl Default for LoadOptions {
@@ -50,6 +56,7 @@ impl Default for LoadOptions {
             extra_plugins: Vec::new(),
             validate: true,
             path_security: false,
+            collect_capital_gains: false,
         }
     }
 }
@@ -65,6 +72,7 @@ impl LoadOptions {
             extra_plugins: Vec::new(),
             validate: false,
             path_security: false,
+            collect_capital_gains: false,
         }
     }
 }
@@ -77,7 +85,6 @@ pub enum ProcessError {
     Load(#[from] LoadError),
 
     /// Booking/interpolation error.
-    #[cfg(feature = "booking")]
     #[error("booking error: {message}")]
     Booking {
         /// Error message.
@@ -147,7 +154,6 @@ pub struct Ledger {
     /// ledger's own method, before `@@` normalization). Consumers — e.g. the
     /// capgains report — read these directly rather than re-booking the stream
     /// and re-deriving them, so they cannot drift from `rledger check`.
-    #[cfg(feature = "booking")]
     pub capital_gains: Vec<rustledger_booking::CapitalGain>,
 }
 
@@ -205,7 +211,6 @@ impl Ledger {
     /// repeatedly should hoist the result above their loop.
     /// `TODO(perf):` memoize internally once a benchmark shows it
     /// matters.
-    #[cfg(feature = "booking")]
     #[must_use]
     pub fn balance_view(&self) -> Vec<Directive> {
         let mut booked: Vec<Directive> = self.directives.iter().map(|s| s.value.clone()).collect();
@@ -377,7 +382,6 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // issue #1182) and the booking engine see the same value. File-
     // level `option "booking_method"` wins when explicitly set;
     // otherwise the API-level `LoadOptions.booking_method` is used.
-    #[cfg(any(feature = "validation", feature = "booking"))]
     let effective_booking_method = resolve_effective_booking_method(&raw, options);
 
     #[cfg(feature = "validation")]
@@ -418,16 +422,14 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     #[cfg(not(feature = "validation"))]
     let directives = synthed.early_validate(&raw.source_map, &mut errors);
 
-    // Capture realized capital gains produced by the canonical booking pass.
-    #[cfg(feature = "booking")]
+    // Capture realized capital gains produced by the canonical booking pass, but
+    // only when the caller asked for them (the capgains report) — no consumer pays
+    // to retain them otherwise.
     let mut capital_gains: Vec<rustledger_booking::CapitalGain> = Vec::new();
     let (booked, failed) = directives.book(
-        #[cfg(feature = "booking")]
         effective_booking_method,
-        #[cfg(feature = "booking")]
         &mut errors,
-        #[cfg(feature = "booking")]
-        &mut capital_gains,
+        options.collect_capital_gains.then_some(&mut capital_gains),
     );
 
     let regular_applied = booked.apply_regular_plugins(
@@ -453,7 +455,6 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         source_map: raw.source_map,
         errors,
         display_context: raw.display_context,
-        #[cfg(feature = "booking")]
         capital_gains,
     })
 }
@@ -464,7 +465,6 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
 /// needs it to seed per-account booking) and the booking engine see
 /// the same value. File-level `option "booking_method"` wins when
 /// explicitly set; otherwise the API-level default is used.
-#[cfg(any(feature = "validation", feature = "booking"))]
 fn resolve_effective_booking_method(
     raw: &LoadResult,
     options: &LoadOptions,
@@ -630,33 +630,21 @@ impl crate::Directives<crate::EarlyValidated> {
     /// already reported the root cause and the downstream checks
     /// would cascade misleading errors. They get re-merged at
     /// [`crate::Directives::<crate::LateValidated>::finalize`].
-    ///
-    /// When the `booking` feature is disabled this is an identity
-    /// transition: directives pass through unchanged and the failed
-    /// set is always empty. The same method exists in both feature
-    /// configurations so the caller in `process()` doesn't need a
-    /// `#[cfg]` match — the booking-specific arguments appear or
-    /// disappear via per-parameter `#[cfg]` attributes, mirroring
-    /// `early_validate` / `late_validate`.
     pub(crate) fn book(
         mut self,
-        #[cfg(feature = "booking")] effective_method: rustledger_core::BookingMethod,
-        #[cfg(feature = "booking")] errors: &mut Vec<LedgerError>,
-        #[cfg(feature = "booking")] gains: &mut Vec<rustledger_booking::CapitalGain>,
+        effective_method: rustledger_core::BookingMethod,
+        errors: &mut Vec<LedgerError>,
+        gains: Option<&mut Vec<rustledger_booking::CapitalGain>>,
     ) -> (
         crate::Directives<crate::Booked>,
         crate::phase::FailedBookings,
     ) {
-        #[cfg(feature = "booking")]
         let (booked, failed) = run_booking(
             std::mem::take(self.as_vec_mut()),
             effective_method,
             errors,
             gains,
         );
-        #[cfg(not(feature = "booking"))]
-        let (booked, failed): (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) =
-            (std::mem::take(self.as_vec_mut()), Vec::new());
         (
             crate::Directives::new_unchecked(booked),
             crate::phase::FailedBookings::new(failed),
@@ -776,7 +764,6 @@ impl crate::Directives<crate::LateValidated> {
         // forgetting to normalize. It was previously bolted onto the CLI `check`
         // path only, so the FFI surface silently regressed to exposing raw `@@`
         // totals when it moved onto this shared pipeline (#1462).
-        #[cfg(feature = "booking")]
         for spanned in &mut v {
             if let Directive::Transaction(txn) = &mut spanned.value {
                 rustledger_booking::normalize_prices(txn);
@@ -806,12 +793,11 @@ impl crate::Directives<crate::LateValidated> {
 /// cascade misleading errors). The caller is responsible for
 /// re-merging `failed` into the final `Ledger.directives` for output
 /// so the user still sees their original input.
-#[cfg(feature = "booking")]
 fn run_booking(
     mut directives: Vec<Spanned<Directive>>,
     booking_method: BookingMethod,
     errors: &mut Vec<LedgerError>,
-    gains: &mut Vec<rustledger_booking::CapitalGain>,
+    mut gains: Option<&mut Vec<rustledger_booking::CapitalGain>>,
 ) -> (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) {
     use rustledger_booking::BookingEngine;
 
@@ -832,7 +818,9 @@ fn run_booking(
             match engine.book_and_interpolate_with_gains(txn) {
                 Ok((result, txn_gains)) => {
                     engine.apply(&result.transaction);
-                    gains.extend(txn_gains);
+                    if let Some(g) = gains.as_deref_mut() {
+                        g.extend(txn_gains);
+                    }
                     *txn = result.transaction;
                 }
                 Err(e) => {
@@ -1595,7 +1583,7 @@ fn run_error_to_ledger(e: &rustledger_plugin::PluginRunError) -> LedgerError {
     }
 }
 
-#[cfg(all(test, feature = "booking", feature = "validation"))]
+#[cfg(all(test, feature = "validation"))]
 mod finalize_price_tests {
     use rustledger_core::{Directive, PriceKind};
 

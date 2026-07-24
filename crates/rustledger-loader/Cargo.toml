@@ -18,11 +18,14 @@ default = ["cache", "full"]
 # Enable rkyv-based binary caching for faster loads
 cache = ["dep:rkyv", "dep:blake3", "rustledger-parser/rkyv"]
 
-# Full processing: booking + plugins + validation (like Python's loader.load_file())
-full = ["booking", "plugins", "validation"]
+# Full processing: plugins + validation on top of the always-on booking pass
+# (like Python's loader.load_file()).
+full = ["plugins", "validation"]
 
-# Individual processing features
-booking = ["dep:rustledger-booking"]
+# Individual processing features. Booking is NOT optional: a loader that cannot
+# book cannot compute balances (reductions would not match lots), so `process()`
+# would produce semantically broken output. Pure parse/format goes through the
+# parser crate directly, not this loader.
 plugins = ["dep:rustledger-plugin"]
 validation = ["dep:rustledger-validate"]
 
@@ -44,7 +47,7 @@ rustc-hash.workspace = true
 rayon.workspace = true
 
 # Optional processing dependencies
-rustledger-booking = { workspace = true, optional = true }
+rustledger-booking.workspace = true
 rustledger-plugin = { workspace = true, optional = true, default-features = false }
 rustledger-plugin-types = { workspace = true, optional = true }
 rustledger-validate = { workspace = true, optional = true }

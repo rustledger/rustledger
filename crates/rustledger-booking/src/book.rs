@@ -73,11 +73,13 @@ pub struct CapitalGain {
     pub currency: rustledger_core::Currency,
     /// Units of this lot disposed of (always positive).
     pub units: Decimal,
-    /// The gain amount (positive) or loss (negative), in the cost currency.
-    pub amount: Amount,
-    /// Cost basis of this lot (units × per-unit cost).
+    /// Cost basis of this lot (units × per-unit cost), in the lot's cost currency.
     pub cost_basis: Amount,
-    /// Sale proceeds attributable to this lot.
+    /// Sale proceeds attributable to this lot, in the sale-price currency. Equals
+    /// the cost-basis currency for an ordinary same-currency disposal; a consumer
+    /// derives the realized gain as `proceeds − cost_basis` when the two currencies
+    /// match (they cannot be subtracted across currencies without an FX rate — that
+    /// policy is the consumer's, not the booking engine's).
     pub proceeds: Amount,
     /// The date of the disposing transaction (the sale/cover date).
     pub sale_date: rustledger_core::NaiveDate,
@@ -415,72 +417,59 @@ impl BookingEngine {
                                 price.amount.as_ref().and_then(IncompleteAmount::as_amount)
                         {
                             let total_units = units.number.abs();
-                            // Eligible lots: cost present and in the SALE-price currency.
-                            // A cross-currency lot is skipped (proceeds − cost_basis
-                            // across currencies is meaningless without FX — out of scope);
-                            // a same-currency lot in the same sale is still reported, so a
-                            // mixed sale records what it can and drops only what it can't.
-                            let eligible: Vec<_> = booking_result
-                                .matched
-                                .iter()
-                                .filter(|m| {
-                                    m.cost.as_ref().is_some_and(|c| c.currency == amt.currency)
-                                })
-                                .collect();
-                            // A `Total` (`@@`) sale value is pro-rated across the lots and
-                            // rounded to the precision the total was written in, with the
-                            // LAST lot taking the exact remainder so the per-lot values sum
-                            // EXACTLY to the stated total (no unreconciled 28-digit tail in
-                            // the machine-readable export). The remainder trick is only exact
-                            // when every matched lot is eligible; a mixed-currency sale
-                            // (rare) falls back to plain pro-rata for the dropped share.
-                            let all_eligible = eligible.len() == booking_result.matched.len();
-                            let scale = amt.number.scale();
-                            let n = eligible.len();
-                            let mut allocated = Decimal::ZERO;
-                            for (i, m) in eligible.iter().enumerate() {
-                                let cost = m.cost.as_ref().expect("eligible lots carry a cost");
+                            for m in &booking_result.matched {
+                                // A matched cost-bearing lot always carries a cost; skip a
+                                // (defensive) cost-less one since it has no basis. The
+                                // cost and sale currencies are recorded as-is — a
+                                // cross-currency disposal (sale price in a different
+                                // currency than the lot's cost) is NOT dropped here; whether
+                                // its `proceeds − cost_basis` gain is computable is the
+                                // consumer's policy, not the booking engine's.
+                                let Some(cost) = &m.cost else { continue };
                                 let lot_units = m.units.number.abs();
+                                // The lot's cost value (in the cost currency).
                                 let lot_value = lot_units * cost.number;
+                                // The reduction's sale value (in the sale-price currency).
+                                // A `Unit` (`@`) price is exact per unit. A `Total` (`@@`)
+                                // price is the EXACT pro-rata share `total × units /
+                                // total_units` (multiply before divide, so a single lot and
+                                // evenly-dividing splits are exact). It is deliberately NOT
+                                // rounded here: rounding a money split to a clean per-lot
+                                // figure is a presentation concern that needs the currency's
+                                // precision (the report's `DisplayContext`), and rounding in
+                                // the booking layer to the total's own scale both distorts
+                                // round-dollar totals and can drive the last lot negative.
+                                // The exact fractions match Python beancount.
                                 let sale_value = match price.kind {
-                                    // `@` unit price: exact per unit.
                                     rustledger_core::PriceKind::Unit => amt.number * lot_units,
-                                    // Last eligible lot of an all-eligible `@@` sale: exact
-                                    // remainder so the lots sum to the stated total.
-                                    rustledger_core::PriceKind::Total
-                                        if all_eligible && i + 1 == n =>
-                                    {
-                                        amt.number - allocated
-                                    }
                                     rustledger_core::PriceKind::Total if !total_units.is_zero() => {
-                                        (amt.number * lot_units / total_units).round_dp(scale)
+                                        amt.number * lot_units / total_units
                                     }
                                     rustledger_core::PriceKind::Total => Decimal::ZERO,
                                 };
-                                allocated += sale_value;
                                 // Closing a SHORT (matched lot has negative units) inverts
                                 // the roles: the lot's cost is the price the units were SOLD
                                 // at when the short was opened (the proceeds), and the
-                                // reduction's price is what is PAID to cover (the basis).
-                                // `gain = proceeds − cost_basis` holds for both directions.
+                                // reduction's price is what is PAID to cover (the basis) —
+                                // and the currencies follow suit.
                                 let short_sale = m.units.number.is_sign_negative();
-                                let (proceeds_num, cost_basis_num) = if short_sale {
-                                    (lot_value, sale_value)
+                                let (proceeds, cost_basis) = if short_sale {
+                                    (
+                                        Amount::new(lot_value, &cost.currency),
+                                        Amount::new(sale_value, &amt.currency),
+                                    )
                                 } else {
-                                    (sale_value, lot_value)
+                                    (
+                                        Amount::new(sale_value, &amt.currency),
+                                        Amount::new(lot_value, &cost.currency),
+                                    )
                                 };
                                 gains.push(CapitalGain {
                                     account: posting.account.clone(),
                                     currency: units.currency.clone(),
                                     units: lot_units,
-                                    // Same currency by the eligibility filter, so proceeds,
-                                    // basis, and gain are all in `cost.currency`.
-                                    amount: Amount::new(
-                                        proceeds_num - cost_basis_num,
-                                        &cost.currency,
-                                    ),
-                                    cost_basis: Amount::new(cost_basis_num, &cost.currency),
-                                    proceeds: Amount::new(proceeds_num, &cost.currency),
+                                    cost_basis,
+                                    proceeds,
                                     sale_date: txn.date,
                                     acquired_date: cost.date,
                                     short_sale,
@@ -679,46 +668,43 @@ impl BookingEngine {
 
     /// Book and interpolate a transaction.
     ///
-    /// This fills in empty cost specs, then interpolates any missing amounts.
+    /// This fills in empty cost specs, then interpolates any missing amounts. Thin
+    /// wrapper over [`Self::book_and_interpolate_with_gains`] that discards the
+    /// realized gains — a single implementation so the two cannot drift.
     pub fn book_and_interpolate(
         &self,
         txn: &Transaction,
     ) -> Result<InterpolationResult, BookingError> {
-        // Fast path: with no cost specs, `book` is an identity that only clones
-        // `txn` verbatim (profiling flagged that clone as ~6 MB / 10k txns — the
-        // common case). This method consumes only `booked.transaction` — the
-        // `gains` / `booked_indices` are unused here — and in the fast path that
-        // transaction *equals* `txn`, so `interpolate(&book(txn).transaction)`
-        // is provably identical to `interpolate(txn)`. Interpolate the original
-        // directly and skip the clone.
-        if !txn.postings.iter().any(|p| p.cost.is_some()) {
-            return Ok(interpolate(txn)?);
-        }
-
-        // First book (fill in costs)
-        let booked = self.book(txn)?;
-
-        // Then interpolate (fill in missing amounts)
-        let result = interpolate(&booked.transaction)?;
-
-        Ok(result)
+        Ok(self.book_and_interpolate_with_gains(txn)?.0)
     }
 
-    /// Like [`Self::book_and_interpolate`], but also returns the per-lot
-    /// [`CapitalGain`]s `book` computed for this transaction.
+    /// Book and interpolate a transaction, also returning the per-lot
+    /// [`CapitalGain`]s `book` computed for it.
     ///
     /// The loader's booking pass uses this so realized gains are captured **once**,
     /// during canonical booking (in booking order, with the ledger's own method,
     /// before `@@` normalization), and exposed on the `Ledger` — rather than each
-    /// consumer re-booking the stream and re-deriving them. The fast path (no cost
-    /// specs) yields no gains, exactly as `book_and_interpolate` books nothing.
+    /// consumer re-booking the stream and re-deriving them.
+    ///
+    /// # Errors
+    /// Returns a [`BookingError`] if the transaction cannot be booked (e.g. an
+    /// ambiguous or unmatched cost reduction) or interpolated (unresolved elided
+    /// amounts).
     pub fn book_and_interpolate_with_gains(
         &self,
         txn: &Transaction,
     ) -> Result<(InterpolationResult, Vec<CapitalGain>), BookingError> {
+        // Fast path: with no cost specs, `book` is an identity that only clones
+        // `txn` verbatim (profiling flagged that clone as ~6 MB / 10k txns — the
+        // common case), and it realizes no gains. In the fast path `book(txn)`'s
+        // transaction *equals* `txn`, so `interpolate(&book(txn).transaction)` is
+        // provably identical to `interpolate(txn)`. Interpolate the original
+        // directly, skip the clone, and return no gains (an empty `Vec` does not
+        // allocate).
         if !txn.postings.iter().any(|p| p.cost.is_some()) {
             return Ok((interpolate(txn)?, Vec::new()));
         }
+        // First book (fill in costs + compute gains), then interpolate amounts.
         let booked = self.book(txn)?;
         let result = interpolate(&booked.transaction)?;
         Ok((result, booked.gains))
@@ -976,7 +962,7 @@ mod tests {
         );
         let gain = &booked.gains[0];
         // Gain = 5 * (175 - 150) = 125
-        assert_eq!(gain.amount.number, dec!(125));
+        assert_eq!((gain.proceeds.number - gain.cost_basis.number), dec!(125));
     }
 
     #[test]
@@ -1072,7 +1058,10 @@ mod tests {
         let gain = &booked_sell.gains[0];
         // The gain should be close to 36.73 (sale proceeds - cost basis)
         // Sale: 1.763 * 191 = 336.733, Cost: 300.00, Gain ≈ 36.73
-        eprintln!("Capital gain: {:?}", gain.amount);
+        eprintln!(
+            "Capital gain: {:?}",
+            gain.proceeds.number - gain.cost_basis.number
+        );
     }
 
     #[test]
@@ -1169,7 +1158,7 @@ mod tests {
         // Gain = 875 - (5 * 150) = 875 - 750 = 125
         assert_eq!(booked.gains.len(), 1, "Expected 1 gain");
         let gain = &booked.gains[0];
-        assert_eq!(gain.amount.number, dec!(125));
+        assert_eq!((gain.proceeds.number - gain.cost_basis.number), dec!(125));
     }
 
     #[test]
@@ -1376,7 +1365,11 @@ mod tests {
         // gains; this is the shape the capital-gains report consumes.)
         assert_eq!(booked.gains.len(), 1, "the disposal is recorded");
         let g = &booked.gains[0];
-        assert_eq!(g.amount.number, dec!(0), "zero gain");
+        assert_eq!(
+            (g.proceeds.number - g.cost_basis.number),
+            dec!(0),
+            "zero gain"
+        );
         assert_eq!(g.units, dec!(5));
         assert_eq!(g.cost_basis.number, dec!(750.00));
         assert_eq!(g.proceeds.number, dec!(750.00));
@@ -1422,13 +1415,13 @@ mod tests {
         assert_eq!(g[0].acquired_date, Some(date(2020, 1, 1)));
         assert_eq!(g[0].cost_basis.number, dec!(500));
         assert_eq!(g[0].proceeds.number, dec!(750));
-        assert_eq!(g[0].amount.number, dec!(250));
+        assert_eq!((g[0].proceeds.number - g[0].cost_basis.number), dec!(250));
         // Lot 2: 3 units, acquired 2020-06-01, basis 360, proceeds 450, gain 90.
         assert_eq!(g[1].units, dec!(3));
         assert_eq!(g[1].acquired_date, Some(date(2020, 6, 1)));
         assert_eq!(g[1].cost_basis.number, dec!(360));
         assert_eq!(g[1].proceeds.number, dec!(450));
-        assert_eq!(g[1].amount.number, dec!(90));
+        assert_eq!((g[1].proceeds.number - g[1].cost_basis.number), dec!(90));
     }
 
     /// A single-lot `@@` (total) sale records the stated total as proceeds
@@ -1465,7 +1458,7 @@ mod tests {
         // Exact — NOT 99.9999…28dp — because the last (only) lot takes the remainder.
         assert_eq!(g[0].proceeds.number, dec!(100));
         assert_eq!(g[0].cost_basis.number, dec!(90));
-        assert_eq!(g[0].amount.number, dec!(10));
+        assert_eq!((g[0].proceeds.number - g[0].cost_basis.number), dec!(10));
     }
 
     /// A multi-lot `@@` (total) sale pro-rates the stated total across lots so the
@@ -1508,11 +1501,13 @@ mod tests {
         );
     }
 
-    /// A multi-lot `@@` (total) sale whose total does NOT divide evenly across the
-    /// matched lots still has per-lot proceeds that sum EXACTLY to the stated total
-    /// (the last lot takes the remainder), with no 28-digit division tail.
+    /// A multi-lot `@@` (total) sale whose total does NOT divide evenly gives each
+    /// lot its EXACT pro-rata share (`total × units / total_units`) — never rounded
+    /// or forced (which distorts round-dollar totals and can go negative). The
+    /// shares are exact fractions that round to the expected cents and sum to the
+    /// stated total.
     #[test]
-    fn test_book_total_price_uneven_split_reconciles() {
+    fn test_book_total_price_uneven_split_is_exact_prorata() {
         let mut engine = BookingEngine::new(); // FIFO
         let lot = |d, n, cost| {
             Transaction::new(d, "buy")
@@ -1530,35 +1525,78 @@ mod tests {
         };
         engine.apply(&lot(date(2020, 1, 1), dec!(1), dec!(10)));
         engine.apply(&lot(date(2020, 6, 1), dec!(2), dec!(10)));
-        // Sell 3 for a TOTAL of 100 written to the cent: FIFO 1 + 2. 100/3 does not
-        // terminate, so pro-rata would tail; the report must still sum to 100.00.
+        // Sell 3 for a round-dollar TOTAL of 100 (scale 0): FIFO 1 + 2. 100/3 does
+        // not terminate — the shares must NOT be rounded to whole dollars.
         let sell = Transaction::new(date(2021, 1, 1), "sell")
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-3), "AAPL"))
                     .with_cost(CostSpec::empty())
-                    .with_price(PriceAnnotation::total(Amount::new(dec!(100.00), "USD"))),
+                    .with_price(PriceAnnotation::total(Amount::new(dec!(100), "USD"))),
             )
-            .with_synthesized_posting(Posting::new(
-                "Assets:Cash",
-                Amount::new(dec!(100.00), "USD"),
-            ));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")));
         let g = engine.book(&sell).unwrap().gains;
         assert_eq!(g.len(), 2);
-        // Rounded to the total's 2dp; no 28-digit tail.
-        assert_eq!(g[0].proceeds.number, dec!(33.33));
-        assert_eq!(g[1].proceeds.number, dec!(66.67)); // remainder: 100.00 - 33.33
+        // Exact pro-rata: 100 × 1/3 and 100 × 2/3 (NOT 33 and 67 whole-dollar).
+        assert_eq!(g[0].proceeds.number, dec!(100) * dec!(1) / dec!(3));
+        assert_eq!(g[1].proceeds.number, dec!(100) * dec!(2) / dec!(3));
+        // Positive (never a negative last-lot remainder), rounding to the true cents.
+        assert!(g[0].proceeds.number > dec!(0) && g[1].proceeds.number > dec!(0));
+        assert_eq!(g[0].proceeds.number.round_dp(2), dec!(33.33));
+        assert_eq!(g[1].proceeds.number.round_dp(2), dec!(66.67));
         assert_eq!(
-            g[0].proceeds.number + g[1].proceeds.number,
+            (g[0].proceeds.number + g[1].proceeds.number).round_dp(2),
             dec!(100.00),
-            "per-lot proceeds sum EXACTLY to the stated total"
+            "shares sum to the stated total at cent precision"
         );
     }
 
-    /// A disposal whose sale-price currency differs from the lot's cost currency
-    /// is cross-currency (out of scope): no `CapitalGain` is recorded, because
-    /// `proceeds − cost_basis` across currencies is meaningless without FX.
+    /// A coarse-scale `@@` total split across MANY lots never produces a negative
+    /// per-lot proceeds (the old round-to-scale-plus-remainder scheme could:
+    /// `@@ 2 USD` over four lots rounded the first three UP past the total, driving
+    /// the last lot negative). Exact pro-rata keeps every lot positive.
     #[test]
-    fn test_book_cross_currency_disposal_records_nothing() {
+    fn test_book_total_price_coarse_scale_never_negative() {
+        let mut engine = BookingEngine::new(); // FIFO
+        let lot = |d, n: Decimal| {
+            Transaction::new(d, "buy")
+                .with_synthesized_posting(
+                    Posting::new("Assets:Stock", Amount::new(n, "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(1) })
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(-n, "USD")))
+        };
+        engine.apply(&lot(date(2020, 1, 1), dec!(3)));
+        engine.apply(&lot(date(2020, 2, 1), dec!(3)));
+        engine.apply(&lot(date(2020, 3, 1), dec!(3)));
+        engine.apply(&lot(date(2020, 4, 1), dec!(1)));
+        // Sell all 10 for a round-dollar total of 2 (scale 0), FIFO 3+3+3+1.
+        let sell = Transaction::new(date(2021, 1, 1), "sell")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-10), "AAPL"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(PriceAnnotation::total(Amount::new(dec!(2), "USD"))),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(2), "USD")));
+        let g = engine.book(&sell).unwrap().gains;
+        assert_eq!(g.len(), 4);
+        assert!(
+            g.iter().all(|x| x.proceeds.number >= dec!(0)),
+            "no lot has negative proceeds: {:?}",
+            g.iter().map(|x| x.proceeds.number).collect::<Vec<_>>()
+        );
+        let total: Decimal = g.iter().map(|x| x.proceeds.number).sum();
+        assert_eq!(total.round_dp(2), dec!(2.00), "shares sum to the total");
+    }
+
+    /// A disposal whose sale-price currency differs from the lot's cost currency is
+    /// RECORDED with proceeds in the sale currency and basis in the cost currency
+    /// (the booking engine does not decide whether a cross-currency gain is
+    /// computable — that policy is the consumer's; the report filters such rows).
+    #[test]
+    fn test_book_cross_currency_disposal_records_both_currencies() {
         let mut engine = BookingEngine::new();
         // Buy 3 AAPL at cost 30 USD.
         engine.apply(
@@ -1575,7 +1613,7 @@ mod tests {
                     Amount::new(dec!(-90), "USD"),
                 )),
         );
-        // Sell priced in EUR — a currency the lot's USD basis cannot be compared to.
+        // Sell priced in EUR.
         let sell = Transaction::new(date(2024, 6, 1), "sell")
             .with_synthesized_posting(
                 Posting::new("Assets:Stock", Amount::new(dec!(-3), "AAPL"))
@@ -1584,17 +1622,20 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(150), "EUR")));
         let g = engine.book(&sell).unwrap().gains;
-        assert!(
-            g.is_empty(),
-            "cross-currency disposal records no gain: {g:?}"
-        );
+        assert_eq!(g.len(), 1);
+        // Proceeds in the sale currency (EUR), basis in the cost currency (USD).
+        assert_eq!(g[0].proceeds.number, dec!(150));
+        assert_eq!(g[0].proceeds.currency.as_ref(), "EUR");
+        assert_eq!(g[0].cost_basis.number, dec!(90));
+        assert_eq!(g[0].cost_basis.currency.as_ref(), "USD");
     }
 
     /// A sale that FIFO-matches lots held in DIFFERENT cost currencies records the
-    /// same-currency lot(s) and skips only the cross-currency one — it does NOT drop
-    /// the whole sale (an all-or-nothing guard would silently omit a real gain).
+    /// same-currency lot AND the cross-currency lot — both are recorded, each with
+    /// its own proceeds/basis currencies (the report, not the booking engine,
+    /// decides a cross-currency row's gain is not computable).
     #[test]
-    fn test_book_mixed_currency_lots_records_only_matching() {
+    fn test_book_mixed_currency_lots_records_both() {
         let mut engine = BookingEngine::new(); // FIFO
         // Lot 1: 5 AAPL at 100 USD (2020). Lot 2: 5 AAPL at 90 EUR (2021).
         engine.apply(
@@ -1634,18 +1675,19 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1200), "USD")));
         let g = engine.book(&sell).unwrap().gains;
-        // Only the USD lot is reported (5u, basis 500, proceeds 750, gain 250); the
-        // EUR-basis lot is skipped, not the whole sale.
-        assert_eq!(
-            g.len(),
-            1,
-            "same-currency lot recorded, EUR lot skipped: {g:?}"
-        );
+        assert_eq!(g.len(), 2, "both lots recorded: {g:?}");
+        // USD lot: same-currency, computable gain 250.
         assert_eq!(g[0].units, dec!(5));
         assert_eq!(g[0].cost_basis.number, dec!(500));
         assert_eq!(g[0].cost_basis.currency.as_ref(), "USD");
         assert_eq!(g[0].proceeds.number, dec!(750));
-        assert_eq!(g[0].amount.number, dec!(250));
+        assert_eq!(g[0].proceeds.currency.as_ref(), "USD");
+        // EUR lot: cross-currency — proceeds in USD (the sale price), basis in EUR.
+        assert_eq!(g[1].units, dec!(3));
+        assert_eq!(g[1].proceeds.number, dec!(450));
+        assert_eq!(g[1].proceeds.currency.as_ref(), "USD");
+        assert_eq!(g[1].cost_basis.number, dec!(270));
+        assert_eq!(g[1].cost_basis.currency.as_ref(), "EUR");
     }
 
     /// Closing a SHORT position: the gain sign and proceeds/basis are the mirror of
@@ -1687,7 +1729,7 @@ mod tests {
         );
         assert_eq!(g[0].cost_basis.number, dec!(400), "cover cost is the basis");
         assert_eq!(
-            g[0].amount.number,
+            (g[0].proceeds.number - g[0].cost_basis.number),
             dec!(100),
             "gain = proceeds - basis = +100"
         );

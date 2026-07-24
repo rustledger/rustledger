@@ -350,10 +350,14 @@ TOTAL       net realized gain          660 USD
   with `rledger check`. A transaction the ledger cannot book is reported as a normal
   load error on stderr, so an incomplete report is never silently mistaken for a
   complete one.
-- **Total prices reconcile.** For a multi-lot `@@` (total) sale whose total does not
-  divide evenly, the per-lot proceeds are allocated to the precision the total was
-  written in, with the last lot taking the remainder, so they sum **exactly** to the
-  stated total (no rounding drift in the CSV/JSON export).
+- **Total prices split exactly.** For a multi-lot `@@` (total) sale, each lot gets
+  its exact pro-rata share (`total × units ÷ total_units`), unrounded — so the split
+  is faithful (matching Python beancount) and never distorts or goes negative.
+  Rounding to a display precision is left to the presentation layer.
+- **Cross-currency disposals are flagged, not dropped silently.** If a sale's price
+  is in a different currency than the lot's cost basis, the realized gain would need
+  an FX rate this tool does not apply, so that disposal is omitted from the rows and
+  a `warning:` with the count is printed to stderr.
 
 Not a tax filing: wash-sale adjustments, separating currency gains from asset
 gains, lots seeded by `pad` (no well-defined cost basis), and jurisdiction rules

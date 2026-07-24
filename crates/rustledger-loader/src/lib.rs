@@ -41,7 +41,6 @@ pub mod cache;
 mod dedup;
 mod options;
 mod phase;
-#[cfg(any(feature = "booking", feature = "plugins", feature = "validation"))]
 mod process;
 mod source_map;
 mod vfs;
@@ -80,7 +79,6 @@ pub use process::{document_source_dirs, resolve_document_dirs, validation_option
 pub fn is_glob_pattern(path: &str) -> bool {
     path.contains(['*', '?', '['])
 }
-#[cfg(any(feature = "booking", feature = "plugins", feature = "validation"))]
 pub use process::{
     ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger, LedgerError, LoadOptions, ProcessError,
     load, load_raw, load_with_fs, process,
@@ -737,16 +735,6 @@ fn build_display_context(directives: &[Spanned<Directive>], options: &Options) -
     );
     ctx.set_render_commas(options.render_commas);
     ctx
-}
-
-/// Load a beancount file without processing.
-///
-/// This is a convenience function that creates a loader and loads a single file.
-/// For fully processed results (booking, plugins, validation), use the
-/// [`load`] function with [`LoadOptions`] instead.
-#[cfg(not(any(feature = "booking", feature = "plugins", feature = "validation")))]
-pub fn load(path: &Path) -> Result<LoadResult, LoadError> {
-    Loader::new().load(path)
 }
 
 #[cfg(test)]

@@ -289,13 +289,9 @@ struct LoadedReport {
     /// Source-faithful directive stream (pads remain `Pad`). Used by
     /// reports that count/list source directive kinds.
     directives: Vec<rustledger_core::Directive>,
-    /// The PRE-booking parsed stream, populated only for the capgains report.
-    /// Capgains must run its own booking pass over un-booked directives to
-    /// realize per-lot proceeds exactly: the loader's stored stream has already
-    /// expanded multi-lot reductions and normalized `@@` totals to per-unit
-    /// prices (dividing by each expanded posting's units), which is lossy for
-    /// total-price sale proceeds. Empty for every other report.
-    parsed_directives: Vec<rustledger_core::Directive>,
+    /// Realized capital gains captured by the loader's canonical booking pass,
+    /// consumed by the capgains report. Empty for every other report.
+    capital_gains: Vec<rustledger_booking::CapitalGain>,
     /// Config-aware account-type classifier (honors `name_*` renames).
     /// Reports must route/sign accounts through this, never by hardcoded
     /// root-prefix matching — renamed ledgers otherwise misroute (L5:
@@ -314,9 +310,6 @@ struct LoadedReport {
     /// The returns report uses the first as the default reporting currency
     /// (overridable with `--currency`); other reports ignore it.
     operating_currency: Vec<String>,
-    /// The booking method the loader used, so the capgains report re-books the
-    /// parsed stream with the SAME lot-matching (not a defaulted method).
-    booking_method: rustledger_core::BookingMethod,
 }
 
 /// Load and fully process the file (parse → book → plugins), producing the
@@ -347,31 +340,6 @@ fn load(file: &PathBuf, report: &Report, verbose: bool, no_cache: bool) -> Resul
     // stream; `process` books it exactly as the uncached `load` did.
     // Disable with `--no-cache` or `BEANCOUNT_DISABLE_LOAD_CACHE`.
     let (raw, _from_cache) = crate::cmd::loadcache::load_result_cached(file, no_cache, verbose)?;
-    // The capgains report re-books the PRE-booking parsed stream itself (see
-    // `LoadedReport::parsed_directives`), so snapshot it before `process` consumes
-    // `raw`. Only clone for that report — every other report ignores the field.
-    //
-    // Canonical-sort by `(date, priority, file_id, span.start)` — exactly the
-    // loader's pre-booking sort — so the report's stable booking-order pass matches
-    // `rledger check`'s lot attribution even when the raw concatenation order differs
-    // from canonical order (e.g. a ledger split across `include`d files).
-    let parsed_directives: Vec<rustledger_core::Directive> =
-        if matches!(report, Report::Capgains { .. }) {
-            let mut keyed: Vec<_> = raw
-                .directives
-                .iter()
-                .map(|s| {
-                    (
-                        (s.value.date(), s.value.priority(), s.file_id, s.span.start),
-                        s.value.clone(),
-                    )
-                })
-                .collect();
-            keyed.sort_by_key(|(k, _)| *k);
-            keyed.into_iter().map(|(_, v)| v).collect()
-        } else {
-            Vec::new()
-        };
     let ledger = rustledger_loader::process(raw, &options)
         .with_context(|| format!("failed to load {}", file.display()))?;
 
@@ -426,17 +394,16 @@ fn load(file: &PathBuf, report: &Report, verbose: bool, no_cache: bool) -> Resul
     let account_types = ledger.options.to_account_types();
     let display_context = ledger.display_context.clone();
     let operating_currency = ledger.options.operating_currency.clone();
-    let booking_method = ledger.effective_booking_method;
+    let capital_gains = ledger.capital_gains;
     let directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
 
     Ok(LoadedReport {
         directives,
-        parsed_directives,
+        capital_gains,
         account_types,
         balance_view,
         display_context,
         operating_currency,
-        booking_method,
     })
 }
 
@@ -587,10 +554,9 @@ fn render<W: io::Write>(
                 end: end_date,
             };
             capgains::report_capgains(
-                &loaded.parsed_directives,
+                &loaded.capital_gains,
                 &filter,
                 *long_term_days,
-                loaded.booking_method,
                 &loaded.display_context,
                 format,
                 writer,

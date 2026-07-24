@@ -5,20 +5,18 @@
 //! with proceeds, cost basis, and realized gain/loss, plus per-term and
 //! per-currency summaries.
 //!
-//! It consumes [`rustledger_booking::CapitalGain`] — the canonical, per-lot
-//! realized gain the booking engine computes when it matches a reduction against
-//! its lots — so it cannot drift from the engine's lot-matching (a sale crossing
-//! several lots is already one `CapitalGain` per lot, each with its own
-//! acquisition date).
-//!
-//! It runs its own [`BookingEngine`] over the **pre-booking parsed stream**, in
-//! booking order (`book` then `apply` per transaction, exactly like the loader's
-//! own pass). The parsed stream is used deliberately rather than the loader's
-//! stored directives: the stored stream has already expanded multi-lot reductions
-//! and normalized `@@` total prices to per-unit (dividing the total by each
-//! expanded posting's units), which is lossy for total-price sale proceeds —
-//! re-booking it would over-count. Booking the parsed stream instead lets `book`
-//! observe each sale's original `@@`/`@` price and record exact proceeds.
+//! It consumes [`rustledger_booking::CapitalGain`]s straight from
+//! [`Ledger::capital_gains`](rustledger_loader::Ledger) — the realized gains the
+//! loader's own booking pass computes, once, in booking order, with the ledger's
+//! own method, and *before* `@@` normalization (so total-price proceeds are exact).
+//! The report does NOT re-book the stream: re-deriving the loader's lot-matching is
+//! exactly the drift the canonical-function discipline warns against, and every
+//! way of doing it (a defaulted booking method, a hand-rolled canonical sort, the
+//! pre- vs post-normalization stream, a re-implemented interpolate/apply loop) was
+//! a bug this report worked through before the gains were exposed at the source.
+//! A transaction the loader cannot book is recorded in `Ledger::errors` (printed by
+//! the shared load path), so an incomplete report is surfaced through the normal
+//! error channel.
 //!
 //! **Short positions** are reported when covered: the lot's cost is the price the
 //! units were sold at when the short was opened, so proceeds are the short-open
@@ -36,8 +34,8 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_booking::BookingEngine;
-use rustledger_core::{BookingMethod, Directive, DisplayContext, NaiveDate};
+use rustledger_booking::CapitalGain;
+use rustledger_core::{DisplayContext, NaiveDate};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -88,77 +86,22 @@ struct Disposal {
     currency: String,
 }
 
-/// Book `directives` (the pre-booking parsed stream) in booking order and collect
-/// one [`Disposal`] per matched lot.
+/// Transform the loader's canonical [`CapitalGain`]s into report [`Disposal`]s,
+/// classifying each lot's holding period.
 ///
-/// `long_term_days` is the holding-period threshold: `Some(n)` classifies a lot
-/// held strictly more than `n` days as long-term; `None` uses the leap-year-safe
-/// calendar rule (long-term when the sale is more than one calendar year after
-/// acquisition).
-///
-/// Each transaction is `book`ed (which computes the per-lot gains against the
-/// current inventory) then `apply`ed (which accumulates the lots) — the same
-/// two-step the loader (`run_booking`) and `rustledger_booking::book_transactions`
-/// use. This deliberately re-derives that loop rather than calling the canonical
-/// `book`/`book_transactions` free functions, because they return only the booked
-/// directives and DROP the per-lot [`rustledger_booking::CapitalGain`]s this report
-/// exists to surface — the gains are reachable only via `BookingEngine::book`
-/// directly. To stay faithful to `rledger check`, this loop mirrors the loader
-/// exactly: the ledger's own booking method (below), canonical + booking-order
-/// sorting (the caller canonical-sorts; this sorts by `booking_sort_key`), and
-/// `interpolate`-then-`apply`. The end-to-end tests exercise the real binary path.
-///
-/// Transactions are visited in booking order (`booking_sort_key`) so a same-date
-/// sell never books before the buy that seeds its lot. A transaction that fails to
-/// book or interpolate (an un-booked ledger, or a pad-/plugin-seeded lot the
-/// pre-plugin stream can't resolve) is skipped rather than aborting the whole
-/// report; the returned count lets the caller warn that the report may be
-/// incomplete. Skipping — rather than applying a partially-booked transaction —
-/// matches the loader (`run_booking` moves such transactions to `failed` and does
-/// NOT apply them), so the report never realizes a lot `rledger check` rejects.
-///
-/// Returns the disposals plus the number of transactions skipped.
-fn collect_disposals(
-    directives: &[Directive],
-    method: BookingMethod,
-    long_term_days: Option<i64>,
-) -> (Vec<Disposal>, usize) {
-    // Use the ledger's OWN booking method (not `BookingEngine::new`'s FIFO
-    // default) so the report's lot-matching matches `rledger check`: a ledger
-    // booked Strict where a bare-`{}` sale is ambiguous must fail to book here
-    // too, rather than the report silently FIFO-matching a gain the ledger rejects.
-    let mut engine = BookingEngine::with_method(method);
-    engine.register_account_methods(directives.iter());
-
-    // Visit in booking order — sells after the same-date buys that seed their
-    // lots — while leaving `directives` itself untouched (a stable index sort,
-    // mirroring `rustledger_booking::book`).
-    let mut order: Vec<usize> = (0..directives.len()).collect();
-    order.sort_by_key(|&i| rustledger_core::booking_sort_key(&directives[i]));
-
-    let mut out = Vec::new();
-    let mut skipped = 0usize;
-    for &i in &order {
-        let Directive::Transaction(txn) = &directives[i] else {
-            continue;
-        };
-        // `book` computes the per-lot gains against the CURRENT inventory but does
-        // NOT mutate it. Interpolate BEFORE recording anything: a transaction that
-        // fails to book OR interpolate is dropped by the loader (moved to `failed`,
-        // never applied), so drop it here too — recording its gains or applying its
-        // partially-resolved postings would diverge from `rledger check`.
-        let Ok(booked) = engine.book(txn) else {
-            skipped += 1;
-            continue;
-        };
-        let Ok(interpolated) = rustledger_booking::interpolate(&booked.transaction) else {
-            skipped += 1;
-            continue;
-        };
-        for g in &booked.gains {
+/// The gains are computed ONCE by the loader's own booking pass (in booking order,
+/// with the ledger's own method, before `@@` normalization) and exposed on the
+/// `Ledger` — this report consumes them directly rather than re-booking the stream,
+/// so it cannot drift from `rledger check`. All that remains here is holding-period
+/// classification: `long_term_days = Some(n)` means held strictly more than `n`
+/// days; `None` uses the leap-year-safe calendar rule.
+fn to_disposals(gains: &[CapitalGain], long_term_days: Option<i64>) -> Vec<Disposal> {
+    gains
+        .iter()
+        .map(|g| {
             let held_days = g
                 .acquired_date
-                .and_then(|a| a.until((jiff::Unit::Day, txn.date)).ok())
+                .and_then(|a| a.until((jiff::Unit::Day, g.sale_date)).ok())
                 .map(|s| i64::from(s.get_days()))
                 // A lot "acquired" after the sale (a future-dated cost) yields a
                 // negative span — nonsensical as a holding period, so drop it.
@@ -171,12 +114,14 @@ fn collect_disposals(
             } else {
                 match g.acquired_date {
                     None => Term::Unknown,
-                    Some(a) if is_long_term(a, txn.date, held_days, long_term_days) => Term::Long,
+                    Some(a) if is_long_term(a, g.sale_date, held_days, long_term_days) => {
+                        Term::Long
+                    }
                     Some(_) => Term::Short,
                 }
             };
-            out.push(Disposal {
-                sold: txn.date,
+            Disposal {
+                sold: g.sale_date,
                 account: g.account.to_string(),
                 commodity: g.currency.to_string(),
                 units: g.units,
@@ -187,12 +132,9 @@ fn collect_disposals(
                 cost_basis: g.cost_basis.number,
                 gain: g.amount.number,
                 currency: g.amount.currency.to_string(),
-            });
-        }
-        // Accumulate the interpolated transaction, exactly as the loader does.
-        engine.apply(&interpolated.transaction);
-    }
-    (out, skipped)
+            }
+        })
+        .collect()
 }
 
 /// Classify a holding period as long-term.
@@ -230,36 +172,21 @@ pub(super) struct CapgainsFilter<'a> {
 
 /// Generate the capital-gains report.
 ///
-/// `directives` must be the PRE-booking parsed stream (the dispatcher passes
-/// `loaded.parsed_directives`); [`collect_disposals`] books it itself.
+/// `gains` are the loader's canonical realized gains (`Ledger::capital_gains`).
 /// `long_term_days` is the holding-period threshold: `None` uses the calendar
 /// "> 1 year" rule (leap-year correct), `Some(n)` a fixed day count.
 ///
 /// # Errors
 /// Propagates writer I/O errors.
 pub(super) fn report_capgains<W: Write>(
-    directives: &[Directive],
+    gains: &[CapitalGain],
     filter: &CapgainsFilter,
     long_term_days: Option<i64>,
-    method: BookingMethod,
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
-    let (disposals, skipped) = collect_disposals(directives, method, long_term_days);
-    // The report books the pre-plugin parsed stream itself, so a transaction that
-    // fails to book/interpolate (a pad- or plugin-seeded lot, or an unbookable
-    // entry) is dropped. Surface that on stderr so an incomplete report is never
-    // silently mistaken for a complete one.
-    if skipped > 0 {
-        eprintln!(
-            "warning: {skipped} transaction(s) could not be booked for the \
-             capital-gains report and were skipped (e.g. pad- or plugin-seeded \
-             lots, or an unbalanced entry); the report may be incomplete — run \
-             `rledger check`"
-        );
-    }
-    let mut rows: Vec<Disposal> = disposals
+    let mut rows: Vec<Disposal> = to_disposals(gains, long_term_days)
         .into_iter()
         .filter(|d| {
             filter
@@ -491,9 +418,7 @@ fn truncate(s: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustledger_core::{
-        Amount, CostNumber, CostSpec, Posting, PriceAnnotation, Transaction, naive_date,
-    };
+    use rustledger_core::{Amount, naive_date};
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         naive_date(y, m, day).unwrap()
@@ -503,103 +428,29 @@ mod tests {
         Amount::new(Decimal::from(n), ccy)
     }
 
-    /// `Assets:Broker:Stock` bought at `cost`/unit; cash leg keeps it balanced.
-    fn buy(date: NaiveDate, units: i64, cost: i64) -> Directive {
-        let spec = CostSpec::empty()
-            .with_number(CostNumber::PerUnit {
-                value: Decimal::from(cost),
-            })
-            .with_currency("USD");
-        Directive::Transaction(
-            Transaction::new(date, "buy")
-                .with_synthesized_posting(
-                    Posting::new("Assets:Broker:Stock", money(units, "AAPL")).with_cost(spec),
-                )
-                .with_synthesized_posting(Posting::new("Assets:Bank", money(-units * cost, "USD"))),
-        )
-    }
-
-    /// Sell `units` (positive) with an empty cost that lot-matches, at `price`
-    /// (per-unit `@`). The cash leg is left to balance conceptually — booking a
-    /// reduction does not require it for gain computation.
-    fn sell_at(date: NaiveDate, units: i64, price: PriceAnnotation) -> Directive {
-        Directive::Transaction(
-            Transaction::new(date, "sell")
-                .with_synthesized_posting(
-                    Posting::new("Assets:Broker:Stock", money(-units, "AAPL"))
-                        .with_cost(CostSpec::empty())
-                        .with_price(price),
-                )
-                .with_synthesized_posting(Posting::new("Assets:Bank", money(0, "USD"))),
-        )
-    }
-
-    /// The headline regression: a buy followed by a sell yields a non-empty
-    /// disposal list with the correct gain. (Before the book/apply fix the engine
-    /// inventory never accumulated and this returned nothing.)
-    #[test]
-    fn disposals_are_collected_not_empty() {
-        let dirs = vec![
-            buy(d(2020, 1, 1), 10, 100),
-            sell_at(d(2020, 6, 1), 4, PriceAnnotation::unit(money(150, "USD"))),
-        ];
-        let (disposals, _skipped) = collect_disposals(&dirs, BookingMethod::Fifo, None);
-        assert_eq!(disposals.len(), 1, "the sale must produce a disposal");
-        let g = &disposals[0];
-        assert_eq!(g.units, Decimal::from(4));
-        assert_eq!(g.cost_basis, Decimal::from(400));
-        assert_eq!(g.proceeds, Decimal::from(600));
-        assert_eq!(g.gain, Decimal::from(200));
-        assert_eq!(g.acquired, Some(d(2020, 1, 1)));
-    }
-
-    /// A sale crossing several lots yields one disposal per lot, each with its own
-    /// acquisition date and basis.
-    #[test]
-    fn multi_lot_sale_is_one_disposal_per_lot() {
-        let dirs = vec![
-            buy(d(2020, 1, 1), 5, 100),
-            buy(d(2020, 6, 1), 5, 120),
-            sell_at(d(2021, 3, 1), 8, PriceAnnotation::unit(money(150, "USD"))),
-        ];
-        let (disposals, _skipped) = collect_disposals(&dirs, BookingMethod::Fifo, None);
-        assert_eq!(disposals.len(), 2);
-        assert_eq!(disposals[0].acquired, Some(d(2020, 1, 1)));
-        assert_eq!(disposals[0].units, Decimal::from(5));
-        assert_eq!(disposals[1].acquired, Some(d(2020, 6, 1)));
-        assert_eq!(disposals[1].units, Decimal::from(3));
-    }
-
-    /// A single-lot `@@` (total) sale records the stated total as proceeds
-    /// EXACTLY, even when it does not divide evenly by the units.
-    #[test]
-    fn total_price_proceeds_are_exact() {
-        let dirs = vec![
-            buy(d(2020, 1, 1), 3, 30),
-            sell_at(d(2020, 6, 1), 3, PriceAnnotation::total(money(100, "USD"))),
-        ];
-        let (disposals, _skipped) = collect_disposals(&dirs, BookingMethod::Fifo, None);
-        assert_eq!(disposals.len(), 1);
-        assert_eq!(
-            disposals[0].proceeds,
-            Decimal::from(100),
-            "no 99.999…28dp division tail"
-        );
-        assert_eq!(disposals[0].gain, Decimal::from(10));
-    }
-
-    /// Booking order, not stream order: a sell listed BEFORE the same-date buy that
-    /// seeds its lot still matches (the loader books same-date augmentations first).
-    #[test]
-    fn books_in_booking_order_not_stream_order() {
-        // Sell appears first in the vector, buy second, both on 2020-01-01.
-        let dirs = vec![
-            sell_at(d(2020, 1, 1), 4, PriceAnnotation::unit(money(150, "USD"))),
-            buy(d(2020, 1, 1), 10, 100),
-        ];
-        let (disposals, _skipped) = collect_disposals(&dirs, BookingMethod::Fifo, None);
-        assert_eq!(disposals.len(), 1, "sell matches the same-date buy's lot");
-        assert_eq!(disposals[0].gain, Decimal::from(200));
+    /// Build a canonical `CapitalGain` (as the loader would hand the report),
+    /// denominated in USD on commodity AAPL.
+    #[allow(clippy::too_many_arguments)]
+    fn gain(
+        account: &str,
+        sale: NaiveDate,
+        acquired: Option<NaiveDate>,
+        units: i64,
+        basis: i64,
+        proceeds: i64,
+        short_sale: bool,
+    ) -> CapitalGain {
+        CapitalGain {
+            account: account.into(),
+            currency: "AAPL".into(),
+            units: Decimal::from(units),
+            amount: money(proceeds - basis, "USD"),
+            cost_basis: money(basis, "USD"),
+            proceeds: money(proceeds, "USD"),
+            sale_date: sale,
+            acquired_date: acquired,
+            short_sale,
+        }
     }
 
     /// Whole days between two dates (the `held_days` the report computes).
@@ -607,6 +458,71 @@ mod tests {
         a.until((jiff::Unit::Day, s))
             .ok()
             .map(|sp| i64::from(sp.get_days()))
+    }
+
+    /// `to_disposals` classifies the holding period: a short sale is always short;
+    /// a lot with no acquisition date is unknown; otherwise the threshold decides.
+    #[test]
+    fn to_disposals_classifies_term() {
+        let gains = vec![
+            gain(
+                "Assets:Broker:Stock",
+                d(2024, 1, 1),
+                Some(d(2020, 1, 1)),
+                5,
+                500,
+                750,
+                false,
+            ),
+            gain(
+                "Assets:Broker:Stock",
+                d(2024, 1, 1),
+                Some(d(2023, 12, 1)),
+                5,
+                500,
+                600,
+                false,
+            ),
+            gain(
+                "Assets:Broker:Stock",
+                d(2024, 1, 1),
+                None,
+                6,
+                690,
+                900,
+                false,
+            ),
+            gain(
+                "Assets:Broker:Stock",
+                d(2024, 1, 1),
+                Some(d(2020, 1, 1)),
+                5,
+                400,
+                500,
+                true,
+            ),
+        ];
+        let ds = to_disposals(&gains, None);
+        assert_eq!(ds[0].term.as_str(), "long"); // held ~4 years
+        assert_eq!(ds[1].term.as_str(), "short"); // held ~1 month
+        assert_eq!(ds[2].term.as_str(), "unknown"); // no acquisition date
+        assert_eq!(ds[3].term.as_str(), "short"); // short sale, always short
+        // A dateless lot has no held_days; a short still shows its span.
+        assert_eq!(ds[2].held_days, None);
+        assert_eq!(ds[3].held_days, held(d(2020, 1, 1), d(2024, 1, 1)));
+    }
+
+    #[test]
+    fn short_account_returns_leaf() {
+        assert_eq!(short_account("Assets:Broker:AAPL"), "AAPL");
+        assert_eq!(short_account("Cash"), "Cash");
+    }
+
+    #[test]
+    fn truncate_keeps_head_and_marks_elision() {
+        assert_eq!(truncate("abc", 5), "abc"); // shorter than width: unchanged
+        assert_eq!(truncate("abcde", 5), "abcde"); // exactly width: unchanged
+        assert_eq!(truncate("abcdef", 5), "abcd…"); // over width: head + ellipsis
     }
 
     /// The calendar long-term rule is leap-year correct: a holding from Jan 1 2020
@@ -643,14 +559,12 @@ mod tests {
     /// `--long-term-days N` overrides the calendar rule with a fixed day count.
     #[test]
     fn long_term_days_override() {
-        // 60 days > 30.
         assert!(is_long_term(
             d(2020, 1, 1),
             d(2020, 3, 1),
             held(d(2020, 1, 1), d(2020, 3, 1)),
             Some(30)
         ));
-        // 19 days, not > 30.
         assert!(!is_long_term(
             d(2020, 1, 1),
             d(2020, 1, 20),
@@ -658,7 +572,6 @@ mod tests {
             Some(30)
         ));
         // Boundary: held EXACTLY the threshold is NOT long (strictly more than N).
-        // 2020-01-01 -> 2020-01-31 is 30 days; with a 30-day threshold that is short.
         assert_eq!(held(d(2020, 1, 1), d(2020, 1, 31)), Some(30));
         assert!(!is_long_term(
             d(2020, 1, 1),
@@ -668,91 +581,72 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn short_account_returns_leaf() {
-        assert_eq!(short_account("Assets:Broker:AAPL"), "AAPL");
-        assert_eq!(short_account("Cash"), "Cash");
+    fn csv(gains: &[CapitalGain], filter: &CapgainsFilter) -> String {
+        let ctx = DisplayContext::new();
+        let mut buf = Vec::new();
+        report_capgains(gains, filter, None, &ctx, &OutputFormat::Csv, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
     }
 
-    #[test]
-    fn truncate_keeps_head_and_marks_elision() {
-        assert_eq!(truncate("abc", 5), "abc"); // shorter than width: unchanged
-        assert_eq!(truncate("abcde", 5), "abcde"); // exactly width: unchanged
-        assert_eq!(truncate("abcdef", 5), "abcd…"); // over width: head + ellipsis
-    }
-
-    /// The `--year` filter compares the full `i32` year and does not silently drop
-    /// disposals for years outside `i16` (the old lossy `i16::try_from` did).
+    /// The `--year` filter compares the full `i32` year (no lossy `i16::try_from`).
     #[test]
     fn year_filter_matches_the_right_year() {
-        let dirs = vec![
-            buy(d(2020, 1, 1), 10, 100),
-            sell_at(d(2021, 6, 1), 4, PriceAnnotation::unit(money(150, "USD"))),
-        ];
-        let ctx = DisplayContext::new();
-        let render_year = |year: Option<i32>| {
-            let filter = CapgainsFilter {
-                account: None,
-                year,
-                end: None,
-            };
-            let mut buf = Vec::new();
-            report_capgains(
-                &dirs,
-                &filter,
-                None,
-                BookingMethod::Fifo,
-                &ctx,
-                &OutputFormat::Csv,
-                &mut buf,
-            )
-            .unwrap();
-            String::from_utf8(buf).unwrap()
+        let gains = vec![gain(
+            "Assets:Broker:Stock",
+            d(2021, 6, 1),
+            Some(d(2020, 1, 1)),
+            4,
+            400,
+            600,
+            false,
+        )];
+        let f = |year| CapgainsFilter {
+            account: None,
+            year,
+            end: None,
         };
-        // Data row present for 2021, absent for 2020 (only a buy that year).
-        assert!(render_year(Some(2021)).lines().count() > 1);
-        assert_eq!(render_year(Some(2020)).lines().count(), 1, "header only");
-        assert!(render_year(None).lines().count() > 1);
+        assert!(csv(&gains, &f(Some(2021))).lines().count() > 1);
+        assert_eq!(
+            csv(&gains, &f(Some(2020))).lines().count(),
+            1,
+            "header only"
+        );
+        assert!(csv(&gains, &f(None)).lines().count() > 1);
     }
 
     /// The account filter keeps only disposals under the given prefix.
     #[test]
     fn account_filter_scopes_by_prefix() {
-        let dirs = vec![
-            buy(d(2020, 1, 1), 10, 100),
-            sell_at(d(2020, 6, 1), 4, PriceAnnotation::unit(money(150, "USD"))),
-        ];
-        let ctx = DisplayContext::new();
-        let render_acct = |acct: Option<&str>| {
-            let filter = CapgainsFilter {
-                account: acct,
-                year: None,
-                end: None,
-            };
-            let mut buf = Vec::new();
-            report_capgains(
-                &dirs,
-                &filter,
-                None,
-                BookingMethod::Fifo,
-                &ctx,
-                &OutputFormat::Csv,
-                &mut buf,
-            )
-            .unwrap();
-            String::from_utf8(buf).unwrap()
+        let gains = vec![gain(
+            "Assets:Broker:Stock",
+            d(2020, 6, 1),
+            Some(d(2020, 1, 1)),
+            4,
+            400,
+            600,
+            false,
+        )];
+        let f = |account| CapgainsFilter {
+            account,
+            year: None,
+            end: None,
         };
-        assert!(render_acct(Some("Assets:Broker")).lines().count() > 1);
-        assert_eq!(render_acct(Some("Assets:Other")).lines().count(), 1);
+        assert!(csv(&gains, &f(Some("Assets:Broker"))).lines().count() > 1);
+        assert_eq!(csv(&gains, &f(Some("Assets:Other"))).lines().count(), 1);
     }
 
     /// The text renderer emits a header, a data row, and the term summary.
     #[test]
     fn text_render_smoke() {
-        let dirs = vec![
-            buy(d(2020, 1, 1), 10, 100),
-            sell_at(d(2022, 6, 1), 4, PriceAnnotation::unit(money(150, "USD"))),
-        ];
+        let gains = vec![gain(
+            "Assets:Broker:Stock",
+            d(2022, 6, 1),
+            Some(d(2020, 1, 1)),
+            4,
+            400,
+            600,
+            false,
+        )];
         let ctx = DisplayContext::new();
         let filter = CapgainsFilter {
             account: None,
@@ -760,16 +654,7 @@ mod tests {
             end: None,
         };
         let mut buf = Vec::new();
-        report_capgains(
-            &dirs,
-            &filter,
-            None,
-            BookingMethod::Fifo,
-            &ctx,
-            &OutputFormat::Text,
-            &mut buf,
-        )
-        .unwrap();
+        report_capgains(&gains, &filter, None, &ctx, &OutputFormat::Text, &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("Realized capital gains"));
         assert!(out.contains("AAPL"));

@@ -79,6 +79,8 @@ pub struct CapitalGain {
     pub cost_basis: Amount,
     /// Sale proceeds attributable to this lot.
     pub proceeds: Amount,
+    /// The date of the disposing transaction (the sale/cover date).
+    pub sale_date: rustledger_core::NaiveDate,
     /// Acquisition date of the lot, when the lot carried one (the holding-period
     /// start for short vs long term classification).
     pub acquired_date: Option<rustledger_core::NaiveDate>,
@@ -479,6 +481,7 @@ impl BookingEngine {
                                     ),
                                     cost_basis: Amount::new(cost_basis_num, &cost.currency),
                                     proceeds: Amount::new(proceeds_num, &cost.currency),
+                                    sale_date: txn.date,
                                     acquired_date: cost.date,
                                     short_sale,
                                 });
@@ -699,6 +702,26 @@ impl BookingEngine {
         let result = interpolate(&booked.transaction)?;
 
         Ok(result)
+    }
+
+    /// Like [`Self::book_and_interpolate`], but also returns the per-lot
+    /// [`CapitalGain`]s `book` computed for this transaction.
+    ///
+    /// The loader's booking pass uses this so realized gains are captured **once**,
+    /// during canonical booking (in booking order, with the ledger's own method,
+    /// before `@@` normalization), and exposed on the `Ledger` — rather than each
+    /// consumer re-booking the stream and re-deriving them. The fast path (no cost
+    /// specs) yields no gains, exactly as `book_and_interpolate` books nothing.
+    pub fn book_and_interpolate_with_gains(
+        &self,
+        txn: &Transaction,
+    ) -> Result<(InterpolationResult, Vec<CapitalGain>), BookingError> {
+        if !txn.postings.iter().any(|p| p.cost.is_some()) {
+            return Ok((interpolate(txn)?, Vec::new()));
+        }
+        let booked = self.book(txn)?;
+        let result = interpolate(&booked.transaction)?;
+        Ok((result, booked.gains))
     }
 }
 

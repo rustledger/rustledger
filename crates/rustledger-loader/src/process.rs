@@ -142,12 +142,13 @@ pub struct Ledger {
     pub errors: Vec<LedgerError>,
     /// Display context for formatting numbers.
     pub display_context: DisplayContext,
-    /// The booking method actually used to book this ledger: the file-level
-    /// `option "booking_method"` when set, otherwise the API-level default.
-    /// Exposed so a consumer that re-books (e.g. the capgains report over the
-    /// pre-booking stream) matches the loader's own lot-matching instead of
-    /// silently defaulting to a different method.
-    pub effective_booking_method: rustledger_core::BookingMethod,
+    /// Realized capital gains/losses, one per disposed tax lot, captured during
+    /// the loader's single canonical booking pass (in booking order, with the
+    /// ledger's own method, before `@@` normalization). Consumers — e.g. the
+    /// capgains report — read these directly rather than re-booking the stream
+    /// and re-deriving them, so they cannot drift from `rledger check`.
+    #[cfg(feature = "booking")]
+    pub capital_gains: Vec<rustledger_booking::CapitalGain>,
 }
 
 impl Ledger {
@@ -378,10 +379,6 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // otherwise the API-level `LoadOptions.booking_method` is used.
     #[cfg(any(feature = "validation", feature = "booking"))]
     let effective_booking_method = resolve_effective_booking_method(&raw, options);
-    // With neither feature, nothing books, so the value is inert — mirror the
-    // `LoadOptions` default so the `Ledger` field is always populated.
-    #[cfg(not(any(feature = "validation", feature = "booking")))]
-    let effective_booking_method = options.booking_method;
 
     #[cfg(feature = "validation")]
     let validation_session = if options.validate {
@@ -421,11 +418,16 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     #[cfg(not(feature = "validation"))]
     let directives = synthed.early_validate(&raw.source_map, &mut errors);
 
+    // Capture realized capital gains produced by the canonical booking pass.
+    #[cfg(feature = "booking")]
+    let mut capital_gains: Vec<rustledger_booking::CapitalGain> = Vec::new();
     let (booked, failed) = directives.book(
         #[cfg(feature = "booking")]
         effective_booking_method,
         #[cfg(feature = "booking")]
         &mut errors,
+        #[cfg(feature = "booking")]
+        &mut capital_gains,
     );
 
     let regular_applied = booked.apply_regular_plugins(
@@ -451,7 +453,8 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         source_map: raw.source_map,
         errors,
         display_context: raw.display_context,
-        effective_booking_method,
+        #[cfg(feature = "booking")]
+        capital_gains,
     })
 }
 
@@ -639,13 +642,18 @@ impl crate::Directives<crate::EarlyValidated> {
         mut self,
         #[cfg(feature = "booking")] effective_method: rustledger_core::BookingMethod,
         #[cfg(feature = "booking")] errors: &mut Vec<LedgerError>,
+        #[cfg(feature = "booking")] gains: &mut Vec<rustledger_booking::CapitalGain>,
     ) -> (
         crate::Directives<crate::Booked>,
         crate::phase::FailedBookings,
     ) {
         #[cfg(feature = "booking")]
-        let (booked, failed) =
-            run_booking(std::mem::take(self.as_vec_mut()), effective_method, errors);
+        let (booked, failed) = run_booking(
+            std::mem::take(self.as_vec_mut()),
+            effective_method,
+            errors,
+            gains,
+        );
         #[cfg(not(feature = "booking"))]
         let (booked, failed): (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) =
             (std::mem::take(self.as_vec_mut()), Vec::new());
@@ -803,6 +811,7 @@ fn run_booking(
     mut directives: Vec<Spanned<Directive>>,
     booking_method: BookingMethod,
     errors: &mut Vec<LedgerError>,
+    gains: &mut Vec<rustledger_booking::CapitalGain>,
 ) -> (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) {
     use rustledger_booking::BookingEngine;
 
@@ -820,9 +829,10 @@ fn run_booking(
     for &i in &order {
         let spanned = &mut directives[i];
         if let Directive::Transaction(txn) = &mut spanned.value {
-            match engine.book_and_interpolate(txn) {
-                Ok(result) => {
+            match engine.book_and_interpolate_with_gains(txn) {
+                Ok((result, txn_gains)) => {
                     engine.apply(&result.transaction);
+                    gains.extend(txn_gains);
                     *txn = result.transaction;
                 }
                 Err(e) => {

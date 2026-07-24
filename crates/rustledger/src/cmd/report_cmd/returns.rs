@@ -358,19 +358,22 @@ fn first_shared_inscope_account(
     None
 }
 
-/// Whether a rendered returns report covered every scope, or left some as `n/a`.
+/// Whether a rendered returns report covered every scope, or left some unvaluable.
 ///
-/// The report is written to the `writer` regardless; this only reports the
-/// *completeness* of what was written, so the CLI boundary can decide the process
-/// exit code. Keeping the exit-code policy at the call site (rather than having
-/// `report_returns` return `Err` after it has already produced output) separates
-/// "produce the report" from "decide the exit status".
+/// Returned only on `Ok(_)` (the report is written to the `writer` in that case);
+/// this reports the *completeness* of what was written, so the CLI boundary can
+/// decide the process exit code. Keeping the exit-code policy at the call site
+/// (rather than having `report_returns` return `Err` after it has already produced
+/// output) separates "produce the report" from "decide the exit status". An
+/// unvaluable scope renders as an `n/a` row in text/CSV, and as a row with `null`
+/// figures plus a populated `error` field in JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReturnsOutcome {
     /// Every scope was valued.
     Complete,
-    /// `unvaluable` of `total` scopes could not be valued and rendered as `n/a`.
-    /// The report was still written; the caller should exit non-zero.
+    /// `unvaluable` of `total` scopes could not be valued (rendered `n/a` in
+    /// text/CSV, or `null` figures with an `error` field in JSON). The report was
+    /// still written; the caller should exit non-zero.
     Partial { unvaluable: usize, total: usize },
 }
 
@@ -387,7 +390,8 @@ pub(super) enum ReturnsOutcome {
 /// # Returns
 ///
 /// [`ReturnsOutcome`], reporting whether the written report covered every scope
-/// or left some `--by-group` rows as `n/a`. The report is written to `writer`
+/// or left some `--by-group` rows unvaluable (`n/a` in text/CSV, or `null` figures
+/// with an `error` field in JSON). On `Ok(_)` the report is written to `writer`
 /// either way; the caller maps [`ReturnsOutcome::Partial`] to a non-zero exit.
 ///
 /// # Errors

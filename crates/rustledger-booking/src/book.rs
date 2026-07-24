@@ -406,6 +406,14 @@ impl BookingEngine {
                         if let Some(price) = &posting.price
                             && let Some(amt) =
                                 price.amount.as_ref().and_then(IncompleteAmount::as_amount)
+                            // Cross-currency disposals are out of scope: only record
+                            // gains when EVERY matched lot has a cost basis in the same
+                            // currency as the sale price, so `proceeds − cost_basis` is
+                            // meaningful. Otherwise record nothing for the whole
+                            // reduction rather than emit misleading partial rows.
+                            && booking_result.matched.iter().all(|m| {
+                                m.cost.as_ref().is_some_and(|c| c.currency == amt.currency)
+                            })
                         {
                             let total_units = units.number.abs();
                             // Allocate proceeds across the matched lots. A `Unit` (`@`)
@@ -1453,6 +1461,42 @@ mod tests {
             g[0].proceeds.number + g[1].proceeds.number,
             dec!(1200),
             "per-lot proceeds sum exactly to the stated total"
+        );
+    }
+
+    /// A disposal whose sale-price currency differs from the lot's cost currency
+    /// is cross-currency (out of scope): no `CapitalGain` is recorded, because
+    /// `proceeds − cost_basis` across currencies is meaningless without FX.
+    #[test]
+    fn test_book_cross_currency_disposal_records_nothing() {
+        let mut engine = BookingEngine::new();
+        // Buy 3 AAPL at cost 30 USD.
+        engine.apply(
+            &Transaction::new(date(2024, 1, 1), "buy")
+                .with_synthesized_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(3), "AAPL")).with_cost(
+                        CostSpec::empty()
+                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(30) })
+                            .with_currency("USD"),
+                    ),
+                )
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-90), "USD"),
+                )),
+        );
+        // Sell priced in EUR — a currency the lot's USD basis cannot be compared to.
+        let sell = Transaction::new(date(2024, 6, 1), "sell")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-3), "AAPL"))
+                    .with_cost(CostSpec::empty())
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(50), "EUR"))),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(150), "EUR")));
+        let g = engine.book(&sell).unwrap().gains;
+        assert!(
+            g.is_empty(),
+            "cross-currency disposal records no gain: {g:?}"
         );
     }
 

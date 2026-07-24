@@ -2,8 +2,8 @@
 //!
 //! Where `report holdings` shows what you still HOLD, this shows what you SOLD:
 //! one row per disposed tax lot, classified short vs long term by holding period,
-//! with proceeds, cost basis, and realized gain/loss, plus per-term and per-year
-//! summaries.
+//! with proceeds, cost basis, and realized gain/loss, plus per-term and
+//! per-currency summaries.
 //!
 //! It consumes [`rustledger_booking::CapitalGain`] — the canonical, per-lot
 //! realized gain the booking engine computes when it matches a reduction against
@@ -89,8 +89,15 @@ fn collect_disposals(
             continue;
         };
         // `book` computes the per-lot gains against the CURRENT inventory but does
-        // NOT mutate it; `apply` accumulates the booked lots for later matching.
+        // NOT mutate it. Interpolate the booked transaction before `apply`,
+        // mirroring the loader's `book_and_interpolate` → `apply` pipeline: `apply`
+        // expects filled-in amounts (an elided balancing leg would otherwise be
+        // silently dropped), and a transaction that fails to interpolate would fail
+        // in the loader too, so skip it whole rather than record a partial gain.
         let Ok(booked) = engine.book(txn) else {
+            continue;
+        };
+        let Ok(interpolated) = rustledger_booking::interpolate(&booked.transaction) else {
             continue;
         };
         for g in &booked.gains {
@@ -114,7 +121,7 @@ fn collect_disposals(
                 currency: g.amount.currency.to_string(),
             });
         }
-        engine.apply(&booked.transaction);
+        engine.apply(&interpolated.transaction);
     }
     out
 }

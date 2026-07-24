@@ -325,7 +325,7 @@ TOTAL       net realized gain          660 USD
 - A **disposal** is a reduction that carries a sale price (`@` per-unit or `@@`
   total). A sale crossing several lots produces **one row per lot** — each with its
   own acquisition date and cost basis — which is the shape tax forms (e.g. US Form
-  8949\) want. A costless transfer of a lot is not a disposal.
+  8949) want. A costless transfer of a lot is not a disposal.
 - **Proceeds** come from the sale price. For a `@@` total price the proceeds are
   pro-rated across the matched lots so they **sum exactly to the stated total**
   (a single-lot `@@` records the total verbatim, with no division rounding).

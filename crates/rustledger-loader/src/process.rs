@@ -142,6 +142,12 @@ pub struct Ledger {
     pub errors: Vec<LedgerError>,
     /// Display context for formatting numbers.
     pub display_context: DisplayContext,
+    /// The booking method actually used to book this ledger: the file-level
+    /// `option "booking_method"` when set, otherwise the API-level default.
+    /// Exposed so a consumer that re-books (e.g. the capgains report over the
+    /// pre-booking stream) matches the loader's own lot-matching instead of
+    /// silently defaulting to a different method.
+    pub effective_booking_method: rustledger_core::BookingMethod,
 }
 
 impl Ledger {
@@ -372,6 +378,10 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // otherwise the API-level `LoadOptions.booking_method` is used.
     #[cfg(any(feature = "validation", feature = "booking"))]
     let effective_booking_method = resolve_effective_booking_method(&raw, options);
+    // With neither feature, nothing books, so the value is inert — mirror the
+    // `LoadOptions` default so the `Ledger` field is always populated.
+    #[cfg(not(any(feature = "validation", feature = "booking")))]
+    let effective_booking_method = options.booking_method;
 
     #[cfg(feature = "validation")]
     let validation_session = if options.validate {
@@ -441,6 +451,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         source_map: raw.source_map,
         errors,
         display_context: raw.display_context,
+        effective_booking_method,
     })
 }
 

@@ -36,6 +36,7 @@ ______________________________________________________________________
 | **31 built-in plugins** | Plus Python plugin compatibility via WASI sandbox |
 | **Bank import** | CSV/OFX import with auto-detection, dedup, and categorization |
 | **Investment returns** | Money-weighted (XIRR) and time-weighted returns, robust over imperfect ledgers: a built-in beangrow replacement |
+| **Capital gains** | Realized gains per tax lot, short vs long term, with exact `@@` proceeds and calendar-correct holding periods |
 
 <details>
 <summary><strong>Comparison with other tools</strong></summary>
@@ -142,6 +143,7 @@ Python beancount users can install `bean-check`, `bean-query`, etc. wrapper scri
 | `journal` | `register` | Transaction register |
 | `holdings` | | Investment holdings |
 | `returns` | | Investment returns: money-weighted (XIRR) + time-weighted, with `--by-group` breakdown (a built-in beangrow replacement) |
+| `capgains` | | Realized capital gains/losses per tax lot (short vs long term) |
 | `networth` | | Net worth over time |
 | `accounts` | | List all accounts |
 | `commodities` | | List all commodities |

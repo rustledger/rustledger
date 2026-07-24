@@ -24,6 +24,7 @@ A report subcommand (e.g. `balances`, `journal`) is required — running `rledge
 | `journal` | `register` | Transaction register |
 | `holdings` | | Investment holdings with cost basis |
 | `returns` | | Investment returns — money-weighted (XIRR) and time-weighted |
+| `capgains` | | Realized capital gains/losses per tax lot (short vs long term) |
 | `networth` | | Net worth over time |
 | `accounts` | | List all accounts |
 | `commodities` | | List all currencies/commodities |
@@ -249,12 +250,15 @@ Notes on grouping:
   is an *independent sub-portfolio* — its return is computed over just its own
   accounts, like a separate report. This matches how beangrow and hledger `roi`
   present grouped returns.
+
 - **Groups do not sum to TOTAL.** The `TOTAL` row is the whole portfolio, printed
   for reference — not the sum of the group rows. (Untagged in-scope holdings are
   counted in TOTAL but appear in no group.) Two groups that share a cash account,
   for instance, can't be added up cleanly.
+
 - **Warnings.** rledger prints a `warning:` to stderr for cases that would
   otherwise mislead:
+
   - a `returns-group:` tag on an account outside `--investments`/`--income`;
   - a non-string `returns-group:` value;
   - two groups whose accounts overlap by prefix (the shared holding is counted
@@ -265,6 +269,7 @@ Notes on grouping:
   - a group named `TOTAL` (it collides with the total row in text/CSV output);
   - `--by-group` with no in-scope `returns-group:` tags (the report then shows
     only the TOTAL row).
+
 - **Partial reports.** Because each group is valued independently, a group (or the
   `TOTAL`) that hits one of the two blockers above — an unpriced commodity or an
   elided posting — shows `n/a` across its row, with a `warning:` naming the reason,
@@ -281,6 +286,64 @@ Notes on grouping:
 
 See [`returns-group:` metadata](../reference/syntax.md#returns-group-metadata) for
 the tagging syntax.
+
+### Realized Capital Gains
+
+`capgains` reports **realized** gains and losses — what you *sold*, one row per
+disposed tax lot — where `holdings` shows what you still *hold*. Each row carries
+the lot's acquisition date, holding period, proceeds, cost basis, and gain/loss,
+classified short vs long term.
+
+```bash
+rledger report ledger.beancount capgains
+```
+
+```text
+Realized capital gains
+===============================================================================
+
+Sold       Commodity / account      Units  Acquired    Term   Proceeds       Gain
+-------------------------------------------------------------------------------
+2024-03-01 AAPL Stock                   8  2020-01-01    LT       1200        400
+2024-04-01 AAPL Stock                   2  2020-01-01    LT        350        150
+2024-04-01 AAPL Stock                   2  2023-06-01    ST        350        110
+-------------------------------------------------------------------------------
+Short-term    1 disposals   proceeds          350   gain          110 USD
+Long-term     2 disposals   proceeds         1550   gain          550 USD
+TOTAL       net realized gain          660 USD
+```
+
+| Option | Description |
+|--------|-------------|
+| `--account <PREFIX>` | Only disposals from accounts under this prefix. |
+| `--year <YYYY>` | Only disposals in this calendar/tax year. |
+| `--end <YYYY-MM-DD>` | Exclude disposals after this date. |
+| `--long-term-days <N>` | Override the long-term threshold with a fixed day count (held strictly more than `N` days is long-term). |
+
+**How it works.**
+
+- A **disposal** is a reduction that carries a sale price (`@` per-unit or `@@`
+  total). A sale crossing several lots produces **one row per lot** — each with its
+  own acquisition date and cost basis — which is the shape tax forms (e.g. US Form
+  8949\) want. A costless transfer of a lot is not a disposal.
+- **Proceeds** come from the sale price. For a `@@` total price the proceeds are
+  pro-rated across the matched lots so they **sum exactly to the stated total**
+  (a single-lot `@@` records the total verbatim, with no division rounding).
+- **Cost basis** is the matched lot's booked cost; **gain = proceeds − cost basis**.
+- **Short vs long term.** By default a lot is long-term when the sale is **more than
+  one calendar year** after acquisition — the leap-year-correct US rule (a 366-day
+  holding across a leap day is *not* yet long-term). `--long-term-days N` replaces
+  this with a fixed day count.
+- **Lot matching** uses the ledger's own booking method (`option "booking_method"`,
+  per-account `open ... "METHOD"`), so results match `rledger check`. A sale the
+  ledger cannot book unambiguously (e.g. a bare `{}` reduction spanning
+  different-cost lots under strict booking) is **skipped, not guessed** — run
+  `rledger check` first to see those errors.
+
+Not a tax filing: wash-sale adjustments, separating currency gains from asset
+gains, lots seeded by `pad` (no well-defined cost basis), and jurisdiction rules
+beyond the long-term threshold are out of scope. Gains are reported in each lot's
+**cost currency**, summarized per currency for a multi-currency ledger.
 
 ### Net Worth Over Time
 

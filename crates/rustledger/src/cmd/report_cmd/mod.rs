@@ -25,6 +25,7 @@
 mod accounts;
 mod balances;
 mod balsheet;
+mod capgains;
 mod commodities;
 mod holdings;
 mod income;
@@ -185,6 +186,25 @@ pub enum Report {
         #[arg(long)]
         by_group: bool,
     },
+    /// Realized capital gains/losses per tax lot (short vs long term)
+    Capgains {
+        /// Filter to disposals from accounts under this prefix (default: all).
+        #[arg(short, long)]
+        account: Option<String>,
+        /// Only disposals in this calendar/tax year (`YYYY`).
+        #[arg(short, long)]
+        year: Option<i32>,
+        /// Exclude disposals after this date (`YYYY-MM-DD`).
+        #[arg(short, long)]
+        end: Option<String>,
+        /// Override the long-term threshold with a fixed day count: a lot held
+        /// strictly more than this many days is long-term. The default (unset)
+        /// uses the calendar rule — long-term when the sale is more than one year
+        /// after acquisition — which is leap-year correct (the US "> 1 year" rule),
+        /// unlike any fixed day count.
+        #[arg(long)]
+        long_term_days: Option<i64>,
+    },
 }
 
 /// Run the report command with the given arguments.
@@ -269,6 +289,13 @@ struct LoadedReport {
     /// Source-faithful directive stream (pads remain `Pad`). Used by
     /// reports that count/list source directive kinds.
     directives: Vec<rustledger_core::Directive>,
+    /// The PRE-booking parsed stream, populated only for the capgains report.
+    /// Capgains must run its own booking pass over un-booked directives to
+    /// realize per-lot proceeds exactly: the loader's stored stream has already
+    /// expanded multi-lot reductions and normalized `@@` totals to per-unit
+    /// prices (dividing by each expanded posting's units), which is lossy for
+    /// total-price sale proceeds. Empty for every other report.
+    parsed_directives: Vec<rustledger_core::Directive>,
     /// Config-aware account-type classifier (honors `name_*` renames).
     /// Reports must route/sign accounts through this, never by hardcoded
     /// root-prefix matching — renamed ledgers otherwise misroute (L5:
@@ -287,6 +314,9 @@ struct LoadedReport {
     /// The returns report uses the first as the default reporting currency
     /// (overridable with `--currency`); other reports ignore it.
     operating_currency: Vec<String>,
+    /// The booking method the loader used, so the capgains report re-books the
+    /// parsed stream with the SAME lot-matching (not a defaulted method).
+    booking_method: rustledger_core::BookingMethod,
 }
 
 /// Load and fully process the file (parse → book → plugins), producing the
@@ -317,6 +347,15 @@ fn load(file: &PathBuf, report: &Report, verbose: bool, no_cache: bool) -> Resul
     // stream; `process` books it exactly as the uncached `load` did.
     // Disable with `--no-cache` or `BEANCOUNT_DISABLE_LOAD_CACHE`.
     let (raw, _from_cache) = crate::cmd::loadcache::load_result_cached(file, no_cache, verbose)?;
+    // The capgains report re-books the PRE-booking parsed stream itself (see
+    // `LoadedReport::parsed_directives`), so snapshot it before `process` consumes
+    // `raw`. Only clone for that report — every other report ignores the field.
+    let parsed_directives: Vec<rustledger_core::Directive> =
+        if matches!(report, Report::Capgains { .. }) {
+            raw.directives.iter().map(|s| s.value.clone()).collect()
+        } else {
+            Vec::new()
+        };
     let ledger = rustledger_loader::process(raw, &options)
         .with_context(|| format!("failed to load {}", file.display()))?;
 
@@ -371,14 +410,17 @@ fn load(file: &PathBuf, report: &Report, verbose: bool, no_cache: bool) -> Resul
     let account_types = ledger.options.to_account_types();
     let display_context = ledger.display_context.clone();
     let operating_currency = ledger.options.operating_currency.clone();
+    let booking_method = ledger.effective_booking_method;
     let directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
 
     Ok(LoadedReport {
         directives,
+        parsed_directives,
         account_types,
         balance_view,
         display_context,
         operating_currency,
+        booking_method,
     })
 }
 
@@ -509,6 +551,34 @@ fn render<W: io::Write>(
                     if total == 1 { "scope" } else { "scopes" },
                 );
             }
+        }
+        Report::Capgains {
+            account,
+            year,
+            end,
+            long_term_days,
+        } => {
+            let end_date: Option<NaiveDate> = end
+                .as_deref()
+                .map(|s| {
+                    s.parse()
+                        .with_context(|| format!("invalid --end date {s:?} (expected YYYY-MM-DD)"))
+                })
+                .transpose()?;
+            let filter = capgains::CapgainsFilter {
+                account: account.as_deref(),
+                year: *year,
+                end: end_date,
+            };
+            capgains::report_capgains(
+                &loaded.parsed_directives,
+                &filter,
+                *long_term_days,
+                loaded.booking_method,
+                &loaded.display_context,
+                format,
+                writer,
+            )?;
         }
     }
 

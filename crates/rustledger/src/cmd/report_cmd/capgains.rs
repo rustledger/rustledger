@@ -205,6 +205,11 @@ impl PooledIrr {
 /// Pooled realized IRR over the eligible closed lots in `currency`, optionally
 /// restricted to one `term` bucket.
 ///
+/// **Precondition:** [`fill_lot_irr`] has run over `rows` — eligibility keys off
+/// each row's solved `irr`, so an unfilled slice pools nothing. The render path
+/// guarantees this (rates are filled before `render`), and it is what keeps a
+/// summary rate consistent with the cells above it.
+///
 /// Pooling every lot's flows into one series and solving once is the
 /// beangrow-shaped aggregate: a money-weighted return over all the capital that
 /// actually cycled through, not an average of per-lot rates. The rate is `None`
@@ -219,10 +224,12 @@ fn aggregate_irr(rows: &[Disposal], currency: &str, term: Option<Term>) -> Poole
         .filter(|d| d.currency == currency && term.is_none_or(|t| d.term == t))
     {
         total += 1;
-        // Pool a lot ONLY if its own rate solved — the same predicate the per-lot
-        // cell uses. Pooling on flow-availability instead would let a lot that
-        // renders `n/a` silently drive the aggregate (and be counted as covered).
-        if lot_irr(d).is_some()
+        // Pool a lot ONLY if its own rate solved, reusing the ALREADY-SOLVED
+        // `d.irr` — the literal value in its cell, so the cell and the aggregate
+        // cannot disagree about which lots count, and no lot is re-solved once per
+        // summary cell. (Pooling on flow-availability instead would let a lot that
+        // renders `n/a` silently drive the aggregate and be counted as covered.)
+        if d.irr.is_some()
             && let Some(f) = lot_flows(d)
         {
             eligible += 1;

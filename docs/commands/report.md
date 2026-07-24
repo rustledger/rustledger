@@ -370,11 +370,14 @@ never came back.
 In CSV and JSON the rate is a 2-decimal **percent** in an `irr_pct` field (empty /
 `null` when undefined) — the same unit as `report returns`' `money_weighted_return_pct`,
 so the two reports' rates are directly comparable. The JSON summaries also carry
-`irr_lots` / `irr_lots_total` (the rate's coverage). In the text table a rate beyond
-±9999% is shown as `>9999%` / `<-9999%` to keep the columns aligned; the exact value
-is always in CSV/JSON. (A very short hold can annualize to an enormous number — a
-one-day 20% gain compounds to about 8×10³⁰ %/yr — which is arithmetically true but
-rarely meaningful.)
+`irr_lots` / `irr_lots_total` (the rate's coverage).
+
+A very short hold annualizes to an enormous number — a one-day 20% gain compounds to
+about 8×10³⁰ %/yr, arithmetically true but meaningless, and far more digits than a
+consumer (or this project's own decimal type) can read back. Rates **above 9999%**
+are therefore shown as `>9999%` in the text table and reported as empty / `null` in
+CSV/JSON, rather than as a fabricated figure. There is no lower cap: a round trip
+cannot lose more than its basis, so no rate falls below -100%.
 
 With `--year` or `--end`, the rate is computed from the flows of the lots that
 *closed* in the window; a lot bought in 2019 and sold in 2024 contributes its full

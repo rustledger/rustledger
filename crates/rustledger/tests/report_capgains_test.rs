@@ -439,12 +439,32 @@ fn irr_is_absent_without_the_flag() {
     let f = write_fixture(LEDGER_IRR);
     let path = f.path().to_str().unwrap();
     // Default output schema is unchanged — no irr column/field anywhere.
+    // Assert on the SCHEMA lines, not a substring of the whole output: a commodity
+    // or payee containing "irr" must not be able to fail (or pass) these.
     let csv = run(&bin, &["report", path, "capgains", "--format", "csv"]);
-    assert!(!csv.contains("irr"), "no irr column by default: {csv}");
+    let header = csv.lines().next().expect("a header");
+    assert!(
+        !header.contains("irr"),
+        "no irr column by default: {header}"
+    );
+    assert_eq!(
+        header.split(',').count(),
+        11,
+        "pre-IRR column count: {header}"
+    );
     let json = run(&bin, &["report", path, "capgains", "--format", "json"]);
-    assert!(!json.contains("irr"), "no irr field by default: {json}");
+    let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert!(
+        v["disposals"][0].get("irr_pct").is_none(),
+        "no irr field: {json}"
+    );
+    assert!(v.get("total_irr_pct").is_none(), "no total block: {json}");
     let txt = run(&bin, &["report", path, "capgains", "--no-pager"]);
-    assert!(!txt.contains("IRR"), "no IRR column by default: {txt}");
+    let thead = txt
+        .lines()
+        .find(|l| l.starts_with("Sold"))
+        .expect("a table header");
+    assert!(!thead.contains("IRR"), "no IRR column by default: {thead}");
 }
 
 #[test]

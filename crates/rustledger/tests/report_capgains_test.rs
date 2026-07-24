@@ -121,15 +121,35 @@ fn json_summaries_split_short_and_long_term() {
     let f = write_fixture(LEDGER);
     let path = f.path().to_str().unwrap();
     let out = run(&bin, &["report", path, "capgains", "--format", "json"]);
-    // Long-term total 550, short-term total 110.
-    assert!(
-        out.contains(r#""long_term": [{"currency": "USD", "disposals": 2, "proceeds": "1550", "cost_basis": "1000", "gain": "550"}]"#),
-        "long-term summary: {out}"
-    );
-    assert!(
-        out.contains(r#""short_term": [{"currency": "USD", "disposals": 1, "proceeds": "350", "cost_basis": "240", "gain": "110"}]"#),
-        "short-term summary: {out}"
-    );
+    // Parse the whole payload — this also asserts the output is valid JSON.
+    let v: serde_json::Value =
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("invalid JSON ({e}): {out}"));
+
+    // Three per-lot disposals.
+    assert_eq!(v["disposals"].as_array().unwrap().len(), 3, "{out}");
+
+    // Long-term summary: 2 disposals, proceeds 1550, gain 550 USD.
+    let lt = &v["long_term"][0];
+    assert_eq!(lt["currency"], "USD");
+    assert_eq!(lt["disposals"], 2);
+    assert_eq!(lt["proceeds"], "1550");
+    assert_eq!(lt["cost_basis"], "1000");
+    assert_eq!(lt["gain"], "550");
+
+    // Short-term summary: 1 disposal, proceeds 350, gain 110 USD.
+    let st = &v["short_term"][0];
+    assert_eq!(st["currency"], "USD");
+    assert_eq!(st["disposals"], 1);
+    assert_eq!(st["proceeds"], "350");
+    assert_eq!(st["gain"], "110");
+
+    // Spot-check the first disposal row's fields.
+    let d0 = &v["disposals"][0];
+    assert_eq!(d0["commodity"], "AAPL");
+    assert_eq!(d0["units"], "8");
+    assert_eq!(d0["term"], "long");
+    assert_eq!(d0["proceeds"], "1200");
+    assert_eq!(d0["gain"], "400");
 }
 
 #[test]

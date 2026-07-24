@@ -240,7 +240,7 @@ fn render<W: Write>(
                     d.sold,
                     csv_escape(&d.account),
                     csv_escape(&d.commodity),
-                    d.units,
+                    csv_escape(&money(d.units, &d.commodity)),
                     d.acquired.map_or_else(String::new, |a| a.to_string()),
                     d.held_days.map_or_else(String::new, |h| h.to_string()),
                     term(d.long_term),
@@ -258,7 +258,7 @@ fn render<W: Write>(
                     d.sold,
                     json_escape(&d.account),
                     json_escape(&d.commodity),
-                    d.units,
+                    json_escape(&money(d.units, &d.commodity)),
                     d.acquired
                         .map_or_else(|| "null".to_string(), |a| format!("\"{a}\"")),
                     d.held_days
@@ -314,14 +314,14 @@ fn render<W: Write>(
                 writeln!(
                     writer,
                     "{:<11}{:<22}{:>8}{:<12}{:>6}{:>11}{:>11}",
-                    // `Date` / `Decimal` `Display` ignore fmt width flags, so
-                    // stringify first to keep the columns aligned.
+                    // `Date` `Display` ignores fmt width flags, so stringify first
+                    // to keep the columns aligned.
                     d.sold.to_string(),
                     truncate(
                         &format!("{} {}", d.commodity, short_account(&d.account)),
                         22
                     ),
-                    d.units.to_string(),
+                    money(d.units, &d.commodity),
                     d.acquired
                         .map_or_else(|| "  —".to_string(), |a| format!("  {a}")),
                     if d.long_term { "LT" } else { "ST" },

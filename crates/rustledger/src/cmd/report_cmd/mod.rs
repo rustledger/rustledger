@@ -204,6 +204,13 @@ pub enum Report {
         /// unlike any fixed day count.
         #[arg(long)]
         long_term_days: Option<i64>,
+        /// Add the annualized realized return (IRR) of each closed lot, plus a
+        /// pooled IRR per term and currency. This is a **realized-only**
+        /// money-weighted return over lots you actually closed; for the
+        /// total-portfolio return including what you still hold, use
+        /// `report returns`.
+        #[arg(long)]
+        irr: bool,
     },
 }
 
@@ -543,6 +550,7 @@ fn render<W: io::Write>(
             year,
             end,
             long_term_days,
+            irr,
         } => {
             if let Some(n) = long_term_days
                 && *n < 0
@@ -565,6 +573,7 @@ fn render<W: io::Write>(
                 &loaded.capital_gains,
                 &filter,
                 *long_term_days,
+                *irr,
                 &loaded.display_context,
                 format,
                 writer,

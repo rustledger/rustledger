@@ -574,10 +574,13 @@ fn fmt_rate(rate: Option<f64>) -> String {
     )
 }
 
-/// A rate for the grouped **text** table: the numeric rate carries its own `%`,
-/// but an undefined rate is `n/a` (not `n/a%`). Matches `render_single`'s
-/// single-scope text output, where the `%` hangs off the value, not the column.
-fn fmt_rate_pct(rate: Option<f64>) -> String {
+/// A rate for a **text** table: the numeric rate carries its own `%`, but an
+/// undefined rate is `n/a` (not `n/a%`). Matches `render_single`'s single-scope
+/// text output, where the `%` hangs off the value, not the column.
+///
+/// Shared with the capgains report's realized-IRR column so the two rate columns
+/// cannot drift in formatting.
+pub(super) fn fmt_rate_pct(rate: Option<f64>) -> String {
     match rate {
         Some(_) => format!("{}%", fmt_rate(rate)),
         None => "n/a".to_string(),

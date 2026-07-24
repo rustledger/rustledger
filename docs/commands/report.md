@@ -319,6 +319,48 @@ TOTAL       net realized gain          660 USD
 | `--year <YYYY>` | Only disposals in this calendar/tax year. |
 | `--end <YYYY-MM-DD>` | Exclude disposals after this date. |
 | `--long-term-days <N>` | Override the long-term threshold with a fixed day count (held strictly more than `N` days is long-term). |
+| `--irr` | Add the annualized realized return of each closed lot, plus a pooled rate per term and currency (see below). |
+
+**Realized IRR (`--irr`).**
+
+Each closed lot is a round trip — money out at acquisition, money back at sale — so
+it has an annualized money-weighted return:
+
+```bash
+rledger report ledger.beancount capgains --irr
+```
+
+```text
+Sold       Commodity / account        Units  Acquired    Term       Proceeds           Gain       IRR
+-----------------------------------------------------------------------------------------------------
+2020-12-31 AAA Stock                     10  2020-01-01    ST           1100            100    10.00%
+2021-12-31 BBB Stock                      5  2020-01-01    LT            605            105    10.00%
+-----------------------------------------------------------------------------------------------------
+Short-term    1 disposals   proceeds            1100   gain             100 USD   IRR 10.00%
+Long-term     1 disposals   proceeds             605   gain             105 USD   IRR 10.00%
+TOTAL       net realized gain             205 USD   IRR 10.00%
+```
+
+Note both lots read 10% even though the second gained 21% in total — the rate is
+*annualized*, so a 1.21× return over two years is 10%/year compounded. The summary
+rates pool every eligible lot's flows into one series and solve once (a
+money-weighted return over all the capital that cycled through), rather than
+averaging per-lot rates.
+
+> **This is a realized-only return.** It can only see lots you actually closed, so
+> it is **not** your portfolio's total return — a position you still hold
+> contributes nothing, however it has performed. For the total return including
+> unrealized holdings valued at market, use [`report returns`](#investment-returns)
+> (money-weighted **and** time-weighted). The two answer different questions:
+> `returns` is the portfolio-level view; this is the per-lot view.
+
+A lot shows `n/a` (and is excluded from the pooled rates) when the rate is
+undefined: **short sales** (money-in-then-out makes an IRR unconventional and
+misleading), lots with **no acquisition date** (e.g. under `AVERAGE` booking, which
+merges lots and drops their dates), **same-day round trips** (a zero-day holding
+cannot be annualized), and a non-positive cost basis. In CSV/JSON the rate is the
+raw fraction (`0.1`, or empty/`null` when undefined); the percent formatting is
+text-only.
 
 **How it works.**
 

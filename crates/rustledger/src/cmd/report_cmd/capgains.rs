@@ -25,17 +25,27 @@
 //! no acquisition date — e.g. under `AVERAGE` booking, which merges lots and drops
 //! their dates — is classified `unknown`, not silently `short`.
 //!
+//! **Realized IRR** (`--irr`): the annualized money-weighted return of each closed
+//! round trip — `−cost_basis` at acquisition, `+proceeds` at sale — solved with the
+//! canonical [`rustledger_returns::xirr`], plus a pooled rate per term and per
+//! currency. This is a **realized-only** return: it can only see lots you actually
+//! closed, so it is NOT the portfolio's total return. For that (including what you
+//! still hold, valued at market) use `report returns`, which is the beangrow-shaped
+//! total-return report; this column is the per-lot view `returns` cannot give.
+//!
 //! Gains are reported in each lot's **cost currency**; a multi-currency ledger is
 //! summarized per currency. Not a tax filing: wash-sale adjustment, currency-gain
 //! separation, lots seeded by `pad` (no well-defined cost basis), and jurisdiction
 //! rules beyond the long-term threshold are out of scope (run `rledger check` to
 //! validate the ledger first).
 
+use super::returns::fmt_rate_pct;
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
 use rustledger_booking::CapitalGain;
 use rustledger_core::{DisplayContext, NaiveDate};
+use rustledger_returns::{CashFlow, xirr};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -84,6 +94,58 @@ struct Disposal {
     gain: Decimal,
     /// The cost currency the figures are denominated in.
     currency: String,
+    /// Closing a short position — excluded from IRR (see [`lot_flows`]).
+    short_sale: bool,
+    /// Annualized money-weighted return of this lot's round trip, when defined
+    /// and requested (`--irr`). `None` = not requested, or undefined for this lot.
+    irr: Option<f64>,
+}
+
+/// The cash flows of one closed round trip: the basis paid out at acquisition and
+/// the proceeds received at sale — the input to this lot's IRR.
+///
+/// `None` when a round-trip rate is undefined, so the lot renders `n/a` and is
+/// excluded from the pooled aggregate:
+/// - **short sales** — the money-in-then-out shape makes an IRR unconventional and
+///   misleading, so it is deliberately not reported;
+/// - **no acquisition date** (an `AVERAGE`-cost lot merges lots and drops dates),
+///   so the outflow cannot be dated;
+/// - **same-day round trips** (zero-day holding), where annualizing divides by a
+///   zero time span;
+/// - **non-positive cost basis**, which has no rate of return.
+fn lot_flows(d: &Disposal) -> Option<[CashFlow; 2]> {
+    if d.short_sale || d.cost_basis <= Decimal::ZERO {
+        return None;
+    }
+    let acquired = d.acquired?;
+    if d.held_days? <= 0 {
+        return None;
+    }
+    Some([
+        CashFlow::new(acquired, -d.cost_basis),
+        CashFlow::new(d.sold, d.proceeds),
+    ])
+}
+
+/// Pooled realized IRR over the eligible closed lots in `currency`, optionally
+/// restricted to one `term` bucket.
+///
+/// Pooling every lot's flows into one series and solving once is the
+/// beangrow-shaped aggregate: a money-weighted return over all the capital that
+/// actually cycled through, not an average of per-lot rates. Returns `None` when
+/// no lot is eligible or the series has no computable root (e.g. no sign change).
+fn aggregate_irr(rows: &[Disposal], currency: &str, term: Option<Term>) -> Option<f64> {
+    let mut flows: Vec<CashFlow> = rows
+        .iter()
+        .filter(|d| d.currency == currency && term.is_none_or(|t| d.term == t))
+        .filter_map(lot_flows)
+        .flatten()
+        .collect();
+    if flows.is_empty() {
+        return None;
+    }
+    flows.sort_by_key(|f| f.date);
+    xirr(&flows)
 }
 
 /// Transform the loader's canonical [`CapitalGain`]s into report [`Disposal`]s,
@@ -101,9 +163,13 @@ struct Disposal {
 /// `cross_currency` total so the caller can surface it (rather than silently
 /// omitting it). `long_term_days = Some(n)` means held strictly more than `n` days;
 /// `None` uses the leap-year-safe calendar rule.
-fn to_disposals(gains: &[CapitalGain], long_term_days: Option<i64>) -> (Vec<Disposal>, usize) {
+fn to_disposals(
+    gains: &[CapitalGain],
+    long_term_days: Option<i64>,
+    with_irr: bool,
+) -> (Vec<Disposal>, usize) {
     let mut cross_currency = 0usize;
-    let rows = gains
+    let mut rows: Vec<Disposal> = gains
         .iter()
         .filter_map(|g| {
             // Cross-currency: proceeds and basis are in different currencies, so
@@ -145,9 +211,17 @@ fn to_disposals(gains: &[CapitalGain], long_term_days: Option<i64>) -> (Vec<Disp
                 cost_basis: g.cost_basis.number,
                 gain: g.proceeds.number - g.cost_basis.number,
                 currency: g.cost_basis.currency.to_string(),
+                short_sale: g.short_sale,
+                irr: None,
             })
         })
         .collect();
+    // Per-lot IRR is opt-in: the solver runs only when the caller asked for it.
+    if with_irr {
+        for d in &mut rows {
+            d.irr = lot_flows(d).and_then(|f| xirr(&f));
+        }
+    }
     (rows, cross_currency)
 }
 
@@ -188,7 +262,8 @@ pub(super) struct CapgainsFilter<'a> {
 ///
 /// `gains` are the loader's canonical realized gains (`Ledger::capital_gains`).
 /// `long_term_days` is the holding-period threshold: `None` uses the calendar
-/// "> 1 year" rule (leap-year correct), `Some(n)` a fixed day count.
+/// "> 1 year" rule (leap-year correct), `Some(n)` a fixed day count. `with_irr`
+/// adds the annualized realized-return columns (see the module docs).
 ///
 /// # Errors
 /// Propagates writer I/O errors.
@@ -196,11 +271,12 @@ pub(super) fn report_capgains<W: Write>(
     gains: &[CapitalGain],
     filter: &CapgainsFilter,
     long_term_days: Option<i64>,
+    with_irr: bool,
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
-    let (disposals, cross_currency) = to_disposals(gains, long_term_days);
+    let (disposals, cross_currency) = to_disposals(gains, long_term_days, with_irr);
     // A cross-currency disposal (sale price in a different currency than the lot's
     // cost basis) has no gain without an FX rate, so it is dropped from the rows.
     // Surface the count on stderr rather than silently omitting it.
@@ -227,7 +303,7 @@ pub(super) fn report_capgains<W: Write>(
     rows.sort_by(|a, b| {
         (a.sold, &a.account, &a.commodity).cmp(&(b.sold, &b.account, &b.commodity))
     });
-    render(&rows, ctx, format, writer)
+    render(&rows, with_irr, ctx, format, writer)
 }
 
 /// Per-(currency, term) running totals for the summary.
@@ -250,6 +326,7 @@ impl Totals {
 
 fn render<W: Write>(
     rows: &[Disposal],
+    with_irr: bool,
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
@@ -279,15 +356,18 @@ fn render<W: Write>(
 
     match format {
         OutputFormat::Csv => {
+            // The `irr` column appears only under `--irr`, so the default schema is
+            // unchanged for existing consumers.
             writeln!(
                 writer,
-                "sold,account,commodity,units,acquired,held_days,term,currency,proceeds,cost_basis,gain"
+                "sold,account,commodity,units,acquired,held_days,term,currency,proceeds,cost_basis,gain{}",
+                if with_irr { ",irr" } else { "" }
             )?;
             for d in rows {
                 // Raw `Decimal` (no separators, no rounding) for machine parsing.
                 writeln!(
                     writer,
-                    "{},{},{},{},{},{},{},{},{},{},{}",
+                    "{},{},{},{},{},{},{},{},{},{},{}{}",
                     d.sold,
                     csv_escape(&d.account),
                     csv_escape(&d.commodity),
@@ -299,13 +379,20 @@ fn render<W: Write>(
                     d.proceeds,
                     d.cost_basis,
                     d.gain,
+                    // Raw rate (e.g. `0.1042`), empty when undefined — the text
+                    // report owns percent formatting.
+                    if with_irr {
+                        format!(",{}", fmt_rate_machine(d.irr))
+                    } else {
+                        String::new()
+                    },
                 )?;
             }
         }
         OutputFormat::Json => {
             let obj = |d: &Disposal| {
                 format!(
-                    r#"{{"sold": "{}", "account": "{}", "commodity": "{}", "units": "{}", "acquired": {}, "held_days": {}, "term": "{}", "currency": "{}", "proceeds": "{}", "cost_basis": "{}", "gain": "{}"}}"#,
+                    r#"{{"sold": "{}", "account": "{}", "commodity": "{}", "units": "{}", "acquired": {}, "held_days": {}, "term": "{}", "currency": "{}", "proceeds": "{}", "cost_basis": "{}", "gain": "{}"{}}}"#,
                     d.sold,
                     json_escape(&d.account),
                     json_escape(&d.commodity),
@@ -319,40 +406,89 @@ fn render<W: Write>(
                     d.proceeds,
                     d.cost_basis,
                     d.gain,
+                    // Numeric rate, or `null` when undefined; present only under
+                    // `--irr` so the default schema is unchanged.
+                    if with_irr {
+                        format!(r#", "irr": {}"#, fmt_rate_json(d.irr))
+                    } else {
+                        String::new()
+                    },
                 )
             };
             let disposals: Vec<String> = rows.iter().map(obj).collect();
-            let summ = |b: &BTreeMap<String, Totals>| -> String {
+            // Each term bucket carries the pooled IRR of that bucket's lots.
+            let summ = |b: &BTreeMap<String, Totals>, term: Term| -> String {
                 let parts: Vec<String> = b
                     .iter()
                     .map(|(c, t)| {
                         format!(
-                            r#"{{"currency": "{}", "disposals": {}, "proceeds": "{}", "cost_basis": "{}", "gain": "{}"}}"#,
+                            r#"{{"currency": "{}", "disposals": {}, "proceeds": "{}", "cost_basis": "{}", "gain": "{}"{}}}"#,
                             json_escape(c),
                             t.count,
                             t.proceeds,
                             t.cost_basis,
                             t.gain,
+                            if with_irr {
+                                format!(
+                                    r#", "irr": {}"#,
+                                    fmt_rate_json(aggregate_irr(rows, c, Some(term)))
+                                )
+                            } else {
+                                String::new()
+                            },
                         )
                     })
                     .collect();
                 format!("[{}]", parts.join(", "))
             };
+            // Whole-report realized IRR per currency (all terms pooled).
+            let totals_irr = if with_irr {
+                let mut currencies: Vec<&String> = short
+                    .keys()
+                    .chain(long.keys())
+                    .chain(unknown.keys())
+                    .collect();
+                currencies.sort_unstable();
+                currencies.dedup();
+                let parts: Vec<String> = currencies
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            r#"{{"currency": "{}", "irr": {}}}"#,
+                            json_escape(c),
+                            fmt_rate_json(aggregate_irr(rows, c, None))
+                        )
+                    })
+                    .collect();
+                format!(r#", "total_irr": [{}]"#, parts.join(", "))
+            } else {
+                String::new()
+            };
             writeln!(
                 writer,
-                r#"{{"disposals": [{}], "short_term": {}, "long_term": {}, "unknown_term": {}}}"#,
+                r#"{{"disposals": [{}], "short_term": {}, "long_term": {}, "unknown_term": {}{}}}"#,
                 disposals.join(", "),
-                summ(&short),
-                summ(&long),
-                summ(&unknown),
+                summ(&short, Term::Short),
+                summ(&long, Term::Long),
+                summ(&unknown, Term::Unknown),
+                totals_irr,
             )?;
         }
         OutputFormat::Text => {
             // Wide enough for millions with thousands separators (e.g.
-            // `1,500,000.00`) without the amount columns overflowing.
-            const RULE: usize = 91;
+            // `1,500,000.00`) without the amount columns overflowing; the IRR
+            // column adds its own width when shown.
+            let rule: usize = if with_irr { 101 } else { 91 };
+            // The trailing IRR cell, empty when the column is off.
+            let irr_cell = |r: Option<f64>| {
+                if with_irr {
+                    format!("{:>10}", fmt_rate_pct(r))
+                } else {
+                    String::new()
+                }
+            };
             writeln!(writer, "Realized capital gains")?;
-            writeln!(writer, "{}", "=".repeat(RULE))?;
+            writeln!(writer, "{}", "=".repeat(rule))?;
             writeln!(writer)?;
             if rows.is_empty() {
                 writeln!(writer, "No realized disposals in range.")?;
@@ -360,14 +496,25 @@ fn render<W: Write>(
             }
             writeln!(
                 writer,
-                "{:<11}{:<22}{:>10}{:<12}{:>6}{:>15}{:>15}",
-                "Sold", "Commodity / account", "Units", "  Acquired", "Term", "Proceeds", "Gain"
+                "{:<11}{:<22}{:>10}{:<12}{:>6}{:>15}{:>15}{}",
+                "Sold",
+                "Commodity / account",
+                "Units",
+                "  Acquired",
+                "Term",
+                "Proceeds",
+                "Gain",
+                if with_irr {
+                    format!("{:>10}", "IRR")
+                } else {
+                    String::new()
+                },
             )?;
-            writeln!(writer, "{}", "-".repeat(RULE))?;
+            writeln!(writer, "{}", "-".repeat(rule))?;
             for d in rows {
                 writeln!(
                     writer,
-                    "{:<11}{:<22}{:>10}{:<12}{:>6}{:>15}{:>15}",
+                    "{:<11}{:<22}{:>10}{:<12}{:>6}{:>15}{:>15}{}",
                     // `Date` `Display` ignores fmt width flags, so stringify first
                     // to keep the columns aligned.
                     d.sold.to_string(),
@@ -381,9 +528,10 @@ fn render<W: Write>(
                     d.term.abbr(),
                     money(d.proceeds, &d.currency),
                     money(d.gain, &d.currency),
+                    irr_cell(d.irr),
                 )?;
             }
-            writeln!(writer, "{}", "-".repeat(RULE))?;
+            writeln!(writer, "{}", "-".repeat(rule))?;
             // Per-currency short-term / long-term / unknown totals, then net.
             let mut currencies: Vec<&String> = short
                 .keys()
@@ -393,18 +541,26 @@ fn render<W: Write>(
             currencies.sort_unstable();
             currencies.dedup();
             for c in currencies {
-                for (label, bucket) in [
-                    ("Short-term", &short),
-                    ("Long-term", &long),
-                    ("Unknown-term", &unknown),
+                for (label, bucket, term) in [
+                    ("Short-term", &short, Term::Short),
+                    ("Long-term", &long, Term::Long),
+                    ("Unknown-term", &unknown, Term::Unknown),
                 ] {
                     if let Some(t) = bucket.get(c) {
                         writeln!(
                             writer,
-                            "{label:<12}{:>3} disposals   proceeds {:>15}   gain {:>15} {c}",
+                            "{label:<12}{:>3} disposals   proceeds {:>15}   gain {:>15} {c}{}",
                             t.count,
                             money(t.proceeds, c),
                             money(t.gain, c),
+                            if with_irr {
+                                format!(
+                                    "   IRR {}",
+                                    fmt_rate_pct(aggregate_irr(rows, c, Some(term)))
+                                )
+                            } else {
+                                String::new()
+                            },
                         )?;
                     }
                 }
@@ -413,14 +569,32 @@ fn render<W: Write>(
                     + unknown.get(c).map(|t| t.gain).unwrap_or_default();
                 writeln!(
                     writer,
-                    "{:<12}net realized gain {:>15} {c}",
+                    "{:<12}net realized gain {:>15} {c}{}",
                     "TOTAL",
-                    money(net, c)
+                    money(net, c),
+                    if with_irr {
+                        format!("   IRR {}", fmt_rate_pct(aggregate_irr(rows, c, None)))
+                    } else {
+                        String::new()
+                    },
                 )?;
             }
         }
     }
     Ok(())
+}
+
+/// A rate for CSV: the raw fractional rate (e.g. `0.1042`), empty when undefined.
+///
+/// Machine output stays unformatted — no percent sign, no rounding to a display
+/// precision — matching the exact-value policy the other CSV/JSON columns follow.
+fn fmt_rate_machine(rate: Option<f64>) -> String {
+    rate.map_or_else(String::new, |r| r.to_string())
+}
+
+/// A rate for JSON: a bare number, or `null` when undefined.
+fn fmt_rate_json(rate: Option<f64>) -> String {
+    rate.map_or_else(|| "null".to_string(), |r| r.to_string())
 }
 
 /// The leaf of an account path (`Assets:Broker:AAPL` -> `AAPL`), for the compact
@@ -525,7 +699,7 @@ mod tests {
                 true,
             ),
         ];
-        let (ds, cross) = to_disposals(&gains, None);
+        let (ds, cross) = to_disposals(&gains, None, false);
         assert_eq!(cross, 0);
         assert_eq!(ds[0].term.as_str(), "long"); // held ~4 years
         assert_eq!(ds[1].term.as_str(), "short"); // held ~1 month
@@ -549,9 +723,119 @@ mod tests {
             500,
             false,
         );
-        let (ds, _) = to_disposals(&[g], None);
+        let (ds, _) = to_disposals(&[g], None, false);
         assert_eq!(ds[0].term.as_str(), "unknown");
         assert_eq!(ds[0].held_days, None, "negative span dropped");
+    }
+
+    /// A one-year round trip 1000 -> 1100 annualizes to exactly 10%; a two-year
+    /// 500 -> 605 also annualizes to 10% (the rate compounds, so it is NOT the
+    /// 21% total). Pinning both shapes proves the flows are dated, not just divided.
+    #[test]
+    fn per_lot_irr_annualizes_the_round_trip() {
+        let gains = vec![
+            // 2020-01-01 -> 2020-12-31 (365 days): 1000 -> 1100.
+            gain(
+                "Assets:Broker:Stock",
+                d(2020, 12, 31),
+                Some(d(2020, 1, 1)),
+                10,
+                1000,
+                1100,
+                false,
+            ),
+            // 2020-01-01 -> 2021-12-31 (730 days): 500 -> 605 = 1.21x over 2y.
+            gain(
+                "Assets:Broker:Stock",
+                d(2021, 12, 31),
+                Some(d(2020, 1, 1)),
+                5,
+                500,
+                605,
+                false,
+            ),
+        ];
+        let (ds, _) = to_disposals(&gains, None, true);
+        // Compare the rate to within a hundredth of a percent (the solver returns
+        // a converged float, not an exact decimal).
+        let is_10pct = |r: Option<f64>| (r.expect("defined rate") - 0.10).abs() < 1e-4;
+        assert!(
+            is_10pct(ds[0].irr),
+            "one-year 10% gain -> 10%/yr: {:?}",
+            ds[0].irr
+        );
+        assert!(
+            is_10pct(ds[1].irr),
+            "two-year 21% gain -> 10%/yr compounded: {:?}",
+            ds[1].irr
+        );
+        // Pooled over both lots (same rate) -> the same 10%.
+        assert!(is_10pct(aggregate_irr(&ds, "USD", None)));
+    }
+
+    /// IRR is opt-in: with `with_irr = false` no rate is computed at all.
+    #[test]
+    fn per_lot_irr_is_not_computed_unless_requested() {
+        let gains = vec![gain(
+            "Assets:Broker:Stock",
+            d(2020, 12, 31),
+            Some(d(2020, 1, 1)),
+            10,
+            1000,
+            1100,
+            false,
+        )];
+        let (ds, _) = to_disposals(&gains, None, false);
+        assert_eq!(ds[0].irr, None, "no IRR unless --irr");
+    }
+
+    /// The undefined cases render `n/a` and are excluded from the pooled aggregate:
+    /// a same-day round trip, a dateless (AVERAGE-cost) lot, and a short sale.
+    #[test]
+    fn irr_is_undefined_for_same_day_dateless_and_short_lots() {
+        let gains = vec![
+            // Same-day: zero-day span.
+            gain(
+                "Assets:Broker:Stock",
+                d(2020, 1, 1),
+                Some(d(2020, 1, 1)),
+                10,
+                100,
+                120,
+                false,
+            ),
+            // Dateless (AVERAGE cost).
+            gain(
+                "Assets:Broker:Stock",
+                d(2020, 6, 1),
+                None,
+                6,
+                690,
+                900,
+                false,
+            ),
+            // Short sale.
+            gain(
+                "Assets:Broker:Stock",
+                d(2021, 6, 1),
+                Some(d(2020, 1, 1)),
+                5,
+                400,
+                500,
+                true,
+            ),
+        ];
+        let (ds, _) = to_disposals(&gains, None, true);
+        assert!(ds.iter().all(|d| d.irr.is_none()), "all three undefined");
+        assert!(
+            ds.iter().all(|d| lot_flows(d).is_none()),
+            "none contribute flows"
+        );
+        assert_eq!(
+            aggregate_irr(&ds, "USD", None),
+            None,
+            "no eligible lot -> no pooled rate"
+        );
     }
 
     /// A cross-currency disposal (proceeds and basis in different currencies) is
@@ -577,7 +861,7 @@ mod tests {
             acquired_date: Some(d(2020, 1, 1)),
             short_sale: false,
         };
-        let (ds, cross_count) = to_disposals(&[same, cross], None);
+        let (ds, cross_count) = to_disposals(&[same, cross], None, false);
         assert_eq!(ds.len(), 1, "only the same-currency disposal is kept");
         assert_eq!(cross_count, 1, "the cross-currency disposal is counted");
         assert_eq!(ds[0].gain, Decimal::from(250));
@@ -655,7 +939,16 @@ mod tests {
     fn csv(gains: &[CapitalGain], filter: &CapgainsFilter) -> String {
         let ctx = DisplayContext::new();
         let mut buf = Vec::new();
-        report_capgains(gains, filter, None, &ctx, &OutputFormat::Csv, &mut buf).unwrap();
+        report_capgains(
+            gains,
+            filter,
+            None,
+            false,
+            &ctx,
+            &OutputFormat::Csv,
+            &mut buf,
+        )
+        .unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -725,7 +1018,16 @@ mod tests {
             end: None,
         };
         let mut buf = Vec::new();
-        report_capgains(&gains, &filter, None, &ctx, &OutputFormat::Text, &mut buf).unwrap();
+        report_capgains(
+            &gains,
+            &filter,
+            None,
+            false,
+            &ctx,
+            &OutputFormat::Text,
+            &mut buf,
+        )
+        .unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("Realized capital gains"));
         assert!(out.contains("AAPL"));
@@ -780,7 +1082,16 @@ mod tests {
             end: None,
         };
         let mut buf = Vec::new();
-        report_capgains(&gains, &filter, None, &ctx, &OutputFormat::Text, &mut buf).unwrap();
+        report_capgains(
+            &gains,
+            &filter,
+            None,
+            false,
+            &ctx,
+            &OutputFormat::Text,
+            &mut buf,
+        )
+        .unwrap();
         let out = String::from_utf8(buf).unwrap();
         assert!(
             out.contains("Short-term") && out.contains("Long-term") && out.contains("Unknown-term")

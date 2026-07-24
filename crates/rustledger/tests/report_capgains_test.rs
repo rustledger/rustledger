@@ -106,6 +106,34 @@ const LEDGER_AVERAGE: &str = r#"option "booking_method" "AVERAGE"
   Income:Gains
 "#;
 
+/// Two closed round trips that each annualize to exactly 10%: a one-year
+/// 1000 -> 1100, and a two-year 500 -> 605 (1.21x compounded). The pooled
+/// realized IRR is therefore also 10%.
+const LEDGER_IRR: &str = r#"option "booking_method" "FIFO"
+
+2019-01-01 open Assets:Broker:Stock
+2019-01-01 open Assets:Bank
+2019-01-01 open Income:Gains
+
+2020-01-01 * "buy A"
+  Assets:Broker:Stock  10 AAA {100 USD}
+  Assets:Bank       -1000 USD
+
+2020-12-31 * "sell A"
+  Assets:Broker:Stock  -10 AAA {} @ 110 USD
+  Assets:Bank        1100 USD
+  Income:Gains
+
+2020-01-01 * "buy B"
+  Assets:Broker:Stock  5 BBB {100 USD}
+  Assets:Bank        -500 USD
+
+2021-12-31 * "sell B"
+  Assets:Broker:Stock  -5 BBB {} @ 121 USD
+  Assets:Bank         605 USD
+  Income:Gains
+"#;
+
 fn write_fixture(source: &str) -> tempfile::NamedTempFile {
     let mut f = tempfile::Builder::new()
         .prefix("report-capgains-")
@@ -345,6 +373,104 @@ fn average_cost_disposal_has_unknown_term() {
     assert!(
         txt.contains("net realized gain") && txt.contains("210 USD"),
         "net includes the unknown-term gain: {txt}"
+    );
+}
+
+#[test]
+fn irr_annualizes_each_lot_and_pools_the_aggregate() {
+    let bin = require_rledger!();
+    let f = write_fixture(LEDGER_IRR);
+    let path = f.path().to_str().unwrap();
+
+    // CSV gains a raw-rate `irr` column: both lots annualize to 0.1 (10%/yr).
+    let csv = run(
+        &bin,
+        &["report", path, "capgains", "--irr", "--format", "csv"],
+    );
+    let rows: Vec<&str> = csv.lines().collect();
+    assert!(rows[0].ends_with(",irr"), "header gains irr: {}", rows[0]);
+    assert!(
+        rows[1].ends_with(",0.1"),
+        "one-year lot = 10%/yr: {}",
+        rows[1]
+    );
+    assert!(
+        rows[2].ends_with(",0.1"),
+        "two-year lot = 10%/yr: {}",
+        rows[2]
+    );
+
+    // Text shows the percent column and the pooled per-term / total rates.
+    let txt = run(&bin, &["report", path, "capgains", "--irr", "--no-pager"]);
+    assert!(txt.contains("IRR"), "IRR column header: {txt}");
+    assert!(txt.contains("10.00%"), "annualized rate: {txt}");
+    assert!(
+        txt.lines()
+            .any(|l| l.starts_with("TOTAL") && l.contains("IRR 10.00%")),
+        "pooled total IRR: {txt}"
+    );
+
+    // JSON carries numeric rates plus the per-currency total_irr block.
+    let json = run(
+        &bin,
+        &["report", path, "capgains", "--irr", "--format", "json"],
+    );
+    let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(v["disposals"][0]["irr"], 0.1);
+    assert_eq!(v["total_irr"][0]["currency"], "USD");
+    assert_eq!(v["total_irr"][0]["irr"], 0.1);
+}
+
+#[test]
+fn irr_is_absent_without_the_flag() {
+    let bin = require_rledger!();
+    let f = write_fixture(LEDGER_IRR);
+    let path = f.path().to_str().unwrap();
+    // Default output schema is unchanged — no irr column/field anywhere.
+    let csv = run(&bin, &["report", path, "capgains", "--format", "csv"]);
+    assert!(!csv.contains("irr"), "no irr column by default: {csv}");
+    let json = run(&bin, &["report", path, "capgains", "--format", "json"]);
+    assert!(!json.contains("irr"), "no irr field by default: {json}");
+    let txt = run(&bin, &["report", path, "capgains", "--no-pager"]);
+    assert!(!txt.contains("IRR"), "no IRR column by default: {txt}");
+}
+
+#[test]
+fn irr_is_na_for_short_sales_and_dateless_lots() {
+    let bin = require_rledger!();
+    // A short cover: money-in-then-out, so no conventional IRR.
+    let fs = write_fixture(LEDGER_SHORT);
+    let short = run(
+        &bin,
+        &[
+            "report",
+            fs.path().to_str().unwrap(),
+            "capgains",
+            "--irr",
+            "--format",
+            "csv",
+        ],
+    );
+    assert!(
+        short.lines().nth(1).is_some_and(|l| l.ends_with(',')),
+        "short sale has an empty irr cell: {short}"
+    );
+    // An AVERAGE-cost lot has no acquisition date to run the clock from.
+    let fa = write_fixture(LEDGER_AVERAGE);
+    let avg = run(
+        &bin,
+        &[
+            "report",
+            fa.path().to_str().unwrap(),
+            "capgains",
+            "--irr",
+            "--format",
+            "csv",
+        ],
+    );
+    assert!(
+        avg.lines().nth(1).is_some_and(|l| l.ends_with(',')),
+        "dateless lot has an empty irr cell: {avg}"
     );
 }
 

@@ -119,19 +119,19 @@ fn to_disposals(gains: &[CapitalGain], long_term_days: Option<i64>) -> (Vec<Disp
                 // A lot "acquired" after the sale (a future-dated cost) yields a
                 // negative span — nonsensical as a holding period, so drop it.
                 .filter(|&d| d >= 0);
-            // Short-sale gains are always short-term (US rule); otherwise a lot with
-            // no acquisition date has an unknown holding period; otherwise apply the
-            // threshold.
-            let term = if g.short_sale {
-                Term::Short
-            } else {
-                match g.acquired_date {
-                    None => Term::Unknown,
-                    Some(a) if is_long_term(a, g.sale_date, held_days, long_term_days) => {
-                        Term::Long
-                    }
-                    Some(_) => Term::Short,
+            // Short-sale gains are always short-term (US rule). Otherwise the holding
+            // period is determinable only when the lot has an acquisition date AND a
+            // non-negative span (`held_days` is `Some`) — a lot with no date (AVERAGE
+            // cost) or a future-dated one is `unknown`, never silently short.
+            let term = match (g.short_sale, g.acquired_date, held_days) {
+                (true, _, _) => Term::Short,
+                (_, Some(a), Some(_))
+                    if is_long_term(a, g.sale_date, held_days, long_term_days) =>
+                {
+                    Term::Long
                 }
+                (_, Some(_), Some(_)) => Term::Short,
+                _ => Term::Unknown,
             };
             Some(Disposal {
                 sold: g.sale_date,
@@ -295,7 +295,7 @@ fn render<W: Write>(
                     d.acquired.map_or_else(String::new, |a| a.to_string()),
                     d.held_days.map_or_else(String::new, |h| h.to_string()),
                     d.term.as_str(),
-                    d.currency,
+                    csv_escape(&d.currency),
                     d.proceeds,
                     d.cost_basis,
                     d.gain,
@@ -534,6 +534,24 @@ mod tests {
         // A dateless lot has no held_days; a short still shows its span.
         assert_eq!(ds[2].held_days, None);
         assert_eq!(ds[3].held_days, held(d(2020, 1, 1), d(2024, 1, 1)));
+    }
+
+    /// A lot "acquired" AFTER the sale (a future-dated cost — invalid data) has an
+    /// undeterminable holding period: classified `unknown`, never silently `short`.
+    #[test]
+    fn future_dated_acquisition_is_unknown_not_short() {
+        let g = gain(
+            "Assets:Broker:Stock",
+            d(2020, 1, 1),       // sold
+            Some(d(2021, 1, 1)), // "acquired" a year AFTER the sale
+            5,
+            400,
+            500,
+            false,
+        );
+        let (ds, _) = to_disposals(&[g], None);
+        assert_eq!(ds[0].term.as_str(), "unknown");
+        assert_eq!(ds[0].held_days, None, "negative span dropped");
     }
 
     /// A cross-currency disposal (proceeds and basis in different currencies) is

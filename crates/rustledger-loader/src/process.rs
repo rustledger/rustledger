@@ -62,7 +62,10 @@ impl Default for LoadOptions {
 }
 
 impl LoadOptions {
-    /// Create options for raw loading (no booking, no plugins, no validation).
+    /// Create options for minimal processing: no plugins, no validation, and no
+    /// capital-gains retention. Booking always runs (it is mandatory — a loader that
+    /// cannot book cannot resolve costs or match lots); for truly unbooked directives
+    /// use the parser or [`load_raw`] instead.
     #[must_use]
     pub const fn raw() -> Self {
         Self {

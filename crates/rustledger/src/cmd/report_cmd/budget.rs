@@ -36,9 +36,14 @@ use std::io::Write;
 /// Does this account pass the `--account` filter?
 ///
 /// A raw prefix test, matching `balances`, `holdings`, `journal` and `networth`
-/// (balances.rs:29) — one flag must select the same accounts in every report, so
-/// a user can reconcile a budget's `actual` against `report balances`, and so a
-/// partial prefix behaves the same everywhere.
+/// (balances.rs:29): one flag must select the same ACCOUNTS in every report, and
+/// a partial prefix must behave the same everywhere.
+///
+/// It does NOT follow that a budget's `actual` equals what `report balances`
+/// shows for the same accounts and window. Spending is clipped to the day a
+/// covering budget existed (see `clip_start`), so a window reaching back before
+/// the budget was declared legitimately reports less here. Selecting the same
+/// accounts is the guarantee; equal figures are not.
 ///
 /// This is deliberately NOT the component-aware [`is_subaccount_or_equal`] used
 /// for budget COVERAGE below. They answer different questions: coverage decides
@@ -131,6 +136,7 @@ fn closed_account_errors(
     directives: &[Directive],
     budgets: &Budgets,
     to: NaiveDate,
+    children: bool,
 ) -> Vec<BudgetError> {
     let mut closed: BTreeMap<&str, NaiveDate> = BTreeMap::new();
     for d in directives {
@@ -144,7 +150,16 @@ fn closed_account_errors(
         .entries()
         .iter()
         .filter_map(|b| {
-            let when = *closed.get(b.account.as_str())?;
+            // Coverage, not identity: under `--children` a parent budget is
+            // answered by its children, so a parent whose covering accounts are
+            // all closed can no longer see spending either. This was the one
+            // diagnostic of the three that did not take the flag, so it silently
+            // excluded the subtree case the other two handle.
+            let when = *closed
+                .iter()
+                .filter(|(acct, _)| covers(&b.account, acct, children))
+                .map(|(_, when)| when)
+                .min()?;
             // Only if the budget is still running past the close inside this
             // window; a budget that ended before it is unremarkable.
             // Any budget that accrues on or after the close is unspendable for
@@ -357,7 +372,12 @@ pub(super) fn report_budget<W: Write>(
         &budgets,
         filter.children,
     ));
-    errors.extend(closed_account_errors(directives, &budgets, filter.to));
+    errors.extend(closed_account_errors(
+        directives,
+        &budgets,
+        filter.to,
+        filter.children,
+    ));
     // Whether the ledger had ANY unusable budget, computed before the filter:
     // `Empty::diagnose` must not conclude "no budgets declared" for a ledger
     // whose budgets were all rejected merely because `--account` excluded them
@@ -562,7 +582,18 @@ pub(super) fn report_budget<W: Write>(
     for ((ccy, credit), (b, a)) in &totals {
         if b.is_none() || a.is_none() {
             let row = total_row(ccy, *credit, *b, *a);
-            errors.push(unrepresentable(&row.account, ccy));
+            // A total whose component is unknown is itself unknown: summing only
+            // the representable rows would print an authoritative-looking figure
+            // that silently omits an account. It stays absent, and says why.
+            errors.push(BudgetError {
+                date: filter.from,
+                account: Some(row.account.clone()),
+                reason: format!(
+                    "{} for {ccy} is absent because at least one budget in it is \
+                     too large to represent; the rows above show which",
+                    row.account
+                ),
+            });
         }
     }
 

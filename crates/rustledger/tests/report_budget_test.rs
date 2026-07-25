@@ -2000,3 +2000,72 @@ fn an_all_rejected_report_does_not_promise_absent_warnings() {
     );
     assert!(unfiltered.contains("warnings above"), "{unfiltered}");
 }
+
+/// Coverage, not identity: under `--children` a parent budget is answered by its
+/// children, so a parent whose covering accounts are all closed can no longer
+/// see spending either. This was the one diagnostic of the three that did not
+/// take the flag, so it silently excluded the subtree case.
+#[test]
+fn a_closed_child_reports_against_the_parent_budget() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2019-01-01 open Expenses:Food:Groceries\n\
+         2019-01-01 open Assets:Cash\n\
+         2019-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n\
+         2024-03-01 close Expenses:Food:Groceries\n",
+    );
+    let out = Command::new(&bin)
+        .args([
+            "report",
+            f.path().to_str().unwrap(),
+            "budget",
+            "--children",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2025-01-01",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("closed on"),
+        "a parent budget whose only covering account is closed must be reported: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A total whose component is unknown is itself unknown. It must say WHY, rather
+/// than reusing the per-budget phrasing, so a consumer can tell an overflowing
+/// aggregate from an overflowing single budget.
+#[test]
+fn an_absent_total_explains_that_a_component_overflowed() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 open Expenses:Gas\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 7000000000000000000000000000.00 USD\n\
+         2024-01-01 custom \"budget\" Expenses:Gas \"monthly\" 100.00 USD\n",
+    );
+    let json = run(
+        &bin,
+        &[
+            "report",
+            f.path().to_str().unwrap(),
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2025-01-01",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        json.contains("is absent because at least one budget in it"),
+        "the absent total must name its cause: {json}"
+    );
+    // The well-formed row is still reported in full.
+    assert!(json.contains(r#""account": "Expenses:Gas""#), "{json}");
+}

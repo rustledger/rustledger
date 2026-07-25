@@ -611,8 +611,12 @@ def check_one(
             if "ZZQ" not in stderr_text:
                 failures["typo_currency_unreported"].append((seed, acct, children))
     for acct, when in (closed or {}).items():
-        rendered = [a for a, _ in rows if a == acct]
-        if rendered and when < d_to and "closed on" not in stderr_text:
+        # Coverage, not identity: under --children a parent budget is answered by
+        # its children, so a closed CHILD must warn on the parent's row too. The
+        # identity-only version of this check could not see that case, which is
+        # the same blind spot the implementation had.
+        covered_rows = [a for a, _ in rows if covers(a, acct, children)]
+        if covered_rows and when < d_to and "closed on" not in stderr_text:
             failures["closed_account_unreported"].append((seed, acct, str(when)))
 
     # Text and CSV, which the JSON oracle above cannot see.

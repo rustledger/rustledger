@@ -140,6 +140,21 @@ def gen_ledger(rng: random.Random):
     lines.append("2019-01-01 open Assets:Cash")
     lines.append("")
 
+    # Occasionally close an account, so the closed-account diagnostics are
+    # exercised rather than assumed. Every defect in the warning surface so far
+    # has been a guard that excluded a neighboring case, and the generator
+    # reached none of them.
+    closed = {}
+    for a in accts:
+        if rng.random() < 0.15:
+            when = datetime.date(2020, 1, 1) + datetime.timedelta(days=rng.randint(0, 1400))
+            closed[a] = when
+    for a, when in sorted(closed.items()):
+        lines.append(f"{when} close {a}")
+    if closed:
+        lines.append("")
+
+    typos = []
     for _ in range(rng.randint(1, 5)):
         a = rng.choice(accts)
         # Slice the WHOLE list: capping at 3 meant the long commodity added
@@ -159,7 +174,19 @@ def gen_ledger(rng: random.Random):
             if rng.random() < 0.15
             else Decimal(rng.randint(1, 500000)) / Decimal(100)
         )
-        lines.append(f'{d} custom "budget" {a} "{rng.choice(INTERVALS)}" {amt} {ccy}')
+        # A typo'd account or currency must be REPORTED, not silently rendered
+        # as a tidy 0% row. Both are generated so the warning oracle below has
+        # something to be right or wrong about.
+        roll = rng.random()
+        if roll < 0.08:
+            bad = a + "Zz"
+            typos.append(("unopened", bad))
+            lines.append(f'{d} custom "budget" {bad} "{rng.choice(INTERVALS)}" {amt} {ccy}')
+        elif roll < 0.16:
+            typos.append(("currency", a))
+            lines.append(f'{d} custom "budget" {a} "{rng.choice(INTERVALS)}" {amt} ZZQ')
+        else:
+            lines.append(f'{d} custom "budget" {a} "{rng.choice(INTERVALS)}" {amt} {ccy}')
     lines.append("")
 
     for _ in range(rng.randint(0, 12)):
@@ -199,7 +226,7 @@ def gen_ledger(rng: random.Random):
 
     start = datetime.date(2020, 1, 1) + datetime.timedelta(days=rng.randint(0, 1200))
     end = start + datetime.timedelta(days=rng.randint(1, 900))
-    return "\n".join(lines) + "\n", start, end
+    return "\n".join(lines) + "\n", start, end, closed, typos
 
 
 def read_declarations(path: str):
@@ -494,7 +521,9 @@ def check_rendered_formats(rledger, path, d_from, d_to, children, got, failures,
         failures["text_columns_ragged"].append((seed, sorted(row_widths)[:6]))
 
 
-def check_one(rledger, path, src, d_from, d_to, children, failures, seed):
+def check_one(
+    rledger, path, src, d_from, d_to, children, failures, seed, closed=None, typos=None
+):
     Path(path).write_text(src)
     args = [
         rledger, "report", path, "budget",
@@ -554,6 +583,37 @@ def check_one(rledger, path, src, d_from, d_to, children, failures, seed):
             failures["actual_mismatch"].append(
                 (seed, key, f"got={gotv} want={want}", children)
             )
+
+    # DIAGNOSTICS. Every defect in this surface so far has been a guard that
+    # excluded a neighboring case, and none of them were reachable by the
+    # generator. The rule checked here is the one the code documents: a budget
+    # that cannot ever see spending must say so, and stderr must carry the same
+    # set as the JSON `errors` array.
+    stderr_text = proc.stderr
+    json_msgs = [e["message"] for e in got.get("errors", [])]
+    for msg in json_msgs:
+        if msg not in stderr_text:
+            failures["error_json_not_on_stderr"].append((seed, msg[:80]))
+    for bad in {b for kind, b in (typos or []) if kind == "unopened"}:
+        # Only when the row is actually reported (the window may exclude it).
+        if any(a == bad for a, _ in rows) and bad not in stderr_text:
+            failures["typo_account_unreported"].append((seed, bad, children))
+    for acct in {a for kind, a in (typos or []) if kind == "currency"}:
+        # Only when the account actually posts something in ANOTHER currency.
+        # A budget on an account with no postings yet is legitimate (the budget
+        # precedes the spending), and the report deliberately stays quiet there;
+        # asserting otherwise made this oracle wrong, not the code.
+        posts_other = any(
+            a == acct and c != "ZZQ" and Decimal(r["actual"] or 0) != 0
+            for (a, c), r in rows.items()
+        )
+        if posts_other and any(a == acct and c == "ZZQ" for a, c in rows):
+            if "ZZQ" not in stderr_text:
+                failures["typo_currency_unreported"].append((seed, acct, children))
+    for acct, when in (closed or {}).items():
+        rendered = [a for a, _ in rows if a == acct]
+        if rendered and when < d_to and "closed on" not in stderr_text:
+            failures["closed_account_unreported"].append((seed, acct, str(when)))
 
     # Text and CSV, which the JSON oracle above cannot see.
     check_rendered_formats(rledger, path, d_from, d_to, children, got, failures, seed)
@@ -648,8 +708,11 @@ def main() -> int:
     for i in range(args.count):
         seed = args.seed + i
         rng = random.Random(seed)
-        src, d_from, d_to = gen_ledger(rng)
-        check_one(args.rledger, path, src, d_from, d_to, rng.random() < 0.5, failures, seed)
+        src, d_from, d_to, closed, typos = gen_ledger(rng)
+        check_one(
+            args.rledger, path, src, d_from, d_to, rng.random() < 0.5, failures, seed,
+            closed, typos,
+        )
 
     print(f"ran {args.count} generated ledgers from seed {args.seed}")
     if not failures:

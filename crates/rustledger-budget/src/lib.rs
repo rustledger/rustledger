@@ -309,6 +309,24 @@ impl Budgets {
         keys
     }
 
+    /// Every distinct `(account, currency)` ever declared, regardless of date.
+    ///
+    /// Callers that aggregate across a subtree need this: under a
+    /// children-inclusive rule a row is live when any budget it covers is live,
+    /// which [`Self::keys_in_force_before`] cannot answer because it only looks
+    /// at each account's own declarations.
+    #[must_use]
+    pub fn all_keys(&self) -> Vec<(String, String)> {
+        let mut keys: Vec<(String, String)> = self
+            .entries
+            .iter()
+            .map(|e| (e.account.clone(), e.currency.clone()))
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
     /// Whether any budget takes effect before `before`.
     #[must_use]
     pub fn any_in_force_before(&self, before: NaiveDate) -> bool {

@@ -399,7 +399,27 @@ pub(super) fn report_budget<W: Write>(
     // last year: without this filter, reviewing a past period produced a row with
     // `0.00` budgeted and a full window of spending against it, reporting the
     // whole period as overspend for a budget that did not exist yet.
-    let keys = budgets.keys_in_force_before(filter.to);
+    // A row is live when a budget it COVERS is live, which under `--children`
+    // is not the same as the account's own declarations being live: a parent
+    // whose own budget starts next year still aggregates a child budget that is
+    // running now, and dropping that row lost the aggregate the flag exists to
+    // provide. Row identities still come from declared pairs, so no row is
+    // invented for an account nobody budgeted in that currency.
+    let keys: Vec<(String, String)> = if filter.children {
+        budgets
+            .all_keys()
+            .into_iter()
+            .filter(|(account, currency)| {
+                budgets.entries().iter().any(|b| {
+                    b.currency == *currency
+                        && b.from < filter.to
+                        && covers(account, &b.account, true)
+                })
+            })
+            .collect()
+    } else {
+        budgets.keys_in_force_before(filter.to)
+    };
 
     let budgets_ref = &budgets;
     let mut rows: Vec<BudgetRow> = keys

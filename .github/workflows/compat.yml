@@ -700,6 +700,19 @@ jobs:
                   for r in regressions:
                       f.write(r + "\n")
           EOF
+      - name: Budget report fuzz (property + differential)
+        run: |
+          # `report budget` is arithmetic over generated data, and example-based
+          # tests only cover the examples someone thought of. This generates
+          # ledgers and checks the budgeted figure against a clean-room per-day
+          # accrual, the actual figure against an independent recomputation, and
+          # the rows-vs-TOTAL invariant. Self-test first so the oracle itself is
+          # guarded even if the corpus run is skipped.
+          python3 scripts/compat-budget-fuzz.py --self-test
+          python3 scripts/compat-budget-fuzz.py \
+            --rledger ./target/release/rledger \
+            --seed "$(( GITHUB_RUN_NUMBER * 500 ))" \
+            --count 500
       - name: Validate stale-divergence detection logic
         run: |
           # Unit-checks the stale/dangling-mask detection on synthetic data, so

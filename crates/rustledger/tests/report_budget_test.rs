@@ -1539,3 +1539,45 @@ fn an_account_filter_does_not_turn_rejected_budgets_into_none_declared() {
     assert!(txt.contains("every `custom \"budget\"` directive"), "{txt}");
     assert!(!txt.contains("No budgets declared"), "{txt}");
 }
+
+/// Under `--children` a row is live when a budget it COVERS is live, which is
+/// not the same as the account's own declarations being live. A parent whose
+/// own budget starts next year still aggregates a child budget running now, and
+/// dropping that row lost the aggregate the flag exists to provide.
+///
+/// Found by `scripts/compat-budget-fuzz.py`, not by hand: it needs a parent and
+/// a child budget in one currency with declaration dates straddling the window.
+#[test]
+fn a_parent_row_survives_when_only_a_child_budget_is_live() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2019-01-01 open Expenses:Food\n\
+         2019-01-01 open Expenses:Food:Grocery\n\
+         2021-05-18 custom \"budget\" Expenses:Food:Grocery \"daily\" 614.77 GBP\n\
+         2022-05-22 custom \"budget\" Expenses:Food \"monthly\" 4274.21 GBP\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let csv = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--children",
+            "--from",
+            "2021-10-17",
+            "--to",
+            "2021-10-24",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    // 7 days x 614.77, aggregated onto the parent even though the parent's own
+    // GBP budget does not start until 2022.
+    assert!(
+        csv.contains("Expenses:Food,GBP,4303.39"),
+        "the parent row must aggregate the live child budget: {csv}"
+    );
+    assert!(csv.contains("Expenses:Food:Grocery,GBP,4303.39"), "{csv}");
+}

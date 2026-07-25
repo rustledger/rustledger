@@ -68,7 +68,16 @@ ACCOUNTS = [
     "Expenses:Transport",
     "Expenses:Transport:Bus",
     "Expenses:Rent",
+    # Credit-normal, so the sign normalization and the separate earning total
+    # are exercised rather than assumed.
+    "Income:Salary",
+    "Income:Salary:Bonus",
 ]
+
+
+def is_credit_normal(account: str) -> bool:
+    """Mirrors `AccountTypes::is_credit_normal` for the default type names."""
+    return account.split(":")[0] in ("Income", "Liabilities", "Equity")
 
 
 def period_bounds(interval: str, day: datetime.date):
@@ -129,9 +138,18 @@ def gen_ledger(rng: random.Random):
         ccy = rng.choice(CURRENCIES[:2])
         d = datetime.date(2020, 1, 1) + datetime.timedelta(days=rng.randint(0, 1400))
         amt = Decimal(rng.randint(1, 50000)) / Decimal(100)
+        sign = -1 if is_credit_normal(a) else 1
         lines.append(f'{d} * "txn"')
-        lines.append(f"  {a}  {amt} {ccy}")
-        lines.append(f"  Assets:Cash  -{amt} {ccy}")
+        if rng.random() < 0.25 and not is_credit_normal(a):
+            # Priced posting: the weight is in another currency, so the report
+            # must count it against a budget in EITHER currency.
+            rate = Decimal(rng.randint(80, 140)) / Decimal(100)
+            other = "EUR" if ccy == "USD" else "USD"
+            lines.append(f"  {a}  {amt} {ccy} @ {rate} {other}")
+            lines.append(f"  Assets:Cash  -{(amt * rate).quantize(Decimal('0.00001'))} {other}")
+        else:
+            lines.append(f"  {a}  {sign * amt} {ccy}")
+            lines.append(f"  Assets:Cash  {-sign * amt} {ccy}")
     lines.append("")
 
     start = datetime.date(2020, 1, 1) + datetime.timedelta(days=rng.randint(0, 1200))
@@ -216,8 +234,14 @@ def expected_actual(path: str, decls, rows, d_from, d_to, children: bool):
         if not isinstance(e, Transaction) or not (d_from <= e.date < d_to):
             continue
         for p in e.postings:
+            # A posting priced into another currency moved money in both, so it
+            # counts against a budget in either. Weight in the same currency as
+            # the units supersedes the units (`90 USD @@ 95 USD` spent 95).
+            moved = {p.units.currency: p.units.number}
+            if p.price is not None and p.price.currency != p.units.currency:
+                moved[p.price.currency] = p.units.number * p.price.number
             for row_acct, ccy in rows:
-                if ccy != p.units.currency or not covers(row_acct, p.account, children):
+                if ccy not in moved or not covers(row_acct, p.account, children):
                     continue
                 covering = [
                     s
@@ -229,7 +253,8 @@ def expected_actual(path: str, decls, rows, d_from, d_to, children: bool):
                 if not covering:
                     continue
                 if e.date >= max(min(covering), d_from):
-                    out[(row_acct, ccy)] += p.units.number
+                    signed = -moved[ccy] if is_credit_normal(p.account) else moved[ccy]
+                    out[(row_acct, ccy)] += signed
     return dict(out)
 
 
@@ -293,12 +318,17 @@ def check_one(rledger, path, src, d_from, d_to, children, failures, seed):
 
     if not children:
         for tot in got["totals"]:
-            if tot["budgeted"] is None or tot["account"] != "TOTAL":
+            if tot["budgeted"] is None:
                 continue
+            # Spending budgets and earning targets total separately, so each
+            # TOTAL sums only the rows of its own normal direction.
+            earned = tot["account"] == "TOTAL (earned)"
             summed = sum(
                 Decimal(r["budgeted"])
                 for r in got["budgets"]
-                if r["currency"] == tot["currency"] and r["budgeted"] is not None
+                if r["currency"] == tot["currency"]
+                and r["budgeted"] is not None
+                and is_credit_normal(r["account"]) == earned
             )
             slack = tolerance(tot["budgeted"]) * Decimal(len(got["budgets"]) + 1)
             if abs(summed - Decimal(tot["budgeted"])) > slack:

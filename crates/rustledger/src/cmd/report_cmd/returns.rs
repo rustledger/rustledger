@@ -829,25 +829,11 @@ fn render_grouped<W: Write>(
 
 /// Truncate a label to fit a text column (keeps the informative tail).
 ///
-/// The label is first run through `sanitize_display` (control chars → space),
-/// so it can neither split the fixed-width row across lines nor inject a spoofed
-/// second line into the text report.
+/// Delegates to the shared [`super::truncate_label`], which sanitizes control
+/// characters so a label can neither split the fixed-width row across lines nor
+/// inject a spoofed second line into the text report.
 fn truncate(s: &str, width: usize) -> String {
-    let s = sanitize_display(s);
-    let s = s.as_str();
-    if s.chars().count() <= width {
-        s.to_string()
-    } else {
-        let tail: String = s
-            .chars()
-            .rev()
-            .take(width - 1)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        format!("…{tail}")
-    }
+    super::truncate_label(s, width)
 }
 
 #[cfg(test)]

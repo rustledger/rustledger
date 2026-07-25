@@ -42,6 +42,7 @@
 #![warn(missing_docs)]
 
 pub mod amount;
+pub mod calendar;
 pub mod cost;
 pub mod directive;
 pub mod display_context;
@@ -63,6 +64,7 @@ pub mod visit;
 mod kani_proofs;
 
 pub use amount::{Amount, AmountParseError, AmountParseErrorReason, IncompleteAmount};
+pub use calendar::{CalendarPeriod, quarter_index0};
 pub use cost::{BookedCost, BookedCostInvariantError, Cost, CostNumber, CostSpec};
 pub use directive::{
     Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document, Event, MetaValue,

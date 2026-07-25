@@ -626,13 +626,27 @@ fn render<W: io::Write>(
                     .checked_add(jiff::Span::new().days(1))
                     .unwrap_or(today),
             };
+            // The default start is the first of the year *being reported on*, not
+            // of the current year: `--to 2025-01-01` asks about 2024, and
+            // anchoring the start to wall-clock `now` made that hard-error with
+            // an empty window. The sibling horizon-taking reports (returns,
+            // capgains) likewise derive their window from the supplied endpoint.
             let from_date = match from.as_deref() {
                 Some(s) => parse_date(s)?,
-                None => today.first_of_year(),
+                None => to_date
+                    .checked_sub(jiff::Span::new().days(1))
+                    .unwrap_or(to_date)
+                    .first_of_year(),
             };
-            if from_date > to_date {
+            // `--to` is exclusive, so `--from X --to X` is an empty window, not a
+            // single day. Rendering it produced a full table of authoritative
+            // all-zero rows, indistinguishable from "you budgeted nothing and
+            // spent nothing" — and `--from X --to X` is exactly what a user types
+            // for one day, since most CLIs read such a pair as inclusive.
+            if from_date >= to_date {
                 anyhow::bail!(
-                    "--from ({from_date}) is after --to ({to_date}); the window would be empty"
+                    "--from ({from_date}) is not before --to ({to_date}); the window is empty \
+                     (--to is EXCLUSIVE, so a single day is --from {from_date} --to <the next day>)"
                 );
             }
             let filter = budget::BudgetFilter {
@@ -708,6 +722,49 @@ pub(super) fn account_balances(
 // which is invalid JSON).
 pub(super) use rustledger_core::format::escape_csv as csv_escape;
 pub(super) use rustledger_core::format::escape_json as json_escape;
+
+/// Replace control characters (and the Unicode line/paragraph separators) with
+/// spaces so a value cannot break out of a fixed-width text row.
+///
+/// The text renderers lay rows out by column width, with no quoting of their
+/// own — CSV and JSON escape their fields, but text does not. A label carrying a
+/// raw newline therefore splits its row and can forge a convincing extra line in
+/// the table, including a fake `TOTAL`. Ledger-derived labels reach these
+/// renderers from places that accept arbitrary strings (metadata, and the budget
+/// report's quoted-account form), so sanitizing is the renderer's job.
+pub(super) fn sanitize_display(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Truncate a label to fit a text column, keeping the informative **tail**.
+///
+/// Account names share their head (`Expenses:Home:Improvements:…`), so cutting
+/// the tail is what makes two distinct accounts render as identical rows; the
+/// leading `…` marks the elision instead. Always sanitized first (see
+/// [`sanitize_display`]).
+pub(super) fn truncate_label(s: &str, width: usize) -> String {
+    let s = sanitize_display(s);
+    if s.chars().count() <= width {
+        return s;
+    }
+    let tail: String = s
+        .chars()
+        .rev()
+        .take(width.saturating_sub(1))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…{tail}")
+}
 
 #[derive(Default)]
 pub(super) struct LedgerStats {

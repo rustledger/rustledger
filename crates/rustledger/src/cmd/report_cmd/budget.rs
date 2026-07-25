@@ -33,6 +33,22 @@ use rustledger_core::{AccountTypes, Directive, DisplayContext, NaiveDate, is_sub
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
+/// Does this account pass the `--account` filter?
+///
+/// A raw prefix test, matching `balances`, `holdings`, `journal` and `networth`
+/// (balances.rs:29) — one flag must select the same accounts in every report, so
+/// a user can reconcile a budget's `actual` against `report balances`, and so a
+/// partial prefix behaves the same everywhere.
+///
+/// This is deliberately NOT the component-aware [`is_subaccount_or_equal`] used
+/// for budget COVERAGE below. They answer different questions: coverage decides
+/// which spending a budget is responsible for — where treating
+/// `Expenses:FoodCourt` as part of `Expenses:Food` would be wrong, and is a Fava
+/// bug we do not copy — while this is a display filter the user typed.
+fn passes_account_filter(account: &str, filter: Option<&str>) -> bool {
+    filter.is_none_or(|prefix| account.starts_with(prefix))
+}
+
 /// Budgets naming an account the ledger never opens.
 ///
 /// A typo'd account is the worst kind of budget bug: it parses, so `check` is
@@ -57,7 +73,14 @@ fn unopened_account_errors(directives: &[Directive], budgets: &Budgets) -> Vec<B
     budgets
         .entries()
         .iter()
-        .filter(|b| !opened.contains(b.account.as_str()))
+        // A parent budgeted as an aggregate (`Expenses:Food` with only
+        // `Expenses:Food:Groceries` opened) is a normal, working setup — warning
+        // on it told users their budget was broken while the table below showed
+        // it working.
+        .filter(|b| {
+            !opened.contains(b.account.as_str())
+                && !opened.iter().any(|o| is_subaccount_or_equal(o, &b.account))
+        })
         .filter(|b| seen.insert(b.account.clone()))
         .map(|b| BudgetError {
             date: b.from,
@@ -66,6 +89,78 @@ fn unopened_account_errors(directives: &[Directive], budgets: &Budgets) -> Vec<B
                  report no spending",
                 b.account
             ),
+        })
+        .collect()
+}
+
+/// Does a budget on `budgeted` account for spending booked to `posting_account`?
+///
+/// The single definition of budget COVERAGE, used by both the rendered rows and
+/// the whole-report totals. They were two independent spellings of this rule, so
+/// a change to one silently made the TOTAL stop describing the rows above it —
+/// and the integration tests, which assert on rendered text, would not have
+/// caught it.
+///
+/// Component-aware by design: `Expenses:FoodCourt` is NOT part of
+/// `Expenses:Food`, though Fava's `startswith` test says otherwise.
+fn covers(budgeted: &str, posting_account: &str, children: bool) -> bool {
+    if children {
+        is_subaccount_or_equal(posting_account, budgeted)
+    } else {
+        posting_account == budgeted
+    }
+}
+
+/// Budgets whose currency the account never posts in.
+///
+/// The sibling of the typo'd-account check, and the same silent misreport: a
+/// budget written in `USF` against an account that posts `USD` renders a tidy
+/// `0.0%` used row while the real spending sits one keystroke away. Only
+/// accounts that DO post something are checked, so a budget set up before any
+/// spending is recorded stays quiet.
+fn mismatched_currency_errors(directives: &[Directive], budgets: &Budgets) -> Vec<BudgetError> {
+    // Every currency each account actually moves — units and, for a priced or
+    // costed posting, the weight currency too, since `90 EUR @ 1.10 USD` is
+    // legitimately budgetable in either.
+    let mut posted: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for d in directives {
+        let Directive::Transaction(txn) = d else {
+            continue;
+        };
+        for p in &txn.postings {
+            let Some(units) = p.units.as_ref().and_then(|u| u.as_amount()) else {
+                continue;
+            };
+            let entry = posted.entry(p.account.as_str()).or_default();
+            entry.insert(units.currency.to_string());
+            if let Some(w) = rustledger_booking::posting_weight(p) {
+                entry.insert(w.currency.to_string());
+            }
+        }
+    }
+    let mut seen = BTreeSet::new();
+    budgets
+        .entries()
+        .iter()
+        .filter(|b| {
+            posted
+                .get(b.account.as_str())
+                .is_some_and(|currencies| !currencies.contains(&b.currency))
+        })
+        .filter(|b| seen.insert((b.account.clone(), b.currency.clone())))
+        .map(|b| {
+            let actually = posted
+                .get(b.account.as_str())
+                .map(|c| c.iter().cloned().collect::<Vec<_>>().join(", "))
+                .unwrap_or_default();
+            BudgetError {
+                date: b.from,
+                reason: format!(
+                    "budget for {} is in {}, but that account only posts {}; \
+                     the budget will report no spending",
+                    b.account, b.currency, actually
+                ),
+            }
         })
         .collect()
 }
@@ -92,7 +187,9 @@ fn normalized_actual(types: &AccountTypes, account: &str, raw: Decimal) -> Decim
 struct BudgetRow {
     account: String,
     currency: String,
-    budgeted: Decimal,
+    /// `None` when the accrual is not representable — rendered `n/a`, never a
+    /// clamped number passed off as the answer.
+    budgeted: Option<Decimal>,
     actual: Decimal,
 }
 
@@ -101,17 +198,18 @@ impl BudgetRow {
     ///
     /// `actual` is already sign-normalized (see [`normalized_actual`]) so this
     /// subtraction reads the same way for a spending budget and an earning target.
-    fn remaining(&self) -> Decimal {
-        self.budgeted - self.actual
+    fn remaining(&self) -> Option<Decimal> {
+        self.budgeted?.checked_sub(self.actual)
     }
 
     /// Fraction of the budget used, `None` when nothing was budgeted (which would
     /// be a division by zero, not 0% or 100%).
     fn used_fraction(&self) -> Option<f64> {
-        if self.budgeted.is_zero() {
+        let budgeted = self.budgeted?;
+        if budgeted.is_zero() {
             return None;
         }
-        let b: f64 = self.budgeted.try_into().ok()?;
+        let b: f64 = budgeted.try_into().ok()?;
         let a: f64 = self.actual.try_into().ok()?;
         Some(a / b)
     }
@@ -144,23 +242,33 @@ pub(super) fn report_budget<W: Write>(
 ) -> Result<()> {
     let (budgets, mut errors) = Budgets::from_directives(directives);
     errors.extend(unopened_account_errors(directives, &budgets));
+    errors.extend(mismatched_currency_errors(directives, &budgets));
     errors.sort_by_key(|e| e.date);
     for e in &errors {
         eprintln!("warning: {}: {}", e.date, e.reason);
     }
 
-    // Every currency anyone budgeted in. Used to decide which side of a
-    // priced/costed posting the spending counts against (see below).
-    let budgeted_currencies: BTreeSet<&str> = budgets
-        .entries()
-        .iter()
-        .map(|b| b.currency.as_str())
-        .collect();
-
     // Actual spend per (account, currency) inside the window. Postings are read
     // directly rather than through `account_balances` because a budget is about
     // FLOW over a period, not the running balance an inventory realizes.
-    let mut actuals: BTreeMap<(String, String), Decimal> = BTreeMap::new();
+    //
+    // A posting priced or held at a cost moved money in TWO currencies:
+    // `Expenses:Travel 90.00 EUR @ 1.10 USD` is both 90 EUR of travel and 99 USD
+    // out of pocket, and both are true. It is therefore recorded under both keys,
+    // and each budget row reads only its own currency — a EUR budget sees 90, a
+    // USD budget sees 99, and neither is affected by whether the other exists.
+    //
+    // Deciding this once, globally, from "which currencies did anyone budget in"
+    // was wrong: adding an unrelated `custom "budget" Expenses:Travel ... EUR`
+    // moved an *Expenses:Food* posting from its USD row to a EUR key no row read,
+    // silently zeroing that account's reported spend. Rows never sum across
+    // currencies, so recording both costs nothing and couples nothing.
+    //
+    // The weight (and its cost-beats-price ladder) comes from
+    // `rustledger_booking::posting_weight`, the same one `rledger check` and
+    // BQL's `weight` column use, so budget totals cannot drift from the balance
+    // rules.
+    let mut actuals: BTreeMap<(String, String), Vec<(NaiveDate, Decimal)>> = BTreeMap::new();
     for d in directives {
         let Directive::Transaction(txn) = d else {
             continue;
@@ -172,32 +280,18 @@ pub(super) fn report_budget<W: Write>(
             let Some(units) = p.units.as_ref().and_then(|u| u.as_amount()) else {
                 continue;
             };
-            // Which currency does this posting spend? For a plain posting the
-            // units are the whole story. For one carried at a cost or a price
-            // (`Expenses:Travel 90.00 EUR @ 1.10 USD`) there are two defensible
-            // answers, so prefer the one the user actually budgeted in: units if
-            // that currency is budgeted anywhere, else the canonical balance
-            // weight, which is what the money really cost them. Without this a
-            // USD food budget silently ignored every foreign-currency grocery
-            // run and reported the user as fully under budget.
-            //
-            // The weight (and its cost-beats-price ladder) comes from
-            // `rustledger_booking::posting_weight`, the same one `rledger check`
-            // and BQL's `weight` column use, so budget totals cannot drift from
-            // the balance rules.
-            let counted = if budgeted_currencies.contains(units.currency.as_str()) {
-                (units.currency.to_string(), units.number)
-            } else {
-                rustledger_booking::posting_weight(p)
-                    .filter(|w| budgeted_currencies.contains(w.currency.as_str()))
-                    .map_or_else(
-                        || (units.currency.to_string(), units.number),
-                        |w| (w.currency.to_string(), w.number),
-                    )
-            };
-            *actuals
-                .entry((p.account.to_string(), counted.0))
-                .or_default() += counted.1;
+            actuals
+                .entry((p.account.to_string(), units.currency.to_string()))
+                .or_default()
+                .push((txn.date, units.number));
+            if let Some(weight) = rustledger_booking::posting_weight(p)
+                && weight.currency != units.currency
+            {
+                actuals
+                    .entry((p.account.to_string(), weight.currency.to_string()))
+                    .or_default()
+                    .push((txn.date, weight.number));
+            }
         }
     }
 
@@ -214,42 +308,54 @@ pub(super) fn report_budget<W: Write>(
 
     let mut rows: Vec<BudgetRow> = keys
         .into_iter()
-        .filter(|(account, _)| {
-            filter
-                .account
-                .is_none_or(|p| is_subaccount_or_equal(account, p))
-        })
+        .filter(|(account, _)| passes_account_filter(account, filter.account))
         .map(|(account, currency)| {
-            let budgeted = if filter.children {
-                // Sum this account's own budget with every child's: Fava's
-                // child mode adds them rather than letting the parent absorb.
+            // The budget accounts this row is responsible for: itself, plus every
+            // child budget under `--children` (Fava's child mode adds them rather
+            // than letting the parent absorb them).
+            let covered_budgets: Vec<&String> = if filter.children {
                 let mut all: Vec<&String> = budgets
                     .entries()
                     .iter()
-                    .filter(|b| {
-                        b.currency == currency && is_subaccount_or_equal(&b.account, &account)
-                    })
+                    .filter(|b| b.currency == currency && covers(&account, &b.account, true))
                     .map(|b| &b.account)
                     .collect();
                 all.sort();
                 all.dedup();
-                all.iter()
-                    .map(|a| budgets.accrue(a, &currency, filter.from, filter.to))
-                    .sum()
+                all
             } else {
-                budgets.accrue(&account, &currency, filter.from, filter.to)
+                vec![&account]
             };
+            // An un-representable accrual (only reachable from an absurd declared
+            // amount) is reported as such rather than clamped: a clamped figure
+            // is wrong by an unbounded factor and looks authoritative.
+            let budgeted: Option<Decimal> = covered_budgets
+                .iter()
+                .map(|a| budgets.accrue(a, &currency, filter.from, filter.to))
+                .try_fold(Decimal::ZERO, |acc, seg| {
+                    seg.and_then(|s| acc.checked_add(s))
+                });
+            // Spending only counts from the day a budget for this row existed.
+            // `accrue` already refuses to credit anything before that date, so
+            // summing the whole window on the actual side charged a budget added
+            // in June with January-to-May's spending — on the DEFAULT window
+            // (year-to-date), which reported someone exactly on budget as 400%
+            // used. Both sides now share one effective start.
+            let effective_start = covered_budgets
+                .iter()
+                .filter_map(|a| budgets.effective_start(a, &currency))
+                .min()
+                .unwrap_or(filter.from)
+                .max(filter.from);
             let actual = actuals
                 .iter()
-                .filter(|((a, c), _)| {
-                    *c == currency
-                        && if filter.children {
-                            is_subaccount_or_equal(a, &account)
-                        } else {
-                            *a == account
-                        }
+                .filter(|((a, c), _)| *c == currency && covers(&account, a, filter.children))
+                .flat_map(|((a, _), entries)| {
+                    entries
+                        .iter()
+                        .filter(|(date, _)| *date >= effective_start)
+                        .map(move |(_, v)| normalized_actual(types, a, *v))
                 })
-                .map(|((a, _), v)| normalized_actual(types, a, *v))
                 .sum();
             BudgetRow {
                 account,
@@ -269,7 +375,8 @@ pub(super) fn report_budget<W: Write>(
         &rows,
         &totals,
         filter,
-        Empty::diagnose(&budgets, filter),
+        Empty::diagnose(&budgets, &errors, filter),
+        &errors,
         ctx,
         format,
         writer,
@@ -283,38 +390,44 @@ pub(super) fn report_budget<W: Write>(
 /// derived from the distinct budget entries and the postings they cover instead.
 fn compute_totals(
     budgets: &Budgets,
-    actuals: &BTreeMap<(String, String), Decimal>,
+    actuals: &BTreeMap<(String, String), Vec<(NaiveDate, Decimal)>>,
     filter: &BudgetFilter,
     types: &AccountTypes,
-) -> BTreeMap<String, (Decimal, Decimal)> {
+) -> BTreeMap<String, (Option<Decimal>, Decimal)> {
     // Distinct budgeted (account, currency) pairs, after the account filter.
     let pairs: Vec<(String, String)> = budgets
         .keys_in_force_before(filter.to)
         .into_iter()
-        .filter(|(account, _)| {
-            filter
-                .account
-                .is_none_or(|p| is_subaccount_or_equal(account, p))
-        })
+        .filter(|(account, _)| passes_account_filter(account, filter.account))
         .collect();
 
-    let mut totals: BTreeMap<String, (Decimal, Decimal)> = BTreeMap::new();
+    let mut totals: BTreeMap<String, (Option<Decimal>, Decimal)> = BTreeMap::new();
     for (account, currency) in &pairs {
-        let e = totals.entry(currency.clone()).or_default();
-        e.0 += budgets.accrue(account, currency, filter.from, filter.to);
-    }
-    // Each posting counts once, against whichever budgeted accounts cover it.
-    for ((account, currency), raw) in actuals {
-        let covered = pairs.iter().any(|(b, c)| {
-            c == currency
-                && if filter.children {
-                    is_subaccount_or_equal(account, b)
-                } else {
-                    account == b
-                }
+        let e = totals
+            .entry(currency.clone())
+            .or_insert((Some(Decimal::ZERO), Decimal::ZERO));
+        e.0 = e.0.and_then(|acc| {
+            budgets
+                .accrue(account, currency, filter.from, filter.to)
+                .and_then(|seg| acc.checked_add(seg))
         });
-        if covered {
-            let e = totals.entry(currency.clone()).or_default();
+    }
+    // Each posting counts once, against whichever budgeted accounts cover it —
+    // and, as on the row side, only from the day one of those budgets existed.
+    for ((account, currency), entries) in actuals {
+        let effective_start = pairs
+            .iter()
+            .filter(|(b, c)| c == currency && covers(b, account, filter.children))
+            .filter_map(|(b, c)| budgets.effective_start(b, c))
+            .min();
+        let Some(effective_start) = effective_start else {
+            continue;
+        };
+        let effective_start = effective_start.max(filter.from);
+        let e = totals
+            .entry(currency.clone())
+            .or_insert((Some(Decimal::ZERO), Decimal::ZERO));
+        for (_, raw) in entries.iter().filter(|(d, _)| *d >= effective_start) {
             e.1 += normalized_actual(types, account, *raw);
         }
     }
@@ -332,6 +445,8 @@ fn compute_totals(
 enum Empty {
     /// The ledger declares no budgets at all.
     NoneDeclared,
+    /// Every budget directive in the ledger was rejected as malformed.
+    AllRejected,
     /// Budgets exist but all start on or after the window's exclusive end.
     NoneInWindow { earliest: NaiveDate },
     /// Budgets were in force, but `--account` excluded every one.
@@ -339,9 +454,16 @@ enum Empty {
 }
 
 impl Empty {
-    fn diagnose(budgets: &Budgets, filter: &BudgetFilter) -> Self {
+    fn diagnose(budgets: &Budgets, errors: &[BudgetError], filter: &BudgetFilter) -> Self {
         let Some(earliest) = budgets.earliest() else {
-            return Self::NoneDeclared;
+            // "You have no budgets" is a lie when the ledger has budget
+            // directives that were all rejected — it sends the user looking for
+            // the syntax they think they are missing, not the typo they made.
+            return if errors.is_empty() {
+                Self::NoneDeclared
+            } else {
+                Self::AllRejected
+            };
         };
         if !budgets.any_in_force_before(filter.to) {
             return Self::NoneInWindow { earliest };
@@ -351,7 +473,7 @@ impl Empty {
 }
 
 /// A whole-report total as a row, so totals and rows render through one path.
-fn total_row(currency: &str, budgeted: Decimal, actual: Decimal) -> BudgetRow {
+fn total_row(currency: &str, budgeted: Option<Decimal>, actual: Decimal) -> BudgetRow {
     BudgetRow {
         account: "TOTAL".to_string(),
         currency: currency.to_string(),
@@ -367,14 +489,18 @@ fn fmt_used(used: Option<f64>) -> String {
 
 fn render<W: Write>(
     rows: &[BudgetRow],
-    totals: &BTreeMap<String, (Decimal, Decimal)>,
+    totals: &BTreeMap<String, (Option<Decimal>, Decimal)>,
     filter: &BudgetFilter,
     empty: Empty,
+    errors: &[BudgetError],
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
     let money = |n: Decimal, ccy: &str| ctx.format_amount_number(n, ccy);
+    // An un-representable figure prints `n/a` rather than a clamped number.
+    let money_opt =
+        |n: Option<Decimal>, ccy: &str| n.map_or_else(|| "n/a".to_string(), |v| money(v, ccy));
     match format {
         OutputFormat::Csv => {
             writeln!(
@@ -393,9 +519,9 @@ fn render<W: Write>(
                     "{},{},{},{},{},{}",
                     csv_escape(&r.account),
                     csv_escape(&r.currency),
-                    csv_escape(&money(r.budgeted, &r.currency)),
+                    csv_escape(&money_opt(r.budgeted, &r.currency)),
                     csv_escape(&money(r.actual, &r.currency)),
-                    csv_escape(&money(r.remaining(), &r.currency)),
+                    csv_escape(&money_opt(r.remaining(), &r.currency)),
                     r.used_fraction()
                         .map_or_else(String::new, |u| format!("{:.1}", u * 100.0)),
                 )?;
@@ -410,9 +536,9 @@ fn render<W: Write>(
                     "{},{},{},{},{},{}",
                     csv_escape(&row.account),
                     csv_escape(ccy),
-                    csv_escape(&money(row.budgeted, ccy)),
+                    csv_escape(&money_opt(row.budgeted, ccy)),
                     csv_escape(&money(row.actual, ccy)),
-                    csv_escape(&money(row.remaining(), ccy)),
+                    csv_escape(&money_opt(row.remaining(), ccy)),
                     row.used_fraction()
                         .map_or_else(String::new, |u| format!("{:.1}", u * 100.0)),
                 )?;
@@ -424,9 +550,9 @@ fn render<W: Write>(
                     r#"{{"account": "{}", "currency": "{}", "budgeted": "{}", "actual": "{}", "remaining": "{}", "used_pct": {}}}"#,
                     json_escape(&r.account),
                     json_escape(&r.currency),
-                    money(r.budgeted, &r.currency),
+                    money_opt(r.budgeted, &r.currency),
                     money(r.actual, &r.currency),
-                    money(r.remaining(), &r.currency),
+                    money_opt(r.remaining(), &r.currency),
                     r.used_fraction()
                         .map_or_else(|| "null".to_string(), |u| format!("{:.1}", u * 100.0)),
                 )
@@ -439,13 +565,29 @@ fn render<W: Write>(
                 .iter()
                 .map(|(ccy, (b, a))| obj(&total_row(ccy, *b, *a)))
                 .collect();
+            // Rejected directives are reported in-band as well as on stderr.
+            // Without this a dashboard cannot tell "this ledger has no budgets"
+            // from "every budget in it was rejected": both produced an empty
+            // `budgets` array and exit 0, so the user's typo stayed invisible
+            // for as long as they only looked at the UI.
+            let error_objs: Vec<String> = errors
+                .iter()
+                .map(|e| {
+                    format!(
+                        r#"{{"date": "{}", "message": "{}"}}"#,
+                        e.date,
+                        json_escape(&e.reason)
+                    )
+                })
+                .collect();
             writeln!(
                 writer,
-                r#"{{"from": "{}", "to": "{}", "budgets": [{}], "totals": [{}]}}"#,
+                r#"{{"from": "{}", "to": "{}", "budgets": [{}], "totals": [{}], "errors": [{}]}}"#,
                 filter.from,
                 filter.to,
                 objs.join(", "),
-                total_objs.join(", ")
+                total_objs.join(", "),
+                error_objs.join(", ")
             )?;
         }
         OutputFormat::Text => {
@@ -466,6 +608,11 @@ fn render<W: Write>(
                 // them all" — telling a user with budgets that they have none
                 // sends them looking for a parsing bug that isn't there.
                 match empty {
+                    Empty::AllRejected => writeln!(
+                        writer,
+                        "No usable budgets: every `custom \"budget\"` directive in \
+                         this ledger was rejected. See the warnings above."
+                    )?,
                     Empty::NoneDeclared => writeln!(
                         writer,
                         "No budgets declared. Add e.g.:\n  2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD"
@@ -490,19 +637,19 @@ fn render<W: Write>(
             // which figure is which.
             writeln!(
                 writer,
-                "{:<28}{:<6}{:>13}{:>13}{:>13}{:>9}",
+                "{:<28} {:<5}{:>13}{:>13}{:>13}{:>9}",
                 "Account", "Ccy", "Budgeted", "Actual", "Remaining", "Used"
             )?;
             writeln!(writer, "{}", "-".repeat(RULE))?;
             for r in rows {
                 writeln!(
                     writer,
-                    "{:<28}{:<6}{:>13}{:>13}{:>13}{:>9}",
+                    "{:<28} {:<5}{:>13}{:>13}{:>13}{:>9}",
                     truncate(&r.account, 28),
                     r.currency,
-                    money(r.budgeted, &r.currency),
+                    money_opt(r.budgeted, &r.currency),
                     money(r.actual, &r.currency),
-                    money(r.remaining(), &r.currency),
+                    money_opt(r.remaining(), &r.currency),
                     fmt_used(r.used_fraction()),
                 )?;
             }
@@ -513,12 +660,12 @@ fn render<W: Write>(
                 let row = total_row(ccy, *b, *a);
                 writeln!(
                     writer,
-                    "{:<28}{:<6}{:>13}{:>13}{:>13}{:>9}",
+                    "{:<28} {:<5}{:>13}{:>13}{:>13}{:>9}",
                     row.account,
                     ccy,
-                    money(row.budgeted, ccy),
+                    money_opt(row.budgeted, ccy),
                     money(row.actual, ccy),
-                    money(row.remaining(), ccy),
+                    money_opt(row.remaining(), ccy),
                     fmt_used(row.used_fraction()),
                 )?;
             }
@@ -527,14 +674,14 @@ fn render<W: Write>(
     Ok(())
 }
 
-/// Truncate to a column width, keeping the informative head.
+/// Truncate a label to a column width, keeping the informative tail.
+///
+/// The shared [`super::truncate_label`]: it sanitizes control characters (a
+/// budget account may be written as an arbitrary quoted string, and a raw
+/// newline in one would otherwise forge a row in the text table) and keeps the
+/// tail, so two accounts sharing a long prefix stay distinguishable.
 fn truncate(s: &str, width: usize) -> String {
-    if s.chars().count() <= width {
-        s.to_string()
-    } else {
-        let head: String = s.chars().take(width.saturating_sub(1)).collect();
-        format!("{head}…")
-    }
+    super::truncate_label(s, width)
 }
 
 #[cfg(test)]
@@ -548,26 +695,36 @@ mod tests {
         let r = BudgetRow {
             account: "Expenses:Food".into(),
             currency: "USD".into(),
-            budgeted: Decimal::from(400),
+            budgeted: Some(Decimal::from(400)),
             actual: Decimal::from(120),
         };
-        assert_eq!(r.remaining(), Decimal::from(280));
+        assert_eq!(r.remaining(), Some(Decimal::from(280)));
         assert!((r.used_fraction().unwrap() - 0.30).abs() < 1e-9);
         // Overspent: remaining goes negative rather than clamping at zero.
         let over = BudgetRow {
             actual: Decimal::from(500),
             ..r
         };
-        assert_eq!(over.remaining(), Decimal::from(-100));
+        assert_eq!(over.remaining(), Some(Decimal::from(-100)));
         assert!(over.used_fraction().unwrap() > 1.0);
         // No budget -> no percentage (a division by zero is not 0% or 100%).
         let none = BudgetRow {
             account: "Expenses:Food".into(),
             currency: "USD".into(),
-            budgeted: Decimal::ZERO,
+            budgeted: Some(Decimal::ZERO),
             actual: Decimal::from(50),
         };
         assert_eq!(none.used_fraction(), None);
         assert_eq!(fmt_used(None), "n/a");
+        // An un-representable accrual has no remaining and no percentage — it is
+        // reported as `n/a`, never as a clamped number.
+        let overflowed = BudgetRow {
+            account: "Expenses:Food".into(),
+            currency: "USD".into(),
+            budgeted: None,
+            actual: Decimal::from(50),
+        };
+        assert_eq!(overflowed.remaining(), None);
+        assert_eq!(overflowed.used_fraction(), None);
     }
 }

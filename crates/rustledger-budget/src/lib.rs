@@ -41,7 +41,7 @@
 //!   entirely before the first declaration accrues nothing.
 
 use rust_decimal::Decimal;
-use rustledger_core::{Directive, MetaValue, NaiveDate};
+use rustledger_core::{CalendarPeriod, Directive, MetaValue, NaiveDate};
 
 /// A budget interval, which fixes both the calendar anchoring and the per-day
 /// denominator.
@@ -78,37 +78,34 @@ impl Interval {
         }
     }
 
+    /// The calendar period this interval measures.
+    ///
+    /// The truncation arithmetic itself lives in
+    /// [`rustledger_core::CalendarPeriod`], shared with BQL's `DATE_TRUNC`, so a
+    /// weekly budget and `GROUP BY DATE_TRUNC('WEEK', date)` cannot disagree
+    /// about where a week starts. This type stays distinct because it also
+    /// carries the Fava keyword vocabulary, which is a budget-format concern.
+    #[must_use]
+    pub const fn period(self) -> CalendarPeriod {
+        match self {
+            Self::Day => CalendarPeriod::Day,
+            Self::Week => CalendarPeriod::Week,
+            Self::Month => CalendarPeriod::Month,
+            Self::Quarter => CalendarPeriod::Quarter,
+            Self::Year => CalendarPeriod::Year,
+        }
+    }
+
     /// The first day of the calendar interval containing `day`.
     #[must_use]
     pub fn start_of(self, day: NaiveDate) -> NaiveDate {
-        match self {
-            Self::Day => day,
-            // ISO week: back up to Monday.
-            Self::Week => day
-                .checked_sub(
-                    jiff::Span::new().days(i64::from(day.weekday().to_monday_zero_offset())),
-                )
-                .unwrap_or(day),
-            Self::Month => day.first_of_month(),
-            Self::Quarter => {
-                let m = ((day.month() - 1) / 3) * 3 + 1;
-                NaiveDate::new(day.year(), m, 1).unwrap_or(day)
-            }
-            Self::Year => day.first_of_year(),
-        }
+        self.period().start_of(day)
     }
 
     /// The first day of the interval after the one starting at `start`.
     #[must_use]
     pub fn next_start(self, start: NaiveDate) -> NaiveDate {
-        let span = match self {
-            Self::Day => jiff::Span::new().days(1),
-            Self::Week => jiff::Span::new().days(7),
-            Self::Month => jiff::Span::new().months(1),
-            Self::Quarter => jiff::Span::new().months(3),
-            Self::Year => jiff::Span::new().years(1),
-        };
-        start.checked_add(span).unwrap_or(start)
+        self.period().next_start(start)
     }
 }
 
@@ -145,9 +142,28 @@ pub struct BudgetError {
 fn account_name(value: &MetaValue) -> Option<String> {
     match value {
         MetaValue::Account(a) => Some(a.to_string()),
-        MetaValue::String(s) if s.contains(':') => Some(s.clone()),
+        MetaValue::String(s) if looks_like_account(s) => Some(s.clone()),
         _ => None,
     }
+}
+
+/// Is this quoted string plausibly an account name?
+///
+/// Requires colon-separated, non-empty components made of characters an account
+/// can actually contain. A quoted value is otherwise arbitrary user text, and
+/// accepting it verbatim let a name carrying a newline forge a row in the text
+/// report's fixed-width table. The renderer sanitizes too — this is the other
+/// half of that defense, keeping junk out of the model rather than only out of
+/// one view of it.
+fn looks_like_account(s: &str) -> bool {
+    let mut components = s.split(':');
+    let has_two = s.contains(':');
+    has_two
+        && components.all(|c| {
+            !c.is_empty()
+                && c.chars()
+                    .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_')
+        })
 }
 
 /// Read every `custom "budget"` directive, in effective-date order.
@@ -172,11 +188,17 @@ pub fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetE
         // strings, so real Fava-budgeted ledgers contain both spellings; taking
         // only the token would reject a ledger Fava renders fine, which is
         // exactly the compatibility this crate exists to provide.
+        // Trailing values are ignored rather than rejected: Fava reads
+        // `values[0..2]` and lets a ledger carry a trailing note
+        // (`... 400.00 USD "groceries only"`). Rejecting the whole directive
+        // dropped a real budget AND its matching spend from the report over a
+        // comment — the opposite of the compatibility this crate exists for.
         let parsed = match c.values.as_slice() {
             [
                 acct,
                 MetaValue::String(interval_raw),
                 MetaValue::Amount(amount),
+                ..,
             ] => account_name(acct).map(|a| (a, interval_raw, amount)),
             _ => None,
         };
@@ -291,6 +313,20 @@ impl Budgets {
             .rfind(|b| b.account == account && b.currency == currency && b.from <= day)
     }
 
+    /// The first date any budget for `(account, currency)` takes effect.
+    ///
+    /// Before this date the pair has no budget at all, so spending then is not
+    /// spending "against" it — the dual of [`Self::accrue`], which likewise
+    /// credits nothing before a budget exists.
+    #[must_use]
+    pub fn effective_start(&self, account: &str, currency: &str) -> Option<NaiveDate> {
+        self.entries
+            .iter()
+            .filter(|e| e.account == account && e.currency == currency)
+            .map(|e| e.from)
+            .min()
+    }
+
     /// The date of the next declaration for `(account, currency)` strictly after
     /// `after` — where the accrual rate changes.
     #[must_use]
@@ -323,7 +359,18 @@ impl Budgets {
     /// Segments break at whichever comes first: the end of the calendar interval,
     /// the start of a superseding budget, or the end of the window.
     #[must_use]
-    pub fn accrue(&self, account: &str, currency: &str, from: NaiveDate, to: NaiveDate) -> Decimal {
+    /// `None` if the arithmetic leaves `Decimal`'s range, which only an absurd
+    /// declared amount can cause. Saturating instead would print a figure wrong
+    /// by an unbounded factor as though it were authoritative — a two-month
+    /// window and a one-month window both clamping to `Decimal::MAX` look
+    /// identical on screen.
+    pub fn accrue(
+        &self,
+        account: &str,
+        currency: &str,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Option<Decimal> {
         let next_day = |d: NaiveDate| d.checked_add(jiff::Span::new().days(1)).unwrap_or(d);
         let days_between = |a: NaiveDate, b: NaiveDate| {
             i64::from(a.until((jiff::Unit::Day, b)).map_or(0, |s| s.get_days()))
@@ -365,15 +412,17 @@ impl Budgets {
                 // amount comes from the ledger, which must never panic the CLI.
                 // Fall back to divide-first for those: the residue is irrelevant
                 // at that scale, and a slightly inexact number beats an abort.
-                let seg = b.amount.checked_mul(num).map_or_else(
-                    || (b.amount / den).saturating_mul(num),
-                    |product| product / den,
-                );
-                total = total.saturating_add(seg);
+                let seg = match b.amount.checked_mul(num) {
+                    Some(product) => product.checked_div(den)?,
+                    // Multiply-before-divide overflows above about MAX/366;
+                    // divide-first still answers, less exactly, at that scale.
+                    None => b.amount.checked_div(den)?.checked_mul(num)?,
+                };
+                total = total.checked_add(seg)?;
             }
             cursor = seg_end;
         }
-        total
+        Some(total)
     }
 }
 

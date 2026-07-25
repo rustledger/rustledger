@@ -214,18 +214,14 @@ impl Executor<'_> {
         };
 
         let result = match field.as_str() {
-            "YEAR" => rustledger_core::naive_date(i32::from(date.year()), 1, 1),
-            "QUARTER" => {
-                let quarter = quarter_index0(date.month() as u32);
-                rustledger_core::naive_date(i32::from(date.year()), quarter * 3 + 1, 1)
-            }
-            "MONTH" => rustledger_core::naive_date(i32::from(date.year()), date.month() as u32, 1),
-            "WEEK" => {
-                // Start of week (Monday)
-                let days_from_monday = i64::from(date.weekday().to_monday_zero_offset() as u32);
-                date.checked_add(jiff::ToSpan::days(-days_from_monday)).ok()
-            }
-            "DAY" => Some(date),
+            // Truncation delegates to the shared canonical
+            // (`rustledger_core::CalendarPeriod`) so BQL period grouping and the
+            // budget report's interval accrual cannot drift apart.
+            "YEAR" => Some(rustledger_core::CalendarPeriod::Year.start_of(date)),
+            "QUARTER" => Some(rustledger_core::CalendarPeriod::Quarter.start_of(date)),
+            "MONTH" => Some(rustledger_core::CalendarPeriod::Month.start_of(date)),
+            "WEEK" => Some(rustledger_core::CalendarPeriod::Week.start_of(date)),
+            "DAY" => Some(rustledger_core::CalendarPeriod::Day.start_of(date)),
             _ => {
                 return Err(QueryError::Type(format!(
                     "DATE_TRUNC: unknown field '{field}', expected YEAR, QUARTER, MONTH, WEEK, or DAY"

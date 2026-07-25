@@ -193,7 +193,7 @@ fn report_command(name: &'static str, description: &'static str) -> Command {
         .usage(
             "ag-rledger report [<file>] <report> [--file <file>] [--format <format>] [--verbose] \
              [-v] [--account <account>] [--limit <n>] [--period <period>] [--currency <currency>] \
-             [--no-zero]",
+             [--no-zero] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--children]",
         )
         .allow_unknown_flags()
         .allow_extra_args()
@@ -569,7 +569,7 @@ fn build_report_args(
         CommandError::new(
             "report subcommand is required",
             "MISSING_REPORT",
-            "Use balances, income, journal, holdings, networth, accounts, commodities, stats, or prices.",
+            "Use balances, income, journal, holdings, networth, accounts, commodities, stats, prices, or budget.",
         )
         .exit_code(agcli::ExitCode::USAGE)
     })?;

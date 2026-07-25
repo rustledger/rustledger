@@ -60,23 +60,27 @@ fn whole_period_accrues_the_exact_stated_amount() {
     )]);
     // Leap February: 29 days.
     assert_eq!(
-        b.accrue("Expenses:Food", "USD", d(2024, 2, 1), d(2024, 3, 1)),
+        b.accrue("Expenses:Food", "USD", d(2024, 2, 1), d(2024, 3, 1))
+            .unwrap(),
         Decimal::from(400),
         "29-day February still totals exactly the monthly amount"
     );
     // Common February: 28 days.
     assert_eq!(
-        b.accrue("Expenses:Food", "USD", d(2025, 2, 1), d(2025, 3, 1)),
+        b.accrue("Expenses:Food", "USD", d(2025, 2, 1), d(2025, 3, 1))
+            .unwrap(),
         Decimal::from(400)
     );
     // 31-day month.
     assert_eq!(
-        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2024, 2, 1)),
+        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2024, 2, 1))
+            .unwrap(),
         Decimal::from(400)
     );
     // A whole year of a monthly budget is twelve months' worth.
     assert_eq!(
-        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2025, 1, 1)),
+        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2025, 1, 1))
+            .unwrap(),
         Decimal::from(4800)
     );
 }
@@ -91,7 +95,9 @@ fn partial_window_prorates_by_calendar_days() {
         Interval::Month,
         400,
     )]);
-    let got = b.accrue("Expenses:Food", "USD", d(2024, 2, 1), d(2024, 2, 15));
+    let got = b
+        .accrue("Expenses:Food", "USD", d(2024, 2, 1), d(2024, 2, 15))
+        .unwrap();
     let want = Decimal::from(400) * Decimal::from(14) / Decimal::from(29);
     assert_eq!(got, want);
     // Sanity: the fraction is a real 29-day denominator, not 28 or 30.
@@ -111,12 +117,14 @@ fn later_directive_supersedes_from_its_date() {
     ]);
     // May (old rate) + June (new rate).
     assert_eq!(
-        b.accrue("Expenses:Food", "USD", d(2024, 5, 1), d(2024, 7, 1)),
+        b.accrue("Expenses:Food", "USD", d(2024, 5, 1), d(2024, 7, 1))
+            .unwrap(),
         Decimal::from(850)
     );
     // Whole year: Jan-May at 400, Jun-Dec at 450.
     assert_eq!(
-        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2025, 1, 1)),
+        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2025, 1, 1))
+            .unwrap(),
         Decimal::from(5 * 400 + 7 * 450)
     );
 }
@@ -132,16 +140,19 @@ fn currencies_coexist_rather_than_superseding() {
         eur,
     ]);
     assert_eq!(
-        b.accrue("Expenses:Food", "USD", d(2024, 2, 1), d(2024, 3, 1)),
+        b.accrue("Expenses:Food", "USD", d(2024, 2, 1), d(2024, 3, 1))
+            .unwrap(),
         Decimal::from(400),
         "the EUR entry must not supersede the USD one"
     );
     assert_eq!(
-        b.accrue("Expenses:Food", "USD", d(2024, 3, 1), d(2024, 4, 1)),
+        b.accrue("Expenses:Food", "USD", d(2024, 3, 1), d(2024, 4, 1))
+            .unwrap(),
         Decimal::from(400)
     );
     assert_eq!(
-        b.accrue("Expenses:Food", "EUR", d(2024, 2, 1), d(2024, 3, 1)),
+        b.accrue("Expenses:Food", "EUR", d(2024, 2, 1), d(2024, 3, 1))
+            .unwrap(),
         Decimal::from(100)
     );
 }
@@ -157,12 +168,14 @@ fn nothing_accrues_before_the_first_declaration() {
         300,
     )]);
     assert_eq!(
-        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2024, 6, 1)),
+        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2024, 6, 1))
+            .unwrap(),
         Decimal::ZERO
     );
     // A window straddling the declaration picks up only the covered part.
     assert_eq!(
-        b.accrue("Expenses:Food", "USD", d(2024, 5, 1), d(2024, 7, 1)),
+        b.accrue("Expenses:Food", "USD", d(2024, 5, 1), d(2024, 7, 1))
+            .unwrap(),
         Decimal::from(300),
         "May accrues nothing; June accrues the full month"
     );
@@ -179,7 +192,8 @@ fn weekly_and_yearly_denominators() {
     )]);
     // 29 days of February at 10/day.
     assert_eq!(
-        w.accrue("Expenses:T", "USD", d(2024, 2, 1), d(2024, 3, 1)),
+        w.accrue("Expenses:T", "USD", d(2024, 2, 1), d(2024, 3, 1))
+            .unwrap(),
         Decimal::from(290)
     );
     let y = Budgets::new(vec![budget(
@@ -190,12 +204,14 @@ fn weekly_and_yearly_denominators() {
     )]);
     // A whole leap year is exactly the yearly figure.
     assert_eq!(
-        y.accrue("Expenses:T", "USD", d(2024, 1, 1), d(2025, 1, 1)),
+        y.accrue("Expenses:T", "USD", d(2024, 1, 1), d(2025, 1, 1))
+            .unwrap(),
         Decimal::from(3660)
     );
     // One day of a 366-day year.
     assert_eq!(
-        y.accrue("Expenses:T", "USD", d(2024, 3, 1), d(2024, 3, 2)),
+        y.accrue("Expenses:T", "USD", d(2024, 3, 1), d(2024, 3, 2))
+            .unwrap(),
         Decimal::from(3660) / Decimal::from(366)
     );
 }
@@ -213,7 +229,8 @@ fn quarters_anchor_to_calendar_boundaries() {
         910,
     )]);
     assert_eq!(
-        b.accrue("Expenses:T", "USD", d(2024, 4, 1), d(2024, 7, 1)),
+        b.accrue("Expenses:T", "USD", d(2024, 4, 1), d(2024, 7, 1))
+            .unwrap(),
         Decimal::from(910),
         "Q2 accrues exactly the quarterly amount"
     );

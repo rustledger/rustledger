@@ -324,7 +324,7 @@ fn an_inverted_window_is_rejected() {
         .expect("run");
     assert!(!out.status.success(), "an empty window must error");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("after"),
+        String::from_utf8_lossy(&out.stderr).contains("the window is empty"),
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -405,11 +405,11 @@ fn children_totals_do_not_double_count_the_child() {
     );
     // Rows overlap by design (the parent row includes its child).
     assert!(
-        txt.contains("Expenses:Food               USD          400.00        50.00"),
+        txt.contains("Expenses:Food                USD         400.00        50.00"),
         "{txt}"
     );
     assert!(
-        txt.contains("Expenses:Food:Restaurant    USD          100.00        50.00"),
+        txt.contains("Expenses:Food:Restaurant     USD         100.00        50.00"),
         "{txt}"
     );
     // The TOTAL counts each budget and each posting once: 300+100 and one 50.
@@ -685,8 +685,8 @@ fn text_output_names_the_currency_of_each_row() {
             "--no-pager",
         ],
     );
-    assert!(txt.contains("Expenses:Food               EUR"), "{txt}");
-    assert!(txt.contains("Expenses:Food               USD"), "{txt}");
+    assert!(txt.contains("Expenses:Food                EUR"), "{txt}");
+    assert!(txt.contains("Expenses:Food                USD"), "{txt}");
 }
 
 /// An `--account` filter that excludes everything must not claim the ledger has
@@ -710,7 +710,7 @@ fn an_empty_result_says_which_reason_applies() {
             "--to",
             "2024-03-01",
             "--account",
-            "Expenses:Foo",
+            "Expenses:Nonexistent",
             "--no-pager",
         ],
     );
@@ -766,5 +766,266 @@ fn a_budget_on_an_unopened_account_warns() {
     assert!(
         stderr.contains("Expenses:Foood") && stderr.contains("no such account is opened"),
         "a typo'd budget account must be reported: {stderr}"
+    );
+}
+
+/// Spending from before the budget was declared must not be charged against it.
+/// `accrue` already refuses to credit a budget before its own date; summing the
+/// whole window on the actual side reported someone exactly on budget as 400%
+/// used — on the DEFAULT year-to-date window.
+#[test]
+fn spending_before_the_budget_existed_is_not_charged_to_it() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-06-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n\
+         2024-01-15 * \"a\"\n  Expenses:Food 400.00 USD\n  Assets:Cash\n\
+         2024-02-15 * \"b\"\n  Expenses:Food 400.00 USD\n  Assets:Cash\n\
+         2024-03-15 * \"c\"\n  Expenses:Food 400.00 USD\n  Assets:Cash\n\
+         2024-06-15 * \"d\"\n  Expenses:Food 400.00 USD\n  Assets:Cash\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let csv = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-07-01",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        csv.contains("Expenses:Food,USD,400.00,400.00,0.00,100.0"),
+        "June's budget is compared with June's spending, not the whole year's: {csv}"
+    );
+}
+
+/// A budget declared for one account must not change how another account's
+/// spending is counted. Choosing the counted currency from a ledger-global set of
+/// budgeted currencies made adding an unrelated budget zero an existing row.
+#[test]
+fn an_unrelated_budget_does_not_move_another_accounts_spend() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Travel\n\
+         2024-01-01 open Expenses:Groceries\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-01-01 custom \"budget\" Expenses:Travel \"monthly\" 1000.00 USD\n\
+         2024-01-01 custom \"budget\" Expenses:Groceries \"monthly\" 300.00 EUR\n\
+         2024-01-10 * \"flight\"\n  \
+           Expenses:Travel  500.00 EUR @ 1.10 USD\n  Assets:Cash     -550.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let csv = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        csv.contains("Expenses:Travel,USD,1000.00,550.00,450.00,55.0"),
+        "the 550 USD flight counts against the USD travel budget: {csv}"
+    );
+}
+
+/// A budget account is written as a quoted string in some Fava ledgers, so it can
+/// carry arbitrary text — including a newline, which would split the fixed-width
+/// text row and forge an extra table line (a fake TOTAL).
+#[test]
+fn a_quoted_account_cannot_forge_a_table_row() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" \"Expenses:Food\nTOTAL      USD  999.00\" \"monthly\" 400.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let out = Command::new(&bin)
+        .args([
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run rledger");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !text.contains("999.00"),
+        "a newline in a quoted account must not produce a forged row: {text}"
+    );
+}
+
+/// Two accounts sharing a long prefix must stay distinguishable: truncating the
+/// tail rendered both as `Expenses:Home:Improvements:…`.
+#[test]
+fn long_account_names_stay_distinguishable() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Home:Improvements:Kitchen\n\
+         2024-01-01 open Expenses:Home:Improvements:Bathroom\n\
+         2024-01-01 custom \"budget\" Expenses:Home:Improvements:Kitchen \"monthly\" 100.00 USD\n\
+         2024-01-01 custom \"budget\" Expenses:Home:Improvements:Bathroom \"monthly\" 200.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let txt = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--no-pager",
+        ],
+    );
+    assert!(txt.contains("Kitchen"), "{txt}");
+    assert!(txt.contains("Bathroom"), "{txt}");
+}
+
+/// `--to` is exclusive, so `--from X --to X` is an empty window. Rendering it
+/// produced a table of authoritative all-zero rows.
+#[test]
+fn an_empty_window_is_rejected_not_rendered_as_zeros() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let out = Command::new(&bin)
+        .args([
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-03-05",
+            "--to",
+            "2024-03-05",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run rledger");
+    assert!(!out.status.success(), "an empty window must be an error");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("EXCLUSIVE"),
+        "the error should explain the exclusive end"
+    );
+}
+
+/// A budget whose currency the account never posts in is a typo, and rendered a
+/// tidy 0%-used row while the real spending sat one keystroke away.
+#[test]
+fn a_budget_in_a_currency_the_account_never_posts_warns() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Assets:Cash\n\
+         2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USF\n\
+         2024-03-05 * \"groceries\"\n  Expenses:Food 380.00 USD\n  Assets:Cash\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let out = Command::new(&bin)
+        .args([
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-03-01",
+            "--to",
+            "2024-04-01",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run rledger");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("USF") && stderr.contains("only posts USD"),
+        "a currency typo must be reported: {stderr}"
+    );
+}
+
+/// An accrual too large to represent is reported as `n/a`, never as a clamped
+/// number: saturating made a one-month and a two-month window print the same
+/// figure, each looking authoritative.
+#[test]
+fn an_unrepresentable_accrual_reports_na_not_a_clamped_number() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 79228162514264337593543950335 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let csv = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-03-01",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        csv.contains("Expenses:Food,USD,n/a"),
+        "two months of a MAX budget is not representable: {csv}"
+    );
+}
+
+/// Machine consumers must be able to tell "no budgets" from "all budgets
+/// rejected" — both produced an empty `budgets` array and exit 0.
+#[test]
+fn json_reports_rejected_directives_in_band() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"fortnightly\" 400.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let json = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    assert!(json.contains("\"errors\""), "{json}");
+    assert!(
+        json.contains("fortnightly"),
+        "the rejected directive is named: {json}"
     );
 }

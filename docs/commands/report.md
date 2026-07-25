@@ -452,19 +452,25 @@ Budget
 
 Period      2024-02-01 to 2024-03-01 (end exclusive)
 
-Account                            Budgeted       Actual    Remaining     Used
+Account                      Ccy       Budgeted       Actual    Remaining     Used
 ------------------------------------------------------------------------------------
-Expenses:Food                        400.00       120.00       280.00    30.0%
-Expenses:Transport                   290.00        60.00       230.00    20.7%
+Expenses:Food                USD         400.00       120.00       280.00    30.0%
+Expenses:Transport           USD         290.00        60.00       230.00    20.7%
 ------------------------------------------------------------------------------------
-TOTAL                                690.00       180.00       510.00    26.1% USD
+TOTAL                        USD         690.00       180.00       510.00    26.1%
 ```
+
+Totals are per currency (summing across currencies would be meaningless), and each
+budget and each posting is counted once — under `--children` a parent row and a child
+row overlap by design, so the TOTAL is *not* the sum of the rows. `--format csv` and
+`--format json` carry the same TOTAL rows, and JSON adds an `errors` array naming any
+directive that could not be read.
 
 | Option | Description |
 |--------|-------------|
-| `--account <PREFIX>` | Only accounts under this prefix. |
-| `--from <YYYY-MM-DD>` | Window start, inclusive. Defaults to the start of the current year. |
-| `--to <YYYY-MM-DD>` | Window end, **exclusive**. Defaults to *tomorrow*, so the default window includes today's own spending. |
+| `--account <PREFIX>` | Only accounts starting with this prefix — the same raw prefix test `balances`, `holdings`, `journal` and `networth` use, so one value selects the same accounts everywhere. (Budget *coverage* under `--children` is matched by account component instead; see below.) |
+| `--from <YYYY-MM-DD>` | Window start, inclusive. Defaults to the start of the year being reported on (the year of `--to`), not the current year. |
+| `--to <YYYY-MM-DD>` | Window end, **exclusive**. Defaults to *tomorrow*, so the default window includes today's own spending. Because it is exclusive, `--from X --to X` is an empty window and is rejected. |
 | `--children` | Count spending in subaccounts toward a parent's budget (see below). |
 
 **Intervals** are `daily`, `weekly`, `monthly`, `quarterly` and `yearly` (the bare
@@ -492,6 +498,13 @@ currency**, from its own date. Budgets in different currencies for one account s
 simultaneously active and are reported as separate rows — one rate never silently
 replaces another denominated differently. Nothing accrues before the first declaration:
 a budget is not retroactive.
+
+**Spending before the budget existed is excluded too.** Both sides of the comparison
+start on the day the budget was declared, so adding a budget in June and running the
+default year-to-date window compares June's budget against June's spending — not
+against January-to-June's. A posting carrying a price or a cost counts toward a budget
+in *either* currency it moved: `Expenses:Travel 90.00 EUR @ 1.10 USD` is 90.00 against
+a EUR budget and 99.00 against a USD one.
 
 **Parent and child accounts.** By default a budget on `Expenses:Food` covers only
 postings booked to `Expenses:Food` itself, matching Fava. Pass `--children` to also

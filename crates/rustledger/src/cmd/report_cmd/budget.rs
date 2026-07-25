@@ -147,14 +147,26 @@ fn closed_account_errors(
             let when = *closed.get(b.account.as_str())?;
             // Only if the budget is still running past the close inside this
             // window; a budget that ended before it is unremarkable.
-            (when < to && b.from <= when && seen.insert(b.account.clone())).then(|| BudgetError {
+            // Any budget that accrues on or after the close is unspendable for
+            // those days. A budget declared AFTER the close is the worse case —
+            // it can never see a single posting — and an earlier `b.from <= when`
+            // guard silently excluded exactly that one.
+            (when < to && b.from < to && seen.insert(b.account.clone())).then(|| BudgetError {
                 date: when,
                 account: Some(b.account.clone()),
-                reason: format!(
-                    "budget for {} keeps accruing after the account was closed on {}; \
-                     no spending can be booked to it after that date",
-                    b.account, when
-                ),
+                reason: if b.from >= when {
+                    format!(
+                        "budget for {} starts {} but the account was closed on {}; \
+                         no spending can ever be booked to it",
+                        b.account, b.from, when
+                    )
+                } else {
+                    format!(
+                        "budget for {} keeps accruing after the account was closed on {}; \
+                         no spending can be booked to it after that date",
+                        b.account, when
+                    )
+                },
             })
         })
         .collect()
@@ -526,11 +538,6 @@ pub(super) fn report_budget<W: Write>(
         .collect();
     rows.sort_by(|a, b| (&a.account, &a.currency).cmp(&(&b.account, &b.currency)));
 
-    errors.sort_by_key(|e| e.date);
-    for e in &errors {
-        eprintln!("warning: {}: {}", e.date, e.reason);
-    }
-
     let totals = compute_totals(&budgets, &actuals, filter, types);
 
     // An un-representable figure is reported in band as well as rendered `n/a`,
@@ -558,11 +565,20 @@ pub(super) fn report_budget<W: Write>(
             errors.push(unrepresentable(&row.account, ccy));
         }
     }
+
+    // Emitted HERE, after every error is known: the un-representable-figure
+    // errors are only discovered once rows and totals exist, and an earlier
+    // emission point sent them to the JSON array but never to stderr, so a text
+    // or CSV user saw `n/a` cells with nothing explaining them.
+    errors.sort_by_key(|e| e.date);
+    for e in &errors {
+        eprintln!("warning: {}: {}", e.date, e.reason);
+    }
     render(
         &rows,
         &totals,
         filter,
-        Empty::diagnose(&budgets, had_errors, filter),
+        Empty::diagnose(&budgets, had_errors, !errors.is_empty(), filter),
         &errors,
         ctx,
         format,
@@ -635,7 +651,10 @@ enum Empty {
     /// The ledger declares no budgets at all.
     NoneDeclared,
     /// Every budget directive in the ledger was rejected as malformed.
-    AllRejected,
+    /// `shown` is false when `--account` filtered away every warning, in which
+    /// case pointing the user at warnings that are not on screen is worse than
+    /// saying nothing.
+    AllRejected { shown: bool },
     /// Budgets exist but all start on or after the window's exclusive end.
     NoneInWindow { earliest: NaiveDate },
     /// Budgets were in force, but `--account` excluded every one.
@@ -643,7 +662,12 @@ enum Empty {
 }
 
 impl Empty {
-    fn diagnose(budgets: &Budgets, had_errors: bool, filter: &BudgetFilter) -> Self {
+    fn diagnose(
+        budgets: &Budgets,
+        had_errors: bool,
+        errors_shown: bool,
+        filter: &BudgetFilter,
+    ) -> Self {
         // Diagnose over the budgets the user asked about. Testing "is anything
         // in force" across the WHOLE ledger let an unrelated account's live
         // budget mask the real reason: a report filtered to an account whose
@@ -660,7 +684,9 @@ impl Empty {
             // directive in it was rejected. Saying "no budgets declared" for the
             // latter sends the user looking for syntax they are not missing.
             return if had_errors {
-                Self::AllRejected
+                Self::AllRejected {
+                    shown: errors_shown,
+                }
             } else {
                 Self::NoneDeclared
             };
@@ -899,10 +925,16 @@ fn render<W: Write>(
                 // them all" — telling a user with budgets that they have none
                 // sends them looking for a parsing bug that isn't there.
                 match empty {
-                    Empty::AllRejected => writeln!(
+                    Empty::AllRejected { shown: true } => writeln!(
                         writer,
                         "No usable budgets: every `custom \"budget\"` directive in \
                          this ledger was rejected. See the warnings above."
+                    )?,
+                    Empty::AllRejected { shown: false } => writeln!(
+                        writer,
+                        "No usable budgets: every `custom \"budget\"` directive in \
+                         this ledger was rejected. Re-run without --account to see \
+                         which ones and why."
                     )?,
                     Empty::NoneDeclared => writeln!(
                         writer,

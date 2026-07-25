@@ -1890,3 +1890,113 @@ fn a_budget_accruing_past_a_close_is_reported() {
         "no warning when the window ends at the close"
     );
 }
+
+/// A budget declared AFTER its account was closed can never see a single
+/// posting — strictly worse than one that merely runs past the close — and an
+/// earlier guard excluded exactly that case from the warning.
+#[test]
+fn a_budget_declared_after_a_close_is_reported() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Old\n\
+         2024-03-01 close Expenses:Old\n\
+         2024-04-01 custom \"budget\" Expenses:Old \"monthly\" 400.00 USD\n",
+    );
+    let out = Command::new(&bin)
+        .args([
+            "report",
+            f.path().to_str().unwrap(),
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-07-01",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no spending can ever be booked"),
+        "a budget starting after the close must be reported: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// stderr and the JSON `errors` array must report the same set. The
+/// un-representable-figure errors are discovered only once rows and totals
+/// exist, and emitting warnings before that sent them to JSON alone — so a text
+/// or CSV user saw `n/a` cells with nothing explaining them.
+#[test]
+fn an_overflow_is_explained_on_stderr_not_only_in_json() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 79228162514264337593543950335 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    for fmt in ["text", "csv"] {
+        let out = Command::new(&bin)
+            .args([
+                "report",
+                path,
+                "budget",
+                "--from",
+                "2024-01-01",
+                "--to",
+                "2024-06-01",
+                "--format",
+                fmt,
+                "--no-pager",
+            ])
+            .output()
+            .expect("run");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("too large to represent"),
+            "{fmt} output must explain its n/a cells on stderr"
+        );
+    }
+}
+
+/// "See the warnings above" must not be printed when `--account` filtered every
+/// warning away, leaving the user hunting for diagnostics that are not there.
+#[test]
+fn an_all_rejected_report_does_not_promise_absent_warnings() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"fortnightly\" 400.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let filtered = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-06-01",
+            "--account",
+            "Expenses:Zzz",
+            "--no-pager",
+        ],
+    );
+    assert!(filtered.contains("Re-run without --account"), "{filtered}");
+    assert!(!filtered.contains("warnings above"), "{filtered}");
+
+    let unfiltered = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-06-01",
+            "--no-pager",
+        ],
+    );
+    assert!(unfiltered.contains("warnings above"), "{unfiltered}");
+}

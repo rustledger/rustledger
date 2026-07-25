@@ -512,6 +512,14 @@ simultaneously active and are reported as separate rows — one rate never silen
 replaces another denominated differently. Nothing accrues before the first declaration:
 a budget is not retroactive.
 
+**Pad-synthesized postings count as spending.** A `pad`/`balance` pair that
+reconciles a budgeted account books the difference to it, and `report budget`
+counts that like any other posting — the same figure `report balances` and
+`report income` show for the same account. It can look surprising, because no
+transaction in the file corresponds to it; the plug is the ledger saying that
+money did move. If you would rather it did not count against a budget, pad to a
+dedicated adjustment account instead of a budgeted one.
+
 **Spending before the budget existed is excluded too.** Both sides of the comparison
 start on the day the budget was declared, so adding a budget in June and running the
 default year-to-date window compares June's budget against June's spending — not

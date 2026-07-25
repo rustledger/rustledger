@@ -98,3 +98,7 @@ templates/
 # cargo-mutants output (generated)
 mutants.out/
 mutants.out.old/
+
+# Python bytecode from the compat harnesses in scripts/
+__pycache__/
+*.pyc

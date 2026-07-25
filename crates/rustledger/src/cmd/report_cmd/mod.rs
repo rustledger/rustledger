@@ -635,7 +635,14 @@ fn render<W: io::Write>(
                 to: to_date,
                 children: *children,
             };
-            budget::report_budget(directives, &filter, &loaded.display_context, format, writer)?;
+            budget::report_budget(
+                directives,
+                &filter,
+                &loaded.account_types,
+                &loaded.display_context,
+                format,
+                writer,
+            )?;
         }
     }
 

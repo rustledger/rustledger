@@ -330,3 +330,96 @@ fn an_inverted_window_is_rejected() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// An earning target on a credit-normal account compares in the same direction as
+/// a spending budget: earning exactly the target is 100% used with nothing
+/// remaining — NOT `actual -5000, remaining 10000, used -100%`, which is what a
+/// raw (unnormalized) posting sum produces for income.
+#[test]
+fn income_budgets_compare_in_the_right_direction() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        r#"2024-01-01 open Income:Salary
+2024-01-01 open Assets:Cash
+
+2024-01-01 custom "budget" Income:Salary "monthly" 5000.00 USD
+
+2024-03-05 * "paycheck"
+  Assets:Cash     5000.00 USD
+  Income:Salary
+"#,
+    );
+    let path = f.path().to_str().unwrap();
+    let csv = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-03-01",
+            "--to",
+            "2024-04-01",
+            "--format",
+            "csv",
+        ],
+    );
+    assert_eq!(
+        csv.lines().nth(1).expect("a row"),
+        "Income:Salary,USD,5000.00,5000.00,0.00,100.0"
+    );
+}
+
+/// Under `--children`, a parent row and a child row BOTH include the child, so the
+/// TOTAL must be derived from the underlying budgets and postings rather than by
+/// summing the rendered rows — otherwise the child is counted twice.
+#[test]
+fn children_totals_do_not_double_count_the_child() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        r#"2024-01-01 open Expenses:Food
+2024-01-01 open Expenses:Food:Restaurant
+2024-01-01 open Assets:Cash
+
+2024-01-01 custom "budget" Expenses:Food            "monthly" 300.00 USD
+2024-01-01 custom "budget" Expenses:Food:Restaurant "monthly" 100.00 USD
+
+2024-03-05 * "restaurant spend"
+  Expenses:Food:Restaurant  50.00 USD
+  Assets:Cash
+"#,
+    );
+    let path = f.path().to_str().unwrap();
+    let txt = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-03-01",
+            "--to",
+            "2024-04-01",
+            "--children",
+            "--no-pager",
+        ],
+    );
+    // Rows overlap by design (the parent row includes its child).
+    assert!(
+        txt.contains("Expenses:Food                        400.00        50.00"),
+        "{txt}"
+    );
+    assert!(
+        txt.contains("Expenses:Food:Restaurant             100.00        50.00"),
+        "{txt}"
+    );
+    // The TOTAL counts each budget and each posting once: 300+100 and one 50.
+    let total = txt
+        .lines()
+        .find(|l| l.starts_with("TOTAL"))
+        .expect("a TOTAL line");
+    assert!(
+        total.contains("400.00") && total.contains("50.00"),
+        "TOTAL must not double-count the child (would be 500.00/100.00): {total}"
+    );
+}

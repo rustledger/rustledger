@@ -44,7 +44,9 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_core::{Directive, DisplayContext, MetaValue, NaiveDate, is_subaccount_or_equal};
+use rustledger_core::{
+    AccountTypes, Directive, DisplayContext, MetaValue, NaiveDate, is_subaccount_or_equal,
+};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -263,6 +265,24 @@ fn accrue(
     total
 }
 
+/// Sign-normalize a posting total so "actual" always counts the same direction the
+/// budget was declared in.
+///
+/// Expense postings are debits (positive) and a spending budget is written
+/// positive, so those already agree. Income postings are **credits** (negative)
+/// while an earning target is also written positive — without this flip, earning
+/// exactly your 5000 target would report `actual -5000`, `remaining 10000` and
+/// `used -100%`. The same applies to any credit-normal account (income, liability,
+/// equity), so the test is the canonical config-aware
+/// [`AccountTypes::is_credit_normal`] rather than a hardcoded `Income:` prefix.
+fn normalized_actual(types: &AccountTypes, account: &str, raw: Decimal) -> Decimal {
+    if types.is_credit_normal(account) {
+        -raw
+    } else {
+        raw
+    }
+}
+
 /// One row of the report: an account's budget versus what it actually spent.
 struct BudgetRow {
     account: String,
@@ -274,9 +294,8 @@ struct BudgetRow {
 impl BudgetRow {
     /// Budget minus actual. Positive is under budget (money left), negative over.
     ///
-    /// Expense budgets are declared as positive amounts while expense postings are
-    /// also positive (debits), so this subtraction is the natural direction and
-    /// needs no per-account-type sign flip.
+    /// `actual` is already sign-normalized (see [`normalized_actual`]) so this
+    /// subtraction reads the same way for a spending budget and an earning target.
     fn remaining(&self) -> Decimal {
         self.budgeted - self.actual
     }
@@ -313,6 +332,7 @@ pub(super) struct BudgetFilter<'a> {
 pub(super) fn report_budget<W: Write>(
     directives: &[Directive],
     filter: &BudgetFilter,
+    types: &AccountTypes,
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
@@ -392,7 +412,7 @@ pub(super) fn report_budget<W: Write>(
                             *a == account
                         }
                 })
-                .map(|(_, v)| *v)
+                .map(|((a, _), v)| normalized_actual(types, a, *v))
                 .sum();
             BudgetRow {
                 account,
@@ -404,7 +424,58 @@ pub(super) fn report_budget<W: Write>(
         .collect();
     rows.sort_by(|a, b| (&a.account, &a.currency).cmp(&(&b.account, &b.currency)));
 
-    render(&rows, filter, ctx, format, writer)
+    // Totals are computed from the underlying data rather than by summing the rows:
+    // under `--children` a parent row and a child row both include the child's
+    // budget and spending, so adding the rows up would count it twice.
+    let totals = compute_totals(&budgets, &actuals, filter, types);
+    render(&rows, &totals, filter, ctx, format, writer)
+}
+
+/// Whole-report totals per currency, counting every budget and every posting once.
+///
+/// Summing the rendered rows would be wrong under `--children`: a parent row and a
+/// child row each include the child, so the child would be counted twice. These are
+/// derived from the distinct budget entries and the postings they cover instead.
+fn compute_totals(
+    budgets: &[BudgetEntry],
+    actuals: &BTreeMap<(String, String), Decimal>,
+    filter: &BudgetFilter,
+    types: &AccountTypes,
+) -> BTreeMap<String, (Decimal, Decimal)> {
+    // Distinct budgeted (account, currency) pairs, after the account filter.
+    let mut pairs: Vec<(String, String)> = budgets
+        .iter()
+        .filter(|b| {
+            filter
+                .account
+                .is_none_or(|p| is_subaccount_or_equal(&b.account, p))
+        })
+        .map(|b| (b.account.clone(), b.currency.clone()))
+        .collect();
+    pairs.sort();
+    pairs.dedup();
+
+    let mut totals: BTreeMap<String, (Decimal, Decimal)> = BTreeMap::new();
+    for (account, currency) in &pairs {
+        let e = totals.entry(currency.clone()).or_default();
+        e.0 += accrue(budgets, account, currency, filter.from, filter.to);
+    }
+    // Each posting counts once, against whichever budgeted accounts cover it.
+    for ((account, currency), raw) in actuals {
+        let covered = pairs.iter().any(|(b, c)| {
+            c == currency
+                && if filter.children {
+                    is_subaccount_or_equal(account, b)
+                } else {
+                    account == b
+                }
+        });
+        if covered {
+            let e = totals.entry(currency.clone()).or_default();
+            e.1 += normalized_actual(types, account, *raw);
+        }
+    }
+    totals
 }
 
 /// A used-fraction as a percentage cell, or `n/a` when nothing was budgeted.
@@ -414,6 +485,7 @@ fn fmt_used(used: Option<f64>) -> String {
 
 fn render<W: Write>(
     rows: &[BudgetRow],
+    totals: &BTreeMap<String, (Decimal, Decimal)>,
     filter: &BudgetFilter,
     ctx: &DisplayContext,
     format: &OutputFormat,
@@ -504,17 +576,13 @@ fn render<W: Write>(
                 )?;
             }
             writeln!(writer, "{}", "-".repeat(RULE))?;
-            // Totals per currency: summing across currencies would be meaningless.
-            let mut totals: BTreeMap<&str, (Decimal, Decimal)> = BTreeMap::new();
-            for r in rows {
-                let e = totals.entry(&r.currency).or_default();
-                e.0 += r.budgeted;
-                e.1 += r.actual;
-            }
+            // Totals per currency (summing across currencies would be meaningless),
+            // counting each budget and posting once — see `compute_totals`.
             for (ccy, (b, a)) in totals {
+                let (b, a) = (*b, *a);
                 let row = BudgetRow {
                     account: String::new(),
-                    currency: ccy.to_string(),
+                    currency: ccy.clone(),
                     budgeted: b,
                     actual: a,
                 };

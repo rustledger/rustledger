@@ -1338,3 +1338,185 @@ fn an_integer_budget_amount_does_not_pin_the_currency_to_zero_dp() {
     );
     assert!(csv.contains("Expenses:Crypto,BTC,0.5"), "{csv}");
 }
+
+/// A yearly budget near the end of the representable date range must not
+/// accrue a full year's amount per day. The period's next start does not
+/// exist there; saturating made the interval look one day long.
+#[test]
+fn a_period_past_the_representable_range_is_not_treated_as_one_day() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"yearly\" 400.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let csv = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "9999-01-01",
+            "--to",
+            "9999-12-31",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        !csv.contains("145600"),
+        "a 400/yr budget must not accrue ~364x: {csv}"
+    );
+}
+
+/// A posting whose canonical weight differs from its units in NUMBER but not
+/// currency (`90.00 USD @@ 95.00 USD`) spends the weight. Recording the units
+/// made the report disagree with BQL's `weight` column on the same posting.
+#[test]
+fn a_same_currency_weight_is_what_counts_as_spent() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Fees\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-01-01 custom \"budget\" Expenses:Fees \"monthly\" 400.00 USD\n\
+         2024-02-10 * \"fee\"\n  \
+           Expenses:Fees  90.00 USD @@ 95.00 USD\n  Assets:Cash   -95.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let csv = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-02-01",
+            "--to",
+            "2024-03-01",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        csv.contains("Expenses:Fees,USD,400.00,95.00,305.00,23.8"),
+        "the posting moved 95.00, which is what BQL `weight` reports: {csv}"
+    );
+}
+
+/// An earning target and a spending budget must not be added together: the sum
+/// is meaningless and its `Used` percentage reads far healthier than the
+/// spending actually is.
+#[test]
+fn income_and_expense_budgets_total_separately() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Travel\n\
+         2024-01-01 open Income:Salary\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-01-01 custom \"budget\" Expenses:Travel \"monthly\" 400.00 USD\n\
+         2024-01-01 custom \"budget\" Income:Salary \"monthly\" 5000.00 USD\n\
+         2024-02-05 * \"trip\"\n  Expenses:Travel  99.00 USD\n  Assets:Cash\n\
+         2024-02-06 * \"pay\"\n  Assets:Cash  5000.00 USD\n  Income:Salary\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let csv = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-02-01",
+            "--to",
+            "2024-03-01",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        csv.contains("TOTAL,USD,400.00,99.00,301.00,24.8"),
+        "the spending total covers only spending budgets: {csv}"
+    );
+    assert!(
+        csv.contains("TOTAL (earned),USD,5000.00,5000.00,0.00,100.0"),
+        "the earning target totals separately: {csv}"
+    );
+    assert!(
+        !csv.contains("5400.00"),
+        "the two must never be summed: {csv}"
+    );
+}
+
+/// The unopened-account warning is exempted for an aggregate parent budget only
+/// under `--children`, which is what makes the children answer it. In the
+/// default mode that budget really does report nothing.
+#[test]
+fn an_aggregate_parent_budget_warns_only_when_children_are_not_counted() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food:Groceries\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n\
+         2024-02-05 * \"g\"\n  Expenses:Food:Groceries 120.00 USD\n  Assets:Cash\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let args = [
+        "report",
+        path,
+        "budget",
+        "--from",
+        "2024-02-01",
+        "--to",
+        "2024-03-01",
+        "--no-pager",
+    ];
+    let default_mode = Command::new(&bin).args(args).output().expect("run");
+    assert!(
+        String::from_utf8_lossy(&default_mode.stderr).contains("no such account is opened"),
+        "without --children the budget reports nothing, so it must warn"
+    );
+    let mut with_children = args.to_vec();
+    with_children.push("--children");
+    let kids = Command::new(&bin)
+        .args(&with_children)
+        .output()
+        .expect("run");
+    assert!(
+        !String::from_utf8_lossy(&kids.stderr).contains("no such account is opened"),
+        "with --children it works, so it must not warn"
+    );
+}
+
+/// `--account` narrows which warnings are shown, but must not change the
+/// diagnosis of an empty report: a ledger whose budgets were all rejected is
+/// not a ledger with no budgets.
+#[test]
+fn an_account_filter_does_not_turn_rejected_budgets_into_none_declared() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"fortnightly\" 400.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let txt = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-02-01",
+            "--to",
+            "2024-03-01",
+            "--account",
+            "Assets",
+            "--no-pager",
+        ],
+    );
+    assert!(txt.contains("every `custom \"budget\"` directive"), "{txt}");
+    assert!(!txt.contains("No budgets declared"), "{txt}");
+}

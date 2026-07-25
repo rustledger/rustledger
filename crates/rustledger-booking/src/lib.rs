@@ -450,10 +450,26 @@ pub fn price_weight(
 ///
 /// `None` for a posting whose units are unresolved (elided, pre-interpolation).
 ///
-/// Consumers that need "what currency did this posting really move, and how
-/// much" — the BQL `weight` column, `currency_accounts` grouping, the budget
-/// report's actual-spend accrual — MUST call this rather than re-derive the
-/// ladder, or they drift from `rledger check` on cost/price shapes.
+/// Consumers that surface a per-posting weight — the BQL `weight` column, the
+/// budget report's actual-spend accrual — MUST call this rather than re-derive
+/// the ladder, so they cannot drift from each other.
+///
+/// # This is NOT byte-for-byte the `rledger check` rule
+///
+/// [`calculate_residual`]'s `residual_weight` is the balance validator's rule
+/// and differs in two places, both of which only matter for cost specs:
+///
+/// - a cost spec with a number but NO explicit currency: the residual infers
+///   the cost currency from the transaction's other postings
+///   (`infer_cost_currency_from_postings`); this function falls through to the
+///   price branch instead;
+/// - a bare `{}` with no determinable number: the residual contributes NOTHING
+///   and deliberately refuses to fall through to a price annotation, because
+///   the canonical weight of a cost-tracked posting is `units × cost`, not
+///   `units × price` (issue #1026); this function does fall through.
+///
+/// Aligning the two would change BQL `weight` results, so it is deliberately
+/// left alone here — but do not describe this as "the rule `check` uses".
 #[must_use]
 pub fn posting_weight(posting: &rustledger_core::Posting) -> Option<Amount> {
     let units = posting.amount()?;

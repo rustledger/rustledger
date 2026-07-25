@@ -139,6 +139,19 @@ pub struct DisplayContext {
     /// These take precedence over inferred precision under any policy.
     fixed_precisions: HashMap<String, u32>,
 
+    /// Precisions learned ONLY from amounts inside `custom` directives, for
+    /// currencies nothing else describes.
+    ///
+    /// Kept apart from `distributions` on purpose. A `custom` directive is
+    /// metadata: it should let a report render such a currency as money instead
+    /// of a raw 28-digit `Decimal`, but it must not make the currency appear in
+    /// [`Self::currencies`] or [`Self::resolved_precisions`] — which cross the
+    /// FFI as the ledger's display-precision map — nor widen
+    /// [`Self::default_precision`], which takes the maximum across every
+    /// distribution and would then be moved by a currency the ledger never
+    /// transacts in.
+    custom_fallback: HashMap<String, Distribution>,
+
     /// Inference policy for [`DisplayContext::get_precision`]. Defaults
     /// to [`Precision::MostCommon`] to match Python `bean-query`.
     precision: Precision,
@@ -451,7 +464,10 @@ impl DisplayContext {
             // untracked keeps its natural scale, which is verbose but never
             // wrong.
             if !described.contains(&currency) && Self::decimal_precision(number) > 0 {
-                ctx.update(number, &currency);
+                ctx.custom_fallback
+                    .entry(currency)
+                    .or_default()
+                    .update(Self::decimal_precision(number));
             }
         }
 
@@ -485,7 +501,10 @@ impl DisplayContext {
         if let Some(&precision) = self.fixed_precisions.get(currency) {
             return Some(precision);
         }
-        let dist = self.distributions.get(currency)?;
+        let dist = self
+            .distributions
+            .get(currency)
+            .or_else(|| self.custom_fallback.get(currency))?;
         match self.precision {
             Precision::MostCommon => dist.mode(),
             Precision::Maximum => dist.max(),

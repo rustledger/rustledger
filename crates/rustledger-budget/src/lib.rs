@@ -103,8 +103,10 @@ impl Interval {
     }
 
     /// The first day of the interval after the one starting at `start`.
+    /// `None` when that date is outside the representable range — see
+    /// [`CalendarPeriod::next_start`].
     #[must_use]
-    pub fn next_start(self, start: NaiveDate) -> NaiveDate {
+    pub fn next_start(self, start: NaiveDate) -> Option<NaiveDate> {
         self.period().next_start(start)
     }
 }
@@ -397,7 +399,9 @@ impl Budgets {
                 continue;
             };
             let istart = b.interval.start_of(cursor);
-            let inext = b.interval.next_start(istart);
+            // No representable next period start means the interval's length is
+            // unknowable; report that rather than dividing by a one-day fallback.
+            let inext = b.interval.next_start(istart)?;
             let mut seg_end = inext.min(to);
             // The next superseding declaration, if it lands inside this segment.
             if let Some(change) = self.next_change_after(account, currency, cursor)

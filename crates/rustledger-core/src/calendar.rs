@@ -72,14 +72,21 @@ impl CalendarPeriod {
         }
     }
 
-    /// The first day of the period after the one starting at `start`.
+    /// The first day of the period after the one starting at `start`, or `None`
+    /// when that date is outside the representable range.
     ///
     /// `start` is expected to be a period start (the output of [`Self::start_of`]);
     /// the difference between this and `start` is the period's true calendar
     /// length, which is what makes a per-day accrual divide by 28/29/30/31 for a
     /// month and 365/366 for a year.
+    ///
+    /// Returning `None` rather than saturating to `start` is deliberate: a
+    /// caller measuring the period's length would otherwise get zero and, after
+    /// the usual `.max(1)` guard, divide by a single day — inflating a yearly
+    /// budget by ~365x near the end of the representable range, silently and
+    /// with no error anywhere.
     #[must_use]
-    pub fn next_start(self, start: NaiveDate) -> NaiveDate {
+    pub fn next_start(self, start: NaiveDate) -> Option<NaiveDate> {
         let span = match self {
             Self::Day => jiff::Span::new().days(1),
             Self::Week => jiff::Span::new().days(7),
@@ -87,7 +94,7 @@ impl CalendarPeriod {
             Self::Quarter => jiff::Span::new().months(3),
             Self::Year => jiff::Span::new().years(1),
         };
-        start.checked_add(span).unwrap_or(start)
+        start.checked_add(span).ok()
     }
 }
 
@@ -136,6 +143,16 @@ mod tests {
         );
     }
 
+    /// Near the end of the representable range the next period start does not
+    /// exist. Saturating to `start` would make the period look zero days long,
+    /// and a per-day accrual would then divide by one.
+    #[test]
+    fn next_start_is_none_past_the_representable_range() {
+        let last = NaiveDate::MAX;
+        assert_eq!(CalendarPeriod::Year.next_start(last), None);
+        assert_eq!(CalendarPeriod::Month.next_start(last), None);
+    }
+
     #[test]
     fn month_and_year_truncate_and_advance() {
         assert_eq!(
@@ -148,9 +165,9 @@ mod tests {
         );
         // Leap February is 29 days long, not 28 or 30.
         let feb = CalendarPeriod::Month.start_of(d(2024, 2, 10));
-        assert_eq!(CalendarPeriod::Month.next_start(feb), d(2024, 3, 1));
+        assert_eq!(CalendarPeriod::Month.next_start(feb), Some(d(2024, 3, 1)));
         // A leap year is 366 days.
         let y = CalendarPeriod::Year.start_of(d(2024, 6, 1));
-        assert_eq!(CalendarPeriod::Year.next_start(y), d(2025, 1, 1));
+        assert_eq!(CalendarPeriod::Year.next_start(y), Some(d(2025, 1, 1)));
     }
 }

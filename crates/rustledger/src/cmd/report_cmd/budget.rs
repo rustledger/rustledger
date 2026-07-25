@@ -56,7 +56,11 @@ fn passes_account_filter(account: &str, filter: Option<&str>) -> bool {
 /// spent none of my food budget" while the actual spending sits on the correctly
 /// spelled account, which the report deliberately omits for having no budget.
 /// One warning turns that silent misreport into an obvious fix.
-fn unopened_account_errors(directives: &[Directive], budgets: &Budgets) -> Vec<BudgetError> {
+fn unopened_account_errors(
+    directives: &[Directive],
+    budgets: &Budgets,
+    children: bool,
+) -> Vec<BudgetError> {
     let opened: BTreeSet<&str> = directives
         .iter()
         .filter_map(|d| match d {
@@ -74,12 +78,15 @@ fn unopened_account_errors(directives: &[Directive], budgets: &Budgets) -> Vec<B
         .entries()
         .iter()
         // A parent budgeted as an aggregate (`Expenses:Food` with only
-        // `Expenses:Food:Groceries` opened) is a normal, working setup — warning
-        // on it told users their budget was broken while the table below showed
-        // it working.
+        // `Expenses:Food:Groceries` opened) is a normal, working setup — but ONLY
+        // under `--children`, which is what makes the children's spending answer
+        // the parent's budget. In the default mode that budget really does report
+        // nothing, so exempting it there restored the silent misreport this check
+        // exists to catch.
         .filter(|b| {
-            !opened.contains(b.account.as_str())
-                && !opened.iter().any(|o| is_subaccount_or_equal(o, &b.account))
+            let covered_by_a_child =
+                children && opened.iter().any(|o| is_subaccount_or_equal(o, &b.account));
+            !opened.contains(b.account.as_str()) && !covered_by_a_child
         })
         .filter(|b| seen.insert(b.account.clone()))
         .map(|b| BudgetError {
@@ -287,12 +294,21 @@ pub(super) fn report_budget<W: Write>(
     writer: &mut W,
 ) -> Result<()> {
     let (budgets, mut errors) = Budgets::from_directives(directives);
-    errors.extend(unopened_account_errors(directives, &budgets));
+    errors.extend(unopened_account_errors(
+        directives,
+        &budgets,
+        filter.children,
+    ));
     errors.extend(mismatched_currency_errors(
         directives,
         &budgets,
         filter.children,
     ));
+    // Whether the ledger had ANY unusable budget, computed before the filter:
+    // `Empty::diagnose` must not conclude "no budgets declared" for a ledger
+    // whose budgets were all rejected merely because `--account` excluded them
+    // from display.
+    let had_errors = !errors.is_empty();
     // Only warn about budgets this invocation actually reports on: narrowing to
     // one account should not emit stderr noise (or JSON `errors` entries) about
     // accounts the user explicitly excluded.
@@ -325,9 +341,10 @@ pub(super) fn report_budget<W: Write>(
     // currencies, so recording both costs nothing and couples nothing.
     //
     // The weight (and its cost-beats-price ladder) comes from
-    // `rustledger_booking::posting_weight`, the same one `rledger check` and
-    // BQL's `weight` column use, so budget totals cannot drift from the balance
-    // rules.
+    // `rustledger_booking::posting_weight`, shared with BQL's `weight` column so
+    // the two cannot drift. Note it is NOT byte-for-byte the balance validator's
+    // rule: the two differ on cost specs lacking an explicit currency and on a
+    // bare `{}` (issue #1026), both documented on `posting_weight` itself.
     let mut actuals: BTreeMap<(String, String), Vec<(NaiveDate, Decimal)>> = BTreeMap::new();
     for d in directives {
         let Directive::Transaction(txn) = d else {
@@ -340,17 +357,36 @@ pub(super) fn report_budget<W: Write>(
             let Some(units) = p.units.as_ref().and_then(|u| u.as_amount()) else {
                 continue;
             };
-            actuals
-                .entry((p.account.to_string(), units.currency.to_string()))
-                .or_default()
-                .push((txn.date, units.number));
-            if let Some(weight) = rustledger_booking::posting_weight(p)
-                && weight.currency != units.currency
-            {
-                actuals
-                    .entry((p.account.to_string(), weight.currency.to_string()))
-                    .or_default()
-                    .push((txn.date, weight.number));
+            match rustledger_booking::posting_weight(p) {
+                // Same currency, different number (`90.00 USD @@ 95.00 USD`, or a
+                // cost denominated in the units currency): there is only ONE
+                // currency here and the weight is what the posting really moved.
+                // Recording the units instead made the report disagree with
+                // `rledger check` and BQL's `weight` column on the same posting.
+                Some(weight) if weight.currency == units.currency => {
+                    actuals
+                        .entry((p.account.to_string(), weight.currency.to_string()))
+                        .or_default()
+                        .push((txn.date, weight.number));
+                }
+                // Two currencies: the posting is budgetable in either, so record
+                // both and let each row read its own.
+                Some(weight) => {
+                    actuals
+                        .entry((p.account.to_string(), units.currency.to_string()))
+                        .or_default()
+                        .push((txn.date, units.number));
+                    actuals
+                        .entry((p.account.to_string(), weight.currency.to_string()))
+                        .or_default()
+                        .push((txn.date, weight.number));
+                }
+                None => {
+                    actuals
+                        .entry((p.account.to_string(), units.currency.to_string()))
+                        .or_default()
+                        .push((txn.date, units.number));
+                }
             }
         }
     }
@@ -437,7 +473,7 @@ pub(super) fn report_budget<W: Write>(
         &rows,
         &totals,
         filter,
-        Empty::diagnose(&budgets, &errors, filter),
+        Empty::diagnose(&budgets, had_errors, filter),
         &errors,
         ctx,
         format,
@@ -455,7 +491,7 @@ fn compute_totals(
     actuals: &BTreeMap<(String, String), Vec<(NaiveDate, Decimal)>>,
     filter: &BudgetFilter,
     types: &AccountTypes,
-) -> BTreeMap<String, (Option<Decimal>, Option<Decimal>)> {
+) -> BTreeMap<(String, bool), (Option<Decimal>, Option<Decimal>)> {
     // Distinct budgeted (account, currency) pairs, after the account filter.
     let pairs: Vec<(String, String)> = budgets
         .keys_in_force_before(filter.to)
@@ -463,10 +499,10 @@ fn compute_totals(
         .filter(|(account, _)| passes_account_filter(account, filter.account))
         .collect();
 
-    let mut totals: BTreeMap<String, (Option<Decimal>, Option<Decimal>)> = BTreeMap::new();
+    let mut totals: BTreeMap<(String, bool), (Option<Decimal>, Option<Decimal>)> = BTreeMap::new();
     for (account, currency) in &pairs {
         let e = totals
-            .entry(currency.clone())
+            .entry((currency.clone(), types.is_credit_normal(account)))
             .or_insert((Some(Decimal::ZERO), Some(Decimal::ZERO)));
         e.0 = e.0.and_then(|acc| {
             budgets
@@ -488,7 +524,7 @@ fn compute_totals(
         };
         let start = start.max(filter.from);
         let e = totals
-            .entry(currency.clone())
+            .entry((currency.clone(), types.is_credit_normal(account)))
             .or_insert((Some(Decimal::ZERO), Some(Decimal::ZERO)));
         for (_, raw) in entries.iter().filter(|(d, _)| *d >= start) {
             e.1 =
@@ -518,15 +554,15 @@ enum Empty {
 }
 
 impl Empty {
-    fn diagnose(budgets: &Budgets, errors: &[BudgetError], filter: &BudgetFilter) -> Self {
+    fn diagnose(budgets: &Budgets, had_errors: bool, filter: &BudgetFilter) -> Self {
         let Some(earliest) = budgets.earliest() else {
             // "You have no budgets" is a lie when the ledger has budget
             // directives that were all rejected — it sends the user looking for
             // the syntax they think they are missing, not the typo they made.
-            return if errors.is_empty() {
-                Self::NoneDeclared
-            } else {
+            return if had_errors {
                 Self::AllRejected
+            } else {
+                Self::NoneDeclared
             };
         };
         if !budgets.any_in_force_before(filter.to) {
@@ -537,9 +573,22 @@ impl Empty {
 }
 
 /// A whole-report total as a row, so totals and rows render through one path.
-fn total_row(currency: &str, budgeted: Option<Decimal>, actual: Option<Decimal>) -> BudgetRow {
+fn total_row(
+    currency: &str,
+    credit_normal: bool,
+    budgeted: Option<Decimal>,
+    actual: Option<Decimal>,
+) -> BudgetRow {
     BudgetRow {
-        account: "TOTAL".to_string(),
+        // Spending budgets and earning targets are totaled separately: adding a
+        // 5000 salary target to a 400 travel budget gives a figure that means
+        // nothing, and a `Used` percentage that reads far healthier than the
+        // spending actually is.
+        account: if credit_normal {
+            "TOTAL (earned)".to_string()
+        } else {
+            "TOTAL".to_string()
+        },
         currency: currency.to_string(),
         budgeted,
         actual,
@@ -553,7 +602,7 @@ fn fmt_used(used: Option<f64>) -> String {
 
 fn render<W: Write>(
     rows: &[BudgetRow],
-    totals: &BTreeMap<String, (Option<Decimal>, Option<Decimal>)>,
+    totals: &BTreeMap<(String, bool), (Option<Decimal>, Option<Decimal>)>,
     filter: &BudgetFilter,
     empty: Empty,
     errors: &[BudgetError],
@@ -614,8 +663,8 @@ fn render<W: Write>(
             // The whole-report total, as its own row per currency. Consumers
             // cannot re-derive it by summing the rows: under `--children` a
             // parent row and a child row both include the child.
-            for (ccy, (b, a)) in totals {
-                let row = total_row(ccy, *b, *a);
+            for ((ccy, credit), (b, a)) in totals {
+                let row = total_row(ccy, *credit, *b, *a);
                 writeln!(
                     writer,
                     "{},{},{},{},{},{}",
@@ -648,7 +697,7 @@ fn render<W: Write>(
             // because under `--children` parent and child rows overlap.
             let total_objs: Vec<String> = totals
                 .iter()
-                .map(|(ccy, (b, a))| obj(&total_row(ccy, *b, *a)))
+                .map(|((ccy, credit), (b, a))| obj(&total_row(ccy, *credit, *b, *a)))
                 .collect();
             // Rejected directives are reported in-band as well as on stderr.
             // Without this a dashboard cannot tell "this ledger has no budgets"
@@ -731,7 +780,7 @@ fn render<W: Write>(
             let ccy_width = rows
                 .iter()
                 .map(|r| r.currency.chars().count())
-                .chain(totals.keys().map(|c| c.chars().count()))
+                .chain(totals.keys().map(|(c, _)| c.chars().count()))
                 .max()
                 .unwrap_or(3)
                 .max(3);
@@ -758,8 +807,8 @@ fn render<W: Write>(
             writeln!(writer, "{}", "-".repeat(rule))?;
             // Totals per currency (summing across currencies would be meaningless),
             // counting each budget and posting once — see `compute_totals`.
-            for (ccy, (b, a)) in totals {
-                let row = total_row(ccy, *b, *a);
+            for ((ccy, credit), (b, a)) in totals {
+                let row = total_row(ccy, *credit, *b, *a);
                 writeln!(
                     writer,
                     "{:<28} {:<ccy_width$}{:>13}{:>13}{:>13}{:>9}",

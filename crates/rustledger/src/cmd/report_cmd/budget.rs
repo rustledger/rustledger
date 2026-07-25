@@ -319,10 +319,9 @@ pub(super) fn report_budget<W: Write>(
                 .is_none_or(|a| passes_account_filter(a, Some(prefix)))
         });
     }
-    errors.sort_by_key(|e| e.date);
-    for e in &errors {
-        eprintln!("warning: {}: {}", e.date, e.reason);
-    }
+    // Warnings are emitted below, once the rows are built: an un-representable
+    // figure is only discovered then, and stderr and the JSON `errors` array
+    // must report the same set.
 
     // Actual spend per (account, currency) inside the window. Postings are read
     // directly rather than through `account_balances` because a budget is about
@@ -465,9 +464,32 @@ pub(super) fn report_budget<W: Write>(
         .collect();
     rows.sort_by(|a, b| (&a.account, &a.currency).cmp(&(&b.account, &b.currency)));
 
+    // An un-representable figure is reported in band as well as rendered `n/a`.
+    // Without this a consumer sees `"budgeted": null` with an empty `errors`
+    // array and cannot tell an overflow from a bug in its own parsing — the very
+    // ambiguity the array was added to remove for rejected directives.
+    for r in &rows {
+        if r.budgeted.is_none() || r.actual.is_none() {
+            errors.push(BudgetError {
+                date: filter.from,
+                account: Some(r.account.clone()),
+                reason: format!(
+                    "budget for {} in {} is too large to represent; \
+                     the figure is reported as absent rather than clamped",
+                    r.account, r.currency
+                ),
+            });
+        }
+    }
+
     // Totals are computed from the underlying data rather than by summing the rows:
     // under `--children` a parent row and a child row both include the child's
     // budget and spending, so adding the rows up would count it twice.
+    errors.sort_by_key(|e| e.date);
+    for e in &errors {
+        eprintln!("warning: {}: {}", e.date, e.reason);
+    }
+
     let totals = compute_totals(&budgets, &actuals, filter, types);
     render(
         &rows,
@@ -618,11 +640,20 @@ fn render<W: Write>(
     // rendered before the context learned about `custom` amounts at all.
     // `round_dp(8).normalize()` keeps enough places for a crypto-scale budget
     // and drops trailing zeros.
+    /// How many decimals to show for a currency the ledger never describes.
+    /// Enough for a crypto-scale budget, far from `Decimal`'s 28.
+    const MAX_UNTRACKED_DP: u32 = 8;
     let money = |n: Decimal, ccy: &str| {
         if ctx.get_precision(ccy).is_some() {
             ctx.format_amount_number(n, ccy)
+        } else if n.scale() <= MAX_UNTRACKED_DP {
+            // Already short: print it as written, so a declared `400.00 USD`
+            // keeps its trailing zeros even in a ledger with no postings yet.
+            n.to_string()
         } else {
-            n.round_dp(8).normalize().to_string()
+            // Repeating by construction (a pro-rated accrual). Round, and drop
+            // the trailing zeros rounding may leave.
+            n.round_dp(MAX_UNTRACKED_DP).normalize().to_string()
         }
     };
     // An un-representable figure is reported as absent, never as a clamped

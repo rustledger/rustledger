@@ -621,11 +621,13 @@ fn a_budget_does_not_apply_before_it_was_declared() {
     );
 }
 
-/// A currency that appears only in a `custom "budget"` directive still has a
-/// display precision, so a pro-rated (repeating) figure renders as money rather
-/// than a 28-digit Decimal that overruns the columns.
+/// A currency the ledger never posts in has no display convention to infer, so
+/// a pro-rated (repeating) figure is rounded for display rather than printed to
+/// 28 digits. It is deliberately NOT rounded to the declared amount's scale:
+/// that scale is a stylistic choice about the declaration, and using it rounded
+/// a 0.22580645 BTC accrual to `0.2`.
 #[test]
-fn a_budget_only_currency_still_gets_display_precision() {
+fn a_budget_only_currency_is_rounded_for_display() {
     let bin = require_rledger!();
     let f = write_fixture(
         "2024-01-01 open Expenses:Food\n\
@@ -645,10 +647,10 @@ fn a_budget_only_currency_still_gets_display_precision() {
             "--no-pager",
         ],
     );
-    assert!(txt.contains("245.16"), "{txt}");
+    assert!(txt.contains("245.16129032"), "rounded to 8 dp: {txt}");
     assert!(
-        !txt.contains("245.1612903"),
-        "the raw repeating decimal must not reach the report: {txt}"
+        !txt.contains("245.1612903225"),
+        "the raw 28-digit decimal must not reach the report: {txt}"
     );
 }
 
@@ -679,10 +681,10 @@ fn csv_uses_display_precision_and_carries_a_total() {
         ],
     );
     assert!(
-        csv.contains("Expenses:Food,USD,245.16,0.00,245.16,0.0"),
+        csv.contains("Expenses:Food,USD,245.16129032,0,245.16129032,0.0"),
         "{csv}"
     );
-    assert!(csv.contains("TOTAL,USD,245.16"), "{csv}");
+    assert!(csv.contains("TOTAL,USD,245.16129032"), "{csv}");
 }
 
 /// Two currencies on one account must be distinguishable in the default output.
@@ -1117,7 +1119,9 @@ fn a_child_budget_does_not_drag_the_parents_clip_window_backwards() {
          2024-01-01 custom \"budget\" Expenses:Food:Restaurant \"monthly\" 100.00 USD\n\
          2024-06-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n\
          2024-02-15 * \"groceries on the parent, before the parent budget exists\"\n  \
-           Expenses:Food   50.00 USD\n  Assets:Cash    -50.00 USD\n",
+           Expenses:Food   50.00 USD\n  Assets:Cash    -50.00 USD\n\
+         2024-07-20 * \"restaurant, after both budgets exist\"\n  \
+           Expenses:Food:Restaurant  30.00 USD\n  Assets:Cash              -30.00 USD\n",
     );
     let path = f.path().to_str().unwrap();
     let csv = run(
@@ -1146,9 +1150,13 @@ fn a_child_budget_does_not_drag_the_parents_clip_window_backwards() {
         .expect("a TOTAL row");
     let parent_actual = parent.split(',').nth(3).unwrap();
     let total_actual = total.split(',').nth(3).unwrap();
+    // The Feb 50.00 predates the parent's June budget and must be excluded; the
+    // Jul 30.00 postdates both and must be counted. Asserting a NON-ZERO figure
+    // matters: comparing 0.00 to 0.00 would also be satisfied by a rule that
+    // clipped rows and totals identically-wrongly.
     assert_eq!(
-        parent_actual, "0.00",
-        "the Feb spend predates the parent's June budget: {csv}"
+        parent_actual, "30.00",
+        "excludes the pre-budget Feb spend, includes the Jul spend: {csv}"
     );
     assert_eq!(
         parent_actual, total_actual,
@@ -1332,11 +1340,22 @@ fn an_integer_budget_amount_does_not_pin_the_currency_to_zero_dp() {
             "--no-pager",
         ],
     );
-    assert!(
-        !csv.contains("Expenses:Crypto,BTC,1,"),
-        "15/29 of 1 BTC is not 1: {csv}"
+    // Assert the EXACT field. `contains("...,0.5")` is satisfied both by the
+    // correct value and by the 28-digit `0.5172413793103448275862068966` that a
+    // previous attempt produced — a guard the regression can satisfy is not one.
+    let budgeted = csv
+        .lines()
+        .nth(1)
+        .expect("a row")
+        .split(',')
+        .nth(2)
+        .expect("the budgeted field")
+        .to_string();
+    assert_eq!(
+        budgeted, "0.51724138",
+        "15/29 of 1 BTC, rounded for display and not pinned to the declared \
+         integer's scale: {csv}"
     );
-    assert!(csv.contains("Expenses:Crypto,BTC,0.5"), "{csv}");
 }
 
 /// A yearly budget near the end of the representable date range must not

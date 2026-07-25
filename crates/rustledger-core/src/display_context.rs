@@ -139,19 +139,6 @@ pub struct DisplayContext {
     /// These take precedence over inferred precision under any policy.
     fixed_precisions: HashMap<String, u32>,
 
-    /// Precisions learned ONLY from amounts inside `custom` directives, for
-    /// currencies nothing else describes.
-    ///
-    /// Kept apart from `distributions` on purpose. A `custom` directive is
-    /// metadata: it should let a report render such a currency as money instead
-    /// of a raw 28-digit `Decimal`, but it must not make the currency appear in
-    /// [`Self::currencies`] or [`Self::resolved_precisions`] — which cross the
-    /// FFI as the ledger's display-precision map — nor widen
-    /// [`Self::default_precision`], which takes the maximum across every
-    /// distribution and would then be moved by a currency the ledger never
-    /// transacts in.
-    custom_fallback: HashMap<String, Distribution>,
-
     /// Inference policy for [`DisplayContext::get_precision`]. Defaults
     /// to [`Precision::MostCommon`] to match Python `bean-query`.
     precision: Precision,
@@ -362,7 +349,6 @@ impl DisplayContext {
     {
         let directives = directives.into_iter();
         let mut ctx = Self::new();
-        let mut custom_amounts: Vec<(Decimal, String)> = Vec::new();
 
         // Stage 1: scan directives for amounts to infer precision.
         for directive in directives.clone() {
@@ -423,17 +409,21 @@ impl DisplayContext {
                     ctx.update(p.amount.number, p.amount.currency.as_str());
                 }
                 // A `custom` directive can carry amounts (Fava's
-                // `custom "budget" Expenses:Food "monthly" 400.00 USD` is the
-                // common one). Collected here but applied *after* the main pass
-                // as a fallback only — see below.
-                Directive::Custom(c) => {
-                    for value in &c.values {
-                        if let crate::MetaValue::Amount(amount) = value {
-                            custom_amounts.push((amount.number, amount.currency.to_string()));
-                        }
-                    }
-                }
-                Directive::Pad(_)
+                // `custom "budget" Expenses:Food "monthly" 400.00 USD`), but they
+                // deliberately do NOT inform display precision.
+                //
+                // They were tried as a source and are not one: the decimal count
+                // a user writes in a budget line is a stylistic choice about the
+                // DECLARATION, while the figure a budget report prints is
+                // pro-rated and a repeating decimal by construction. Taking the
+                // declared scale rounded `0.5 BTC` accrued over 14/31 of a month
+                // to `0.2` against a true 0.22580645 — 12% low — and taking an
+                // integer `1 BTC` pinned the currency to 0 dp. A consumer that
+                // needs to render a currency this context has never seen should
+                // choose its own precision (the budget report rounds and
+                // normalizes), rather than inferring one from metadata.
+                Directive::Custom(_)
+                | Directive::Pad(_)
                 | Directive::Open(_)
                 | Directive::Close(_)
                 | Directive::Commodity(_)
@@ -441,33 +431,6 @@ impl DisplayContext {
                 | Directive::Query(_)
                 | Directive::Note(_)
                 | Directive::Document(_) => {}
-            }
-        }
-
-        // Amounts written inside `custom` directives are a **fallback** source of
-        // precision, never a vote. They are the user writing a number in a
-        // currency, so a currency that appears ONLY there (a budget added before
-        // any spending is recorded) should still render as money rather than a
-        // raw 28-digit Decimal. But a `custom` directive is metadata, not a
-        // transaction: letting it into the histogram let three
-        // `custom "budget" ... 400.0000 USD` lines outvote a ledger's 2dp
-        // postings and re-render `balances` — every report — at 4dp. Applying
-        // them only for currencies nothing else described keeps postings
-        // authoritative wherever they exist.
-        let described: std::collections::HashSet<String> =
-            ctx.distributions.keys().cloned().collect();
-        for (number, currency) in custom_amounts {
-            // Only an amount with fractional digits teaches anything useful. An
-            // integer one (`custom "budget" ... 1 BTC`) would pin the currency at
-            // 0 dp, and a report that pro-rates — which is why this fallback
-            // exists — then renders 0.5172 BTC as `1`. Leaving such a currency
-            // untracked keeps its natural scale, which is verbose but never
-            // wrong.
-            if !described.contains(&currency) && Self::decimal_precision(number) > 0 {
-                ctx.custom_fallback
-                    .entry(currency)
-                    .or_default()
-                    .update(Self::decimal_precision(number));
             }
         }
 
@@ -501,10 +464,7 @@ impl DisplayContext {
         if let Some(&precision) = self.fixed_precisions.get(currency) {
             return Some(precision);
         }
-        let dist = self
-            .distributions
-            .get(currency)
-            .or_else(|| self.custom_fallback.get(currency))?;
+        let dist = self.distributions.get(currency)?;
         match self.precision {
             Precision::MostCommon => dist.mode(),
             Precision::Maximum => dist.max(),
@@ -1745,20 +1705,28 @@ mod custom_directive_precision_tests {
         )
     }
 
-    /// A currency that appears ONLY in `custom` directives still gets a display
-    /// precision — otherwise a budget added before any spending is recorded
-    /// renders as a raw 28-digit Decimal once pro-rated over a partial window.
+    /// Amounts inside `custom` directives do NOT inform display precision.
+    ///
+    /// The decimal count in a budget line is a stylistic choice about the
+    /// declaration; a budget report's figure is pro-rated and repeating by
+    /// construction. Inferring from the declaration rounded a 0.22580645 BTC
+    /// accrual to `0.2`. A consumer needing to render a currency this context
+    /// has never seen picks its own precision instead.
     #[test]
-    fn a_custom_only_currency_gets_precision() {
-        let directives = [custom_with_amount(1, Amount::new(dec!(400.00), "USD"))];
+    fn custom_amounts_do_not_inform_precision() {
+        let directives = [custom_with_amount(1, Amount::new(dec!(0.5), "BTC"))];
         let ctx = DisplayContext::from_directives(directives.iter(), std::iter::empty());
-        assert_eq!(ctx.get_precision("USD"), Some(2));
+        assert_eq!(ctx.get_precision("BTC"), None);
+        assert!(
+            !ctx.currencies().any(|c| c == "BTC"),
+            "a currency seen only in metadata must not enter the ledger's \
+             currency list, which crosses the FFI"
+        );
     }
 
-    /// But `custom` amounts must never OUTVOTE the ledger's postings: a custom
-    /// directive is metadata, not a transaction. Three 4dp budget lines against
-    /// one 2dp posting must leave USD at the posting's 2dp — otherwise every
-    /// report in the CLI silently re-renders that ledger at the budget's scale.
+    /// And they certainly must not outvote postings: three 4 dp budget lines
+    /// against one 2 dp posting once moved USD's mode to 4 dp, silently
+    /// re-rendering every report in the CLI.
     #[test]
     fn custom_amounts_do_not_outvote_postings() {
         let directives = [
@@ -1772,10 +1740,6 @@ mod custom_directive_precision_tests {
             ),
         ];
         let ctx = DisplayContext::from_directives(directives.iter(), std::iter::empty());
-        assert_eq!(
-            ctx.get_precision("USD"),
-            Some(2),
-            "postings stay authoritative for a currency they describe"
-        );
+        assert_eq!(ctx.get_precision("USD"), Some(2));
     }
 }

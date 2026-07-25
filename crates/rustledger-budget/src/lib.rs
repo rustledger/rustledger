@@ -195,17 +195,20 @@ pub fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetE
         // dropped a real budget AND its matching spend from the report over a
         // comment — the opposite of the compatibility this crate exists for.
         //
-        // A trailing AMOUNT is different: `... 400.00 USD 300.00 EUR` is a user
-        // declaring two budgets on one line, and silently keeping the first
-        // would drop the second with no diagnostic anywhere. That stays an
-        // error, so the user is told which half was lost.
+        // A trailing NUMBER or AMOUNT is different: `... 400.00 USD 300.00 EUR`
+        // and `... 400.00 USD 300.00` are both a user declaring a second figure,
+        // and silently keeping the first would drop it with no diagnostic
+        // anywhere. Those stay an error, so the user is told which half was lost.
         let parsed = match c.values.as_slice() {
             [
                 acct,
                 MetaValue::String(interval_raw),
                 MetaValue::Amount(amount),
                 rest @ ..,
-            ] if !rest.iter().any(|v| matches!(v, MetaValue::Amount(_))) => {
+            ] if !rest
+                .iter()
+                .any(|v| matches!(v, MetaValue::Amount(_) | MetaValue::Number(_))) =>
+            {
                 account_name(acct).map(|a| (a, interval_raw, amount))
             }
             _ => None,

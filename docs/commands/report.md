@@ -465,7 +465,19 @@ budget and each posting is counted once — under `--children` a parent row and 
 row overlap by design, so the TOTAL is *not* the sum of the rows. `--format csv` and
 `--format json` carry the same TOTAL rows, and JSON adds an `errors` array naming any
 directive that could not be read. A figure too large to represent is reported as absent
-rather than clamped: `n/a` in text, an empty cell in CSV, `null` in JSON.
+rather than clamped: `n/a` in text, an empty cell in CSV, `null` in JSON (and named in
+`errors`).
+
+Each row is rounded for display independently, and the TOTAL is computed from the
+unrounded figures, so on a pro-rated window the printed rows may not add up to the
+printed TOTAL by a cent. The TOTAL is the accurate number; it is also *not* the sum of
+the rows under `--children`, where a parent row and a child row overlap by design.
+
+A currency the ledger never posts in — a budget added before any spending is recorded —
+has no display convention to infer, so a pro-rated figure for it is rounded to 8 decimal
+places rather than to the scale of the declared amount. That scale describes the
+declaration, not the pro-rated result: rounding `0.5 BTC` accrued over half a month to
+one decimal would report `0.2` for a true `0.22580645`.
 
 | Option | Description |
 |--------|-------------|

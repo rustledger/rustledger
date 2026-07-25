@@ -118,7 +118,15 @@ def covers(budgeted: str, other: str, children: bool) -> bool:
 
 
 def gen_ledger(rng: random.Random):
-    lines = ['option "operating_currency" "USD"', ""]
+    lines = ['option "operating_currency" "USD"']
+    # Pin every currency to a high display precision. Without this the report
+    # rounds to the precision inferred from the postings, which can be 0 dp, and
+    # the comparison tolerance (half a unit in the last printed place) would then
+    # be +/-0.5 -- loose enough to hide a real arithmetic error. At 10 dp the
+    # tolerance is ~5e-11 and the oracles are compared almost exactly.
+    for ccy in CURRENCIES:
+        lines.append(f'option "display_precision" "{ccy}:0.0000000001"')
+    lines.append("")
     accts = rng.sample(ACCOUNTS, rng.randint(1, len(ACCOUNTS)))
     for a in accts:
         lines.append(f"2019-01-01 open {a}")
@@ -364,6 +372,18 @@ def self_test() -> int:
     if abs(leap_feb - Decimal(400)) > Decimal("1e-40"):
         print(f"FAIL leap-February accrual: {got}")
         ok = False
+    # The comparison must stay tight enough to be worth running. Generated
+    # ledgers pin every currency to 10 dp precisely so this holds; if that pin
+    # is ever dropped the tolerance silently widens to +/-0.5 for an integer
+    # render and the whole harness goes quiet. Verified by mutation: injecting
+    # 1e-6 into the oracle's per-day accrual makes a 10-ledger run fail.
+    if tolerance("1.0000000000") > Decimal("1e-9"):
+        print(f"FAIL tolerance too loose at 10 dp: {tolerance('1.0000000000')}")
+        ok = False
+    if tolerance("1") <= Decimal("0.05"):
+        print("FAIL tolerance model wrong: a 0 dp render should be treated as coarse")
+        ok = False
+
     print("self-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

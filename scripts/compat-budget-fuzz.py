@@ -137,7 +137,18 @@ def gen_ledger(rng: random.Random):
         a = rng.choice(accts)
         ccy = rng.choice(CURRENCIES[: rng.randint(1, 3)])
         d = datetime.date(2020, 1, 1) + datetime.timedelta(days=rng.randint(0, 1400))
-        amt = Decimal(rng.randint(1, 500000)) / Decimal(100)
+        # A tiny budget against ordinary spending yields a percentage wide
+        # enough to collide with the column beside it (`500000.0%`), which is
+        # how the Used column's fixed width survived several runs unnoticed.
+        amt = (
+            # Tiny enough that ordinary spending against it yields a percentage
+            # of nine or more characters (>= 100000.0%). At 0.01 the widest seen
+            # was eight, which is why the Used column's fixed width survived
+            # several full runs unnoticed.
+            Decimal(rng.randint(1, 50)) / Decimal(100000)
+            if rng.random() < 0.15
+            else Decimal(rng.randint(1, 500000)) / Decimal(100)
+        )
         lines.append(f'{d} custom "budget" {a} "{rng.choice(INTERVALS)}" {amt} {ccy}')
     lines.append("")
 
@@ -381,7 +392,13 @@ def check_rendered_formats(rledger, path, d_from, d_to, children, got, failures,
         if line.count(",") != 5:
             failures["csv_field_count"].append((seed, line[:100]))
     for line in csv_lines[1:]:
-        acct, ccy, budgeted, actual, remaining, used = line.split(",")
+        parts = line.split(",")
+        if len(parts) != 6:
+            # Already recorded above as csv_field_count. Unpacking anyway turned
+            # a reportable failure into a traceback that aborted the whole run,
+            # which is exactly the wrong direction for a harness.
+            continue
+        acct, ccy, budgeted, actual, remaining, used = parts
         row = json_rows.get((acct, ccy))
         if row is None:
             failures["csv_row_not_in_json"].append((seed, (acct, ccy), children))
@@ -404,15 +421,31 @@ def check_rendered_formats(rledger, path, d_from, d_to, children, got, failures,
     if txt_proc.returncode != 0:
         failures["text_nonzero_exit"].append((seed, txt_proc.stderr.strip()[:120]))
         return
+    # Identify data rows by the accounts and totals the JSON already told us to
+    # expect, rather than by an account-root prefix. Matching on `Expenses:`/
+    # `Income:` made the check silently vacuous for any other root (Assets,
+    # Liabilities, a renamed account type) — it would pass by skipping every row.
+    want_labels = {a for a, _ in json_rows} | {"TOTAL", "TOTAL (earned)"}
+    seen_rows = 0
     for line in txt_proc.stdout.splitlines():
         stripped = line.strip()
-        if not (stripped.startswith(("Expenses:", "Income:", "TOTAL"))):
+        # LONGEST match: "TOTAL" is a prefix of "TOTAL (earned)", and a set has
+        # no order, so picking any match miscounted the earned rows.
+        label = max(
+            (l for l in want_labels if stripped.startswith(l)),
+            key=len,
+            default=None,
+        )
+        if label is None:
             continue
-        fields = stripped.split()
-        # "TOTAL (earned)" carries a space in its label.
-        expected = 7 if stripped.startswith("TOTAL (earned)") else 6
-        if len(fields) != expected:
+        seen_rows += 1
+        # The label may contain a space ("TOTAL (earned)"); the remainder must
+        # be exactly the five other columns.
+        rest = stripped[len(label):].split()
+        if len(rest) != 5:
             failures["text_columns_fused"].append((seed, stripped[:110]))
+    if json_rows and seen_rows == 0:
+        failures["text_no_rows_matched"].append((seed, "text check matched nothing"))
 
 
 def check_one(rledger, path, src, d_from, d_to, children, failures, seed):

@@ -1762,3 +1762,76 @@ fn the_account_filter_echo_cannot_forge_a_row() {
         "a newline in --account must not produce a forged line: {txt}"
     );
 }
+
+/// The `Used` column must be sized to its content like the others. It was the
+/// one left at a constant, so an overspent placeholder budget rendered
+/// `-4999.00500000.0%` and the reader could read the remaining figure as
+/// `-4999.00500000`.
+#[test]
+fn a_wide_percentage_does_not_fuse_with_remaining() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Misc\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-01-01 custom \"budget\" Expenses:Misc \"monthly\" 1.00 USD\n\
+         2024-02-05 * \"big\"\n  Expenses:Misc 5000.00 USD\n  Assets:Cash\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let txt = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-02-01",
+            "--to",
+            "2024-03-01",
+            "--no-pager",
+        ],
+    );
+    let row = txt
+        .lines()
+        .find(|l| l.starts_with("Expenses:Misc"))
+        .expect("a row");
+    assert_eq!(
+        row.split_whitespace().count(),
+        6,
+        "Remaining and Used must stay separable: {row:?}"
+    );
+}
+
+/// A TOTAL can overflow even when every row it sums is representable, so the
+/// in-band error must cover totals too — otherwise a consumer sees a null total
+/// with an empty `errors` array and cannot tell an overflow from its own bug.
+#[test]
+fn an_unrepresentable_total_is_reported_in_band() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:A\n\
+         2024-01-01 open Expenses:B\n\
+         2024-01-01 custom \"budget\" Expenses:A \"yearly\" 50000000000000000000000000000 USD\n\
+         2024-01-01 custom \"budget\" Expenses:B \"yearly\" 50000000000000000000000000000 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let json = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2025-01-01",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    assert!(json.contains(r#""budgeted": null"#), "{json}");
+    assert!(
+        json.contains("too large to represent"),
+        "the null total must be explained in `errors`: {json}"
+    );
+}

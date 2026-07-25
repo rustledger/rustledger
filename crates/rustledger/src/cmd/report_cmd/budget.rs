@@ -484,33 +484,38 @@ pub(super) fn report_budget<W: Write>(
         .collect();
     rows.sort_by(|a, b| (&a.account, &a.currency).cmp(&(&b.account, &b.currency)));
 
-    // An un-representable figure is reported in band as well as rendered `n/a`.
-    // Without this a consumer sees `"budgeted": null` with an empty `errors`
-    // array and cannot tell an overflow from a bug in its own parsing — the very
-    // ambiguity the array was added to remove for rejected directives.
-    for r in &rows {
-        if r.budgeted.is_none() || r.actual.is_none() {
-            errors.push(BudgetError {
-                date: filter.from,
-                account: Some(r.account.clone()),
-                reason: format!(
-                    "budget for {} in {} is too large to represent; \
-                     the figure is reported as absent rather than clamped",
-                    r.account, r.currency
-                ),
-            });
-        }
-    }
-
-    // Totals are computed from the underlying data rather than by summing the rows:
-    // under `--children` a parent row and a child row both include the child's
-    // budget and spending, so adding the rows up would count it twice.
     errors.sort_by_key(|e| e.date);
     for e in &errors {
         eprintln!("warning: {}: {}", e.date, e.reason);
     }
 
     let totals = compute_totals(&budgets, &actuals, filter, types);
+
+    // An un-representable figure is reported in band as well as rendered `n/a`,
+    // for ROWS AND TOTALS alike. Without this a consumer sees `"budgeted": null`
+    // with an empty `errors` array and cannot tell an overflow from a bug in its
+    // own parsing — and a TOTAL can overflow even when every row it sums is
+    // individually representable, so covering only the rows left the commonest
+    // overflow silent.
+    let unrepresentable = |label: &str, ccy: &str| BudgetError {
+        date: filter.from,
+        account: Some(label.to_string()),
+        reason: format!(
+            "budget for {label} in {ccy} is too large to represent; \
+             the figure is reported as absent rather than clamped"
+        ),
+    };
+    for r in &rows {
+        if r.budgeted.is_none() || r.actual.is_none() {
+            errors.push(unrepresentable(&r.account, &r.currency));
+        }
+    }
+    for ((ccy, credit), (b, a)) in &totals {
+        if b.is_none() || a.is_none() {
+            let row = total_row(ccy, *credit, *b, *a);
+            errors.push(unrepresentable(&row.account, ccy));
+        }
+    }
     render(
         &rows,
         &totals,
@@ -919,17 +924,26 @@ fn render<W: Write>(
                 num_w(1, "Actual"),
                 num_w(2, "Remaining"),
             );
-            let rule = RULE.max(acct_w + 1 + ccy_w + bw + aw + rw + 9);
+            // The Used column is content-sized too. It was left at a constant
+            // while the others were fixed, so a percentage of nine or more
+            // characters (a tiny budget with real spending against it —
+            // `500000.0%`) butted straight against Remaining and the reader
+            // could read `-4999.00500000` as one figure.
+            let uw = width(
+                &|r| fmt_used(r.used_fraction()).chars().count(),
+                "Used".len(),
+            ) + 2;
+            let rule = RULE.max(acct_w + 1 + ccy_w + bw + aw + rw + uw);
             writeln!(
                 writer,
-                "{:<acct_w$} {:<ccy_w$}{:>bw$}{:>aw$}{:>rw$}{:>9}",
+                "{:<acct_w$} {:<ccy_w$}{:>bw$}{:>aw$}{:>rw$}{:>uw$}",
                 "Account", "Ccy", "Budgeted", "Actual", "Remaining", "Used"
             )?;
             writeln!(writer, "{}", "-".repeat(rule))?;
             let line = |r: &BudgetRow| {
                 let [b, a, rem] = cells(r);
                 format!(
-                    "{:<acct_w$} {:<ccy_w$}{:>bw$}{:>aw$}{:>rw$}{:>9}",
+                    "{:<acct_w$} {:<ccy_w$}{:>bw$}{:>aw$}{:>rw$}{:>uw$}",
                     // Sanitized, not truncated: every column is sized to its
                     // content, so nothing is cut, but a control character in a
                     // label would still split the fixed-width row. Widths are

@@ -721,6 +721,40 @@ jobs:
             --output compat-bql-results.jsonl \
             --baseline .github/badges/previous-bql-results.jsonl \
             --github-output
+      # `report budget` is arithmetic over generated data, so it is checked by
+      # generation rather than by examples: the budgeted figure against a
+      # clean-room per-day accrual, each row's actual against an independent
+      # recomputation, both TOTALs against a once-per-posting oracle, and all
+      # three output formats for column separability and CSV/JSON agreement.
+      #
+      # Runs HERE, not with the gates below, because the
+      # "Commit results to compatibility branch" step checks out an orphan
+      # branch that has no `scripts/` and no `target/` — a gate placed after it
+      # cannot even find this script. It records a verdict instead and the gate
+      # at the end fails on that, which is the same shape as the other gates.
+      #
+      # Seeding matches the synthetic corpus policy: fresh nightly, fixed for
+      # PR/push so a red X does not move when an unrelated commit lands.
+      # Reproduce any failure with `--seed <n> --count 1`.
+      - name: Budget report fuzz
+        id: budget_fuzz
+        continue-on-error: true
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            BUDGET_SEED="${{ github.run_id }}"; BUDGET_COUNT=500
+          else
+            BUDGET_SEED=12345; BUDGET_COUNT=150
+          fi
+          printf 'seed=%s\ncount=%s\n' "$BUDGET_SEED" "$BUDGET_COUNT" >> "$GITHUB_OUTPUT"
+          if python3 scripts/compat-budget-fuzz.py --self-test \
+             && python3 scripts/compat-budget-fuzz.py \
+                  --rledger ./target/release/rledger \
+                  --seed "$BUDGET_SEED" --count "$BUDGET_COUNT"; then
+            echo "failed=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=1" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate YAML summary
         run: |
           cat > compat-results.yaml << EOF
@@ -1166,32 +1200,11 @@ jobs:
       # compatibility-branch commit still happen (a one-shot red alert; the
       # committed baseline advances, and the regression details live in
       # compat-regressions.txt on the compatibility branch).
-      # BUDGET GATE: `report budget` is arithmetic over generated data, so it is
-      # checked by generation rather than by examples — the budgeted figure
-      # against a clean-room per-day accrual, each row's actual against an
-      # independent recomputation, and both TOTALs against a once-per-posting
-      # oracle. Runs with the other gates, LAST and with `always()`, so a budget
-      # divergence cannot skip the BQL step, the charts, the PR comment or the
-      # compatibility-branch commit.
-      #
-      # Seeding matches the synthetic corpus policy above: nightly explores
-      # fresh ledgers, PR/push stays deterministic so a red X does not move when
-      # an unrelated commit is pushed. Reproduce with `--seed <n> --count 1`.
       - name: Gate on budget report fuzz
-        if: always()
+        if: steps.budget_fuzz.outputs.failed == '1'
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            BUDGET_SEED="${{ github.run_id }}"
-            BUDGET_COUNT=500
-          else
-            BUDGET_SEED=12345
-            BUDGET_COUNT=150
-          fi
-          python3 scripts/compat-budget-fuzz.py --self-test
-          python3 scripts/compat-budget-fuzz.py \
-            --rledger ./target/release/rledger \
-            --seed "$BUDGET_SEED" \
-            --count "$BUDGET_COUNT"
+          echo "::error::Budget report fuzz found a divergence (seed=${{ steps.budget_fuzz.outputs.seed }}, count=${{ steps.budget_fuzz.outputs.count }}). Reproduce with: python3 scripts/compat-budget-fuzz.py --rledger ./target/release/rledger --seed <n> --count 1"
+          exit 1
 
       - name: Gate on check regressions
         if: steps.compat_test.outputs.regression_count != '0'

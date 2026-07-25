@@ -348,6 +348,73 @@ def tolerance(rendered: str) -> Decimal:
     return Decimal(5) * Decimal(10) ** Decimal(-dp - 1) + Decimal("1e-12")
 
 
+def run_format(rledger, path, d_from, d_to, children, fmt):
+    args = [
+        rledger, "report", path, "budget",
+        "--from", str(d_from), "--to", str(d_to),
+        "--format", fmt, "--no-pager",
+    ]
+    if children:
+        args.append("--children")
+    return subprocess.run(args, capture_output=True, text=True, timeout=120)
+
+
+def check_rendered_formats(rledger, path, d_from, d_to, children, got, failures, seed):
+    """Text and CSV must say the same thing as JSON, and stay readable.
+
+    The JSON oracle above cannot see either: every defect this catches shipped
+    at some point — an account column truncated so two rows rendered
+    identically, numeric columns so narrow that Actual fused with Remaining,
+    and a percentage computed from unrounded figures beside rounded amounts.
+    """
+    json_rows = {
+        (b["account"], b["currency"]): b
+        for b in list(got["budgets"]) + list(got["totals"])
+    }
+
+    csv_proc = run_format(rledger, path, d_from, d_to, children, "csv")
+    if csv_proc.returncode != 0:
+        failures["csv_nonzero_exit"].append((seed, csv_proc.stderr.strip()[:120]))
+        return
+    csv_lines = [l for l in csv_proc.stdout.splitlines() if l.strip()]
+    for line in csv_lines:
+        if line.count(",") != 5:
+            failures["csv_field_count"].append((seed, line[:100]))
+    for line in csv_lines[1:]:
+        acct, ccy, budgeted, actual, remaining, used = line.split(",")
+        row = json_rows.get((acct, ccy))
+        if row is None:
+            failures["csv_row_not_in_json"].append((seed, (acct, ccy), children))
+            continue
+        for field, csv_val in (
+            ("budgeted", budgeted), ("actual", actual), ("remaining", remaining)
+        ):
+            want = row[field] if field != "remaining" else row.get("remaining")
+            want_s = "" if want is None else str(want)
+            if csv_val != want_s:
+                failures["csv_json_disagree"].append(
+                    (seed, (acct, ccy), f"{field}: csv={csv_val!r} json={want_s!r}")
+                )
+        # A zero budget has no meaningful percentage; a finite one beside a
+        # zero amount is a contradiction a consumer cannot reconcile.
+        if budgeted and Decimal(budgeted) == 0 and used != "":
+            failures["used_pct_on_zero_budget"].append((seed, (acct, ccy), used))
+
+    txt_proc = run_format(rledger, path, d_from, d_to, children, "text")
+    if txt_proc.returncode != 0:
+        failures["text_nonzero_exit"].append((seed, txt_proc.stderr.strip()[:120]))
+        return
+    for line in txt_proc.stdout.splitlines():
+        stripped = line.strip()
+        if not (stripped.startswith(("Expenses:", "Income:", "TOTAL"))):
+            continue
+        fields = stripped.split()
+        # "TOTAL (earned)" carries a space in its label.
+        expected = 7 if stripped.startswith("TOTAL (earned)") else 6
+        if len(fields) != expected:
+            failures["text_columns_fused"].append((seed, stripped[:110]))
+
+
 def check_one(rledger, path, src, d_from, d_to, children, failures, seed):
     Path(path).write_text(src)
     args = [
@@ -408,6 +475,9 @@ def check_one(rledger, path, src, d_from, d_to, children, failures, seed):
             failures["actual_mismatch"].append(
                 (seed, key, f"got={gotv} want={want}", children)
             )
+
+    # Text and CSV, which the JSON oracle above cannot see.
+    check_rendered_formats(rledger, path, d_from, d_to, children, got, failures, seed)
 
     # Totals, in BOTH modes and on BOTH sides. Under --children a parent row and
     # a child row overlap, so the TOTAL is deliberately not the sum of the rows;

@@ -148,7 +148,23 @@ def gen_ledger(rng: random.Random):
         amt = Decimal(rng.randint(1, 50000)) / Decimal(100)
         sign = -1 if is_credit_normal(a) else 1
         lines.append(f'{d} * "txn"')
-        if rng.random() < 0.25 and not is_credit_normal(a):
+        shape = rng.random()
+        if shape < 0.12 and not is_credit_normal(a):
+            # `@@` total price in the SAME currency: the weight differs from the
+            # units in number only, and the weight is what was spent.
+            total = (amt + Decimal(rng.randint(1, 500)) / Decimal(100)).quantize(
+                Decimal("0.01")
+            )
+            lines.append(f"  {a}  {amt} {ccy} @@ {total} {ccy}")
+            lines.append(f"  Assets:Cash  -{total} {ccy}")
+        elif shape < 0.24 and not is_credit_normal(a):
+            # Cost spec denominated in another currency.
+            rate = Decimal(rng.randint(80, 140)) / Decimal(100)
+            other = "EUR" if ccy == "USD" else "USD"
+            cost = (amt * rate).quantize(Decimal("0.01"))
+            lines.append(f"  {a}  {amt} {ccy} {{{rate} {other}}}")
+            lines.append(f"  Assets:Cash  -{cost} {other}")
+        elif rng.random() < 0.25 and not is_credit_normal(a):
             # Priced posting: the weight is in another currency, so the report
             # must count it against a budget in EITHER currency.
             rate = Decimal(rng.randint(80, 140)) / Decimal(100)
@@ -242,12 +258,26 @@ def expected_actual(path: str, decls, rows, d_from, d_to, children: bool):
         if not isinstance(e, Transaction) or not (d_from <= e.date < d_to):
             continue
         for p in e.postings:
-            # A posting priced into another currency moved money in both, so it
-            # counts against a budget in either. Weight in the same currency as
-            # the units supersedes the units (`90 USD @@ 95 USD` spent 95).
+            # The canonical weight ladder, mirrored from
+            # `rustledger_booking::posting_weight`: a cost spec with a number and
+            # a currency wins, else a price annotation, else the units. A weight
+            # in a SECOND currency means the posting moved money in both, so it
+            # counts against a budget in either; a weight in the SAME currency
+            # (`90 USD @@ 95 USD`, or a cost denominated in the units currency)
+            # supersedes the units, because only one currency moved and the
+            # weight is what it cost.
             moved = {p.units.currency: p.units.number}
-            if p.price is not None and p.price.currency != p.units.currency:
-                moved[p.price.currency] = p.units.number * p.price.number
+            weight = None
+            if p.cost is not None and getattr(p.cost, "number", None) is not None:
+                weight = (p.cost.currency, p.units.number * p.cost.number)
+            elif p.price is not None:
+                weight = (p.price.currency, p.units.number * p.price.number)
+            if weight is not None:
+                wccy, wnum = weight
+                if wccy == p.units.currency:
+                    moved[wccy] = wnum
+                else:
+                    moved[wccy] = wnum
             for row_acct, ccy in rows:
                 if ccy not in moved or not covers(row_acct, p.account, children):
                     continue
@@ -263,6 +293,48 @@ def expected_actual(path: str, decls, rows, d_from, d_to, children: bool):
                 if e.date >= max(min(covering), d_from):
                     signed = -moved[ccy] if is_credit_normal(p.account) else moved[ccy]
                     out[(row_acct, ccy)] += signed
+    return dict(out)
+
+
+def expected_total_actual(path: str, decls, d_from, d_to, children: bool):
+    """Each posting counted ONCE, against whichever budget covers it.
+
+    The totals are deliberately not the sum of the rendered rows: under
+    `--children` a parent row and a child row overlap. Coverage therefore uses
+    the run's actual `children` flag (a posting on a child IS covered by its
+    parent's budget), while each posting still contributes at most once per
+    currency it moved.
+    """
+    from beancount.core.data import Transaction
+    from beancount.loader import load_file
+
+    entries, _errors, _options = load_file(path)
+    starts: dict[tuple[str, str], datetime.date] = {}
+    for d in decls:
+        key = (d[2], d[5])
+        starts[key] = min(starts.get(key, d[0]), d[0])
+
+    out: dict[tuple[str, bool], Decimal] = defaultdict(Decimal)
+    for e in entries:
+        if not isinstance(e, Transaction) or not (d_from <= e.date < d_to):
+            continue
+        for p in e.postings:
+            moved = {p.units.currency: p.units.number}
+            if p.cost is not None and getattr(p.cost, "number", None) is not None:
+                moved[p.cost.currency] = p.units.number * p.cost.number
+            elif p.price is not None:
+                moved[p.price.currency] = p.units.number * p.price.number
+            for ccy, number in moved.items():
+                covering = [
+                    s
+                    for (a, c), s in starts.items()
+                    if c == ccy and covers(a, p.account, children)
+                ]
+                if not covering:
+                    continue
+                if e.date >= max(min(covering), d_from):
+                    signed = -number if is_credit_normal(p.account) else number
+                    out[(ccy, is_credit_normal(p.account))] += signed
     return dict(out)
 
 
@@ -312,6 +384,19 @@ def check_one(rledger, path, src, d_from, d_to, children, failures, seed):
                 (seed, key, f"got={gotv} want={str(want)[:24]}", children)
             )
 
+    # A row the oracle never predicted is as much a defect as a missing one:
+    # without this, spurious rows could never fail the fuzz.
+    predicted = expected_budgeted(decls, d_from, d_to, children)
+    for key, row in rows.items():
+        if key in predicted:
+            continue
+        # A zero-valued row is legitimate: the key is declared but accrues
+        # nothing in this window, and the oracle drops zeros.
+        if row["budgeted"] not in (None, "0") and Decimal(row["budgeted"]) != 0:
+            failures["unexpected_row"].append(
+                (seed, key, f"budgeted={row['budgeted']}", children)
+            )
+
     act = expected_actual(path, decls, list(rows), d_from, d_to, children)
     for key, row in rows.items():
         if row["actual"] is None:
@@ -324,24 +409,31 @@ def check_one(rledger, path, src, d_from, d_to, children, failures, seed):
                 (seed, key, f"got={gotv} want={want}", children)
             )
 
-    if not children:
-        for tot in got["totals"]:
-            if tot["budgeted"] is None:
+    # Totals, in BOTH modes and on BOTH sides. Under --children a parent row and
+    # a child row overlap, so the TOTAL is deliberately not the sum of the rows;
+    # it counts each budget entry and each posting once. That is computed here
+    # from the same per-entry oracles rather than from the rendered rows.
+    want_tot: dict[tuple[str, bool], list[Decimal]] = defaultdict(
+        lambda: [Decimal(0), Decimal(0)]
+    )
+    for (acct, ccy), val in expected_budgeted(decls, d_from, d_to, False).items():
+        want_tot[(ccy, is_credit_normal(acct))][0] += val
+    for (ccy, credit), val in expected_total_actual(
+        path, decls, d_from, d_to, children
+    ).items():
+        want_tot[(ccy, credit)][1] += val
+
+    for tot in got["totals"]:
+        earned = tot["account"] == "TOTAL (earned)"
+        key = (tot["currency"], earned)
+        for idx, field in ((0, "budgeted"), (1, "actual")):
+            if tot[field] is None:
                 continue
-            # Spending budgets and earning targets total separately, so each
-            # TOTAL sums only the rows of its own normal direction.
-            earned = tot["account"] == "TOTAL (earned)"
-            summed = sum(
-                Decimal(r["budgeted"])
-                for r in got["budgets"]
-                if r["currency"] == tot["currency"]
-                and r["budgeted"] is not None
-                and is_credit_normal(r["account"]) == earned
-            )
-            slack = tolerance(tot["budgeted"]) * Decimal(len(got["budgets"]) + 1)
-            if abs(summed - Decimal(tot["budgeted"])) > slack:
-                failures["total_ne_rows"].append(
-                    (seed, tot["currency"], f"rows={summed} total={tot['budgeted']}")
+            want = want_tot.get(key, [Decimal(0), Decimal(0)])[idx]
+            slack = tolerance(tot[field]) * Decimal(len(got["budgets"]) + 2)
+            if abs(Decimal(tot[field]) - want) > slack:
+                failures[f"total_{field}_mismatch"].append(
+                    (seed, key, f"got={tot[field]} want={str(want)[:24]}", children)
                 )
 
 

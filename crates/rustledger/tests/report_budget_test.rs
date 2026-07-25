@@ -681,7 +681,7 @@ fn csv_uses_display_precision_and_carries_a_total() {
         ],
     );
     assert!(
-        csv.contains("Expenses:Food,USD,245.16129032,0,245.16129032,0.0"),
+        csv.contains("Expenses:Food,USD,245.16129032,0.00000000,245.16129032,0.0"),
         "{csv}"
     );
     assert!(csv.contains("TOTAL,USD,245.16129032"), "{csv}");
@@ -1580,4 +1580,185 @@ fn a_parent_row_survives_when_only_a_child_budget_is_live() {
         "the parent row must aggregate the live child budget: {csv}"
     );
     assert!(csv.contains("Expenses:Food:Grocery,GBP,4303.39"), "{csv}");
+}
+
+/// The empty-report diagnosis must be made over the budgets the user asked
+/// about. Testing "is anything in force" across the whole ledger let an
+/// unrelated account's live budget mask the real reason, so a report filtered
+/// to an account whose budget starts later blamed the `--account` prefix and
+/// sent the user to debug a name that was in fact matching.
+#[test]
+fn an_empty_filtered_report_diagnoses_the_filtered_accounts() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Rent\n\
+         2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Rent \"monthly\" 1000.00 USD\n\
+         2026-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let starts_later = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--account",
+            "Expenses:Food",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2025-01-01",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        starts_later.contains("No budgets were in force in this period")
+            && starts_later.contains("2026-01-01"),
+        "the budget starts later; the prefix is not the problem: {starts_later}"
+    );
+
+    // A filter that genuinely matches nothing still says so.
+    let no_match = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--account",
+            "Expenses:Zzz",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2025-01-01",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        no_match.contains("No budgets match --account"),
+        "{no_match}"
+    );
+}
+
+/// Every text column is sized to its content. A fixed width either truncates
+/// (so two distinct values render identically and their figures are
+/// misattributed) or lets a wide cell fuse with its neighbor (so the reader
+/// cannot tell where Actual ends and Remaining begins). Both were shipped here
+/// before this was applied uniformly.
+#[test]
+fn text_columns_never_truncate_or_fuse() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:AlphaDivision:Operations:Facilities:Utilities\n\
+         2024-01-01 open Expenses:BetaDivision:Operations:Facilities:Utilities\n\
+         2020-01-01 open Expenses:Mining\n\
+         2024-01-01 custom \"budget\" Expenses:AlphaDivision:Operations:Facilities:Utilities \"monthly\" 100.00 USD\n\
+         2024-01-01 custom \"budget\" Expenses:BetaDivision:Operations:Facilities:Utilities \"monthly\" 900.00 USD\n\
+         2020-01-01 custom \"budget\" Expenses:Mining \"monthly\" 12345.50000000 BTC\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let txt = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--no-pager",
+        ],
+    );
+    // Both long accounts appear in full, so their figures are attributable.
+    assert!(
+        txt.contains("Expenses:AlphaDivision:Operations:Facilities:Utilities"),
+        "{txt}"
+    );
+    assert!(
+        txt.contains("Expenses:BetaDivision:Operations:Facilities:Utilities"),
+        "{txt}"
+    );
+    // Every data row splits into exactly the six columns; a fused cell would
+    // yield fewer fields.
+    for l in txt
+        .lines()
+        .filter(|l| l.starts_with("Expenses:") || l.starts_with("TOTAL"))
+    {
+        assert_eq!(
+            l.split_whitespace().count(),
+            6,
+            "row must have six separable columns: {l:?}"
+        );
+    }
+}
+
+/// The four numeric fields of a row must be mutually consistent. Computing the
+/// percentage from unrounded figures while showing rounded ones printed
+/// `budgeted 0, actual 0, remaining 0, used_pct 2033.3`.
+#[test]
+fn a_rows_fields_agree_with_each_other() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "option \"display_precision\" \"USD:1\"\n\
+         2024-01-01 open Expenses:Tiny\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-01-01 custom \"budget\" Expenses:Tiny \"yearly\" 0.02 USD\n\
+         2024-01-02 * \"t\"\n  Expenses:Tiny 0.01 USD\n  Assets:Cash\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let csv = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-01-10",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    let row = csv.lines().nth(1).expect("a row");
+    let f: Vec<&str> = row.split(',').collect();
+    assert_eq!(f[2], "0", "budgeted rounds to zero: {row}");
+    assert_eq!(
+        f[5], "",
+        "a percentage of a zero budget is undefined, not a finite number: {row}"
+    );
+}
+
+/// `--account` is user input echoed into a fixed-width table that does no
+/// quoting of its own, so it must be sanitized like any other label.
+#[test]
+fn the_account_filter_echo_cannot_forge_a_row() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let txt = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-04-01",
+            "--account",
+            "Zzz\n2024-01-01 TOTAL   USD  9999",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        !txt.lines()
+            .any(|l| l.trim_start().starts_with("2024-01-01 TOTAL")),
+        "a newline in --account must not produce a forged line: {txt}"
+    );
 }

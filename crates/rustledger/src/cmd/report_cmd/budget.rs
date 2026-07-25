@@ -28,7 +28,7 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_budget::{BudgetError, Budgets};
+use rustledger_budget::{BudgetEntry, BudgetError, Budgets};
 use rustledger_core::{AccountTypes, Directive, DisplayContext, NaiveDate, is_subaccount_or_equal};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -597,17 +597,32 @@ enum Empty {
 
 impl Empty {
     fn diagnose(budgets: &Budgets, had_errors: bool, filter: &BudgetFilter) -> Self {
-        let Some(earliest) = budgets.earliest() else {
-            // "You have no budgets" is a lie when the ledger has budget
-            // directives that were all rejected — it sends the user looking for
-            // the syntax they think they are missing, not the typo they made.
+        // Diagnose over the budgets the user asked about. Testing "is anything
+        // in force" across the WHOLE ledger let an unrelated account's live
+        // budget mask the real reason: a report filtered to an account whose
+        // budget simply starts later was blamed on the `--account` prefix, and
+        // the user sent to debug a name that was in fact matching.
+        let in_scope: Vec<&BudgetEntry> = budgets
+            .entries()
+            .iter()
+            .filter(|e| passes_account_filter(&e.account, filter.account))
+            .collect();
+        // Three different answers, in order of what the user most needs to know.
+        if budgets.is_empty() {
+            // Nothing parsed at all: either the ledger has no budgets, or every
+            // directive in it was rejected. Saying "no budgets declared" for the
+            // latter sends the user looking for syntax they are not missing.
             return if had_errors {
                 Self::AllRejected
             } else {
                 Self::NoneDeclared
             };
+        }
+        let Some(earliest) = in_scope.iter().map(|e| e.from).min() else {
+            // Budgets exist, but none of them are under `--account`.
+            return Self::FilteredOut;
         };
-        if !budgets.any_in_force_before(filter.to) {
+        if !in_scope.iter().any(|e| e.from < filter.to) {
             return Self::NoneInWindow { earliest };
         }
         Self::FilteredOut
@@ -652,29 +667,76 @@ fn render<W: Write>(
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
-    // A pro-rated budget is a repeating decimal, so it MUST be rounded for
-    // display. The ledger's `DisplayContext` answers for any currency it has
-    // seen; a currency it has not (a budget whose only declared amount is an
-    // integer teaches no precision, deliberately — see `DisplayContext`) would
-    // otherwise print all 28 digits and overrun the columns, which is how this
-    // rendered before the context learned about `custom` amounts at all.
-    // `round_dp(8).normalize()` keeps enough places for a crypto-scale budget
-    // and drops trailing zeros.
+    // Round to display precision ONCE, up front, and render every format from
+    // the rounded values. Computing the percentage from the unrounded figures
+    // while showing rounded ones let a row print `budgeted 0, actual 0,
+    // remaining 0, used_pct 2033.3` — four fields a consumer cannot reconcile.
+    // All four now derive from the same numbers.
     /// How many decimals to show for a currency the ledger never describes.
     /// Enough for a crypto-scale budget, far from `Decimal`'s 28.
     const MAX_UNTRACKED_DP: u32 = 8;
-    let money = |n: Decimal, ccy: &str| {
-        if ctx.get_precision(ccy).is_some() {
-            ctx.format_amount_number(n, ccy)
-        } else if n.scale() <= MAX_UNTRACKED_DP {
-            // Already short: print it as written, so a declared `400.00 USD`
-            // keeps its trailing zeros even in a ledger with no postings yet.
-            n.to_string()
-        } else {
-            // Repeating by construction (a pro-rated accrual). Round, and drop
-            // the trailing zeros rounding may leave.
-            n.round_dp(MAX_UNTRACKED_DP).normalize().to_string()
+    let untracked_scale: BTreeMap<String, u32> = {
+        let mut m: BTreeMap<String, u32> = BTreeMap::new();
+        let all_totals: Vec<BudgetRow> = totals
+            .iter()
+            .map(|((ccy, credit), (b, a))| total_row(ccy, *credit, *b, *a))
+            .collect();
+        for r in rows.iter().chain(all_totals.iter()) {
+            if ctx.get_precision(&r.currency).is_some() {
+                continue;
+            }
+            let seen = [r.budgeted, r.actual, r.remaining()]
+                .into_iter()
+                .flatten()
+                // Raw scale, not normalized: a declared `100.00 USD` keeps its
+                // trailing zeros, while a pro-rated (28-digit) value is capped.
+                .map(|v| v.scale().min(MAX_UNTRACKED_DP))
+                .max()
+                .unwrap_or(0);
+            let e = m.entry(r.currency.clone()).or_default();
+            *e = (*e).max(seen);
         }
+        m
+    };
+    let round_disp = |v: Decimal, ccy: &str| -> Decimal {
+        ctx.get_precision(ccy).map_or_else(
+            || {
+                v.round_dp(
+                    untracked_scale
+                        .get(ccy)
+                        .copied()
+                        .unwrap_or(MAX_UNTRACKED_DP),
+                )
+            },
+            |dp| v.round_dp(dp),
+        )
+    };
+    let round_row = |r: &BudgetRow| BudgetRow {
+        account: r.account.clone(),
+        currency: r.currency.clone(),
+        budgeted: r.budgeted.map(|v| round_disp(v, &r.currency)),
+        actual: r.actual.map(|v| round_disp(v, &r.currency)),
+    };
+    let rows: Vec<BudgetRow> = rows.iter().map(round_row).collect();
+    let rows = &rows[..];
+    let total_rows: Vec<BudgetRow> = totals
+        .iter()
+        .map(|((ccy, credit), (b, a))| round_row(&total_row(ccy, *credit, *b, *a)))
+        .collect();
+
+    // A pro-rated budget is a repeating decimal, so it MUST be rounded for
+    // display. The ledger's `DisplayContext` answers for any currency it has
+    // seen; for one it has not (a budget added before any spending is recorded)
+    // the report picks the scale itself — see `untracked_scale`, which chooses
+    // ONE per currency so the cells of a row agree with each other.
+    let money = |n: Decimal, ccy: &str| {
+        ctx.get_precision(ccy).map_or_else(
+            || {
+                let dp = untracked_scale.get(ccy).copied().unwrap_or(0);
+                format!("{n:.*}", dp as usize)
+            },
+            |_| ctx.format_amount_number(n, ccy),
+        )
     };
     // An un-representable figure is reported as absent, never as a clamped
     // number. Text says `n/a`; machine output follows the same convention the
@@ -714,8 +776,8 @@ fn render<W: Write>(
             // The whole-report total, as its own row per currency. Consumers
             // cannot re-derive it by summing the rows: under `--children` a
             // parent row and a child row both include the child.
-            for ((ccy, credit), (b, a)) in totals {
-                let row = total_row(ccy, *credit, *b, *a);
+            for row in &total_rows {
+                let (ccy, row) = (row.currency.as_str(), row);
                 writeln!(
                     writer,
                     "{},{},{},{},{},{}",
@@ -746,10 +808,7 @@ fn render<W: Write>(
             // An explicit per-currency total, matching `returns`' `"total"`
             // object: consumers must not re-derive it by summing `budgets`,
             // because under `--children` parent and child rows overlap.
-            let total_objs: Vec<String> = totals
-                .iter()
-                .map(|((ccy, credit), (b, a))| obj(&total_row(ccy, *credit, *b, *a)))
-                .collect();
+            let total_objs: Vec<String> = total_rows.iter().map(obj).collect();
             // Rejected directives are reported in-band as well as on stderr.
             // Without this a dashboard cannot tell "this ledger has no budgets"
             // from "every budget in it was rejected": both produced an empty
@@ -812,7 +871,7 @@ fn render<W: Write>(
                         writer,
                         "No budgets match --account {}. (Accounts are matched by raw \
                          prefix, the same as `report balances`.)",
-                        filter.account.unwrap_or_default()
+                        super::sanitize_display(filter.account.unwrap_or_default())
                     )?,
                 }
                 return Ok(());
@@ -828,62 +887,75 @@ fn render<W: Write>(
             // would render identically and misattribute their figures. Widening
             // costs a few columns on the rare long-ticker ledger; truncating
             // costs correctness on it.
-            let ccy_width = rows
-                .iter()
-                .map(|r| r.currency.chars().count())
-                .chain(totals.keys().map(|(c, _)| c.chars().count()))
-                .max()
-                .unwrap_or(3)
-                .max(3);
-            // The rule spans the table, which widens with the currency column.
-            let rule = RULE.max(28 + 1 + ccy_width + 13 * 3 + 9);
-            writeln!(
-                writer,
-                "{:<28} {:<ccy_width$}{:>13}{:>13}{:>13}{:>9}",
-                "Account", "Ccy", "Budgeted", "Actual", "Remaining", "Used"
-            )?;
-            writeln!(writer, "{}", "-".repeat(rule))?;
-            for r in rows {
-                writeln!(
-                    writer,
-                    "{:<28} {:<ccy_width$}{:>13}{:>13}{:>13}{:>9}",
-                    truncate(&r.account, 28),
-                    r.currency,
+            // EVERY column is sized to its content, for one reason: a cell that
+            // does not fit either merges with its neighbor (so the reader
+            // cannot tell where Actual ends and Remaining begins) or is
+            // truncated (so two distinct values render identically and the
+            // figures beside them are misattributed). Both are worse than a
+            // wide table. This was learned twice here — first on the currency
+            // column, then on the account and numeric columns — so it is now
+            // applied uniformly rather than per column.
+            let cells = |r: &BudgetRow| {
+                [
                     money_text(r.budgeted, &r.currency),
                     money_text(r.actual, &r.currency),
                     money_text(r.remaining(), &r.currency),
+                ]
+            };
+            let width = |f: &dyn Fn(&BudgetRow) -> usize, floor: usize| {
+                rows.iter()
+                    .chain(total_rows.iter())
+                    .map(f)
+                    .max()
+                    .unwrap_or(floor)
+                    .max(floor)
+            };
+            let acct_w = width(&|r| r.account.chars().count(), "Account".len());
+            let ccy_w = width(&|r| r.currency.chars().count(), "Ccy".len());
+            let num_w =
+                |i: usize, head: &str| width(&|r| cells(r)[i].chars().count(), head.len()) + 2;
+            let (bw, aw, rw) = (
+                num_w(0, "Budgeted"),
+                num_w(1, "Actual"),
+                num_w(2, "Remaining"),
+            );
+            let rule = RULE.max(acct_w + 1 + ccy_w + bw + aw + rw + 9);
+            writeln!(
+                writer,
+                "{:<acct_w$} {:<ccy_w$}{:>bw$}{:>aw$}{:>rw$}{:>9}",
+                "Account", "Ccy", "Budgeted", "Actual", "Remaining", "Used"
+            )?;
+            writeln!(writer, "{}", "-".repeat(rule))?;
+            let line = |r: &BudgetRow| {
+                let [b, a, rem] = cells(r);
+                format!(
+                    "{:<acct_w$} {:<ccy_w$}{:>bw$}{:>aw$}{:>rw$}{:>9}",
+                    // Sanitized, not truncated: every column is sized to its
+                    // content, so nothing is cut, but a control character in a
+                    // label would still split the fixed-width row. Widths are
+                    // computed on the same char counts (sanitizing is 1:1).
+                    super::sanitize_display(&r.account),
+                    super::sanitize_display(&r.currency),
+                    b,
+                    a,
+                    rem,
                     fmt_used(r.used_fraction()),
-                )?;
+                )
+            };
+            for r in rows {
+                writeln!(writer, "{}", line(r))?;
             }
             writeln!(writer, "{}", "-".repeat(rule))?;
-            // Totals per currency (summing across currencies would be meaningless),
-            // counting each budget and posting once — see `compute_totals`.
-            for ((ccy, credit), (b, a)) in totals {
-                let row = total_row(ccy, *credit, *b, *a);
-                writeln!(
-                    writer,
-                    "{:<28} {:<ccy_width$}{:>13}{:>13}{:>13}{:>9}",
-                    row.account,
-                    ccy,
-                    money_text(row.budgeted, ccy),
-                    money_text(row.actual, ccy),
-                    money_text(row.remaining(), ccy),
-                    fmt_used(row.used_fraction()),
-                )?;
+            // Totals per currency (summing across currencies would be
+            // meaningless), counting each budget and posting once — see
+            // `compute_totals`. Rendered through the same path as the rows so
+            // the two cannot drift in shape.
+            for r in &total_rows {
+                writeln!(writer, "{}", line(r))?;
             }
         }
     }
     Ok(())
-}
-
-/// Truncate a label to a column width, keeping the informative tail.
-///
-/// The shared [`super::truncate_label`]: it sanitizes control characters (a
-/// budget account may be written as an arbitrary quoted string, and a raw
-/// newline in one would otherwise forge a row in the text table) and keeps the
-/// tail, so two accounts sharing a long prefix stay distinguishable.
-fn truncate(s: &str, width: usize) -> String {
-    super::truncate_label(s, width)
 }
 
 #[cfg(test)]

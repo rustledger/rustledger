@@ -700,19 +700,6 @@ jobs:
                   for r in regressions:
                       f.write(r + "\n")
           EOF
-      - name: Budget report fuzz (property + differential)
-        run: |
-          # `report budget` is arithmetic over generated data, and example-based
-          # tests only cover the examples someone thought of. This generates
-          # ledgers and checks the budgeted figure against a clean-room per-day
-          # accrual, the actual figure against an independent recomputation, and
-          # the rows-vs-TOTAL invariant. Self-test first so the oracle itself is
-          # guarded even if the corpus run is skipped.
-          python3 scripts/compat-budget-fuzz.py --self-test
-          python3 scripts/compat-budget-fuzz.py \
-            --rledger ./target/release/rledger \
-            --seed "$(( GITHUB_RUN_NUMBER * 500 ))" \
-            --count 500
       - name: Validate stale-divergence detection logic
         run: |
           # Unit-checks the stale/dangling-mask detection on synthetic data, so
@@ -1179,6 +1166,33 @@ jobs:
       # compatibility-branch commit still happen (a one-shot red alert; the
       # committed baseline advances, and the regression details live in
       # compat-regressions.txt on the compatibility branch).
+      # BUDGET GATE: `report budget` is arithmetic over generated data, so it is
+      # checked by generation rather than by examples — the budgeted figure
+      # against a clean-room per-day accrual, each row's actual against an
+      # independent recomputation, and both TOTALs against a once-per-posting
+      # oracle. Runs with the other gates, LAST and with `always()`, so a budget
+      # divergence cannot skip the BQL step, the charts, the PR comment or the
+      # compatibility-branch commit.
+      #
+      # Seeding matches the synthetic corpus policy above: nightly explores
+      # fresh ledgers, PR/push stays deterministic so a red X does not move when
+      # an unrelated commit is pushed. Reproduce with `--seed <n> --count 1`.
+      - name: Gate on budget report fuzz
+        if: always()
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            BUDGET_SEED="${{ github.run_id }}"
+            BUDGET_COUNT=500
+          else
+            BUDGET_SEED=12345
+            BUDGET_COUNT=150
+          fi
+          python3 scripts/compat-budget-fuzz.py --self-test
+          python3 scripts/compat-budget-fuzz.py \
+            --rledger ./target/release/rledger \
+            --seed "$BUDGET_SEED" \
+            --count "$BUDGET_COUNT"
+
       - name: Gate on check regressions
         if: steps.compat_test.outputs.regression_count != '0'
         run: |

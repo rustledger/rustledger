@@ -81,7 +81,6 @@ fn unopened_account_errors(
     let mut seen = BTreeSet::new();
     budgets
         .entries()
-        .iter()
         // A parent budgeted as an aggregate (`Expenses:Food` with only
         // `Expenses:Food:Groceries` opened) is a normal, working setup — but ONLY
         // under `--children`, which is what makes the children's spending answer
@@ -148,7 +147,6 @@ fn closed_account_errors(
     let mut seen = BTreeSet::new();
     budgets
         .entries()
-        .iter()
         .filter_map(|b| {
             // Coverage, not identity: under `--children` a parent budget is
             // answered by its children, so a parent whose covering accounts are
@@ -233,7 +231,6 @@ fn mismatched_currency_errors(
     let mut seen = BTreeSet::new();
     budgets
         .entries()
-        .iter()
         .filter(|b| {
             let seen_currencies = covered_currencies(&b.account);
             !seen_currencies.is_empty() && !seen_currencies.contains(&b.currency)
@@ -484,7 +481,7 @@ pub(super) fn report_budget<W: Write>(
             .all_keys()
             .into_iter()
             .filter(|(account, currency)| {
-                budgets.entries().iter().any(|b| {
+                budgets.entries().any(|b| {
                     b.currency == *currency
                         && b.from < filter.to
                         && covers(account, &b.account, true)
@@ -506,7 +503,6 @@ pub(super) fn report_budget<W: Write>(
             let covered_budgets: Vec<&String> = if filter.children {
                 let mut all: Vec<&String> = budgets
                     .entries()
-                    .iter()
                     .filter(|b| b.currency == currency && covers(&account, &b.account, true))
                     .map(|b| &b.account)
                     .collect();
@@ -706,7 +702,6 @@ impl Empty {
         // the user sent to debug a name that was in fact matching.
         let in_scope: Vec<&BudgetEntry> = budgets
             .entries()
-            .iter()
             .filter(|e| passes_account_filter(&e.account, filter.account))
             .collect();
         // Three different answers, in order of what the user most needs to know.

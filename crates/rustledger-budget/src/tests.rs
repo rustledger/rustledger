@@ -243,3 +243,48 @@ fn weeks_anchor_to_iso_monday() {
     assert_eq!(Interval::Week.start_of(d(2024, 3, 7)), d(2024, 3, 4));
     assert_eq!(Interval::Week.start_of(d(2024, 3, 4)), d(2024, 3, 4));
 }
+
+/// The published ordering contract: `new` sorts by date STABLY, and supersession
+/// takes the last entry on a date, so two declarations sharing a date and
+/// `(account, currency)` supersede in the order the caller passed them.
+///
+/// This is the contract a non-CLI consumer most easily gets wrong, and it was
+/// documented incorrectly ("entries need not be sorted", with no mention that
+/// order decides the winner) until this test was written.
+#[test]
+fn same_date_entries_supersede_in_caller_order() {
+    let first = budget(d(2024, 3, 12), "Expenses:Rent", Interval::Year, 3867);
+    let second = budget(d(2024, 3, 12), "Expenses:Rent", Interval::Month, 3174);
+
+    let as_written = Budgets::new(vec![first.clone(), second.clone()]);
+    assert_eq!(
+        as_written
+            .in_force("Expenses:Rent", "USD", d(2024, 4, 1))
+            .map(|b| b.interval),
+        Some(Interval::Month),
+        "the later line wins"
+    );
+
+    // Reversing the input reverses the winner: the order is the contract, not
+    // an incidental property of the sort.
+    let reversed = Budgets::new(vec![second, first]);
+    assert_eq!(
+        reversed
+            .in_force("Expenses:Rent", "USD", d(2024, 4, 1))
+            .map(|b| b.interval),
+        Some(Interval::Year)
+    );
+}
+
+/// `entries()` yields every declaration in effective-date order, and stays an
+/// iterator so the storage can be re-indexed later without a major version.
+#[test]
+fn entries_are_yielded_in_effective_date_order() {
+    let b = Budgets::new(vec![
+        budget(d(2024, 6, 1), "Expenses:Food", Interval::Month, 450),
+        budget(d(2024, 1, 1), "Expenses:Food", Interval::Month, 400),
+    ]);
+    let dates: Vec<_> = b.entries().map(|e| e.from).collect();
+    assert_eq!(dates, vec![d(2024, 1, 1), d(2024, 6, 1)]);
+    assert_eq!(b.entries().len(), 2);
+}

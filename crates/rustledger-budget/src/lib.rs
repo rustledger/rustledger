@@ -260,7 +260,16 @@ pub struct Budgets {
 }
 
 impl Budgets {
-    /// Index a set of declarations. `entries` need not be sorted.
+    /// Index a set of declarations.
+    ///
+    /// `entries` need not be sorted by date — this sorts them. It IS
+    /// order-significant in one respect: the sort is stable, and supersession
+    /// resolves to the LAST entry on a given date, so two declarations sharing a
+    /// date and `(account, currency)` supersede in the order you pass them.
+    /// [`Self::from_directives`] passes them in file order, which is what
+    /// beancount entry order (and therefore Fava) means by "the later one wins".
+    /// A caller assembling entries from a map or a set has no such order and
+    /// will get an arbitrary winner; sort or deduplicate before calling.
     #[must_use]
     pub fn new(mut entries: Vec<BudgetEntry>) -> Self {
         entries.sort_by_key(|e| e.from);
@@ -275,9 +284,15 @@ impl Budgets {
     }
 
     /// Every declaration, in effective-date order.
-    #[must_use]
-    pub fn entries(&self) -> &[BudgetEntry] {
-        &self.entries
+    ///
+    /// Returns an iterator rather than a slice deliberately: the storage is a
+    /// flat `Vec` today and the lookups here scan it linearly, which is fine for
+    /// the handful of budgets a ledger has but not for a consumer with
+    /// thousands. Handing out `&[BudgetEntry]` would freeze that representation
+    /// on the published API, so re-indexing later — by `(account, currency)`,
+    /// say — could not be done without a major version.
+    pub fn entries(&self) -> impl ExactSizeIterator<Item = &BudgetEntry> + Clone {
+        self.entries.iter()
     }
 
     /// Whether any budget at all was declared.

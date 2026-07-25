@@ -13,6 +13,7 @@ members = [
   "crates/rustledger-importer",
   "crates/rustledger-ops",
   "crates/rustledger-returns",
+  "crates/rustledger-budget",
   "crates/rustledger",
   "crates/rustledger-wasm",
   "crates/rustledger-ffi-wasi",
@@ -34,6 +35,7 @@ default-members = [
   "crates/rustledger-importer",
   "crates/rustledger-ops",
   "crates/rustledger-returns",
+  "crates/rustledger-budget",
   "crates/rustledger",
   "crates/rustledger-lsp",
 ]
@@ -201,6 +203,7 @@ rustledger-booking = { version = "0.21.0", path = "crates/rustledger-booking" }
 rustledger-validate = { version = "0.21.0", path = "crates/rustledger-validate" }
 rustledger-query = { version = "0.21.0", path = "crates/rustledger-query" }
 rustledger-returns = { version = "0.21.0", path = "crates/rustledger-returns" }
+rustledger-budget = { version = "0.21.0", path = "crates/rustledger-budget" }
 rustledger-completion = { version = "0.21.0", path = "crates/rustledger-completion" }
 rustledger-plugin = { version = "0.21.0", path = "crates/rustledger-plugin", default-features = false }
 rustledger-plugin-types = { version = "0.21.0", path = "crates/rustledger-plugin-types" }

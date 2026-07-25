@@ -1,0 +1,24 @@
+[package]
+name = "rustledger-budget"
+description = "Budget model for beancount ledgers — Fava-compatible `custom \"budget\"` directives, calendar intervals, and per-day accrual"
+version = "0.21.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["beancount", "accounting", "budget", "fava"]
+categories = ["finance"]
+authors.workspace = true
+readme = "README.md"
+
+[lib]
+bench = false
+
+[dependencies]
+rustledger-core.workspace = true
+rust_decimal.workspace = true
+jiff.workspace = true
+
+[lints]
+workspace = true

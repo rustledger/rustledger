@@ -80,6 +80,7 @@ rustledger-booking.workspace = true
 rustledger-validate.workspace = true
 rustledger-query.workspace = true
 rustledger-returns.workspace = true
+rustledger-budget.workspace = true
 # Both default to their wasmtime-free feature set (rustledger-plugin's workspace
 # entry is default-features = false; rustledger-importer's `default` is empty).
 # `python-plugin-wasm` re-enables `rustledger-plugin/python-plugins` and

@@ -3375,6 +3375,7 @@ dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
  "rustledger-booking",
+ "rustledger-budget",
  "rustledger-core",
  "rustledger-importer",
  "rustledger-loader",
@@ -3408,6 +3409,15 @@ dependencies = [
  "rustledger-core",
  "serde_json",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "rustledger-budget"
+version = "0.21.0"
+dependencies = [
+ "jiff",
+ "rust_decimal",
+ "rustledger-core",
 ]
 
 [[package]]

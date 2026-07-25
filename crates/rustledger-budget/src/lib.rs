@@ -435,9 +435,19 @@ impl Budgets {
                 continue;
             };
             let istart = b.interval.start_of(cursor);
-            // No representable next period start means the interval's length is
-            // unknowable; report that rather than dividing by a one-day fallback.
-            let inext = b.interval.next_start(istart)?;
+            // The final period at the very end of the representable calendar has
+            // no next start, so its length — and therefore its per-day rate — is
+            // unknowable. Stop and keep what is already accrued.
+            //
+            // Propagating `None` here instead threw away the whole total: a
+            // window of `--to 9999-12-31` returned nothing for a budget whose
+            // accrual to that point was 9,570,000.00, and the caller attributed
+            // the absence to `Decimal` overflow, which it was not. Omitting one
+            // unmeasurable trailing period from an all-time window is a far
+            // smaller lie than discarding every period before it.
+            let Some(inext) = b.interval.next_start(istart) else {
+                break;
+            };
             let mut seg_end = inext.min(to);
             // The next superseding declaration, if it lands inside this segment.
             if let Some(change) = self.next_change_after(account, currency, cursor)

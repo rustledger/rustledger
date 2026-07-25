@@ -288,3 +288,32 @@ fn entries_are_yielded_in_effective_date_order() {
     assert_eq!(dates, vec![d(2024, 1, 1), d(2024, 6, 1)]);
     assert_eq!(b.entries().len(), 2);
 }
+
+/// A window running to the end of the representable calendar keeps everything
+/// accrued before the final, unmeasurable period.
+///
+/// The last period has no next start, so its length — and its per-day rate — is
+/// unknowable. Propagating that as `None` discarded the entire total: an
+/// all-time window returned nothing for a budget worth millions up to that
+/// point, and the caller then blamed `Decimal` overflow, which it was not.
+#[test]
+fn a_window_reaching_the_calendar_end_keeps_what_it_accrued() {
+    let b = Budgets::new(vec![budget(
+        d(2024, 1, 1),
+        "Expenses:Food",
+        Interval::Year,
+        1200,
+    )]);
+    let to_last_boundary = b
+        .accrue("Expenses:Food", "USD", d(2024, 1, 1), d(9999, 1, 1))
+        .expect("a representable total");
+    let past_it = b
+        .accrue("Expenses:Food", "USD", d(2024, 1, 1), d(9999, 12, 31))
+        .expect("extending the window must not discard the total");
+    assert_eq!(
+        to_last_boundary, past_it,
+        "the unmeasurable trailing period contributes nothing, but everything \
+         before it survives"
+    );
+    assert!(to_last_boundary > Decimal::from(9_000_000));
+}

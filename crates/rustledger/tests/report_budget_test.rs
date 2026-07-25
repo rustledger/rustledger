@@ -413,13 +413,18 @@ fn children_totals_do_not_double_count_the_child() {
         "{txt}"
     );
     // The TOTAL counts each budget and each posting once: 300+100 and one 50.
+    // Assert the WHOLE line, not substrings: with a wrong budgeted total of
+    // 450.00 the line reads `TOTAL USD 450.00 50.00 400.00 11.1%`, and a
+    // `contains("400.00")` guard is satisfied by the Remaining column — a guard
+    // the divergence cannot trip is decoration.
     let total = txt
         .lines()
         .find(|l| l.starts_with("TOTAL"))
         .expect("a TOTAL line");
-    assert!(
-        total.contains("400.00") && total.contains("50.00"),
-        "TOTAL must not double-count the child (would be 500.00/100.00): {total}"
+    assert_eq!(
+        total.split_whitespace().collect::<Vec<_>>(),
+        vec!["TOTAL", "USD", "400.00", "50.00", "350.00", "12.5%"],
+        "TOTAL must not double-count the child (would be 500.00/100.00)"
     );
 }
 
@@ -1061,4 +1066,235 @@ fn json_reports_rejected_directives_in_band() {
         json.contains("fortnightly"),
         "the rejected directive is named: {json}"
     );
+}
+
+/// Under `--children` a row covers budgets with DIFFERENT declaration dates. The
+/// clip that excludes pre-budget spending must be applied per posting-account, or
+/// an early child budget drags the parent's window backwards and charges the
+/// parent row with spending that predates the parent's own budget — while the
+/// TOTAL, which had the rule written the other way, disagrees.
+#[test]
+fn a_child_budget_does_not_drag_the_parents_clip_window_backwards() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 open Expenses:Food:Restaurant\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-01-01 custom \"budget\" Expenses:Food:Restaurant \"monthly\" 100.00 USD\n\
+         2024-06-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n\
+         2024-02-15 * \"groceries on the parent, before the parent budget exists\"\n  \
+           Expenses:Food   50.00 USD\n  Assets:Cash    -50.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let csv = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--children",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-12-31",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    let parent = csv
+        .lines()
+        .find(|l| l.starts_with("Expenses:Food,"))
+        .expect("a parent row");
+    let total = csv
+        .lines()
+        .find(|l| l.starts_with("TOTAL,"))
+        .expect("a TOTAL row");
+    let parent_actual = parent.split(',').nth(3).unwrap();
+    let total_actual = total.split(',').nth(3).unwrap();
+    assert_eq!(
+        parent_actual, "0.00",
+        "the Feb spend predates the parent's June budget: {csv}"
+    );
+    assert_eq!(
+        parent_actual, total_actual,
+        "the row and the TOTAL must agree on actual: {csv}"
+    );
+}
+
+/// A second amount on one directive is a user declaring two budgets on one line.
+/// Silently keeping the first drops the other with no diagnostic anywhere; a
+/// trailing NOTE, which Fava allows, must still parse.
+#[test]
+fn a_second_amount_is_reported_but_a_trailing_note_is_not() {
+    let bin = require_rledger!();
+    let two = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD 300.00 EUR\n",
+    );
+    let out = Command::new(&bin)
+        .args([
+            "report",
+            two.path().to_str().unwrap(),
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run rledger");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("malformed budget directive"),
+        "two amounts on one line must be reported, not half-parsed"
+    );
+
+    let note = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD \"groceries only\"\n",
+    );
+    let csv = run(
+        &bin,
+        &[
+            "report",
+            note.path().to_str().unwrap(),
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    assert!(csv.contains("Expenses:Food,USD,400.00"), "{csv}");
+}
+
+/// A commodity name longer than the column must not shift every numeric column
+/// right; beancount permits up to 24 characters.
+#[test]
+fn a_long_commodity_name_keeps_the_columns_aligned() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 300.00 USD\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 300.00 VACATION-FUND\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let txt = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-04-01",
+            "--no-pager",
+        ],
+    );
+    let rows: Vec<&str> = txt
+        .lines()
+        .filter(|l| l.starts_with("Expenses:Food "))
+        .collect();
+    assert_eq!(rows.len(), 2, "{txt}");
+    // Compare CHARACTER offsets: the truncation marker `…` is three bytes, so a
+    // byte index differs between the rows even when the columns line up.
+    let col = |l: &str| {
+        l.chars()
+            .collect::<Vec<_>>()
+            .windows(6)
+            .position(|w| w.iter().collect::<String>() == "900.00")
+            .expect("a budgeted figure")
+    };
+    assert_eq!(
+        col(rows[0]),
+        col(rows[1]),
+        "both rows put Budgeted in the same column: {txt}"
+    );
+}
+
+/// Narrowing to one account must not emit warnings about accounts the user
+/// explicitly excluded — they belong to a report the user did not ask for.
+#[test]
+fn warnings_respect_the_account_filter() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n\
+         2024-01-01 custom \"budget\" Expenses:Typo \"monthly\" 100.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let filtered = Command::new(&bin)
+        .args([
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--account",
+            "Expenses:Food",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run rledger");
+    assert!(
+        !String::from_utf8_lossy(&filtered.stderr).contains("Expenses:Typo"),
+        "an excluded account must not warn: {}",
+        String::from_utf8_lossy(&filtered.stderr)
+    );
+    let unfiltered = Command::new(&bin)
+        .args([
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run rledger");
+    assert!(
+        String::from_utf8_lossy(&unfiltered.stderr).contains("Expenses:Typo"),
+        "without the filter it still warns"
+    );
+}
+
+/// An integer `custom "budget"` amount must not pin a whole currency to 0 dp: a
+/// pro-rated figure then renders as a whole token (0.5172 BTC as `1`).
+#[test]
+fn an_integer_budget_amount_does_not_pin_the_currency_to_zero_dp() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Crypto\n\
+         2024-01-01 custom \"budget\" Expenses:Crypto \"monthly\" 1 BTC\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let csv = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-02-01",
+            "--to",
+            "2024-02-16",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        !csv.contains("Expenses:Crypto,BTC,1,"),
+        "15/29 of 1 BTC is not 1: {csv}"
+    );
+    assert!(csv.contains("Expenses:Crypto,BTC,0.5"), "{csv}");
 }

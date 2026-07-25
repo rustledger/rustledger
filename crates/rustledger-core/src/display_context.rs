@@ -444,7 +444,13 @@ impl DisplayContext {
         let described: std::collections::HashSet<String> =
             ctx.distributions.keys().cloned().collect();
         for (number, currency) in custom_amounts {
-            if !described.contains(&currency) {
+            // Only an amount with fractional digits teaches anything useful. An
+            // integer one (`custom "budget" ... 1 BTC`) would pin the currency at
+            // 0 dp, and a report that pro-rates — which is why this fallback
+            // exists — then renders 0.5172 BTC as `1`. Leaving such a currency
+            // untracked keeps its natural scale, which is verbose but never
+            // wrong.
+            if !described.contains(&currency) && Self::decimal_precision(number) > 0 {
                 ctx.update(number, &currency);
             }
         }

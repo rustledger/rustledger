@@ -130,6 +130,10 @@ pub struct BudgetEntry {
 pub struct BudgetError {
     /// The directive's date.
     pub date: NaiveDate,
+    /// The account the directive names, when it could be read. `None` for a
+    /// directive malformed enough that no account could be identified. Lets a
+    /// consumer report only the problems relevant to the accounts it is showing.
+    pub account: Option<String>,
     /// What is wrong with it, phrased for a user.
     pub reason: String,
 }
@@ -183,23 +187,31 @@ pub fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetE
         // strings, so real Fava-budgeted ledgers contain both spellings; taking
         // only the token would reject a ledger Fava renders fine, which is
         // exactly the compatibility this crate exists to provide.
-        // Trailing values are ignored rather than rejected: Fava reads
-        // `values[0..2]` and lets a ledger carry a trailing note
+        // A trailing NOTE is ignored rather than rejected: Fava reads
+        // `values[0..2]` and lets a ledger carry one
         // (`... 400.00 USD "groceries only"`). Rejecting the whole directive
         // dropped a real budget AND its matching spend from the report over a
         // comment — the opposite of the compatibility this crate exists for.
+        //
+        // A trailing AMOUNT is different: `... 400.00 USD 300.00 EUR` is a user
+        // declaring two budgets on one line, and silently keeping the first
+        // would drop the second with no diagnostic anywhere. That stays an
+        // error, so the user is told which half was lost.
         let parsed = match c.values.as_slice() {
             [
                 acct,
                 MetaValue::String(interval_raw),
                 MetaValue::Amount(amount),
-                ..,
-            ] => account_name(acct).map(|a| (a, interval_raw, amount)),
+                rest @ ..,
+            ] if !rest.iter().any(|v| matches!(v, MetaValue::Amount(_))) => {
+                account_name(acct).map(|a| (a, interval_raw, amount))
+            }
             _ => None,
         };
         let Some((account, interval_raw, amount)) = parsed else {
             errors.push(BudgetError {
                 date: c.date,
+                account: c.values.first().and_then(account_name),
                 reason: "malformed budget directive; expected: \
                      custom \"budget\" <Account> \"<interval>\" <amount> <CCY>"
                     .to_string(),
@@ -209,6 +221,7 @@ pub fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetE
         let Some(interval) = Interval::parse(interval_raw) else {
             errors.push(BudgetError {
                 date: c.date,
+                account: Some(account.clone()),
                 reason: format!(
                     "budget directive has an invalid interval {interval_raw:?} \
                      (use daily, weekly, monthly, quarterly or yearly)"

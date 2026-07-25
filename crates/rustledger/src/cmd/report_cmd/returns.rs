@@ -44,7 +44,7 @@
 //! (beangrow, fava-portfolio-summary) uses declared groups that bundle their
 //! income accounts.
 
-use super::{OutputFormat, csv_escape, json_escape};
+use super::{OutputFormat, csv_escape, json_escape, sanitize_display};
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use rustledger_core::{Directive, DisplayContext, MetaValue, NaiveDate, is_subaccount_or_equal};
@@ -236,25 +236,6 @@ fn build_groups(
     }
 
     rows
-}
-
-/// Replace control characters and the Unicode line/paragraph separators
-/// (U+2028/U+2029) with a space. A `returns-group:` label is arbitrary
-/// user-controlled text; on the human-facing surfaces (the text table, CSV, and
-/// stderr warnings) such bytes could inject terminal escapes or extra lines, so
-/// they are neutralized. The JSON path does not use this — it keeps the label
-/// intact and valid via `escape_json` (C0 control bytes become `\uXXXX`;
-/// U+2028/U+2029 stay as-is, which is already valid inside a JSON string).
-fn sanitize_display(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect()
 }
 
 /// The first shared in-scope account for EACH group in `rows`, computed in ONE

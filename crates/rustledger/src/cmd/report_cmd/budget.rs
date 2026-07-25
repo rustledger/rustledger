@@ -119,6 +119,47 @@ fn covers(budgeted: &str, posting_account: &str, children: bool) -> bool {
     }
 }
 
+/// Budgets that keep accruing after their account was closed.
+///
+/// `close` means no further postings are possible, so every day after it
+/// contributes budget that nothing can ever be spent against — the row then
+/// reads as a large underspend. The accrual is deliberately NOT changed: a
+/// budget is a declaration in its own right, Fava does not consider `close`
+/// either, and silently dropping the tail would be its own surprise. Warning
+/// says the same thing without changing a number.
+fn closed_account_errors(
+    directives: &[Directive],
+    budgets: &Budgets,
+    to: NaiveDate,
+) -> Vec<BudgetError> {
+    let mut closed: BTreeMap<&str, NaiveDate> = BTreeMap::new();
+    for d in directives {
+        if let Directive::Close(c) = d {
+            let e = closed.entry(c.account.as_str()).or_insert(c.date);
+            *e = (*e).min(c.date);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    budgets
+        .entries()
+        .iter()
+        .filter_map(|b| {
+            let when = *closed.get(b.account.as_str())?;
+            // Only if the budget is still running past the close inside this
+            // window; a budget that ended before it is unremarkable.
+            (when < to && b.from <= when && seen.insert(b.account.clone())).then(|| BudgetError {
+                date: when,
+                account: Some(b.account.clone()),
+                reason: format!(
+                    "budget for {} keeps accruing after the account was closed on {}; \
+                     no spending can be booked to it after that date",
+                    b.account, when
+                ),
+            })
+        })
+        .collect()
+}
+
 /// Budgets whose currency the account never posts in.
 ///
 /// The sibling of the typo'd-account check, and the same silent misreport: a
@@ -304,6 +345,7 @@ pub(super) fn report_budget<W: Write>(
         &budgets,
         filter.children,
     ));
+    errors.extend(closed_account_errors(directives, &budgets, filter.to));
     // Whether the ledger had ANY unusable budget, computed before the filter:
     // `Empty::diagnose` must not conclude "no budgets declared" for a ledger
     // whose budgets were all rejected merely because `--account` excluded them

@@ -1835,3 +1835,58 @@ fn an_unrepresentable_total_is_reported_in_band() {
         "the null total must be explained in `errors`: {json}"
     );
 }
+
+/// `close` means no further postings are possible, so a budget still accruing
+/// past it contributes amounts nothing can ever be spent against and the row
+/// reads as a large underspend. The accrual is deliberately unchanged — a
+/// budget is a declaration in its own right, and Fava does not consider `close`
+/// either — but the report says so.
+#[test]
+fn a_budget_accruing_past_a_close_is_reported() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Sub\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-01-01 custom \"budget\" Expenses:Sub \"monthly\" 300.00 USD\n\
+         2024-01-10 * \"spend\"\n  Expenses:Sub  100.00 USD\n  Assets:Cash\n\
+         2024-02-01 close Expenses:Sub\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let past = Command::new(&bin)
+        .args([
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-04-01",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        String::from_utf8_lossy(&past.stderr).contains("after the account was closed"),
+        "a budget running past the close must be reported: {}",
+        String::from_utf8_lossy(&past.stderr)
+    );
+
+    // A window that ends at the close is unremarkable and must stay quiet.
+    let upto = Command::new(&bin)
+        .args([
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--no-pager",
+        ])
+        .output()
+        .expect("run");
+    assert!(
+        !String::from_utf8_lossy(&upto.stderr).contains("after the account was closed"),
+        "no warning when the window ends at the close"
+    );
+}

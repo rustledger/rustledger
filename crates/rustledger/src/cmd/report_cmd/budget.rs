@@ -138,10 +138,17 @@ fn closed_account_errors(
     children: bool,
 ) -> Vec<BudgetError> {
     let mut closed: BTreeMap<&str, NaiveDate> = BTreeMap::new();
+    let mut opened: BTreeSet<&str> = BTreeSet::new();
     for d in directives {
-        if let Directive::Close(c) = d {
-            let e = closed.entry(c.account.as_str()).or_insert(c.date);
-            *e = (*e).min(c.date);
+        match d {
+            Directive::Close(c) => {
+                let e = closed.entry(c.account.as_str()).or_insert(c.date);
+                *e = (*e).min(c.date);
+            }
+            Directive::Open(o) => {
+                opened.insert(o.account.as_str());
+            }
+            _ => {}
         }
     }
     let mut seen = BTreeSet::new();
@@ -150,14 +157,28 @@ fn closed_account_errors(
         .filter_map(|b| {
             // Coverage, not identity: under `--children` a parent budget is
             // answered by its children, so a parent whose covering accounts are
-            // all closed can no longer see spending either. This was the one
-            // diagnostic of the three that did not take the flag, so it silently
-            // excluded the subtree case the other two handle.
-            let when = *closed
+            // ALL closed can no longer see spending either.
+            //
+            // "All", not "any": an earlier version warned as soon as one covered
+            // account closed, which produced a warning saying no spending could
+            // be booked directly above a row showing spending booked through a
+            // sibling that was still open. The relevant date is then the LAST
+            // close, not the first, because spending remains possible until
+            // every covering account has shut.
+            let covering: Vec<&str> = opened
                 .iter()
-                .filter(|(acct, _)| covers(&b.account, acct, children))
-                .map(|(_, when)| when)
-                .min()?;
+                .copied()
+                .filter(|acct| covers(&b.account, acct, children))
+                .collect();
+            if covering.is_empty() {
+                return None;
+            }
+            let when = *covering
+                .iter()
+                .map(|acct| closed.get(acct))
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .max()?;
             // Only if the budget is still running past the close inside this
             // window; a budget that ended before it is unremarkable.
             // Any budget that accrues on or after the close is unspendable for
@@ -196,15 +217,24 @@ fn mismatched_currency_errors(
     directives: &[Directive],
     budgets: &Budgets,
     children: bool,
+    from: NaiveDate,
+    to: NaiveDate,
 ) -> Vec<BudgetError> {
     // Every currency each account actually moves — units and, for a priced or
     // costed posting, the weight currency too, since `90 EUR @ 1.10 USD` is
     // legitimately budgetable in either.
+    // Windowed, like every other posting walk in this report. Scanning the whole
+    // ledger let a currency the account stopped posting years ago suppress the
+    // warning: an EUR budget for 2024 stayed silent because the account posted
+    // EUR in 2019, which is precisely the silent misreport this exists to catch.
     let mut posted: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     for d in directives {
         let Directive::Transaction(txn) = d else {
             continue;
         };
+        if txn.date < from || txn.date >= to {
+            continue;
+        }
         for p in &txn.postings {
             let Some(units) = p.units.as_ref().and_then(|u| u.as_amount()) else {
                 continue;
@@ -368,6 +398,8 @@ pub(super) fn report_budget<W: Write>(
         directives,
         &budgets,
         filter.children,
+        filter.from,
+        filter.to,
     ));
     errors.extend(closed_account_errors(
         directives,
@@ -575,9 +607,9 @@ pub(super) fn report_budget<W: Write>(
             errors.push(unrepresentable(&r.account, &r.currency));
         }
     }
-    for ((ccy, credit), (b, a)) in &totals {
+    for ((ccy, kind), (b, a)) in &totals {
         if b.is_none() || a.is_none() {
-            let row = total_row(ccy, *credit, *b, *a);
+            let row = total_row(ccy, kind, *b, *a);
             // A total whose component is unknown is itself unknown: summing only
             // the representable rows would print an authoritative-looking figure
             // that silently omits an account. It stays absent, and says why.
@@ -623,7 +655,7 @@ fn compute_totals(
     actuals: &BTreeMap<(String, String), Vec<(NaiveDate, Decimal)>>,
     filter: &BudgetFilter,
     types: &AccountTypes,
-) -> BTreeMap<(String, bool), (Option<Decimal>, Option<Decimal>)> {
+) -> BTreeMap<(String, String), (Option<Decimal>, Option<Decimal>)> {
     // Distinct budgeted (account, currency) pairs, after the account filter.
     let pairs: Vec<(String, String)> = budgets
         .keys_in_force_before(filter.to)
@@ -631,10 +663,11 @@ fn compute_totals(
         .filter(|(account, _)| passes_account_filter(account, filter.account))
         .collect();
 
-    let mut totals: BTreeMap<(String, bool), (Option<Decimal>, Option<Decimal>)> = BTreeMap::new();
+    let mut totals: BTreeMap<(String, String), (Option<Decimal>, Option<Decimal>)> =
+        BTreeMap::new();
     for (account, currency) in &pairs {
         let e = totals
-            .entry((currency.clone(), types.is_credit_normal(account)))
+            .entry((currency.clone(), account_kind(account)))
             .or_insert((Some(Decimal::ZERO), Some(Decimal::ZERO)));
         e.0 = e.0.and_then(|acc| {
             budgets
@@ -656,7 +689,7 @@ fn compute_totals(
         };
         let start = start.max(filter.from);
         let e = totals
-            .entry((currency.clone(), types.is_credit_normal(account)))
+            .entry((currency.clone(), account_kind(account)))
             .or_insert((Some(Decimal::ZERO), Some(Decimal::ZERO)));
         for (_, raw) in entries.iter().filter(|(d, _)| *d >= start) {
             e.1 =
@@ -728,22 +761,30 @@ impl Empty {
     }
 }
 
+/// The account's top-level type, which is how totals are bucketed.
+fn account_kind(account: &str) -> String {
+    account.split(':').next().unwrap_or(account).to_string()
+}
+
 /// A whole-report total as a row, so totals and rows render through one path.
 fn total_row(
     currency: &str,
-    credit_normal: bool,
+    kind: &str,
     budgeted: Option<Decimal>,
     actual: Option<Decimal>,
 ) -> BudgetRow {
     BudgetRow {
-        // Spending budgets and earning targets are totaled separately: adding a
-        // 5000 salary target to a 400 travel budget gives a figure that means
-        // nothing, and a `Used` percentage that reads far healthier than the
-        // spending actually is.
-        account: if credit_normal {
-            "TOTAL (earned)".to_string()
-        } else {
+        // Totals are per ACCOUNT TYPE, not per direction. Adding a 5000 salary
+        // target to a 400 travel budget gives a figure that means nothing and a
+        // `Used` percentage that reads far healthier than the spending is — but
+        // bucketing merely by credit-normality repeated the mistake one level
+        // up, lumping a credit-card spending budget in with an income target
+        // and labeling the sum "earned". Expenses keep the bare `TOTAL` label
+        // because they are the overwhelmingly common case.
+        account: if kind == "Expenses" {
             "TOTAL".to_string()
+        } else {
+            format!("TOTAL ({kind})")
         },
         currency: currency.to_string(),
         budgeted,
@@ -758,7 +799,7 @@ fn fmt_used(used: Option<f64>) -> String {
 
 fn render<W: Write>(
     rows: &[BudgetRow],
-    totals: &BTreeMap<(String, bool), (Option<Decimal>, Option<Decimal>)>,
+    totals: &BTreeMap<(String, String), (Option<Decimal>, Option<Decimal>)>,
     filter: &BudgetFilter,
     empty: Empty,
     errors: &[BudgetError],
@@ -778,7 +819,7 @@ fn render<W: Write>(
         let mut m: BTreeMap<String, u32> = BTreeMap::new();
         let all_totals: Vec<BudgetRow> = totals
             .iter()
-            .map(|((ccy, credit), (b, a))| total_row(ccy, *credit, *b, *a))
+            .map(|((ccy, kind), (b, a))| total_row(ccy, kind, *b, *a))
             .collect();
         for r in rows.iter().chain(all_totals.iter()) {
             if ctx.get_precision(&r.currency).is_some() {
@@ -820,7 +861,7 @@ fn render<W: Write>(
     let rows = &rows[..];
     let total_rows: Vec<BudgetRow> = totals
         .iter()
-        .map(|((ccy, credit), (b, a))| round_row(&total_row(ccy, *credit, *b, *a)))
+        .map(|((ccy, kind), (b, a))| round_row(&total_row(ccy, kind, *b, *a)))
         .collect();
 
     // A pro-rated budget is a repeating decimal, so it MUST be rounded for

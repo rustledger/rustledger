@@ -226,7 +226,7 @@ def gen_ledger(rng: random.Random):
 
     start = datetime.date(2020, 1, 1) + datetime.timedelta(days=rng.randint(0, 1200))
     end = start + datetime.timedelta(days=rng.randint(1, 900))
-    return "\n".join(lines) + "\n", start, end, closed, typos
+    return "\n".join(lines) + "\n", start, end, closed, typos, accts
 
 
 def read_declarations(path: str):
@@ -362,7 +362,7 @@ def expected_total_actual(path: str, decls, d_from, d_to, children: bool):
         key = (d[2], d[5])
         starts[key] = min(starts.get(key, d[0]), d[0])
 
-    out: dict[tuple[str, bool], Decimal] = defaultdict(Decimal)
+    out: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
     for e in entries:
         if not isinstance(e, Transaction) or not (d_from <= e.date < d_to):
             continue
@@ -382,7 +382,7 @@ def expected_total_actual(path: str, decls, d_from, d_to, children: bool):
                     continue
                 if e.date >= max(min(covering), d_from):
                     signed = -number if is_credit_normal(p.account) else number
-                    out[(ccy, is_credit_normal(p.account))] += signed
+                    out[(ccy, p.account.split(":")[0])] += signed
     return dict(out)
 
 
@@ -522,7 +522,8 @@ def check_rendered_formats(rledger, path, d_from, d_to, children, got, failures,
 
 
 def check_one(
-    rledger, path, src, d_from, d_to, children, failures, seed, closed=None, typos=None
+    rledger, path, src, d_from, d_to, children, failures, seed,
+    closed=None, typos=None, opened=None,
 ):
     Path(path).write_text(src)
     args = [
@@ -610,14 +611,20 @@ def check_one(
         if posts_other and any(a == acct and c == "ZZQ" for a, c in rows):
             if "ZZQ" not in stderr_text:
                 failures["typo_currency_unreported"].append((seed, acct, children))
-    for acct, when in (closed or {}).items():
-        # Coverage, not identity: under --children a parent budget is answered by
-        # its children, so a closed CHILD must warn on the parent's row too. The
-        # identity-only version of this check could not see that case, which is
-        # the same blind spot the implementation had.
-        covered_rows = [a for a, _ in rows if covers(a, acct, children)]
-        if covered_rows and when < d_to and "closed on" not in stderr_text:
-            failures["closed_account_unreported"].append((seed, acct, str(when)))
+    # A row can no longer see spending only when EVERY opened account it covers
+    # is closed; one closed sibling among open ones leaves it perfectly
+    # spendable. Asserting on "any closed account is covered" made this oracle
+    # demand a warning the report is right not to give.
+    for acct, _ in rows:
+        covering = [o for o in (opened or []) if covers(acct, o, children)]
+        if not covering:
+            continue
+        closes = [(closed or {}).get(o) for o in covering]
+        if any(c is None for c in closes):
+            continue
+        last = max(closes)
+        if last < d_to and "closed on" not in stderr_text:
+            failures["closed_account_unreported"].append((seed, acct, str(last)))
 
     # Text and CSV, which the JSON oracle above cannot see.
     check_rendered_formats(rledger, path, d_from, d_to, children, got, failures, seed)
@@ -626,19 +633,23 @@ def check_one(
     # a child row overlap, so the TOTAL is deliberately not the sum of the rows;
     # it counts each budget entry and each posting once. That is computed here
     # from the same per-entry oracles rather than from the rendered rows.
-    want_tot: dict[tuple[str, bool], list[Decimal]] = defaultdict(
+    want_tot: dict[tuple[str, str], list[Decimal]] = defaultdict(
         lambda: [Decimal(0), Decimal(0)]
     )
     for (acct, ccy), val in expected_budgeted(decls, d_from, d_to, False).items():
-        want_tot[(ccy, is_credit_normal(acct))][0] += val
-    for (ccy, credit), val in expected_total_actual(
+        want_tot[(ccy, acct.split(":")[0])][0] += val
+    for (ccy, kind), val in expected_total_actual(
         path, decls, d_from, d_to, children
     ).items():
-        want_tot[(ccy, credit)][1] += val
+        want_tot[(ccy, kind)][1] += val
 
     for tot in got["totals"]:
-        earned = tot["account"] == "TOTAL (earned)"
-        key = (tot["currency"], earned)
+        # Totals are bucketed by ACCOUNT TYPE: `TOTAL` is Expenses, everything
+        # else is `TOTAL (<Type>)`. Bucketing by credit-normality lumped a
+        # credit-card budget in with an income target and called the sum earned.
+        label = tot["account"]
+        kind = "Expenses" if label == "TOTAL" else label[len("TOTAL ("):-1]
+        key = (tot["currency"], kind)
         for idx, field in ((0, "budgeted"), (1, "actual")):
             if tot[field] is None:
                 continue
@@ -712,10 +723,10 @@ def main() -> int:
     for i in range(args.count):
         seed = args.seed + i
         rng = random.Random(seed)
-        src, d_from, d_to, closed, typos = gen_ledger(rng)
+        src, d_from, d_to, closed, typos, opened = gen_ledger(rng)
         check_one(
             args.rledger, path, src, d_from, d_to, rng.random() < 0.5, failures, seed,
-            closed, typos,
+            closed, typos, opened,
         )
 
     print(f"ran {args.count} generated ledgers from seed {args.seed}")

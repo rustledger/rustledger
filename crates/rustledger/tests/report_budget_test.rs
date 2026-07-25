@@ -1461,8 +1461,8 @@ fn income_and_expense_budgets_total_separately() {
         "the spending total covers only spending budgets: {csv}"
     );
     assert!(
-        csv.contains("TOTAL (earned),USD,5000.00,5000.00,0.00,100.0"),
-        "the earning target totals separately: {csv}"
+        csv.contains("TOTAL (Income),USD,5000.00,5000.00,0.00,100.0"),
+        "the income target totals separately, under its own account type: {csv}"
     );
     assert!(
         !csv.contains("5400.00"),

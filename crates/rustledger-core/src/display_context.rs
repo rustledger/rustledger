@@ -349,6 +349,7 @@ impl DisplayContext {
     {
         let directives = directives.into_iter();
         let mut ctx = Self::new();
+        let mut custom_amounts: Vec<(Decimal, String)> = Vec::new();
 
         // Stage 1: scan directives for amounts to infer precision.
         for directive in directives.clone() {
@@ -410,16 +411,12 @@ impl DisplayContext {
                 }
                 // A `custom` directive can carry amounts (Fava's
                 // `custom "budget" Expenses:Food "monthly" 400.00 USD` is the
-                // common one), and those are the user writing a number in a
-                // currency — exactly the signal this inference is built on. A
-                // currency that appears *only* there otherwise has no precision
-                // at all, so a report of it printed the raw 28-digit Decimal.
-                // This reads any Amount value generically, without the core
-                // knowing what a "budget" is.
+                // common one). Collected here but applied *after* the main pass
+                // as a fallback only — see below.
                 Directive::Custom(c) => {
                     for value in &c.values {
                         if let crate::MetaValue::Amount(amount) = value {
-                            ctx.update(amount.number, amount.currency.as_str());
+                            custom_amounts.push((amount.number, amount.currency.to_string()));
                         }
                     }
                 }
@@ -431,6 +428,24 @@ impl DisplayContext {
                 | Directive::Query(_)
                 | Directive::Note(_)
                 | Directive::Document(_) => {}
+            }
+        }
+
+        // Amounts written inside `custom` directives are a **fallback** source of
+        // precision, never a vote. They are the user writing a number in a
+        // currency, so a currency that appears ONLY there (a budget added before
+        // any spending is recorded) should still render as money rather than a
+        // raw 28-digit Decimal. But a `custom` directive is metadata, not a
+        // transaction: letting it into the histogram let three
+        // `custom "budget" ... 400.0000 USD` lines outvote a ledger's 2dp
+        // postings and re-render `balances` — every report — at 4dp. Applying
+        // them only for currencies nothing else described keeps postings
+        // authoritative wherever they exist.
+        let described: std::collections::HashSet<String> =
+            ctx.distributions.keys().cloned().collect();
+        for (number, currency) in custom_amounts {
+            if !described.contains(&currency) {
+                ctx.update(number, &currency);
             }
         }
 
@@ -1688,6 +1703,54 @@ mod tests {
             ctx.resolved_precisions(),
             vec![("EUR".to_string(), 3), ("USD".to_string(), 4)],
             "the wire export reflects the fixed-table precedence"
+        );
+    }
+}
+
+#[cfg(test)]
+mod custom_directive_precision_tests {
+    use super::*;
+    use crate::{Amount, Custom, Directive, MetaValue, Posting, Transaction, naive_date};
+    use rust_decimal_macros::dec;
+
+    fn custom_with_amount(day: u32, amount: Amount) -> Directive {
+        Directive::Custom(
+            Custom::new(naive_date(2024, 1, day).unwrap(), "budget")
+                .with_value(MetaValue::Amount(amount)),
+        )
+    }
+
+    /// A currency that appears ONLY in `custom` directives still gets a display
+    /// precision — otherwise a budget added before any spending is recorded
+    /// renders as a raw 28-digit Decimal once pro-rated over a partial window.
+    #[test]
+    fn a_custom_only_currency_gets_precision() {
+        let directives = [custom_with_amount(1, Amount::new(dec!(400.00), "USD"))];
+        let ctx = DisplayContext::from_directives(directives.iter(), std::iter::empty());
+        assert_eq!(ctx.get_precision("USD"), Some(2));
+    }
+
+    /// But `custom` amounts must never OUTVOTE the ledger's postings: a custom
+    /// directive is metadata, not a transaction. Three 4dp budget lines against
+    /// one 2dp posting must leave USD at the posting's 2dp — otherwise every
+    /// report in the CLI silently re-renders that ledger at the budget's scale.
+    #[test]
+    fn custom_amounts_do_not_outvote_postings() {
+        let directives = [
+            custom_with_amount(1, Amount::new(dec!(400.0000), "USD")),
+            custom_with_amount(2, Amount::new(dec!(100.0000), "USD")),
+            custom_with_amount(3, Amount::new(dec!(50.0000), "USD")),
+            Directive::Transaction(
+                Transaction::new(naive_date(2024, 2, 1).unwrap(), "a").with_synthesized_posting(
+                    Posting::new("Expenses:Food", Amount::new(dec!(10.00), "USD")),
+                ),
+            ),
+        ];
+        let ctx = DisplayContext::from_directives(directives.iter(), std::iter::empty());
+        assert_eq!(
+            ctx.get_precision("USD"),
+            Some(2),
+            "postings stay authoritative for a currency they describe"
         );
     }
 }

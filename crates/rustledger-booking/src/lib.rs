@@ -436,6 +436,47 @@ pub fn price_weight(
     price_weight_generic::<Decimal>(units_number, price_number, kind)
 }
 
+/// The canonical weight of a whole posting: the amount, **in the currency the
+/// posting contributes to the transaction balance**, that this posting is worth.
+///
+/// This is the *ladder* that selects between the two weight arithmetics
+/// ([`cost_number_weight`] and [`price_weight`]), matching Beancount — cost
+/// beats price:
+///
+/// - a cost spec with both a number and an explicit currency → cost weight, in
+///   the cost currency;
+/// - else a complete price annotation → price weight, in the price currency;
+/// - else the units themselves, in the units currency.
+///
+/// `None` for a posting whose units are unresolved (elided, pre-interpolation).
+///
+/// Consumers that need "what currency did this posting really move, and how
+/// much" — the BQL `weight` column, `currency_accounts` grouping, the budget
+/// report's actual-spend accrual — MUST call this rather than re-derive the
+/// ladder, or they drift from `rledger check` on cost/price shapes.
+#[must_use]
+pub fn posting_weight(posting: &rustledger_core::Posting) -> Option<Amount> {
+    let units = posting.amount()?;
+    if let Some(cost_spec) = &posting.cost
+        && let Some(number) = &cost_spec.number
+        && let Some(currency) = cost_spec.currency.clone()
+    {
+        return Some(Amount::new(
+            cost_number_weight(units.number, number),
+            currency,
+        ));
+    }
+    if let Some(price_ann) = &posting.price
+        && let Some(price_amt) = price_ann.amount()
+    {
+        return Some(Amount::new(
+            price_weight(units.number, price_amt.number, price_ann.kind),
+            price_amt.currency.clone(),
+        ));
+    }
+    Some(units.clone())
+}
+
 /// The price-annotation weight arithmetic, generic over the numeric backend —
 /// the single implementation behind [`price_weight`] and [`residual_weight`].
 ///

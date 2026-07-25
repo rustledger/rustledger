@@ -408,6 +408,21 @@ impl DisplayContext {
                     // currency with hundreds of mainstream postings.
                     ctx.update(p.amount.number, p.amount.currency.as_str());
                 }
+                // A `custom` directive can carry amounts (Fava's
+                // `custom "budget" Expenses:Food "monthly" 400.00 USD` is the
+                // common one), and those are the user writing a number in a
+                // currency — exactly the signal this inference is built on. A
+                // currency that appears *only* there otherwise has no precision
+                // at all, so a report of it printed the raw 28-digit Decimal.
+                // This reads any Amount value generically, without the core
+                // knowing what a "budget" is.
+                Directive::Custom(c) => {
+                    for value in &c.values {
+                        if let crate::MetaValue::Amount(amount) = value {
+                            ctx.update(amount.number, amount.currency.as_str());
+                        }
+                    }
+                }
                 Directive::Pad(_)
                 | Directive::Open(_)
                 | Directive::Close(_)
@@ -415,8 +430,7 @@ impl DisplayContext {
                 | Directive::Event(_)
                 | Directive::Query(_)
                 | Directive::Note(_)
-                | Directive::Document(_)
-                | Directive::Custom(_) => {}
+                | Directive::Document(_) => {}
             }
         }
 

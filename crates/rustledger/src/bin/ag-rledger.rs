@@ -616,6 +616,12 @@ fn build_report(
         Some("prices") => Ok(Report::Prices {
             commodity: string_flag(req, "commodity", Some("c")),
         }),
+        Some("budget") => Ok(Report::Budget {
+            account: string_flag(req, "account", Some("a")),
+            from: string_flag(req, "from", None),
+            to: string_flag(req, "to", None),
+            children: bool_flag(req, "children", None),
+        }),
         _ => Err(invalid_enum(
             "report",
             report_name,
@@ -630,6 +636,7 @@ fn build_report(
                 "commodities",
                 "stats",
                 "prices",
+                "budget",
             ],
         )),
     }
@@ -647,6 +654,7 @@ fn parse_report_name(name: &str) -> Option<String> {
         "commodities" => Some("commodities".to_string()),
         "stats" => Some("stats".to_string()),
         "prices" => Some("prices".to_string()),
+        "budget" => Some("budget".to_string()),
         _ => None,
     }
 }

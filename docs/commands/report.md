@@ -464,7 +464,7 @@ TOTAL                                690.00       180.00       510.00    26.1% U
 |--------|-------------|
 | `--account <PREFIX>` | Only accounts under this prefix. |
 | `--from <YYYY-MM-DD>` | Window start, inclusive. Defaults to the start of the current year. |
-| `--to <YYYY-MM-DD>` | Window end, **exclusive**. Defaults to today. |
+| `--to <YYYY-MM-DD>` | Window end, **exclusive**. Defaults to *tomorrow*, so the default window includes today's own spending. |
 | `--children` | Count spending in subaccounts toward a parent's budget (see below). |
 
 **Intervals** are `daily`, `weekly`, `monthly`, `quarterly` and `yearly` (the bare

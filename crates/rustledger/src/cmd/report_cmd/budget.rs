@@ -47,7 +47,7 @@ use rust_decimal::Decimal;
 use rustledger_core::{
     AccountTypes, Directive, DisplayContext, MetaValue, NaiveDate, is_subaccount_or_equal,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 /// A budget interval, which fixes both the calendar anchoring and the per-day
@@ -128,6 +128,19 @@ pub(super) struct BudgetError {
     pub reason: String,
 }
 
+/// The account named by a `custom` value, accepting either spelling.
+///
+/// A quoted string only counts as an account if it looks like one (it contains a
+/// `:` component separator), so a genuinely malformed directive still reports as
+/// malformed instead of being read as an account named after its own typo.
+fn account_name(value: &MetaValue) -> Option<String> {
+    match value {
+        MetaValue::Account(a) => Some(a.to_string()),
+        MetaValue::String(s) if s.contains(':') => Some(s.clone()),
+        _ => None,
+    }
+}
+
 /// Read every `custom "budget"` directive, newest-last per (account, currency).
 ///
 /// Malformed entries are collected as errors rather than dropped: a budget that
@@ -142,25 +155,36 @@ fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetError
             continue;
         }
         // Shape: <Account> "<interval>" <amount>
-        let [
-            MetaValue::Account(acct),
-            MetaValue::String(interval_raw),
-            MetaValue::Amount(amount),
-        ] = c.values.as_slice()
-        else {
+        //
+        // The account is accepted both as a bare account token and as a quoted
+        // string. Fava's own reader is duck-typed (it just takes `values[0]`),
+        // and Beancount's `custom` documentation writes its examples with quoted
+        // strings, so real Fava-budgeted ledgers contain both spellings; taking
+        // only the token would reject a ledger Fava renders fine, which is
+        // exactly the compatibility this report exists to provide.
+        let parsed = match c.values.as_slice() {
+            [
+                acct,
+                MetaValue::String(interval_raw),
+                MetaValue::Amount(amount),
+            ] => account_name(acct).map(|a| (a, interval_raw, amount)),
+            _ => None,
+        };
+        let Some((account, interval_raw, amount)) = parsed else {
             errors.push(BudgetError {
                 date: c.date,
-                reason: "expected: custom \"budget\" <Account> \"<interval>\" <amount> <CCY>"
+                reason: "malformed budget directive; expected: \
+                     custom \"budget\" <Account> \"<interval>\" <amount> <CCY>"
                     .to_string(),
             });
             continue;
         };
-        let account = acct.to_string();
         let Some(interval) = Interval::parse(interval_raw) else {
             errors.push(BudgetError {
                 date: c.date,
                 reason: format!(
-                    "invalid interval {interval_raw:?} (use daily, weekly, monthly, quarterly or yearly)"
+                    "budget directive has an invalid interval {interval_raw:?} \
+                     (use daily, weekly, monthly, quarterly or yearly)"
                 ),
             });
             continue;
@@ -176,6 +200,42 @@ fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetError
     // Effective-date order, so the "latest in force" scan below is a simple walk.
     out.sort_by_key(|e| e.from);
     (out, errors)
+}
+
+/// Budgets naming an account the ledger never opens.
+///
+/// A typo'd account is the worst kind of budget bug: it parses, so `check` is
+/// happy, and it renders as a real row at `0.0%` used — the user reads "I have
+/// spent none of my food budget" while the actual spending sits on the correctly
+/// spelled account, which the report deliberately omits for having no budget.
+/// One warning turns that silent misreport into an obvious fix.
+fn unopened_account_errors(directives: &[Directive], budgets: &[BudgetEntry]) -> Vec<BudgetError> {
+    let opened: BTreeSet<&str> = directives
+        .iter()
+        .filter_map(|d| match d {
+            Directive::Open(o) => Some(o.account.as_str()),
+            _ => None,
+        })
+        .collect();
+    // A ledger with no `open` directives at all is not using them; do not warn on
+    // every budget in that case.
+    if opened.is_empty() {
+        return Vec::new();
+    }
+    let mut seen = BTreeSet::new();
+    budgets
+        .iter()
+        .filter(|b| !opened.contains(b.account.as_str()))
+        .filter(|b| seen.insert(b.account.clone()))
+        .map(|b| BudgetError {
+            date: b.from,
+            reason: format!(
+                "budget for {} but no such account is opened; the budget will \
+                 report no spending",
+                b.account
+            ),
+        })
+        .collect()
 }
 
 /// The budget in force for `(account, currency)` on `day`, if any.
@@ -258,7 +318,19 @@ fn accrue(
         let seg_days = days_between(cursor, seg_end);
         let interval_days = days_between(istart, inext).max(1);
         if seg_days > 0 {
-            total += b.amount * Decimal::from(seg_days) / Decimal::from(interval_days);
+            let num = Decimal::from(seg_days);
+            let den = Decimal::from(interval_days);
+            // Multiply-before-divide is what makes a fully covered interval come
+            // to exactly `amount`, but the product overflows `Decimal` once the
+            // declared amount exceeds about MAX/366 — and a budget amount comes
+            // from the ledger, which must never panic the CLI. Fall back to
+            // divide-first for those: the residue is irrelevant at that scale,
+            // and a slightly inexact number beats an abort.
+            let seg = b.amount.checked_mul(num).map_or_else(
+                || (b.amount / den).saturating_mul(num),
+                |product| product / den,
+            );
+            total = total.saturating_add(seg);
         }
         cursor = seg_end;
     }
@@ -337,13 +409,16 @@ pub(super) fn report_budget<W: Write>(
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
-    let (budgets, errors) = parse_budgets(directives);
+    let (budgets, mut errors) = parse_budgets(directives);
+    errors.extend(unopened_account_errors(directives, &budgets));
+    errors.sort_by_key(|e| e.date);
     for e in &errors {
-        eprintln!(
-            "warning: {}: malformed budget directive: {}",
-            e.date, e.reason
-        );
+        eprintln!("warning: {}: {}", e.date, e.reason);
     }
+
+    // Every currency anyone budgeted in. Used to decide which side of a
+    // priced/costed posting the spending counts against (see below).
+    let budgeted_currencies: BTreeSet<&str> = budgets.iter().map(|b| b.currency.as_str()).collect();
 
     // Actual spend per (account, currency) inside the window. Postings are read
     // directly rather than through `account_balances` because a budget is about
@@ -360,17 +435,47 @@ pub(super) fn report_budget<W: Write>(
             let Some(units) = p.units.as_ref().and_then(|u| u.as_amount()) else {
                 continue;
             };
+            // Which currency does this posting spend? For a plain posting the
+            // units are the whole story. For one carried at a cost or a price
+            // (`Expenses:Travel 90.00 EUR @ 1.10 USD`) there are two defensible
+            // answers, so prefer the one the user actually budgeted in: units if
+            // that currency is budgeted anywhere, else the canonical balance
+            // weight, which is what the money really cost them. Without this a
+            // USD food budget silently ignored every foreign-currency grocery
+            // run and reported the user as fully under budget.
+            //
+            // The weight (and its cost-beats-price ladder) comes from
+            // `rustledger_booking::posting_weight`, the same one `rledger check`
+            // and BQL's `weight` column use, so budget totals cannot drift from
+            // the balance rules.
+            let counted = if budgeted_currencies.contains(units.currency.as_str()) {
+                (units.currency.to_string(), units.number)
+            } else {
+                rustledger_booking::posting_weight(p)
+                    .filter(|w| budgeted_currencies.contains(w.currency.as_str()))
+                    .map_or_else(
+                        || (units.currency.to_string(), units.number),
+                        |w| (w.currency.to_string(), w.number),
+                    )
+            };
             *actuals
-                .entry((p.account.to_string(), units.currency.to_string()))
-                .or_default() += units.number;
+                .entry((p.account.to_string(), counted.0))
+                .or_default() += counted.1;
         }
     }
 
     // One row per budgeted (account, currency). A budget with no spending still
     // appears (that is the point of a budget report); spending with no budget does
     // not — `report balances` already answers that question.
+    //
+    // "Budgeted" means *in force somewhere in this window*, i.e. declared before
+    // the exclusive end. A budget written today does not retroactively apply to
+    // last year: without this filter, reviewing a past period produced a row with
+    // `0.00` budgeted and a full window of spending against it, reporting the
+    // whole period as overspend for a budget that did not exist yet.
     let mut keys: Vec<(String, String)> = budgets
         .iter()
+        .filter(|b| b.from < filter.to)
         .map(|b| (b.account.clone(), b.currency.clone()))
         .collect();
     keys.sort();
@@ -428,7 +533,15 @@ pub(super) fn report_budget<W: Write>(
     // under `--children` a parent row and a child row both include the child's
     // budget and spending, so adding the rows up would count it twice.
     let totals = compute_totals(&budgets, &actuals, filter, types);
-    render(&rows, &totals, filter, ctx, format, writer)
+    render(
+        &rows,
+        &totals,
+        filter,
+        Empty::diagnose(&budgets, filter),
+        ctx,
+        format,
+        writer,
+    )
 }
 
 /// Whole-report totals per currency, counting every budget and every posting once.
@@ -445,6 +558,7 @@ fn compute_totals(
     // Distinct budgeted (account, currency) pairs, after the account filter.
     let mut pairs: Vec<(String, String)> = budgets
         .iter()
+        .filter(|b| b.from < filter.to)
         .filter(|b| {
             filter
                 .account
@@ -478,6 +592,45 @@ fn compute_totals(
     totals
 }
 
+/// Why a report came out with no rows.
+///
+/// An empty budget report is ambiguous in a way that matters: "you have no
+/// budgets", "your budgets start later than the period you asked about" and
+/// "your `--account` filter excluded them" send the user to three different
+/// places, and reporting the wrong one sends them hunting a parsing bug that
+/// does not exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Empty {
+    /// The ledger declares no budgets at all.
+    NoneDeclared,
+    /// Budgets exist but all start on or after the window's exclusive end.
+    NoneInWindow { earliest: NaiveDate },
+    /// Budgets were in force, but `--account` excluded every one.
+    FilteredOut,
+}
+
+impl Empty {
+    fn diagnose(budgets: &[BudgetEntry], filter: &BudgetFilter) -> Self {
+        let Some(earliest) = budgets.iter().map(|b| b.from).min() else {
+            return Self::NoneDeclared;
+        };
+        if !budgets.iter().any(|b| b.from < filter.to) {
+            return Self::NoneInWindow { earliest };
+        }
+        Self::FilteredOut
+    }
+}
+
+/// A whole-report total as a row, so totals and rows render through one path.
+fn total_row(currency: &str, budgeted: Decimal, actual: Decimal) -> BudgetRow {
+    BudgetRow {
+        account: "TOTAL".to_string(),
+        currency: currency.to_string(),
+        budgeted,
+        actual,
+    }
+}
+
 /// A used-fraction as a percentage cell, or `n/a` when nothing was budgeted.
 fn fmt_used(used: Option<f64>) -> String {
     used.map_or_else(|| "n/a".to_string(), |u| format!("{:.1}%", u * 100.0))
@@ -487,6 +640,7 @@ fn render<W: Write>(
     rows: &[BudgetRow],
     totals: &BTreeMap<String, (Decimal, Decimal)>,
     filter: &BudgetFilter,
+    empty: Empty,
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
@@ -498,44 +652,71 @@ fn render<W: Write>(
                 writer,
                 "account,currency,budgeted,actual,remaining,used_pct"
             )?;
+            // Numbers render through the ledger's `DisplayContext`, like every
+            // other report's CSV (the U4 invariant): a pro-rated budget is a
+            // repeating decimal, and emitting it raw handed spreadsheets a
+            // 28-digit number where the text report showed `45.16`.
+            // `csv_escape` on the amounts because `render_commas` puts thousands
+            // separators inside the field.
             for r in rows {
-                // Raw `Decimal` for machine consumption; the text report owns
-                // display precision and separators.
                 writeln!(
                     writer,
                     "{},{},{},{},{},{}",
                     csv_escape(&r.account),
                     csv_escape(&r.currency),
-                    r.budgeted,
-                    r.actual,
-                    r.remaining(),
+                    csv_escape(&money(r.budgeted, &r.currency)),
+                    csv_escape(&money(r.actual, &r.currency)),
+                    csv_escape(&money(r.remaining(), &r.currency)),
                     r.used_fraction()
+                        .map_or_else(String::new, |u| format!("{:.1}", u * 100.0)),
+                )?;
+            }
+            // The whole-report total, as its own row per currency. Consumers
+            // cannot re-derive it by summing the rows: under `--children` a
+            // parent row and a child row both include the child.
+            for (ccy, (b, a)) in totals {
+                let row = total_row(ccy, *b, *a);
+                writeln!(
+                    writer,
+                    "{},{},{},{},{},{}",
+                    csv_escape(&row.account),
+                    csv_escape(ccy),
+                    csv_escape(&money(row.budgeted, ccy)),
+                    csv_escape(&money(row.actual, ccy)),
+                    csv_escape(&money(row.remaining(), ccy)),
+                    row.used_fraction()
                         .map_or_else(String::new, |u| format!("{:.1}", u * 100.0)),
                 )?;
             }
         }
         OutputFormat::Json => {
-            let objs: Vec<String> = rows
+            let obj = |r: &BudgetRow| {
+                format!(
+                    r#"{{"account": "{}", "currency": "{}", "budgeted": "{}", "actual": "{}", "remaining": "{}", "used_pct": {}}}"#,
+                    json_escape(&r.account),
+                    json_escape(&r.currency),
+                    money(r.budgeted, &r.currency),
+                    money(r.actual, &r.currency),
+                    money(r.remaining(), &r.currency),
+                    r.used_fraction()
+                        .map_or_else(|| "null".to_string(), |u| format!("{:.1}", u * 100.0)),
+                )
+            };
+            let objs: Vec<String> = rows.iter().map(obj).collect();
+            // An explicit per-currency total, matching `returns`' `"total"`
+            // object: consumers must not re-derive it by summing `budgets`,
+            // because under `--children` parent and child rows overlap.
+            let total_objs: Vec<String> = totals
                 .iter()
-                .map(|r| {
-                    format!(
-                        r#"{{"account": "{}", "currency": "{}", "budgeted": "{}", "actual": "{}", "remaining": "{}", "used_pct": {}}}"#,
-                        json_escape(&r.account),
-                        json_escape(&r.currency),
-                        r.budgeted,
-                        r.actual,
-                        r.remaining(),
-                        r.used_fraction()
-                            .map_or_else(|| "null".to_string(), |u| format!("{:.1}", u * 100.0)),
-                    )
-                })
+                .map(|(ccy, (b, a))| obj(&total_row(ccy, *b, *a)))
                 .collect();
             writeln!(
                 writer,
-                r#"{{"from": "{}", "to": "{}", "budgets": [{}]}}"#,
+                r#"{{"from": "{}", "to": "{}", "budgets": [{}], "totals": [{}]}}"#,
                 filter.from,
                 filter.to,
-                objs.join(", ")
+                objs.join(", "),
+                total_objs.join(", ")
             )?;
         }
         OutputFormat::Text => {
@@ -552,23 +733,44 @@ fn render<W: Write>(
             )?;
             writeln!(writer)?;
             if rows.is_empty() {
-                writeln!(
-                    writer,
-                    "No budgets declared. Add e.g.:\n  2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD"
-                )?;
+                // Distinguish "you have no budgets" from "your filter excluded
+                // them all" — telling a user with budgets that they have none
+                // sends them looking for a parsing bug that isn't there.
+                match empty {
+                    Empty::NoneDeclared => writeln!(
+                        writer,
+                        "No budgets declared. Add e.g.:\n  2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD"
+                    )?,
+                    Empty::NoneInWindow { earliest } => writeln!(
+                        writer,
+                        "No budgets were in force in this period. \
+                         A budget applies from its own date onward, and the earliest \
+                         one here is dated {earliest}."
+                    )?,
+                    Empty::FilteredOut => writeln!(
+                        writer,
+                        "No budgets match --account {}. (Accounts are matched by \
+                         component, so a partial component name matches nothing.)",
+                        filter.account.unwrap_or_default()
+                    )?,
+                }
                 return Ok(());
             }
+            // A currency column: without it two rows for one account in two
+            // currencies are indistinguishable, and the reader has no way to tell
+            // which figure is which.
             writeln!(
                 writer,
-                "{:<30}{:>13}{:>13}{:>13}{:>9}",
-                "Account", "Budgeted", "Actual", "Remaining", "Used"
+                "{:<28}{:<6}{:>13}{:>13}{:>13}{:>9}",
+                "Account", "Ccy", "Budgeted", "Actual", "Remaining", "Used"
             )?;
             writeln!(writer, "{}", "-".repeat(RULE))?;
             for r in rows {
                 writeln!(
                     writer,
-                    "{:<30}{:>13}{:>13}{:>13}{:>9}",
-                    truncate(&r.account, 30),
+                    "{:<28}{:<6}{:>13}{:>13}{:>13}{:>9}",
+                    truncate(&r.account, 28),
+                    r.currency,
                     money(r.budgeted, &r.currency),
                     money(r.actual, &r.currency),
                     money(r.remaining(), &r.currency),
@@ -579,19 +781,14 @@ fn render<W: Write>(
             // Totals per currency (summing across currencies would be meaningless),
             // counting each budget and posting once — see `compute_totals`.
             for (ccy, (b, a)) in totals {
-                let (b, a) = (*b, *a);
-                let row = BudgetRow {
-                    account: String::new(),
-                    currency: ccy.clone(),
-                    budgeted: b,
-                    actual: a,
-                };
+                let row = total_row(ccy, *b, *a);
                 writeln!(
                     writer,
-                    "{:<30}{:>13}{:>13}{:>13}{:>9} {ccy}",
-                    "TOTAL",
-                    money(b, ccy),
-                    money(a, ccy),
+                    "{:<28}{:<6}{:>13}{:>13}{:>13}{:>9}",
+                    row.account,
+                    ccy,
+                    money(row.budgeted, ccy),
+                    money(row.actual, ccy),
                     money(row.remaining(), ccy),
                     fmt_used(row.used_fraction()),
                 )?;

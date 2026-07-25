@@ -223,7 +223,9 @@ pub enum Report {
         /// (No short flag: `-f` is the global `--format`.)
         #[arg(long)]
         from: Option<String>,
-        /// End of the reporting window, EXCLUSIVE (`YYYY-MM-DD`). Defaults to today.
+        /// End of the reporting window, EXCLUSIVE (`YYYY-MM-DD`).
+        /// Defaults to tomorrow, so that the default window includes today.
+        /// (No short flag: `-t` is unused but `--to` stays symmetric with `--from`.)
         #[arg(long)]
         to: Option<String>,
         /// Count spending in subaccounts toward a parent's budget, summing the
@@ -410,6 +412,10 @@ fn load(file: &PathBuf, report: &Report, verbose: bool, no_cache: bool) -> Resul
             // Returns extraction requires the booked, pad-expanded stream (its
             // terminal valuation realizes inventory, including pad-seeded lots).
             | Report::Returns { .. }
+            // Budget sums postings over a window, so pad-synthesized postings are
+            // spending like any other — without this the budget report disagreed
+            // with `balances`/`income` on the same ledger.
+            | Report::Budget { .. }
     );
     let has_pads = needs_balance_view
         && ledger
@@ -636,7 +642,7 @@ fn render<W: io::Write>(
                 children: *children,
             };
             budget::report_budget(
-                directives,
+                balance_input,
                 &filter,
                 &loaded.account_types,
                 &loaded.display_context,

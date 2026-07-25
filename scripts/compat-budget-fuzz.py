@@ -55,13 +55,20 @@ from pathlib import Path
 getcontext().prec = 60
 
 INTERVALS = ["daily", "weekly", "monthly", "quarterly", "yearly"]
-CURRENCIES = ["USD", "EUR", "GBP"]
+# One deliberately long commodity: beancount permits 24 characters, and the
+# text report sizes the currency column to content. Without a long one in the
+# corpus that column is never stressed and a fixed width would pass unnoticed —
+# which is exactly how the `Used` column's constant survived several full runs.
+CURRENCIES = ["USD", "EUR", "GBP", "VACATION-FUND-LONG-NAME"]
 
 # Component-distinct names on purpose. This report selects subaccounts by
 # component (`Expenses:Food` does not cover `Expenses:FoodCourt`, a deliberate
 # deviation from Fava's `startswith`), and mixing prefix-colliding names into the
 # corpus would test that deviation rather than the arithmetic.
 ACCOUNTS = [
+    # One deep account, for the same reason as the long commodity above: the
+    # account column is content-sized and needs something wide to size against.
+    "Expenses:Home:Improvements:Kitchen:Appliances:Refrigeration",
     "Expenses:Food",
     "Expenses:Food:Restaurant",
     "Expenses:Food:Grocery",
@@ -135,7 +142,10 @@ def gen_ledger(rng: random.Random):
 
     for _ in range(rng.randint(1, 5)):
         a = rng.choice(accts)
-        ccy = rng.choice(CURRENCIES[: rng.randint(1, 3)])
+        # Slice the WHOLE list: capping at 3 meant the long commodity added
+        # for column-width coverage sat at index 3 and was never chosen, so
+        # the coverage it was added for did not exist.
+        ccy = rng.choice(CURRENCIES[: rng.randint(1, len(CURRENCIES))])
         d = datetime.date(2020, 1, 1) + datetime.timedelta(days=rng.randint(0, 1400))
         # A tiny budget against ordinary spending yields a percentage wide
         # enough to collide with the column beside it (`500000.0%`), which is
@@ -446,6 +456,42 @@ def check_rendered_formats(rledger, path, d_from, d_to, children, got, failures,
             failures["text_columns_fused"].append((seed, stripped[:110]))
     if json_rows and seen_rows == 0:
         failures["text_no_rows_matched"].append((seed, "text check matched nothing"))
+
+    # Field counting catches FUSION but is blind to TRUNCATION: a fixed-width
+    # column pads rather than cuts in Rust's formatter, so a too-narrow account
+    # or currency column still yields six fields while rendering two distinct
+    # rows identically. Assert every label appears in full instead, which is the
+    # property that actually matters — the reader must be able to tell the rows
+    # apart and attribute the figures.
+    for acct, ccy in json_rows:
+        if acct not in txt_proc.stdout:
+            failures["text_label_truncated"].append((seed, acct, "account"))
+        if ccy not in txt_proc.stdout:
+            failures["text_label_truncated"].append((seed, ccy, "currency"))
+
+    # And neither check sees RAGGEDNESS: a column that is too narrow but pads
+    # rather than truncates leaves every row individually well-formed while
+    # pushing one row's numbers further right than another's, so the table no
+    # longer lines up. Every data row must start its currency at the same
+    # offset, which is only true when the account column is sized to content.
+    # Every column is content-sized and the last is right-aligned, so every data
+    # row is exactly the same length. Any column that pads to a constant instead
+    # breaks that the moment one row's value exceeds it — which is the failure a
+    # per-row field count and a label check both miss, because each row is
+    # individually well-formed and merely starts its numbers in a different
+    # place from its neighbor.
+    row_widths = set()
+    for line in txt_proc.stdout.splitlines():
+        stripped = line.rstrip()
+        label = max(
+            (l for l in want_labels if stripped.strip().startswith(l)),
+            key=len,
+            default=None,
+        )
+        if label is not None:
+            row_widths.add(len(stripped))
+    if len(row_widths) > 1:
+        failures["text_columns_ragged"].append((seed, sorted(row_widths)[:6]))
 
 
 def check_one(rledger, path, src, d_from, d_to, children, failures, seed):

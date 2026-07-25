@@ -464,7 +464,8 @@ Totals are per currency (summing across currencies would be meaningless), and ea
 budget and each posting is counted once — under `--children` a parent row and a child
 row overlap by design, so the TOTAL is *not* the sum of the rows. `--format csv` and
 `--format json` carry the same TOTAL rows, and JSON adds an `errors` array naming any
-directive that could not be read.
+directive that could not be read. A figure too large to represent is reported as absent
+rather than clamped: `n/a` in text, an empty cell in CSV, `null` in JSON.
 
 | Option | Description |
 |--------|-------------|

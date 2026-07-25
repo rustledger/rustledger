@@ -147,23 +147,18 @@ fn account_name(value: &MetaValue) -> Option<String> {
     }
 }
 
-/// Is this quoted string plausibly an account name?
+/// Is this quoted string actually a valid account name?
 ///
-/// Requires colon-separated, non-empty components made of characters an account
-/// can actually contain. A quoted value is otherwise arbitrary user text, and
-/// accepting it verbatim let a name carrying a newline forge a row in the text
-/// report's fixed-width table. The renderer sanitizes too — this is the other
-/// half of that defense, keeping junk out of the model rather than only out of
-/// one view of it.
+/// A quoted value is arbitrary user text — accepting it verbatim let a name
+/// carrying a newline forge a row in the text report's fixed-width table. The
+/// test is [`rustledger_parser::is_valid_account_name`], the CANONICAL rule
+/// (it lexes the name and requires it to round-trip as a single account token),
+/// not a hand-rolled character check: that function's own documentation records
+/// that the validator and loader once each hand-implemented this with different
+/// accepted character sets, letting through accounts that could never be parsed
+/// back.
 fn looks_like_account(s: &str) -> bool {
-    let mut components = s.split(':');
-    let has_two = s.contains(':');
-    has_two
-        && components.all(|c| {
-            !c.is_empty()
-                && c.chars()
-                    .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_')
-        })
+    rustledger_parser::is_valid_account_name(s)
 }
 
 /// Read every `custom "budget"` directive, in effective-date order.

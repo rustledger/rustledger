@@ -498,9 +498,16 @@ fn render<W: Write>(
     writer: &mut W,
 ) -> Result<()> {
     let money = |n: Decimal, ccy: &str| ctx.format_amount_number(n, ccy);
-    // An un-representable figure prints `n/a` rather than a clamped number.
-    let money_opt =
+    // An un-representable figure is reported as absent, never as a clamped
+    // number. Text says `n/a`; machine output follows the same convention the
+    // other reports use for an absent number — an empty CSV cell and a JSON
+    // `null` — so a consumer parsing decimals is not handed the literal "n/a".
+    let money_text =
         |n: Option<Decimal>, ccy: &str| n.map_or_else(|| "n/a".to_string(), |v| money(v, ccy));
+    let money_csv = |n: Option<Decimal>, ccy: &str| n.map_or_else(String::new, |v| money(v, ccy));
+    let money_json = |n: Option<Decimal>, ccy: &str| {
+        n.map_or_else(|| "null".to_string(), |v| format!("\"{}\"", money(v, ccy)))
+    };
     match format {
         OutputFormat::Csv => {
             writeln!(
@@ -519,9 +526,9 @@ fn render<W: Write>(
                     "{},{},{},{},{},{}",
                     csv_escape(&r.account),
                     csv_escape(&r.currency),
-                    csv_escape(&money_opt(r.budgeted, &r.currency)),
+                    csv_escape(&money_csv(r.budgeted, &r.currency)),
                     csv_escape(&money(r.actual, &r.currency)),
-                    csv_escape(&money_opt(r.remaining(), &r.currency)),
+                    csv_escape(&money_csv(r.remaining(), &r.currency)),
                     r.used_fraction()
                         .map_or_else(String::new, |u| format!("{:.1}", u * 100.0)),
                 )?;
@@ -536,9 +543,9 @@ fn render<W: Write>(
                     "{},{},{},{},{},{}",
                     csv_escape(&row.account),
                     csv_escape(ccy),
-                    csv_escape(&money_opt(row.budgeted, ccy)),
+                    csv_escape(&money_csv(row.budgeted, ccy)),
                     csv_escape(&money(row.actual, ccy)),
-                    csv_escape(&money_opt(row.remaining(), ccy)),
+                    csv_escape(&money_csv(row.remaining(), ccy)),
                     row.used_fraction()
                         .map_or_else(String::new, |u| format!("{:.1}", u * 100.0)),
                 )?;
@@ -547,12 +554,12 @@ fn render<W: Write>(
         OutputFormat::Json => {
             let obj = |r: &BudgetRow| {
                 format!(
-                    r#"{{"account": "{}", "currency": "{}", "budgeted": "{}", "actual": "{}", "remaining": "{}", "used_pct": {}}}"#,
+                    r#"{{"account": "{}", "currency": "{}", "budgeted": {}, "actual": "{}", "remaining": {}, "used_pct": {}}}"#,
                     json_escape(&r.account),
                     json_escape(&r.currency),
-                    money_opt(r.budgeted, &r.currency),
+                    money_json(r.budgeted, &r.currency),
                     money(r.actual, &r.currency),
-                    money_opt(r.remaining(), &r.currency),
+                    money_json(r.remaining(), &r.currency),
                     r.used_fraction()
                         .map_or_else(|| "null".to_string(), |u| format!("{:.1}", u * 100.0)),
                 )
@@ -647,9 +654,9 @@ fn render<W: Write>(
                     "{:<28} {:<5}{:>13}{:>13}{:>13}{:>9}",
                     truncate(&r.account, 28),
                     r.currency,
-                    money_opt(r.budgeted, &r.currency),
+                    money_text(r.budgeted, &r.currency),
                     money(r.actual, &r.currency),
-                    money_opt(r.remaining(), &r.currency),
+                    money_text(r.remaining(), &r.currency),
                     fmt_used(r.used_fraction()),
                 )?;
             }
@@ -663,9 +670,9 @@ fn render<W: Write>(
                     "{:<28} {:<5}{:>13}{:>13}{:>13}{:>9}",
                     row.account,
                     ccy,
-                    money_opt(row.budgeted, ccy),
+                    money_text(row.budgeted, ccy),
                     money(row.actual, ccy),
-                    money_opt(row.remaining(), ccy),
+                    money_text(row.remaining(), ccy),
                     fmt_used(row.used_fraction()),
                 )?;
             }

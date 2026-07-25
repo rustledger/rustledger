@@ -3418,6 +3418,7 @@ dependencies = [
  "jiff",
  "rust_decimal",
  "rustledger-core",
+ "rustledger-parser",
 ]
 
 [[package]]

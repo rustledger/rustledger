@@ -992,10 +992,43 @@ fn an_unrepresentable_accrual_reports_na_not_a_clamped_number() {
             "--no-pager",
         ],
     );
+    // Machine output reports an absent number the way the other reports do — an
+    // empty CSV cell and a JSON `null` — so a consumer parsing decimals is never
+    // handed the literal "n/a". Only the text report says `n/a`.
     assert!(
-        csv.contains("Expenses:Food,USD,n/a"),
+        csv.contains("Expenses:Food,USD,,"),
         "two months of a MAX budget is not representable: {csv}"
     );
+    let json = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-03-01",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    assert!(json.contains(r#""budgeted": null"#), "{json}");
+    let txt = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-03-01",
+            "--no-pager",
+        ],
+    );
+    assert!(txt.contains("n/a"), "{txt}");
 }
 
 /// Machine consumers must be able to tell "no budgets" from "all budgets

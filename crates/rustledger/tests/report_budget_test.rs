@@ -403,14 +403,32 @@ fn children_totals_do_not_double_count_the_child() {
             "--no-pager",
         ],
     );
-    // Rows overlap by design (the parent row includes its child).
-    assert!(
-        txt.contains("Expenses:Food                USD         400.00        50.00"),
-        "{txt}"
+    // Rows overlap by design (the parent row includes its child). Assert on the
+    // fields, not on column positions: the currency column is sized to the widest
+    // commodity present, so a literal-spacing match breaks on unrelated changes
+    // while still not pinning the numbers.
+    let fields = |prefix: &str| -> Vec<String> {
+        txt.lines()
+            .find(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("a {prefix} row in:\n{txt}"))
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(
+        fields("Expenses:Food "),
+        vec!["Expenses:Food", "USD", "400.00", "50.00", "350.00", "12.5%"]
     );
-    assert!(
-        txt.contains("Expenses:Food:Restaurant     USD         100.00        50.00"),
-        "{txt}"
+    assert_eq!(
+        fields("Expenses:Food:Restaurant"),
+        vec![
+            "Expenses:Food:Restaurant",
+            "USD",
+            "100.00",
+            "50.00",
+            "50.00",
+            "50.0%"
+        ]
     );
     // The TOTAL counts each budget and each posting once: 300+100 and one 50.
     // Assert the WHOLE line, not substrings: with a wrong budgeted total of
@@ -690,8 +708,24 @@ fn text_output_names_the_currency_of_each_row() {
             "--no-pager",
         ],
     );
-    assert!(txt.contains("Expenses:Food                EUR"), "{txt}");
-    assert!(txt.contains("Expenses:Food                USD"), "{txt}");
+    // Each row names its own currency, and the two rows carry DIFFERENT figures —
+    // a `contains` on the label alone would pass even if both rows showed the
+    // same numbers, which is the ambiguity this column exists to remove.
+    let row = |ccy: &str| -> Vec<String> {
+        txt.lines()
+            .find(|l| l.starts_with("Expenses:Food ") && l.contains(ccy))
+            .unwrap_or_else(|| panic!("a {ccy} row in:\n{txt}"))
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(row("EUR")[1], "EUR");
+    assert_eq!(row("USD")[1], "USD");
+    assert_ne!(
+        row("EUR")[2],
+        row("USD")[2],
+        "the two currencies' budgeted figures must be distinguishable: {txt}"
+    );
 }
 
 /// An `--account` filter that excludes everything must not claim the ledger has
@@ -1172,8 +1206,10 @@ fn a_second_amount_is_reported_but_a_trailing_note_is_not() {
     assert!(csv.contains("Expenses:Food,USD,400.00"), "{csv}");
 }
 
-/// A commodity name longer than the column must not shift every numeric column
-/// right; beancount permits up to 24 characters.
+/// A commodity name longer than the default column must widen the column rather
+/// than be truncated: truncating re-creates the misattribution bug the currency
+/// column was added to fix, since two 24-character commodities can share a
+/// suffix. Columns must stay aligned and both names must appear in full.
 #[test]
 fn a_long_commodity_name_keeps_the_columns_aligned() {
     let bin = require_rledger!();
@@ -1201,6 +1237,10 @@ fn a_long_commodity_name_keeps_the_columns_aligned() {
         .filter(|l| l.starts_with("Expenses:Food "))
         .collect();
     assert_eq!(rows.len(), 2, "{txt}");
+    assert!(
+        txt.contains("VACATION-FUND"),
+        "the full commodity name: {txt}"
+    );
     // Compare CHARACTER offsets: the truncation marker `…` is three bytes, so a
     // byte index differs between the rows even when the columns line up.
     let col = |l: &str| {

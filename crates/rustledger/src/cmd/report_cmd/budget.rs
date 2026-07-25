@@ -561,7 +561,21 @@ fn render<W: Write>(
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
-    let money = |n: Decimal, ccy: &str| ctx.format_amount_number(n, ccy);
+    // A pro-rated budget is a repeating decimal, so it MUST be rounded for
+    // display. The ledger's `DisplayContext` answers for any currency it has
+    // seen; a currency it has not (a budget whose only declared amount is an
+    // integer teaches no precision, deliberately — see `DisplayContext`) would
+    // otherwise print all 28 digits and overrun the columns, which is how this
+    // rendered before the context learned about `custom` amounts at all.
+    // `round_dp(8).normalize()` keeps enough places for a crypto-scale budget
+    // and drops trailing zeros.
+    let money = |n: Decimal, ccy: &str| {
+        if ctx.get_precision(ccy).is_some() {
+            ctx.format_amount_number(n, ccy)
+        } else {
+            n.round_dp(8).normalize().to_string()
+        }
+    };
     // An un-representable figure is reported as absent, never as a clamped
     // number. Text says `n/a`; machine output follows the same convention the
     // other reports use for an absent number — an empty CSV cell and a JSON
@@ -706,34 +720,51 @@ fn render<W: Write>(
             // A currency column: without it two rows for one account in two
             // currencies are indistinguishable, and the reader has no way to tell
             // which figure is which.
+            //
+            // Sized to the widest commodity actually present rather than a fixed
+            // width, because truncating a commodity re-creates exactly the bug
+            // the column was added to fix: beancount permits 24-character names,
+            // and two that share a suffix (`VACATION-FUND-A`, `OTHER-FUND-A`)
+            // would render identically and misattribute their figures. Widening
+            // costs a few columns on the rare long-ticker ledger; truncating
+            // costs correctness on it.
+            let ccy_width = rows
+                .iter()
+                .map(|r| r.currency.chars().count())
+                .chain(totals.keys().map(|c| c.chars().count()))
+                .max()
+                .unwrap_or(3)
+                .max(3);
+            // The rule spans the table, which widens with the currency column.
+            let rule = RULE.max(28 + 1 + ccy_width + 13 * 3 + 9);
             writeln!(
                 writer,
-                "{:<28} {:<5}{:>13}{:>13}{:>13}{:>9}",
+                "{:<28} {:<ccy_width$}{:>13}{:>13}{:>13}{:>9}",
                 "Account", "Ccy", "Budgeted", "Actual", "Remaining", "Used"
             )?;
-            writeln!(writer, "{}", "-".repeat(RULE))?;
+            writeln!(writer, "{}", "-".repeat(rule))?;
             for r in rows {
                 writeln!(
                     writer,
-                    "{:<28} {:<5}{:>13}{:>13}{:>13}{:>9}",
+                    "{:<28} {:<ccy_width$}{:>13}{:>13}{:>13}{:>9}",
                     truncate(&r.account, 28),
-                    truncate(&r.currency, 5),
+                    r.currency,
                     money_text(r.budgeted, &r.currency),
                     money_text(r.actual, &r.currency),
                     money_text(r.remaining(), &r.currency),
                     fmt_used(r.used_fraction()),
                 )?;
             }
-            writeln!(writer, "{}", "-".repeat(RULE))?;
+            writeln!(writer, "{}", "-".repeat(rule))?;
             // Totals per currency (summing across currencies would be meaningless),
             // counting each budget and posting once — see `compute_totals`.
             for (ccy, (b, a)) in totals {
                 let row = total_row(ccy, *b, *a);
                 writeln!(
                     writer,
-                    "{:<28} {:<5}{:>13}{:>13}{:>13}{:>9}",
+                    "{:<28} {:<ccy_width$}{:>13}{:>13}{:>13}{:>9}",
                     row.account,
-                    truncate(ccy, 5),
+                    ccy,
                     money_text(row.budgeted, ccy),
                     money_text(row.actual, ccy),
                     money_text(row.remaining(), ccy),

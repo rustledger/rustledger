@@ -25,6 +25,7 @@
 mod accounts;
 mod balances;
 mod balsheet;
+mod budget;
 mod capgains;
 mod commodities;
 mod holdings;
@@ -211,6 +212,25 @@ pub enum Report {
         /// `report returns`.
         #[arg(long)]
         irr: bool,
+    },
+    /// Budgeted vs actual spending, from Fava-compatible `custom "budget"` directives
+    Budget {
+        /// Only accounts under this prefix (default: all budgeted accounts).
+        #[arg(short, long)]
+        account: Option<String>,
+        /// Start of the reporting window, inclusive (`YYYY-MM-DD`).
+        /// Defaults to the start of the current year.
+        /// (No short flag: `-f` is the global `--format`.)
+        #[arg(long)]
+        from: Option<String>,
+        /// End of the reporting window, EXCLUSIVE (`YYYY-MM-DD`). Defaults to today.
+        #[arg(long)]
+        to: Option<String>,
+        /// Count spending in subaccounts toward a parent's budget, summing the
+        /// parent's own budget with any child budgets. Off by default, matching
+        /// Fava: a budget on `Expenses:Food` covers only that exact account.
+        #[arg(long)]
+        children: bool,
     },
 }
 
@@ -578,6 +598,44 @@ fn render<W: io::Write>(
                 format,
                 writer,
             )?;
+        }
+        Report::Budget {
+            account,
+            from,
+            to,
+            children,
+        } => {
+            let parse_date = |s: &str| -> Result<NaiveDate> {
+                s.parse()
+                    .with_context(|| format!("invalid date {s:?} (expected YYYY-MM-DD)"))
+            };
+            // Default window: the current year to date. `to` is exclusive, so the
+            // default end is today + 1 day — otherwise today's own spending would
+            // be silently excluded from its own budget.
+            // Same clock source the returns report uses for its default horizon.
+            let today = jiff::Zoned::now().date();
+            let to_date = match to.as_deref() {
+                Some(s) => parse_date(s)?,
+                None => today
+                    .checked_add(jiff::Span::new().days(1))
+                    .unwrap_or(today),
+            };
+            let from_date = match from.as_deref() {
+                Some(s) => parse_date(s)?,
+                None => today.first_of_year(),
+            };
+            if from_date > to_date {
+                anyhow::bail!(
+                    "--from ({from_date}) is after --to ({to_date}); the window would be empty"
+                );
+            }
+            let filter = budget::BudgetFilter {
+                account: account.as_deref(),
+                from: from_date,
+                to: to_date,
+                children: *children,
+            };
+            budget::report_budget(directives, &filter, &loaded.display_context, format, writer)?;
         }
     }
 

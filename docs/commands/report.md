@@ -25,6 +25,7 @@ A report subcommand (e.g. `balances`, `journal`) is required — running `rledge
 | `holdings` | | Investment holdings with cost basis |
 | `returns` | | Investment returns — money-weighted (XIRR) and time-weighted |
 | `capgains` | | Realized capital gains/losses per tax lot (short vs long term) |
+| `budget` | | Budgeted vs actual spending, from Fava-compatible `custom "budget"` directives |
 | `networth` | | Net worth over time |
 | `accounts` | | List all accounts |
 | `commodities` | | List all currencies/commodities |
@@ -427,6 +428,89 @@ Not a tax filing: wash-sale adjustments, separating currency gains from asset
 gains, lots seeded by `pad` (no well-defined cost basis), and jurisdiction rules
 beyond the long-term threshold are out of scope. Gains are reported in each lot's
 **cost currency**, summarized per currency for a multi-currency ledger.
+
+### Budget
+
+`budget` reports budgeted versus actual spending. Budgets are declared with
+**Fava's `custom "budget"` directive** — plain, unextended Beancount syntax, so a
+ledger already budgeted for Fava works here unchanged and the ledger stays the only
+source of truth:
+
+```beancount
+2024-01-01 custom "budget" Expenses:Food      "monthly" 400.00 USD
+2024-01-01 custom "budget" Expenses:Transport "weekly"   70.00 USD
+2024-06-01 custom "budget" Expenses:Food      "monthly" 450.00 USD   ; supersedes from June
+```
+
+```bash
+rledger report ledger.beancount budget --from 2024-02-01 --to 2024-03-01
+```
+
+```text
+Budget
+====================================================================================
+
+Period      2024-02-01 to 2024-03-01 (end exclusive)
+
+Account                            Budgeted       Actual    Remaining     Used
+------------------------------------------------------------------------------------
+Expenses:Food                        400.00       120.00       280.00    30.0%
+Expenses:Transport                   290.00        60.00       230.00    20.7%
+------------------------------------------------------------------------------------
+TOTAL                                690.00       180.00       510.00    26.1% USD
+```
+
+| Option | Description |
+|--------|-------------|
+| `--account <PREFIX>` | Only accounts under this prefix. |
+| `--from <YYYY-MM-DD>` | Window start, inclusive. Defaults to the start of the current year. |
+| `--to <YYYY-MM-DD>` | Window end, **exclusive**. Defaults to today. |
+| `--children` | Count spending in subaccounts toward a parent's budget (see below). |
+
+**Intervals** are `daily`, `weekly`, `monthly`, `quarterly` and `yearly` (the bare
+nouns `day`, `week`, `month`, `quarter`, `year` are also accepted, case-insensitively,
+matching Fava's implementation). An unrecognized interval is reported as a warning and
+that directive is skipped — it does not silently become a zero budget.
+
+**How the budget is pro-rated.** Each day in the window accrues its share of the
+budget for the calendar interval containing it, so the denominator is a real calendar
+length: a monthly budget divides by 28, 29, 30 or 31, and a yearly one by 365 or 366.
+Two consequences worth knowing:
+
+- A **whole** calendar period always accrues *exactly* the stated amount — a monthly
+  400 over February reads 400.00, in a leap year too.
+- An **arbitrary** window pro-rates automatically: the first half of February 2024 is
+  14/29 of the monthly figure, no special case needed.
+
+Intervals anchor to **calendar boundaries** (month = the 1st, quarter = Jan/Apr/Jul/Oct 1,
+year = Jan 1, week = ISO Monday), *not* to the date on the directive. A budget declared
+mid-month starts accruing that day, but each day is still divided by the surrounding
+calendar month.
+
+**Superseding.** A later directive replaces an earlier one for the same account **and
+currency**, from its own date. Budgets in different currencies for one account stay
+simultaneously active and are reported as separate rows — one rate never silently
+replaces another denominated differently. Nothing accrues before the first declaration:
+a budget is not retroactive.
+
+**Parent and child accounts.** By default a budget on `Expenses:Food` covers only
+postings booked to `Expenses:Food` itself, matching Fava. Pass `--children` to also
+count subaccounts, which *sums* the parent's own budget with any child budgets (they
+add; the child is not absorbed).
+
+> **A deliberate deviation from Fava.** Fava selects children with a plain string
+> prefix test, so a budget on `Expenses:Food` also captures `Expenses:FoodCourt` — a
+> different account that merely shares a name prefix. rledger compares account
+> *components*, so only true subaccounts (`Expenses:Food:Restaurant`) match.
+
+`remaining` is `budgeted − actual`, so an overspent account goes negative rather than
+clamping at zero, and `used` is `n/a` (not 0%) when nothing was budgeted. Totals are
+per currency; summing across currencies would be meaningless. Accounts with spending
+but no budget are not listed — [`report balances`](#account-balances) already answers
+that question.
+
+This is periodic budget-vs-actual, not envelope budgeting: there is no rollover of
+unspent amounts between periods, and no allocation of income into envelopes.
 
 ### Net Worth Over Time
 

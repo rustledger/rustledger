@@ -36,6 +36,7 @@ ______________________________________________________________________
 | **31 built-in plugins** | Plus Python plugin compatibility via WASI sandbox |
 | **Bank import** | CSV/OFX import with auto-detection, dedup, and categorization |
 | **Investment returns** | Money-weighted (XIRR) and time-weighted returns, robust over imperfect ledgers: a built-in beangrow replacement |
+| **Budgeting** | Budgeted vs actual spending from Fava-compatible `custom "budget"` directives, calendar-accurate pro-rating |
 | **Capital gains** | Realized gains per tax lot, short vs long term, with exact `@@` proceeds, calendar-correct holding periods, and optional per-lot annualized return (`--irr`) |
 
 <details>
@@ -144,6 +145,7 @@ Python beancount users can install `bean-check`, `bean-query`, etc. wrapper scri
 | `holdings` | | Investment holdings |
 | `returns` | | Investment returns: money-weighted (XIRR) + time-weighted, with `--by-group` breakdown (a built-in beangrow replacement) |
 | `capgains` | | Realized capital gains/losses per tax lot (short vs long term) |
+| `budget` | | Budgeted vs actual spending (Fava-compatible `custom "budget"`) |
 | `networth` | | Net worth over time |
 | `accounts` | | List all accounts |
 | `commodities` | | List all commodities |

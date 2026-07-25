@@ -317,3 +317,395 @@ fn a_window_reaching_the_calendar_end_keeps_what_it_accrued() {
     );
     assert!(to_last_boundary > Decimal::from(9_000_000));
 }
+
+// ---------------------------------------------------------------------------
+// Contract tests for the query surface and the directive reader.
+//
+// Written from a mutation-testing audit (`cargo mutants -p rustledger-budget`),
+// which found 47 of 90 mutants surviving: `parse_budgets` could return nothing,
+// every query method could return empty, and every `<` in a date comparison
+// could become `<=`, `==` or `>`, with no test noticing. That last group is the
+// exact defect class this feature kept shipping — a boundary decided one case
+// too wide or too narrow — so these tests assert ON the boundaries rather than
+// safely inside them.
+// ---------------------------------------------------------------------------
+
+use rust_decimal::Decimal as Dec;
+use rustledger_core::{Amount, Custom, Directive, MetaValue};
+
+fn custom(day: NaiveDate, values: Vec<MetaValue>) -> Directive {
+    let mut c = Custom::new(day, "budget");
+    c.values = values;
+    Directive::Custom(c)
+}
+
+fn budget_directive(
+    day: NaiveDate,
+    account: &str,
+    interval: &str,
+    amount: &str,
+    ccy: &str,
+) -> Directive {
+    custom(
+        day,
+        vec![
+            MetaValue::Account(account.into()),
+            MetaValue::String(interval.to_string()),
+            MetaValue::Amount(Amount::new(amount.parse::<Dec>().unwrap(), ccy.to_string())),
+        ],
+    )
+}
+
+#[test]
+fn parse_budgets_reads_a_well_formed_directive() {
+    let dirs = vec![budget_directive(
+        d(2024, 1, 1),
+        "Expenses:Food",
+        "monthly",
+        "400.00",
+        "USD",
+    )];
+    let (entries, errors) = parse_budgets(&dirs);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].account, "Expenses:Food");
+    assert_eq!(entries[0].currency, "USD");
+    assert_eq!(entries[0].interval, Interval::Month);
+    assert_eq!(entries[0].amount, Dec::from(400));
+    assert_eq!(entries[0].from, d(2024, 1, 1));
+}
+
+#[test]
+fn parse_budgets_rejects_and_explains_bad_shapes() {
+    // Wrong arity, wrong types, an unknown interval, and a second numeric value
+    // (a user writing two budgets on one line) must each be reported, not
+    // silently dropped or half-read.
+    let cases: Vec<(Directive, &str)> = vec![
+        (custom(d(2024, 1, 1), vec![]), "malformed"),
+        (
+            custom(
+                d(2024, 1, 1),
+                vec![MetaValue::Account("Expenses:Food".into())],
+            ),
+            "malformed",
+        ),
+        (
+            budget_directive(d(2024, 1, 1), "Expenses:Food", "fortnightly", "1", "USD"),
+            "invalid interval",
+        ),
+        (
+            custom(
+                d(2024, 1, 1),
+                vec![
+                    MetaValue::Account("Expenses:Food".into()),
+                    MetaValue::String("monthly".to_string()),
+                    MetaValue::Amount(Amount::new(Dec::from(400), "USD".to_string())),
+                    MetaValue::Number(Dec::from(300)),
+                ],
+            ),
+            "malformed",
+        ),
+    ];
+    for (dir, expect) in cases {
+        let (entries, errors) = parse_budgets(&[dir]);
+        assert!(entries.is_empty(), "must not half-read: {entries:?}");
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].reason.contains(expect),
+            "expected {expect:?} in {:?}",
+            errors[0].reason
+        );
+    }
+}
+
+#[test]
+fn parse_budgets_accepts_a_quoted_account_and_a_trailing_note() {
+    let dirs = vec![custom(
+        d(2024, 1, 1),
+        vec![
+            MetaValue::String("Expenses:Food".to_string()),
+            MetaValue::String("monthly".to_string()),
+            MetaValue::Amount(Amount::new(Dec::from(400), "USD".to_string())),
+            MetaValue::String("groceries only".to_string()),
+        ],
+    )];
+    let (entries, errors) = parse_budgets(&dirs);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].account, "Expenses:Food");
+}
+
+#[test]
+fn parse_budgets_rejects_a_quoted_string_that_is_not_an_account() {
+    for bad in ["not an account", "Expenses", "", "Expenses:Food\nTOTAL 9"] {
+        let dirs = vec![custom(
+            d(2024, 1, 1),
+            vec![
+                MetaValue::String(bad.to_string()),
+                MetaValue::String("monthly".to_string()),
+                MetaValue::Amount(Amount::new(Dec::from(400), "USD".to_string())),
+            ],
+        )];
+        let (entries, errors) = parse_budgets(&dirs);
+        assert!(entries.is_empty(), "{bad:?} must not parse as an account");
+        assert_eq!(errors.len(), 1, "{bad:?}");
+    }
+}
+
+#[test]
+fn parse_budgets_ignores_other_custom_types() {
+    let mut c = Custom::new(d(2024, 1, 1), "not-a-budget");
+    c.values = vec![MetaValue::Account("Expenses:Food".into())];
+    let (entries, errors) = parse_budgets(&[Directive::Custom(c)]);
+    assert!(entries.is_empty() && errors.is_empty());
+}
+
+/// `before` is EXCLUSIVE. A budget declared exactly on it is not yet in force;
+/// one declared the day before is. Both mutants `<= ` and `>` flip exactly one
+/// of these.
+#[test]
+fn in_force_before_is_exclusive_at_the_boundary() {
+    let b = Budgets::new(vec![budget(
+        d(2024, 6, 15),
+        "Expenses:Food",
+        Interval::Month,
+        400,
+    )]);
+    assert!(!b.any_in_force_before(d(2024, 6, 15)), "on the bound: no");
+    assert!(b.any_in_force_before(d(2024, 6, 16)), "one day past: yes");
+    assert!(b.keys_in_force_before(d(2024, 6, 15)).is_empty());
+    assert_eq!(
+        b.keys_in_force_before(d(2024, 6, 16)),
+        vec![("Expenses:Food".to_string(), "USD".to_string())]
+    );
+}
+
+/// `in_force` is INCLUSIVE of the declaration day, unlike `*_before`. The pair
+/// of boundaries is easy to write one apart; assert both.
+#[test]
+fn in_force_includes_the_declaration_day() {
+    let b = Budgets::new(vec![budget(
+        d(2024, 6, 15),
+        "Expenses:Food",
+        Interval::Month,
+        400,
+    )]);
+    assert!(b.in_force("Expenses:Food", "USD", d(2024, 6, 14)).is_none());
+    assert!(b.in_force("Expenses:Food", "USD", d(2024, 6, 15)).is_some());
+    // Keyed on the PAIR: neither a different account nor a different currency
+    // may resolve to it.
+    assert!(b.in_force("Expenses:Foo", "USD", d(2024, 6, 15)).is_none());
+    assert!(b.in_force("Expenses:Food", "EUR", d(2024, 6, 15)).is_none());
+}
+
+#[test]
+fn effective_start_is_the_earliest_for_the_pair_only() {
+    let b = Budgets::new(vec![
+        budget(d(2024, 6, 1), "Expenses:Food", Interval::Month, 450),
+        budget(d(2024, 1, 1), "Expenses:Food", Interval::Month, 400),
+        budget(d(2023, 1, 1), "Expenses:Rent", Interval::Month, 900),
+    ]);
+    assert_eq!(
+        b.effective_start("Expenses:Food", "USD"),
+        Some(d(2024, 1, 1))
+    );
+    assert_eq!(
+        b.effective_start("Expenses:Rent", "USD"),
+        Some(d(2023, 1, 1))
+    );
+    assert_eq!(b.effective_start("Expenses:Food", "EUR"), None);
+    assert_eq!(b.effective_start("Expenses:Nope", "USD"), None);
+}
+
+/// `next_change_after` is STRICTLY after: a declaration on the same day is not
+/// a future change, or the accrual would split a segment at a boundary it has
+/// already passed.
+#[test]
+fn next_change_after_is_strict() {
+    let b = Budgets::new(vec![
+        budget(d(2024, 1, 1), "Expenses:Food", Interval::Month, 400),
+        budget(d(2024, 6, 1), "Expenses:Food", Interval::Month, 450),
+    ]);
+    assert_eq!(
+        b.next_change_after("Expenses:Food", "USD", d(2024, 1, 1)),
+        Some(d(2024, 6, 1))
+    );
+    assert_eq!(
+        b.next_change_after("Expenses:Food", "USD", d(2024, 6, 1)),
+        None,
+        "the same day is not a later change"
+    );
+    assert_eq!(
+        b.next_change_after("Expenses:Food", "EUR", d(2024, 1, 1)),
+        None
+    );
+}
+
+#[test]
+fn all_keys_is_every_declared_pair_regardless_of_date() {
+    let b = Budgets::new(vec![
+        budget(d(2099, 1, 1), "Expenses:Food", Interval::Month, 400),
+        budget(d(2024, 1, 1), "Expenses:Rent", Interval::Month, 900),
+        budget(d(2024, 2, 1), "Expenses:Rent", Interval::Month, 950),
+    ]);
+    assert_eq!(
+        b.all_keys(),
+        vec![
+            ("Expenses:Food".to_string(), "USD".to_string()),
+            ("Expenses:Rent".to_string(), "USD".to_string()),
+        ],
+        "deduplicated, and a future declaration still counts"
+    );
+    // ...while the windowed view excludes the future one.
+    assert_eq!(b.keys_in_force_before(d(2024, 6, 1)).len(), 1);
+}
+
+#[test]
+fn is_empty_and_earliest_reflect_the_entries() {
+    let none = Budgets::default();
+    assert!(none.is_empty());
+    assert_eq!(none.earliest(), None);
+    assert_eq!(none.entries().len(), 0);
+
+    let some = Budgets::new(vec![
+        budget(d(2024, 6, 1), "Expenses:Food", Interval::Month, 450),
+        budget(d(2023, 3, 1), "Expenses:Rent", Interval::Month, 900),
+    ]);
+    assert!(!some.is_empty());
+    assert_eq!(some.earliest(), Some(d(2023, 3, 1)));
+}
+
+/// `accrue` over an empty or inverted window is zero, not a panic and not a
+/// whole period. `from == to` is the case a caller hits by asking for one day.
+#[test]
+fn accrue_over_an_empty_window_is_zero() {
+    let b = Budgets::new(vec![budget(
+        d(2024, 1, 1),
+        "Expenses:Food",
+        Interval::Month,
+        400,
+    )]);
+    assert_eq!(
+        b.accrue("Expenses:Food", "USD", d(2024, 3, 5), d(2024, 3, 5)),
+        Some(Decimal::ZERO)
+    );
+    assert_eq!(
+        b.accrue("Expenses:Food", "USD", d(2024, 3, 6), d(2024, 3, 5)),
+        Some(Decimal::ZERO)
+    );
+    // An unbudgeted pair accrues nothing rather than erroring.
+    assert_eq!(
+        b.accrue("Expenses:Food", "EUR", d(2024, 1, 1), d(2024, 2, 1)),
+        Some(Decimal::ZERO)
+    );
+}
+
+/// `from_directives` must actually read the ledger, not just hand back an empty
+/// index. Mutating it to `(Default::default(), vec![])` survived every other
+/// test because they all build `Budgets` by hand.
+#[test]
+fn from_directives_indexes_what_it_parsed() {
+    let dirs = vec![
+        budget_directive(d(2024, 1, 1), "Expenses:Food", "monthly", "400.00", "USD"),
+        budget_directive(d(2024, 6, 1), "Expenses:Food", "monthly", "450.00", "USD"),
+        budget_directive(
+            d(2024, 1, 1),
+            "Expenses:Rent",
+            "fortnightly",
+            "900.00",
+            "USD",
+        ),
+    ];
+    let (budgets, errors) = Budgets::from_directives(&dirs);
+    assert_eq!(errors.len(), 1, "the bad interval is reported");
+    assert!(!budgets.is_empty());
+    assert_eq!(budgets.entries().len(), 2);
+    assert_eq!(budgets.earliest(), Some(d(2024, 1, 1)));
+    // A whole month at each rate, proving the entries are usable and ordered.
+    assert_eq!(
+        budgets.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2024, 2, 1)),
+        Some(Decimal::from(400))
+    );
+    assert_eq!(
+        budgets.accrue("Expenses:Food", "USD", d(2024, 6, 1), d(2024, 7, 1)),
+        Some(Decimal::from(450))
+    );
+}
+
+/// The "no budget yet in force" branch skips the cursor to the next declaration
+/// only when that declaration is INSIDE the window; otherwise it stops. Both
+/// halves matter: `next < to` relaxed to `<=` or to `true` would step to a
+/// declaration on or past the end and accrue a period that is not in range.
+#[test]
+fn accrue_skips_to_a_later_declaration_only_inside_the_window() {
+    let b = Budgets::new(vec![budget(
+        d(2024, 6, 15),
+        "Expenses:Food",
+        Interval::Day,
+        10,
+    )]);
+    // Window ends exactly ON the declaration: nothing is in force in it.
+    assert_eq!(
+        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2024, 6, 15)),
+        Some(Decimal::ZERO),
+        "a declaration on the exclusive end is outside the window"
+    );
+    // Window ends one day later: exactly one day accrues.
+    assert_eq!(
+        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2024, 6, 16)),
+        Some(Decimal::from(10))
+    );
+}
+
+/// A superseding declaration splits the segment only when it lands strictly
+/// INSIDE it. Landing exactly on the segment end changes nothing, and relaxing
+/// that to `<=` re-splits a boundary already accounted for.
+#[test]
+fn a_supersession_on_the_segment_boundary_does_not_resplit_it() {
+    // The second declaration falls exactly on the month boundary, which is
+    // already where the segment ends.
+    let b = Budgets::new(vec![
+        budget(d(2024, 1, 1), "Expenses:Food", Interval::Month, 310),
+        budget(d(2024, 2, 1), "Expenses:Food", Interval::Month, 290),
+    ]);
+    // January in full at 310, February in full at 290.
+    assert_eq!(
+        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2024, 3, 1)),
+        Some(Decimal::from(600))
+    );
+    // And a mid-month supersession still splits: 14 days of Feb at 290/29 plus
+    // 15 at 580/29.
+    let mid = Budgets::new(vec![
+        budget(d(2024, 2, 1), "Expenses:Food", Interval::Month, 290),
+        budget(d(2024, 2, 15), "Expenses:Food", Interval::Month, 580),
+    ]);
+    let want = Decimal::from(290) * Decimal::from(14) / Decimal::from(29)
+        + Decimal::from(580) * Decimal::from(15) / Decimal::from(29);
+    assert_eq!(
+        mid.accrue("Expenses:Food", "USD", d(2024, 2, 1), d(2024, 3, 1)),
+        Some(want)
+    );
+}
+
+/// A zero-length segment contributes nothing. `seg_days > 0` relaxed to `>= 0`
+/// would divide a zero-day segment into the total, which is only harmless by
+/// accident.
+#[test]
+fn a_zero_day_segment_contributes_nothing() {
+    let b = Budgets::new(vec![budget(
+        d(2024, 1, 1),
+        "Expenses:Food",
+        Interval::Month,
+        400,
+    )]);
+    // One single day, at the very start of a month: exactly 400/31.
+    assert_eq!(
+        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2024, 1, 2)),
+        Some(Decimal::from(400) / Decimal::from(31))
+    );
+    // And the degenerate window contributes nothing at all.
+    assert_eq!(
+        b.accrue("Expenses:Food", "USD", d(2024, 1, 1), d(2024, 1, 1)),
+        Some(Decimal::ZERO)
+    );
+}

@@ -426,11 +426,17 @@ impl Budgets {
         let mut cursor = from;
         while cursor < to {
             let Some(b) = self.in_force(account, currency, cursor) else {
-                // No budget yet in force: skip ahead to the next declaration that
-                // starts inside the window, or stop.
+                // No budget yet in force: skip ahead to the next declaration, or
+                // stop if there is none.
+                //
+                // No `next < to` guard: `next_change_after` returns a date
+                // strictly after `cursor`, so a declaration at or past `to`
+                // simply ends the loop on the next iteration with the same
+                // total. Mutation testing flagged that guard as unkillable,
+                // which is how a dead condition announces itself.
                 match self.next_change_after(account, currency, cursor) {
-                    Some(next) if next < to => cursor = next,
-                    _ => break,
+                    Some(next) => cursor = next,
+                    None => break,
                 }
                 continue;
             };
@@ -450,6 +456,10 @@ impl Budgets {
             };
             let mut seg_end = inext.min(to);
             // The next superseding declaration, if it lands inside this segment.
+            // `<` and `<=` are indistinguishable here (assigning `seg_end` to a
+            // value it already holds changes nothing), so mutation testing
+            // reports the comparison as unkillable; the guard itself is NOT
+            // dead, because a change beyond `seg_end` must not extend it.
             if let Some(change) = self.next_change_after(account, currency, cursor)
                 && change < seg_end
             {
@@ -461,6 +471,10 @@ impl Budgets {
             }
             let seg_days = days_between(cursor, seg_end);
             let interval_days = days_between(istart, inext).max(1);
+            // `> 0` rather than `>= 0`: a zero-day segment contributes exactly
+            // zero either way, so the two are indistinguishable by result. The
+            // test is kept because skipping the arithmetic entirely is clearer
+            // than relying on `0 * amount / days` to vanish.
             if seg_days > 0 {
                 let num = Decimal::from(seg_days);
                 let den = Decimal::from(interval_days);

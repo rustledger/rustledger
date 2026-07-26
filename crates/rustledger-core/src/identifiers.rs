@@ -335,7 +335,11 @@ pub const ACCOUNT_TYPES: [&str; 5] = ["Assets", "Liabilities", "Equity", "Income
 
 /// The five beancount account-type kinds, independent of their configured
 /// root names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Ord` follows the beancount statement order (assets, liabilities, equity,
+/// income, expenses), so anything grouped by kind — a totals bucket, a report
+/// section — sorts the way a reader expects rather than alphabetically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AccountTypeKind {
     /// Assets (debit-normal, balance sheet).
     Assets,
@@ -386,6 +390,22 @@ impl Default for AccountTypes {
 }
 
 impl AccountTypes {
+    /// The configured root name for a kind — the inverse of [`Self::kind`].
+    ///
+    /// Lets a consumer that has classified an account render it back using the
+    /// ledger's own vocabulary, instead of hardcoding "Expenses" and mislabeling
+    /// every ledger that sets `option "name_expenses"`.
+    #[must_use]
+    pub fn root_name(&self, kind: AccountTypeKind) -> &str {
+        match kind {
+            AccountTypeKind::Assets => &self.assets,
+            AccountTypeKind::Liabilities => &self.liabilities,
+            AccountTypeKind::Equity => &self.equity,
+            AccountTypeKind::Income => &self.income,
+            AccountTypeKind::Expenses => &self.expenses,
+        }
+    }
+
     /// Classify `account` by its root segment against the configured names.
     ///
     /// Returns `None` for roots matching none of the five (custom types).

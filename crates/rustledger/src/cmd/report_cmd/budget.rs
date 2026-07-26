@@ -29,9 +29,13 @@ use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
 use rustledger_budget::{
-    BudgetEntry, BudgetError, BudgetRow, Budgets, covers, passes_account_filter,
+    Bucket, BudgetEntry, BudgetError, BudgetRow, BudgetTotal, Budgets, covers,
+    passes_account_filter,
 };
-use rustledger_core::{AccountTypes, Directive, DisplayContext, NaiveDate, is_subaccount_or_equal};
+use rustledger_core::{
+    Account, AccountTypeKind, AccountTypes, Currency, Directive, DisplayContext, NaiveDate,
+    is_subaccount_or_equal,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
@@ -239,7 +243,7 @@ fn mismatched_currency_errors(
         .filter(|b| b.from < to)
         .filter(|b| {
             let seen_currencies = covered_currencies(&b.account);
-            !seen_currencies.is_empty() && !seen_currencies.contains(&b.currency)
+            !seen_currencies.is_empty() && !seen_currencies.contains(b.currency.as_str())
         })
         .filter(|b| seen.insert((b.account.clone(), b.currency.clone())))
         .map(|b| {
@@ -345,9 +349,9 @@ pub(super) fn report_budget<W: Write>(
     // own parsing — and a TOTAL can overflow even when every row it sums is
     // individually representable, so covering only the rows left the commonest
     // overflow silent.
-    let unrepresentable = |label: &str, ccy: &str| BudgetError {
+    let unrepresentable = |label: &Account, ccy: &Currency| BudgetError {
         date: filter.from,
-        account: Some(label.to_string()),
+        account: Some(label.clone()),
         reason: format!(
             "budget for {label} in {ccy} is too large to represent; \
              the figure is reported as absent rather than clamped"
@@ -358,9 +362,9 @@ pub(super) fn report_budget<W: Write>(
             errors.push(unrepresentable(&r.account, &r.currency));
         }
     }
-    for ((ccy, kind), (b, a)) in &totals {
-        if b.is_none() || a.is_none() {
-            let row = total_row(types, ccy, kind, *b, *a);
+    for t in &totals {
+        if t.budgeted.is_none() || t.actual.is_none() {
+            let row = total_row(types, t);
             // A total whose component is unknown is itself unknown: summing only
             // the representable rows would print an authoritative-looking figure
             // that silently omits an account. It stays absent, and says why.
@@ -368,9 +372,9 @@ pub(super) fn report_budget<W: Write>(
                 date: filter.from,
                 account: Some(row.account.clone()),
                 reason: format!(
-                    "{} for {ccy} is absent because at least one budget in it is \
+                    "{} for {} is absent because at least one budget in it is \
                      too large to represent; the rows above show which",
-                    row.account
+                    row.account, t.currency
                 ),
             });
         }
@@ -518,36 +522,32 @@ impl Empty {
 }
 
 /// A whole-report total as a row, so totals and rows render through one path.
-fn total_row(
-    types: &AccountTypes,
-    currency: &str,
-    kind: &str,
-    budgeted: Option<Decimal>,
-    actual: Option<Decimal>,
-) -> BudgetRow {
+///
+/// Totals are per ACCOUNT TYPE, not per direction. Adding a 5000 salary target
+/// to a 400 travel budget gives a figure that means nothing and a `Used`
+/// percentage reading far healthier than the spending is — but bucketing merely
+/// by credit-normality repeated the mistake one level up, lumping a credit-card
+/// spending budget in with an income target and labeling the sum "earned".
+/// Expenses keep the bare `TOTAL` label, being the overwhelmingly common case.
+///
+/// The Expenses case is a MATCH ARM on the typed bucket, not a comparison
+/// against a root name. When the bucket was a raw string this decision read
+/// `kind == "Expenses"`, so a ledger setting `option "name_expenses" "Depenses"`
+/// emitted no row any consumer recognized as the primary total — including this
+/// repo's own fuzz oracle. With the classification carried as a value there is
+/// no string to get wrong, and the ledger's own vocabulary comes back out of
+/// `AccountTypes::root_name` for the label.
+fn total_row(types: &AccountTypes, total: &BudgetTotal) -> BudgetRow {
+    let label = match &total.bucket {
+        Bucket::Typed(AccountTypeKind::Expenses) => "TOTAL".to_string(),
+        Bucket::Typed(kind) => format!("TOTAL ({})", types.root_name(*kind)),
+        Bucket::Other(root) => format!("TOTAL ({root})"),
+    };
     BudgetRow {
-        // Totals are per ACCOUNT TYPE, not per direction. Adding a 5000 salary
-        // target to a 400 travel budget gives a figure that means nothing and a
-        // `Used` percentage that reads far healthier than the spending is — but
-        // bucketing merely by credit-normality repeated the mistake one level
-        // up, lumping a credit-card spending budget in with an income target
-        // and labeling the sum "earned". Expenses keep the bare `TOTAL` label
-        // because they are the overwhelmingly common case.
-        //
-        // Which root IS the expenses root comes from `AccountTypes`, never from
-        // the literal "Expenses": a ledger that sets `option "name_expenses"
-        // "Depenses"` labelled its primary spending total `TOTAL (Depenses)`,
-        // so no row carried the documented `TOTAL` label at all and every
-        // consumer keying on it — including this repo's own fuzz oracle —
-        // silently reclassified the main total as a secondary bucket.
-        account: if kind == types.expenses {
-            "TOTAL".to_string()
-        } else {
-            format!("TOTAL ({kind})")
-        },
-        currency: currency.to_string(),
-        budgeted,
-        actual,
+        account: Account::new(label),
+        currency: total.currency.clone(),
+        budgeted: total.budgeted,
+        actual: total.actual,
     }
 }
 
@@ -573,7 +573,7 @@ struct Rounding<'a> {
     /// Chosen scale per currency the ledger's `DisplayContext` does not know —
     /// a budget declared before any spending is recorded. ONE per currency, so
     /// the cells of a row agree with each other.
-    untracked: BTreeMap<String, u32>,
+    untracked: BTreeMap<Currency, u32>,
 }
 
 impl<'a> Rounding<'a> {
@@ -584,14 +584,11 @@ impl<'a> Rounding<'a> {
     fn new(
         types: &AccountTypes,
         rows: &[BudgetRow],
-        totals: &BTreeMap<(String, String), (Option<Decimal>, Option<Decimal>)>,
+        totals: &[BudgetTotal],
         ctx: &'a DisplayContext,
     ) -> Self {
-        let mut untracked: BTreeMap<String, u32> = BTreeMap::new();
-        let all_totals: Vec<BudgetRow> = totals
-            .iter()
-            .map(|((ccy, kind), (b, a))| total_row(types, ccy, kind, *b, *a))
-            .collect();
+        let mut untracked: BTreeMap<Currency, u32> = BTreeMap::new();
+        let all_totals: Vec<BudgetRow> = totals.iter().map(|t| total_row(types, t)).collect();
         for r in rows.iter().chain(all_totals.iter()) {
             if ctx.get_precision(&r.currency).is_some() {
                 continue;
@@ -660,7 +657,7 @@ struct Rendering<'a> {
 fn render<W: Write>(
     env: &Rendering<'_>,
     rows: &[BudgetRow],
-    totals: &BTreeMap<(String, String), (Option<Decimal>, Option<Decimal>)>,
+    totals: &[BudgetTotal],
     filter: &BudgetFilter,
     empty: Empty,
     errors: &[BudgetError],
@@ -679,7 +676,7 @@ fn render<W: Write>(
     let rows = &rows[..];
     let total_rows: Vec<BudgetRow> = totals
         .iter()
-        .map(|((ccy, kind), (b, a))| round_row(&total_row(types, ccy, kind, *b, *a)))
+        .map(|t| round_row(&total_row(types, t)))
         .collect();
 
     // A pro-rated budget is a repeating decimal, so it MUST be rounded for

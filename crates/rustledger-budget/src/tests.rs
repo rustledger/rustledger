@@ -10,10 +10,10 @@ fn d(y: i32, m: u32, day: u32) -> NaiveDate {
 fn budget(from: NaiveDate, account: &str, interval: Interval, amount: i64) -> BudgetEntry {
     BudgetEntry {
         from,
-        account: account.to_string(),
+        account: Account::new(account),
         interval,
         amount: Decimal::from(amount),
-        currency: "USD".to_string(),
+        currency: Currency::new("USD"),
     }
 }
 
@@ -134,7 +134,7 @@ fn later_directive_supersedes_from_its_date() {
 #[test]
 fn currencies_coexist_rather_than_superseding() {
     let mut eur = budget(d(2024, 2, 1), "Expenses:Food", Interval::Month, 100);
-    eur.currency = "EUR".to_string();
+    eur.currency = Currency::new("EUR");
     let b = Budgets::new(vec![
         budget(d(2024, 1, 1), "Expenses:Food", Interval::Month, 400),
         eur,
@@ -527,7 +527,7 @@ fn in_force_before_is_exclusive_at_the_boundary() {
     assert!(b.keys_in_force_before(d(2024, 6, 15)).is_empty());
     assert_eq!(
         b.keys_in_force_before(d(2024, 6, 16)),
-        vec![("Expenses:Food".to_string(), "USD".to_string())]
+        vec![(Account::new("Expenses:Food"), Currency::new("USD"))]
     );
 }
 
@@ -602,8 +602,8 @@ fn all_keys_is_every_declared_pair_regardless_of_date() {
     assert_eq!(
         b.all_keys(),
         vec![
-            ("Expenses:Food".to_string(), "USD".to_string()),
-            ("Expenses:Rent".to_string(), "USD".to_string()),
+            (Account::new("Expenses:Food"), Currency::new("USD")),
+            (Account::new("Expenses:Rent"), Currency::new("USD")),
         ],
         "deduplicated, and a future declaration still counts"
     );

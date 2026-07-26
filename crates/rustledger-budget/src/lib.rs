@@ -42,12 +42,12 @@
 
 mod compare;
 pub use compare::{
-    BudgetRow, Comparison, Totals, account_kind, clip_start, normalized_actual,
+    Bucket, BudgetRow, BudgetTotal, Comparison, clip_start, normalized_actual,
     passes_account_filter,
 };
 
 use rust_decimal::Decimal;
-use rustledger_core::{CalendarPeriod, Directive, MetaValue, NaiveDate};
+use rustledger_core::{Account, CalendarPeriod, Currency, Directive, MetaValue, NaiveDate};
 
 /// A budget interval, which fixes both the calendar anchoring and the per-day
 /// denominator.
@@ -155,13 +155,13 @@ pub struct BudgetEntry {
     /// Effective from this date (the directive's own date).
     pub from: NaiveDate,
     /// The budgeted account.
-    pub account: String,
+    pub account: Account,
     /// The interval the amount is stated over.
     pub interval: Interval,
     /// The budgeted amount per interval.
     pub amount: Decimal,
     /// The currency the amount is stated in.
-    pub currency: String,
+    pub currency: Currency,
 }
 
 /// A `custom "budget"` directive that could not be read, reported rather than
@@ -173,7 +173,7 @@ pub struct BudgetError {
     /// The account the directive names, when it could be read. `None` for a
     /// directive malformed enough that no account could be identified. Lets a
     /// consumer report only the problems relevant to the accounts it is showing.
-    pub account: Option<String>,
+    pub account: Option<Account>,
     /// What is wrong with it, phrased for a user.
     pub reason: String,
 }
@@ -183,10 +183,10 @@ pub struct BudgetError {
 /// A quoted string only counts as an account if it looks like one (it contains a
 /// `:` component separator), so a genuinely malformed directive still reports as
 /// malformed instead of being read as an account named after its own typo.
-fn account_name(value: &MetaValue) -> Option<String> {
+fn account_name(value: &MetaValue) -> Option<Account> {
     match value {
-        MetaValue::Account(a) => Some(a.to_string()),
-        MetaValue::String(s) if looks_like_account(s) => Some(s.clone()),
+        MetaValue::Account(a) => Some(a.clone()),
+        MetaValue::String(s) if looks_like_account(s) => Some(Account::new(s.as_str())),
         _ => None,
     }
 }
@@ -277,7 +277,7 @@ pub fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetE
             account,
             interval,
             amount: amount.number,
-            currency: amount.currency.to_string(),
+            currency: amount.currency.clone(),
         });
     }
     // Effective-date order, so the "latest in force" scan is a simple walk.
@@ -350,8 +350,8 @@ impl Budgets {
     /// "In force before" excludes budgets declared on or after the window's
     /// exclusive end: a budget written today does not apply to last year.
     #[must_use]
-    pub fn keys_in_force_before(&self, before: NaiveDate) -> Vec<(String, String)> {
-        let mut keys: Vec<(String, String)> = self
+    pub fn keys_in_force_before(&self, before: NaiveDate) -> Vec<(Account, Currency)> {
+        let mut keys: Vec<(Account, Currency)> = self
             .entries
             .iter()
             .filter(|e| e.from < before)
@@ -369,8 +369,8 @@ impl Budgets {
     /// which [`Self::keys_in_force_before`] cannot answer because it only looks
     /// at each account's own declarations.
     #[must_use]
-    pub fn all_keys(&self) -> Vec<(String, String)> {
-        let mut keys: Vec<(String, String)> = self
+    pub fn all_keys(&self) -> Vec<(Account, Currency)> {
+        let mut keys: Vec<(Account, Currency)> = self
             .entries
             .iter()
             .map(|e| (e.account.clone(), e.currency.clone()))

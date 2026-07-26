@@ -18,7 +18,7 @@
 
 use crate::{Budgets, covers};
 use rust_decimal::Decimal;
-use rustledger_core::{AccountTypes, Directive, NaiveDate};
+use rustledger_core::{Account, AccountTypeKind, AccountTypes, Currency, Directive, NaiveDate};
 use std::collections::BTreeMap;
 
 /// One row of a comparison: an account's budget against its spending.
@@ -30,9 +30,9 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BudgetRow {
     /// The budgeted account.
-    pub account: String,
+    pub account: Account,
     /// The currency this row is denominated in.
-    pub currency: String,
+    pub currency: Currency,
     /// Accrued budget over the window.
     pub budgeted: Option<Decimal>,
     /// Spending counted against it, sign-normalized.
@@ -60,29 +60,100 @@ impl BudgetRow {
     }
 }
 
-/// Whole-comparison totals, keyed by `(currency, account type)`.
+/// Which bucket a total sums over.
 ///
-/// Per TYPE, not per direction: bucketing merely by credit-normality sums a
-/// credit-card spending budget into an income target, which is as meaningless as
-/// the cross-currency sum the currency key already prevents.
-pub type Totals = BTreeMap<(String, String), (Option<Decimal>, Option<Decimal>)>;
+/// Per account TYPE, not per direction: bucketing merely by credit-normality
+/// sums a credit-card spending budget into an income target, which is as
+/// meaningless as the cross-currency sum the currency key already prevents.
+///
+/// TYPED rather than the account's raw root string. A raw root made
+/// `kind == "Expenses"` a writable comparison, and a ledger setting
+/// `option "name_expenses" "Depenses"` then produced no bucket any consumer
+/// recognized as the primary one. With the classification carried as a value
+/// there is no string to compare and the mistake cannot be expressed.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Bucket {
+    /// One of the five account types the ledger's options define.
+    Typed(AccountTypeKind),
+    /// A root outside those five. Beancount permits only the five at the top
+    /// level, so this is unreachable for a validated ledger — but `AccountTypes`
+    /// answers `Option`, and inventing a classification for an unclassifiable
+    /// account is how a total ends up describing rows it does not contain.
+    Other(Account),
+}
+
+impl Bucket {
+    /// Classify an account, config-aware.
+    #[must_use]
+    pub fn of(types: &AccountTypes, account: &Account) -> Self {
+        types.kind(account.as_str()).map_or_else(
+            || Self::Other(Account::new(root_of(account.as_str()))),
+            Self::Typed,
+        )
+    }
+
+    /// The account type, when the root is one of the five.
+    #[must_use]
+    pub const fn kind(&self) -> Option<AccountTypeKind> {
+        match self {
+            Self::Typed(k) => Some(*k),
+            Self::Other(_) => None,
+        }
+    }
+}
+
+/// The first component of an account name.
+fn root_of(account: &str) -> &str {
+    account.split(':').next().unwrap_or(account)
+}
+
+/// One whole-comparison total: a bucket's budgeted and actual in one currency.
+///
+/// The pair used to be an unnamed `(Option<Decimal>, Option<Decimal>)` tuple in
+/// a map value, so which element was which could only be learned from prose.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BudgetTotal {
+    /// The account type this total sums over.
+    pub bucket: Bucket,
+    /// The currency it is denominated in.
+    pub currency: Currency,
+    /// Accrued budget over the window.
+    pub budgeted: Option<Decimal>,
+    /// Spending counted against it, sign-normalized.
+    pub actual: Option<Decimal>,
+}
+
+impl BudgetTotal {
+    /// Budget minus actual. Positive is under budget, negative over.
+    #[must_use]
+    pub fn remaining(&self) -> Option<Decimal> {
+        self.budgeted?.checked_sub(self.actual?)
+    }
+
+    /// Fraction of the budget used — see [`BudgetRow::used_fraction`].
+    #[must_use]
+    pub fn used_fraction(&self) -> Option<f64> {
+        BudgetRow {
+            account: Account::new(""),
+            currency: self.currency.clone(),
+            budgeted: self.budgeted,
+            actual: self.actual,
+        }
+        .used_fraction()
+    }
+}
 
 /// Budgeted and actual, per row and in total.
 #[derive(Clone, Debug, Default)]
 pub struct Comparison {
     /// One row per budgeted `(account, currency)`, sorted.
     pub rows: Vec<BudgetRow>,
-    /// Totals counting each budget and each posting exactly once.
+    /// Totals counting each budget and each posting exactly once, sorted by
+    /// `(currency, bucket)`.
     ///
     /// Deliberately NOT the sum of `rows`: under `children` a parent row and a
     /// child row overlap by design, so adding the rows double-counts the child.
-    pub totals: Totals,
-}
-
-/// The account's top-level type, which is how totals are bucketed.
-#[must_use]
-pub fn account_kind(account: &str) -> String {
-    account.split(':').next().unwrap_or(account).to_string()
+    pub totals: Vec<BudgetTotal>,
 }
 
 /// Does this account pass a raw-prefix filter?
@@ -165,11 +236,11 @@ fn collect_actuals(
     directives: &[Directive],
     from: NaiveDate,
     to: NaiveDate,
-) -> BTreeMap<(String, String), Vec<(NaiveDate, Decimal)>> {
-    let mut actuals: BTreeMap<(String, String), Vec<(NaiveDate, Decimal)>> = BTreeMap::new();
-    let mut record = |account: &str, currency: &str, date: NaiveDate, amount: Decimal| {
+) -> BTreeMap<(Account, Currency), Vec<(NaiveDate, Decimal)>> {
+    let mut actuals: BTreeMap<(Account, Currency), Vec<(NaiveDate, Decimal)>> = BTreeMap::new();
+    let mut record = |account: &Account, currency: &Currency, date: NaiveDate, amount: Decimal| {
         actuals
-            .entry((account.to_string(), currency.to_string()))
+            .entry((account.clone(), currency.clone()))
             .or_default()
             .push((date, amount));
     };
@@ -186,14 +257,14 @@ fn collect_actuals(
             };
             match rustledger_booking::posting_weight(p) {
                 Some(w) if w.currency == units.currency => {
-                    record(p.account.as_str(), &w.currency, txn.date, w.number);
+                    record(&p.account, &w.currency, txn.date, w.number);
                 }
                 Some(w) => {
-                    record(p.account.as_str(), &units.currency, txn.date, units.number);
-                    record(p.account.as_str(), &w.currency, txn.date, w.number);
+                    record(&p.account, &units.currency, txn.date, units.number);
+                    record(&p.account, &w.currency, txn.date, w.number);
                 }
                 None => {
-                    record(p.account.as_str(), &units.currency, txn.date, units.number);
+                    record(&p.account, &units.currency, txn.date, units.number);
                 }
             }
         }
@@ -231,12 +302,14 @@ impl Budgets {
         // whose own budget starts next year still aggregates a child budget
         // running now. Row identities still come from declared pairs, so no row
         // is invented for an account nobody budgeted in that currency.
-        let keys: Vec<(String, String)> = if children {
+        let keys: Vec<(Account, Currency)> = if children {
             self.all_keys()
                 .into_iter()
                 .filter(|(account, currency)| {
                     self.entries().any(|b| {
-                        b.currency == *currency && b.from < to && covers(account, &b.account, true)
+                        b.currency == *currency
+                            && b.from < to
+                            && covers(account.as_str(), b.account.as_str(), true)
                     })
                 })
                 .collect()
@@ -246,12 +319,15 @@ impl Budgets {
 
         let mut rows: Vec<BudgetRow> = keys
             .into_iter()
-            .filter(|(account, _)| passes_account_filter(account, account_filter))
+            .filter(|(account, _)| passes_account_filter(account.as_str(), account_filter))
             .map(|(account, currency)| {
                 let covered: Vec<&str> = if children {
                     let mut all: Vec<&str> = self
                         .entries()
-                        .filter(|b| b.currency == currency && covers(&account, &b.account, true))
+                        .filter(|b| {
+                            b.currency == currency
+                                && covers(account.as_str(), b.account.as_str(), true)
+                        })
                         .map(|b| b.account.as_str())
                         .collect();
                     all.sort_unstable();
@@ -262,22 +338,29 @@ impl Budgets {
                 };
                 let budgeted: Option<Decimal> = covered
                     .iter()
-                    .map(|a| self.accrue(a, &currency, from, to))
+                    .map(|a| self.accrue(a, currency.as_str(), from, to))
                     .try_fold(Decimal::ZERO, |acc, seg| {
                         seg.and_then(|s| acc.checked_add(s))
                     });
                 let actual = actuals
                     .iter()
-                    .filter(|((a, c), _)| *c == currency && covers(&account, a, children))
+                    .filter(|((a, c), _)| {
+                        *c == currency && covers(account.as_str(), a.as_str(), children)
+                    })
                     .flat_map(|((a, _), entries)| {
-                        let start =
-                            clip_start(self, covered.iter().copied(), a, &currency, children)
-                                .unwrap_or(from)
-                                .max(from);
+                        let start = clip_start(
+                            self,
+                            covered.iter().copied(),
+                            a.as_str(),
+                            currency.as_str(),
+                            children,
+                        )
+                        .unwrap_or(from)
+                        .max(from);
                         entries
                             .iter()
                             .filter(move |(date, _)| *date >= start)
-                            .map(move |(_, v)| normalized_actual(types, a, *v))
+                            .map(move |(_, v)| normalized_actual(types, a.as_str(), *v))
                     })
                     .try_fold(Decimal::ZERO, Decimal::checked_add);
                 BudgetRow {
@@ -297,27 +380,32 @@ impl Budgets {
     /// Totals counting every budget and every posting exactly once.
     fn totals(
         &self,
-        actuals: &BTreeMap<(String, String), Vec<(NaiveDate, Decimal)>>,
+        actuals: &BTreeMap<(Account, Currency), Vec<(NaiveDate, Decimal)>>,
         types: &AccountTypes,
         from: NaiveDate,
         to: NaiveDate,
         children: bool,
         account_filter: Option<&str>,
-    ) -> Totals {
-        let pairs: Vec<(String, String)> = self
+    ) -> Vec<BudgetTotal> {
+        let pairs: Vec<(Account, Currency)> = self
             .keys_in_force_before(to)
             .into_iter()
-            .filter(|(account, _)| passes_account_filter(account, account_filter))
+            .filter(|(account, _)| passes_account_filter(account.as_str(), account_filter))
             .collect();
 
-        let mut totals: Totals = BTreeMap::new();
+        // Accumulated in a map keyed by `(currency, bucket)` — currency first so
+        // the sorted output groups a multi-currency report by currency — then
+        // handed out as a sorted `Vec` so the published shape carries named
+        // fields instead of a tuple whose halves are told apart only by prose.
+        let mut acc: BTreeMap<(Currency, Bucket), (Option<Decimal>, Option<Decimal>)> =
+            BTreeMap::new();
         for (account, currency) in &pairs {
-            let e = totals
-                .entry((currency.clone(), account_kind(account)))
+            let e = acc
+                .entry((currency.clone(), Bucket::of(types, account)))
                 .or_insert((Some(Decimal::ZERO), Some(Decimal::ZERO)));
-            e.0 = e.0.and_then(|acc| {
-                self.accrue(account, currency, from, to)
-                    .and_then(|seg| acc.checked_add(seg))
+            e.0 = e.0.and_then(|sum| {
+                self.accrue(account.as_str(), currency.as_str(), from, to)
+                    .and_then(|seg| sum.checked_add(seg))
             });
         }
         // Each posting counts once, against whichever budgeted accounts cover
@@ -327,19 +415,33 @@ impl Budgets {
                 .iter()
                 .filter(|(_, c)| c == currency)
                 .map(|(b, _)| b.as_str());
-            let Some(start) = clip_start(self, covering, account, currency, children) else {
+            let Some(start) = clip_start(
+                self,
+                covering,
+                account.as_str(),
+                currency.as_str(),
+                children,
+            ) else {
                 continue;
             };
             let start = start.max(from);
-            let e = totals
-                .entry((currency.clone(), account_kind(account)))
+            let e = acc
+                .entry((currency.clone(), Bucket::of(types, account)))
                 .or_insert((Some(Decimal::ZERO), Some(Decimal::ZERO)));
             for (_, raw) in entries.iter().filter(|(d, _)| *d >= start) {
-                e.1 =
-                    e.1.and_then(|acc| acc.checked_add(normalized_actual(types, account, *raw)));
+                e.1 = e.1.and_then(|sum| {
+                    sum.checked_add(normalized_actual(types, account.as_str(), *raw))
+                });
             }
         }
-        totals
+        acc.into_iter()
+            .map(|((currency, bucket), (budgeted, actual))| BudgetTotal {
+                bucket,
+                currency,
+                budgeted,
+                actual,
+            })
+            .collect()
     }
 }
 
@@ -356,10 +458,10 @@ mod tests {
     fn entry(from: NaiveDate, account: &str) -> BudgetEntry {
         BudgetEntry {
             from,
-            account: account.to_string(),
+            account: Account::new(account),
             interval: Interval::Month,
             amount: Decimal::from(100),
-            currency: "USD".to_string(),
+            currency: Currency::new("USD"),
         }
     }
 
@@ -414,13 +516,42 @@ mod tests {
         assert!(!covers("Expenses:Food", "Expenses:FoodCourt", true));
     }
 
+    /// Classification is by TYPE and config-aware, so a renamed root still
+    /// buckets as the type it is — the whole reason this is not the raw root
+    /// string it used to be.
     #[test]
-    fn account_kind_is_the_top_level_component() {
-        assert_eq!(account_kind("Expenses:Food:Sub"), "Expenses");
-        assert_eq!(account_kind("Income:Salary"), "Income");
-        assert_eq!(account_kind("Liabilities:CreditCard"), "Liabilities");
-        assert_eq!(account_kind("Expenses"), "Expenses");
-        assert_eq!(account_kind(""), "");
+    fn a_bucket_classifies_by_type_not_by_root_spelling() {
+        let types = AccountTypes::default();
+        let of = |a: &str| Bucket::of(&types, &Account::new(a));
+        assert_eq!(
+            of("Expenses:Food:Sub").kind(),
+            Some(AccountTypeKind::Expenses)
+        );
+        assert_eq!(of("Income:Salary").kind(), Some(AccountTypeKind::Income));
+        assert_eq!(
+            of("Liabilities:CreditCard").kind(),
+            Some(AccountTypeKind::Liabilities)
+        );
+        assert_eq!(of("Expenses").kind(), Some(AccountTypeKind::Expenses));
+
+        // A ledger that renames its expense root buckets identically — under the
+        // old raw-root key this produced a bucket nothing recognized as primary.
+        let renamed = AccountTypes {
+            expenses: "Depenses".to_string(),
+            ..AccountTypes::default()
+        };
+        assert_eq!(
+            Bucket::of(&renamed, &Account::new("Depenses:Food")).kind(),
+            Some(AccountTypeKind::Expenses)
+        );
+        // ...and the ledger's own name comes back for display.
+        assert_eq!(renamed.root_name(AccountTypeKind::Expenses), "Depenses");
+
+        // An unclassifiable root stays explicitly unclassified rather than being
+        // invented into one of the five.
+        let odd = Bucket::of(&types, &Account::new("Weird:Thing"));
+        assert_eq!(odd.kind(), None);
+        assert_eq!(odd, Bucket::Other(Account::new("Weird")));
     }
 
     #[test]
@@ -480,10 +611,10 @@ mod tests {
         use rustledger_core::{Amount, Posting, Transaction};
         let budgets = Budgets::new(vec![BudgetEntry {
             from: d(2024, 2, 1),
-            account: "Expenses:Food".to_string(),
+            account: Account::new("Expenses:Food"),
             interval: Interval::Month,
             amount: Decimal::from(400),
-            currency: "USD".to_string(),
+            currency: Currency::new("USD"),
         }]);
         let txn = |day, amount: i64| {
             Directive::Transaction(Transaction::new(day, "x").with_synthesized_posting(
@@ -510,10 +641,13 @@ mod tests {
         assert_eq!(row.remaining(), Some(Decimal::from(280)));
         assert!((row.used_fraction().unwrap() - 0.30).abs() < 1e-9);
         assert_eq!(
-            cmp.totals
-                .get(&("USD".to_string(), "Expenses".to_string()))
-                .copied(),
-            Some((Some(Decimal::from(400)), Some(Decimal::from(120))))
+            cmp.totals,
+            vec![BudgetTotal {
+                bucket: Bucket::Typed(AccountTypeKind::Expenses),
+                currency: Currency::new("USD"),
+                budgeted: Some(Decimal::from(400)),
+                actual: Some(Decimal::from(120)),
+            }]
         );
     }
 
@@ -559,10 +693,10 @@ mod boundary_tests {
     fn budget_of(from: NaiveDate, account: &str, currency: &str, amount: i64) -> BudgetEntry {
         BudgetEntry {
             from,
-            account: account.to_string(),
+            account: Account::new(account),
             interval: Interval::Day,
             amount: Decimal::from(amount),
-            currency: currency.to_string(),
+            currency: Currency::new(currency),
         }
     }
 

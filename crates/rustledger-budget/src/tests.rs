@@ -816,3 +816,85 @@ fn a_sibling_sorting_inside_the_subtree_does_not_truncate_it() {
         assert_eq!(row.budgeted, Some(Decimal::from(want)), "{account}");
     }
 }
+
+/// The indexed supersession lookups must answer exactly what the linear scans
+/// they replaced answered, including the cases that make the index subtle:
+/// several declarations on ONE date (supersession takes the last in caller
+/// order), two currencies for one account (parallel, neither superseding), and
+/// a key with no declarations at all.
+///
+/// Differential rather than by-example: `in_force` is now a `partition_point`
+/// over per-key positions, and the property that matters is agreement with the
+/// definition, not any particular answer.
+#[test]
+fn the_indexed_lookups_agree_with_a_linear_scan() {
+    let mut entries = Vec::new();
+    for (day, account, amount) in [
+        (1, "Expenses:Food", 100),
+        (1, "Expenses:Food", 200), // same date — the LAST one wins
+        (1, "Expenses:Food", 300),
+        (5, "Expenses:Food", 400),
+        (5, "Expenses:Rent", 950),
+        (9, "Expenses:Food", 500),
+        (3, "Expenses:Rent", 900),
+    ] {
+        entries.push(budget(d(2024, 6, day), account, Interval::Month, amount));
+    }
+    // A second currency for an account that already has one: parallel budgets.
+    let mut eur = budget(d(2024, 6, 4), "Expenses:Food", Interval::Month, 77);
+    eur.currency = Currency::new("EUR");
+    entries.push(eur);
+
+    let b = Budgets::new(entries.clone());
+    // The definition, as the code read before the index: entries are sorted by
+    // `from`, and the entry in force is the LAST one dated on or before the day.
+    let mut sorted = entries.clone();
+    sorted.sort_by_key(|e| e.from);
+
+    for account in ["Expenses:Food", "Expenses:Rent", "Expenses:Nothing"] {
+        for currency in ["USD", "EUR", "GBP"] {
+            for day in 1..=12 {
+                let day = d(2024, 6, day);
+
+                let want = sorted
+                    .iter()
+                    .rfind(|e| e.account == account && e.currency == currency && e.from <= day);
+                assert_eq!(
+                    b.in_force(account, currency, day).map(|e| e.amount),
+                    want.map(|e| e.amount),
+                    "in_force({account}, {currency}, {day})"
+                );
+
+                let want_next = sorted
+                    .iter()
+                    .filter(|e| e.account == account && e.currency == currency && e.from > day)
+                    .map(|e| e.from)
+                    .min();
+                assert_eq!(
+                    b.next_change_after(account, currency, day),
+                    want_next,
+                    "next_change_after({account}, {currency}, {day})"
+                );
+            }
+
+            let want_start = sorted
+                .iter()
+                .filter(|e| e.account == account && e.currency == currency)
+                .map(|e| e.from)
+                .min();
+            assert_eq!(
+                b.effective_start(account, currency),
+                want_start,
+                "effective_start({account}, {currency})"
+            );
+        }
+    }
+
+    // The same-date case, spelled out: the last declaration on 2024-06-01 is the
+    // one in force that day, not the first and not an arbitrary one.
+    assert_eq!(
+        b.in_force("Expenses:Food", "USD", d(2024, 6, 1))
+            .map(|e| e.amount),
+        Some(Decimal::from(300))
+    );
+}

@@ -601,6 +601,99 @@ mod tests {
         assert!(!covers("Expenses:Food", "Expenses:FoodCourt", true));
     }
 
+    /// The range narrowing must never EXCLUDE a covered account, for ANY pair of
+    /// account names — that is the entire correctness condition of the ordered
+    /// lookups the comparison was rebuilt on.
+    ///
+    /// Checked exhaustively against the definition (`covers` over the whole
+    /// set) rather than by example, because the failure that already happened
+    /// here was invisible by inspection: `'0'` (0x30) and `'-'` (0x2D) sort
+    /// BELOW `':'` (0x3A), so a sibling like `Expenses:Food0` lands inside the
+    /// parent's byte range and a naive scan stopped at it. The names below are
+    /// picked to straddle the `:` boundary from both sides.
+    #[test]
+    fn the_subtree_range_never_hides_a_covered_account() {
+        let names = [
+            "Expenses",
+            "Expenses:Food",
+            "Expenses:Food0",
+            "Expenses:Food9",
+            "Expenses:Food-Bar",
+            "Expenses:Food-",
+            "Expenses:FoodCourt",
+            "Expenses:Fooda",
+            "Expenses:Food:Restaurant",
+            "Expenses:Food:Restaurant:Tip",
+            "Expenses:Food:0",
+            "Expenses:Food:-x",
+            "Expenses:Foo",
+            "Expenses:Foo:Deep",
+            "Income:Salary",
+            "A",
+            "A:B",
+        ];
+        let set: BTreeSet<Account> = names.iter().copied().map(Account::new).collect();
+        for name in names {
+            let account = Account::new(name);
+            // What the range yields, once `covers` has had its say.
+            let narrowed: Vec<&Account> = subtree_range(&set, &account)
+                .filter(|a| covers(account.as_str(), a.as_str(), true))
+                .collect();
+            // The definition: every account in the set that the budget covers.
+            let all: Vec<&Account> = set
+                .iter()
+                .filter(|a| covers(account.as_str(), a.as_str(), true))
+                .collect();
+            assert_eq!(
+                narrowed, all,
+                "subtree_range dropped a covered account under {name}"
+            );
+        }
+    }
+
+    /// The same condition for the spending map, whose keys carry a currency, and
+    /// for BOTH `children` settings — the non-children bound is a different
+    /// character and has its own way to be wrong.
+    #[test]
+    fn the_spending_range_never_hides_a_covered_key() {
+        let names = [
+            "Expenses:Food",
+            "Expenses:Food0",
+            "Expenses:Food-Bar",
+            "Expenses:FoodCourt",
+            "Expenses:Food:Restaurant",
+            "Expenses:Food:Restaurant:Tip",
+            "Expenses:Foo",
+        ];
+        let mut actuals: BTreeMap<(Account, Currency), Vec<(NaiveDate, Decimal)>> = BTreeMap::new();
+        for n in names {
+            for c in ["USD", "EUR", ""] {
+                actuals.insert(
+                    (Account::new(n), Currency::new(c)),
+                    vec![(d(2024, 2, 1), Decimal::ONE)],
+                );
+            }
+        }
+        for children in [false, true] {
+            for n in names {
+                let account = Account::new(n);
+                let narrowed: Vec<&(Account, Currency)> =
+                    covered_range(&actuals, &account, children)
+                        .map(|(k, _)| k)
+                        .filter(|(a, _)| covers(account.as_str(), a.as_str(), children))
+                        .collect();
+                let all: Vec<&(Account, Currency)> = actuals
+                    .keys()
+                    .filter(|(a, _)| covers(account.as_str(), a.as_str(), children))
+                    .collect();
+                assert_eq!(
+                    narrowed, all,
+                    "covered_range dropped a covered key under {n} (children={children})"
+                );
+            }
+        }
+    }
+
     /// A total's derived figures behave like a row's. Covered here because the
     /// CLI reaches them through `BudgetRow` and only the FFI calls them
     /// directly — so the crate's own suite never did, and a mutation audit

@@ -2598,3 +2598,49 @@ fn a_budget_below_display_precision_says_so() {
         "{ordinary}"
     );
 }
+
+/// The bare `TOTAL` — the expenses bucket, the line a budget report exists for
+/// — leads its currency's totals, ahead of any secondary bucket.
+///
+/// Not free: the crate hands totals over in beancount STATEMENT order (assets,
+/// liabilities, equity, income, expenses), which puts the headline last. That
+/// ordering is right for a general-purpose type and wrong for this reader, so
+/// the renderer reorders — and nothing asserted it until a type change silently
+/// moved `TOTAL (Income)` above `TOTAL`.
+#[test]
+fn the_headline_total_leads_its_currency() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food USD\n\
+         2024-01-01 open Income:Salary USD\n\
+         2024-01-01 open Liabilities:Card USD\n\
+         2024-01-01 open Assets:Cash USD\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n\
+         2024-01-01 custom \"budget\" Income:Salary \"monthly\" 5000.00 USD\n\
+         2024-01-01 custom \"budget\" Liabilities:Card \"monthly\" 100.00 USD\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let text = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-02-01",
+            "--to",
+            "2024-03-01",
+        ],
+    );
+    let totals: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("TOTAL"))
+        .map(|l| l.split_whitespace().next().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        totals.first(),
+        Some(&"TOTAL"),
+        "the expenses total must lead:\n{text}"
+    );
+    assert_eq!(totals.len(), 3, "all three buckets present:\n{text}");
+}

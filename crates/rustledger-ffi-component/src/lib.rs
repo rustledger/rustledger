@@ -40,12 +40,15 @@ use exports::rustledger::ledger::builder::{Directive, Guest as BuilderGuest, Inp
 use exports::rustledger::ledger::format::Guest as FormatGuest;
 use exports::rustledger::ledger::importer::{ExtractResult, Guest as ImporterGuest};
 use exports::rustledger::ledger::ledger::{
-    BatchResult, Guest as LedgerGuest, GuestSession, LedgerOptions, LoadResult, QueryResult,
-    ReturnsResult, Session, ValidateResult,
+    BatchResult, BudgetResult, Guest as LedgerGuest, GuestSession, LedgerOptions, LoadResult,
+    QueryResult, ReturnsResult, Session, ValidateResult,
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. 3.9 adds
+/// The Component-Model api-version this build implements. 3.10 adds
+/// `session.budget` (budgeted vs actual over the held ledger — the
+/// `rledger report budget` engine, so a host can render a Fava-style
+/// budget view without re-deriving the accrual); 3.9 adds
 /// `session.returns` (investment returns — money-weighted XIRR +
 /// time-weighted TWR — over the held ledger, #1847); 3.8 adds
 /// `session.format` (render the held entries honoring the ledger's
@@ -60,7 +63,7 @@ use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 /// encrypted (`.gpg`/`.asc`) ledgers can be decrypted by the host (#1667);
 /// 3.1 added the `diff` field on `balance-dir` (#1663); 3.0 was the breaking
 /// `expand-pads` parameter on `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.9";
+const API_VERSION: &str = "3.10";
 
 struct Component;
 
@@ -166,6 +169,17 @@ impl GuestSession for LedgerSession {
     ) -> Result<ReturnsResult, String> {
         self.state
             .returns(&investments, &income, &currency, &end_date)
+    }
+
+    fn budget(
+        &self,
+        from_date: String,
+        to_date: String,
+        children: bool,
+        account_filter: String,
+    ) -> Result<BudgetResult, String> {
+        self.state
+            .budget(&from_date, &to_date, children, &account_filter)
     }
 }
 

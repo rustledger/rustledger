@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.9.0;
+package rustledger:ledger@3.10.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -411,6 +411,51 @@ interface ledger {
     time-weighted: option<f64>,
   }
 
+  /// One budgeted account in one currency, as computed by `rledger report
+  /// budget` — see `session.budget` (WIT 3.10.0). Amount fields are RAW,
+  /// full-precision decimal strings like `returns-result`'s, NOT
+  /// display-formatted; a host formats them for its own locale. They are `none`
+  /// when the figure is not representable, which is reachable only from an
+  /// absurd declared amount — a clamped number would be wrong by an unbounded
+  /// factor while looking authoritative. `used` is the fraction of the budget
+  /// spent (0.5 = 50%), `none` when nothing was budgeted, since that is a
+  /// division by zero rather than 0% or 100%.
+  record budget-row {
+    account: string,
+    currency: string,
+    budgeted: option<string>,
+    actual: option<string>,
+    remaining: option<string>,
+    used: option<f64>,
+  }
+
+  /// A whole-report total, summed per ACCOUNT TYPE and currency. `kind` is the
+  /// beancount account type ("assets", "liabilities", "equity", "income",
+  /// "expenses"), or the account's own root for a ledger using a type outside
+  /// those five. Deliberately NOT the sum of `rows`: under `children` a parent
+  /// row and a child row overlap by design, so adding the rows double-counts
+  /// the child.
+  record budget-total {
+    kind: string,
+    currency: string,
+    budgeted: option<string>,
+    actual: option<string>,
+    remaining: option<string>,
+    used: option<f64>,
+  }
+
+  /// Budgeted vs actual over a window, plus whatever could not be read.
+  ///
+  /// `errors` carries malformed `custom "budget"` directives and figures too
+  /// large to represent, so a host can tell "this ledger has no budgets" from
+  /// "every budget in it was rejected" — both of which otherwise present as an
+  /// empty `rows`.
+  record budget-result {
+    rows: list<budget-row>,
+    totals: list<budget-total>,
+    errors: list<error>,
+  }
+
   /// Load + run several queries in one parse (replaces `query.batch`).
   record batch-result {
     load: load-result,
@@ -573,6 +618,31 @@ interface ledger {
     /// cash flow is unknown (the one shape net-units cannot value; a cost-basis/lot
     /// error is not fatal).
     returns: func(investments: list<string>, income: list<string>, currency: string, end-date: string) -> result<returns-result, string>;
+    /// Budgeted vs actual over the held ledger (WIT 3.10.0) — the `rledger
+    /// report budget` engine over the boundary, so a host UI can render a
+    /// budget view without re-deriving supersession, calendar anchoring or the
+    /// pro-rata accrual. Budgets come from the ledger's own `custom "budget"`
+    /// directives, Fava's convention, so a ledger already budgeted for Fava
+    /// works unchanged.
+    ///
+    /// `from-date`/`to-date` (`YYYY-MM-DD`) bound a HALF-OPEN window, and
+    /// the budget is pro-rated to it — a partial month accrues its real
+    /// calendar fraction. Both are required; a component has no reliable clock.
+    /// `children` makes a budget cover its subaccounts, summing a parent's own
+    /// budget with any child budgets (they add; the child is not absorbed);
+    /// subaccounts are matched by account COMPONENT, so a budget on
+    /// `Expenses:Food` does not capture `Expenses:FoodCourt` — a deliberate
+    /// deviation from Fava's prefix test. `account-filter` is a raw display
+    /// prefix restricting which rows are reported (pass "" for all), matching
+    /// the CLI's `--account` and the prefix rule every other report uses.
+    ///
+    /// Only budgeted accounts appear: spending with no budget is not a row,
+    /// since `query` already answers that. A parse-recovered load error does
+    /// not block it — it computes over the held directives like the CLI, and
+    /// unreadable budget directives surface in `errors` rather than failing.
+    /// Fallible: returns `err(message)` on an empty or malformed date, or a
+    /// window whose end is not after its start.
+    budget: func(from-date: string, to-date: string, children: bool, account-filter: string) -> result<budget-result, string>;
   }
 }
 

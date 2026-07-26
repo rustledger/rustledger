@@ -31,6 +31,9 @@ rustledger-ops.workspace = true
 rustledger-parser.workspace = true
 rustledger-query.workspace = true
 rustledger-returns.workspace = true
+# `session.budget` runs the same engine as `rledger report budget`.
+rustledger-budget.workspace = true
+rust_decimal.workspace = true
 rustledger-validate.workspace = true
 # Reused for the loader orchestration (`load_source`) and the core->DTO
 # conversion (`directive_to_json`); the component maps those DTOs into WIT

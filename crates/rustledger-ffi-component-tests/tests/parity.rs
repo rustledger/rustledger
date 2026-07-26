@@ -1269,3 +1269,133 @@ fn importer_extract_matches_native_engine() -> Result<()> {
     assert!(text.contains("Assets:Bank"), "{text}");
     Ok(())
 }
+
+/// `session.budget` (WIT 3.10.0): the component's budget over the held ledger
+/// must equal the NATIVE `rustledger_budget` comparison over the same
+/// interpolated, pad-expanded stream — the SAME composition the CLI's
+/// `report budget` calls, so this pins the wasm surface against the CLI's
+/// engine rather than a private re-implementation of the accrual.
+///
+/// The figures are `rust_decimal` (pure integer arithmetic), so they must match
+/// byte-for-byte across the boundary; the `used` fractions are `f64` and are
+/// compared within a tolerance.
+#[test]
+fn session_budget_matches_native_engine() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    // A leap February (the denominator that catches a naive 30-day month), a
+    // child account (so `children` has something to aggregate), an income
+    // target (so sign normalization and a second total bucket are exercised),
+    // and one unreadable directive (so `errors` is non-empty).
+    const LEDGER: &str = "\
+option \"operating_currency\" \"USD\"
+2024-01-01 open Expenses:Food
+2024-01-01 open Expenses:Food:Restaurant
+2024-01-01 open Income:Salary
+2024-01-01 open Assets:Cash
+2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD
+2024-01-01 custom \"budget\" Income:Salary \"monthly\" 5000.00 USD
+2024-01-01 custom \"budget\" Expenses:Food \"decade\" 1.00 USD
+2024-02-05 * \"groceries\"
+  Expenses:Food  120.00 USD
+  Assets:Cash
+2024-02-06 * \"dinner\"
+  Expenses:Food:Restaurant  80.00 USD
+  Assets:Cash
+2024-02-25 * \"pay\"
+  Assets:Cash        4000.00 USD
+  Income:Salary
+";
+    for children in [false, true] {
+        // Component side: hold the ledger and ask for the budget over the boundary.
+        let (mut store, inst) = instantiate()?;
+        let session = inst.rustledger_ledger_ledger().session();
+        let handle = session.call_constructor(&mut store, LEDGER)?;
+        let via = session
+            .call_budget(&mut store, handle, "2024-02-01", "2024-03-01", children, "")?
+            .map_err(|e| anyhow::anyhow!("budget failed: {e}"))?;
+        handle.resource_drop(&mut store)?;
+
+        // Native reference: the same crate the CLI report runs.
+        let native = rustledger_ffi_wasi::helpers::load_source(LEDGER);
+        let padded = rustledger_booking::merge_with_padding(&native.directives);
+        let types = rustledger_core::AccountTypes::default();
+        let (budgets, errs) = rustledger_budget::Budgets::from_directives(&padded);
+        let want = budgets.compare(
+            &padded,
+            &types,
+            "2024-02-01".parse().unwrap(),
+            "2024-03-01".parse().unwrap(),
+            children,
+            None,
+        );
+
+        assert_eq!(via.rows.len(), want.rows.len(), "children={children}");
+        for (got, want) in via.rows.iter().zip(&want.rows) {
+            assert_eq!(got.account, want.account.as_str(), "children={children}");
+            assert_eq!(got.currency, want.currency.as_str());
+            assert_eq!(
+                got.budgeted,
+                want.budgeted.map(|d| d.to_string()),
+                "budgeted for {} (children={children})",
+                got.account
+            );
+            assert_eq!(got.actual, want.actual.map(|d| d.to_string()));
+            assert_eq!(got.remaining, want.remaining().map(|d| d.to_string()));
+            match (got.used, want.used_fraction()) {
+                (Some(a), Some(b)) => assert!((a - b).abs() < 1e-12, "{a} vs {b}"),
+                (a, b) => assert_eq!(a.is_none(), b.is_none(), "{a:?} vs {b:?}"),
+            }
+        }
+
+        // Totals carry the account TYPE, lowercased, not the ledger's root name,
+        // in the crate's CANONICAL order — beancount statement order, so income
+        // precedes expenses. The CLI reorders for reading (the headline expenses
+        // total leads); a host owns its own presentation, so the boundary hands
+        // over the canonical sequence rather than the CLI's.
+        assert_eq!(via.totals.len(), want.totals.len());
+        let kinds: Vec<&str> = via.totals.iter().map(|t| t.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["income", "expenses"], "children={children}");
+
+        // A budget that cannot be read is reported, not fatal: the other two
+        // budgets still produced rows above.
+        assert_eq!(errs.len(), 1, "fixture must carry one bad directive");
+        assert_eq!(via.errors.len(), 1);
+        assert!(
+            via.errors[0].message.contains("decade"),
+            "{:?}",
+            via.errors[0]
+        );
+        assert_eq!(via.errors[0].severity, "warning");
+    }
+    Ok(())
+}
+
+/// The window is half-open and must be non-empty; a component has no clock, so
+/// both bounds are required and a malformed one is an error rather than a
+/// silently-substituted default.
+#[test]
+fn session_budget_rejects_an_empty_or_malformed_window() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    let session = inst.rustledger_ledger_ledger().session();
+    let handle = session.call_constructor(&mut store, "2024-01-01 open Expenses:Food\n")?;
+    for (from, to, want) in [
+        ("2024-03-01", "2024-03-01", "empty window"),
+        ("2024-03-02", "2024-03-01", "empty window"),
+        ("", "2024-03-01", "invalid from-date"),
+        ("2024-03-01", "not-a-date", "invalid to-date"),
+    ] {
+        let err = session
+            .call_budget(&mut store, handle, from, to, false, "")?
+            .expect_err("must reject");
+        assert!(err.contains(want), "for ({from}, {to}) got {err:?}");
+    }
+    handle.resource_drop(&mut store)?;
+    Ok(())
+}

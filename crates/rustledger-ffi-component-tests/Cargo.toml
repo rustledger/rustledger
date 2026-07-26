@@ -23,6 +23,7 @@ rustledger-importer = { workspace = true, features = ["toml-config"] }
 rustledger-ops.workspace = true
 rustledger-query.workspace = true
 rustledger-returns.workspace = true
+rustledger-budget.workspace = true
 
 [lints]
 workspace = true

@@ -674,8 +674,20 @@ fn render<W: Write>(
     };
     let rows: Vec<BudgetRow> = rows.iter().map(round_row).collect();
     let rows = &rows[..];
-    let total_rows: Vec<BudgetRow> = totals
-        .iter()
+    // Canonical order from the crate is by (currency, account type), and type
+    // order is beancount's statement order — assets, liabilities, equity,
+    // income, expenses — which puts the headline expenses total LAST, under
+    // `TOTAL (Income)`. Correct for a general-purpose ordering, wrong for a
+    // reader: this report is about spending, and the bare `TOTAL` is the line
+    // they came for. Reading order is a rendering concern, so it is chosen
+    // here rather than by bending the type's `Ord`.
+    let mut ordered: Vec<&BudgetTotal> = totals.iter().collect();
+    ordered.sort_by(|a, b| {
+        let headline = |t: &BudgetTotal| t.bucket.kind() != Some(AccountTypeKind::Expenses);
+        (&a.currency, headline(a), &a.bucket).cmp(&(&b.currency, headline(b), &b.bucket))
+    });
+    let total_rows: Vec<BudgetRow> = ordered
+        .into_iter()
         .map(|t| round_row(&total_row(types, t)))
         .collect();
 

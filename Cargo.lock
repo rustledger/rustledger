@@ -3449,7 +3449,9 @@ name = "rustledger-ffi-component"
 version = "0.21.0"
 dependencies = [
  "jiff",
+ "rust_decimal",
  "rustledger-booking",
+ "rustledger-budget",
  "rustledger-core",
  "rustledger-ffi-wasi",
  "rustledger-importer",
@@ -3469,6 +3471,7 @@ version = "0.21.0"
 dependencies = [
  "anyhow",
  "rustledger-booking",
+ "rustledger-budget",
  "rustledger-core",
  "rustledger-ffi-wasi",
  "rustledger-importer",

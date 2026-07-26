@@ -1725,7 +1725,8 @@ impl SessionState {
 
     /// The held options' account-root classifier — the single place the
     /// session turns its `name-*` roots into an [`AccountTypes`], shared by
-    /// `query` (BQL classification) and `clamp` (summary classification).
+    /// `query` (BQL classification), `clamp` (summary classification) and
+    /// `budget` (income-vs-expense sign normalization and total bucketing).
     fn account_types(&self) -> rustledger_core::AccountTypes {
         rustledger_core::AccountTypes {
             assets: self.options.name_assets.clone(),
@@ -1894,6 +1895,96 @@ impl SessionState {
             current_value: returns.current_value.to_string(),
             money_weighted: returns.money_weighted,
             time_weighted: returns.time_weighted,
+        })
+    }
+
+    /// `session.budget` — budgeted vs actual over the held ledger (WIT 3.10.0).
+    ///
+    /// The engine is [`rustledger_budget`], the same crate the CLI report and
+    /// `rledger check`'s E6001 use, so a host cannot get a different answer
+    /// from the one `rledger report budget` prints on the same ledger. Nothing
+    /// about supersession, calendar anchoring or the pro-rata accrual is
+    /// re-derived here; this function only converts.
+    ///
+    /// Amounts are raw decimal strings, matching `returns` — the boundary does
+    /// not display-format, because the host owns locale and precision.
+    pub fn budget(
+        &self,
+        from: &str,
+        to: &str,
+        children: bool,
+        account_filter: &str,
+    ) -> Result<out::BudgetResult, String> {
+        let parse = |s: &str, what: &str| -> Result<NaiveDate, String> {
+            s.parse::<NaiveDate>()
+                .map_err(|_| format!("invalid {what} {s:?} (expected YYYY-MM-DD)"))
+        };
+        let from_date = parse(from, "from-date")?;
+        let to_date = parse(to, "to-date")?;
+        if to_date <= from_date {
+            return Err(format!(
+                "empty window: to ({to}) must be after from ({from}); the window is \
+                 half-open [from, to)"
+            ));
+        }
+        // Padded, like every other balance-computing consumer: pad-synthesized
+        // postings are spending as much as any other, and reading the
+        // source-faithful stream made the CLI report disagree with `balances`
+        // on the very same ledger.
+        let directives = self
+            .padded
+            .get_or_init(|| rustledger_booking::merge_with_padding(&self.directives));
+        let types = self.account_types();
+        let (budgets, budget_errors) = rustledger_budget::Budgets::from_directives(directives);
+        let filter = (!account_filter.is_empty()).then_some(account_filter);
+        let cmp = budgets.compare(directives, &types, from_date, to_date, children, filter);
+
+        let amount = |v: Option<rust_decimal::Decimal>| v.map(|d| d.to_string());
+        Ok(out::BudgetResult {
+            rows: cmp
+                .rows
+                .iter()
+                .map(|r| out::BudgetRow {
+                    account: r.account.as_str().to_string(),
+                    currency: r.currency.as_str().to_string(),
+                    budgeted: amount(r.budgeted),
+                    actual: amount(r.actual),
+                    remaining: amount(r.remaining()),
+                    used: r.used_fraction(),
+                })
+                .collect(),
+            totals: cmp
+                .totals
+                .iter()
+                .map(|t| out::BudgetTotal {
+                    // The account TYPE, lowercased, not the ledger's configured
+                    // root name: a host switching on this must not have to know
+                    // whether the ledger said `option "name_expenses"`.
+                    kind: match &t.bucket {
+                        rustledger_budget::Bucket::Typed(k) => format!("{k:?}").to_lowercase(),
+                        rustledger_budget::Bucket::Other(root) => root.as_str().to_string(),
+                    },
+                    currency: t.currency.as_str().to_string(),
+                    budgeted: amount(t.budgeted),
+                    actual: amount(t.actual),
+                    remaining: amount(t.remaining()),
+                    used: t.used_fraction(),
+                })
+                .collect(),
+            // Unreadable budget directives are reported, not fatal: one typo
+            // must not cost the host every other budget in the ledger.
+            errors: budget_errors
+                .into_iter()
+                .map(|e| wit::Error {
+                    message: format!("{}: {}", e.date, e.reason),
+                    line: None,
+                    column: None,
+                    field: e.account.map(|a| a.as_str().to_string()),
+                    entry_index: None,
+                    severity: "warning".to_string(),
+                    phase: "budget".to_string(),
+                })
+                .collect(),
         })
     }
 

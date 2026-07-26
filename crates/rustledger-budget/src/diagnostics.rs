@@ -13,7 +13,7 @@
 //! consumer of the report can see it.
 
 use crate::{BudgetError, Budgets, Comparison, covers, passes_account_filter};
-use rustledger_core::{AccountTypes, Directive, NaiveDate};
+use rustledger_core::{Account, AccountTypes, Currency, Directive, NaiveDate};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Budgets naming an account the ledger never opens.
@@ -174,44 +174,25 @@ pub fn closed_account_errors(
 }
 /// Budgets whose currency the account never posts in.
 ///
+/// `posted` is "which currencies did each account move in this window", read
+/// off the spending the comparison already collected rather than re-derived.
+/// It was re-derived once — the same window filter, the same units-and-weight
+/// rule, written twice — and two places deciding which currencies a posting
+/// moves is exactly the drift this repo's canonical-function discipline exists
+/// to prevent: a change to one would have made the warning disagree with the
+/// figures it sits beside.
+///
 /// The sibling of the typo'd-account check, and the same silent misreport: a
 /// budget written in `USF` against an account that posts `USD` renders a tidy
 /// `0.0%` used row while the real spending sits one keystroke away. Only
 /// accounts that DO post something are checked, so a budget set up before any
 /// spending is recorded stays quiet.
 pub fn mismatched_currency_errors(
-    directives: &[Directive],
+    posted: &BTreeMap<&Account, BTreeSet<&Currency>>,
     budgets: &Budgets,
     children: bool,
-    from: NaiveDate,
     to: NaiveDate,
 ) -> Vec<BudgetError> {
-    // Every currency each account actually moves — units and, for a priced or
-    // costed posting, the weight currency too, since `90 EUR @ 1.10 USD` is
-    // legitimately budgetable in either.
-    // Windowed, like every other posting walk in this report. Scanning the whole
-    // ledger let a currency the account stopped posting years ago suppress the
-    // warning: an EUR budget for 2024 stayed silent because the account posted
-    // EUR in 2019, which is precisely the silent misreport this exists to catch.
-    let mut posted: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
-    for d in directives {
-        let Directive::Transaction(txn) = d else {
-            continue;
-        };
-        if txn.date < from || txn.date >= to {
-            continue;
-        }
-        for p in &txn.postings {
-            let Some(units) = p.units.as_ref().and_then(|u| u.as_amount()) else {
-                continue;
-            };
-            let entry = posted.entry(p.account.as_str()).or_default();
-            entry.insert(units.currency.to_string());
-            if let Some(w) = rustledger_booking::posting_weight(p) {
-                entry.insert(w.currency.to_string());
-            }
-        }
-    }
     // Which currencies a budget could possibly see, under the SAME coverage rule
     // the report uses: with `--children` a parent budget is answered by its
     // children's postings, so checking the parent account alone both missed the
@@ -220,8 +201,8 @@ pub fn mismatched_currency_errors(
     let covered_currencies = |budgeted: &str| -> BTreeSet<String> {
         posted
             .iter()
-            .filter(|(account, _)| covers(budgeted, account, children))
-            .flat_map(|(_, currencies)| currencies.iter().cloned())
+            .filter(|(account, _)| covers(budgeted, account.as_str(), children))
+            .flat_map(|(_, currencies)| currencies.iter().map(|c| c.as_str().to_string()))
             .collect()
     };
     let mut seen = BTreeSet::new();
@@ -263,25 +244,43 @@ pub fn mismatched_currency_errors(
 /// account should not emit warnings about accounts the caller excluded.
 ///
 /// Sorted by date, so the order is stable across formats and runs.
+/// The window and selection a report was asked for.
+///
+/// Bundled because they travel together through every diagnostic and are never
+/// chosen independently — and because passing them positionally made this the
+/// kind of call where two arguments of the same type can be swapped silently.
+pub struct Scope<'a> {
+    /// Inclusive start of the reported window.
+    pub from: NaiveDate,
+    /// Exclusive end.
+    pub to: NaiveDate,
+    /// Whether a budget covers its subaccounts.
+    pub children: bool,
+    /// Raw account prefix the report is narrowed to, if any.
+    pub account_filter: Option<&'a str>,
+}
+
 pub fn collect(
     budgets: &Budgets,
     directives: &[Directive],
     comparison: &Comparison,
     types: &AccountTypes,
-    from: NaiveDate,
-    to: NaiveDate,
-    children: bool,
-    account_filter: Option<&str>,
+    scope: &Scope<'_>,
+    posted: &BTreeMap<&Account, BTreeSet<&Currency>>,
 ) -> Vec<BudgetError> {
+    let Scope {
+        from,
+        to,
+        children,
+        account_filter,
+    } = *scope;
     // The directives that could not be read come first in provenance but not in
     // order: everything is sorted by date at the end, so the caller never sees
     // parse failures and report warnings interleaved differently depending on
     // which surface it asked.
     let mut errors = budgets.errors().to_vec();
     errors.extend(unopened_account_errors(directives, budgets, to, children));
-    errors.extend(mismatched_currency_errors(
-        directives, budgets, children, from, to,
-    ));
+    errors.extend(mismatched_currency_errors(posted, budgets, children, to));
     errors.extend(closed_account_errors(directives, budgets, to, children));
     if let Some(prefix) = account_filter {
         errors.retain(|e| {

@@ -557,15 +557,26 @@ impl Budgets {
             errors: Vec::new(),
             empty: None,
         };
+        // "Which currencies did each account move in this window" comes from
+        // the spending already collected above, not from a second walk of the
+        // directives — two derivations of that fact would drift, and the
+        // warning would end up disagreeing with the figures beside it.
+        let mut posted: BTreeMap<&Account, BTreeSet<&Currency>> = BTreeMap::new();
+        for (account, currency) in actuals.keys() {
+            posted.entry(account).or_default().insert(currency);
+        }
         comparison.errors = crate::diagnostics::collect(
             self,
             directives,
             &comparison,
             types,
-            from,
-            to,
-            children,
-            account_filter,
+            &crate::diagnostics::Scope {
+                from,
+                to,
+                children,
+                account_filter,
+            },
+            &posted,
         );
         comparison.empty = comparison
             .rows

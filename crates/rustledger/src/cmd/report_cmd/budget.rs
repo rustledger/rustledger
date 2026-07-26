@@ -28,31 +28,12 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_budget::{BudgetEntry, BudgetError, Budgets};
+use rustledger_budget::{
+    BudgetEntry, BudgetError, BudgetRow, Budgets, covers, passes_account_filter,
+};
 use rustledger_core::{AccountTypes, Directive, DisplayContext, NaiveDate, is_subaccount_or_equal};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-
-/// Does this account pass the `--account` filter?
-///
-/// A raw prefix test, matching `balances`, `holdings`, `journal` and `networth`
-/// (balances.rs:29): one flag must select the same ACCOUNTS in every report, and
-/// a partial prefix must behave the same everywhere.
-///
-/// It does NOT follow that a budget's `actual` equals what `report balances`
-/// shows for the same accounts and window. Spending is clipped to the day a
-/// covering budget existed (see `clip_start`), so a window reaching back before
-/// the budget was declared legitimately reports less here. Selecting the same
-/// accounts is the guarantee; equal figures are not.
-///
-/// This is deliberately NOT the component-aware [`is_subaccount_or_equal`] used
-/// for budget COVERAGE below. They answer different questions: coverage decides
-/// which spending a budget is responsible for — where treating
-/// `Expenses:FoodCourt` as part of `Expenses:Food` would be wrong, and is a Fava
-/// bug we do not copy — while this is a display filter the user typed.
-fn passes_account_filter(account: &str, filter: Option<&str>) -> bool {
-    filter.is_none_or(|prefix| account.starts_with(prefix))
-}
 
 /// Budgets naming an account the ledger never opens.
 ///
@@ -103,24 +84,6 @@ fn unopened_account_errors(
             ),
         })
         .collect()
-}
-
-/// Does a budget on `budgeted` account for spending booked to `posting_account`?
-///
-/// The single definition of budget COVERAGE, used by both the rendered rows and
-/// the whole-report totals. They were two independent spellings of this rule, so
-/// a change to one silently made the TOTAL stop describing the rows above it —
-/// and the integration tests, which assert on rendered text, would not have
-/// caught it.
-///
-/// Component-aware by design: `Expenses:FoodCourt` is NOT part of
-/// `Expenses:Food`, though Fava's `startswith` test says otherwise.
-fn covers(budgeted: &str, posting_account: &str, children: bool) -> bool {
-    if children {
-        is_subaccount_or_equal(posting_account, budgeted)
-    } else {
-        posting_account == budgeted
-    }
 }
 
 /// Budgets that keep accruing after their account was closed.
@@ -284,85 +247,6 @@ fn mismatched_currency_errors(
         .collect()
 }
 
-/// The first date on which any budget in `covered` was responsible for spending
-/// booked to `posting_account` — the day this posting starts counting.
-///
-/// The dual of the accrual: `accrue` credits nothing before a budget exists, so
-/// the actual side must ignore spending from before it too, or a budget added in
-/// June is charged with January's groceries.
-///
-/// This is deliberately per-POSTING-ACCOUNT, not per row. Under `--children` a
-/// row covers several budgets with different declaration dates, and taking one
-/// minimum for the whole row let an early child budget drag the parent's window
-/// backwards — charging the parent row with spending that predated the parent's
-/// own budget, and disagreeing with the TOTAL, which had this rule written the
-/// other way. Rows and totals now share this one function; that divergence is
-/// the same shape as the double-counting bug `covers` was extracted to prevent.
-fn clip_start<'a>(
-    budgets: &Budgets,
-    covered: impl IntoIterator<Item = &'a str>,
-    posting_account: &str,
-    currency: &str,
-    children: bool,
-) -> Option<NaiveDate> {
-    covered
-        .into_iter()
-        .filter(|b| covers(b, posting_account, children))
-        .filter_map(|b| budgets.effective_start(b, currency))
-        .min()
-}
-
-/// Sign-normalize a posting total so "actual" always counts the same direction the
-/// budget was declared in.
-///
-/// Expense postings are debits (positive) and a spending budget is written
-/// positive, so those already agree. Income postings are **credits** (negative)
-/// while an earning target is also written positive — without this flip, earning
-/// exactly your 5000 target would report `actual -5000`, `remaining 10000` and
-/// `used -100%`. The same applies to any credit-normal account (income, liability,
-/// equity), so the test is the canonical config-aware
-/// [`AccountTypes::is_credit_normal`] rather than a hardcoded `Income:` prefix.
-fn normalized_actual(types: &AccountTypes, account: &str, raw: Decimal) -> Decimal {
-    if types.is_credit_normal(account) {
-        -raw
-    } else {
-        raw
-    }
-}
-
-/// One row of the report: an account's budget versus what it actually spent.
-struct BudgetRow {
-    account: String,
-    currency: String,
-    /// `None` when the accrual is not representable — rendered `n/a`, never a
-    /// clamped number passed off as the answer.
-    budgeted: Option<Decimal>,
-    /// `None` when the spending sum is not representable, for the same reason.
-    actual: Option<Decimal>,
-}
-
-impl BudgetRow {
-    /// Budget minus actual. Positive is under budget (money left), negative over.
-    ///
-    /// `actual` is already sign-normalized (see [`normalized_actual`]) so this
-    /// subtraction reads the same way for a spending budget and an earning target.
-    fn remaining(&self) -> Option<Decimal> {
-        self.budgeted?.checked_sub(self.actual?)
-    }
-
-    /// Fraction of the budget used, `None` when nothing was budgeted (which would
-    /// be a division by zero, not 0% or 100%).
-    fn used_fraction(&self) -> Option<f64> {
-        let budgeted = self.budgeted?;
-        if budgeted.is_zero() {
-            return None;
-        }
-        let b: f64 = budgeted.try_into().ok()?;
-        let a: f64 = self.actual?.try_into().ok()?;
-        Some(a / b)
-    }
-}
-
 /// Filters for the budget report.
 pub(super) struct BudgetFilter<'a> {
     /// Only accounts under this prefix.
@@ -426,167 +310,20 @@ pub(super) fn report_budget<W: Write>(
     // figure is only discovered then, and stderr and the JSON `errors` array
     // must report the same set.
 
-    // Actual spend per (account, currency) inside the window. Postings are read
-    // directly rather than through `account_balances` because a budget is about
-    // FLOW over a period, not the running balance an inventory realizes.
-    //
-    // A posting priced or held at a cost moved money in TWO currencies:
-    // `Expenses:Travel 90.00 EUR @ 1.10 USD` is both 90 EUR of travel and 99 USD
-    // out of pocket, and both are true. It is therefore recorded under both keys,
-    // and each budget row reads only its own currency — a EUR budget sees 90, a
-    // USD budget sees 99, and neither is affected by whether the other exists.
-    //
-    // Deciding this once, globally, from "which currencies did anyone budget in"
-    // was wrong: adding an unrelated `custom "budget" Expenses:Travel ... EUR`
-    // moved an *Expenses:Food* posting from its USD row to a EUR key no row read,
-    // silently zeroing that account's reported spend. Rows never sum across
-    // currencies, so recording both costs nothing and couples nothing.
-    //
-    // The weight (and its cost-beats-price ladder) comes from
-    // `rustledger_booking::posting_weight`, shared with BQL's `weight` column so
-    // the two cannot drift. Note it is NOT byte-for-byte the balance validator's
-    // rule: the two differ on cost specs lacking an explicit currency and on a
-    // bare `{}` (issue #1026), both documented on `posting_weight` itself.
-    let mut actuals: BTreeMap<(String, String), Vec<(NaiveDate, Decimal)>> = BTreeMap::new();
-    for d in directives {
-        let Directive::Transaction(txn) = d else {
-            continue;
-        };
-        if txn.date < filter.from || txn.date >= filter.to {
-            continue;
-        }
-        for p in &txn.postings {
-            let Some(units) = p.units.as_ref().and_then(|u| u.as_amount()) else {
-                continue;
-            };
-            match rustledger_booking::posting_weight(p) {
-                // Same currency, different number (`90.00 USD @@ 95.00 USD`, or a
-                // cost denominated in the units currency): there is only ONE
-                // currency here and the weight is what the posting really moved.
-                // Recording the units instead made the report disagree with
-                // `rledger check` and BQL's `weight` column on the same posting.
-                Some(weight) if weight.currency == units.currency => {
-                    actuals
-                        .entry((p.account.to_string(), weight.currency.to_string()))
-                        .or_default()
-                        .push((txn.date, weight.number));
-                }
-                // Two currencies: the posting is budgetable in either, so record
-                // both and let each row read its own.
-                Some(weight) => {
-                    actuals
-                        .entry((p.account.to_string(), units.currency.to_string()))
-                        .or_default()
-                        .push((txn.date, units.number));
-                    actuals
-                        .entry((p.account.to_string(), weight.currency.to_string()))
-                        .or_default()
-                        .push((txn.date, weight.number));
-                }
-                None => {
-                    actuals
-                        .entry((p.account.to_string(), units.currency.to_string()))
-                        .or_default()
-                        .push((txn.date, units.number));
-                }
-            }
-        }
-    }
-
-    // One row per budgeted (account, currency). A budget with no spending still
-    // appears (that is the point of a budget report); spending with no budget does
-    // not — `report balances` already answers that question.
-    //
-    // "Budgeted" means *in force somewhere in this window*, i.e. declared before
-    // the exclusive end. A budget written today does not retroactively apply to
-    // last year: without this filter, reviewing a past period produced a row with
-    // `0.00` budgeted and a full window of spending against it, reporting the
-    // whole period as overspend for a budget that did not exist yet.
-    // A row is live when a budget it COVERS is live, which under `--children`
-    // is not the same as the account's own declarations being live: a parent
-    // whose own budget starts next year still aggregates a child budget that is
-    // running now, and dropping that row lost the aggregate the flag exists to
-    // provide. Row identities still come from declared pairs, so no row is
-    // invented for an account nobody budgeted in that currency.
-    let keys: Vec<(String, String)> = if filter.children {
-        budgets
-            .all_keys()
-            .into_iter()
-            .filter(|(account, currency)| {
-                budgets.entries().any(|b| {
-                    b.currency == *currency
-                        && b.from < filter.to
-                        && covers(account, &b.account, true)
-                })
-            })
-            .collect()
-    } else {
-        budgets.keys_in_force_before(filter.to)
-    };
-
-    let budgets_ref = &budgets;
-    let mut rows: Vec<BudgetRow> = keys
-        .into_iter()
-        .filter(|(account, _)| passes_account_filter(account, filter.account))
-        .map(|(account, currency)| {
-            // The budget accounts this row is responsible for: itself, plus every
-            // child budget under `--children` (Fava's child mode adds them rather
-            // than letting the parent absorb them).
-            let covered_budgets: Vec<&String> = if filter.children {
-                let mut all: Vec<&String> = budgets
-                    .entries()
-                    .filter(|b| b.currency == currency && covers(&account, &b.account, true))
-                    .map(|b| &b.account)
-                    .collect();
-                all.sort();
-                all.dedup();
-                all
-            } else {
-                vec![&account]
-            };
-            // An un-representable accrual (only reachable from an absurd declared
-            // amount) is reported as such rather than clamped: a clamped figure
-            // is wrong by an unbounded factor and looks authoritative.
-            let budgeted: Option<Decimal> = covered_budgets
-                .iter()
-                .map(|a| budgets.accrue(a, &currency, filter.from, filter.to))
-                .try_fold(Decimal::ZERO, |acc, seg| {
-                    seg.and_then(|s| acc.checked_add(s))
-                });
-            // Spending counts from the day a budget covering THAT account
-            // existed — see `clip_start`. Summed with `checked_add` for the same
-            // reason the budgeted side is: a ledger `check` accepts must not
-            // panic the report.
-            let actual = actuals
-                .iter()
-                .filter(|((a, c), _)| *c == currency && covers(&account, a, filter.children))
-                .flat_map(|((a, _), entries)| {
-                    let start = clip_start(
-                        budgets_ref,
-                        covered_budgets.iter().map(|s| s.as_str()),
-                        a,
-                        &currency,
-                        filter.children,
-                    )
-                    .unwrap_or(filter.from)
-                    .max(filter.from);
-                    entries
-                        .iter()
-                        .filter(move |(date, _)| *date >= start)
-                        .map(move |(_, v)| normalized_actual(types, a, *v))
-                })
-                .try_fold(Decimal::ZERO, Decimal::checked_add);
-            BudgetRow {
-                account,
-                currency,
-                budgeted,
-                actual,
-            }
-        })
-        .collect();
-    rows.sort_by(|a, b| (&a.account, &a.currency).cmp(&(&b.account, &b.currency)));
-
-    let totals = compute_totals(&budgets, &actuals, filter, types);
+    // Budgeted VERSUS ACTUAL is the model's job, not the renderer's: which
+    // currency a priced posting spends, which direction a credit-normal account
+    // counts in, and from which day spending starts counting against a budget
+    // are all decisions another consumer would otherwise have to re-derive.
+    let comparison = budgets.compare(
+        directives,
+        types,
+        filter.from,
+        filter.to,
+        filter.children,
+        filter.account,
+    );
+    let rows = comparison.rows;
+    let totals = comparison.totals;
 
     // An un-representable figure is reported in band as well as rendered `n/a`,
     // for ROWS AND TOTALS alike. Without this a consumer sees `"budgeted": null`
@@ -643,60 +380,6 @@ pub(super) fn report_budget<W: Write>(
         format,
         writer,
     )
-}
-
-/// Whole-report totals per currency, counting every budget and every posting once.
-///
-/// Summing the rendered rows would be wrong under `--children`: a parent row and a
-/// child row each include the child, so the child would be counted twice. These are
-/// derived from the distinct budget entries and the postings they cover instead.
-fn compute_totals(
-    budgets: &Budgets,
-    actuals: &BTreeMap<(String, String), Vec<(NaiveDate, Decimal)>>,
-    filter: &BudgetFilter,
-    types: &AccountTypes,
-) -> BTreeMap<(String, String), (Option<Decimal>, Option<Decimal>)> {
-    // Distinct budgeted (account, currency) pairs, after the account filter.
-    let pairs: Vec<(String, String)> = budgets
-        .keys_in_force_before(filter.to)
-        .into_iter()
-        .filter(|(account, _)| passes_account_filter(account, filter.account))
-        .collect();
-
-    let mut totals: BTreeMap<(String, String), (Option<Decimal>, Option<Decimal>)> =
-        BTreeMap::new();
-    for (account, currency) in &pairs {
-        let e = totals
-            .entry((currency.clone(), account_kind(account)))
-            .or_insert((Some(Decimal::ZERO), Some(Decimal::ZERO)));
-        e.0 = e.0.and_then(|acc| {
-            budgets
-                .accrue(account, currency, filter.from, filter.to)
-                .and_then(|seg| acc.checked_add(seg))
-        });
-    }
-    // Each posting counts once, against whichever budgeted accounts cover it —
-    // and, as on the row side, only from the day one of those budgets existed.
-    for ((account, currency), entries) in actuals {
-        // The same `clip_start` the rows use, over the budget accounts that
-        // cover this posting's account in this currency.
-        let covering = pairs
-            .iter()
-            .filter(|(_, c)| c == currency)
-            .map(|(b, _)| b.as_str());
-        let Some(start) = clip_start(budgets, covering, account, currency, filter.children) else {
-            continue;
-        };
-        let start = start.max(filter.from);
-        let e = totals
-            .entry((currency.clone(), account_kind(account)))
-            .or_insert((Some(Decimal::ZERO), Some(Decimal::ZERO)));
-        for (_, raw) in entries.iter().filter(|(d, _)| *d >= start) {
-            e.1 =
-                e.1.and_then(|acc| acc.checked_add(normalized_actual(types, account, *raw)));
-        }
-    }
-    totals
 }
 
 /// Why a report came out with no rows.
@@ -759,11 +442,6 @@ impl Empty {
         }
         Self::FilteredOut
     }
-}
-
-/// The account's top-level type, which is how totals are bucketed.
-fn account_kind(account: &str) -> String {
-    account.split(':').next().unwrap_or(account).to_string()
 }
 
 /// A whole-report total as a row, so totals and rows render through one path.
@@ -1155,158 +833,5 @@ mod tests {
         };
         assert_eq!(overflowed.remaining(), None);
         assert_eq!(overflowed.used_fraction(), None);
-    }
-}
-
-/// Boundary tests for the report's decision predicates.
-///
-/// These are the sites this feature kept getting wrong: a rule decided one case
-/// too wide or too narrow, with the neighboring case found later by a reviewer
-/// constructing it by hand. They are pure functions, so they can be pinned
-/// directly and cheaply here rather than only through the rendered output —
-/// which also makes them auditable by `cargo mutants` in seconds instead of the
-/// ~10 minutes a mutant costs when it has to rebuild the crate and spawn the
-/// binary for 48 integration tests.
-#[cfg(test)]
-mod predicate_tests {
-    use super::*;
-
-    #[test]
-    fn covers_is_exact_without_children() {
-        assert!(covers("Expenses:Food", "Expenses:Food", false));
-        assert!(!covers("Expenses:Food", "Expenses:Food:Restaurant", false));
-        assert!(!covers("Expenses:Food:Restaurant", "Expenses:Food", false));
-        assert!(!covers("Expenses:Food", "Expenses:FoodCourt", false));
-    }
-
-    /// With `--children` a budget covers itself and its true subaccounts, and
-    /// still NOT a name that merely shares a prefix — the deliberate deviation
-    /// from Fava's `startswith`.
-    #[test]
-    fn covers_is_component_wise_with_children() {
-        assert!(covers("Expenses:Food", "Expenses:Food", true));
-        assert!(covers("Expenses:Food", "Expenses:Food:Restaurant", true));
-        assert!(covers("Expenses:Food", "Expenses:Food:A:B", true));
-        assert!(
-            !covers("Expenses:Food", "Expenses:FoodCourt", true),
-            "a shared prefix is not a subaccount"
-        );
-        assert!(
-            !covers("Expenses:Food:Restaurant", "Expenses:Food", true),
-            "coverage runs down the tree, never up"
-        );
-    }
-
-    /// The `--account` filter is a RAW prefix, matching the sibling reports, and
-    /// deliberately unlike `covers`. A partial component must match here and
-    /// must not match there; that difference is the whole reason both exist.
-    #[test]
-    fn passes_account_filter_is_a_raw_prefix() {
-        assert!(passes_account_filter("Expenses:Food", None));
-        assert!(passes_account_filter(
-            "Expenses:Food",
-            Some("Expenses:Food")
-        ));
-        assert!(passes_account_filter("Expenses:Food", Some("Expenses:Foo")));
-        assert!(passes_account_filter(
-            "Expenses:FoodCourt",
-            Some("Expenses:Food")
-        ));
-        assert!(passes_account_filter(
-            "Expenses:Food:Sub",
-            Some("Expenses:Food")
-        ));
-        assert!(!passes_account_filter("Expenses:Food", Some("Income")));
-        assert!(!passes_account_filter(
-            "Expenses:Food",
-            Some("Expenses:Food:Sub")
-        ));
-        // The two predicates must disagree on exactly this input.
-        assert!(passes_account_filter(
-            "Expenses:FoodCourt",
-            Some("Expenses:Food")
-        ));
-        assert!(!covers("Expenses:Food", "Expenses:FoodCourt", true));
-    }
-
-    #[test]
-    fn account_kind_is_the_top_level_component() {
-        assert_eq!(account_kind("Expenses:Food:Sub"), "Expenses");
-        assert_eq!(account_kind("Income:Salary"), "Income");
-        assert_eq!(account_kind("Liabilities:CreditCard"), "Liabilities");
-        assert_eq!(account_kind("Expenses"), "Expenses");
-        assert_eq!(account_kind(""), "");
-    }
-
-    /// Credit-normal accounts flip sign so an earning target reads the same way
-    /// a spending budget does; debit-normal ones are left alone.
-    #[test]
-    fn normalized_actual_flips_only_credit_normal_accounts() {
-        let types = AccountTypes::default();
-        let hundred = Decimal::from(100);
-        assert_eq!(normalized_actual(&types, "Expenses:Food", hundred), hundred);
-        assert_eq!(normalized_actual(&types, "Assets:Cash", hundred), hundred);
-        assert_eq!(
-            normalized_actual(&types, "Income:Salary", -hundred),
-            hundred
-        );
-        assert_eq!(
-            normalized_actual(&types, "Liabilities:Card", -hundred),
-            hundred
-        );
-        assert_eq!(
-            normalized_actual(&types, "Equity:Opening", -hundred),
-            hundred
-        );
-    }
-
-    fn entry(from: (i32, u32, u32), account: &str) -> rustledger_budget::BudgetEntry {
-        rustledger_budget::BudgetEntry {
-            from: rustledger_core::naive_date(from.0, from.1, from.2).unwrap(),
-            account: account.to_string(),
-            interval: rustledger_budget::Interval::Month,
-            amount: Decimal::from(100),
-            currency: "USD".to_string(),
-        }
-    }
-
-    /// `clip_start` resolves PER POSTING ACCOUNT over the budgets a row is made
-    /// of. Taking one minimum for the whole row let an early child budget drag a
-    /// parent's window backwards; restricting to the row's own budgets is what
-    /// makes the row and the TOTAL agree.
-    #[test]
-    fn clip_start_is_per_posting_account() {
-        let budgets = Budgets::new(vec![
-            entry((2024, 6, 1), "Expenses:Food"),
-            entry((2024, 1, 1), "Expenses:Food:Restaurant"),
-        ]);
-        let covered = ["Expenses:Food", "Expenses:Food:Restaurant"];
-
-        // A posting on the PARENT is covered only by the parent's own budget,
-        // which starts in June — the child's January date must not apply to it.
-        assert_eq!(
-            clip_start(&budgets, covered, "Expenses:Food", "USD", true),
-            Some(rustledger_core::naive_date(2024, 6, 1).unwrap())
-        );
-        // A posting on the CHILD is covered by both, so the earlier wins.
-        assert_eq!(
-            clip_start(&budgets, covered, "Expenses:Food:Restaurant", "USD", true),
-            Some(rustledger_core::naive_date(2024, 1, 1).unwrap())
-        );
-        // Nothing covers an unrelated account, or another currency.
-        assert_eq!(
-            clip_start(&budgets, covered, "Expenses:Rent", "USD", true),
-            None
-        );
-        assert_eq!(
-            clip_start(&budgets, covered, "Expenses:Food", "EUR", true),
-            None
-        );
-        // Without --children the parent does not reach the child at all.
-        assert_eq!(
-            clip_start(&budgets, covered, "Expenses:Food:Restaurant", "USD", false),
-            Some(rustledger_core::naive_date(2024, 1, 1).unwrap()),
-            "the child's own budget still covers it"
-        );
     }
 }

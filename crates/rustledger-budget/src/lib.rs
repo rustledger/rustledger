@@ -40,6 +40,12 @@
 //! - **Not retroactive.** A budget applies from its own date onward, so a period
 //!   entirely before the first declaration accrues nothing.
 
+mod compare;
+pub use compare::{
+    BudgetRow, Comparison, Totals, account_kind, clip_start, normalized_actual,
+    passes_account_filter,
+};
+
 use rust_decimal::Decimal;
 use rustledger_core::{CalendarPeriod, Directive, MetaValue, NaiveDate};
 
@@ -108,6 +114,24 @@ impl Interval {
     #[must_use]
     pub fn next_start(self, start: NaiveDate) -> Option<NaiveDate> {
         self.period().next_start(start)
+    }
+}
+
+/// Does a budget on `budgeted` account for spending booked to `posting_account`?
+///
+/// The single definition of budget COVERAGE, used by row assembly, totals and
+/// every diagnostic. They were once separate spellings of this rule, and a
+/// change to one silently stopped the totals describing the rows above them.
+///
+/// Component-aware by design: `Expenses:FoodCourt` is NOT part of
+/// `Expenses:Food`, though Fava's `startswith` test says otherwise. Per the
+/// project's Python-compatibility policy we match correct behavior, not bugs.
+#[must_use]
+pub fn covers(budgeted: &str, posting_account: &str, children: bool) -> bool {
+    if children {
+        rustledger_core::is_subaccount_or_equal(posting_account, budgeted)
+    } else {
+        posting_account == budgeted
     }
 }
 

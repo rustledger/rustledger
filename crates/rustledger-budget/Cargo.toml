@@ -18,6 +18,7 @@ bench = false
 [dependencies]
 rustledger-core.workspace = true
 rustledger-parser.workspace = true
+rustledger-booking.workspace = true
 rust_decimal.workspace = true
 jiff.workspace = true
 

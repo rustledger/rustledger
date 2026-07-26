@@ -12,7 +12,7 @@
 //! catch. Anything that must be true of a budget report belongs where every
 //! consumer of the report can see it.
 
-use crate::{Bucket, BudgetError, Budgets, Comparison, covers, passes_account_filter};
+use crate::{BudgetError, Budgets, Comparison, covers, passes_account_filter};
 use rustledger_core::{AccountTypes, Directive, NaiveDate};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -124,12 +124,18 @@ pub fn closed_account_errors(
             if covering.is_empty() {
                 return None;
             }
-            let when = *covering
+            // The LAST covering account to close, and WHICH one it was. Under
+            // `--children` a budget on `Expenses:Food` can be answered entirely
+            // by `Expenses:Food:Restaurant`, and it is that descendant's `close`
+            // the date comes from — naming only the budgeted account sent the
+            // reader looking for a `close Expenses:Food` directive that does not
+            // exist in their ledger.
+            let (last_closed, when) = covering
                 .iter()
-                .map(|acct| closed.get(acct))
+                .map(|acct| closed.get(acct).map(|d| (*acct, *d)))
                 .collect::<Option<Vec<_>>>()?
                 .into_iter()
-                .max()?;
+                .max_by_key(|(_, d)| *d)?;
             // Only if the budget is still running past the close inside this
             // window; a budget that ended before it is unremarkable.
             // Any budget that accrues on or after the close is unspendable for
@@ -139,18 +145,28 @@ pub fn closed_account_errors(
             (when < to && b.from < to && seen.insert(b.account.clone())).then(|| BudgetError {
                 date: when,
                 account: Some(b.account.clone()),
-                reason: if b.from >= when {
-                    format!(
-                        "budget for {} starts {} but the account was closed on {}; \
-                         no spending can ever be booked to it",
-                        b.account, b.from, when
-                    )
-                } else {
-                    format!(
-                        "budget for {} keeps accruing after the account was closed on {}; \
-                         no spending can be booked to it after that date",
-                        b.account, when
-                    )
+                reason: {
+                    // Name the account that actually closed whenever it is not
+                    // the budgeted one, so the date and the directive the reader
+                    // is sent to look at belong together.
+                    let closed_what = if last_closed == b.account.as_str() {
+                        format!("the account was closed on {when}")
+                    } else {
+                        format!("{last_closed}, the last account it covers, was closed on {when}")
+                    };
+                    if b.from >= when {
+                        format!(
+                            "budget for {} starts {} but {closed_what}; \
+                             no spending can ever be booked to it",
+                            b.account, b.from
+                        )
+                    } else {
+                        format!(
+                            "budget for {} keeps accruing after {closed_what}; \
+                             no spending can be booked to it after that date",
+                            b.account
+                        )
+                    }
                 },
             })
         })
@@ -310,16 +326,13 @@ fn unrepresentable_errors(
             // A total whose component is unknown is itself unknown: summing only
             // the representable rows would print an authoritative-looking figure
             // that silently omits an account. It stays absent, and says why.
-            let label = match &t.bucket {
-                Bucket::Typed(kind) => types.root_name(*kind).to_string(),
-                Bucket::Other(root) => root.as_str().to_string(),
-            };
             out.push(BudgetError {
                 date: on,
                 account: None,
                 reason: format!(
-                    "the {label} total for {} is absent because at least one \
-                     budget in it is too large to represent; the rows show which",
+                    "{} for {} is absent because at least one budget in it is \
+                     too large to represent; the rows show which",
+                    t.bucket.label(types),
                     t.currency
                 ),
             });

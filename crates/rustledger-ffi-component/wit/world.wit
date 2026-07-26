@@ -462,10 +462,19 @@ interface ledger {
   /// large to represent, so a host can tell "this ledger has no budgets" from
   /// "every budget in it was rejected" — both of which otherwise present as an
   /// empty `rows`.
+  ///
+  /// `empty` says WHY there are no rows, and is absent whenever there are some.
+  /// An empty budget view is ambiguous in a way that matters — "this ledger has
+  /// no budgets", "they all start after this window" and "the account filter
+  /// excluded them" are three different answers — and without this a host could
+  /// only show a blank panel. One of "none_declared", "all_rejected",
+  /// "none_in_window" or "filtered_out"; treat an unknown value as "blank for
+  /// some reason", since the set may grow.
   record budget-result {
     rows: list<budget-row>,
     totals: list<budget-total>,
     errors: list<error>,
+    empty: option<string>,
   }
 
   /// Load + run several queries in one parse (replaces `query.batch`).

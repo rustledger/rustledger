@@ -546,6 +546,27 @@ that question.
 This is periodic budget-vs-actual, not envelope budgeting: there is no rollover of
 unspent amounts between periods, and no allocation of income into envelopes.
 
+**Warnings.** A budget renders as a perfectly ordinary row even when it can never
+match any spending, so the report says what the figures cannot: an account that is
+never opened or already closed, a currency the account never posts in, a figure too
+large to represent, and a budget smaller than its currency's display precision (which
+would otherwise render as `0.00` with `used` `n/a` — indistinguishable from having no
+budget). Warnings go to stderr for text and CSV, and in-band in the JSON `errors`
+array.
+
+A `custom "budget"` directive that rledger is confident IS a budget but cannot use is
+also reported by [`rledger check`](check.md) as `E11001`. Directives whose payload is
+not recognizably a Fava budget are left alone there — `custom` is beancount's open
+extension point and the name is not rledger's alone — though `report budget` still
+mentions them, since you asked about budgets.
+
+**Empty reports.** "No budgets declared", "none were in force in this period" and
+"the `--account` filter excluded them all" are three different answers, and the report
+distinguishes them. JSON carries an `empty` object with a stable `code`
+(`none_declared`, `all_rejected`, `none_in_window`, `filtered_out`) alongside the
+prose; CSV notes it on stderr, since a comment row would break the parsers CSV exists
+for.
+
 ### Net Worth Over Time
 
 ```bash

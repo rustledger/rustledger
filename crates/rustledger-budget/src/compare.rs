@@ -104,6 +104,25 @@ impl Bucket {
         )
     }
 
+    /// How a total over this bucket is labelled.
+    ///
+    /// THE definition, so a warning about a total and the row that total renders
+    /// as cannot name it differently — they did: the overflow warning said "the
+    /// Expenses total for USD" while the table said `TOTAL`, and a reader
+    /// searching the output for the label in the warning found nothing.
+    ///
+    /// Expenses keep the bare `TOTAL`, being the overwhelmingly common case in a
+    /// budget report; every other bucket is named, in the ledger's own
+    /// vocabulary.
+    #[must_use]
+    pub fn label(&self, types: &AccountTypes) -> String {
+        match self {
+            Self::Typed(AccountTypeKind::Expenses) => "TOTAL".to_string(),
+            Self::Typed(kind) => format!("TOTAL ({})", types.root_name(*kind)),
+            Self::Other(root) => format!("TOTAL ({root})"),
+        }
+    }
+
     /// The account type, when the root is one of the five.
     #[must_use]
     pub const fn kind(&self) -> Option<AccountTypeKind> {
@@ -149,6 +168,54 @@ impl BudgetTotal {
     }
 }
 
+/// Why a budget report came out with no rows.
+///
+/// An empty report is ambiguous in a way that matters: "you have no budgets",
+/// "your budgets start later than the period you asked about" and "your filter
+/// excluded them all" are three different answers, and telling a user with
+/// budgets that they have none sends them looking for a parsing bug that is not
+/// there.
+///
+/// In the crate because it is a fact about the LEDGER and the window, not about
+/// rendering — an FFI host needs it as much as a terminal does, and could not
+/// get it while it lived in the command. Each surface phrases it; the variants
+/// are the shared vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Empty {
+    /// The ledger declares no budgets at all.
+    NoneDeclared,
+    /// Every budget directive in the ledger was rejected.
+    ///
+    /// `shown` is false when an account filter removed every warning, in which
+    /// case pointing the user at warnings that are not on screen is worse than
+    /// saying nothing.
+    AllRejected {
+        /// Whether any of those warnings survived the account filter.
+        shown: bool,
+    },
+    /// Budgets exist but all start on or after the window's exclusive end.
+    NoneInWindow {
+        /// The earliest budget in scope, so a caller can say how much later.
+        earliest: NaiveDate,
+    },
+    /// Budgets were in force, but the account filter excluded every one.
+    FilteredOut,
+}
+
+impl Empty {
+    /// A stable machine-readable tag. Prose may be reworded; this is what a
+    /// dashboard branches on.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::NoneDeclared => "none_declared",
+            Self::AllRejected { .. } => "all_rejected",
+            Self::NoneInWindow { .. } => "none_in_window",
+            Self::FilteredOut => "filtered_out",
+        }
+    }
+}
+
 /// Budgeted and actual, per row and in total.
 #[derive(Clone, Debug, Default)]
 pub struct Comparison {
@@ -172,6 +239,8 @@ pub struct Comparison {
     /// rendering, which this crate cannot know (see the CLI's sub-precision
     /// warning).
     pub errors: Vec<BudgetError>,
+    /// Why there are no rows, when there are none. `None` when there are.
+    pub empty: Option<Empty>,
 }
 
 /// Does this account pass a raw-prefix filter?
@@ -416,6 +485,10 @@ impl Budgets {
             // budgeted in that currency.
             self.all_keys()
                 .into_iter()
+                // Filtered FIRST. The covered set below is a subtree walk per
+                // key, and building it for keys the caller then discards was
+                // the bulk of the work on a narrowed report.
+                .filter(|(account, _)| passes_account_filter(account.as_str(), account_filter))
                 .filter_map(|(account, currency)| {
                     let covered: BTreeSet<Account> = subtree_range(&budget_accounts, &account)
                         .filter(|a| covers(account.as_str(), a.as_str(), true))
@@ -435,6 +508,7 @@ impl Budgets {
         } else {
             self.keys_in_force_before(to)
                 .into_iter()
+                .filter(|(account, _)| passes_account_filter(account.as_str(), account_filter))
                 .map(|(account, currency)| {
                     let covered = std::iter::once(account.clone()).collect();
                     ((account, currency), covered)
@@ -444,7 +518,6 @@ impl Budgets {
 
         let mut rows: Vec<BudgetRow> = keys
             .into_iter()
-            .filter(|((account, _), _)| passes_account_filter(account.as_str(), account_filter))
             .map(|((account, currency), covered)| {
                 let budgeted: Option<Decimal> = covered
                     .iter()
@@ -482,6 +555,7 @@ impl Budgets {
             rows,
             totals,
             errors: Vec::new(),
+            empty: None,
         };
         comparison.errors = crate::diagnostics::collect(
             self,
@@ -493,7 +567,51 @@ impl Budgets {
             children,
             account_filter,
         );
+        comparison.empty = comparison
+            .rows
+            .is_empty()
+            .then(|| self.diagnose_empty(to, account_filter, &comparison.errors));
         comparison
+    }
+
+    /// Why a report over this window came out empty.
+    ///
+    /// Diagnosed over the budgets the CALLER asked about. Testing "is anything
+    /// in force" across the whole ledger let an unrelated account's live budget
+    /// mask the real reason: a report filtered to an account whose budget simply
+    /// starts later was blamed on the filter, and the user sent to debug a name
+    /// that was in fact matching.
+    fn diagnose_empty(
+        &self,
+        to: NaiveDate,
+        account_filter: Option<&str>,
+        errors: &[BudgetError],
+    ) -> Empty {
+        let in_scope: Vec<&crate::BudgetEntry> = self
+            .entries()
+            .filter(|e| passes_account_filter(e.account.as_str(), account_filter))
+            .collect();
+        // Three different answers, in order of what the user most needs to know.
+        if self.is_empty() {
+            // Nothing parsed at all: either the ledger has no budgets, or every
+            // directive in it was rejected. Saying "no budgets declared" for the
+            // latter sends the user looking for syntax they are not missing.
+            return if self.errors().is_empty() {
+                Empty::NoneDeclared
+            } else {
+                Empty::AllRejected {
+                    shown: !errors.is_empty(),
+                }
+            };
+        }
+        let Some(earliest) = in_scope.iter().map(|e| e.from).min() else {
+            // Budgets exist, but none of them are under the filter.
+            return Empty::FilteredOut;
+        };
+        if !in_scope.iter().any(|e| e.from < to) {
+            return Empty::NoneInWindow { earliest };
+        }
+        Empty::FilteredOut
     }
 
     /// Totals counting every budget and every posting exactly once.

@@ -416,13 +416,16 @@ impl ErrorCode {
                  file chronologically if you care about source order."
             }
             Self::MalformedBudget => {
-                "A `custom \"budget\"` directive could not be read, so it is ignored \
-                 by `rledger report budget` (warning).\n\nBudgets follow Fava's \
-                 convention: `<date> custom \"budget\" <Account> \"<interval>\" \
-                 <amount> <CCY>`, where interval is daily, weekly, monthly, \
-                 quarterly or yearly.\n\nFix: correct the directive — or ignore \
-                 the warning if this `custom \"budget\"` belongs to other tooling \
-                 with a different payload."
+                "A `custom \"budget\"` directive that is recognizably a budget \
+                 carries content rledger cannot use (warning).\n\nBudgets follow \
+                 Fava's convention: `<date> custom \"budget\" <Account> \
+                 \"<interval>\" <amount> <CCY>`, where interval is daily, weekly, \
+                 monthly, quarterly or yearly. A trailing quoted note is fine; a \
+                 trailing second figure is reported, though the budget still \
+                 applies at the first.\n\nFix: correct the directive. This is not \
+                 raised for a `custom \"budget\"` belonging to other tooling — a \
+                 payload that is not recognizably a Fava budget is left alone, \
+                 since `custom` is beancount's open extension point."
             }
             Self::FutureDate => {
                 "A directive is dated in the future relative to today (warning).\n\n\

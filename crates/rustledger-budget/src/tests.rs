@@ -552,8 +552,10 @@ fn in_force_before_is_exclusive_at_the_boundary() {
         Interval::Month,
         400,
     )]);
-    assert!(!b.any_in_force_before(d(2024, 6, 15)), "on the bound: no");
-    assert!(b.any_in_force_before(d(2024, 6, 16)), "one day past: yes");
+    // `any_in_force_before` used to be asserted here too. It had no caller
+    // outside this test, so it was removed rather than published — the bound it
+    // encoded is the same one `keys_in_force_before` answers, and that one is
+    // load-bearing.
     assert!(b.keys_in_force_before(d(2024, 6, 15)).is_empty());
     assert_eq!(
         b.keys_in_force_before(d(2024, 6, 16)),

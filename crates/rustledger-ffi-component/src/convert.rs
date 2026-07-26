@@ -1992,6 +1992,10 @@ impl SessionState {
                 .collect(),
             // Unreadable budget directives are reported, not fatal: one typo
             // must not cost the host every other budget in the ledger.
+            // The same diagnosis the CLI prints, as a stable tag. A host with
+            // rows and totals but no explanation for a blank panel is exactly
+            // the ambiguity `Empty` exists to remove.
+            empty: cmp.empty.map(|e| e.code().to_string()),
             errors: cmp
                 .errors
                 .into_iter()

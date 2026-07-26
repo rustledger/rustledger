@@ -43,7 +43,7 @@
 mod compare;
 mod diagnostics;
 pub use compare::{
-    Bucket, BudgetRow, BudgetTotal, Comparison, normalized_actual, passes_account_filter,
+    Bucket, BudgetRow, BudgetTotal, Comparison, Empty, normalized_actual, passes_account_filter,
 };
 pub use diagnostics::{closed_account_errors, mismatched_currency_errors, unopened_account_errors};
 
@@ -403,7 +403,7 @@ fn value_text(v: &MetaValue) -> String {
 /// silently does not apply is worse than one that is reported, since the report
 /// would otherwise show `0.00` budgeted and look like deliberate under-spend.
 #[must_use]
-pub fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetError>) {
+pub(crate) fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetError>) {
     let mut out = Vec::new();
     let mut errors = Vec::new();
     for d in directives {
@@ -603,12 +603,6 @@ impl Budgets {
                     .map(move |currency| (account.clone(), currency.clone()))
             })
             .collect()
-    }
-
-    /// Whether any budget takes effect before `before`.
-    #[must_use]
-    pub fn any_in_force_before(&self, before: NaiveDate) -> bool {
-        self.entries.iter().any(|e| e.from < before)
     }
 
     /// The budget in force for `(account, currency)` on `day`, if any.

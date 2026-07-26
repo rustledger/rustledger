@@ -312,17 +312,20 @@ This document catalogs all validation errors and warnings with their trigger con
 
 **Code:** `E11001`
 
-**Condition:** A `custom "budget"` directive that HAS Fava's shape carries content rustledger cannot use, so it is ignored by `rledger report budget`.
+**Condition:** A `custom "budget"` directive that rledger is confident IS a budget carries content it cannot use.
 
-Raised only for the confident cases: an unknown interval keyword, or a second amount (which would silently discard one of the two figures). A `custom "budget"` whose payload does not have Fava's positional shape — `<Account> "<interval>" <amount>` — is NOT reported here. `custom` is beancount's open extension point and the name is not rustledger's alone; beancount's own documented example is `custom "budget" "weekly < 1000.00 USD" 2016-02-28 TRUE 43.03 USD 23`, which Python accepts silently. `rledger report budget` still reports those, because a user who asked about budgets is owed the news that one could not be read.
+Confident means one of:
 
-Historical detail of the original condition: Budgets follow Fava's convention — `<date> custom "budget" <Account> "<interval>" <amount> <CCY>` — where interval is one of `daily`, `weekly`, `monthly`, `quarterly` or `yearly` (each also accepted as the bare noun). Raised for an unparsable shape, an account name that could never be lexed, an unknown interval keyword, or a second amount, which would silently discard one of the two figures.
+- The directive has Fava's positional shape — `<Account> "<interval>" <amount>` — and its account name cannot be lexed, its interval keyword is unknown, or it carries a second figure.
+- The directive names an account and its second value is a real interval keyword, but the rest does not line up (a missing currency, so the amount lexes as a bare number; or transposed operands).
 
-A trailing quoted note is NOT an error: Fava reads only the first three values and real ledgers carry comments there.
+A `custom "budget"` that meets neither test is NOT reported. `custom` is beancount's open extension point and the name is not rledger's alone; beancount's own documented example is `custom "budget" "weekly < 1000.00 USD" 2016-02-28 TRUE 43.03 USD 23`, which Python accepts silently. `rledger report budget` still reports those, because a user who asked about budgets is owed the news that one could not be read.
 
-**Message:** `budget directive has an invalid interval "{interval}" (use daily, weekly, monthly, quarterly or yearly)`, or `malformed budget directive; expected: custom "budget" <Account> "<interval>" <amount> <CCY>`
+A trailing quoted NOTE is not an error — Fava reads only the first three values and real ledgers carry comments there. A trailing FIGURE is reported, but the budget still applies at the first figure, which is what Fava reads.
 
-**Severity:** Warning — `custom` is beancount's open extension point, so another tool may legitimately use the name `budget` with a different payload. Rustledger reports what it cannot use without failing the ledger.
+**Message:** `budget directive has an invalid interval "{interval}" (use daily, weekly, monthly, quarterly or yearly)`, `budget directive names "{value}", which is not a valid account name`, `budget directive carries a second figure; only the first is read, so write one budget per directive`, or `budget directive not understood; expected: custom "budget" <Account> "<interval>" <amount> <CCY>`
+
+**Severity:** Warning — `custom` is beancount's open extension point, so another tool may legitimately use the name `budget` with a different payload. Rledger reports what it cannot use without failing the ledger.
 
 ## Option Errors
 

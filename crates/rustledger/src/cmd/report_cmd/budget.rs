@@ -28,9 +28,7 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_budget::{
-    Bucket, BudgetEntry, BudgetError, BudgetRow, BudgetTotal, Budgets, passes_account_filter,
-};
+use rustledger_budget::{BudgetError, BudgetRow, BudgetTotal, Budgets, Empty};
 use rustledger_core::{
     Account, AccountTypeKind, AccountTypes, Currency, Directive, DisplayContext, NaiveDate,
 };
@@ -79,14 +77,10 @@ pub(super) fn report_budget<W: Write>(
         filter.children,
         filter.account,
     );
-    // Whether the ledger had ANY unusable budget, computed BEFORE the filter:
-    // `Empty::diagnose` must not conclude "no budgets declared" for a ledger
-    // whose budgets were all rejected merely because `--account` excluded them
-    // from display.
-    let had_errors = !budgets.errors().is_empty();
     let rows = comparison.rows;
     let totals = comparison.totals;
     let mut errors = comparison.errors;
+    let empty = comparison.empty;
 
     // A budget too small to survive display rounding stays a CLI concern: it is
     // a fact about this renderer's precision, not about the ledger, and the
@@ -94,11 +88,18 @@ pub(super) fn report_budget<W: Write>(
     // renderer uses, so the warning and the rendered `0.00` cannot disagree.
     let rounding = Rounding::new(types, &rows, &totals, ctx);
     errors.extend(rounding.sub_precision_errors(&rows, filter.from));
+    // Built once and handed on: `render` needs the same rounding, and
+    // constructing it a second time rebuilt every total row to rediscover the
+    // display scales this one already found.
 
     // Emitted HERE, after every error is known: the un-representable-figure
     // errors are only discovered once rows and totals exist, and an earlier
     // emission point sent them to the JSON array but never to stderr, so a text
     // or CSV user saw `n/a` cells with nothing explaining them.
+    // Sorted ONCE, here, because the sub-precision warning above is appended
+    // after the crate has already ordered its own. The crate's sort is what
+    // makes every consumer see the same order; this one only places the
+    // rendering diagnostic among them.
     errors.sort_by_key(|e| e.date);
     for e in &errors {
         eprintln!("warning: {}: {}", e.date, e.reason);
@@ -108,125 +109,48 @@ pub(super) fn report_budget<W: Write>(
         &rows,
         &totals,
         filter,
-        Empty::diagnose(&budgets, had_errors, !errors.is_empty(), filter),
+        empty,
         &errors,
+        &rounding,
         writer,
     )
 }
 
-/// Why a report came out with no rows.
-///
-/// An empty budget report is ambiguous in a way that matters: "you have no
-/// budgets", "your budgets start later than the period you asked about" and
-/// "your `--account` filter excluded them" send the user to three different
-/// places, and reporting the wrong one sends them hunting a parsing bug that
-/// does not exist.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Empty {
-    /// The ledger declares no budgets at all.
-    NoneDeclared,
-    /// Every budget directive in the ledger was rejected as malformed.
-    /// `shown` is false when `--account` filtered away every warning, in which
-    /// case pointing the user at warnings that are not on screen is worse than
-    /// saying nothing.
-    AllRejected { shown: bool },
-    /// Budgets exist but all start on or after the window's exclusive end.
-    NoneInWindow { earliest: NaiveDate },
-    /// Budgets were in force, but `--account` excluded every one.
-    FilteredOut,
-}
-
-impl Empty {
-    /// A stable machine-readable tag for the diagnosis.
-    ///
-    /// The prose below is for humans and may be reworded; this is what a
-    /// dashboard branches on.
-    const fn code(self) -> &'static str {
-        match self {
-            Self::NoneDeclared => "none_declared",
-            Self::AllRejected { .. } => "all_rejected",
-            Self::NoneInWindow { .. } => "none_in_window",
-            Self::FilteredOut => "filtered_out",
-        }
-    }
-
-    /// The diagnosis in prose, written ONCE and rendered by every format.
-    ///
-    /// It used to exist only inside the text branch, so CSV and JSON emitted
-    /// byte-identical empty output for "you have no budgets", "your budgets
-    /// start later than this window" and "--account excluded them all" — the
-    /// exact ambiguity this type was introduced to remove, preserved for every
-    /// consumer that is not a human reading a terminal.
-    fn message(self, filter: &BudgetFilter) -> String {
-        match self {
-            // Says that each one IS reported, not WHERE. Warnings go to stderr,
-            // which a terminal interleaves above this line but an `ag-rledger`
-            // JSON envelope drops entirely — so "see the warnings above" pointed
-            // an agent at something its transport had already discarded. The
-            // JSON format carries them in-band in `errors`.
-            Self::AllRejected { shown: true } => {
-                "No usable budgets: every `custom \"budget\"` directive in this \
+/// The diagnosis in prose. The VARIANTS live in `rustledger-budget` because
+/// they are a fact about the ledger; the wording lives here because it is a
+/// fact about this command — it names `--account` and quotes a `custom` line a
+/// terminal user can paste.
+fn empty_message(empty: Empty, filter: &BudgetFilter) -> String {
+    match empty {
+        // Says that each one IS reported, not WHERE. Warnings go to stderr,
+        // which a terminal interleaves above this line but an `ag-rledger`
+        // JSON envelope drops entirely — so "see the warnings above" pointed
+        // an agent at something its transport had already discarded. The
+        // JSON format carries them in-band in `errors`.
+        Empty::AllRejected { shown: true } => {
+            "No usable budgets: every `custom \"budget\"` directive in this \
                  ledger was rejected. Each one is reported as a warning."
-                    .to_string()
-            }
-            Self::AllRejected { shown: false } => {
-                "No usable budgets: every `custom \"budget\"` directive in this \
+                .to_string()
+        }
+        Empty::AllRejected { shown: false } => {
+            "No usable budgets: every `custom \"budget\"` directive in this \
                  ledger was rejected. Re-run without --account to see which ones \
                  and why."
-                    .to_string()
-            }
-            Self::NoneDeclared => "No budgets declared. Add e.g.:\n  2024-01-01 custom \"budget\" \
+                .to_string()
+        }
+        Empty::NoneDeclared => "No budgets declared. Add e.g.:\n  2024-01-01 custom \"budget\" \
                  Expenses:Food \"monthly\" 400.00 USD"
-                .to_string(),
-            Self::NoneInWindow { earliest } => format!(
-                "No budgets were in force in this period. A budget applies from \
+            .to_string(),
+        Empty::NoneInWindow { earliest } => format!(
+            "No budgets were in force in this period. A budget applies from \
                  its own date onward, and the earliest one here is dated \
                  {earliest}."
-            ),
-            Self::FilteredOut => format!(
-                "No budgets match --account {}. (Accounts are matched by raw \
+        ),
+        Empty::FilteredOut => format!(
+            "No budgets match --account {}. (Accounts are matched by raw \
                  prefix, the same as `report balances`.)",
-                super::sanitize_display(filter.account.unwrap_or_default())
-            ),
-        }
-    }
-
-    fn diagnose(
-        budgets: &Budgets,
-        had_errors: bool,
-        errors_shown: bool,
-        filter: &BudgetFilter,
-    ) -> Self {
-        // Diagnose over the budgets the user asked about. Testing "is anything
-        // in force" across the WHOLE ledger let an unrelated account's live
-        // budget mask the real reason: a report filtered to an account whose
-        // budget simply starts later was blamed on the `--account` prefix, and
-        // the user sent to debug a name that was in fact matching.
-        let in_scope: Vec<&BudgetEntry> = budgets
-            .entries()
-            .filter(|e| passes_account_filter(&e.account, filter.account))
-            .collect();
-        // Three different answers, in order of what the user most needs to know.
-        if budgets.is_empty() {
-            // Nothing parsed at all: either the ledger has no budgets, or every
-            // directive in it was rejected. Saying "no budgets declared" for the
-            // latter sends the user looking for syntax they are not missing.
-            return if had_errors {
-                Self::AllRejected {
-                    shown: errors_shown,
-                }
-            } else {
-                Self::NoneDeclared
-            };
-        }
-        let Some(earliest) = in_scope.iter().map(|e| e.from).min() else {
-            // Budgets exist, but none of them are under `--account`.
-            return Self::FilteredOut;
-        };
-        if !in_scope.iter().any(|e| e.from < filter.to) {
-            return Self::NoneInWindow { earliest };
-        }
-        Self::FilteredOut
+            super::sanitize_display(filter.account.unwrap_or_default())
+        ),
     }
 }
 
@@ -247,13 +171,8 @@ impl Empty {
 /// no string to get wrong, and the ledger's own vocabulary comes back out of
 /// `AccountTypes::root_name` for the label.
 fn total_row(types: &AccountTypes, total: &BudgetTotal) -> BudgetRow {
-    let label = match &total.bucket {
-        Bucket::Typed(AccountTypeKind::Expenses) => "TOTAL".to_string(),
-        Bucket::Typed(kind) => format!("TOTAL ({})", types.root_name(*kind)),
-        Bucket::Other(root) => format!("TOTAL ({root})"),
-    };
     BudgetRow {
-        account: Account::new(label),
+        account: Account::new(total.bucket.label(types)),
         currency: total.currency.clone(),
         budgeted: total.budgeted,
         actual: total.actual,
@@ -368,12 +287,12 @@ fn render<W: Write>(
     rows: &[BudgetRow],
     totals: &[BudgetTotal],
     filter: &BudgetFilter,
-    empty: Empty,
+    empty: Option<Empty>,
     errors: &[BudgetError],
+    rounding: &Rounding<'_>,
     writer: &mut W,
 ) -> Result<()> {
     let Rendering { types, ctx, format } = *env;
-    let rounding = Rounding::new(types, rows, totals, ctx);
     let round_disp = |v: Decimal, ccy: &str| -> Decimal { rounding.round(v, ccy) };
     let round_row = |r: &BudgetRow| BudgetRow {
         account: r.account.clone(),
@@ -431,8 +350,8 @@ fn render<W: Write>(
             // where this report already puts everything a reader needs that is
             // not a data row. Without it three different empty reports were one
             // bare header line.
-            if rows.is_empty() {
-                eprintln!("note: {}", empty.message(filter));
+            if let Some(empty) = empty {
+                eprintln!("note: {}", empty_message(empty, filter));
             }
             writeln!(
                 writer,
@@ -512,15 +431,16 @@ fn render<W: Write>(
             // are. Without it the three empty reports were byte-identical to a
             // machine consumer, which is the ambiguity `Empty` exists to
             // remove — it was just never rendered outside the text branch.
-            let empty_obj = if rows.is_empty() {
-                format!(
-                    r#"{{"code": "{}", "message": "{}"}}"#,
-                    empty.code(),
-                    json_escape(&empty.message(filter))
-                )
-            } else {
-                "null".to_string()
-            };
+            let empty_obj = empty.map_or_else(
+                || "null".to_string(),
+                |e| {
+                    format!(
+                        r#"{{"code": "{}", "message": "{}"}}"#,
+                        e.code(),
+                        json_escape(&empty_message(e, filter))
+                    )
+                },
+            );
             writeln!(
                 writer,
                 r#"{{"from": "{}", "to": "{}", "budgets": [{}], "totals": [{}], "errors": [{}], "empty": {}}}"#,
@@ -549,7 +469,9 @@ fn render<W: Write>(
                 // Distinguish "you have no budgets" from "your filter excluded
                 // them all" — telling a user with budgets that they have none
                 // sends them looking for a parsing bug that isn't there.
-                writeln!(writer, "{}", empty.message(filter))?;
+                if let Some(empty) = empty {
+                    writeln!(writer, "{}", empty_message(empty, filter))?;
+                }
                 return Ok(());
             }
             // A currency column: without it two rows for one account in two

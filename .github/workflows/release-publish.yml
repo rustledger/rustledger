@@ -113,8 +113,16 @@ jobs:
             elif grep -qE "already (been uploaded|exists on)" /tmp/publish.log; then
               echo "✓ $crate already published (skipping)"
             elif grep -q "Trusted Publishing tokens do not support creating new crates" /tmp/publish.log; then
-              echo "⚠ $crate is a new crate - must be published manually first"
-              echo "::warning::$crate requires manual first publish: cargo publish -p $crate"
+              # FATAL, not a warning. Trusted Publishing cannot create a crate,
+              # and everything that path-depends on this one fails right after
+              # with a confusing "no matching package" — so a warning here buys
+              # a HALF-PUBLISHED release and a cascade of unrelated-looking
+              # errors. Stop at the one crate a human has to act on.
+              echo "✗ $crate has never been published"
+              echo "::error::$crate is a new crate. Trusted Publishing cannot create it. Publish it once by hand (cargo publish -p $crate) with a token that can, then re-run this release. Stopping now so the release is not left half-published."
+              FAILED+=("$crate")
+              echo "::endgroup::"
+              break
             else
               echo "✗ Failed to publish $crate"
               cat /tmp/publish.log

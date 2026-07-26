@@ -1324,7 +1324,6 @@ option \"operating_currency\" \"USD\"
         let padded = rustledger_booking::merge_with_padding(&native.directives);
         let types = rustledger_core::AccountTypes::default();
         let budgets = rustledger_budget::Budgets::from_directives(&padded);
-        let errs = budgets.errors().to_vec();
         let want = budgets.compare(
             &padded,
             &types,
@@ -1364,26 +1363,32 @@ option \"operating_currency\" \"USD\"
         let roots: Vec<&str> = via.totals.iter().map(|t| t.root.as_str()).collect();
         assert_eq!(roots, vec!["Income", "Expenses"], "children={children}");
 
-        // A budget that cannot be read is reported, not fatal: the other two
-        // budgets still produced rows above.
-        assert_eq!(errs.len(), 1, "fixture must carry one bad directive");
-        let messages: Vec<&str> = via.errors.iter().map(|e| e.message.as_str()).collect();
-        assert!(
-            messages.iter().any(|m| m.contains("decade")),
-            "{messages:?}"
-        );
+        // The component's error list must EQUAL the native one, not merely
+        // contain a phrase from it. An existential check let the boundary emit
+        // extra or duplicated warnings undetected, which is how the FFI came to
+        // disagree with the CLI about which budgets deserved a complaint.
+        let want: Vec<&str> = want.errors.iter().map(|e| e.reason.as_str()).collect();
+        let got: Vec<String> = via
+            .errors
+            .iter()
+            .map(|e| {
+                e.message
+                    .splitn(2, ": ")
+                    .nth(1)
+                    .unwrap_or(&e.message)
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(got, want, "children={children}");
+        assert!(!want.is_empty(), "the fixture must exercise some warning");
         assert!(via.errors.iter().all(|e| e.severity == "warning"));
-
-        // ...and the REPORT-level diagnostics cross too, not only the parse
-        // failures. A host that gets rows without these renders a tidy 0%-used
-        // bar for a budget on a misspelled account — the silent misreport the
-        // warnings exist to catch. `Expenses:Nosuch` is never opened.
+        // ...including the report-level ones, not only parse failures.
         assert!(
-            messages
-                .iter()
-                .any(|m| m.contains("no such account is opened")),
-            "the unopened-account warning must reach the host: {messages:?}"
+            want.iter().any(|m| m.contains("no such account is opened")),
+            "{want:?}"
         );
+        // Rows exist, so there is no empty diagnosis to report.
+        assert_eq!(via.empty, None, "children={children}");
     }
     Ok(())
 }

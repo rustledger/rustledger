@@ -19,6 +19,10 @@ bench = false
 rustledger-core.workspace = true
 rustledger-parser.workspace = true
 rustledger-booking.workspace = true
+# Budget directives are validated here so `rledger check` and the LSP see a
+# malformed one. The reader is CALLED, never re-implemented — see
+# `validate_budget_custom`.
+rustledger-budget.workspace = true
 # The `maths` feature provides `MathematicalOps::powi`, used by the
 # public `balance_tolerance` helper. Currently it's pulled in
 # transitively via `rustledger-core` thanks to Cargo workspace feature

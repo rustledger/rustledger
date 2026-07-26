@@ -306,6 +306,20 @@ This document catalogs all validation errors and warnings with their trigger con
 
 **Severity:** Warning
 
+## Budget Errors
+
+### MALFORMED_BUDGET
+
+**Code:** `E6001`
+
+**Condition:** A `custom "budget"` directive cannot be read, so it is ignored by `rledger report budget`. Budgets follow Fava's convention — `<date> custom "budget" <Account> "<interval>" <amount> <CCY>` — where interval is one of `daily`, `weekly`, `monthly`, `quarterly` or `yearly` (each also accepted as the bare noun). Raised for an unparsable shape, an account name that could never be lexed, an unknown interval keyword, or a second amount, which would silently discard one of the two figures.
+
+A trailing quoted note is NOT an error: Fava reads only the first three values and real ledgers carry comments there.
+
+**Message:** `budget directive has an invalid interval "{interval}" (use daily, weekly, monthly, quarterly or yearly)`, or `malformed budget directive; expected: custom "budget" <Account> "<interval>" <amount> <CCY>`
+
+**Severity:** Warning — `custom` is beancount's open extension point, so another tool may legitimately use the name `budget` with a different payload. Rustledger reports what it cannot use without failing the ledger.
+
 ## Option Errors
 
 ### UNKNOWN_OPTION

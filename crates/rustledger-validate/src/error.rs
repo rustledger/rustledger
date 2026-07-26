@@ -67,6 +67,10 @@ pub enum ErrorCode {
     /// E5003: Invalid `precision` metadata on commodity directive (warning).
     InvalidPrecisionMetadata,
 
+    // === Budget Errors (E6xxx) ===
+    /// E6001: Malformed `custom "budget"` directive (warning).
+    MalformedBudget,
+
     // === Option Errors (E7xxx) ===
     /// E7001: Unknown option name.
     UnknownOption,
@@ -112,6 +116,7 @@ impl ErrorCode {
         Self::UndeclaredCurrency,
         Self::CurrencyNotAllowed,
         Self::InvalidPrecisionMetadata,
+        Self::MalformedBudget,
         Self::UnknownOption,
         Self::InvalidOptionValue,
         Self::DuplicateOption,
@@ -149,6 +154,8 @@ impl ErrorCode {
             Self::UndeclaredCurrency => "E5001",
             Self::CurrencyNotAllowed => "E5002",
             Self::InvalidPrecisionMetadata => "E5003",
+            // Budget errors
+            Self::MalformedBudget => "E6001",
             // Option errors
             Self::UnknownOption => "E7001",
             Self::InvalidOptionValue => "E7002",
@@ -171,6 +178,7 @@ impl ErrorCode {
                 | Self::AccountCloseNotEmpty
                 | Self::DateOutOfOrder
                 | Self::InvalidPrecisionMetadata
+                | Self::MalformedBudget
         )
     }
 
@@ -225,6 +233,7 @@ impl ErrorCode {
             Self::UndeclaredCurrency => "Currency used without a commodity declaration",
             Self::CurrencyNotAllowed => "Currency not allowed in this account",
             Self::InvalidPrecisionMetadata => "Invalid precision metadata on commodity",
+            Self::MalformedBudget => "Malformed budget directive",
             Self::UnknownOption => "Unknown option name",
             Self::InvalidOptionValue => "Invalid option value",
             Self::DuplicateOption => "Non-repeatable option given more than once",
@@ -401,6 +410,15 @@ impl ErrorCode {
                  in the same file (informational only — directives are sorted before \
                  processing, so this never changes results).\n\nFix: reorder the \
                  file chronologically if you care about source order."
+            }
+            Self::MalformedBudget => {
+                "A `custom \"budget\"` directive could not be read, so it is ignored \
+                 by `rledger report budget` (warning).\n\nBudgets follow Fava's \
+                 convention: `<date> custom \"budget\" <Account> \"<interval>\" \
+                 <amount> <CCY>`, where interval is daily, weekly, monthly, \
+                 quarterly or yearly.\n\nFix: correct the directive — or ignore \
+                 the warning if this `custom \"budget\"` belongs to other tooling \
+                 with a different payload."
             }
             Self::FutureDate => {
                 "A directive is dated in the future relative to today (warning).\n\n\

@@ -205,6 +205,83 @@ fn looks_like_account(s: &str) -> bool {
     rustledger_parser::is_valid_account_name(s)
 }
 
+/// Read ONE `custom "budget"` directive.
+///
+/// `None` when the directive is not a budget at all (some other `custom` type,
+/// which is none of this crate's business). `Some(Err(..))` when it IS a budget
+/// and is malformed — the case a reader must be told about rather than have
+/// silently dropped.
+///
+/// Directive-level on purpose: `rustledger-validate` checks budget directives so
+/// that `rledger check` and the LSP see a typo'd interval, and it must reach the
+/// same verdict as the report. A second reader over there would be the exact
+/// re-derivation this repo's canonical-function discipline exists to prevent,
+/// and it would drift the first time the accepted shape changed.
+#[must_use]
+pub fn budget_entry(c: &rustledger_core::Custom) -> Option<Result<BudgetEntry, BudgetError>> {
+    if c.custom_type != "budget" {
+        return None;
+    }
+    // Shape: <Account> "<interval>" <amount>
+    //
+    // The account is accepted both as a bare account token and as a quoted
+    // string. Fava's own reader is duck-typed (it just takes `values[0]`),
+    // and Beancount's `custom` documentation writes its examples with quoted
+    // strings, so real Fava-budgeted ledgers contain both spellings; taking
+    // only the token would reject a ledger Fava renders fine, which is
+    // exactly the compatibility this crate exists to provide.
+    // A trailing NOTE is ignored rather than rejected: Fava reads
+    // `values[0..2]` and lets a ledger carry one
+    // (`... 400.00 USD "groceries only"`). Rejecting the whole directive
+    // dropped a real budget AND its matching spend from the report over a
+    // comment — the opposite of the compatibility this crate exists for.
+    //
+    // A trailing NUMBER or AMOUNT is different: `... 400.00 USD 300.00 EUR`
+    // and `... 400.00 USD 300.00` are both a user declaring a second figure,
+    // and silently keeping the first would drop it with no diagnostic
+    // anywhere. Those stay an error, so the user is told which half was lost.
+    let parsed = match c.values.as_slice() {
+        [
+            acct,
+            MetaValue::String(interval_raw),
+            MetaValue::Amount(amount),
+            rest @ ..,
+        ] if !rest
+            .iter()
+            .any(|v| matches!(v, MetaValue::Amount(_) | MetaValue::Number(_))) =>
+        {
+            account_name(acct).map(|a| (a, interval_raw, amount))
+        }
+        _ => None,
+    };
+    let Some((account, interval_raw, amount)) = parsed else {
+        return Some(Err(BudgetError {
+            date: c.date,
+            account: c.values.first().and_then(account_name),
+            reason: "malformed budget directive; expected: \
+                 custom \"budget\" <Account> \"<interval>\" <amount> <CCY>"
+                .to_string(),
+        }));
+    };
+    let Some(interval) = Interval::parse(interval_raw) else {
+        return Some(Err(BudgetError {
+            date: c.date,
+            account: Some(account),
+            reason: format!(
+                "budget directive has an invalid interval {interval_raw:?} \
+                 (use daily, weekly, monthly, quarterly or yearly)"
+            ),
+        }));
+    };
+    Some(Ok(BudgetEntry {
+        from: c.date,
+        account,
+        interval,
+        amount: amount.number,
+        currency: amount.currency.clone(),
+    }))
+}
+
 /// Read every `custom "budget"` directive, in effective-date order.
 ///
 /// Malformed entries are returned as errors rather than dropped: a budget that
@@ -216,69 +293,11 @@ pub fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetE
     let mut errors = Vec::new();
     for d in directives {
         let Directive::Custom(c) = d else { continue };
-        if c.custom_type != "budget" {
-            continue;
+        match budget_entry(c) {
+            Some(Ok(entry)) => out.push(entry),
+            Some(Err(e)) => errors.push(e),
+            None => {}
         }
-        // Shape: <Account> "<interval>" <amount>
-        //
-        // The account is accepted both as a bare account token and as a quoted
-        // string. Fava's own reader is duck-typed (it just takes `values[0]`),
-        // and Beancount's `custom` documentation writes its examples with quoted
-        // strings, so real Fava-budgeted ledgers contain both spellings; taking
-        // only the token would reject a ledger Fava renders fine, which is
-        // exactly the compatibility this crate exists to provide.
-        // A trailing NOTE is ignored rather than rejected: Fava reads
-        // `values[0..2]` and lets a ledger carry one
-        // (`... 400.00 USD "groceries only"`). Rejecting the whole directive
-        // dropped a real budget AND its matching spend from the report over a
-        // comment — the opposite of the compatibility this crate exists for.
-        //
-        // A trailing NUMBER or AMOUNT is different: `... 400.00 USD 300.00 EUR`
-        // and `... 400.00 USD 300.00` are both a user declaring a second figure,
-        // and silently keeping the first would drop it with no diagnostic
-        // anywhere. Those stay an error, so the user is told which half was lost.
-        let parsed = match c.values.as_slice() {
-            [
-                acct,
-                MetaValue::String(interval_raw),
-                MetaValue::Amount(amount),
-                rest @ ..,
-            ] if !rest
-                .iter()
-                .any(|v| matches!(v, MetaValue::Amount(_) | MetaValue::Number(_))) =>
-            {
-                account_name(acct).map(|a| (a, interval_raw, amount))
-            }
-            _ => None,
-        };
-        let Some((account, interval_raw, amount)) = parsed else {
-            errors.push(BudgetError {
-                date: c.date,
-                account: c.values.first().and_then(account_name),
-                reason: "malformed budget directive; expected: \
-                     custom \"budget\" <Account> \"<interval>\" <amount> <CCY>"
-                    .to_string(),
-            });
-            continue;
-        };
-        let Some(interval) = Interval::parse(interval_raw) else {
-            errors.push(BudgetError {
-                date: c.date,
-                account: Some(account.clone()),
-                reason: format!(
-                    "budget directive has an invalid interval {interval_raw:?} \
-                     (use daily, weekly, monthly, quarterly or yearly)"
-                ),
-            });
-            continue;
-        };
-        out.push(BudgetEntry {
-            from: c.date,
-            account,
-            interval,
-            amount: amount.number,
-            currency: amount.currency.clone(),
-        });
     }
     // Effective-date order, so the "latest in force" scan is a simple walk.
     out.sort_by_key(|e| e.from);

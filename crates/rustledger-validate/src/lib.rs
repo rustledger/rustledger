@@ -668,6 +668,9 @@ fn validate_phase_inner<D: ValidatableDirective>(
             (Phase::Early, Directive::Note(note)) => {
                 validate_note(state, note, &mut errors);
             }
+            (Phase::Early, Directive::Custom(custom)) => {
+                validate_budget_custom(custom, &mut errors);
+            }
             // ── Phase-split kinds ──
             (Phase::Early, Directive::Transaction(txn)) => {
                 validate_transaction_early(state, txn, &mut errors);
@@ -1142,6 +1145,32 @@ impl ValidationSession<LateDone> {
 /// Per #991, `precision: N` on a `commodity` directive sets a fixed display
 /// precision for that currency. The loader silently ignores invalid values;
 /// this validator is the channel that surfaces the problem to the user.
+/// Report a `custom "budget"` directive that cannot be read.
+///
+/// Budget directives were previously parsed only inside `report budget`, so a
+/// typo'd interval was invisible to `rledger check`, the LSP, BQL and the FFI —
+/// the user's budget silently did not apply, and the one place that would have
+/// said so was the one report they had not run. Post-processing owned by a
+/// single consumer instead of the shared pipeline is a defect category this
+/// repo has hit before.
+///
+/// The verdict comes from [`rustledger_budget::budget_entry`], the same reader
+/// the report uses, so the two cannot disagree about what a valid budget is.
+///
+/// A WARNING, not an error: `custom` is beancount's open extension point, and
+/// another tool may legitimately use the name "budget" with a different payload.
+/// Failing such a ledger outright would be rustledger claiming an extension
+/// point it does not own.
+fn validate_budget_custom(custom: &rustledger_core::Custom, errors: &mut Vec<ValidationError>) {
+    if let Some(Err(e)) = rustledger_budget::budget_entry(custom) {
+        errors.push(ValidationError::new(
+            ErrorCode::MalformedBudget,
+            e.reason,
+            custom.date,
+        ));
+    }
+}
+
 fn validate_commodity_precision_meta(comm: &Commodity, errors: &mut Vec<ValidationError>) {
     let Some(value) = comm.meta.get("precision") else {
         return;
@@ -3482,6 +3511,83 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e.code, ErrorCode::AccountNotOpen | ErrorCode::AccountClosed)),
             "same-date use must be clean: {errors:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod budget_validation_tests {
+    use super::*;
+
+    fn custom(date: NaiveDate, values: Vec<rustledger_core::MetaValue>) -> rustledger_core::Custom {
+        rustledger_core::Custom {
+            date,
+            custom_type: "budget".to_string(),
+            values,
+            meta: rustledger_core::Metadata::default(),
+        }
+    }
+
+    fn d() -> NaiveDate {
+        rustledger_core::naive_date(2024, 1, 1).unwrap()
+    }
+
+    /// A typo'd interval reaches `check` and the LSP, where before it was
+    /// visible only to whoever happened to run `report budget`.
+    #[test]
+    fn a_malformed_budget_is_reported_as_a_warning() {
+        use rustledger_core::{Amount, Currency, MetaValue};
+        let mut errors = Vec::new();
+        validate_budget_custom(
+            &custom(
+                d(),
+                vec![
+                    MetaValue::Account(rustledger_core::Account::new("Expenses:Food")),
+                    MetaValue::String("fortnightly".to_string()),
+                    MetaValue::Amount(Amount {
+                        number: Decimal::from(400),
+                        currency: Currency::new("USD"),
+                    }),
+                ],
+            ),
+            &mut errors,
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].code, ErrorCode::MalformedBudget);
+        assert_eq!(errors[0].code.code(), "E6001");
+        // A WARNING: `custom` is an open extension point, and failing the ledger
+        // would be rustledger claiming a name it does not own.
+        assert_eq!(errors[0].code.severity(), Severity::Warning);
+        assert!(errors[0].message.contains("fortnightly"), "{errors:?}");
+    }
+
+    /// A well-formed budget, and a `custom` of any other type, are both silent.
+    #[test]
+    fn well_formed_and_unrelated_customs_are_silent() {
+        use rustledger_core::{Amount, Currency, MetaValue};
+        let ok = custom(
+            d(),
+            vec![
+                MetaValue::Account(rustledger_core::Account::new("Expenses:Food")),
+                MetaValue::String("monthly".to_string()),
+                MetaValue::Amount(Amount {
+                    number: Decimal::from(400),
+                    currency: Currency::new("USD"),
+                }),
+            ],
+        );
+        let mut errors = Vec::new();
+        validate_budget_custom(&ok, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        let mut other = ok;
+        other.custom_type = "autopay".to_string();
+        other.values = vec![MetaValue::String("anything at all".to_string())];
+        let mut errors = Vec::new();
+        validate_budget_custom(&other, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "another tool's custom type is none of our business: {errors:?}"
         );
     }
 }

@@ -601,6 +601,37 @@ mod tests {
         assert!(!covers("Expenses:Food", "Expenses:FoodCourt", true));
     }
 
+    /// A total's derived figures behave like a row's. Covered here because the
+    /// CLI reaches them through `BudgetRow` and only the FFI calls them
+    /// directly — so the crate's own suite never did, and a mutation audit
+    /// found all four of these accessors replaceable by a constant.
+    #[test]
+    fn a_total_derives_remaining_and_used_like_a_row() {
+        let total = |budgeted: Option<i64>, actual: Option<i64>| BudgetTotal {
+            bucket: Bucket::Typed(AccountTypeKind::Expenses),
+            currency: Currency::new("USD"),
+            budgeted: budgeted.map(Decimal::from),
+            actual: actual.map(Decimal::from),
+        };
+        let t = total(Some(400), Some(120));
+        assert_eq!(t.remaining(), Some(Decimal::from(280)));
+        assert!((t.used_fraction().expect("a fraction") - 0.30).abs() < 1e-9);
+
+        // Overspent: remaining goes negative and the fraction passes 1.
+        let over = total(Some(100), Some(150));
+        assert_eq!(over.remaining(), Some(Decimal::from(-50)));
+        assert!((over.used_fraction().expect("a fraction") - 1.5).abs() < 1e-9);
+
+        // An absent half makes the derived figure absent too, rather than
+        // treating the unknown as zero and printing an authoritative number.
+        assert_eq!(total(None, Some(120)).remaining(), None);
+        assert_eq!(total(Some(400), None).remaining(), None);
+        assert_eq!(total(Some(400), None).used_fraction(), None);
+
+        // Nothing budgeted is a division by zero — not 0%, and not 100%.
+        assert_eq!(total(Some(0), Some(50)).used_fraction(), None);
+    }
+
     /// Classification is by TYPE and config-aware, so a renamed root still
     /// buckets as the type it is — the whole reason this is not the raw root
     /// string it used to be.

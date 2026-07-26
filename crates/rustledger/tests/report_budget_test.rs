@@ -1187,9 +1187,13 @@ fn a_second_amount_is_reported_but_a_trailing_note_is_not() {
         ])
         .output()
         .expect("run rledger");
+    // Names the actual problem. A second amount has Fava's shape, so this is a
+    // budget we are confident about — the class `rledger check` reports too,
+    // unlike a payload that merely shares the name `budget`.
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("malformed budget directive"),
-        "two amounts on one line must be reported, not half-parsed"
+        String::from_utf8_lossy(&out.stderr).contains("carries a second amount"),
+        "two amounts on one line must be reported, not half-parsed: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 
     let note = write_fixture(
@@ -2643,4 +2647,56 @@ fn the_headline_total_leads_its_currency() {
         "the expenses total must lead:\n{text}"
     );
     assert_eq!(totals.len(), 3, "all three buckets present:\n{text}");
+}
+
+/// `custom` is beancount's OPEN extension point, so `rledger check` must not
+/// warn about a `custom "budget"` written for a different tool — while
+/// `report budget`, which the user asked for, still says one could not be read.
+///
+/// The two fixtures are beancount's own documented example and a payload that
+/// names an account but orders its values differently. Both are valid beancount
+/// that Python accepts silently, and both live in this repo already.
+#[test]
+fn check_does_not_claim_another_tools_custom_budget() {
+    let bin = require_rledger!();
+    for source in [
+        // Beancount's canonical `custom` example.
+        "2013-05-18 custom \"budget\" \"weekly < 1000.00 USD\" 2016-02-28 TRUE 43.03 USD 23\n",
+        // Names an account, but not in Fava's order.
+        "2020-01-01 open Assets:Bank:Checking\n\
+         2020-10-07 custom \"budget\" Assets:Bank:Checking 1000.00 USD TRUE \"monthly\"\n",
+    ] {
+        let f = write_fixture(source);
+        let path = f.path().to_str().unwrap();
+        let out = Command::new(&bin)
+            .args(["check", path])
+            .output()
+            .expect("run rledger check");
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !combined.contains("E6001"),
+            "check must not claim the `custom \"budget\"` namespace: {combined}"
+        );
+    }
+
+    // ...but a directive that DOES have Fava's shape and a bad interval is ours
+    // to report, otherwise the check would be worthless.
+    let typo = write_fixture(
+        "2024-01-01 open Expenses:Food\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"fortnightly\" 400.00 USD\n",
+    );
+    let out = Command::new(&bin)
+        .args(["check", typo.path().to_str().unwrap()])
+        .output()
+        .expect("run rledger check");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(combined.contains("E6001"), "{combined}");
 }

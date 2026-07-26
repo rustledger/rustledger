@@ -1935,9 +1935,16 @@ impl SessionState {
             .padded
             .get_or_init(|| rustledger_booking::merge_with_padding(&self.directives));
         let types = self.account_types();
-        let (budgets, budget_errors) = rustledger_budget::Budgets::from_directives(directives);
+        let (budgets, mut budget_errors) = rustledger_budget::Budgets::from_directives(directives);
         let filter = (!account_filter.is_empty()).then_some(account_filter);
         let cmp = budgets.compare(directives, &types, from_date, to_date, children, filter);
+        // The report's OWN diagnostics, not just the parse failures. Without
+        // them a host got a tidy `0.0%` row for a budget on a misspelled
+        // account, and an absent figure with nothing saying why — the silent
+        // misreports the CLI has warned about since the first review round.
+        budget_errors.extend(rustledger_budget::diagnostics(
+            &budgets, directives, &cmp, &types, from_date, to_date, children, filter,
+        ));
 
         let amount = |v: Option<rust_decimal::Decimal>| v.map(|d| d.to_string());
         Ok(out::BudgetResult {

@@ -312,7 +312,11 @@ This document catalogs all validation errors and warnings with their trigger con
 
 **Code:** `E6001`
 
-**Condition:** A `custom "budget"` directive cannot be read, so it is ignored by `rledger report budget`. Budgets follow Fava's convention — `<date> custom "budget" <Account> "<interval>" <amount> <CCY>` — where interval is one of `daily`, `weekly`, `monthly`, `quarterly` or `yearly` (each also accepted as the bare noun). Raised for an unparsable shape, an account name that could never be lexed, an unknown interval keyword, or a second amount, which would silently discard one of the two figures.
+**Condition:** A `custom "budget"` directive that HAS Fava's shape carries content rustledger cannot use, so it is ignored by `rledger report budget`.
+
+Raised only for the confident cases: an unknown interval keyword, or a second amount (which would silently discard one of the two figures). A `custom "budget"` whose payload does not have Fava's positional shape — `<Account> "<interval>" <amount>` — is NOT reported here. `custom` is beancount's open extension point and the name is not rustledger's alone; beancount's own documented example is `custom "budget" "weekly < 1000.00 USD" 2016-02-28 TRUE 43.03 USD 23`, which Python accepts silently. `rledger report budget` still reports those, because a user who asked about budgets is owed the news that one could not be read.
+
+Historical detail of the original condition: Budgets follow Fava's convention — `<date> custom "budget" <Account> "<interval>" <amount> <CCY>` — where interval is one of `daily`, `weekly`, `monthly`, `quarterly` or `yearly` (each also accepted as the bare noun). Raised for an unparsable shape, an account name that could never be lexed, an unknown interval keyword, or a second amount, which would silently discard one of the two figures.
 
 A trailing quoted note is NOT an error: Fava reads only the first three values and real ledgers carry comments there.
 

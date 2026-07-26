@@ -1162,7 +1162,13 @@ impl ValidationSession<LateDone> {
 /// Failing such a ledger outright would be rustledger claiming an extension
 /// point it does not own.
 fn validate_budget_custom(custom: &rustledger_core::Custom, errors: &mut Vec<ValidationError>) {
-    if let Some(Err(e)) = rustledger_budget::budget_entry(custom) {
+    // ONLY the confident class. A `custom "budget"` that does not have Fava's
+    // positional shape is reported by `report budget` — where the user asked —
+    // but not here, because `custom` is beancount's open extension point and
+    // the name is not ours alone. Claiming it made `rledger check` warn on
+    // beancount's own documented example and on two fixtures in this repo, both
+    // of which Python accepts silently.
+    if let rustledger_budget::BudgetRead::Invalid(e) = rustledger_budget::read_budget(custom) {
         errors.push(ValidationError::new(
             ErrorCode::MalformedBudget,
             e.reason,

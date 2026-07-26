@@ -1298,6 +1298,7 @@ option \"operating_currency\" \"USD\"
 2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD
 2024-01-01 custom \"budget\" Income:Salary \"monthly\" 5000.00 USD
 2024-01-01 custom \"budget\" Expenses:Food \"decade\" 1.00 USD
+2024-01-01 custom \"budget\" Expenses:Nosuch \"monthly\" 50.00 USD
 2024-02-05 * \"groceries\"
   Expenses:Food  120.00 USD
   Assets:Cash
@@ -1362,13 +1363,23 @@ option \"operating_currency\" \"USD\"
         // A budget that cannot be read is reported, not fatal: the other two
         // budgets still produced rows above.
         assert_eq!(errs.len(), 1, "fixture must carry one bad directive");
-        assert_eq!(via.errors.len(), 1);
+        let messages: Vec<&str> = via.errors.iter().map(|e| e.message.as_str()).collect();
         assert!(
-            via.errors[0].message.contains("decade"),
-            "{:?}",
-            via.errors[0]
+            messages.iter().any(|m| m.contains("decade")),
+            "{messages:?}"
         );
-        assert_eq!(via.errors[0].severity, "warning");
+        assert!(via.errors.iter().all(|e| e.severity == "warning"));
+
+        // ...and the REPORT-level diagnostics cross too, not only the parse
+        // failures. A host that gets rows without these renders a tidy 0%-used
+        // bar for a budget on a misspelled account — the silent misreport the
+        // warnings exist to catch. `Expenses:Nosuch` is never opened.
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("no such account is opened")),
+            "the unopened-account warning must reach the host: {messages:?}"
+        );
     }
     Ok(())
 }

@@ -429,16 +429,19 @@ fn parse_budgets_reads_a_well_formed_directive() {
 #[test]
 fn parse_budgets_rejects_and_explains_bad_shapes() {
     // Wrong arity, wrong types, an unknown interval, and a second numeric value
-    // (a user writing two budgets on one line) must each be reported, not
-    // silently dropped or half-read.
+    // (a user writing two budgets on one line) must each be reported to the
+    // REPORT's caller, not silently dropped or half-read. `rledger check` is
+    // stricter and reports only the confident classes — see `BudgetRead`.
+    //
+    // A directive with no values at all names no account, so it is not ours to
+    // judge and produces nothing here.
     let cases: Vec<(Directive, &str)> = vec![
-        (custom(d(2024, 1, 1), vec![]), "malformed"),
         (
             custom(
                 d(2024, 1, 1),
                 vec![MetaValue::Account("Expenses:Food".into())],
             ),
-            "malformed",
+            "not understood",
         ),
         (
             budget_directive(d(2024, 1, 1), "Expenses:Food", "fortnightly", "1", "USD"),
@@ -454,19 +457,24 @@ fn parse_budgets_rejects_and_explains_bad_shapes() {
                     MetaValue::Number(Dec::from(300)),
                 ],
             ),
-            "malformed",
+            "carries a second amount",
         ),
     ];
     for (dir, expect) in cases {
         let (entries, errors) = parse_budgets(&[dir]);
         assert!(entries.is_empty(), "must not half-read: {entries:?}");
-        assert_eq!(errors.len(), 1);
+        assert_eq!(errors.len(), 1, "for {expect:?}");
         assert!(
             errors[0].reason.contains(expect),
             "expected {expect:?} in {:?}",
             errors[0].reason
         );
     }
+
+    // A `custom "budget"` with no values names no account: another tool's, and
+    // silent everywhere.
+    let (entries, errors) = parse_budgets(&[custom(d(2024, 1, 1), vec![])]);
+    assert!(entries.is_empty() && errors.is_empty(), "{errors:?}");
 }
 
 #[test]
@@ -486,8 +494,13 @@ fn parse_budgets_accepts_a_quoted_account_and_a_trailing_note() {
     assert_eq!(entries[0].account, "Expenses:Food");
 }
 
+/// A quoted first value that is not an account name means the directive is not
+/// a Fava budget — `custom` is an open extension point and beancount's own
+/// example is exactly this shape. It is ignored rather than reported, and in
+/// particular is never read as an account: a name carrying a newline would
+/// otherwise forge a row in the fixed-width text table.
 #[test]
-fn parse_budgets_rejects_a_quoted_string_that_is_not_an_account() {
+fn a_quoted_string_that_is_not_an_account_is_not_a_budget() {
     for bad in ["not an account", "Expenses", "", "Expenses:Food\nTOTAL 9"] {
         let dirs = vec![custom(
             d(2024, 1, 1),
@@ -499,7 +512,10 @@ fn parse_budgets_rejects_a_quoted_string_that_is_not_an_account() {
         )];
         let (entries, errors) = parse_budgets(&dirs);
         assert!(entries.is_empty(), "{bad:?} must not parse as an account");
-        assert_eq!(errors.len(), 1, "{bad:?}");
+        assert!(
+            errors.is_empty(),
+            "{bad:?} is another tool's payload, not a broken budget: {errors:?}"
+        );
     }
 }
 

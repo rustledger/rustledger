@@ -113,16 +113,18 @@ jobs:
             elif grep -qE "already (been uploaded|exists on)" /tmp/publish.log; then
               echo "✓ $crate already published (skipping)"
             elif grep -q "Trusted Publishing tokens do not support creating new crates" /tmp/publish.log; then
-              # FATAL, not a warning. Trusted Publishing cannot create a crate,
-              # and everything that path-depends on this one fails right after
-              # with a confusing "no matching package" — so a warning here buys
-              # a HALF-PUBLISHED release and a cascade of unrelated-looking
-              # errors. Stop at the one crate a human has to act on.
+              # FATAL, not a warning. Trusted Publishing cannot create a
+              # crate, and everything that path-depends on this one then fails
+              # with a confusing "no matching package" — a warning here bought a
+              # release that looked amber and was half-published.
+              #
+              # The loop still CONTINUES: crates that do not depend on this one
+              # publish fine, and stopping would strand them for no reason. The
+              # run fails at the end with this crate named first in FAILED,
+              # which is the one a human has to act on.
               echo "✗ $crate has never been published"
-              echo "::error::$crate is a new crate. Trusted Publishing cannot create it. Publish it once by hand (cargo publish -p $crate) with a token that can, then re-run this release. Stopping now so the release is not left half-published."
+              echo "::error::$crate is a new crate. Trusted Publishing cannot create it. Publish it once by hand (cargo publish -p $crate) with a token that can, then re-run this release. Crates that depend on it will fail below with 'no matching package'; this is the one to act on."
               FAILED+=("$crate")
-              echo "::endgroup::"
-              break
             else
               echo "✗ Failed to publish $crate"
               cat /tmp/publish.log

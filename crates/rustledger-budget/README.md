@@ -39,17 +39,32 @@ enough to drift:
 ```rust,ignore
 use rustledger_budget::Budgets;
 
-let (budgets, errors) = Budgets::from_directives(&directives);
-for e in &errors {
+let budgets = Budgets::from_directives(&directives);
+
+// Budgeted vs actual, with the report's own warnings already attached.
+let report = budgets.compare(&directives, &types, from, to, /* children */ false, None);
+for row in &report.rows {
+    println!("{} {}: {:?} of {:?}", row.account, row.currency, row.actual, row.budgeted);
+}
+for e in &report.errors {
     eprintln!("warning: {}: {}", e.date, e.reason);
 }
+
+// Or just the accrual, if that is all you need.
 let budgeted = budgets.accrue("Expenses:Food", "USD", from, to);
 ```
 
-Malformed directives come back as errors rather than being dropped: a budget
+`compare` is the entry point: it returns the rows, the per-account-type totals,
+the warnings and — when there are no rows — why. Getting all of it from one call
+is deliberate, so two consumers cannot assemble different answers from the same
+ledger.
+
+Malformed directives come back as warnings rather than being dropped: a budget
 that silently does not apply is worse than one that is reported, because the
 report would otherwise show `0.00` budgeted and look like deliberate
-under-spend.
+under-spend. Directives whose payload is not recognizably a Fava budget are left
+alone entirely — `custom` is beancount's open extension point, and the name
+`budget` is not this crate's alone.
 
 ## License
 

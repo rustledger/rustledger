@@ -74,6 +74,14 @@ impl BudgetRow {
 
 /// Which bucket a total sums over.
 ///
+/// Deliberately EXHAUSTIVE, not `#[non_exhaustive]`. Adding a variant should
+/// break every `match` on it — the CLI's total label, the FFI's `kind` mapping
+/// and the overflow warning each have to decide what a new bucket means, and a
+/// compiler error is the only thing that makes them. `#[non_exhaustive]` would
+/// force a wildcard arm into all three and let a new variant fall silently into
+/// whatever that arm does, which is the failure mode this crate has spent its
+/// review history removing. A major version is the cheaper price.
+///
 /// Per account TYPE, not per direction: bucketing merely by credit-normality
 /// sums a credit-card spending budget into an income target, which is as
 /// meaningless as the cross-currency sum the currency key already prevents.
@@ -170,6 +178,10 @@ impl BudgetTotal {
 
 /// Why a budget report came out with no rows.
 ///
+/// Exhaustive for the same reason as [`Bucket`]: a new way for a report to be
+/// empty is a new sentence someone has to write, and the compiler asking for it
+/// beats a wildcard arm answering with the wrong one.
+///
 /// An empty report is ambiguous in a way that matters: "you have no budgets",
 /// "your budgets start later than the period you asked about" and "your filter
 /// excluded them all" are three different answers, and telling a user with
@@ -217,7 +229,12 @@ impl Empty {
 }
 
 /// Budgeted and actual, per row and in total.
-#[derive(Clone, Debug, Default)]
+///
+/// No `Default`. The derived one produced `rows: []` with `empty: None`, which
+/// this type's own invariant forbids — every consumer reads an absent `empty`
+/// beside no rows as "there are rows", and there were none. A `Comparison` only
+/// ever comes from [`Budgets::compare`], which cannot construct that state.
+#[derive(Clone, Debug)]
 pub struct Comparison {
     /// One row per budgeted `(account, currency)`, sorted.
     pub rows: Vec<BudgetRow>,
@@ -340,7 +357,12 @@ fn clip_start(
     children: bool,
 ) -> Option<NaiveDate> {
     covering_accounts(posting_account, children)
-        .filter(|a| scope.contains(&Account::new(*a)))
+        // Borrowed, not constructed. `Account::new(&str)` is a fresh `Arc<str>`
+        // — interning happens in the loader's dedup pass, not here — so building
+        // one per ancestor to ask a set a question allocated on the report's
+        // hottest path. `Account: Borrow<str>` with a lexicographic `Ord`, so
+        // the set answers `&str` directly.
+        .filter(|a| scope.contains(*a))
         .filter_map(|a| budgets.effective_start(a, currency))
         .min()
 }
@@ -467,6 +489,25 @@ impl Budgets {
         // whose own budget starts next year still aggregates a child budget
         // running now. Row identities still come from declared pairs, so no row
         // is invented for an account nobody budgeted in that currency.
+        // Accrue each declared `(account, currency)` ONCE.
+        //
+        // The rows and the totals both need it — a row sums the accruals of the
+        // budgets it covers, a total sums them per account type — and they were
+        // each calling `accrue` independently, so every pair was pro-rated
+        // twice. `accrue` walks the window segment by segment and is the
+        // report's dominant cost, so that was half the work in the whole
+        // comparison. Every pair either loop can ask for is a declared one:
+        // a row's covered set is filtered to accounts with an effective start
+        // in that currency, which is what `all_keys` enumerates.
+        let accrued: BTreeMap<(Account, Currency), Option<Decimal>> = self
+            .all_keys()
+            .into_iter()
+            .map(|(account, currency)| {
+                let v = self.accrue(account.as_str(), currency.as_str(), from, to);
+                ((account, currency), v)
+            })
+            .collect();
+
         // Every budgeted account, ordered, so a row's subtree is a contiguous
         // range rather than a filter over all declarations.
         let budget_accounts: BTreeSet<Account> =
@@ -521,7 +562,12 @@ impl Budgets {
             .map(|((account, currency), covered)| {
                 let budgeted: Option<Decimal> = covered
                     .iter()
-                    .map(|a| self.accrue(a.as_str(), currency.as_str(), from, to))
+                    .map(|a| {
+                        accrued
+                            .get(&(a.clone(), currency.clone()))
+                            .copied()
+                            .flatten()
+                    })
                     .try_fold(Decimal::ZERO, |acc, seg| {
                         seg.and_then(|s| acc.checked_add(s))
                     });
@@ -550,7 +596,15 @@ impl Budgets {
             .collect();
         rows.sort_by(|a, b| (&a.account, &a.currency).cmp(&(&b.account, &b.currency)));
 
-        let totals = self.totals(&actuals, types, from, to, children, account_filter);
+        let totals = self.totals(
+            &actuals,
+            &accrued,
+            types,
+            from,
+            to,
+            children,
+            account_filter,
+        );
         let mut comparison = Comparison {
             rows,
             totals,
@@ -629,6 +683,7 @@ impl Budgets {
     fn totals(
         &self,
         actuals: &BTreeMap<(Account, Currency), Vec<(NaiveDate, Decimal)>>,
+        accrued: &BTreeMap<(Account, Currency), Option<Decimal>>,
         types: &AccountTypes,
         from: NaiveDate,
         to: NaiveDate,
@@ -652,7 +707,10 @@ impl Budgets {
                 .entry((currency.clone(), Bucket::of(types, account)))
                 .or_insert((Some(Decimal::ZERO), Some(Decimal::ZERO)));
             e.0 = e.0.and_then(|sum| {
-                self.accrue(account.as_str(), currency.as_str(), from, to)
+                accrued
+                    .get(&(account.clone(), currency.clone()))
+                    .copied()
+                    .flatten()
                     .and_then(|seg| sum.checked_add(seg))
             });
         }

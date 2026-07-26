@@ -213,16 +213,18 @@ pub fn mismatched_currency_errors(
         // evidence accused a 2030 budget of a currency typo on the strength of
         // 2024 spending, and phrased it as settled fact.
         .filter(|b| b.from < to)
-        .filter(|b| {
-            let seen_currencies = covered_currencies(&b.account);
-            !seen_currencies.is_empty() && !seen_currencies.contains(b.currency.as_str())
-        })
         .filter(|b| seen.insert((b.account.clone(), b.currency.clone())))
-        .map(|b| {
-            let actually = covered_currencies(&b.account)
-                .into_iter()
-                .collect::<Vec<_>>()
-                .join(", ");
+        // Computed ONCE per budget and carried to the message. It was computed
+        // in the filter and again to format, and each call scans every posting
+        // account and clones every currency it finds.
+        .filter_map(|b| {
+            let seen_currencies = covered_currencies(&b.account);
+            let mismatched =
+                !seen_currencies.is_empty() && !seen_currencies.contains(b.currency.as_str());
+            mismatched.then_some((b, seen_currencies))
+        })
+        .map(|(b, seen_currencies)| {
+            let actually = seen_currencies.into_iter().collect::<Vec<_>>().join(", ");
             BudgetError {
                 date: b.from,
                 account: Some(b.account.clone()),

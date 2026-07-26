@@ -45,7 +45,12 @@ mod diagnostics;
 pub use compare::{
     Bucket, BudgetRow, BudgetTotal, Comparison, Empty, normalized_actual, passes_account_filter,
 };
-pub use diagnostics::{closed_account_errors, mismatched_currency_errors, unopened_account_errors};
+// The individual diagnostics are deliberately NOT exported. `compare` runs all
+// of them and returns the result already filtered and sorted, which is the only
+// way a caller can be sure of the same set the CLI and the FFI get. Exposing
+// them separately publishes an order to get wrong, a subset to forget, and — in
+// `mismatched_currency_errors`' case — an argument no public API can even
+// build.
 
 use rust_decimal::Decimal;
 use rustledger_core::{Account, CalendarPeriod, Currency, Directive, MetaValue, NaiveDate};

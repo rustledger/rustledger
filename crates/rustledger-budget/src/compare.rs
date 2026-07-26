@@ -16,7 +16,7 @@
 //! process. Logic that lives here can be exhaustively verified; logic that lives
 //! there effectively cannot.
 
-use crate::{Budgets, covers};
+use crate::{BudgetError, Budgets, covers};
 use rust_decimal::Decimal;
 use rustledger_core::{Account, AccountTypeKind, AccountTypes, Currency, Directive, NaiveDate};
 use std::collections::{BTreeMap, BTreeSet};
@@ -160,6 +160,18 @@ pub struct Comparison {
     /// Deliberately NOT the sum of `rows`: under `children` a parent row and a
     /// child row overlap by design, so adding the rows double-counts the child.
     pub totals: Vec<BudgetTotal>,
+    /// Everything wrong with this report — unreadable directives, budgets on
+    /// accounts that are never opened or already closed, currencies an account
+    /// never posts, figures too large to represent — filtered to the accounts
+    /// reported on and sorted by date.
+    ///
+    /// Produced HERE, with the rows, because a consumer that assembles it
+    /// separately can assemble it differently: the CLI and the FFI once
+    /// disagreed about which warnings a ledger deserved, and about their order.
+    /// The one thing a caller may still add is a diagnostic about its own
+    /// rendering, which this crate cannot know (see the CLI's sub-precision
+    /// warning).
+    pub errors: Vec<BudgetError>,
 }
 
 /// Does this account pass a raw-prefix filter?
@@ -466,7 +478,22 @@ impl Budgets {
         rows.sort_by(|a, b| (&a.account, &a.currency).cmp(&(&b.account, &b.currency)));
 
         let totals = self.totals(&actuals, types, from, to, children, account_filter);
-        Comparison { rows, totals }
+        let mut comparison = Comparison {
+            rows,
+            totals,
+            errors: Vec::new(),
+        };
+        comparison.errors = crate::diagnostics::collect(
+            self,
+            directives,
+            &comparison,
+            types,
+            from,
+            to,
+            children,
+            account_filter,
+        );
+        comparison
     }
 
     /// Totals counting every budget and every posting exactly once.

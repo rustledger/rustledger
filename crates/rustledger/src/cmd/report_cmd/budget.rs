@@ -62,12 +62,15 @@ pub(super) fn report_budget<W: Write>(
     format: &OutputFormat,
     writer: &mut W,
 ) -> Result<()> {
-    let (budgets, parse_errors) = Budgets::from_directives(directives);
+    let budgets = Budgets::from_directives(directives);
 
-    // Budgeted VERSUS ACTUAL is the model's job, not the renderer's: which
-    // currency a priced posting spends, which direction a credit-normal account
-    // counts in, and from which day spending starts counting against a budget
-    // are all decisions another consumer would otherwise have to re-derive.
+    // Budgeted VERSUS ACTUAL is the model's job, not the renderer's — and so
+    // are the WARNINGS. Which currency a priced posting spends, which direction
+    // a credit-normal account counts in, from which day spending starts
+    // counting, and which budgets deserve a complaint are all decisions another
+    // consumer would otherwise re-derive. The comparison hands back the whole
+    // answer, already filtered to the reported accounts and sorted, so this
+    // command and `session.budget` cannot disagree about it.
     let comparison = budgets.compare(
         directives,
         types,
@@ -76,36 +79,14 @@ pub(super) fn report_budget<W: Write>(
         filter.children,
         filter.account,
     );
-
-    // ...and so are the warnings. They lived here until a host calling
-    // `session.budget` got rows with an empty `errors` list, showing a tidy
-    // `0.0%` bar for a budget on a misspelled account. Anything that must be
-    // true of a budget REPORT belongs where every consumer can see it.
-    let mut errors = parse_errors;
-    // Whether the ledger had ANY unusable budget, computed before the filter:
+    // Whether the ledger had ANY unusable budget, computed BEFORE the filter:
     // `Empty::diagnose` must not conclude "no budgets declared" for a ledger
     // whose budgets were all rejected merely because `--account` excluded them
     // from display.
-    let had_errors = !errors.is_empty();
-    if let Some(prefix) = filter.account {
-        errors.retain(|e| {
-            e.account
-                .as_ref()
-                .is_none_or(|a| passes_account_filter(a.as_str(), Some(prefix)))
-        });
-    }
-    errors.extend(rustledger_budget::diagnostics(
-        &budgets,
-        directives,
-        &comparison,
-        types,
-        filter.from,
-        filter.to,
-        filter.children,
-        filter.account,
-    ));
+    let had_errors = !budgets.errors().is_empty();
     let rows = comparison.rows;
     let totals = comparison.totals;
+    let mut errors = comparison.errors;
 
     // A budget too small to survive display rounding stays a CLI concern: it is
     // a fact about this renderer's precision, not about the ledger, and the

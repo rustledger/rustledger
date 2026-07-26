@@ -1187,13 +1187,34 @@ fn a_second_amount_is_reported_but_a_trailing_note_is_not() {
         ])
         .output()
         .expect("run rledger");
-    // Names the actual problem. A second amount has Fava's shape, so this is a
-    // budget we are confident about — the class `rledger check` reports too,
-    // unlike a payload that merely shares the name `budget`.
+    // Reported AND read. Fava takes the first three values and ignores the
+    // rest, so this really is a 400/month budget there; discarding it would
+    // cost a migrating user the budget and — since only budgeted accounts get
+    // rows — the account's entire line. The warning is the whole remedy.
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("carries a second amount"),
-        "two amounts on one line must be reported, not half-parsed: {}",
-        String::from_utf8_lossy(&out.stderr)
+        stderr.contains("carries a second figure"),
+        "a second figure must be reported: {stderr}"
+    );
+    let kept = run(
+        &bin,
+        &[
+            "report",
+            two.path().to_str().unwrap(),
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--format",
+            "csv",
+            "--no-pager",
+        ],
+    );
+    assert!(
+        kept.lines()
+            .any(|l| l.starts_with("Expenses:Food,USD,400.00")),
+        "...and the first figure is still the budget: {kept}"
     );
 
     let note = write_fixture(

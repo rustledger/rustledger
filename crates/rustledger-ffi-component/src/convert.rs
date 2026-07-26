@@ -1935,16 +1935,12 @@ impl SessionState {
             .padded
             .get_or_init(|| rustledger_booking::merge_with_padding(&self.directives));
         let types = self.account_types();
-        let (budgets, mut budget_errors) = rustledger_budget::Budgets::from_directives(directives);
+        let budgets = rustledger_budget::Budgets::from_directives(directives);
         let filter = (!account_filter.is_empty()).then_some(account_filter);
+        // Rows, totals AND warnings from one call. Assembling the warning list
+        // here is what let this surface disagree with the CLI about which
+        // budgets deserved a complaint, and in what order.
         let cmp = budgets.compare(directives, &types, from_date, to_date, children, filter);
-        // The report's OWN diagnostics, not just the parse failures. Without
-        // them a host got a tidy `0.0%` row for a budget on a misspelled
-        // account, and an absent figure with nothing saying why — the silent
-        // misreports the CLI has warned about since the first review round.
-        budget_errors.extend(rustledger_budget::diagnostics(
-            &budgets, directives, &cmp, &types, from_date, to_date, children, filter,
-        ));
 
         let amount = |v: Option<rust_decimal::Decimal>| v.map(|d| d.to_string());
         Ok(out::BudgetResult {
@@ -1974,9 +1970,18 @@ impl SessionState {
                     // day someone renamed a variant. A root outside the five is
                     // lowercased too, so two totals can never differ only in
                     // case.
+                    // `kind` is a CLOSED vocabulary — the five types plus
+                    // "other" — and `root` carries the ledger's own spelling.
+                    // Lowercasing an unrecognized root into the same space as
+                    // the five made two distinct totals collide on the only key
+                    // this record offers.
                     kind: match &t.bucket {
                         rustledger_budget::Bucket::Typed(k) => k.as_str().to_string(),
-                        rustledger_budget::Bucket::Other(root) => root.as_str().to_lowercase(),
+                        rustledger_budget::Bucket::Other(_) => "other".to_string(),
+                    },
+                    root: match &t.bucket {
+                        rustledger_budget::Bucket::Typed(k) => types.root_name(*k).to_string(),
+                        rustledger_budget::Bucket::Other(root) => root.as_str().to_string(),
                     },
                     currency: t.currency.as_str().to_string(),
                     budgeted: amount(t.budgeted),
@@ -1987,7 +1992,8 @@ impl SessionState {
                 .collect(),
             // Unreadable budget directives are reported, not fatal: one typo
             // must not cost the host every other budget in the ledger.
-            errors: budget_errors
+            errors: cmp
+                .errors
                 .into_iter()
                 .map(|e| wit::Error {
                     message: format!("{}: {}", e.date, e.reason),

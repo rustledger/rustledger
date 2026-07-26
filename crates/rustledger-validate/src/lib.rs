@@ -1163,7 +1163,15 @@ fn validate_budget_custom(custom: &rustledger_core::Custom, errors: &mut Vec<Val
     // the name is not ours alone. Claiming it made `rledger check` warn on
     // beancount's own documented example and on two fixtures in this repo, both
     // of which Python accepts silently.
-    if let rustledger_budget::BudgetRead::Invalid(e) = rustledger_budget::read_budget(custom) {
+    let confident = match rustledger_budget::read_budget(custom) {
+        rustledger_budget::BudgetRead::Invalid(e) => Some(e),
+        // A budget that WAS read but had something dropped from it is equally
+        // confident — the shape matched, so this is ours to report.
+        rustledger_budget::BudgetRead::Read { note, .. } => note,
+        rustledger_budget::BudgetRead::Unrecognized(_)
+        | rustledger_budget::BudgetRead::NotABudget => None,
+    };
+    if let Some(e) = confident {
         errors.push(ValidationError::new(
             ErrorCode::MalformedBudget,
             e.reason,

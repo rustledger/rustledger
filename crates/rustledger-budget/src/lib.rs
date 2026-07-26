@@ -45,9 +45,7 @@ mod diagnostics;
 pub use compare::{
     Bucket, BudgetRow, BudgetTotal, Comparison, normalized_actual, passes_account_filter,
 };
-pub use diagnostics::{
-    closed_account_errors, diagnostics, mismatched_currency_errors, unopened_account_errors,
-};
+pub use diagnostics::{closed_account_errors, mismatched_currency_errors, unopened_account_errors};
 
 use rust_decimal::Decimal;
 use rustledger_core::{Account, CalendarPeriod, Currency, Directive, MetaValue, NaiveDate};
@@ -230,17 +228,33 @@ fn looks_like_account(s: &str) -> bool {
 /// about budgets is owed the news that one could not be read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BudgetRead {
-    /// Not a budget directive at all, or a `custom "budget"` whose first value
-    /// does not even name an account — another tool's payload.
+    /// Not a budget directive at all, or a `custom "budget"` that neither has
+    /// Fava's shape nor names an account — another tool's payload.
     NotABudget,
     /// Names an account, but does not have Fava's positional shape. Possibly a
     /// mistyped budget, possibly a different tool keying its config by account;
     /// the two are indistinguishable from here.
     Unrecognized(BudgetError),
-    /// Has Fava's shape, so it IS a budget, and its content is wrong.
+    /// Has Fava's shape, so it IS a budget, but it cannot be read at all.
     Invalid(BudgetError),
-    /// A budget.
-    Valid(BudgetEntry),
+    /// A budget. `note` carries anything worth telling the user about a
+    /// directive that was nonetheless USED.
+    ///
+    /// The distinction from [`Self::Invalid`] is what the reader can still do.
+    /// A directive with an unusable account or an unknown interval yields no
+    /// budget, so there is nothing to keep. A trailing second figure is
+    /// different: Fava reads the first three values and ignores the rest, so
+    /// `... "monthly" 400.00 USD 12` really is a 400/month budget there.
+    /// Rejecting it outright cost the user their budget AND — because the
+    /// report shows only budgeted accounts — the account's entire row, which is
+    /// a heavier penalty than the mistake. Keep the figure Fava would keep, and
+    /// say the rest was dropped.
+    Read {
+        /// The budget.
+        entry: BudgetEntry,
+        /// What to tell the user about it, if anything.
+        note: Option<BudgetError>,
+    },
 }
 
 /// Read ONE `custom "budget"` directive.
@@ -255,32 +269,40 @@ pub fn read_budget(c: &rustledger_core::Custom) -> BudgetRead {
     if c.custom_type != "budget" {
         return BudgetRead::NotABudget;
     }
-    // Every Fava budget names an account first. A payload that does not is
-    // addressed to some other tool and is none of our business.
-    let Some(account) = c.values.first().and_then(account_name) else {
-        return BudgetRead::NotABudget;
-    };
-    // Shape: <Account> "<interval>" <amount>
+    // SHAPE FIRST. Fava's positional shape — `<something> "<interval>"
+    // <amount>` — is the strongest available evidence that a directive is a
+    // budget, stronger than whether the first value happens to lex as an
+    // account. Testing the account first meant a real budget with a mistyped
+    // account name (`"Expenses:food"`, a lowercase component) was classified as
+    // another tool's payload and vanished from `check` AND from the report,
+    // which then told the user they had declared no budgets at all.
     //
-    // The account is accepted both as a bare account token and as a quoted
-    // string. Fava's own reader is duck-typed (it just takes `values[0]`),
-    // and Beancount's `custom` documentation writes its examples with quoted
-    // strings, so real Fava-budgeted ledgers contain both spellings; taking
-    // only the token would reject a ledger Fava renders fine, which is
-    // exactly the compatibility this crate exists to provide.
+    // Beancount's own canonical example survives this test because its shape is
+    // different, not because of its account:
+    //
+    //     2013-05-18 custom "budget" "weekly < 1000.00 USD" 2016-02-28 TRUE 43.03 USD 23
+    //
+    // is `[String, Date, Bool, Amount, Int]` — `values[1]` is a date, so the
+    // match below fails and it is never ours to judge.
     let [
-        _,
+        first,
         MetaValue::String(interval_raw),
         MetaValue::Amount(amount),
         rest @ ..,
     ] = c.values.as_slice()
     else {
-        return BudgetRead::Unrecognized(BudgetError {
+        return unrecognized(c);
+    };
+    // The shape matched, so this IS a budget. An account that cannot be lexed is
+    // now a reportable fault rather than a reason to disown the directive.
+    let Some(account) = account_name(first) else {
+        return BudgetRead::Invalid(BudgetError {
             date: c.date,
-            account: Some(account),
-            reason: "budget directive not understood; expected: \
-                 custom \"budget\" <Account> \"<interval>\" <amount> <CCY>"
-                .to_string(),
+            account: None,
+            reason: format!(
+                "budget directive names {:?}, which is not a valid account name",
+                value_text(first)
+            ),
         });
     };
     // A trailing NOTE is ignored rather than rejected: Fava reads
@@ -289,22 +311,18 @@ pub fn read_budget(c: &rustledger_core::Custom) -> BudgetRead {
     // dropped a real budget AND its matching spend from the report over a
     // comment — the opposite of the compatibility this crate exists for.
     //
-    // A trailing NUMBER or AMOUNT is different: `... 400.00 USD 300.00 EUR`
-    // and `... 400.00 USD 300.00` are both a user declaring a second figure,
-    // and silently keeping the first would drop it with no diagnostic
-    // anywhere. Those stay an error, so the user is told which half was lost.
-    if rest
-        .iter()
-        .any(|v| matches!(v, MetaValue::Amount(_) | MetaValue::Number(_)))
-    {
-        return BudgetRead::Invalid(BudgetError {
-            date: c.date,
-            account: Some(account),
-            reason: "budget directive carries a second amount; only the first \
-                 is read, so write one budget per directive"
-                .to_string(),
-        });
-    }
+    // A trailing FIGURE is different: `... 400.00 USD 300.00 EUR`,
+    // `... 400.00 USD 300.00` and `... 400.00 USD 23` are all a user declaring
+    // a second one, and silently keeping the first drops it with no diagnostic
+    // anywhere. `Int` belongs in this list as much as `Number` and `Amount`: a
+    // bare `23` parses as `Int`, and leaving it out let exactly that directive
+    // be half-read with no warning.
+    let second_figure = rest.iter().any(|v| {
+        matches!(
+            v,
+            MetaValue::Amount(_) | MetaValue::Number(_) | MetaValue::Int(_)
+        )
+    });
     let Some(interval) = Interval::parse(interval_raw) else {
         return BudgetRead::Invalid(BudgetError {
             date: c.date,
@@ -315,13 +333,68 @@ pub fn read_budget(c: &rustledger_core::Custom) -> BudgetRead {
             ),
         });
     };
-    BudgetRead::Valid(BudgetEntry {
-        from: c.date,
-        account,
-        interval,
-        amount: amount.number,
-        currency: amount.currency.clone(),
-    })
+    let note = second_figure.then(|| BudgetError {
+        date: c.date,
+        account: Some(account.clone()),
+        reason: "budget directive carries a second figure; only the first is \
+             read, so write one budget per directive"
+            .to_string(),
+    });
+    BudgetRead::Read {
+        entry: BudgetEntry {
+            from: c.date,
+            account,
+            interval,
+            amount: amount.number,
+            currency: amount.currency.clone(),
+        },
+        note,
+    }
+}
+
+/// Classify a `custom "budget"` that did NOT have Fava's shape.
+///
+/// Confident — `Invalid`, so `rledger check` reports it — when the directive
+/// names an account AND its second value is a real interval keyword. That
+/// combination is not something another tool writes by coincidence, and it
+/// covers the common near-misses: a missing currency (`"monthly" 400.00`, where
+/// the amount lexes as a bare number) and a swapped operand order.
+///
+/// Otherwise `Unrecognized`: it might be a mistyped budget or another tool
+/// keying its config by account, and the two are indistinguishable from here.
+/// `report budget` says so, because a user who asked about budgets is owed the
+/// news; `rledger check` stays quiet, because `custom` is beancount's open
+/// extension point.
+fn unrecognized(c: &rustledger_core::Custom) -> BudgetRead {
+    let Some(account) = c.values.first().and_then(account_name) else {
+        return BudgetRead::NotABudget;
+    };
+    let reason = "budget directive not understood; expected: \
+         custom \"budget\" <Account> \"<interval>\" <amount> <CCY>"
+        .to_string();
+    let names_an_interval = matches!(
+        c.values.get(1),
+        Some(MetaValue::String(s)) if Interval::parse(s).is_some()
+    );
+    let e = BudgetError {
+        date: c.date,
+        account: Some(account),
+        reason,
+    };
+    if names_an_interval {
+        BudgetRead::Invalid(e)
+    } else {
+        BudgetRead::Unrecognized(e)
+    }
+}
+
+/// A `MetaValue` rendered for a diagnostic, without committing to its type.
+fn value_text(v: &MetaValue) -> String {
+    match v {
+        MetaValue::String(s) => s.clone(),
+        MetaValue::Account(a) => a.as_str().to_string(),
+        other => format!("{other:?}"),
+    }
 }
 
 /// Read every `custom "budget"` directive, in effective-date order.
@@ -339,7 +412,10 @@ pub fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetE
         // asked about budgets, so a `custom "budget"` that could not be read is
         // news. `rledger check` is stricter — see `BudgetRead`.
         match read_budget(c) {
-            BudgetRead::Valid(entry) => out.push(entry),
+            BudgetRead::Read { entry, note } => {
+                out.push(entry);
+                errors.extend(note);
+            }
             BudgetRead::Invalid(e) | BudgetRead::Unrecognized(e) => errors.push(e),
             BudgetRead::NotABudget => {}
         }
@@ -359,6 +435,12 @@ pub fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetE
 pub struct Budgets {
     /// Sorted by `from`, so a reverse scan finds the entry in force.
     entries: Vec<BudgetEntry>,
+    /// Directives that could not be read, kept WITH the index rather than
+    /// handed back separately. They are part of what the ledger said about
+    /// budgets, and a caller holding them apart is a caller that can forget to
+    /// report them — which is exactly how the FFI came to show a different
+    /// warning set from the CLI on one ledger.
+    errors: Vec<BudgetError>,
     /// Entry positions per `(account, currency)`, in effective-date order.
     ///
     /// The supersession lookups — [`Self::in_force`] and
@@ -433,6 +515,7 @@ impl Budgets {
             entries,
             by_key,
             starts,
+            errors: Vec::new(),
         }
     }
 
@@ -446,9 +529,18 @@ impl Budgets {
 
     /// Read and index a ledger's `custom "budget"` directives.
     #[must_use]
-    pub fn from_directives(directives: &[Directive]) -> (Self, Vec<BudgetError>) {
+    pub fn from_directives(directives: &[Directive]) -> Self {
         let (entries, errors) = parse_budgets(directives);
-        (Self::index(entries), errors)
+        Self {
+            errors,
+            ..Self::index(entries)
+        }
+    }
+
+    /// Directives this ledger declared that could not be read.
+    #[must_use]
+    pub fn errors(&self) -> &[BudgetError] {
+        &self.errors
     }
 
     /// Every declaration, in effective-date order.

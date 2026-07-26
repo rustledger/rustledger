@@ -457,12 +457,21 @@ fn parse_budgets_rejects_and_explains_bad_shapes() {
                     MetaValue::Number(Dec::from(300)),
                 ],
             ),
-            "carries a second amount",
+            "carries a second figure",
         ),
     ];
     for (dir, expect) in cases {
         let (entries, errors) = parse_budgets(&[dir]);
-        assert!(entries.is_empty(), "must not half-read: {entries:?}");
+        // A second figure is the ONE bad shape that still yields a budget: Fava
+        // reads the first three values and ignores the rest, so discarding the
+        // directive would cost the user a budget Fava renders — and, because
+        // the report shows only budgeted accounts, the account's whole row.
+        let keeps_the_budget = expect.contains("second figure");
+        assert_eq!(
+            entries.is_empty(),
+            !keeps_the_budget,
+            "for {expect:?}: {entries:?}"
+        );
         assert_eq!(errors.len(), 1, "for {expect:?}");
         assert!(
             errors[0].reason.contains(expect),
@@ -494,13 +503,16 @@ fn parse_budgets_accepts_a_quoted_account_and_a_trailing_note() {
     assert_eq!(entries[0].account, "Expenses:Food");
 }
 
-/// A quoted first value that is not an account name means the directive is not
-/// a Fava budget — `custom` is an open extension point and beancount's own
-/// example is exactly this shape. It is ignored rather than reported, and in
-/// particular is never read as an account: a name carrying a newline would
-/// otherwise forge a row in the fixed-width text table.
+/// A first value that is not an account name, in a directive that OTHERWISE has
+/// Fava's shape, is a budget with a broken account — reported, and never read as
+/// an account. A name carrying a newline would otherwise forge a row in the
+/// fixed-width text table.
+///
+/// The shape is what decides. A payload whose second value is not a quoted
+/// interval is another tool's and stays silent — that is
+/// `check_does_not_claim_another_tools_custom_budget`, over in the CLI tests.
 #[test]
-fn a_quoted_string_that_is_not_an_account_is_not_a_budget() {
+fn a_quoted_string_that_is_not_an_account_is_reported_never_read() {
     for bad in ["not an account", "Expenses", "", "Expenses:Food\nTOTAL 9"] {
         let dirs = vec![custom(
             d(2024, 1, 1),
@@ -512,9 +524,11 @@ fn a_quoted_string_that_is_not_an_account_is_not_a_budget() {
         )];
         let (entries, errors) = parse_budgets(&dirs);
         assert!(entries.is_empty(), "{bad:?} must not parse as an account");
+        assert_eq!(errors.len(), 1, "{bad:?} has Fava's shape, so say so");
         assert!(
-            errors.is_empty(),
-            "{bad:?} is another tool's payload, not a broken budget: {errors:?}"
+            errors[0].reason.contains("not a valid account name"),
+            "{bad:?}: {:?}",
+            errors[0].reason
         );
     }
 }
@@ -683,7 +697,8 @@ fn from_directives_indexes_what_it_parsed() {
             "USD",
         ),
     ];
-    let (budgets, errors) = Budgets::from_directives(&dirs);
+    let budgets = Budgets::from_directives(&dirs);
+    let errors = budgets.errors().to_vec();
     assert_eq!(errors.len(), 1, "the bad interval is reported");
     assert!(!budgets.is_empty());
     assert_eq!(budgets.entries().len(), 2);

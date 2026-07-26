@@ -429,14 +429,26 @@ interface ledger {
     used: option<f64>,
   }
 
-  /// A whole-report total, summed per ACCOUNT TYPE and currency. `kind` is the
-  /// beancount account type ("assets", "liabilities", "equity", "income",
-  /// "expenses"), or the account's own root for a ledger using a type outside
-  /// those five. Deliberately NOT the sum of `rows`: under `children` a parent
-  /// row and a child row overlap by design, so adding the rows double-counts
-  /// the child.
+  /// A whole-report total, summed per ACCOUNT TYPE and currency.
+  ///
+  /// `kind` is one of exactly six values: the five beancount account types
+  /// ("assets", "liabilities", "equity", "income", "expenses") or "other" for a
+  /// root outside them. `root` carries the account root the total actually
+  /// summed, in the ledger's own spelling — so a ledger with
+  /// `option "name_income" "Revenue"` reports `kind: "income", root: "Revenue"`.
+  ///
+  /// The two fields exist because one cannot carry both facts. Folding an
+  /// unrecognized root into the same string space as the five made
+  /// `(kind, currency)` — the only stable key this record offers — collide: a
+  /// ledger that renames Income to Revenue and also posts to a literal `Income`
+  /// root produces two distinct totals that both said "income", and a host
+  /// keying on that silently dropped one.
+  ///
+  /// Deliberately NOT the sum of `rows`: under `children` a parent row and a
+  /// child row overlap by design, so adding the rows double-counts the child.
   record budget-total {
     kind: string,
+    root: string,
     currency: string,
     budgeted: option<string>,
     actual: option<string>,

@@ -1323,7 +1323,8 @@ option \"operating_currency\" \"USD\"
         let native = rustledger_ffi_wasi::helpers::load_source(LEDGER);
         let padded = rustledger_booking::merge_with_padding(&native.directives);
         let types = rustledger_core::AccountTypes::default();
-        let (budgets, errs) = rustledger_budget::Budgets::from_directives(&padded);
+        let budgets = rustledger_budget::Budgets::from_directives(&padded);
+        let errs = budgets.errors().to_vec();
         let want = budgets.compare(
             &padded,
             &types,
@@ -1359,6 +1360,9 @@ option \"operating_currency\" \"USD\"
         assert_eq!(via.totals.len(), want.totals.len());
         let kinds: Vec<&str> = via.totals.iter().map(|t| t.kind.as_str()).collect();
         assert_eq!(kinds, vec!["income", "expenses"], "children={children}");
+        // `kind` is a closed vocabulary; `root` carries the ledger's spelling.
+        let roots: Vec<&str> = via.totals.iter().map(|t| t.root.as_str()).collect();
+        assert_eq!(roots, vec!["Income", "Expenses"], "children={children}");
 
         // A budget that cannot be read is reported, not fatal: the other two
         // budgets still produced rows above.

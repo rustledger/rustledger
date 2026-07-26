@@ -247,8 +247,7 @@ pub fn mismatched_currency_errors(
 /// account should not emit warnings about accounts the caller excluded.
 ///
 /// Sorted by date, so the order is stable across formats and runs.
-#[must_use]
-pub fn diagnostics(
+pub fn collect(
     budgets: &Budgets,
     directives: &[Directive],
     comparison: &Comparison,
@@ -258,7 +257,12 @@ pub fn diagnostics(
     children: bool,
     account_filter: Option<&str>,
 ) -> Vec<BudgetError> {
-    let mut errors = unopened_account_errors(directives, budgets, to, children);
+    // The directives that could not be read come first in provenance but not in
+    // order: everything is sorted by date at the end, so the caller never sees
+    // parse failures and report warnings interleaved differently depending on
+    // which surface it asked.
+    let mut errors = budgets.errors().to_vec();
+    errors.extend(unopened_account_errors(directives, budgets, to, children));
     errors.extend(mismatched_currency_errors(
         directives, budgets, children, from, to,
     ));

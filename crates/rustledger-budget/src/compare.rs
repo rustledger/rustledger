@@ -538,3 +538,238 @@ mod tests {
         );
     }
 }
+
+/// Boundary and coverage tests for the actual-spend half.
+///
+/// Written from a mutation audit of this module: every decision below had a
+/// surviving mutant, meaning no test distinguished it from its neighbor. That is
+/// the defect class this feature shipped repeatedly — a window edge or a
+/// coverage rule decided one case too wide — so these assert on the edges and on
+/// the cases that must NOT match.
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+    use crate::{BudgetEntry, Interval};
+    use rustledger_core::{Amount, Posting, PriceAnnotation, Transaction, naive_date};
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        naive_date(y, m, day).unwrap()
+    }
+
+    fn budget_of(from: NaiveDate, account: &str, currency: &str, amount: i64) -> BudgetEntry {
+        BudgetEntry {
+            from,
+            account: account.to_string(),
+            interval: Interval::Day,
+            amount: Decimal::from(amount),
+            currency: currency.to_string(),
+        }
+    }
+
+    fn spend(day: NaiveDate, account: &str, amount: i64, currency: &str) -> Directive {
+        Directive::Transaction(
+            Transaction::new(day, "x").with_synthesized_posting(Posting::new(
+                account,
+                Amount::new(Decimal::from(amount), currency),
+            )),
+        )
+    }
+
+    fn actual_of(budgets: &Budgets, dirs: &[Directive], from: NaiveDate, to: NaiveDate) -> Decimal {
+        budgets
+            .compare(dirs, &AccountTypes::default(), from, to, false, None)
+            .rows
+            .first()
+            .and_then(|r| r.actual)
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    /// `[from, to)`: a posting ON `from` counts, one ON `to` does not. Both
+    /// halves of that window test had surviving mutants.
+    #[test]
+    fn the_spend_window_is_half_open() {
+        let b = Budgets::new(vec![budget_of(d(2024, 1, 1), "Expenses:Food", "USD", 1)]);
+        let on_from = vec![spend(d(2024, 2, 1), "Expenses:Food", 10, "USD")];
+        let on_to = vec![spend(d(2024, 3, 1), "Expenses:Food", 10, "USD")];
+        let before = vec![spend(d(2024, 1, 31), "Expenses:Food", 10, "USD")];
+        let w = (d(2024, 2, 1), d(2024, 3, 1));
+        assert_eq!(actual_of(&b, &on_from, w.0, w.1), Decimal::from(10));
+        assert_eq!(actual_of(&b, &on_to, w.0, w.1), Decimal::ZERO);
+        assert_eq!(actual_of(&b, &before, w.0, w.1), Decimal::ZERO);
+    }
+
+    /// A weight in the SAME currency supersedes the units; a weight in ANOTHER
+    /// currency is recorded alongside them. Collapsing that guard makes one of
+    /// the two wrong.
+    #[test]
+    fn a_same_currency_weight_supersedes_the_units() {
+        let b = Budgets::new(vec![budget_of(d(2024, 1, 1), "Expenses:Fees", "USD", 1)]);
+        // `90.00 USD @@ 95.00 USD` spent 95, not 90.
+        let same = vec![Directive::Transaction(
+            Transaction::new(d(2024, 2, 10), "fee").with_synthesized_posting(
+                Posting::new("Expenses:Fees", Amount::new(Decimal::from(90), "USD")).with_price(
+                    PriceAnnotation::total(Amount::new(Decimal::from(95), "USD")),
+                ),
+            ),
+        )];
+        assert_eq!(
+            actual_of(&b, &same, d(2024, 2, 1), d(2024, 3, 1)),
+            Decimal::from(95)
+        );
+
+        // `90 EUR @ 1.10 USD` moved BOTH currencies: the USD budget sees 99.
+        let cross = vec![Directive::Transaction(
+            Transaction::new(d(2024, 2, 10), "trip").with_synthesized_posting(
+                Posting::new("Expenses:Fees", Amount::new(Decimal::from(90), "EUR")).with_price(
+                    PriceAnnotation::unit(Amount::new(
+                        Decimal::from(110) / Decimal::from(100),
+                        "USD",
+                    )),
+                ),
+            ),
+        )];
+        assert_eq!(
+            actual_of(&b, &cross, d(2024, 2, 1), d(2024, 3, 1)),
+            Decimal::from(99)
+        );
+
+        // ...and the UNITS side is still recorded, so a EUR budget on the same
+        // account sees 90. Collapsing the same-currency guard drops this half
+        // while leaving the USD figure above intact, so only this assertion
+        // distinguishes them.
+        let eur = Budgets::new(vec![budget_of(d(2024, 1, 1), "Expenses:Fees", "EUR", 1)]);
+        assert_eq!(
+            actual_of(&eur, &cross, d(2024, 2, 1), d(2024, 3, 1)),
+            Decimal::from(90)
+        );
+    }
+
+    /// A row exists only for a budget that matches on ALL THREE of currency,
+    /// date and coverage. Relaxing any one invents a row for something nobody
+    /// budgeted, or resurrects a budget that starts after the window.
+    #[test]
+    fn a_child_row_requires_currency_date_and_coverage_together() {
+        let b = Budgets::new(vec![
+            budget_of(d(2024, 1, 1), "Expenses:Food:Restaurant", "USD", 1),
+            budget_of(d(2099, 1, 1), "Expenses:Rent", "USD", 1), // starts after the window
+            budget_of(d(2024, 1, 1), "Expenses:Travel", "EUR", 1), // different currency
+        ]);
+        let cmp = b.compare(
+            &[],
+            &AccountTypes::default(),
+            d(2024, 2, 1),
+            d(2024, 3, 1),
+            true,
+            None,
+        );
+        let keys: Vec<(&str, &str)> = cmp
+            .rows
+            .iter()
+            .map(|r| (r.account.as_str(), r.currency.as_str()))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("Expenses:Food:Restaurant", "USD"),
+                ("Expenses:Travel", "EUR")
+            ],
+            "the future-dated Rent budget must not produce a row"
+        );
+
+        // `b.from < to` is EXCLUSIVE: a budget declared exactly on the window's
+        // end is not in force within it. Only a declaration ON the bound
+        // separates `<` from `<=`.
+        let on_bound = Budgets::new(vec![budget_of(d(2024, 3, 1), "Expenses:Food", "USD", 1)]);
+        let cmp = on_bound.compare(
+            &[],
+            &AccountTypes::default(),
+            d(2024, 2, 1),
+            d(2024, 3, 1),
+            true,
+            None,
+        );
+        assert!(
+            cmp.rows.is_empty(),
+            "a budget starting on the exclusive end is outside the window"
+        );
+        let inside = on_bound.compare(
+            &[],
+            &AccountTypes::default(),
+            d(2024, 2, 1),
+            d(2024, 3, 2),
+            true,
+            None,
+        );
+        assert_eq!(inside.rows.len(), 1, "one day past it, the row exists");
+    }
+
+    /// Under `children` a parent aggregates its children's budgets, and only
+    /// theirs: not a sibling's, and not another currency's.
+    #[test]
+    fn a_parent_aggregates_only_what_it_covers() {
+        let b = Budgets::new(vec![
+            budget_of(d(2024, 1, 1), "Expenses:Food", "USD", 1),
+            budget_of(d(2024, 1, 1), "Expenses:Food:Restaurant", "USD", 2),
+            budget_of(d(2024, 1, 1), "Expenses:FoodCourt", "USD", 100),
+            budget_of(d(2024, 1, 1), "Expenses:Food:Restaurant", "EUR", 50),
+        ]);
+        let cmp = b.compare(
+            &[],
+            &AccountTypes::default(),
+            d(2024, 2, 1),
+            d(2024, 2, 3),
+            true,
+            None,
+        );
+        let food = cmp
+            .rows
+            .iter()
+            .find(|r| r.account == "Expenses:Food" && r.currency == "USD")
+            .expect("a parent row");
+        // Two days of (1 + 2) daily — the prefix-sharing FoodCourt and the EUR
+        // child are both excluded.
+        assert_eq!(food.budgeted, Some(Decimal::from(6)));
+    }
+
+    /// A row counts only spending in its own currency, on accounts it covers.
+    #[test]
+    fn a_row_counts_only_its_own_currency_and_subtree() {
+        let b = Budgets::new(vec![budget_of(d(2024, 1, 1), "Expenses:Food", "USD", 1)]);
+        let dirs = vec![
+            spend(d(2024, 2, 10), "Expenses:Food", 10, "USD"),
+            spend(d(2024, 2, 10), "Expenses:Food", 500, "EUR"),
+            spend(d(2024, 2, 10), "Expenses:FoodCourt", 700, "USD"),
+            spend(d(2024, 2, 10), "Expenses:Food:Restaurant", 300, "USD"),
+        ];
+        let cmp = b.compare(
+            &dirs,
+            &AccountTypes::default(),
+            d(2024, 2, 1),
+            d(2024, 3, 1),
+            false,
+            None,
+        );
+        let row = cmp.rows.first().expect("a row");
+        assert_eq!(
+            row.actual,
+            Some(Decimal::from(10)),
+            "EUR, the prefix-sharing account and the child are all excluded"
+        );
+
+        // With children the true subaccount joins, and only it.
+        let kids = b.compare(
+            &dirs,
+            &AccountTypes::default(),
+            d(2024, 2, 1),
+            d(2024, 3, 1),
+            true,
+            None,
+        );
+        let row = kids
+            .rows
+            .iter()
+            .find(|r| r.account == "Expenses:Food")
+            .expect("a row");
+        assert_eq!(row.actual, Some(Decimal::from(310)));
+    }
+}

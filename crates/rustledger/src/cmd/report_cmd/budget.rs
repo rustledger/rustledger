@@ -1157,3 +1157,156 @@ mod tests {
         assert_eq!(overflowed.used_fraction(), None);
     }
 }
+
+/// Boundary tests for the report's decision predicates.
+///
+/// These are the sites this feature kept getting wrong: a rule decided one case
+/// too wide or too narrow, with the neighboring case found later by a reviewer
+/// constructing it by hand. They are pure functions, so they can be pinned
+/// directly and cheaply here rather than only through the rendered output —
+/// which also makes them auditable by `cargo mutants` in seconds instead of the
+/// ~10 minutes a mutant costs when it has to rebuild the crate and spawn the
+/// binary for 48 integration tests.
+#[cfg(test)]
+mod predicate_tests {
+    use super::*;
+
+    #[test]
+    fn covers_is_exact_without_children() {
+        assert!(covers("Expenses:Food", "Expenses:Food", false));
+        assert!(!covers("Expenses:Food", "Expenses:Food:Restaurant", false));
+        assert!(!covers("Expenses:Food:Restaurant", "Expenses:Food", false));
+        assert!(!covers("Expenses:Food", "Expenses:FoodCourt", false));
+    }
+
+    /// With `--children` a budget covers itself and its true subaccounts, and
+    /// still NOT a name that merely shares a prefix — the deliberate deviation
+    /// from Fava's `startswith`.
+    #[test]
+    fn covers_is_component_wise_with_children() {
+        assert!(covers("Expenses:Food", "Expenses:Food", true));
+        assert!(covers("Expenses:Food", "Expenses:Food:Restaurant", true));
+        assert!(covers("Expenses:Food", "Expenses:Food:A:B", true));
+        assert!(
+            !covers("Expenses:Food", "Expenses:FoodCourt", true),
+            "a shared prefix is not a subaccount"
+        );
+        assert!(
+            !covers("Expenses:Food:Restaurant", "Expenses:Food", true),
+            "coverage runs down the tree, never up"
+        );
+    }
+
+    /// The `--account` filter is a RAW prefix, matching the sibling reports, and
+    /// deliberately unlike `covers`. A partial component must match here and
+    /// must not match there; that difference is the whole reason both exist.
+    #[test]
+    fn passes_account_filter_is_a_raw_prefix() {
+        assert!(passes_account_filter("Expenses:Food", None));
+        assert!(passes_account_filter(
+            "Expenses:Food",
+            Some("Expenses:Food")
+        ));
+        assert!(passes_account_filter("Expenses:Food", Some("Expenses:Foo")));
+        assert!(passes_account_filter(
+            "Expenses:FoodCourt",
+            Some("Expenses:Food")
+        ));
+        assert!(passes_account_filter(
+            "Expenses:Food:Sub",
+            Some("Expenses:Food")
+        ));
+        assert!(!passes_account_filter("Expenses:Food", Some("Income")));
+        assert!(!passes_account_filter(
+            "Expenses:Food",
+            Some("Expenses:Food:Sub")
+        ));
+        // The two predicates must disagree on exactly this input.
+        assert!(passes_account_filter(
+            "Expenses:FoodCourt",
+            Some("Expenses:Food")
+        ));
+        assert!(!covers("Expenses:Food", "Expenses:FoodCourt", true));
+    }
+
+    #[test]
+    fn account_kind_is_the_top_level_component() {
+        assert_eq!(account_kind("Expenses:Food:Sub"), "Expenses");
+        assert_eq!(account_kind("Income:Salary"), "Income");
+        assert_eq!(account_kind("Liabilities:CreditCard"), "Liabilities");
+        assert_eq!(account_kind("Expenses"), "Expenses");
+        assert_eq!(account_kind(""), "");
+    }
+
+    /// Credit-normal accounts flip sign so an earning target reads the same way
+    /// a spending budget does; debit-normal ones are left alone.
+    #[test]
+    fn normalized_actual_flips_only_credit_normal_accounts() {
+        let types = AccountTypes::default();
+        let hundred = Decimal::from(100);
+        assert_eq!(normalized_actual(&types, "Expenses:Food", hundred), hundred);
+        assert_eq!(normalized_actual(&types, "Assets:Cash", hundred), hundred);
+        assert_eq!(
+            normalized_actual(&types, "Income:Salary", -hundred),
+            hundred
+        );
+        assert_eq!(
+            normalized_actual(&types, "Liabilities:Card", -hundred),
+            hundred
+        );
+        assert_eq!(
+            normalized_actual(&types, "Equity:Opening", -hundred),
+            hundred
+        );
+    }
+
+    fn entry(from: (i32, u32, u32), account: &str) -> rustledger_budget::BudgetEntry {
+        rustledger_budget::BudgetEntry {
+            from: rustledger_core::naive_date(from.0, from.1, from.2).unwrap(),
+            account: account.to_string(),
+            interval: rustledger_budget::Interval::Month,
+            amount: Decimal::from(100),
+            currency: "USD".to_string(),
+        }
+    }
+
+    /// `clip_start` resolves PER POSTING ACCOUNT over the budgets a row is made
+    /// of. Taking one minimum for the whole row let an early child budget drag a
+    /// parent's window backwards; restricting to the row's own budgets is what
+    /// makes the row and the TOTAL agree.
+    #[test]
+    fn clip_start_is_per_posting_account() {
+        let budgets = Budgets::new(vec![
+            entry((2024, 6, 1), "Expenses:Food"),
+            entry((2024, 1, 1), "Expenses:Food:Restaurant"),
+        ]);
+        let covered = ["Expenses:Food", "Expenses:Food:Restaurant"];
+
+        // A posting on the PARENT is covered only by the parent's own budget,
+        // which starts in June — the child's January date must not apply to it.
+        assert_eq!(
+            clip_start(&budgets, covered, "Expenses:Food", "USD", true),
+            Some(rustledger_core::naive_date(2024, 6, 1).unwrap())
+        );
+        // A posting on the CHILD is covered by both, so the earlier wins.
+        assert_eq!(
+            clip_start(&budgets, covered, "Expenses:Food:Restaurant", "USD", true),
+            Some(rustledger_core::naive_date(2024, 1, 1).unwrap())
+        );
+        // Nothing covers an unrelated account, or another currency.
+        assert_eq!(
+            clip_start(&budgets, covered, "Expenses:Rent", "USD", true),
+            None
+        );
+        assert_eq!(
+            clip_start(&budgets, covered, "Expenses:Food", "EUR", true),
+            None
+        );
+        // Without --children the parent does not reach the child at all.
+        assert_eq!(
+            clip_start(&budgets, covered, "Expenses:Food:Restaurant", "USD", false),
+            Some(rustledger_core::naive_date(2024, 1, 1).unwrap()),
+            "the child's own budget still covers it"
+        );
+    }
+}

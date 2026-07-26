@@ -187,6 +187,18 @@ def gen_ledger(rng: random.Random):
             lines.append(f'{d} custom "budget" {a} "{rng.choice(INTERVALS)}" {amt} ZZQ')
         else:
             lines.append(f'{d} custom "budget" {a} "{rng.choice(INTERVALS)}" {amt} {ccy}')
+
+    # Another tool's `custom "budget"`. Neither shape declares a budget, so
+    # neither may produce a row — the oracle skips both and `unexpected_row`
+    # fails if rledger reads either as one. Generated unconditionally so every
+    # ledger carries the case: it is cheap, and the defect it guards against
+    # (claiming the namespace) shipped once already.
+    d = datetime.date(2020, 1, 1) + datetime.timedelta(days=rng.randint(0, 1400))
+    # Beancount's own example: the first value is not an account at all.
+    lines.append(f'{d} custom "budget" "weekly < 1000.00 USD" 2016-02-28 TRUE 43.03 USD 23')
+    # Names an account, but not in Fava's order.
+    other = rng.choice(accts)
+    lines.append(f'{d} custom "budget" {other} 1000.00 USD TRUE "monthly"')
     lines.append("")
 
     for _ in range(rng.randint(0, 12)):
@@ -248,6 +260,19 @@ def read_declarations(path: str):
         if len(vals) < 3:
             continue
         acct, interval, amount = vals[0], vals[1], vals[2]
+        # `custom` is beancount's OPEN extension point and the name "budget" is
+        # not rledger's alone: beancount's own documented example is
+        # `custom "budget" "weekly < 1000.00 USD" 2016-02-28 TRUE 43.03 USD 23`.
+        # A payload that is not POSITIONALLY Fava's is another tool's, declares
+        # no budget, and must produce no row. Skipping it here is what makes the
+        # `unexpected_row` check below a guard against rledger claiming the
+        # namespace — which it briefly did, warning on valid beancount.
+        if not isinstance(acct, str) or ":" not in acct:
+            continue
+        if not isinstance(interval, str):
+            continue
+        if not (hasattr(amount, "number") and hasattr(amount, "currency")):
+            continue
         decls.append(
             (
                 e.date,

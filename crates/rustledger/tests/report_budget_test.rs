@@ -2721,3 +2721,59 @@ fn check_does_not_claim_another_tools_custom_budget() {
     );
     assert!(combined.contains("E11001"), "{combined}");
 }
+
+/// `--account` narrows WHICH rows are reported, never what they say.
+///
+/// The filter is applied before each key's covered set is built — moving it
+/// there was a performance change, and a performance change that alters a
+/// figure is a bug. A parent whose subtree straddles the filter is the case
+/// that would show it: under `--children` the row aggregates budgets the
+/// filter excludes from being rows in their own right, and it must keep doing
+/// so.
+#[test]
+fn an_account_filter_changes_which_rows_are_shown_not_what_they_say() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food USD\n\
+         2024-01-01 open Expenses:Food:Restaurant USD\n\
+         2024-01-01 open Expenses:Travel USD\n\
+         2024-01-01 open Assets:Cash USD\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n\
+         2024-01-01 custom \"budget\" Expenses:Food:Restaurant \"monthly\" 100.00 USD\n\
+         2024-01-01 custom \"budget\" Expenses:Travel \"monthly\" 250.00 USD\n\
+         2024-01-10 * \"x\"\n  \
+           Expenses:Food:Restaurant  60.00 USD\n  \
+           Assets:Cash\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let rows_for = |extra: &[&str]| -> Vec<String> {
+        let mut args = vec![
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--format",
+            "csv",
+        ];
+        args.extend_from_slice(extra);
+        run(&bin, &args)
+            .lines()
+            .filter(|l| l.starts_with("Expenses:Food"))
+            .map(str::to_string)
+            .collect()
+    };
+    for children in [vec![], vec!["--children"]] {
+        let mut unfiltered = children.clone();
+        let mut filtered = children.clone();
+        filtered.extend_from_slice(&["--account", "Expenses:Food"]);
+        unfiltered.push("--no-pager");
+        filtered.push("--no-pager");
+        let a = rows_for(&unfiltered);
+        let b = rows_for(&filtered);
+        assert!(!a.is_empty(), "fixture must produce rows: {children:?}");
+        assert_eq!(a, b, "the filter changed a figure ({children:?})");
+    }
+}

@@ -521,6 +521,55 @@ mod tests {
         assert!(mismatched_currency_errors(&posted, &later, false, d(2024, 3, 1)).is_empty());
     }
 
+    /// The opened-account range must never EXCLUDE a covering account.
+    ///
+    /// The budget's OWN account is deliberately not opened: that forces the
+    /// range to reach past a sibling to find the children, which is where the
+    /// bound matters. `'0'` (0x30) and `'-'` (0x2D) sort below `':'` (0x3A), so
+    /// `Expenses:Food0` lands between `Expenses:Food` and its children. A scan
+    /// that stops at the first non-covering account finds nothing at all here,
+    /// and a budget whose every covering account has closed goes unreported.
+    ///
+    /// An earlier version of this test opened every account including the
+    /// budget's own, so the range never had to travel — and it passed against
+    /// the broken form. Verified by applying that form and watching this fail.
+    #[test]
+    fn the_opened_range_never_hides_a_covering_account() {
+        let b = Budgets::new(vec![budget(d(2024, 1, 1), "Expenses:Food", "USD")]);
+        // Siblings that sort INSIDE the parent's byte range, then the real
+        // children behind them. `Expenses:Food` itself is never opened.
+        let dirs = vec![
+            open(d(2024, 1, 1), "Expenses:Food0"),
+            open(d(2024, 1, 1), "Expenses:Food-Bar"),
+            open(d(2024, 1, 1), "Expenses:Food:Restaurant"),
+            close(d(2024, 2, 1), "Expenses:Food:Restaurant"),
+        ];
+        let got = closed_account_errors(&dirs, &b, d(2024, 4, 1), true);
+        assert_eq!(
+            got.len(),
+            1,
+            "the only covering account closed, so this must warn — finding \
+             nothing means the range stopped at a sibling"
+        );
+        assert!(
+            got[0].reason.contains("Expenses:Food:Restaurant"),
+            "{:?}",
+            got[0]
+        );
+
+        // ...and the siblings are NOT covering, so closing them changes nothing
+        // while a real child stays open.
+        let sibling_closed = vec![
+            open(d(2024, 1, 1), "Expenses:Food0"),
+            close(d(2024, 2, 1), "Expenses:Food0"),
+            open(d(2024, 1, 1), "Expenses:Food:Restaurant"),
+        ];
+        assert!(
+            closed_account_errors(&sibling_closed, &b, d(2024, 4, 1), true).is_empty(),
+            "a closed SIBLING is not a closed covering account"
+        );
+    }
+
     /// Every diagnostic's window bound is EXCLUSIVE at `to`: a budget or a close
     /// dated exactly on it contributes nothing to this report and must not be
     /// judged by it. Only a date ON the bound separates `<` from `<=`.

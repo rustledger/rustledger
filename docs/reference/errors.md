@@ -29,6 +29,7 @@ Format: `file:line: error[code]: message`
 | E7xxx | Option errors |
 | E8xxx | Document errors |
 | E10xxx | Date warnings/info |
+| E11xxx | Budget errors |
 
 ## Account Errors (E1xxx)
 
@@ -236,6 +237,22 @@ Or use `rledger doctor missing-open` to generate them.
 **Cause**: A `commodity` directive has invalid `precision` metadata.
 
 **Fix**: Correct the `precision` metadata value on the commodity directive.
+
+
+## Budget Errors (E11xxx)
+
+### E11001: Malformed Budget Directive (Warning)
+
+A `custom "budget"` directive has Fava's shape but carries content rledger cannot use, so `rledger report budget` ignores it.
+
+```beancount
+2024-01-01 custom "budget" Expenses:Food "fortnightly" 400.00 USD   ; not an interval keyword
+2024-01-01 custom "budget" Expenses:Food "monthly" 400.00 USD 300.00 EUR  ; two amounts
+```
+
+**Fix:** use one of `daily`, `weekly`, `monthly`, `quarterly` or `yearly` (each also accepted as the bare noun), and write one budget per directive.
+
+Only the confident cases are reported. A `custom "budget"` whose payload does not have the positional shape `<Account> "<interval>" <amount>` is NOT flagged: `custom` is beancount's open extension point and the name is not rledger's alone — beancount's own documented example is `custom "budget" "weekly < 1000.00 USD" 2016-02-28 TRUE 43.03 USD 23`. `rledger report budget` still reports those, because a user who asked about budgets is owed the news that one could not be read.
 
 ## Option Errors (E7xxx)
 

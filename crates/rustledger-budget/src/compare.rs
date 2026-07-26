@@ -39,6 +39,24 @@ pub struct BudgetRow {
     pub actual: Option<Decimal>,
 }
 
+/// Fraction of a budget used, `None` when nothing was budgeted — which is a
+/// division by zero, not 0% and not 100%.
+///
+/// Free function because a row and a total answer it identically and neither
+/// owns the rule. The total used to borrow the row's by CONSTRUCTING a throwaway
+/// `BudgetRow` around a dummy account, which is a lot of ceremony to reach four
+/// lines of arithmetic — and it made the total's behavior depend on a type it
+/// has nothing to do with.
+fn used_fraction(budgeted: Option<Decimal>, actual: Option<Decimal>) -> Option<f64> {
+    let budgeted = budgeted?;
+    if budgeted.is_zero() {
+        return None;
+    }
+    let b: f64 = budgeted.try_into().ok()?;
+    let a: f64 = actual?.try_into().ok()?;
+    Some(a / b)
+}
+
 impl BudgetRow {
     /// Budget minus actual. Positive is under budget, negative over.
     #[must_use]
@@ -50,13 +68,7 @@ impl BudgetRow {
     /// a division by zero, not 0% and not 100%.
     #[must_use]
     pub fn used_fraction(&self) -> Option<f64> {
-        let budgeted = self.budgeted?;
-        if budgeted.is_zero() {
-            return None;
-        }
-        let b: f64 = budgeted.try_into().ok()?;
-        let a: f64 = self.actual?.try_into().ok()?;
-        Some(a / b)
+        used_fraction(self.budgeted, self.actual)
     }
 }
 
@@ -133,13 +145,7 @@ impl BudgetTotal {
     /// Fraction of the budget used — see [`BudgetRow::used_fraction`].
     #[must_use]
     pub fn used_fraction(&self) -> Option<f64> {
-        BudgetRow {
-            account: Account::new(""),
-            currency: self.currency.clone(),
-            budgeted: self.budgeted,
-            actual: self.actual,
-        }
-        .used_fraction()
+        used_fraction(self.budgeted, self.actual)
     }
 }
 
@@ -245,7 +251,7 @@ fn covering_accounts(posting_account: &str, children: bool) -> impl Iterator<Ite
 /// budgeting hundreds of accounts, because both the rows and the totals do it
 /// once per posting account.
 #[must_use]
-pub fn clip_start(
+fn clip_start(
     budgets: &Budgets,
     scope: &BTreeSet<Account>,
     posting_account: &str,
@@ -385,45 +391,49 @@ impl Budgets {
         let budget_accounts: BTreeSet<Account> =
             self.entries().map(|b| b.account.clone()).collect();
 
-        let keys: Vec<(Account, Currency)> = if children {
-            // Live when a budget in the row's SUBTREE is live — which is the
-            // contiguous range above, not a scan of every declaration. Asking
-            // each key against all budgets was quadratic in the number of
-            // budgeted accounts.
+        // Each key with the budgeted accounts it answers for, resolved ONCE.
+        // Liveness and the covered set are the same subtree walk asking two
+        // questions ("is any of these live?" and "which are they?"), and doing
+        // it twice per key doubled the dominant term of the whole comparison.
+        let keys: Vec<((Account, Currency), BTreeSet<Account>)> = if children {
+            // A row is live when a budget it COVERS is live, which under
+            // `children` is not the same as the account's own declarations
+            // being live: a parent whose own budget starts next year still
+            // aggregates a child budget running now. Row identities still come
+            // from declared pairs, so no row is invented for an account nobody
+            // budgeted in that currency.
             self.all_keys()
                 .into_iter()
-                .filter(|(account, currency)| {
-                    subtree_range(&budget_accounts, account)
-                        .filter(|a| covers(account.as_str(), a.as_str(), true))
-                        .any(|a| {
-                            self.effective_start(a.as_str(), currency.as_str())
-                                .is_some_and(|start| start < to)
-                        })
-                })
-                .collect()
-        } else {
-            self.keys_in_force_before(to)
-        };
-
-        let mut rows: Vec<BudgetRow> = keys
-            .into_iter()
-            .filter(|(account, _)| passes_account_filter(account.as_str(), account_filter))
-            .map(|(account, currency)| {
-                // The budgeted accounts this row answers for. Under `children`
-                // that is every budget in the row's subtree; otherwise just the
-                // row's own account.
-                let covered: BTreeSet<Account> = if children {
-                    subtree_range(&budget_accounts, &account)
+                .filter_map(|(account, currency)| {
+                    let covered: BTreeSet<Account> = subtree_range(&budget_accounts, &account)
                         .filter(|a| covers(account.as_str(), a.as_str(), true))
                         .filter(|a| {
                             self.effective_start(a.as_str(), currency.as_str())
                                 .is_some()
                         })
                         .cloned()
-                        .collect()
-                } else {
-                    std::iter::once(account.clone()).collect()
-                };
+                        .collect();
+                    let live = covered.iter().any(|a| {
+                        self.effective_start(a.as_str(), currency.as_str())
+                            .is_some_and(|start| start < to)
+                    });
+                    live.then_some(((account, currency), covered))
+                })
+                .collect()
+        } else {
+            self.keys_in_force_before(to)
+                .into_iter()
+                .map(|(account, currency)| {
+                    let covered = std::iter::once(account.clone()).collect();
+                    ((account, currency), covered)
+                })
+                .collect()
+        };
+
+        let mut rows: Vec<BudgetRow> = keys
+            .into_iter()
+            .filter(|((account, _), _)| passes_account_filter(account.as_str(), account_filter))
+            .map(|((account, currency), covered)| {
                 let budgeted: Option<Decimal> = covered
                     .iter()
                     .map(|a| self.accrue(a.as_str(), currency.as_str(), from, to))

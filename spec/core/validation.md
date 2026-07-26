@@ -310,7 +310,7 @@ This document catalogs all validation errors and warnings with their trigger con
 
 ### MALFORMED_BUDGET
 
-**Code:** `E6001`
+**Code:** `E11001`
 
 **Condition:** A `custom "budget"` directive that HAS Fava's shape carries content rustledger cannot use, so it is ignored by `rledger report budget`.
 

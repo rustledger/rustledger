@@ -43,8 +43,7 @@
 mod compare;
 mod diagnostics;
 pub use compare::{
-    Bucket, BudgetRow, BudgetTotal, Comparison, clip_start, normalized_actual,
-    passes_account_filter,
+    Bucket, BudgetRow, BudgetTotal, Comparison, normalized_actual, passes_account_filter,
 };
 pub use diagnostics::{
     closed_account_errors, diagnostics, mismatched_currency_errors, unopened_account_errors,
@@ -369,7 +368,15 @@ pub struct Budgets {
     /// comparison accrues once per (row, covered account). On a ledger
     /// budgeting 1600 accounts that product dominated the whole report.
     /// Indexed, each lookup is a binary search over one account's own history.
-    by_key: BTreeMap<(Account, Currency), Vec<u32>>,
+    /// NESTED rather than keyed by an `(Account, Currency)` tuple, because a
+    /// tuple key cannot be borrowed from a pair of `&str`. With the tuple, every
+    /// lookup called `Account::new(account)` — and `InternedStr::new` takes
+    /// `impl Into<Arc<str>>`, so from a `&str` that is a fresh HEAP ALLOCATION,
+    /// not an interner hit (interning happens in the loader's dedup pass). The
+    /// indexes added to remove per-lookup scans were charging a pair of
+    /// allocations instead. `Account: Borrow<str>` with a lexicographic `Ord`,
+    /// so nested maps take `&str` directly and allocate nothing.
+    by_key: BTreeMap<Account, BTreeMap<Currency, Vec<u32>>>,
     /// Earliest `from` per `(account, currency)`, precomputed.
     ///
     /// [`Self::effective_start`] is called once per (row, posting-account) pair
@@ -377,7 +384,7 @@ pub struct Budgets {
     /// the dominant term: on a ledger budgeting 1600 accounts the comparison
     /// spent seconds here. It cannot go stale — `Budgets` is immutable once
     /// built, and both constructors go through [`Self::index`].
-    starts: BTreeMap<(Account, Currency), NaiveDate>,
+    starts: BTreeMap<Account, BTreeMap<Currency, NaiveDate>>,
 }
 
 impl Budgets {
@@ -400,12 +407,13 @@ impl Budgets {
     /// Build the derived indexes. The ONE place they are computed, so a second
     /// constructor cannot forget one.
     fn index(entries: Vec<BudgetEntry>) -> Self {
-        let mut starts: BTreeMap<(Account, Currency), NaiveDate> = BTreeMap::new();
-        let mut by_key: BTreeMap<(Account, Currency), Vec<u32>> = BTreeMap::new();
+        let mut starts: BTreeMap<Account, BTreeMap<Currency, NaiveDate>> = BTreeMap::new();
+        let mut by_key: BTreeMap<Account, BTreeMap<Currency, Vec<u32>>> = BTreeMap::new();
         for (i, e) in entries.iter().enumerate() {
-            let key = (e.account.clone(), e.currency.clone());
             starts
-                .entry(key.clone())
+                .entry(e.account.clone())
+                .or_default()
+                .entry(e.currency.clone())
                 .and_modify(|d| *d = (*d).min(e.from))
                 .or_insert(e.from);
             // `entries` is sorted by `from` before indexing, so each key's
@@ -413,7 +421,12 @@ impl Budgets {
             // the binary searches below valid. A ledger cannot hold u32::MAX
             // budget directives.
             if let Ok(i) = u32::try_from(i) {
-                by_key.entry(key).or_default().push(i);
+                by_key
+                    .entry(e.account.clone())
+                    .or_default()
+                    .entry(e.currency.clone())
+                    .or_default()
+                    .push(i);
             }
         }
         Self {
@@ -426,7 +439,8 @@ impl Budgets {
     /// The entries for one `(account, currency)`, in effective-date order.
     fn history(&self, account: &str, currency: &str) -> &[u32] {
         self.by_key
-            .get(&(Account::new(account), Currency::new(currency)))
+            .get(account)
+            .and_then(|by_ccy| by_ccy.get(currency))
             .map_or(&[][..], Vec::as_slice)
     }
 
@@ -467,15 +481,18 @@ impl Budgets {
     /// exclusive end: a budget written today does not apply to last year.
     #[must_use]
     pub fn keys_in_force_before(&self, before: NaiveDate) -> Vec<(Account, Currency)> {
-        let mut keys: Vec<(Account, Currency)> = self
-            .entries
+        // Read off `starts`, which is already the deduplicated key set in sorted
+        // order with each key's earliest date. Rebuilding it by cloning every
+        // entry and sorting was redundant work on a structure that exists.
+        self.starts
             .iter()
-            .filter(|e| e.from < before)
-            .map(|e| (e.account.clone(), e.currency.clone()))
-            .collect();
-        keys.sort();
-        keys.dedup();
-        keys
+            .flat_map(|(account, by_ccy)| {
+                by_ccy
+                    .iter()
+                    .filter(|(_, first)| **first < before)
+                    .map(move |(currency, _)| (account.clone(), currency.clone()))
+            })
+            .collect()
     }
 
     /// Every distinct `(account, currency)` ever declared, regardless of date.
@@ -486,14 +503,14 @@ impl Budgets {
     /// at each account's own declarations.
     #[must_use]
     pub fn all_keys(&self) -> Vec<(Account, Currency)> {
-        let mut keys: Vec<(Account, Currency)> = self
-            .entries
+        self.starts
             .iter()
-            .map(|e| (e.account.clone(), e.currency.clone()))
-            .collect();
-        keys.sort();
-        keys.dedup();
-        keys
+            .flat_map(|(account, by_ccy)| {
+                by_ccy
+                    .keys()
+                    .map(move |currency| (account.clone(), currency.clone()))
+            })
+            .collect()
     }
 
     /// Whether any budget takes effect before `before`.
@@ -523,10 +540,11 @@ impl Budgets {
     /// credits nothing before a budget exists.
     #[must_use]
     pub fn effective_start(&self, account: &str, currency: &str) -> Option<NaiveDate> {
-        // Indexed, not scanned — see `starts`. Borrowing the key would need an
-        // owned pair anyway, so the interned clones are the cheap part.
+        // Indexed, not scanned — see `starts`. Borrowed all the way down: this
+        // is called once per (row, posting account) pair and must not allocate.
         self.starts
-            .get(&(Account::new(account), Currency::new(currency)))
+            .get(account)
+            .and_then(|by_ccy| by_ccy.get(currency))
             .copied()
     }
 

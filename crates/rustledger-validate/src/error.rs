@@ -67,8 +67,8 @@ pub enum ErrorCode {
     /// E5003: Invalid `precision` metadata on commodity directive (warning).
     InvalidPrecisionMetadata,
 
-    // === Budget Errors (E6xxx) ===
-    /// E6001: Malformed `custom "budget"` directive (warning).
+    // === Budget Errors (E11xxx) ===
+    /// E11001: Malformed `custom "budget"` directive (warning).
     MalformedBudget,
 
     // === Option Errors (E7xxx) ===
@@ -154,8 +154,12 @@ impl ErrorCode {
             Self::UndeclaredCurrency => "E5001",
             Self::CurrencyNotAllowed => "E5002",
             Self::InvalidPrecisionMetadata => "E5003",
-            // Budget errors
-            Self::MalformedBudget => "E6001",
+            // Budget errors. E6xxx is RESERVED for metadata errors by
+            // docs/reference/errors.md and left alone, even though nothing uses
+            // it yet — the one metadata error that exists (E5003) was filed
+            // under currency. Taking a reserved range quietly is how two
+            // categories end up sharing one prefix.
+            Self::MalformedBudget => "E11001",
             // Option errors
             Self::UnknownOption => "E7001",
             Self::InvalidOptionValue => "E7002",

@@ -1901,7 +1901,7 @@ impl SessionState {
     /// `session.budget` — budgeted vs actual over the held ledger (WIT 3.10.0).
     ///
     /// The engine is [`rustledger_budget`], the same crate the CLI report and
-    /// `rledger check`'s E6001 use, so a host cannot get a different answer
+    /// `rledger check`'s E11001 use, so a host cannot get a different answer
     /// from the one `rledger report budget` prints on the same ledger. Nothing
     /// about supersession, calendar anchoring or the pro-rata accrual is
     /// re-derived here; this function only converts.
@@ -1964,12 +1964,19 @@ impl SessionState {
                 .totals
                 .iter()
                 .map(|t| out::BudgetTotal {
-                    // The account TYPE, lowercased, not the ledger's configured
-                    // root name: a host switching on this must not have to know
-                    // whether the ledger said `option "name_expenses"`.
+                    // The account TYPE, not the ledger's configured root name:
+                    // a host switching on this must not have to know whether
+                    // the ledger said `option "name_expenses"`.
+                    //
+                    // Through `AccountTypeKind::as_str`, the same table
+                    // `util.get-account-type` answers from — `format!("{k:?}")`
+                    // agreed by coincidence and would have changed the wire the
+                    // day someone renamed a variant. A root outside the five is
+                    // lowercased too, so two totals can never differ only in
+                    // case.
                     kind: match &t.bucket {
-                        rustledger_budget::Bucket::Typed(k) => format!("{k:?}").to_lowercase(),
-                        rustledger_budget::Bucket::Other(root) => root.as_str().to_string(),
+                        rustledger_budget::Bucket::Typed(k) => k.as_str().to_string(),
+                        rustledger_budget::Bucket::Other(root) => root.as_str().to_lowercase(),
                     },
                     currency: t.currency.as_str().to_string(),
                     budgeted: amount(t.budgeted),

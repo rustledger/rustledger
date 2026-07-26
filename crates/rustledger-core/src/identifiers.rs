@@ -340,6 +340,7 @@ pub const ACCOUNT_TYPES: [&str; 5] = ["Assets", "Liabilities", "Equity", "Income
 /// income, expenses), so anything grouped by kind — a totals bucket, a report
 /// section — sorts the way a reader expects rather than alphabetically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[allow(clippy::exhaustive_enums)]
 pub enum AccountTypeKind {
     /// Assets (debit-normal, balance sheet).
     Assets,
@@ -385,6 +386,27 @@ impl Default for AccountTypes {
             equity: "Equity".to_string(),
             income: "Income".to_string(),
             expenses: "Expenses".to_string(),
+        }
+    }
+}
+
+impl AccountTypeKind {
+    /// The canonical lowercase name for this kind.
+    ///
+    /// THE wire vocabulary: [`account_type`] and the component's
+    /// `util.get-account-type` answer with these exact strings, so anything
+    /// crossing a boundary must use this rather than formatting the enum.
+    /// `format!("{kind:?}").to_lowercase()` happens to agree today and is a
+    /// silent renaming hazard — a variant renamed for Rust's benefit would
+    /// change a wire value nobody meant to touch.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Assets => "assets",
+            Self::Liabilities => "liabilities",
+            Self::Equity => "equity",
+            Self::Income => "income",
+            Self::Expenses => "expenses",
         }
     }
 }
@@ -477,11 +499,11 @@ impl AccountTypes {
 #[must_use]
 pub fn account_type(account: &str) -> &'static str {
     match account.split(':').next() {
-        Some("Assets") => "assets",
-        Some("Liabilities") => "liabilities",
-        Some("Equity") => "equity",
-        Some("Income") => "income",
-        Some("Expenses") => "expenses",
+        Some("Assets") => AccountTypeKind::Assets.as_str(),
+        Some("Liabilities") => AccountTypeKind::Liabilities.as_str(),
+        Some("Equity") => AccountTypeKind::Equity.as_str(),
+        Some("Income") => AccountTypeKind::Income.as_str(),
+        Some("Expenses") => AccountTypeKind::Expenses.as_str(),
         _ => "unknown",
     }
 }

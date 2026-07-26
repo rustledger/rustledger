@@ -1140,11 +1140,6 @@ impl ValidationSession<LateDone> {
     }
 }
 
-/// Validate the rledger-specific `precision` metadata key on a commodity directive.
-///
-/// Per #991, `precision: N` on a `commodity` directive sets a fixed display
-/// precision for that currency. The loader silently ignores invalid values;
-/// this validator is the channel that surfaces the problem to the user.
 /// Report a `custom "budget"` directive that cannot be read.
 ///
 /// Budget directives were previously parsed only inside `report budget`, so a
@@ -1154,7 +1149,7 @@ impl ValidationSession<LateDone> {
 /// single consumer instead of the shared pipeline is a defect category this
 /// repo has hit before.
 ///
-/// The verdict comes from [`rustledger_budget::budget_entry`], the same reader
+/// The verdict comes from [`rustledger_budget::read_budget`], the same reader
 /// the report uses, so the two cannot disagree about what a valid budget is.
 ///
 /// A WARNING, not an error: `custom` is beancount's open extension point, and
@@ -1177,6 +1172,11 @@ fn validate_budget_custom(custom: &rustledger_core::Custom, errors: &mut Vec<Val
     }
 }
 
+/// Validate the rledger-specific `precision` metadata key on a commodity directive.
+///
+/// Per #991, `precision: N` on a `commodity` directive sets a fixed display
+/// precision for that currency. The loader silently ignores invalid values;
+/// this validator is the channel that surfaces the problem to the user.
 fn validate_commodity_precision_meta(comm: &Commodity, errors: &mut Vec<ValidationError>) {
     let Some(value) = comm.meta.get("precision") else {
         return;
@@ -3560,7 +3560,7 @@ mod budget_validation_tests {
         );
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0].code, ErrorCode::MalformedBudget);
-        assert_eq!(errors[0].code.code(), "E6001");
+        assert_eq!(errors[0].code.code(), "E11001");
         // A WARNING: `custom` is an open extension point, and failing the ledger
         // would be rustledger claiming a name it does not own.
         assert_eq!(errors[0].code.severity(), Severity::Warning);

@@ -143,9 +143,20 @@ impl NativePlugin for CurrencyAccountsPlugin {
 
             // `weight(posting)` returns (amount, currency), delegating the
             // arithmetic to the booking crate's single-source weight ladder
-            // (`cost_number_weight` / `price_weight` — the exact rule the
-            // balance validator's residual uses), after parsing this DTO's
-            // string numbers. The `CostNumberData` → `CostNumber` mapping is
+            // (`cost_number_weight` / `price_weight`), after parsing this DTO's
+            // string numbers.
+            //
+            // The ARITHMETIC is shared; the LADDER is not the balance
+            // validator's. `residual_weight` differs deliberately — it does not
+            // infer a cost number that carries no currency, and it does not let
+            // a bare `{}` fall through to a price — because #1026 turns on
+            // that. This comment previously claimed it was "the exact rule the
+            // balance validator's residual uses", which would send someone
+            // chasing a `weight`-vs-`rledger check` disagreement into aligning
+            // the residual and flipping E3001 for every ledger holding a
+            // bare-cost-plus-price posting. This copy also differs from
+            // `rustledger_booking::posting_weight` for the same two shapes;
+            // see that function's docs for the other half of the pair. The `CostNumberData` → `CostNumber` mapping is
             // an exhaustive match, so future variant additions still
             // compile-fail here, which is what we want.
             //   - Cost: canonical cost weight in cost.currency (preserved

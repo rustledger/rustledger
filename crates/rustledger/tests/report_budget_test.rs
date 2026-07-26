@@ -2678,7 +2678,7 @@ fn check_does_not_claim_another_tools_custom_budget() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(
-            !combined.contains("E6001"),
+            !combined.contains("E11001"),
             "check must not claim the `custom \"budget\"` namespace: {combined}"
         );
     }
@@ -2698,5 +2698,5 @@ fn check_does_not_claim_another_tools_custom_budget() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(combined.contains("E6001"), "{combined}");
+    assert!(combined.contains("E11001"), "{combined}");
 }

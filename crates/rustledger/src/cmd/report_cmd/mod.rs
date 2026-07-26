@@ -279,7 +279,16 @@ pub fn run(
     // Always restore the terminal (drop the pager) even if rendering fails,
     // so a write error mid-report doesn't leave the terminal stuck in pager
     // mode.
-    let result = render(&loaded, report, file, format, &mut writer);
+    let result = // The terminal path sends diagnostics to stderr, where they
+    // interleave with the table above them.
+    render(
+        &loaded,
+        report,
+        file,
+        format,
+        &mut writer,
+        &mut io::stderr(),
+    );
     writer.finish();
     result
 }
@@ -294,18 +303,30 @@ pub fn run(
 /// stderr. The on-disk parse cache stays enabled: the load phase is always
 /// invoked with `no_cache = false` (this entry point takes no `no_cache`
 /// parameter).
+/// `warnings` receives the report's diagnostics — budgets on accounts that are
+/// never opened, figures too large to represent, and the like.
+///
+/// A parameter rather than `eprintln!` because a report's warnings are part of
+/// its answer, and the caller decides where they belong. The CLI sends them to
+/// stderr, where a terminal interleaves them with the table. `ag-rledger`
+/// buffers them into its JSON envelope, which drops the process's real stderr —
+/// so before this, an agent asking for a text or CSV budget report received a
+/// tidy `0.0%`-used row for a budget on a misspelled account with nothing
+/// saying so. That is the silent misreport the diagnostics exist to catch,
+/// reintroduced on the one surface that cannot see past it.
 pub fn run_with_writer<W: io::Write>(
     file: &PathBuf,
     report: &Report,
     verbose: bool,
     format: &OutputFormat,
     out: &mut W,
+    warnings: &mut dyn io::Write,
 ) -> Result<()> {
     // Existence-check → load → render(buffer): the same two-phase split the
     // production `run()` uses, minus the pager. Producing identical report
     // bytes is guaranteed because both paths funnel through `load` + `render`.
     let loaded = load(file, report, verbose, false)?;
-    render(&loaded, report, file, format, out)
+    render(&loaded, report, file, format, out, warnings)
 }
 
 /// Loaded directive views, the output of the load phase of a report.
@@ -455,6 +476,7 @@ fn render<W: io::Write>(
     file: &PathBuf,
     format: &OutputFormat,
     writer: &mut W,
+    warnings: &mut dyn io::Write,
 ) -> Result<()> {
     let directives = &loaded.directives;
 
@@ -558,6 +580,7 @@ fn render<W: io::Write>(
                 &loaded.display_context,
                 format,
                 writer,
+                warnings,
             )?;
             // The report is already written. A partial `--by-group` report exits
             // non-zero so a pipeline gating on exit status does not treat an
@@ -603,6 +626,7 @@ fn render<W: io::Write>(
                 &loaded.display_context,
                 format,
                 writer,
+                warnings,
             )?;
         }
         Report::Budget {
@@ -662,6 +686,7 @@ fn render<W: io::Write>(
                 &loaded.display_context,
                 format,
                 writer,
+                warnings,
             )?;
         }
     }

@@ -394,6 +394,7 @@ pub(super) fn report_returns<W: Write>(
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
+    warnings: &mut dyn Write,
 ) -> Result<ReturnsOutcome> {
     // Reporting currency: --currency, else the ledger's first operating currency,
     // else an actionable error (the return is single-currency by construction).
@@ -430,13 +431,14 @@ pub(super) fn report_returns<W: Write>(
     // Grouping is opt-in; warnings (bad tags, overlaps, non-self-contained
     // groups) go to stderr so they never pollute the report on stdout.
     let group_scopes = build_groups(directives, &whole_scope, end_date, &mut |w| {
-        eprintln!("warning: {w}");
+        let _ = writeln!(warnings, "warning: {w}");
     });
     if group_scopes.is_empty() {
         // Still emit the grouped shape (an empty `groups` list plus the TOTAL):
         // `--by-group` must produce one stable schema regardless of ledger
         // content, so a JSON/CSV consumer never has to branch on it.
-        eprintln!(
+        let _ = writeln!(
+            warnings,
             "warning: --by-group but no in-scope `returns-group:` metadata found; reporting only the whole-portfolio total"
         );
         // No groups to partially render, so an unvaluable TOTAL still fails loudly
@@ -497,7 +499,8 @@ pub(super) fn report_returns<W: Write>(
                 // lines (same guard the grouping warnings use). The error text is
                 // grammar-constrained (account names / currencies), so it needs no
                 // sanitizing.
-                eprintln!(
+                let _ = writeln!(
+                    warnings,
                     "warning: returns for {} are unavailable: {e}",
                     sanitize_display(&label)
                 );
@@ -1190,6 +1193,7 @@ mod tests {
             &ctx,
             &OutputFormat::Text,
             &mut out,
+            &mut Vec::new(),
         );
         // The report is written AND the outcome reports it is partial (2 of 3
         // scopes unvaluable: Broken and TOTAL). The non-zero exit is the CLI

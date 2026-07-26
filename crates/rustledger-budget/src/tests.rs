@@ -937,3 +937,135 @@ fn the_indexed_lookups_agree_with_a_linear_scan() {
         Some(Decimal::from(300))
     );
 }
+
+/// The `Empty` diagnosis, at the level that owns it.
+///
+/// Three different answers — "you have no budgets", "yours start later than
+/// this window", "your filter excluded them all" — and telling a user with
+/// budgets that they have none sends them looking for a parsing bug that is not
+/// there. The `code` is what a dashboard branches on, so each must differ.
+#[test]
+fn an_empty_report_says_which_kind_of_empty() {
+    use rustledger_core::AccountTypes;
+    let types = AccountTypes::default();
+    let window = |b: &Budgets, filter: Option<&str>, to: NaiveDate| {
+        b.compare(&[], &types, d(2024, 1, 1), to, false, filter)
+            .empty
+    };
+
+    // Nothing declared at all.
+    let none = Budgets::new(vec![]);
+    assert_eq!(
+        window(&none, None, d(2024, 2, 1)),
+        Some(Empty::NoneDeclared)
+    );
+
+    // Declared, but every one starts on or after the exclusive end. The bound
+    // is what `<` vs `<=` turns on: a budget dated ON `to` is not in force.
+    let later = Budgets::new(vec![budget(
+        d(2024, 6, 1),
+        "Expenses:Food",
+        Interval::Month,
+        400,
+    )]);
+    assert_eq!(
+        window(&later, None, d(2024, 6, 1)),
+        Some(Empty::NoneInWindow {
+            earliest: d(2024, 6, 1)
+        }),
+        "a budget starting exactly on the exclusive end is not in force"
+    );
+    // One day past it, the budget IS in force, so the report is not empty.
+    assert_eq!(window(&later, None, d(2024, 6, 2)), None);
+
+    // In force, but the filter excluded them.
+    assert_eq!(
+        window(&later, Some("Income"), d(2024, 7, 1)),
+        Some(Empty::FilteredOut)
+    );
+
+    // Every code is distinct — they are the machine-readable half.
+    let codes = [
+        Empty::NoneDeclared.code(),
+        Empty::AllRejected { shown: true }.code(),
+        Empty::NoneInWindow {
+            earliest: d(2024, 1, 1),
+        }
+        .code(),
+        Empty::FilteredOut.code(),
+    ];
+    let unique: std::collections::BTreeSet<_> = codes.iter().collect();
+    assert_eq!(unique.len(), codes.len(), "{codes:?}");
+    assert_eq!(codes[0], "none_declared");
+    assert_eq!(codes[1], "all_rejected");
+    assert_eq!(codes[2], "none_in_window");
+    assert_eq!(codes[3], "filtered_out");
+}
+
+/// A directive that names something unusable quotes it back, so the user can
+/// find the line. The value is rendered, not `Debug`-formatted: a diagnostic
+/// reading `String("Expenses:food")` leaks Rust type names at a user.
+#[test]
+fn an_unusable_account_is_quoted_back_readably() {
+    use rustledger_core::{Amount, Custom, MetaValue};
+    let mut c = Custom::new(d(2024, 1, 1), "budget");
+    c.values = vec![
+        MetaValue::String("Expenses:food".to_string()),
+        MetaValue::String("monthly".to_string()),
+        MetaValue::Amount(Amount::new(Decimal::from(400), "USD")),
+    ];
+    let BudgetRead::Invalid(e) = read_budget(&c) else {
+        panic!("a Fava-shaped directive with a bad account is ours to report");
+    };
+    assert!(
+        e.reason.contains(r#""Expenses:food""#),
+        "the offending text must appear verbatim: {}",
+        e.reason
+    );
+    assert!(
+        !e.reason.contains("String("),
+        "rendered, not Debug-formatted: {}",
+        e.reason
+    );
+}
+
+/// `AllRejected { shown }` distinguishes "each rejection is on screen" from
+/// "your filter removed them" — the two get different advice, and the second
+/// must not tell the user to look at warnings that are not there.
+#[test]
+fn all_rejected_says_whether_the_warnings_survived_the_filter() {
+    use rustledger_core::{AccountTypes, Amount, Custom, MetaValue};
+    let types = AccountTypes::default();
+    let bad = |account: &str| {
+        let mut c = Custom::new(d(2024, 1, 1), "budget");
+        c.values = vec![
+            MetaValue::Account(Account::new(account)),
+            MetaValue::String("fortnightly".to_string()),
+            MetaValue::Amount(Amount::new(Decimal::from(400), "USD")),
+        ];
+        Directive::Custom(c)
+    };
+    let dirs = vec![bad("Expenses:Food")];
+    let b = Budgets::new(vec![]);
+    assert!(b.is_empty(), "the fixture must parse no usable budget");
+
+    let b = Budgets::from_directives(&dirs);
+    assert!(b.is_empty() && !b.errors().is_empty());
+
+    // Unfiltered: the rejection is on screen.
+    let seen = b.compare(&dirs, &types, d(2024, 1, 1), d(2024, 2, 1), false, None);
+    assert_eq!(seen.empty, Some(Empty::AllRejected { shown: true }));
+    assert_eq!(seen.errors.len(), 1);
+
+    // Filtered away: still all-rejected, but do not point at absent warnings.
+    let hidden = b.compare(
+        &dirs,
+        &types,
+        d(2024, 1, 1),
+        d(2024, 2, 1),
+        false,
+        Some("Income"),
+    );
+    assert_eq!(hidden.empty, Some(Empty::AllRejected { shown: false }));
+    assert!(hidden.errors.is_empty());
+}

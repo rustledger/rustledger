@@ -59,6 +59,7 @@ pub(super) fn report_budget<W: Write>(
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
+    warnings: &mut dyn Write,
 ) -> Result<()> {
     let budgets = Budgets::from_directives(directives);
 
@@ -102,7 +103,10 @@ pub(super) fn report_budget<W: Write>(
     // rendering diagnostic among them.
     errors.sort_by_key(|e| e.date);
     for e in &errors {
-        eprintln!("warning: {}: {}", e.date, e.reason);
+        // To the caller's sink, not the process's stderr: an agent envelope
+        // cannot see the latter, and a warning it cannot see is the silent
+        // misreport these exist to prevent.
+        writeln!(warnings, "warning: {}: {}", e.date, e.reason)?;
     }
     render(
         &Rendering { types, ctx, format },
@@ -113,6 +117,7 @@ pub(super) fn report_budget<W: Write>(
         &errors,
         &rounding,
         writer,
+        warnings,
     )
 }
 
@@ -282,6 +287,7 @@ struct Rendering<'a> {
     format: &'a OutputFormat,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render<W: Write>(
     env: &Rendering<'_>,
     rows: &[BudgetRow],
@@ -291,7 +297,10 @@ fn render<W: Write>(
     errors: &[BudgetError],
     rounding: &Rounding<'_>,
     writer: &mut W,
+    warnings: &mut dyn Write,
 ) -> Result<()> {
+    // 9 parameters is over the lint's threshold; every one is genuinely
+    // distinct here and bundling them would only move the list.
     let Rendering { types, ctx, format } = *env;
     let round_disp = |v: Decimal, ccy: &str| -> Decimal { rounding.round(v, ccy) };
     let round_row = |r: &BudgetRow| BudgetRow {
@@ -354,7 +363,7 @@ fn render<W: Write>(
             // not a data row. Without it three different empty reports were one
             // bare header line.
             if let Some(empty) = empty {
-                eprintln!("note: {}", empty_message(empty, filter));
+                writeln!(warnings, "note: {}", empty_message(empty, filter))?;
             }
             writeln!(
                 writer,

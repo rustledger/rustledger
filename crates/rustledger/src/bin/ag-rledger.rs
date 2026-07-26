@@ -205,9 +205,9 @@ fn report_command(name: &'static str, description: &'static str) -> Command {
             let built = build_report_args(req);
             Box::pin(async move {
                 let (file, report, verbose, format) = built?;
-                run_buffered("report", |out| {
+                run_buffered_with_warnings("report", |out, warnings| {
                     rustledger::cmd::report_cmd::run_with_writer(
-                        &file, &report, verbose, &format, out,
+                        &file, &report, verbose, &format, out, warnings,
                     )
                     .map(|()| 0)
                 })
@@ -958,10 +958,34 @@ fn run_buffered<F>(command: &str, run: F) -> Result<CommandOutput, CommandError>
 where
     F: FnOnce(&mut Vec<u8>) -> anyhow::Result<i32>,
 {
+    run_buffered_with_warnings(command, |out, _| run(out))
+}
+
+/// [`run_buffered`], for commands that also produce DIAGNOSTICS.
+///
+/// The envelope carries them in `warnings`. Reports write theirs to a sink
+/// rather than the process's stderr precisely so this can happen: an agent
+/// asking for a text or CSV budget report used to get a tidy `0.0%`-used row
+/// for a budget on a misspelled account, with the warning that says so written
+/// to a stream this envelope discards.
+fn run_buffered_with_warnings<F>(command: &str, run: F) -> Result<CommandOutput, CommandError>
+where
+    F: FnOnce(&mut Vec<u8>, &mut Vec<u8>) -> anyhow::Result<i32>,
+{
     let mut stdout = Vec::new();
-    let exit_code = run(&mut stdout).map_err(|e| command_failed(&e))?;
+    let mut warnings = Vec::new();
+    let exit_code = run(&mut stdout, &mut warnings).map_err(|e| command_failed(&e))?;
     let stdout = String::from_utf8_lossy(&stdout).into_owned();
-    let result = command_result(command, &stdout, exit_code);
+    let warnings = String::from_utf8_lossy(&warnings).into_owned();
+    let mut result = command_result(command, &stdout, exit_code);
+    if !warnings.trim().is_empty()
+        && let Value::Object(map) = &mut result
+    {
+        map.insert(
+            "warnings".to_string(),
+            json!(warnings.lines().collect::<Vec<_>>()),
+        );
+    }
     Ok(CommandOutput::new(result)
         .exit_code(exit_code)
         .next_action(NextAction::new(

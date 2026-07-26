@@ -116,11 +116,28 @@ pub fn closed_account_errors(
             // sibling that was still open. The relevant date is then the LAST
             // close, not the first, because spending remains possible until
             // every covering account has shut.
-            let covering: Vec<&str> = opened
-                .iter()
-                .copied()
-                .filter(|acct| covers(&b.account, acct, children))
-                .collect();
+            // The opened accounts in this budget's subtree, as an ordered RANGE
+            // rather than a scan of every account the ledger opens. Same bound
+            // and same reasoning as `subtree_range` in `compare`: `;` (0x3B) is
+            // the byte after `:`, so it admits every true subaccount, and
+            // `covers` still decides — a range that merely narrows cannot
+            // change the answer, and `take_while` here would be the bug that
+            // one already had.
+            let upper = format!("{};", b.account);
+            let covering: Vec<&str> = if children {
+                opened
+                    .range(b.account.as_str()..upper.as_str())
+                    .copied()
+                    .filter(|acct| covers(&b.account, acct, true))
+                    .collect()
+            } else {
+                // Exact match: a budget covers only its own account.
+                opened
+                    .get(b.account.as_str())
+                    .copied()
+                    .into_iter()
+                    .collect()
+            };
             if covering.is_empty() {
                 return None;
             }
@@ -347,4 +364,286 @@ fn unrepresentable_errors(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Bucket, BudgetEntry, BudgetRow, BudgetTotal, Interval};
+    use rust_decimal::Decimal;
+    use rustledger_core::{Close, Open, naive_date};
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        naive_date(y, m, day).unwrap()
+    }
+
+    fn budget(from: NaiveDate, account: &str, currency: &str) -> BudgetEntry {
+        BudgetEntry {
+            from,
+            account: Account::new(account),
+            interval: Interval::Month,
+            amount: Decimal::from(100),
+            currency: Currency::new(currency),
+        }
+    }
+
+    fn open(day: NaiveDate, account: &str) -> Directive {
+        Directive::Open(Open::new(day, account))
+    }
+
+    fn close(day: NaiveDate, account: &str) -> Directive {
+        Directive::Close(Close::new(day, account))
+    }
+
+    fn reasons(errors: &[BudgetError]) -> Vec<&str> {
+        errors.iter().map(|e| e.reason.as_str()).collect()
+    }
+
+    /// A budget on an account the ledger never opens is the worst kind of budget
+    /// bug: it parses, renders as a real row at 0.0% used, and the real spending
+    /// sits on the correctly spelled account the report omits for having no
+    /// budget.
+    #[test]
+    fn an_unopened_budgeted_account_is_reported() {
+        let dirs = vec![open(d(2024, 1, 1), "Expenses:Food")];
+        let b = Budgets::new(vec![
+            budget(d(2024, 1, 1), "Expenses:Food", "USD"),
+            budget(d(2024, 1, 1), "Expenses:Fodo", "USD"),
+        ]);
+        let got = unopened_account_errors(&dirs, &b, d(2024, 3, 1), false);
+        assert_eq!(got.len(), 1, "{:?}", reasons(&got));
+        assert!(got[0].reason.contains("Expenses:Fodo"), "{:?}", got[0]);
+
+        // A ledger with no `open` directives at all is not using them.
+        assert!(unopened_account_errors(&[], &b, d(2024, 3, 1), false).is_empty());
+
+        // Windowed: a budget declared at or after the exclusive end is not this
+        // report's business.
+        let later = Budgets::new(vec![budget(d(2099, 1, 1), "Expenses:Fodo", "USD")]);
+        assert!(unopened_account_errors(&dirs, &later, d(2024, 3, 1), false).is_empty());
+
+        // Under `--children` a parent budgeted as an aggregate is normal — its
+        // children answer it — but in the default mode it really does report
+        // nothing, so the exemption must NOT apply there.
+        let parent = Budgets::new(vec![budget(d(2024, 1, 1), "Expenses:Food", "USD")]);
+        let child_only = vec![open(d(2024, 1, 1), "Expenses:Food:Restaurant")];
+        assert!(unopened_account_errors(&child_only, &parent, d(2024, 3, 1), true).is_empty());
+        assert_eq!(
+            unopened_account_errors(&child_only, &parent, d(2024, 3, 1), false).len(),
+            1,
+            "without --children the parent's budget really does see nothing"
+        );
+    }
+
+    /// `close` means no further postings, so every day after it accrues budget
+    /// nothing can be spent against — the row reads as a large underspend.
+    #[test]
+    fn a_budget_outliving_its_account_is_reported() {
+        let dirs = vec![
+            open(d(2024, 1, 1), "Expenses:Food"),
+            close(d(2024, 2, 15), "Expenses:Food"),
+        ];
+        let b = Budgets::new(vec![budget(d(2024, 1, 1), "Expenses:Food", "USD")]);
+        let got = closed_account_errors(&dirs, &b, d(2024, 4, 1), false);
+        assert_eq!(got.len(), 1, "{:?}", reasons(&got));
+        assert!(got[0].reason.contains("keeps accruing"), "{:?}", got[0]);
+
+        // A budget declared AFTER the close can never see a posting at all —
+        // the worse case, and phrased differently.
+        let after = Budgets::new(vec![budget(d(2024, 3, 1), "Expenses:Food", "USD")]);
+        let got = closed_account_errors(&dirs, &after, d(2024, 4, 1), false);
+        assert!(got[0].reason.contains("can ever be booked"), "{:?}", got[0]);
+
+        // A close at or after the window's exclusive end strands nothing.
+        assert!(closed_account_errors(&dirs, &b, d(2024, 2, 1), false).is_empty());
+
+        // An account that never closes is unremarkable.
+        let never = vec![open(d(2024, 1, 1), "Expenses:Food")];
+        assert!(closed_account_errors(&never, &b, d(2024, 4, 1), false).is_empty());
+    }
+
+    /// ALL of a budget's covering accounts must be closed, not any: warning while
+    /// a sibling is still open would sit directly above a row showing spending
+    /// booked through it. The date is the LAST close, and the message names
+    /// whichever account it was.
+    #[test]
+    fn children_close_only_when_every_covering_account_has() {
+        let b = Budgets::new(vec![budget(d(2024, 1, 1), "Expenses:Food", "USD")]);
+        let one_open = vec![
+            open(d(2024, 1, 1), "Expenses:Food:Restaurant"),
+            open(d(2024, 1, 1), "Expenses:Food:Groceries"),
+            close(d(2024, 2, 10), "Expenses:Food:Restaurant"),
+        ];
+        assert!(
+            closed_account_errors(&one_open, &b, d(2024, 4, 1), true).is_empty(),
+            "spending can still be booked through the open sibling"
+        );
+
+        let mut both = one_open;
+        both.push(close(d(2024, 2, 20), "Expenses:Food:Groceries"));
+        let got = closed_account_errors(&both, &b, d(2024, 4, 1), true);
+        assert_eq!(got.len(), 1, "{:?}", reasons(&got));
+        // The LAST close, and the account it belongs to — not the budgeted
+        // account, which has no `close` directive of its own.
+        assert_eq!(got[0].date, d(2024, 2, 20));
+        assert!(
+            got[0].reason.contains("Expenses:Food:Groceries"),
+            "{:?}",
+            got[0]
+        );
+    }
+
+    /// A budget in a currency the account never posts reports no spending, and
+    /// looks exactly like an unspent budget.
+    #[test]
+    fn a_currency_the_account_never_posts_is_reported() {
+        let food = Account::new("Expenses:Food");
+        let usd = Currency::new("USD");
+        let posted: BTreeMap<&Account, BTreeSet<&Currency>> =
+            std::iter::once((&food, std::iter::once(&usd).collect())).collect();
+
+        let eur = Budgets::new(vec![budget(d(2024, 1, 1), "Expenses:Food", "EUR")]);
+        let got = mismatched_currency_errors(&posted, &eur, false, d(2024, 3, 1));
+        assert_eq!(got.len(), 1, "{:?}", reasons(&got));
+        assert!(got[0].reason.contains("only posts USD"), "{:?}", got[0]);
+
+        // The currency it does post is silent.
+        let ok = Budgets::new(vec![budget(d(2024, 1, 1), "Expenses:Food", "USD")]);
+        assert!(mismatched_currency_errors(&posted, &ok, false, d(2024, 3, 1)).is_empty());
+
+        // An account that posted NOTHING in the window is unspent, not a
+        // mismatch — warning there would name an empty list of currencies.
+        let other = Budgets::new(vec![budget(d(2024, 1, 1), "Expenses:Travel", "EUR")]);
+        assert!(mismatched_currency_errors(&posted, &other, false, d(2024, 3, 1)).is_empty());
+
+        // Windowed by the budget's own date, like the other two.
+        let later = Budgets::new(vec![budget(d(2099, 1, 1), "Expenses:Food", "EUR")]);
+        assert!(mismatched_currency_errors(&posted, &later, false, d(2024, 3, 1)).is_empty());
+    }
+
+    /// Every diagnostic's window bound is EXCLUSIVE at `to`: a budget or a close
+    /// dated exactly on it contributes nothing to this report and must not be
+    /// judged by it. Only a date ON the bound separates `<` from `<=`.
+    #[test]
+    fn the_window_bound_is_exclusive_in_every_diagnostic() {
+        let to = d(2024, 3, 1);
+        let on_bound = Budgets::new(vec![budget(to, "Expenses:Nosuch", "USD")]);
+        let inside = Budgets::new(vec![budget(d(2024, 2, 28), "Expenses:Nosuch", "USD")]);
+        let opened = vec![open(d(2024, 1, 1), "Expenses:Food")];
+        assert!(unopened_account_errors(&opened, &on_bound, to, false).is_empty());
+        assert_eq!(
+            unopened_account_errors(&opened, &inside, to, false).len(),
+            1
+        );
+
+        let food = Account::new("Expenses:Food");
+        let usd = Currency::new("USD");
+        let posted: BTreeMap<&Account, BTreeSet<&Currency>> =
+            std::iter::once((&food, std::iter::once(&usd).collect())).collect();
+        let eur_on = Budgets::new(vec![budget(to, "Expenses:Food", "EUR")]);
+        let eur_in = Budgets::new(vec![budget(d(2024, 2, 28), "Expenses:Food", "EUR")]);
+        assert!(mismatched_currency_errors(&posted, &eur_on, false, to).is_empty());
+        assert_eq!(
+            mismatched_currency_errors(&posted, &eur_in, false, to).len(),
+            1
+        );
+
+        // The closed check has TWO bounds: the close date and the budget's own.
+        let b = Budgets::new(vec![budget(d(2024, 1, 1), "Expenses:Food", "USD")]);
+        let close_on = vec![
+            open(d(2024, 1, 1), "Expenses:Food"),
+            close(to, "Expenses:Food"),
+        ];
+        let close_in = vec![
+            open(d(2024, 1, 1), "Expenses:Food"),
+            close(d(2024, 2, 28), "Expenses:Food"),
+        ];
+        assert!(closed_account_errors(&close_on, &b, to, false).is_empty());
+        assert_eq!(closed_account_errors(&close_in, &b, to, false).len(), 1);
+        let budget_on = Budgets::new(vec![budget(to, "Expenses:Food", "USD")]);
+        assert!(closed_account_errors(&close_in, &budget_on, to, false).is_empty());
+    }
+
+    /// `collect` is the one entry point, and it really does gather from every
+    /// source — the parse failures the index kept, the three report checks, and
+    /// the absent figures.
+    #[test]
+    fn collect_gathers_from_every_source() {
+        let types = AccountTypes::default();
+        let b = Budgets::new(vec![budget(d(2024, 1, 1), "Expenses:Fodo", "USD")]);
+        let dirs = vec![open(d(2024, 1, 1), "Expenses:Food")];
+        let comparison = Comparison {
+            rows: vec![BudgetRow {
+                account: Account::new("Expenses:Fodo"),
+                currency: Currency::new("USD"),
+                budgeted: None,
+                actual: Some(Decimal::ONE),
+            }],
+            totals: Vec::new(),
+            errors: Vec::new(),
+            empty: None,
+        };
+        let scope = Scope {
+            from: d(2024, 1, 1),
+            to: d(2024, 3, 1),
+            children: false,
+            account_filter: None,
+        };
+        let posted = BTreeMap::new();
+        let got = collect(&b, &dirs, &comparison, &types, &scope, &posted);
+        // The unopened-account warning AND the absent figure, in date order.
+        assert_eq!(got.len(), 2, "{:?}", reasons(&got));
+        assert!(got.iter().any(|e| e.reason.contains("no such account")));
+        assert!(
+            got.iter()
+                .any(|e| e.reason.contains("too large to represent"))
+        );
+    }
+
+    /// An absent figure is reported in band: without this a consumer sees a null
+    /// number with an empty error list and cannot tell an overflow from a bug in
+    /// its own parsing.
+    #[test]
+    fn an_absent_figure_is_explained() {
+        let types = AccountTypes::default();
+        let row = |budgeted: Option<i64>, actual: Option<i64>| BudgetRow {
+            account: Account::new("Expenses:Food"),
+            currency: Currency::new("USD"),
+            budgeted: budgeted.map(Decimal::from),
+            actual: actual.map(Decimal::from),
+        };
+        let cmp = |rows: Vec<BudgetRow>, totals: Vec<BudgetTotal>| Comparison {
+            rows,
+            totals,
+            errors: Vec::new(),
+            empty: None,
+        };
+
+        // EITHER half absent is enough — an overflowing budget beside ordinary
+        // spending is the common shape.
+        for r in [row(None, Some(1)), row(Some(1), None)] {
+            let c = cmp(vec![r], vec![]);
+            assert_eq!(unrepresentable_errors(&c, &types, d(2024, 1, 1)).len(), 1);
+        }
+        assert!(
+            unrepresentable_errors(
+                &cmp(vec![row(Some(1), Some(2))], vec![]),
+                &types,
+                d(2024, 1, 1)
+            )
+            .is_empty()
+        );
+
+        // A TOTAL can overflow even when every row it sums is representable, and
+        // it is named with the label the table renders.
+        let total = BudgetTotal {
+            bucket: Bucket::Typed(rustledger_core::AccountTypeKind::Expenses),
+            currency: Currency::new("USD"),
+            budgeted: None,
+            actual: Some(Decimal::ONE),
+        };
+        let got = unrepresentable_errors(&cmp(vec![], vec![total]), &types, d(2024, 1, 1));
+        assert_eq!(got.len(), 1);
+        assert!(got[0].reason.starts_with("TOTAL for USD"), "{:?}", got[0]);
+    }
 }

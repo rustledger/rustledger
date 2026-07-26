@@ -28,7 +28,7 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_budget::{BudgetError, BudgetRow, BudgetTotal, Budgets, Empty};
+use rustledger_budget::{Bucket, BudgetError, BudgetRow, BudgetTotal, Budgets, Empty};
 use rustledger_core::{
     Account, AccountTypeKind, AccountTypes, Currency, Directive, DisplayContext, NaiveDate,
 };
@@ -314,9 +314,12 @@ fn render<W: Write>(
         let headline = |t: &BudgetTotal| t.bucket.kind() != Some(AccountTypeKind::Expenses);
         (&a.currency, headline(a), &a.bucket).cmp(&(&b.currency, headline(b), &b.bucket))
     });
-    let total_rows: Vec<BudgetRow> = ordered
+    // Kept paired with the bucket they came from: the JSON below reports the
+    // TYPE and the ledger's own root name as separate fields, and a rendered
+    // label cannot be taken apart again to recover them.
+    let total_rows: Vec<(BudgetRow, &Bucket)> = ordered
         .into_iter()
-        .map(|t| round_row(&total_row(types, t)))
+        .map(|t| (round_row(&total_row(types, t)), &t.bucket))
         .collect();
 
     // A pro-rated budget is a repeating decimal, so it MUST be rounded for
@@ -379,7 +382,11 @@ fn render<W: Write>(
             // The whole-report total, as its own row per currency. Consumers
             // cannot re-derive it by summing the rows: under `--children` a
             // parent row and a child row both include the child.
-            for row in &total_rows {
+            // CSV keeps its six-column schema and the rendered label; adding
+            // columns would break every consumer of a format that exists to be
+            // parsed positionally. A caller that needs the bucket typed should
+            // ask for JSON, which carries it.
+            for (row, _) in &total_rows {
                 let (ccy, row) = (row.currency.as_str(), row);
                 writeln!(
                     writer,
@@ -411,7 +418,30 @@ fn render<W: Write>(
             // An explicit per-currency total, matching `returns`' `"total"`
             // object: consumers must not re-derive it by summing `budgets`,
             // because under `--children` parent and child rows overlap.
-            let total_objs: Vec<String> = total_rows.iter().map(obj).collect();
+            // Totals carry `kind` and `root` as well as the rendered label, the
+            // same split `session.budget` makes. One string cannot hold both:
+            // a ledger with `option "name_income" "Revenue"` renders
+            // `TOTAL (Revenue)`, and a consumer keying on that cannot tell it is
+            // the income total, while one keying on `TOTAL` cannot tell it from
+            // the expenses total on a ledger that also has one. `kind` is the
+            // closed vocabulary (the five types plus "other"); `root` is the
+            // ledger's spelling.
+            let total_objs: Vec<String> = total_rows
+                .iter()
+                .map(|(r, bucket)| {
+                    let (kind, root) = match bucket {
+                        Bucket::Typed(k) => (k.as_str(), types.root_name(*k)),
+                        Bucket::Other(root) => ("other", root.as_str()),
+                    };
+                    let base = obj(r);
+                    format!(
+                        r#"{}, "kind": "{}", "root": "{}"}}"#,
+                        base.trim_end_matches('}'),
+                        json_escape(kind),
+                        json_escape(root)
+                    )
+                })
+                .collect();
             // Rejected directives are reported in-band as well as on stderr.
             // Without this a dashboard cannot tell "this ledger has no budgets"
             // from "every budget in it was rejected": both produced an empty
@@ -502,7 +532,7 @@ fn render<W: Write>(
             };
             let width = |f: &dyn Fn(&BudgetRow) -> usize, floor: usize| {
                 rows.iter()
-                    .chain(total_rows.iter())
+                    .chain(total_rows.iter().map(|(r, _)| r))
                     .map(f)
                     .max()
                     .unwrap_or(floor)
@@ -557,7 +587,7 @@ fn render<W: Write>(
             // meaningless), counting each budget and posting once — see
             // `compute_totals`. Rendered through the same path as the rows so
             // the two cannot drift in shape.
-            for r in &total_rows {
+            for (r, _) in &total_rows {
                 writeln!(writer, "{}", line(r))?;
             }
         }

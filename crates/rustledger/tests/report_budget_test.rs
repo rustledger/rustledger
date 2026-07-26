@@ -2777,3 +2777,53 @@ fn an_account_filter_changes_which_rows_are_shown_not_what_they_say() {
         assert_eq!(a, b, "the filter changed a figure ({children:?})");
     }
 }
+
+/// JSON totals carry the account TYPE and the ledger's own root as separate
+/// fields, not just a rendered label.
+///
+/// One string cannot hold both. A ledger with `option "name_income" "Revenue"`
+/// renders `TOTAL (Revenue)`: a consumer keying on that cannot tell it is the
+/// income total, and one keying on `TOTAL` cannot tell it from the expenses
+/// total. The WIT surface was split for exactly this reason; the CLI's machine
+/// format needed the same treatment.
+#[test]
+fn json_totals_carry_the_type_and_the_ledgers_own_root() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "option \"name_income\" \"Revenue\"\n\
+         2024-01-01 open Revenue:Salary USD\n\
+         2024-01-01 open Expenses:Food USD\n\
+         2024-01-01 custom \"budget\" Revenue:Salary \"monthly\" 5000.00 USD\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n",
+    );
+    let json = run(
+        &bin,
+        &[
+            "report",
+            f.path().to_str().unwrap(),
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+            "--format",
+            "json",
+            "--no-pager",
+        ],
+    );
+    // The income total is identifiable as income even though the ledger never
+    // uses that word, and still renders under the name the ledger chose.
+    assert!(
+        json.contains(r#""kind": "income", "root": "Revenue""#),
+        "{json}"
+    );
+    assert!(
+        json.contains(r#""account": "TOTAL (Revenue)""#),
+        "the rendered label is still there for humans: {json}"
+    );
+    // ...and the expenses total keeps the bare label AND a usable type.
+    assert!(
+        json.contains(r#""kind": "expenses", "root": "Expenses""#),
+        "{json}"
+    );
+}

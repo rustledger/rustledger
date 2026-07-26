@@ -283,10 +283,17 @@ pub fn collect(
     errors.extend(mismatched_currency_errors(posted, budgets, children, to));
     errors.extend(closed_account_errors(directives, budgets, to, children));
     if let Some(prefix) = account_filter {
+        // An error we cannot attribute to an account is dropped under an
+        // explicit filter, not kept. `is_none_or` kept it, so a report narrowed
+        // to `Expenses` warned about a directive whose account could not even be
+        // lexed — and, worse, that surviving warning made `AllRejected` claim
+        // every rejection was on screen when the attributable ones had been
+        // filtered away. A caller who asked about one account is owed warnings
+        // about that account; one we cannot place is not known to be about it.
         errors.retain(|e| {
             e.account
                 .as_ref()
-                .is_none_or(|a| passes_account_filter(a.as_str(), Some(prefix)))
+                .is_some_and(|a| passes_account_filter(a.as_str(), Some(prefix)))
         });
     }
     errors.extend(unrepresentable_errors(comparison, types, from));

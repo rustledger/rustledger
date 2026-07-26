@@ -314,12 +314,9 @@ This document catalogs all validation errors and warnings with their trigger con
 
 **Condition:** A `custom "budget"` directive that rledger is confident IS a budget carries content it cannot use.
 
-Confident means one of:
+Confident is ONE rule: the interval slot holds a real interval keyword (`daily`, `weekly`, `monthly`, `quarterly`, `yearly`, or the bare noun of each), OR the first value names an account and the third is an amount. Either is strong evidence; neither occurs by coincidence in a payload written for something else.
 
-- The directive has Fava's positional shape — `<Account> "<interval>" <amount>` — and its account name cannot be lexed, its interval keyword is unknown, or it carries a second figure.
-- The directive names an account and its second value is a real interval keyword, but the rest does not line up (a missing currency, so the amount lexes as a bare number; or transposed operands).
-
-A `custom "budget"` that meets neither test is NOT reported. `custom` is beancount's open extension point and the name is not rledger's alone; beancount's own documented example is `custom "budget" "weekly < 1000.00 USD" 2016-02-28 TRUE 43.03 USD 23`, which Python accepts silently. `rledger report budget` still reports those, because a user who asked about budgets is owed the news that one could not be read.
+A `custom "budget"` meeting neither test is not reported anywhere — not by `check`, not by the LSP, and not by `report budget`. `custom` is beancount's open extension point and the name is not rledger's alone: beancount's own documented example is `custom "budget" "weekly < 1000.00 USD" 2016-02-28 TRUE 43.03 USD 23`, and an envelope-budgeting tool might write `custom "budget" "envelope-groceries" "rollover" 250.00 USD`. Python accepts both silently, and so does rledger.
 
 A trailing quoted NOTE is not an error — Fava reads only the first three values and real ledgers carry comments there. A trailing FIGURE is reported, but the budget still applies at the first figure, which is what Fava reads.
 

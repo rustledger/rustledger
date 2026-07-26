@@ -1168,8 +1168,7 @@ fn validate_budget_custom(custom: &rustledger_core::Custom, errors: &mut Vec<Val
         // A budget that WAS read but had something dropped from it is equally
         // confident — the shape matched, so this is ours to report.
         rustledger_budget::BudgetRead::Read { note, .. } => note,
-        rustledger_budget::BudgetRead::Unrecognized(_)
-        | rustledger_budget::BudgetRead::NotABudget => None,
+        rustledger_budget::BudgetRead::NotABudget => None,
     };
     if let Some(e) = confident {
         errors.push(ValidationError::new(

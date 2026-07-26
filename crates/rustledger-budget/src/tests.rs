@@ -437,13 +437,6 @@ fn parse_budgets_rejects_and_explains_bad_shapes() {
     // judge and produces nothing here.
     let cases: Vec<(Directive, &str)> = vec![
         (
-            custom(
-                d(2024, 1, 1),
-                vec![MetaValue::Account("Expenses:Food".into())],
-            ),
-            "not understood",
-        ),
-        (
             budget_directive(d(2024, 1, 1), "Expenses:Food", "fortnightly", "1", "USD"),
             "invalid interval",
         ),
@@ -480,10 +473,23 @@ fn parse_budgets_rejects_and_explains_bad_shapes() {
         );
     }
 
-    // A `custom "budget"` with no values names no account: another tool's, and
-    // silent everywhere.
-    let (entries, errors) = parse_budgets(&[custom(d(2024, 1, 1), vec![])]);
-    assert!(entries.is_empty() && errors.is_empty(), "{errors:?}");
+    // Too weak to claim: no interval keyword, and no account-plus-amount pair.
+    // Ownership of the `custom "budget"` name is one rule, tabulated in the
+    // CLI's `ownership_of_the_custom_budget_namespace`.
+    for weak in [
+        vec![],
+        vec![MetaValue::Account("Expenses:Food".into())],
+        vec![
+            MetaValue::Account("Expenses:Food".into()),
+            MetaValue::Amount(Amount::new(Dec::from(400), "USD".to_string())),
+        ],
+    ] {
+        let (entries, errors) = parse_budgets(&[custom(d(2024, 1, 1), weak.clone())]);
+        assert!(
+            entries.is_empty() && errors.is_empty(),
+            "{weak:?} is not ours: {errors:?}"
+        );
+    }
 }
 
 #[test]

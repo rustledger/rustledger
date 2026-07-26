@@ -423,9 +423,10 @@ impl ErrorCode {
                  monthly, quarterly or yearly. A trailing quoted note is fine; a \
                  trailing second figure is reported, though the budget still \
                  applies at the first.\n\nFix: correct the directive. This is not \
-                 raised for a `custom \"budget\"` belonging to other tooling — a \
-                 payload that is not recognizably a Fava budget is left alone, \
-                 since `custom` is beancount's open extension point."
+                 raised for a `custom \"budget\"` belonging to other tooling: a \
+                 payload with neither a real interval keyword nor an \
+                 account-and-amount pair is left alone everywhere, since \
+                 `custom` is beancount's open extension point."
             }
             Self::FutureDate => {
                 "A directive is dated in the future relative to today (warning).\n\n\

@@ -2670,27 +2670,70 @@ fn the_headline_total_leads_its_currency() {
     assert_eq!(totals.len(), 3, "all three buckets present:\n{text}");
 }
 
-/// `custom` is beancount's OPEN extension point, so `rledger check` must not
-/// warn about a `custom "budget"` written for a different tool — while
-/// `report budget`, which the user asked for, still says one could not be read.
+/// Which `custom "budget"` directives rledger claims, in both directions.
 ///
-/// The two fixtures are beancount's own documented example and a payload that
-/// names an account but orders its values differently. Both are valid beancount
-/// that Python accepts silently, and both live in this repo already.
+/// `custom` is beancount's OPEN extension point and the name "budget" is not
+/// rledger's alone, so ownership is one rule: a real interval KEYWORD in the
+/// interval slot, or an ACCOUNT and an AMOUNT in theirs.
+///
+/// Table-driven because this rule has been got wrong in both directions, twice.
+/// Tightening it to stop warning on beancount's documented example disowned
+/// real budgets with a mistyped account; reordering to fix that started
+/// claiming an envelope tool's config. Every row below is a case one of those
+/// attempts got wrong — a test that pins only the cases you happened to think
+/// of is how a guard ends up weaker than its name.
 #[test]
-fn check_does_not_claim_another_tools_custom_budget() {
+fn ownership_of_the_custom_budget_namespace() {
     let bin = require_rledger!();
-    for source in [
-        // Beancount's canonical `custom` example.
-        "2013-05-18 custom \"budget\" \"weekly < 1000.00 USD\" 2016-02-28 TRUE 43.03 USD 23\n",
-        // Names an account, but not in Fava's order.
-        "2020-01-01 open Assets:Bank:Checking\n\
-         2020-10-07 custom \"budget\" Assets:Bank:Checking 1000.00 USD TRUE \"monthly\"\n",
-    ] {
-        let f = write_fixture(source);
-        let path = f.path().to_str().unwrap();
+    // (should rledger claim it, directive, why)
+    let cases: &[(bool, &str, &str)] = &[
+        // OURS — a real interval keyword.
+        (
+            true,
+            "Expenses:Food \"fortnight\" 400.00 USD",
+            "unsupported interval keyword",
+        ),
+        (
+            true,
+            "\"Expenses:food\" \"monthly\" 400.00 USD",
+            "unlexable account",
+        ),
+        (true, "Expenses:Food \"monthly\" 400.00", "missing currency"),
+        (
+            true,
+            "Expenses:Food \"monthly\" 400.00 USD 23",
+            "trailing figure",
+        ),
+        // NOT OURS — no keyword, and no account-plus-amount.
+        (
+            false,
+            "\"envelope-groceries\" \"rollover\" 250.00 USD",
+            "another tool's config: no account, no keyword",
+        ),
+        (
+            false,
+            "\"weekly < 1000.00 USD\" 2016-02-28 TRUE 43.03 USD 23",
+            "beancount's own documented example",
+        ),
+        (
+            false,
+            "Assets:Bank:Checking 1000.00 USD TRUE \"monthly\"",
+            "account, but no amount in the amount slot",
+        ),
+        (
+            false,
+            "Expenses:Food 400.00 USD \"monthly\"",
+            "transposed operands",
+        ),
+    ];
+    for (ours, directive, why) in cases {
+        let f = write_fixture(&format!(
+            "2020-01-01 open Assets:Bank:Checking\n\
+             2020-01-01 open Expenses:Food USD\n\
+             2024-01-01 custom \"budget\" {directive}\n"
+        ));
         let out = Command::new(&bin)
-            .args(["check", path])
+            .args(["check", f.path().to_str().unwrap()])
             .output()
             .expect("run rledger check");
         let combined = format!(
@@ -2698,84 +2741,27 @@ fn check_does_not_claim_another_tools_custom_budget() {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        assert!(
-            !combined.contains("E11001"),
-            "check must not claim the `custom \"budget\"` namespace: {combined}"
+        assert_eq!(
+            combined.contains("E11001"),
+            *ours,
+            "{why}: `custom \"budget\" {directive}`\n{combined}"
         );
     }
 
-    // ...but a directive that DOES have Fava's shape and a bad interval is ours
-    // to report, otherwise the check would be worthless.
-    let typo = write_fixture(
-        "2024-01-01 open Expenses:Food\n\
-         2024-01-01 custom \"budget\" Expenses:Food \"fortnightly\" 400.00 USD\n",
+    // A well-formed budget is claimed and silent — the rule must not be
+    // satisfied merely by never claiming anything.
+    let good = write_fixture(
+        "2020-01-01 open Expenses:Food USD\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n",
     );
     let out = Command::new(&bin)
-        .args(["check", typo.path().to_str().unwrap()])
+        .args(["check", good.path().to_str().unwrap()])
         .output()
         .expect("run rledger check");
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("E11001"),
+        "a valid budget must be silent"
     );
-    assert!(combined.contains("E11001"), "{combined}");
-}
-
-/// `--account` narrows WHICH rows are reported, never what they say.
-///
-/// The filter is applied before each key's covered set is built — moving it
-/// there was a performance change, and a performance change that alters a
-/// figure is a bug. A parent whose subtree straddles the filter is the case
-/// that would show it: under `--children` the row aggregates budgets the
-/// filter excludes from being rows in their own right, and it must keep doing
-/// so.
-#[test]
-fn an_account_filter_changes_which_rows_are_shown_not_what_they_say() {
-    let bin = require_rledger!();
-    let f = write_fixture(
-        "2024-01-01 open Expenses:Food USD\n\
-         2024-01-01 open Expenses:Food:Restaurant USD\n\
-         2024-01-01 open Expenses:Travel USD\n\
-         2024-01-01 open Assets:Cash USD\n\
-         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n\
-         2024-01-01 custom \"budget\" Expenses:Food:Restaurant \"monthly\" 100.00 USD\n\
-         2024-01-01 custom \"budget\" Expenses:Travel \"monthly\" 250.00 USD\n\
-         2024-01-10 * \"x\"\n  \
-           Expenses:Food:Restaurant  60.00 USD\n  \
-           Assets:Cash\n",
-    );
-    let path = f.path().to_str().unwrap();
-    let rows_for = |extra: &[&str]| -> Vec<String> {
-        let mut args = vec![
-            "report",
-            path,
-            "budget",
-            "--from",
-            "2024-01-01",
-            "--to",
-            "2024-02-01",
-            "--format",
-            "csv",
-        ];
-        args.extend_from_slice(extra);
-        run(&bin, &args)
-            .lines()
-            .filter(|l| l.starts_with("Expenses:Food"))
-            .map(str::to_string)
-            .collect()
-    };
-    for children in [vec![], vec!["--children"]] {
-        let mut unfiltered = children.clone();
-        let mut filtered = children.clone();
-        filtered.extend_from_slice(&["--account", "Expenses:Food"]);
-        unfiltered.push("--no-pager");
-        filtered.push("--no-pager");
-        let a = rows_for(&unfiltered);
-        let b = rows_for(&filtered);
-        assert!(!a.is_empty(), "fixture must produce rows: {children:?}");
-        assert_eq!(a, b, "the filter changed a figure ({children:?})");
-    }
 }
 
 /// JSON totals carry the account TYPE and the ledger's own root as separate

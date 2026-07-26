@@ -45,6 +45,7 @@ use std::io::Write;
 fn unopened_account_errors(
     directives: &[Directive],
     budgets: &Budgets,
+    to: NaiveDate,
     children: bool,
 ) -> Vec<BudgetError> {
     let opened: BTreeSet<&str> = directives
@@ -62,6 +63,13 @@ fn unopened_account_errors(
     let mut seen = BTreeSet::new();
     budgets
         .entries()
+        // Only budgets this report could actually show. All three diagnostics
+        // now share this bound: a budget declared after the window contributes
+        // no row, no total and no figure, so accusing it of a defect the reader
+        // cannot see in the output is noise — and worse for the currency check
+        // below, which judged such a budget against postings from a window it
+        // does not apply to.
+        .filter(|b| b.from < to)
         // A parent budgeted as an aggregate (`Expenses:Food` with only
         // `Expenses:Food:Groceries` opened) is a normal, working setup — but ONLY
         // under `--children`, which is what makes the children's spending answer
@@ -224,6 +232,11 @@ fn mismatched_currency_errors(
     let mut seen = BTreeSet::new();
     budgets
         .entries()
+        // Same window bound as the other two diagnostics. The posting scan above
+        // is already windowed; judging an out-of-window budget on in-window
+        // evidence accused a 2030 budget of a currency typo on the strength of
+        // 2024 spending, and phrased it as settled fact.
+        .filter(|b| b.from < to)
         .filter(|b| {
             let seen_currencies = covered_currencies(&b.account);
             !seen_currencies.is_empty() && !seen_currencies.contains(&b.currency)
@@ -276,6 +289,7 @@ pub(super) fn report_budget<W: Write>(
     errors.extend(unopened_account_errors(
         directives,
         &budgets,
+        filter.to,
         filter.children,
     ));
     errors.extend(mismatched_currency_errors(
@@ -346,7 +360,7 @@ pub(super) fn report_budget<W: Write>(
     }
     for ((ccy, kind), (b, a)) in &totals {
         if b.is_none() || a.is_none() {
-            let row = total_row(ccy, kind, *b, *a);
+            let row = total_row(types, ccy, kind, *b, *a);
             // A total whose component is unknown is itself unknown: summing only
             // the representable rows would print an authoritative-looking figure
             // that silently omits an account. It stays absent, and says why.
@@ -362,6 +376,12 @@ pub(super) fn report_budget<W: Write>(
         }
     }
 
+    // A budget too small to survive display rounding is diagnosed through the
+    // SAME `Rounding` the renderer uses, so the warning and the rendered `0.00`
+    // can never disagree about what the display precision is.
+    let rounding = Rounding::new(types, &rows, &totals, ctx);
+    errors.extend(rounding.sub_precision_errors(&rows, filter.from));
+
     // Emitted HERE, after every error is known: the un-representable-figure
     // errors are only discovered once rows and totals exist, and an earlier
     // emission point sent them to the JSON array but never to stderr, so a text
@@ -371,13 +391,12 @@ pub(super) fn report_budget<W: Write>(
         eprintln!("warning: {}: {}", e.date, e.reason);
     }
     render(
+        &Rendering { types, ctx, format },
         &rows,
         &totals,
         filter,
         Empty::diagnose(&budgets, had_errors, !errors.is_empty(), filter),
         &errors,
-        ctx,
-        format,
         writer,
     )
 }
@@ -405,6 +424,60 @@ enum Empty {
 }
 
 impl Empty {
+    /// A stable machine-readable tag for the diagnosis.
+    ///
+    /// The prose below is for humans and may be reworded; this is what a
+    /// dashboard branches on.
+    const fn code(self) -> &'static str {
+        match self {
+            Self::NoneDeclared => "none_declared",
+            Self::AllRejected { .. } => "all_rejected",
+            Self::NoneInWindow { .. } => "none_in_window",
+            Self::FilteredOut => "filtered_out",
+        }
+    }
+
+    /// The diagnosis in prose, written ONCE and rendered by every format.
+    ///
+    /// It used to exist only inside the text branch, so CSV and JSON emitted
+    /// byte-identical empty output for "you have no budgets", "your budgets
+    /// start later than this window" and "--account excluded them all" — the
+    /// exact ambiguity this type was introduced to remove, preserved for every
+    /// consumer that is not a human reading a terminal.
+    fn message(self, filter: &BudgetFilter) -> String {
+        match self {
+            // Says that each one IS reported, not WHERE. Warnings go to stderr,
+            // which a terminal interleaves above this line but an `ag-rledger`
+            // JSON envelope drops entirely — so "see the warnings above" pointed
+            // an agent at something its transport had already discarded. The
+            // JSON format carries them in-band in `errors`.
+            Self::AllRejected { shown: true } => {
+                "No usable budgets: every `custom \"budget\"` directive in this \
+                 ledger was rejected. Each one is reported as a warning."
+                    .to_string()
+            }
+            Self::AllRejected { shown: false } => {
+                "No usable budgets: every `custom \"budget\"` directive in this \
+                 ledger was rejected. Re-run without --account to see which ones \
+                 and why."
+                    .to_string()
+            }
+            Self::NoneDeclared => "No budgets declared. Add e.g.:\n  2024-01-01 custom \"budget\" \
+                 Expenses:Food \"monthly\" 400.00 USD"
+                .to_string(),
+            Self::NoneInWindow { earliest } => format!(
+                "No budgets were in force in this period. A budget applies from \
+                 its own date onward, and the earliest one here is dated \
+                 {earliest}."
+            ),
+            Self::FilteredOut => format!(
+                "No budgets match --account {}. (Accounts are matched by raw \
+                 prefix, the same as `report balances`.)",
+                super::sanitize_display(filter.account.unwrap_or_default())
+            ),
+        }
+    }
+
     fn diagnose(
         budgets: &Budgets,
         had_errors: bool,
@@ -446,6 +519,7 @@ impl Empty {
 
 /// A whole-report total as a row, so totals and rows render through one path.
 fn total_row(
+    types: &AccountTypes,
     currency: &str,
     kind: &str,
     budgeted: Option<Decimal>,
@@ -459,7 +533,14 @@ fn total_row(
         // up, lumping a credit-card spending budget in with an income target
         // and labeling the sum "earned". Expenses keep the bare `TOTAL` label
         // because they are the overwhelmingly common case.
-        account: if kind == "Expenses" {
+        //
+        // Which root IS the expenses root comes from `AccountTypes`, never from
+        // the literal "Expenses": a ledger that sets `option "name_expenses"
+        // "Depenses"` labelled its primary spending total `TOTAL (Depenses)`,
+        // so no row carried the documented `TOTAL` label at all and every
+        // consumer keying on it — including this repo's own fuzz oracle —
+        // silently reclassified the main total as a secondary bucket.
+        account: if kind == types.expenses {
             "TOTAL".to_string()
         } else {
             format!("TOTAL ({kind})")
@@ -475,29 +556,41 @@ fn fmt_used(used: Option<f64>) -> String {
     used.map_or_else(|| "n/a".to_string(), |u| format!("{:.1}%", u * 100.0))
 }
 
-fn render<W: Write>(
-    rows: &[BudgetRow],
-    totals: &BTreeMap<(String, String), (Option<Decimal>, Option<Decimal>)>,
-    filter: &BudgetFilter,
-    empty: Empty,
-    errors: &[BudgetError],
-    ctx: &DisplayContext,
-    format: &OutputFormat,
-    writer: &mut W,
-) -> Result<()> {
-    // Round to display precision ONCE, up front, and render every format from
-    // the rounded values. Computing the percentage from the unrounded figures
-    // while showing rounded ones let a row print `budgeted 0, actual 0,
-    // remaining 0, used_pct 2033.3` — four fields a consumer cannot reconcile.
-    // All four now derive from the same numbers.
+/// The report's display-rounding rule, in one place.
+///
+/// Rounding to display precision happens ONCE, up front, and every format
+/// renders from the rounded values — deriving the percentage from unrounded
+/// figures beside rounded amounts printed a row of four fields a reader could
+/// not reconcile (`budgeted 0, actual 0, remaining 0, used_pct 2033.3`).
+///
+/// Named and shared because the rounding is not only a rendering concern: the
+/// diagnostic that reports a budget too small to survive it has to apply the
+/// very same rule, and a second copy of "how many decimals does this currency
+/// get" is exactly the drift this repo's canonical-function discipline exists
+/// to prevent.
+struct Rounding<'a> {
+    ctx: &'a DisplayContext,
+    /// Chosen scale per currency the ledger's `DisplayContext` does not know —
+    /// a budget declared before any spending is recorded. ONE per currency, so
+    /// the cells of a row agree with each other.
+    untracked: BTreeMap<String, u32>,
+}
+
+impl<'a> Rounding<'a> {
     /// How many decimals to show for a currency the ledger never describes.
     /// Enough for a crypto-scale budget, far from `Decimal`'s 28.
     const MAX_UNTRACKED_DP: u32 = 8;
-    let untracked_scale: BTreeMap<String, u32> = {
-        let mut m: BTreeMap<String, u32> = BTreeMap::new();
+
+    fn new(
+        types: &AccountTypes,
+        rows: &[BudgetRow],
+        totals: &BTreeMap<(String, String), (Option<Decimal>, Option<Decimal>)>,
+        ctx: &'a DisplayContext,
+    ) -> Self {
+        let mut untracked: BTreeMap<String, u32> = BTreeMap::new();
         let all_totals: Vec<BudgetRow> = totals
             .iter()
-            .map(|((ccy, kind), (b, a))| total_row(ccy, kind, *b, *a))
+            .map(|((ccy, kind), (b, a))| total_row(types, ccy, kind, *b, *a))
             .collect();
         for r in rows.iter().chain(all_totals.iter()) {
             if ctx.get_precision(&r.currency).is_some() {
@@ -508,27 +601,74 @@ fn render<W: Write>(
                 .flatten()
                 // Raw scale, not normalized: a declared `100.00 USD` keeps its
                 // trailing zeros, while a pro-rated (28-digit) value is capped.
-                .map(|v| v.scale().min(MAX_UNTRACKED_DP))
+                .map(|v| v.scale().min(Self::MAX_UNTRACKED_DP))
                 .max()
                 .unwrap_or(0);
-            let e = m.entry(r.currency.clone()).or_default();
+            let e = untracked.entry(r.currency.clone()).or_default();
             *e = (*e).max(seen);
         }
-        m
-    };
-    let round_disp = |v: Decimal, ccy: &str| -> Decimal {
-        ctx.get_precision(ccy).map_or_else(
-            || {
-                v.round_dp(
-                    untracked_scale
-                        .get(ccy)
-                        .copied()
-                        .unwrap_or(MAX_UNTRACKED_DP),
-                )
-            },
+        Self { ctx, untracked }
+    }
+
+    fn untracked_scale(&self, ccy: &str) -> Option<u32> {
+        self.untracked.get(ccy).copied()
+    }
+
+    fn round(&self, v: Decimal, ccy: &str) -> Decimal {
+        self.ctx.get_precision(ccy).map_or_else(
+            || v.round_dp(self.untracked_scale(ccy).unwrap_or(Self::MAX_UNTRACKED_DP)),
             |dp| v.round_dp(dp),
         )
-    };
+    }
+
+    /// Budgets that exist but are too small to survive display rounding.
+    ///
+    /// A budget below its currency's precision renders as `0.00`, and a zero
+    /// budget makes the Used percentage undefined — so the row prints
+    /// `budgeted 0.00 … Used n/a`, which is exactly how this report says
+    /// "nothing was budgeted here". A real 0.004/month budget with 500.00 of
+    /// spending against it therefore read as an unbudgeted account rather than
+    /// a 12,500,000% overrun. Rounding first stays; that it DESTROYS
+    /// information is what the report has to say out loud.
+    fn sub_precision_errors(&self, rows: &[BudgetRow], on: NaiveDate) -> Vec<BudgetError> {
+        rows.iter()
+            .filter_map(|r| {
+                let b = r.budgeted?;
+                (!b.is_zero() && self.round(b, &r.currency).is_zero()).then(|| BudgetError {
+                    date: on,
+                    account: Some(r.account.clone()),
+                    reason: format!(
+                        "budget for {} is {} {}, smaller than the display precision \
+                         for {}; it is shown as zero and its Used percentage as n/a",
+                        r.account, b, r.currency, r.currency
+                    ),
+                })
+            })
+            .collect()
+    }
+}
+
+/// How to render, as opposed to what: the ledger's account naming and display
+/// precision plus the chosen output format. Bundled because they travel
+/// together through every rendering path and are never chosen independently.
+struct Rendering<'a> {
+    types: &'a AccountTypes,
+    ctx: &'a DisplayContext,
+    format: &'a OutputFormat,
+}
+
+fn render<W: Write>(
+    env: &Rendering<'_>,
+    rows: &[BudgetRow],
+    totals: &BTreeMap<(String, String), (Option<Decimal>, Option<Decimal>)>,
+    filter: &BudgetFilter,
+    empty: Empty,
+    errors: &[BudgetError],
+    writer: &mut W,
+) -> Result<()> {
+    let Rendering { types, ctx, format } = *env;
+    let rounding = Rounding::new(types, rows, totals, ctx);
+    let round_disp = |v: Decimal, ccy: &str| -> Decimal { rounding.round(v, ccy) };
     let round_row = |r: &BudgetRow| BudgetRow {
         account: r.account.clone(),
         currency: r.currency.clone(),
@@ -539,7 +679,7 @@ fn render<W: Write>(
     let rows = &rows[..];
     let total_rows: Vec<BudgetRow> = totals
         .iter()
-        .map(|((ccy, kind), (b, a))| round_row(&total_row(ccy, kind, *b, *a)))
+        .map(|((ccy, kind), (b, a))| round_row(&total_row(types, ccy, kind, *b, *a)))
         .collect();
 
     // A pro-rated budget is a repeating decimal, so it MUST be rounded for
@@ -550,7 +690,7 @@ fn render<W: Write>(
     let money = |n: Decimal, ccy: &str| {
         ctx.get_precision(ccy).map_or_else(
             || {
-                let dp = untracked_scale.get(ccy).copied().unwrap_or(0);
+                let dp = rounding.untracked_scale(ccy).unwrap_or(0);
                 format!("{n:.*}", dp as usize)
             },
             |_| ctx.format_amount_number(n, ccy),
@@ -568,6 +708,14 @@ fn render<W: Write>(
     };
     match format {
         OutputFormat::Csv => {
+            // CSV is a strict data format — a comment row would break the
+            // parsers this output exists for — so the diagnosis goes to stderr,
+            // where this report already puts everything a reader needs that is
+            // not a data row. Without it three different empty reports were one
+            // bare header line.
+            if rows.is_empty() {
+                eprintln!("note: {}", empty.message(filter));
+            }
             writeln!(
                 writer,
                 "account,currency,budgeted,actual,remaining,used_pct"
@@ -642,14 +790,28 @@ fn render<W: Write>(
                     )
                 })
                 .collect();
+            // `empty` says WHY there are no rows, and is null whenever there
+            // are. Without it the three empty reports were byte-identical to a
+            // machine consumer, which is the ambiguity `Empty` exists to
+            // remove — it was just never rendered outside the text branch.
+            let empty_obj = if rows.is_empty() {
+                format!(
+                    r#"{{"code": "{}", "message": "{}"}}"#,
+                    empty.code(),
+                    json_escape(&empty.message(filter))
+                )
+            } else {
+                "null".to_string()
+            };
             writeln!(
                 writer,
-                r#"{{"from": "{}", "to": "{}", "budgets": [{}], "totals": [{}], "errors": [{}]}}"#,
+                r#"{{"from": "{}", "to": "{}", "budgets": [{}], "totals": [{}], "errors": [{}], "empty": {}}}"#,
                 filter.from,
                 filter.to,
                 objs.join(", "),
                 total_objs.join(", "),
-                error_objs.join(", ")
+                error_objs.join(", "),
+                empty_obj
             )?;
         }
         OutputFormat::Text => {
@@ -669,35 +831,7 @@ fn render<W: Write>(
                 // Distinguish "you have no budgets" from "your filter excluded
                 // them all" — telling a user with budgets that they have none
                 // sends them looking for a parsing bug that isn't there.
-                match empty {
-                    Empty::AllRejected { shown: true } => writeln!(
-                        writer,
-                        "No usable budgets: every `custom \"budget\"` directive in \
-                         this ledger was rejected. See the warnings above."
-                    )?,
-                    Empty::AllRejected { shown: false } => writeln!(
-                        writer,
-                        "No usable budgets: every `custom \"budget\"` directive in \
-                         this ledger was rejected. Re-run without --account to see \
-                         which ones and why."
-                    )?,
-                    Empty::NoneDeclared => writeln!(
-                        writer,
-                        "No budgets declared. Add e.g.:\n  2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD"
-                    )?,
-                    Empty::NoneInWindow { earliest } => writeln!(
-                        writer,
-                        "No budgets were in force in this period. \
-                         A budget applies from its own date onward, and the earliest \
-                         one here is dated {earliest}."
-                    )?,
-                    Empty::FilteredOut => writeln!(
-                        writer,
-                        "No budgets match --account {}. (Accounts are matched by raw \
-                         prefix, the same as `report balances`.)",
-                        super::sanitize_display(filter.account.unwrap_or_default())
-                    )?,
-                }
+                writeln!(writer, "{}", empty.message(filter))?;
                 return Ok(());
             }
             // A currency column: without it two rows for one account in two

@@ -31,10 +31,18 @@ use crate::error::QueryError;
 /// transaction balancing.
 ///
 /// Both the arithmetic and the cost-beats-price ladder come from
-/// [`rustledger_booking::posting_weight`] — the exact rule the balance
-/// validator's residual uses — so the `weight` column cannot drift from
-/// `rledger check`, and neither can the other consumers of that ladder (the
-/// budget report's actual-spend accrual, `currency_accounts` grouping).
+/// [`rustledger_booking::posting_weight`], shared with the budget report's
+/// actual-spend accrual, so those two cannot drift from each other.
+///
+/// It is NOT the balance validator's rule and must not be described as one.
+/// `posting_weight`'s own docs spell out where it diverges from
+/// `calculate_residual`'s `residual_weight` (a cost number carrying no
+/// currency, and a bare `{}` refusing to fall through to a price). Claiming
+/// the two cannot drift would send someone chasing a `weight`-vs-`rledger
+/// check` disagreement into "aligning" the residual — which is issue #1026
+/// re-introduced, flipping E3001 for every ledger holding a bare-cost-plus-
+/// price posting. `currency_accounts` re-derives the ladder on the DTO types
+/// and differs deliberately as well; see its own comments.
 /// Notably `{{total}}`/`PerUnitFromTotal` specs take the preserved total
 /// (sign following units) rather than recomputing `units × per_unit`, which
 /// for a non-terminating per-unit division would be off in the last of
@@ -1360,10 +1368,16 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
                     // beanquery returns a `YYYY-Qn` string, not an integer.
+                    // Through the canonical, like `DATE_TRUNC('QUARTER', …)`
+                    // and `DATE_PART('QUARTER', …)`. This was the last inline
+                    // copy of the formula: a configurable fiscal-year quarter
+                    // offset would have moved those two and left this one
+                    // labeling each bucket a quarter off from the rows beside
+                    // it, with no test failing.
                     Value::Date(d) => Ok(Value::String(format!(
                         "{:04}-Q{}",
                         d.year(),
-                        (d.month() - 1) / 3 + 1
+                        rustledger_core::quarter_index0(u32::from(d.month().unsigned_abs())) + 1
                     ))),
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type("QUARTER expects a date".to_string())),

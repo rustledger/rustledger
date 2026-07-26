@@ -1384,9 +1384,26 @@ fn a_period_past_the_representable_range_is_not_treated_as_one_day() {
             "--no-pager",
         ],
     );
+    // Asserted as a VALUE, not as the absence of one wrong number. The
+    // predecessor of this assertion was `!csv.contains("145600")`, which the
+    // silently-zero output satisfied just as well as the correct one — it could
+    // not fail on the defect it was written for. 400/yr over 364 of 365 days is
+    // 398.90410958904109589041095890.
+    let row = csv
+        .lines()
+        .find(|l| l.starts_with("Expenses:Food,"))
+        .unwrap_or_else(|| panic!("no Expenses:Food row: {csv}"));
+    let budgeted: f64 = row
+        .split(',')
+        .nth(2)
+        .expect("budgeted column")
+        .parse()
+        .expect("a numeric budgeted figure");
     assert!(
-        !csv.contains("145600"),
-        "a 400/yr budget must not accrue ~364x: {csv}"
+        (budgeted - 398.904_109_6).abs() < 1e-6,
+        "a 400/yr budget over the final calendar year must accrue its pro-rata \
+         share (~398.90), not 145600 (a 364x inflation) and not 0.00 (the \
+         period dropped): {csv}"
     );
 }
 
@@ -1998,7 +2015,11 @@ fn an_all_rejected_report_does_not_promise_absent_warnings() {
             "--no-pager",
         ],
     );
-    assert!(unfiltered.contains("warnings above"), "{unfiltered}");
+    // Says that each rejection IS reported, without promising WHERE. Warnings
+    // go to stderr, which a terminal shows above this line but the `ag-rledger`
+    // JSON envelope discards — the old "see the warnings above" pointed an
+    // agent at something its transport had already dropped.
+    assert!(unfiltered.contains("reported as a warning"), "{unfiltered}");
 }
 
 /// Coverage, not identity: under `--children` a parent budget is answered by its
@@ -2068,4 +2089,292 @@ fn an_absent_total_explains_that_a_component_overflowed() {
     );
     // The well-formed row is still reported in full.
     assert!(json.contains(r#""account": "Expenses:Gas""#), "{json}");
+}
+
+/// The text report draws two horizontal rules — one under the column headers and
+/// one above the totals — whose width is computed from the content
+/// (`RULE.max(acct_w + 1 + ccy_w + bw + aw + rw + uw)`). Nothing asserted the
+/// computed width agreed with what was actually rendered, so every arithmetic
+/// operator in that expression could be corrupted without a test noticing: a
+/// rule shorter than its rows reads as a truncated table, and one longer reads
+/// as a stray line. Assert the relationship directly — the rules span exactly
+/// the widest line they separate — with content wide enough to beat the
+/// constant floor.
+#[test]
+fn the_rules_span_the_widest_rendered_line() {
+    let bin = require_rledger!();
+    // A long account and a wide figure push every column past its header, so the
+    // computed width (not the 84-column floor) decides.
+    let f = write_fixture(
+        "2024-01-01 open Expenses:AlphaDivision:Operations:Facilities:Utilities USD\n\
+         2024-01-01 open Assets:Cash USD\n\
+         2024-01-01 custom \"budget\" Expenses:AlphaDivision:Operations:Facilities:Utilities \"monthly\" 1234567.89 USD\n\
+         2024-02-05 * \"power\"\n  \
+           Expenses:AlphaDivision:Operations:Facilities:Utilities  987654.32 USD\n  \
+           Assets:Cash\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let text = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-02-01",
+            "--to",
+            "2024-03-01",
+        ],
+    );
+
+    let rules: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.is_empty() && l.chars().all(|c| c == '-'))
+        .collect();
+    assert_eq!(rules.len(), 2, "expected two dashed rules:\n{text}");
+    assert_eq!(
+        rules[0].chars().count(),
+        rules[1].chars().count(),
+        "the two rules must be the same width:\n{text}"
+    );
+    let rule_w = rules[0].chars().count();
+    assert!(
+        rule_w > 84,
+        "this fixture must exceed the 84-column floor so the computed width is \
+         what is under test, got {rule_w}:\n{text}"
+    );
+
+    // Every line of the table proper — headers, rows, totals — is exactly as
+    // wide as the rule. Trailing spaces are not emitted, so compare against the
+    // widest line rather than each one.
+    let widest = text
+        .lines()
+        .filter(|l| l.contains(" USD") || l.starts_with("Account") || l.starts_with("TOTAL"))
+        .map(|l| l.chars().count())
+        .max()
+        .expect("table lines");
+    assert_eq!(
+        rule_w, widest,
+        "the rule must span the widest table line, not fall short or overhang:\n{text}"
+    );
+}
+
+/// The currency-mismatch scan windows postings to `[from, to)`, the same window
+/// the report itself uses, so that a currency the account stopped posting years
+/// ago cannot suppress the warning. Both ends of that window need pinning: a
+/// posting on `from` counts, and one on `to` does not.
+#[test]
+fn the_currency_mismatch_scan_uses_the_half_open_window() {
+    let bin = require_rledger!();
+    let ledger = |date: &str| {
+        format!(
+            "2020-01-01 open Expenses:Gear USD,EUR\n\
+             2020-01-01 open Assets:Cash USD,EUR\n\
+             2020-01-01 custom \"budget\" Expenses:Gear \"monthly\" 100.00 EUR\n\
+             {date} * \"kit\"\n  \
+               Expenses:Gear  50.00 USD\n  \
+               Assets:Cash\n"
+        )
+    };
+    let warns = |source: String| -> bool {
+        let f = write_fixture(&source);
+        let path = f.path().to_str().unwrap().to_string();
+        let out = Command::new(&bin)
+            .args([
+                "report",
+                &path,
+                "budget",
+                "--from",
+                "2024-02-01",
+                "--to",
+                "2024-03-01",
+            ])
+            .output()
+            .expect("run rledger");
+        String::from_utf8_lossy(&out.stderr).contains("EUR")
+    };
+
+    // A USD posting on the first day of the window is in scope: the EUR budget
+    // is a mismatch and must be reported.
+    assert!(
+        warns(ledger("2024-02-01")),
+        "a posting on `from` is inside the window"
+    );
+    // The day before the window, and the exclusive end, are both out of scope —
+    // with no in-window posting there is nothing to contradict the EUR budget.
+    assert!(
+        !warns(ledger("2024-01-31")),
+        "a posting the day before `from` is outside the window"
+    );
+    assert!(
+        !warns(ledger("2024-03-01")),
+        "a posting on `to` is outside the window — `to` is exclusive"
+    );
+}
+
+/// The mismatch warning fires only when the covered accounts posted SOMETHING
+/// and none of it was the budgeted currency. An account that posted nothing at
+/// all in the window is not a currency mismatch — it is simply unspent, and
+/// warning there would name an empty list of currencies ("posts , not EUR").
+#[test]
+fn an_account_with_no_postings_is_not_a_currency_mismatch() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        "2020-01-01 open Expenses:Gear EUR\n\
+         2020-01-01 custom \"budget\" Expenses:Gear \"monthly\" 100.00 EUR\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let out = Command::new(&bin)
+        .args([
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-02-01",
+            "--to",
+            "2024-03-01",
+        ])
+        .output()
+        .expect("run rledger");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("posts"),
+        "an unspent budget must not be reported as a currency mismatch: {stderr}"
+    );
+}
+
+/// `close` on the window's exclusive end means the account was open for every
+/// day the report covers, so there is nothing to warn about. Only a close
+/// landing exactly on `to` separates the `when < to` bound from `when <= to`.
+#[test]
+fn an_account_closed_on_the_windows_exclusive_end_is_not_warned_about() {
+    let bin = require_rledger!();
+    let warns_for = |close: &str| -> bool {
+        let f = write_fixture(&format!(
+            "2024-01-01 open Expenses:Food USD\n\
+             2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n\
+             {close} close Expenses:Food\n"
+        ));
+        let path = f.path().to_str().unwrap().to_string();
+        let out = Command::new(&bin)
+            .args([
+                "report",
+                &path,
+                "budget",
+                "--from",
+                "2024-02-01",
+                "--to",
+                "2024-03-01",
+            ])
+            .output()
+            .expect("run rledger");
+        String::from_utf8_lossy(&out.stderr).contains("closed")
+    };
+    assert!(
+        !warns_for("2024-03-01"),
+        "closing on the exclusive end leaves the account open all window"
+    );
+    assert!(
+        warns_for("2024-02-15"),
+        "closing mid-window really does strand the rest of the budget"
+    );
+}
+
+/// The un-representable-figure warning fires when EITHER side is absent, not
+/// only when both are. An overflowing budget beside ordinary spending is the
+/// common shape and must still be explained.
+#[test]
+fn one_absent_figure_is_enough_to_explain_itself() {
+    let bin = require_rledger!();
+    // A budget large enough to overflow `Decimal` when pro-rated, against an
+    // account with perfectly ordinary (representable) spending.
+    // A single interval always fits (the accrual is at most the declared
+    // amount), so the overflow has to come from SUMMING intervals: 1e28 a month
+    // for twelve months is 1.2e29, past `Decimal`'s ~7.9e28 ceiling.
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Huge USD\n\
+         2024-01-01 open Assets:Cash USD\n\
+         2024-01-01 custom \"budget\" Expenses:Huge \"monthly\" \
+         10000000000000000000000000000 USD\n\
+         2024-02-10 * \"ordinary\"\n  \
+           Expenses:Huge  25.00 USD\n  \
+           Assets:Cash\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let out = Command::new(&bin)
+        .args([
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2025-01-01",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run rledger");
+    let json = String::from_utf8_lossy(&out.stdout);
+    // Exactly one side is absent: the budget overflowed, the actual did not.
+    assert!(json.contains(r#""budgeted": null"#), "{json}");
+    assert!(json.contains(r#""actual": "25.00""#), "{json}");
+    assert!(
+        json.contains("too large to represent"),
+        "an absent figure must be explained even when its neighbor is fine: {json}"
+    );
+}
+
+/// Numeric columns are content-width PLUS EXACTLY TWO — one space of gutter and
+/// one of breathing room. Asserting only that the rules span the widest line
+/// leaves the padding free: doubling it widens the rule and the rows together,
+/// so the table stays self-consistent while wasting a screenful of space.
+#[test]
+fn numeric_columns_carry_exactly_two_spaces_of_padding() {
+    let bin = require_rledger!();
+    // Every numeric cell is NARROWER than its header here ("0.00" < "Budgeted",
+    // "n/a" < "Used"), so each column is exactly its header plus the padding —
+    // which is what makes the padding itself observable.
+    let f = write_fixture(
+        "2024-01-01 open Expenses:A USD\n\
+         2024-01-01 open Assets:Cash USD\n\
+         2024-01-01 custom \"budget\" Expenses:A \"monthly\" 0.00 USD\n\
+         2024-02-05 * \"x\"\n  \
+           Expenses:A  0.50 USD\n  \
+           Assets:Cash\n",
+    );
+    let path = f.path().to_str().unwrap();
+    let text = run(
+        &bin,
+        &[
+            "report",
+            path,
+            "budget",
+            "--from",
+            "2024-02-01",
+            "--to",
+            "2024-03-01",
+        ],
+    );
+    let header = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("Account"))
+        .unwrap_or_else(|| panic!("no header: {text}"));
+    // Each numeric header is right-aligned in a column two wider than the
+    // widest thing in it — here the header itself — so exactly two spaces
+    // precede each. Doubling the padding instead of adding it widens the rule
+    // and the rows together, leaving the table self-consistent and the earlier
+    // "rules span the widest line" check satisfied.
+    for head in ["Budgeted", "Actual", "Remaining", "Used"] {
+        let at = header
+            .find(head)
+            .unwrap_or_else(|| panic!("{head}: {text}"));
+        let before = &header[..at];
+        let gutter = before.len() - before.trim_end().len();
+        assert_eq!(
+            gutter, 2,
+            "the {head} column must be content width + 2, got {gutter} spaces \
+             of gutter:\n{text}"
+        );
+    }
 }

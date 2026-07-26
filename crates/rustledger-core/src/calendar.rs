@@ -20,6 +20,16 @@ use crate::NaiveDate;
 /// A calendar period. Periods are anchored to the calendar, never to an
 /// arbitrary start date: months begin on the 1st, quarters on Jan/Apr/Jul/Oct 1,
 /// years on Jan 1, and weeks on the ISO Monday.
+///
+/// # Deliberate divergence from Fava (quarters)
+///
+/// Fava's `_IntervalQuarter.get_prev` tests `date.month > i` where it needs
+/// `>=`, so it puts April in Q1, July in Q2 and October in Q3 — every quarter
+/// boundary month falls into the preceding quarter. Reported as
+/// beancount/fava#2318. rustledger anchors quarters correctly, per the
+/// project's Python-compatibility policy: match correct behavior, not bugs.
+/// A `custom "budget"` on a `"quarterly"` interval therefore accrues over
+/// different boundaries than Fava's budget view for those three months.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CalendarPeriod {
     /// One calendar day.
@@ -95,6 +105,36 @@ impl CalendarPeriod {
             Self::Year => jiff::Span::new().years(1),
         };
         start.checked_add(span).ok()
+    }
+
+    /// The calendar length, in days, of the period starting at `start`.
+    ///
+    /// Equal to the gap to [`Self::next_start`] wherever that date exists. The
+    /// final period of the representable calendar has no representable next
+    /// start, but its LENGTH is still well defined, and this returns it: a day
+    /// and a week are fixed-length, and month, quarter and year boundaries all
+    /// coincide with the end of the calendar, so the span to the last
+    /// representable day is the whole period.
+    ///
+    /// Pro-rata accrual needs the length, not the boundary date. Deriving the
+    /// length from `next_start` alone forced callers to give up on the final
+    /// period entirely — a budget was reported as `0.00` for a window inside
+    /// it, which reads as "nothing budgeted" rather than "cannot say".
+    #[must_use]
+    pub fn period_days(self, start: NaiveDate) -> i64 {
+        let days_between = |a: NaiveDate, b: NaiveDate| {
+            i64::from(a.until((jiff::Unit::Day, b)).map_or(0, |s| s.get_days()))
+        };
+        if let Some(next) = self.next_start(start) {
+            return days_between(start, next);
+        }
+        match self {
+            Self::Day => 1,
+            Self::Week => 7,
+            // `+ 1` because `MAX` is the last day IN the period, not the first
+            // day after it.
+            Self::Month | Self::Quarter | Self::Year => days_between(start, NaiveDate::MAX) + 1,
+        }
     }
 }
 

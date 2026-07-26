@@ -521,6 +521,14 @@ fn price_weight_generic<D: WeightNum>(
 /// the numeric backend. Single source of truth for [`calculate_residual`] and
 /// [`calculate_residual_precise`].
 ///
+/// DELIBERATELY not the same rule as [`posting_weight`], which serves BQL's
+/// `weight` column and the budget report. That one infers a cost number with no
+/// currency and refuses to let a bare `{}` fall through to a price; this one
+/// does neither, because #1026 turns on it — aligning the two flips E3001
+/// pass/fail for every ledger containing a bare-cost-plus-price posting. See
+/// `posting_weight`'s docs for the other half of this pair. Revisit only if
+/// #1026 is settled such that one rule can serve both.
+///
 /// Weight rule (Beancount): a cost spec puts the weight in the cost currency
 /// (`cost` beats `price`); else a price annotation puts it in the price
 /// currency; else the weight is the units themselves.

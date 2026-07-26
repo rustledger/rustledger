@@ -292,12 +292,20 @@ fn entries_are_yielded_in_effective_date_order() {
 /// A window running to the end of the representable calendar keeps everything
 /// accrued before the final, unmeasurable period.
 ///
-/// The last period has no next start, so its length — and its per-day rate — is
-/// unknowable. Propagating that as `None` discarded the entire total: an
-/// all-time window returned nothing for a budget worth millions up to that
-/// point, and the caller then blamed `Decimal` overflow, which it was not.
+/// The last period of the representable calendar has no representable NEXT
+/// start, but it still has a length, so it accrues pro-rata like any other.
+///
+/// Two earlier spellings were wrong. Propagating `None` discarded the entire
+/// total: an all-time window returned nothing for a budget worth millions up to
+/// that point, and the caller then blamed `Decimal` overflow. Breaking out of
+/// the loop kept those millions but silently dropped the final period, so
+/// extending the window over it added exactly zero.
+///
+/// Asserted as a VALUE. The predecessor of this test asserted only that the two
+/// windows agreed, which is precisely what the dropped-period bug produced — it
+/// pinned the defect instead of the fix.
 #[test]
-fn a_window_reaching_the_calendar_end_keeps_what_it_accrued() {
+fn the_final_calendar_period_accrues_pro_rata_like_any_other() {
     let b = Budgets::new(vec![budget(
         d(2024, 1, 1),
         "Expenses:Food",
@@ -310,12 +318,55 @@ fn a_window_reaching_the_calendar_end_keeps_what_it_accrued() {
     let past_it = b
         .accrue("Expenses:Food", "USD", d(2024, 1, 1), d(9999, 12, 31))
         .expect("extending the window must not discard the total");
-    assert_eq!(
-        to_last_boundary, past_it,
-        "the unmeasurable trailing period contributes nothing, but everything \
-         before it survives"
-    );
     assert!(to_last_boundary > Decimal::from(9_000_000));
+
+    // 9999 is not a leap year, and the window stops one day short of its end.
+    let final_stub = Decimal::from(1200) * Decimal::from(364) / Decimal::from(365);
+    // Compared with a tolerance: differencing two ~9.5-million totals spends
+    // most of `Decimal`'s significant digits, so the last few of the quotient
+    // are not recoverable this way. The exact value is asserted below, on a
+    // window small enough to carry it.
+    let contributed = past_it - to_last_boundary;
+    assert!(
+        (contributed - final_stub).abs() < Decimal::new(1, 6),
+        "the final period must contribute its pro-rata share ({final_stub}), \
+         not zero — got {contributed}"
+    );
+
+    // A window lying ENTIRELY inside that period is the case the dropped period
+    // made indistinguishable from "nothing was budgeted".
+    assert_eq!(
+        b.accrue("Expenses:Food", "USD", d(9999, 1, 1), d(9999, 12, 31)),
+        Some(final_stub)
+    );
+}
+
+/// A period's length is defined at the end of the calendar, where its next
+/// start is not. Fixed-length periods keep their length; calendar-aligned ones
+/// run to the last representable day.
+#[test]
+fn the_final_period_still_has_a_length() {
+    use rustledger_core::CalendarPeriod;
+    assert_eq!(CalendarPeriod::Month.period_days(d(9999, 12, 1)), 31);
+    assert_eq!(CalendarPeriod::Quarter.period_days(d(9999, 10, 1)), 92);
+    assert_eq!(CalendarPeriod::Year.period_days(d(9999, 1, 1)), 365);
+    assert_eq!(CalendarPeriod::Day.period_days(d(9999, 12, 31)), 1);
+    assert_eq!(CalendarPeriod::Week.period_days(d(9999, 12, 27)), 7);
+    // Away from the edge it must agree with the gap to the next start, which is
+    // the definition it replaces.
+    for (p, start) in [
+        (CalendarPeriod::Month, d(2024, 2, 1)),
+        (CalendarPeriod::Quarter, d(2024, 1, 1)),
+        (CalendarPeriod::Year, d(2024, 1, 1)),
+    ] {
+        let next = p.next_start(start).expect("representable");
+        let gap = i64::from(
+            start
+                .until((jiff::Unit::Day, next))
+                .map_or(0, |s| s.get_days()),
+        );
+        assert_eq!(p.period_days(start), gap, "{p:?} at {start}");
+    }
 }
 
 // ---------------------------------------------------------------------------

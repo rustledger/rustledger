@@ -462,12 +462,19 @@ def check_rendered_formats(rledger, path, d_from, d_to, children, got, failures,
     # expect, rather than by an account-root prefix. Matching on `Expenses:`/
     # `Income:` made the check silently vacuous for any other root (Assets,
     # Liabilities, a renamed account type) — it would pass by skipping every row.
-    want_labels = {a for a, _ in json_rows} | {"TOTAL", "TOTAL (earned)"}
+    # `json_rows` already carries every total label the run produced (it is built
+    # from `budgets` + `totals`), so the bare "TOTAL" below is belt-and-braces.
+    # A literal "TOTAL (earned)" used to sit here as well; no such label has ever
+    # been emitted — totals are bucketed by account TYPE, so they read
+    # "TOTAL (Income)" — and a stale label in a longest-match set is the kind of
+    # thing that reads like a live rule when it is only leftovers.
+    want_labels = {a for a, _ in json_rows} | {"TOTAL"}
     seen_rows = 0
     for line in txt_proc.stdout.splitlines():
         stripped = line.strip()
-        # LONGEST match: "TOTAL" is a prefix of "TOTAL (earned)", and a set has
-        # no order, so picking any match miscounted the earned rows.
+        # LONGEST match: "TOTAL" is a prefix of "TOTAL (Income)", and a set has
+        # no order, so picking any match split the label in the wrong place and
+        # counted a stray sixth column.
         label = max(
             (l for l in want_labels if stripped.startswith(l)),
             key=len,
@@ -476,7 +483,7 @@ def check_rendered_formats(rledger, path, d_from, d_to, children, got, failures,
         if label is None:
             continue
         seen_rows += 1
-        # The label may contain a space ("TOTAL (earned)"); the remainder must
+        # The label may contain a space ("TOTAL (Income)"); the remainder must
         # be exactly the five other columns.
         rest = stripped[len(label):].split()
         if len(rest) != 5:

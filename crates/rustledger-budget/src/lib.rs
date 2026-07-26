@@ -60,6 +60,11 @@ pub enum Interval {
     /// A calendar month (28, 29, 30 or 31 days).
     Month,
     /// A calendar quarter, anchored at Jan/Apr/Jul/Oct 1.
+    ///
+    /// Deliberately NOT Fava's boundaries: its `_IntervalQuarter.get_prev`
+    /// tests `date.month > i` where it needs `>=`, putting April in Q1, July in
+    /// Q2 and October in Q3 (beancount/fava#2318). See
+    /// [`rustledger_core::CalendarPeriod`] for the full note.
     Quarter,
     /// A calendar year (365 or 366 days).
     Year,
@@ -114,6 +119,15 @@ impl Interval {
     #[must_use]
     pub fn next_start(self, start: NaiveDate) -> Option<NaiveDate> {
         self.period().next_start(start)
+    }
+
+    /// The calendar length, in days, of the interval starting at `start` — the
+    /// per-day accrual's denominator. See [`CalendarPeriod::period_days`];
+    /// unlike [`Self::next_start`] it is defined for the final period of the
+    /// representable calendar too.
+    #[must_use]
+    pub fn period_days(self, start: NaiveDate) -> i64 {
+        self.period().period_days(start)
     }
 }
 
@@ -465,20 +479,24 @@ impl Budgets {
                 continue;
             };
             let istart = b.interval.start_of(cursor);
-            // The final period at the very end of the representable calendar has
-            // no next start, so its length — and therefore its per-day rate — is
-            // unknowable. Stop and keep what is already accrued.
+            // The final period of the representable calendar has no representable
+            // NEXT start, but `to` is representable and therefore lies inside that
+            // period, so the segment simply ends at `to`. Its length — the
+            // pro-rata denominator — comes from `period_days`, which is defined
+            // there precisely so this case needs no special arithmetic.
             //
-            // Propagating `None` here instead threw away the whole total: a
-            // window of `--to 9999-12-31` returned nothing for a budget whose
-            // accrual to that point was 9,570,000.00, and the caller attributed
-            // the absence to `Decimal` overflow, which it was not. Omitting one
-            // unmeasurable trailing period from an all-time window is a far
-            // smaller lie than discarding every period before it.
-            let Some(inext) = b.interval.next_start(istart) else {
-                break;
-            };
-            let mut seg_end = inext.min(to);
+            // Two earlier spellings were both wrong. Propagating `None` threw away
+            // the whole total, so `--to 9999-12-31` reported nothing for a budget
+            // that had accrued 9,570,000.00, and the caller blamed `Decimal`
+            // overflow. Breaking out kept the earlier periods but silently dropped
+            // the final one: extending the window by a month added 0.00 budget,
+            // and a window lying entirely inside that period reported a live
+            // budget as `0.00` with no diagnostic — indistinguishable from
+            // "nothing was budgeted".
+            let mut seg_end = b
+                .interval
+                .next_start(istart)
+                .map_or(to, |inext| inext.min(to));
             // The next superseding declaration, if it lands inside this segment.
             // `<` and `<=` are indistinguishable here (assigning `seg_end` to a
             // value it already holds changes nothing), so mutation testing
@@ -494,7 +512,7 @@ impl Budgets {
                 seg_end = next_day(cursor).min(to);
             }
             let seg_days = days_between(cursor, seg_end);
-            let interval_days = days_between(istart, inext).max(1);
+            let interval_days = b.interval.period_days(istart).max(1);
             // `> 0` rather than `>= 0`: a zero-day segment contributes exactly
             // zero either way, so the two are indistinguishable by result. The
             // test is kept because skipping the arithmetic entirely is clearer

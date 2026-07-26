@@ -2319,8 +2319,12 @@ fn one_absent_figure_is_enough_to_explain_itself() {
     // Exactly one side is absent: the budget overflowed, the actual did not.
     assert!(json.contains(r#""budgeted": null"#), "{json}");
     assert!(json.contains(r#""actual": "25.00""#), "{json}");
+    // The ROW's own message, not the substring it shares with the TOTAL's.
+    // `too large to represent` appears in both, so asserting it alone was
+    // satisfied by the totals warning even with the row check disabled — a
+    // proxy that could not fail on the defect it names.
     assert!(
-        json.contains("too large to represent"),
+        json.contains("budget for Expenses:Huge in USD is too large to represent"),
         "an absent figure must be explained even when its neighbor is fine: {json}"
     );
 }
@@ -2377,4 +2381,220 @@ fn numeric_columns_carry_exactly_two_spaces_of_padding() {
              of gutter:\n{text}"
         );
     }
+}
+
+/// The window bound the three diagnostics share is EXCLUSIVE at `to`. A budget
+/// declared exactly on the window's end contributes no row, so it must not be
+/// judged against that window's postings either.
+#[test]
+fn a_budget_declared_on_the_windows_end_is_not_diagnosed() {
+    let bin = require_rledger!();
+    let warns = |budget_date: &str| -> bool {
+        let f = write_fixture(&format!(
+            "2020-01-01 open Expenses:Gear USD,EUR\n\
+             2020-01-01 open Assets:Cash USD,EUR\n\
+             {budget_date} custom \"budget\" Expenses:Gear \"monthly\" 100.00 EUR\n\
+             2024-02-10 * \"kit\"\n  \
+               Expenses:Gear  50.00 USD\n  \
+               Assets:Cash\n"
+        ));
+        let path = f.path().to_str().unwrap().to_string();
+        let out = Command::new(&bin)
+            .args([
+                "report",
+                &path,
+                "budget",
+                "--from",
+                "2024-02-01",
+                "--to",
+                "2024-03-01",
+            ])
+            .output()
+            .expect("run rledger");
+        String::from_utf8_lossy(&out.stderr).contains("only posts USD")
+    };
+    assert!(
+        !warns("2024-03-01"),
+        "a budget starting on the exclusive end is outside the window"
+    );
+    assert!(
+        warns("2024-02-28"),
+        "one day inside it, the mismatch is real and must be reported"
+    );
+}
+
+/// None of the three diagnostics may judge a budget declared exactly ON the
+/// window's exclusive end, because none of them can show it: `to` is exclusive,
+/// so such a budget contributes no row, no total and no figure.
+///
+/// All three carry the same `b.from < to` bound, and each was verified to
+/// survive `<=` on its own — a budget dated on the bound is the only input that
+/// separates them.
+#[test]
+fn no_diagnostic_judges_a_budget_declared_on_the_exclusive_end() {
+    let bin = require_rledger!();
+    // One ledger, one date knob, three latent complaints: an unopened account,
+    // a closed account, and a currency the account never posts.
+    let stderr_for = |budget_date: &str| -> String {
+        let f = write_fixture(&format!(
+            "2020-01-01 open Expenses:Gear USD\n\
+             2020-01-01 open Assets:Cash USD\n\
+             2024-02-20 close Expenses:Gear\n\
+             {budget_date} custom \"budget\" Expenses:Gear \"monthly\" 100.00 EUR\n\
+             {budget_date} custom \"budget\" Expenses:Nosuch \"monthly\" 100.00 USD\n\
+             2024-02-10 * \"kit\"\n  \
+               Expenses:Gear  50.00 USD\n  \
+               Assets:Cash\n"
+        ));
+        let path = f.path().to_str().unwrap().to_string();
+        let out = Command::new(&bin)
+            .args([
+                "report",
+                &path,
+                "budget",
+                "--from",
+                "2024-02-01",
+                "--to",
+                "2024-03-01",
+            ])
+            .output()
+            .expect("run rledger");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    let on_the_bound = stderr_for("2024-03-01");
+    assert!(
+        !on_the_bound.contains("no such account is opened"),
+        "unopened: {on_the_bound}"
+    );
+    assert!(!on_the_bound.contains("closed"), "closed: {on_the_bound}");
+    assert!(
+        !on_the_bound.contains("only posts"),
+        "currency: {on_the_bound}"
+    );
+
+    // One day inside it, all three are real and must be reported — otherwise
+    // the assertions above would pass on a report that never diagnoses anything.
+    let inside = stderr_for("2024-02-28");
+    assert!(
+        inside.contains("no such account is opened"),
+        "unopened: {inside}"
+    );
+    assert!(inside.contains("closed"), "closed: {inside}");
+    assert!(inside.contains("only posts"), "currency: {inside}");
+}
+
+/// The `empty` object's `code` is the stable tag a dashboard branches on, so
+/// each diagnosis must carry its own. Asserting only that the field exists let
+/// every diagnosis answer with the same string.
+#[test]
+fn each_empty_diagnosis_carries_its_own_code() {
+    let bin = require_rledger!();
+    let budgeted = write_fixture(
+        "2024-01-01 open Expenses:Food USD\n\
+         2024-01-01 custom \"budget\" Expenses:Food \"monthly\" 400.00 USD\n",
+    );
+    let empty_ledger = write_fixture("2024-01-01 open Expenses:Food USD\n");
+    let code_of = |path: &str, args: &[&str]| -> String {
+        let mut argv = vec!["report", path, "budget", "--format", "json"];
+        argv.extend_from_slice(args);
+        let json = run(&bin, &argv);
+        let at = json
+            .find(r#""empty": "#)
+            .unwrap_or_else(|| panic!("no empty field: {json}"));
+        let rest = &json[at..];
+        rest.find(r#""code": ""#).map_or_else(
+            || "null".to_string(),
+            |c| {
+                let tail = &rest[c + r#""code": ""#.len()..];
+                tail[..tail.find('"').expect("closing quote")].to_string()
+            },
+        )
+    };
+    let budgeted_path = budgeted.path().to_str().unwrap();
+    assert_eq!(
+        code_of(
+            budgeted_path,
+            &[
+                "--from",
+                "2024-02-01",
+                "--to",
+                "2024-03-01",
+                "--account",
+                "Nope"
+            ]
+        ),
+        "filtered_out"
+    );
+    assert_eq!(
+        code_of(
+            budgeted_path,
+            &["--from", "2020-01-01", "--to", "2020-03-01"]
+        ),
+        "none_in_window"
+    );
+    assert_eq!(
+        code_of(
+            empty_ledger.path().to_str().unwrap(),
+            &["--from", "2020-01-01", "--to", "2020-03-01"]
+        ),
+        "none_declared"
+    );
+    // And a report WITH rows says `null`, not a code.
+    assert_eq!(
+        code_of(
+            budgeted_path,
+            &["--from", "2024-02-01", "--to", "2024-03-01"]
+        ),
+        "null"
+    );
+}
+
+/// A budget too small to survive display rounding is announced, and a budget
+/// that is genuinely zero is not — the report would otherwise explain a zero it
+/// was asked for.
+#[test]
+fn a_budget_below_display_precision_says_so() {
+    let bin = require_rledger!();
+    let stderr_for = |amount: &str| -> String {
+        let f = write_fixture(&format!(
+            "2024-01-01 open Expenses:Fees USD\n\
+             2024-01-01 open Assets:Cash USD\n\
+             2024-01-01 custom \"budget\" Expenses:Fees \"monthly\" {amount} USD\n\
+             2024-02-10 * \"x\"\n  \
+               Expenses:Fees  500.00 USD\n  \
+               Assets:Cash\n"
+        ));
+        let path = f.path().to_str().unwrap().to_string();
+        let out = Command::new(&bin)
+            .args([
+                "report",
+                &path,
+                "budget",
+                "--from",
+                "2024-02-01",
+                "--to",
+                "2024-03-01",
+            ])
+            .output()
+            .expect("run rledger");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let tiny = stderr_for("0.004");
+    assert!(
+        tiny.contains("smaller than the display precision"),
+        "a real budget hidden by rounding must be announced: {tiny}"
+    );
+    // Zero is not "hidden by rounding" — it renders as exactly what it is.
+    let zero = stderr_for("0.00");
+    assert!(
+        !zero.contains("smaller than the display precision"),
+        "a genuinely zero budget needs no explanation: {zero}"
+    );
+    // Nor does an ordinary one.
+    let ordinary = stderr_for("400.00");
+    assert!(
+        !ordinary.contains("smaller than the display precision"),
+        "{ordinary}"
+    );
 }

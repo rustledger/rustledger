@@ -19,7 +19,7 @@
 use crate::{Budgets, covers};
 use rust_decimal::Decimal;
 use rustledger_core::{Account, AccountTypeKind, AccountTypes, Currency, Directive, NaiveDate};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One row of a comparison: an account's budget against its spending.
 ///
@@ -187,7 +187,44 @@ pub fn normalized_actual(types: &AccountTypes, account: &str, raw: Decimal) -> D
     }
 }
 
-/// The first date on which any budget in `covered` was responsible for spending
+/// The ordered range of `set` that could lie in `account`'s subtree.
+///
+/// A NARROWING only — the caller still applies [`covers`], so over-inclusion is
+/// harmless and the answer cannot change. `take_while` here would be a bug: a
+/// sibling component like `Expenses:Food0` sorts BETWEEN `Expenses:Food` and
+/// `Expenses:Food:Restaurant`, because `'0'` (0x30) precedes `':'` (0x3A), so
+/// stopping at the first non-covered account would silently drop the child
+/// behind it. The `;` bound (0x3B, just past `':'`) admits every true
+/// subaccount and a few siblings, which `covers` then rejects.
+fn subtree_range<'a>(
+    set: &'a BTreeSet<Account>,
+    account: &Account,
+) -> impl Iterator<Item = &'a Account> {
+    let mut upper = account.as_str().to_string();
+    upper.push(';');
+    set.range(account.clone()..Account::new(upper))
+}
+
+/// Every account a budget could sit on that would cover `posting_account`:
+/// the account itself, plus its ancestors when `children` is set.
+///
+/// Bounded by account DEPTH (three or four in practice), which is what lets
+/// coverage be answered by lookup instead of by scanning every budget.
+fn covering_accounts(posting_account: &str, children: bool) -> impl Iterator<Item = &str> {
+    let mut end = Some(posting_account.len());
+    std::iter::from_fn(move || {
+        let e = end?;
+        let slice = &posting_account[..e];
+        end = if children {
+            posting_account[..e].rfind(':')
+        } else {
+            None
+        };
+        Some(slice)
+    })
+}
+
+/// The first date on which any budget in `scope` was responsible for spending
 /// booked to `posting_account`.
 ///
 /// The dual of the accrual: `accrue` credits nothing before a budget exists, so
@@ -199,19 +236,60 @@ pub fn normalized_actual(types: &AccountTypes, account: &str, raw: Decimal) -> D
 /// the whole row let an early child budget drag the parent's window backwards —
 /// charging the parent with spending that predated the parent's own budget, and
 /// disagreeing with the totals, which had the rule written the other way.
+///
+/// `scope` is the set of budgeted accounts the caller is answering for. Walking
+/// the posting account's ANCESTORS and testing membership is equivalent to
+/// filtering the scope by [`covers`] — the same component-wise rule, read from
+/// the other end — and is bounded by depth rather than by the number of
+/// budgets. Filtering the scope was the report's dominant cost on a ledger
+/// budgeting hundreds of accounts, because both the rows and the totals do it
+/// once per posting account.
 #[must_use]
-pub fn clip_start<'a>(
+pub fn clip_start(
     budgets: &Budgets,
-    covered: impl IntoIterator<Item = &'a str>,
+    scope: &BTreeSet<Account>,
     posting_account: &str,
     currency: &str,
     children: bool,
 ) -> Option<NaiveDate> {
-    covered
-        .into_iter()
-        .filter(|b| covers(b, posting_account, children))
-        .filter_map(|b| budgets.effective_start(b, currency))
+    covering_accounts(posting_account, children)
+        .filter(|a| scope.contains(&Account::new(*a)))
+        .filter_map(|a| budgets.effective_start(a, currency))
         .min()
+}
+
+/// The slice of `actuals` that could possibly be covered by a budget on
+/// `account`, as a `BTreeMap` range rather than a full scan.
+///
+/// Purely a NARROWING: [`covers`] still decides, so this cannot change an
+/// answer, only how many keys are asked. That matters because the caller asks
+/// once per row — on a ledger budgeting 1600 accounts, scanning every posting
+/// account for every row was seconds of the report.
+///
+/// The bound works because account components are `:`-separated and `;` is the
+/// next byte after `:`. Every true subaccount of `Expenses:Food` sorts below
+/// `Expenses:Food;`, while `Expenses:FoodCourt` sorts above it — the same
+/// component-wise distinction `covers` makes, which is why the two agree.
+fn covered_range<'a>(
+    actuals: &'a BTreeMap<(Account, Currency), Vec<(NaiveDate, Decimal)>>,
+    account: &Account,
+    children: bool,
+) -> impl Iterator<Item = (&'a (Account, Currency), &'a Vec<(NaiveDate, Decimal)>)> {
+    use std::ops::Bound::{Excluded, Included};
+    // The two modes differ only in where the subtree ends. `;` (0x3B) is just
+    // past the `:` that starts a child component, so it admits every true
+    // subaccount; `\0` admits nothing beyond the account itself. Either way
+    // `covers` still decides — see `subtree_range` for why a bound is used
+    // rather than stopping at the first non-covered key.
+    let terminator = if children { ';' } else { '\0' };
+    let mut upper = account.as_str().to_string();
+    upper.push(terminator);
+    // The empty currency is the least possible, so `(account, "")` is the first
+    // key that could belong to `account` in any currency.
+    actuals.range((
+        Included((account.clone(), Currency::new(""))),
+        Excluded((Account::new(upper), Currency::new(""))),
+    ))
 }
 
 /// Spending per `(account, currency)` inside `[from, to)`, dated.
@@ -302,15 +380,25 @@ impl Budgets {
         // whose own budget starts next year still aggregates a child budget
         // running now. Row identities still come from declared pairs, so no row
         // is invented for an account nobody budgeted in that currency.
+        // Every budgeted account, ordered, so a row's subtree is a contiguous
+        // range rather than a filter over all declarations.
+        let budget_accounts: BTreeSet<Account> =
+            self.entries().map(|b| b.account.clone()).collect();
+
         let keys: Vec<(Account, Currency)> = if children {
+            // Live when a budget in the row's SUBTREE is live — which is the
+            // contiguous range above, not a scan of every declaration. Asking
+            // each key against all budgets was quadratic in the number of
+            // budgeted accounts.
             self.all_keys()
                 .into_iter()
                 .filter(|(account, currency)| {
-                    self.entries().any(|b| {
-                        b.currency == *currency
-                            && b.from < to
-                            && covers(account.as_str(), b.account.as_str(), true)
-                    })
+                    subtree_range(&budget_accounts, account)
+                        .filter(|a| covers(account.as_str(), a.as_str(), true))
+                        .any(|a| {
+                            self.effective_start(a.as_str(), currency.as_str())
+                                .is_some_and(|start| start < to)
+                        })
                 })
                 .collect()
         } else {
@@ -321,42 +409,36 @@ impl Budgets {
             .into_iter()
             .filter(|(account, _)| passes_account_filter(account.as_str(), account_filter))
             .map(|(account, currency)| {
-                let covered: Vec<&str> = if children {
-                    let mut all: Vec<&str> = self
-                        .entries()
-                        .filter(|b| {
-                            b.currency == currency
-                                && covers(account.as_str(), b.account.as_str(), true)
+                // The budgeted accounts this row answers for. Under `children`
+                // that is every budget in the row's subtree; otherwise just the
+                // row's own account.
+                let covered: BTreeSet<Account> = if children {
+                    subtree_range(&budget_accounts, &account)
+                        .filter(|a| covers(account.as_str(), a.as_str(), true))
+                        .filter(|a| {
+                            self.effective_start(a.as_str(), currency.as_str())
+                                .is_some()
                         })
-                        .map(|b| b.account.as_str())
-                        .collect();
-                    all.sort_unstable();
-                    all.dedup();
-                    all
+                        .cloned()
+                        .collect()
                 } else {
-                    vec![account.as_str()]
+                    std::iter::once(account.clone()).collect()
                 };
                 let budgeted: Option<Decimal> = covered
                     .iter()
-                    .map(|a| self.accrue(a, currency.as_str(), from, to))
+                    .map(|a| self.accrue(a.as_str(), currency.as_str(), from, to))
                     .try_fold(Decimal::ZERO, |acc, seg| {
                         seg.and_then(|s| acc.checked_add(s))
                     });
-                let actual = actuals
-                    .iter()
+                let actual = covered_range(&actuals, &account, children)
                     .filter(|((a, c), _)| {
                         *c == currency && covers(account.as_str(), a.as_str(), children)
                     })
                     .flat_map(|((a, _), entries)| {
-                        let start = clip_start(
-                            self,
-                            covered.iter().copied(),
-                            a.as_str(),
-                            currency.as_str(),
-                            children,
-                        )
-                        .unwrap_or(from)
-                        .max(from);
+                        let start =
+                            clip_start(self, &covered, a.as_str(), currency.as_str(), children)
+                                .unwrap_or(from)
+                                .max(from);
                         entries
                             .iter()
                             .filter(move |(date, _)| *date >= start)
@@ -410,18 +492,21 @@ impl Budgets {
         }
         // Each posting counts once, against whichever budgeted accounts cover
         // it, and only from the day one of those budgets existed.
+        // One scope per currency, built once, instead of re-filtering `pairs`
+        // for every posting account.
+        let mut scope_by_currency: BTreeMap<&Currency, BTreeSet<Account>> = BTreeMap::new();
+        for (account, currency) in &pairs {
+            scope_by_currency
+                .entry(currency)
+                .or_default()
+                .insert(account.clone());
+        }
+        let empty = BTreeSet::new();
         for ((account, currency), entries) in actuals {
-            let covering = pairs
-                .iter()
-                .filter(|(_, c)| c == currency)
-                .map(|(b, _)| b.as_str());
-            let Some(start) = clip_start(
-                self,
-                covering,
-                account.as_str(),
-                currency.as_str(),
-                children,
-            ) else {
+            let scope = scope_by_currency.get(currency).unwrap_or(&empty);
+            let Some(start) =
+                clip_start(self, scope, account.as_str(), currency.as_str(), children)
+            else {
                 continue;
             };
             let start = start.max(from);
@@ -582,23 +667,26 @@ mod tests {
             entry(d(2024, 6, 1), "Expenses:Food"),
             entry(d(2024, 1, 1), "Expenses:Food:Restaurant"),
         ]);
-        let covered = ["Expenses:Food", "Expenses:Food:Restaurant"];
+        let covered: BTreeSet<Account> = ["Expenses:Food", "Expenses:Food:Restaurant"]
+            .into_iter()
+            .map(Account::new)
+            .collect();
         assert_eq!(
-            clip_start(&budgets, covered, "Expenses:Food", "USD", true),
+            clip_start(&budgets, &covered, "Expenses:Food", "USD", true),
             Some(d(2024, 6, 1)),
             "a posting on the parent is covered only by the parent's own budget"
         );
         assert_eq!(
-            clip_start(&budgets, covered, "Expenses:Food:Restaurant", "USD", true),
+            clip_start(&budgets, &covered, "Expenses:Food:Restaurant", "USD", true),
             Some(d(2024, 1, 1)),
             "a posting on the child is covered by both, so the earlier wins"
         );
         assert_eq!(
-            clip_start(&budgets, covered, "Expenses:Rent", "USD", true),
+            clip_start(&budgets, &covered, "Expenses:Rent", "USD", true),
             None
         );
         assert_eq!(
-            clip_start(&budgets, covered, "Expenses:Food", "EUR", true),
+            clip_start(&budgets, &covered, "Expenses:Food", "EUR", true),
             None
         );
     }

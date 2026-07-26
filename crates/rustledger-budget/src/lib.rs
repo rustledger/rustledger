@@ -48,6 +48,7 @@ pub use compare::{
 
 use rust_decimal::Decimal;
 use rustledger_core::{Account, CalendarPeriod, Currency, Directive, MetaValue, NaiveDate};
+use std::collections::BTreeMap;
 
 /// A budget interval, which fixes both the calendar anchoring and the per-day
 /// denominator.
@@ -314,6 +315,24 @@ pub fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<BudgetE
 pub struct Budgets {
     /// Sorted by `from`, so a reverse scan finds the entry in force.
     entries: Vec<BudgetEntry>,
+    /// Entry positions per `(account, currency)`, in effective-date order.
+    ///
+    /// The supersession lookups — [`Self::in_force`] and
+    /// [`Self::next_change_after`] — used to scan every declaration in the
+    /// ledger. [`Self::accrue`] calls them once per contiguous segment, so a
+    /// year of a monthly budget is two dozen full scans PER ACCRUAL, and the
+    /// comparison accrues once per (row, covered account). On a ledger
+    /// budgeting 1600 accounts that product dominated the whole report.
+    /// Indexed, each lookup is a binary search over one account's own history.
+    by_key: BTreeMap<(Account, Currency), Vec<u32>>,
+    /// Earliest `from` per `(account, currency)`, precomputed.
+    ///
+    /// [`Self::effective_start`] is called once per (row, posting-account) pair
+    /// while pairing spending with budgets, and scanning `entries` for each was
+    /// the dominant term: on a ledger budgeting 1600 accounts the comparison
+    /// spent seconds here. It cannot go stale — `Budgets` is immutable once
+    /// built, and both constructors go through [`Self::index`].
+    starts: BTreeMap<(Account, Currency), NaiveDate>,
 }
 
 impl Budgets {
@@ -330,14 +349,47 @@ impl Budgets {
     #[must_use]
     pub fn new(mut entries: Vec<BudgetEntry>) -> Self {
         entries.sort_by_key(|e| e.from);
-        Self { entries }
+        Self::index(entries)
+    }
+
+    /// Build the derived indexes. The ONE place they are computed, so a second
+    /// constructor cannot forget one.
+    fn index(entries: Vec<BudgetEntry>) -> Self {
+        let mut starts: BTreeMap<(Account, Currency), NaiveDate> = BTreeMap::new();
+        let mut by_key: BTreeMap<(Account, Currency), Vec<u32>> = BTreeMap::new();
+        for (i, e) in entries.iter().enumerate() {
+            let key = (e.account.clone(), e.currency.clone());
+            starts
+                .entry(key.clone())
+                .and_modify(|d| *d = (*d).min(e.from))
+                .or_insert(e.from);
+            // `entries` is sorted by `from` before indexing, so each key's
+            // positions come out in effective-date order — which is what makes
+            // the binary searches below valid. A ledger cannot hold u32::MAX
+            // budget directives.
+            if let Ok(i) = u32::try_from(i) {
+                by_key.entry(key).or_default().push(i);
+            }
+        }
+        Self {
+            entries,
+            by_key,
+            starts,
+        }
+    }
+
+    /// The entries for one `(account, currency)`, in effective-date order.
+    fn history(&self, account: &str, currency: &str) -> &[u32] {
+        self.by_key
+            .get(&(Account::new(account), Currency::new(currency)))
+            .map_or(&[][..], Vec::as_slice)
     }
 
     /// Read and index a ledger's `custom "budget"` directives.
     #[must_use]
     pub fn from_directives(directives: &[Directive]) -> (Self, Vec<BudgetError>) {
         let (entries, errors) = parse_budgets(directives);
-        (Self { entries }, errors)
+        (Self::index(entries), errors)
     }
 
     /// Every declaration, in effective-date order.
@@ -411,9 +463,12 @@ impl Budgets {
     /// a USD budget for one account are both live and neither replaces the other.
     #[must_use]
     pub fn in_force(&self, account: &str, currency: &str, day: NaiveDate) -> Option<&BudgetEntry> {
-        self.entries
-            .iter()
-            .rfind(|b| b.account == account && b.currency == currency && b.from <= day)
+        let history = self.history(account, currency);
+        // The LAST entry dated on or before `day`. Same answer as a reverse scan
+        // of every declaration: supersession resolves to the last entry on a
+        // date, and this key's positions are already in that order.
+        let at = history.partition_point(|&i| self.entries[i as usize].from <= day);
+        history[..at].last().map(|&i| &self.entries[i as usize])
     }
 
     /// The first date any budget for `(account, currency)` takes effect.
@@ -423,11 +478,11 @@ impl Budgets {
     /// credits nothing before a budget exists.
     #[must_use]
     pub fn effective_start(&self, account: &str, currency: &str) -> Option<NaiveDate> {
-        self.entries
-            .iter()
-            .filter(|e| e.account == account && e.currency == currency)
-            .map(|e| e.from)
-            .min()
+        // Indexed, not scanned — see `starts`. Borrowing the key would need an
+        // owned pair anyway, so the interned clones are the cheap part.
+        self.starts
+            .get(&(Account::new(account), Currency::new(currency)))
+            .copied()
     }
 
     /// The date of the next declaration for `(account, currency)` strictly after
@@ -439,11 +494,9 @@ impl Budgets {
         currency: &str,
         after: NaiveDate,
     ) -> Option<NaiveDate> {
-        self.entries
-            .iter()
-            .filter(|e| e.account == account && e.currency == currency && e.from > after)
-            .map(|e| e.from)
-            .min()
+        let history = self.history(account, currency);
+        let at = history.partition_point(|&i| self.entries[i as usize].from <= after);
+        history.get(at).map(|&i| self.entries[i as usize].from)
     }
 
     /// Accrue the budgeted amount for one `(account, currency)` over `[from, to)`.

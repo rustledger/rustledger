@@ -760,3 +760,59 @@ fn a_zero_day_segment_contributes_nothing() {
         Some(Decimal::ZERO)
     );
 }
+
+/// A sibling whose name sorts BETWEEN a parent and its children must not hide
+/// them.
+///
+/// The subtree lookups are `BTreeMap`/`BTreeSet` ranges, and account names sort
+/// bytewise: `'0'` is 0x30 and `':'` is 0x3A, so `Expenses:Food0` falls between
+/// `Expenses:Food` and `Expenses:Food:Restaurant`. A range that stopped at the
+/// first non-covered account would drop the child sitting behind the sibling —
+/// the row would report the parent's own budget and none of its subtree's, with
+/// nothing to indicate the omission.
+#[test]
+fn a_sibling_sorting_inside_the_subtree_does_not_truncate_it() {
+    use rustledger_core::AccountTypes;
+    let b = Budgets::new(vec![
+        budget(d(2024, 1, 1), "Expenses:Food", Interval::Month, 100),
+        // Sorts between the two above. Valid beancount: components may carry
+        // digits and dashes after the first character.
+        budget(d(2024, 1, 1), "Expenses:Food0", Interval::Month, 7),
+        budget(d(2024, 1, 1), "Expenses:Food-Bar", Interval::Month, 9),
+        budget(
+            d(2024, 1, 1),
+            "Expenses:Food:Restaurant",
+            Interval::Month,
+            400,
+        ),
+    ]);
+    let cmp = b.compare(
+        &[],
+        &AccountTypes::default(),
+        d(2024, 2, 1),
+        d(2024, 3, 1),
+        true,
+        None,
+    );
+    let food = cmp
+        .rows
+        .iter()
+        .find(|r| r.account == "Expenses:Food")
+        .expect("the parent row must exist");
+    assert_eq!(
+        food.budgeted,
+        Some(Decimal::from(500)),
+        "the parent aggregates its own 100 and the child's 400 — the siblings \
+         that sort between them are not part of the subtree and must neither \
+         be counted nor hide the child"
+    );
+    // ...and the siblings are their own rows, at their own amounts.
+    for (account, want) in [("Expenses:Food0", 7), ("Expenses:Food-Bar", 9)] {
+        let row = cmp
+            .rows
+            .iter()
+            .find(|r| r.account == account)
+            .unwrap_or_else(|| panic!("no row for {account}"));
+        assert_eq!(row.budgeted, Some(Decimal::from(want)), "{account}");
+    }
+}

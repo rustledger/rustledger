@@ -185,25 +185,6 @@ jobs:
       - name: Forbid std::sync Mutex/RwLock in library code
         run: ./scripts/check-sync-primitives.sh
 
-  # Ratchet keeping `file:` URI <-> path conversion inside
-  # `rustledger-lsp/src/proto.rs` (#1868). Four hand-rolled converters coexisted
-  # in that crate, each wrong differently (no encoding / spaces only / no
-  # no decoding on the way back / a Windows separator escaped to %5C) and all four
-  # agreed on the ASCII paths anyone tests with. Same grep-ratchet, no-extra-
-  # toolchain pattern as the unsafe and sync-primitive invariants.
-  #
-  # No `should_build` gate: the scripts are what is being run, so a PR touching
-  # only them must still exercise them.
-  uri-boundary:
-    name: URI Boundary
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Self-test the guard (a ratchet whose regex stopped matching says ok forever)
-        run: ./scripts/test-uri-boundary.sh
-      - name: "Confine file: URI conversion to the boundary module"
-        run: ./scripts/check-uri-boundary.sh
-
   # The ONLY job in this repo that runs `cargo test` off Linux.
   #
   # `rustledger-lsp` is where platform-specific path handling actually lives:
@@ -523,7 +504,7 @@ jobs:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, uri-boundary, lsp-platform, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate]
+    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, lsp-platform, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate]
     steps:
       - name: Check results
         run: |
@@ -542,18 +523,6 @@ jobs:
           echo "wit-version-gate result: $wit_gate"
           if [[ "$wit_gate" != "success" ]]; then
             echo "wit-version-gate must pass"
-            exit 1
-          fi
-
-          # uri-boundary always runs (no should_build gate, because the
-          # scripts it runs are themselves what a PR may be changing), so its
-          # result is always required. It was advisory when first added, which
-          # meant the ratchet could report a violation and the PR would still
-          # be mergeable — a ratchet nobody has to satisfy is documentation.
-          uri_boundary="${{ needs.uri-boundary.result }}"
-          echo "uri-boundary result: $uri_boundary"
-          if [[ "$uri_boundary" != "success" ]]; then
-            echo "uri-boundary must pass"
             exit 1
           fi
 

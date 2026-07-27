@@ -260,7 +260,7 @@ pub fn run(
     // Existence check → load → (only now) create pager → render → finish.
     // Both the load and any render error surface BEFORE the pager exists,
     // so a bad file never flashes the alternate screen.
-    let loaded = load(file, report, verbose, no_cache)?;
+    let loaded = load(file, report, verbose, no_cache, &mut io::stderr())?;
 
     let use_pager = !no_pager && matches!(format, OutputFormat::Text);
     let pager_cmd = if use_pager {
@@ -325,7 +325,7 @@ pub fn run_with_writer<W: io::Write>(
     // Existence-check → load → render(buffer): the same two-phase split the
     // production `run()` uses, minus the pager. Producing identical report
     // bytes is guaranteed because both paths funnel through `load` + `render`.
-    let loaded = load(file, report, verbose, false)?;
+    let loaded = load(file, report, verbose, false, warnings)?;
     render(&loaded, report, file, format, out, warnings)
 }
 
@@ -368,7 +368,13 @@ struct LoadedReport {
 /// This is the load phase shared by [`run`] and [`run_with_writer`]. It
 /// performs the existence check, loads via the on-disk cache, processes, and
 /// computes the (optional) pad-expanded balance view — but renders nothing.
-fn load(file: &PathBuf, report: &Report, verbose: bool, no_cache: bool) -> Result<LoadedReport> {
+fn load(
+    file: &PathBuf,
+    report: &Report,
+    verbose: bool,
+    no_cache: bool,
+    warnings: &mut dyn io::Write,
+) -> Result<LoadedReport> {
     // Check if file exists
     if !file.exists() {
         anyhow::bail!("file not found: {}", file.display());
@@ -396,9 +402,14 @@ fn load(file: &PathBuf, report: &Report, verbose: bool, no_cache: bool) -> Resul
     let ledger = rustledger_loader::process(raw, &options)
         .with_context(|| format!("failed to load {}", file.display()))?;
 
-    // Report any errors
+    // To the caller's sink, like every other diagnostic. These are the ones an
+    // agent can least afford to miss: a parse failure means recovery may have
+    // dropped directives, so the report below is computed over less than the
+    // ledger says. Left on `eprintln!`, they reached the terminal and nothing
+    // else — a confident, complete-looking report over a file that did not
+    // parse, which is the failure the sink was introduced to end.
     for err in &ledger.errors {
-        eprintln!("{}: {}", err.code, err.message);
+        let _ = writeln!(warnings, "{}: {}", err.code, err.message);
     }
 
     // Two views of the directive stream, chosen per-report below:

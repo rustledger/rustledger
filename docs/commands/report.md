@@ -556,9 +556,8 @@ array.
 
 A `custom "budget"` directive that rledger is confident IS a budget but cannot use is
 also reported by [`rledger check`](check.md) as `E11001`. Directives whose payload is
-not recognizably a Fava budget are left alone there — `custom` is beancount's open
-extension point and the name is not rledger's alone — though `report budget` still
-mentions them, since you asked about budgets.
+not recognizably a Fava budget are left alone everywhere — `custom` is beancount's
+open extension point and the name is not rledger's alone.
 
 **Empty reports.** "No budgets declared", "none were in force in this period" and
 "the `--account` filter excluded them all" are three different answers, and the report

@@ -476,20 +476,27 @@ fn parse_budgets_rejects_and_explains_bad_shapes() {
     // Too weak to claim: no interval keyword, and no account-plus-amount pair.
     // Ownership of the `custom "budget"` name is one rule, tabulated in the
     // CLI's `ownership_of_the_custom_budget_namespace`.
-    for weak in [
-        vec![],
-        vec![MetaValue::Account("Expenses:Food".into())],
-        vec![
-            MetaValue::Account("Expenses:Food".into()),
-            MetaValue::Amount(Amount::new(Dec::from(400), "USD".to_string())),
-        ],
-    ] {
+    for weak in [vec![], vec![MetaValue::Account("Expenses:Food".into())]] {
         let (entries, errors) = parse_budgets(&[custom(d(2024, 1, 1), weak.clone())]);
         assert!(
             entries.is_empty() && errors.is_empty(),
             "{weak:?} is not ours: {errors:?}"
         );
     }
+
+    // An account AND an amount IS ours, even with the interval word forgotten:
+    // two values leave no room for another tool's schema, and reporting nothing
+    // meant the report claimed "No budgets declared" over a ledger that plainly
+    // declared one.
+    let (entries, errors) = parse_budgets(&[custom(
+        d(2024, 1, 1),
+        vec![
+            MetaValue::Account("Expenses:Food".into()),
+            MetaValue::Amount(Amount::new(Dec::from(400), "USD".to_string())),
+        ],
+    )]);
+    assert!(entries.is_empty(), "no interval, so no budget: {entries:?}");
+    assert_eq!(errors.len(), 1, "...but it is reported: {errors:?}");
 }
 
 #[test]

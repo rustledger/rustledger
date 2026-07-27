@@ -106,7 +106,12 @@ pub(super) fn report_budget<W: Write>(
         // To the caller's sink, not the process's stderr: an agent envelope
         // cannot see the latter, and a warning it cannot see is the silent
         // misreport these exist to prevent.
-        writeln!(warnings, "warning: {}: {}", e.date, e.reason)?;
+        // A failed WARNING write must not cost the reader the REPORT. `?` here
+        // meant `2>/dev/full` — a cron job whose log filesystem filled — lost
+        // the whole table and exited 101, but only on ledgers that happened to
+        // have a diagnostic, so the failure looked unrelated to disk state.
+        // The sibling reports already ignore it; this now matches them.
+        let _ = writeln!(warnings, "warning: {}: {}", e.date, e.reason);
     }
     render(
         &Rendering { types, ctx, format },
@@ -363,7 +368,7 @@ fn render<W: Write>(
             // not a data row. Without it three different empty reports were one
             // bare header line.
             if let Some(empty) = empty {
-                writeln!(warnings, "note: {}", empty_message(empty, filter))?;
+                let _ = writeln!(warnings, "note: {}", empty_message(empty, filter));
             }
             writeln!(
                 writer,

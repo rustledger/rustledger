@@ -275,9 +275,10 @@ pub enum BudgetRead {
 /// | `Expenses:Food "monthly" 400.00 USD` | ours — keyword |
 /// | `"Expenses:food" "monthly" 400.00 USD` | ours — keyword; the account is the fault |
 /// | `Expenses:Food "fortnight" 400.00 USD` | ours — account + amount; the interval is the fault |
+/// | `Expenses:Food 400.00 USD` | ours — account + amount, no room for another schema |
 /// | `Expenses:Food "monthly" 400.00` | ours — keyword; the missing currency is the fault |
 /// | `"weekly < 1000.00 USD" 2016-02-28 TRUE …` | not ours — beancount's own example |
-/// | `Assets:Bank:Checking 1000.00 USD TRUE "monthly"` | not ours — no amount in the amount slot |
+/// | `Assets:Bank:Checking 1000.00 USD TRUE "monthly"` | not ours — four values is someone else's schema |
 /// | `"envelope-groceries" "rollover" 250.00 USD` | not ours — no account, no keyword |
 ///
 /// `<Account> "monthly"` with no amount IS claimed, deliberately: a directive
@@ -289,8 +290,19 @@ fn addressed_to_us(c: &rustledger_core::Custom) -> bool {
         c.values.get(1),
         Some(MetaValue::String(s)) if Interval::parse(s).is_some()
     );
-    let account_and_amount = c.values.first().and_then(account_name).is_some()
-        && matches!(c.values.get(2), Some(MetaValue::Amount(_)));
+    // An account and an amount, in a payload short enough to be Fava's. The
+    // amount need not be in slot 2: `custom "budget" Expenses:Food 400.00 USD`
+    // is a budget with the interval word forgotten, and requiring the slot made
+    // it addressed to nobody — reported by neither `check` nor the report, which
+    // then printed "No budgets declared" over a ledger that plainly declares one.
+    //
+    // The ARITY is what keeps another tool's payload out. Fava reads three
+    // values and tolerates a trailing note, so anything longer is a schema of
+    // its own: `custom "budget" Assets:Bank:Checking 1000.00 USD TRUE "monthly"`
+    // has four and is not ours to judge.
+    let account_and_amount = c.values.len() <= 3
+        && c.values.first().and_then(account_name).is_some()
+        && c.values.iter().any(|v| matches!(v, MetaValue::Amount(_)));
     names_interval || account_and_amount
 }
 

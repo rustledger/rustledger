@@ -2704,6 +2704,11 @@ fn ownership_of_the_custom_budget_namespace() {
             "Expenses:Food \"monthly\" 400.00 USD 23",
             "trailing figure",
         ),
+        (
+            true,
+            "Expenses:Food 400.00 USD",
+            "interval forgotten: account + amount, no room in two values for another schema",
+        ),
         // NOT OURS — no keyword, and no account-plus-amount.
         (
             false,
@@ -2718,12 +2723,12 @@ fn ownership_of_the_custom_budget_namespace() {
         (
             false,
             "Assets:Bank:Checking 1000.00 USD TRUE \"monthly\"",
-            "account, but no amount in the amount slot",
+            "four values is another tool's schema, not Fava's three",
         ),
         (
-            false,
+            true,
             "Expenses:Food 400.00 USD \"monthly\"",
-            "transposed operands",
+            "transposed, but still recognizably a budget",
         ),
     ];
     for (ours, directive, why) in cases {

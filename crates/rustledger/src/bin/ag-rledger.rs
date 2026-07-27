@@ -981,10 +981,7 @@ where
     if !warnings.trim().is_empty()
         && let Value::Object(map) = &mut result
     {
-        map.insert(
-            "warnings".to_string(),
-            json!(warnings.lines().collect::<Vec<_>>()),
-        );
+        map.insert("warnings".to_string(), json!(split_diagnostics(&warnings)));
     }
     Ok(CommandOutput::new(result)
         .exit_code(exit_code)
@@ -992,6 +989,36 @@ where
             format!("ag-rledger {command} --help"),
             "Inspect command usage",
         )))
+}
+
+/// One array entry per DIAGNOSTIC, not per line.
+///
+/// A diagnostic may span lines — the "no budgets declared" note carries an
+/// example `custom` directive on a second one — so splitting the sink buffer on
+/// newlines turned a single message into two entries, the second looking like a
+/// separate warning with no context. A continuation is any line that does not
+/// begin a new diagnostic.
+fn split_diagnostics(buffer: &str) -> Vec<String> {
+    let starts_one = |line: &str| {
+        line.starts_with("warning:")
+            || line.starts_with("note:")
+            // Loader diagnostics lead with their code, e.g. `LOAD: …`, `E1001: …`.
+            || line.split_once(':').is_some_and(|(code, _)| {
+                !code.is_empty()
+                    && code.starts_with(|c: char| c.is_ascii_uppercase())
+                    && code.chars().all(|c| c.is_ascii_alphanumeric())
+            })
+    };
+    let mut out: Vec<String> = Vec::new();
+    for line in buffer.lines() {
+        if out.is_empty() || starts_one(line) {
+            out.push(line.to_string());
+        } else if let Some(last) = out.last_mut() {
+            last.push('\n');
+            last.push_str(line);
+        }
+    }
+    out
 }
 
 fn command_result(command: &str, stdout: &str, exit_code: i32) -> Value {

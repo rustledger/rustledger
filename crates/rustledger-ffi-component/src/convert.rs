@@ -356,6 +356,17 @@ fn semantic_validation_errors(
         .filter(|err| !is_dup_of_booking(&err.message))
         .map(|err| {
             let mut e = ffi::Error::new(&err.message).validate_phase();
+            // Preserve severity, like the loader path already does. Every
+            // validation finding was crossing as `severity: "error"` because
+            // that is `Error::new`'s default, so a WARNING flipped
+            // `validate-result.valid` to false. Harmless while every validation
+            // code was an error; E11001 is a warning that fires on ordinary
+            // Fava-budgeted ledgers, so a host gating on `valid` would call a
+            // perfectly loadable ledger broken over an extension-point
+            // directive Fava itself ignores.
+            if err.code.severity() == rustledger_validate::Severity::Warning {
+                e.severity = "warning".to_string();
+            }
             if let Some(span) = err.span {
                 e = e.with_line(loaded.line_lookup.byte_to_line(span.start));
             }

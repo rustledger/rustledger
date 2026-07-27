@@ -57,10 +57,16 @@ pub const fn quarter_index0(month1: u32) -> u32 {
 impl CalendarPeriod {
     /// The first day of the period containing `day`.
     ///
-    /// Falls back to `day` itself if the truncated date would be invalid, which
-    /// the calendar arithmetic makes unreachable — the 1st of a real month
-    /// always exists — but which keeps this total rather than panicking on
-    /// ledger-derived dates.
+    /// Falls back to `day` itself if the truncated date would be out of range,
+    /// which keeps this total rather than panicking on ledger-derived dates.
+    ///
+    /// For month, quarter and year that fallback is unreachable: the 1st of a
+    /// real month always exists. For WEEK it is reachable at the very start of
+    /// the representable calendar, where the containing ISO week begins before
+    /// `NaiveDate::MIN` and there is no Monday to return; the result then is the
+    /// day itself, NOT a week start. No ledger reaches that date, but the
+    /// saturation is real and this says so rather than implying stricter
+    /// semantics than the code provides.
     #[must_use]
     pub fn start_of(self, day: NaiveDate) -> NaiveDate {
         match self {

@@ -551,8 +551,10 @@ match any spending, so the report says what the figures cannot: an account that 
 never opened or already closed, a currency the account never posts in, a figure too
 large to represent, and a budget smaller than its currency's display precision (which
 would otherwise render as `0.00` with `used` `n/a` — indistinguishable from having no
-budget). Warnings go to stderr for text and CSV, and in-band in the JSON `errors`
-array.
+budget). Warnings are written to stderr in every format, and JSON additionally
+carries them in-band in its `errors` array, so a consumer parsing only stdout
+still sees them. `ag-rledger` puts them in its envelope as structured
+`warnings` records, since it discards the process's stderr.
 
 A `custom "budget"` directive that rledger is confident IS a budget but cannot use is
 also reported by [`rledger check`](check.md) as `E11001`. Directives whose payload is

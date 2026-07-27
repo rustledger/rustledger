@@ -234,6 +234,44 @@ mod windows_shape_tests {
         );
     }
 
+    /// EVERY byte a POSIX filename may contain survives a round trip.
+    ///
+    /// Exhaustive rather than a corpus. The `[ ] ^ |` gap existed because `url`
+    /// encodes to the WHATWG path set and `fluent_uri` parses strict RFC 3986,
+    /// and it survived review precisely because the hand-picked corpus happened
+    /// to contain no character of that class. A list of examples can only cover
+    /// what its author thought of; enumerating the alphabet cannot miss a fifth
+    /// character, which is the question this actually answers.
+    ///
+    /// `cfg(unix)` for `OsStrExt`: on Windows the legal-filename set is
+    /// different and narrower, so the same sweep would not be meaningful.
+    #[cfg(unix)]
+    #[test]
+    fn every_legal_filename_byte_round_trips() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut bad = Vec::new();
+        // All but NUL and `/`, the only two a POSIX filename cannot contain.
+        for b in 1u8..=255 {
+            if b == b'/' {
+                continue;
+            }
+            let raw = [b'x', b, b'y'];
+            let path = std::path::Path::new("/tmp").join(std::ffi::OsStr::from_bytes(&raw));
+            match path_to_uri(&path) {
+                Err(e) => bad.push(format!("{b:#04x}: path_to_uri: {e}")),
+                Ok(uri) => match uri_to_path(&uri) {
+                    Err(e) => bad.push(format!("{b:#04x}: uri_to_path: {e} ({})", uri.as_str())),
+                    Ok(back) if back != path => {
+                        bad.push(format!("{b:#04x}: {back:?} != {path:?}"));
+                    }
+                    Ok(_) => {}
+                },
+            }
+        }
+        assert!(bad.is_empty(), "bytes that do not round trip: {bad:#?}");
+    }
+
     /// The half of the Windows question that IS testable anywhere: the escaping
     /// `url` omits and `lsp-types` requires is applied regardless of platform.
     #[test]

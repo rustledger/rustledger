@@ -524,14 +524,22 @@ mod tests {
             "brackets must be percent-encoded: {}",
             target.as_str()
         );
-        // Against the CANONICAL path, because the resolver asks the OS. The raw
-        // `TempDir` path is not the same string as its resolved form on either
-        // platform with a symlinked or shortened temp directory: macOS gives
-        // `/var/...` where the real path is `/private/var/...`, and Windows
-        // gives the 8.3 `RUNNER~1` for `runneradmin`. Comparing against the raw
-        // path passed on Linux and nowhere else.
+        // Compared in ONE spelling, because three are in play for this file and
+        // no two of them are the same string:
+        //
+        //   raw TempDir     macOS `/var/...`      Windows `...\RUNNER~1\...`
+        //   canonicalized   macOS `/private/var/` Windows `\\?\C:\...`
+        //   through the URI both prefixes dropped by `url`'s conversion
+        //
+        // The claim worth asserting is that the target NAMES THE FIXTURE, so
+        // both sides are resolved and then compared. Asserting on any single
+        // spelling passes on one platform and fails on the others, which is
+        // how the raw-path version of this got through review.
+        let target_path = crate::uri_to_path(&target).expect("target inverts");
         assert_eq!(
-            crate::uri_to_path(&target).expect("target inverts"),
+            target_path
+                .canonical_for_loader_lookup()
+                .expect("the target exists"),
             dir.path()
                 .join(fname)
                 .canonicalize()

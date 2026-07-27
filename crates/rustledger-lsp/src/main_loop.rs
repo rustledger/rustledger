@@ -879,10 +879,17 @@ impl MainLoopState {
         let mut documents: Vec<(Uri, String, Arc<ParseResult>)> = {
             let mut vfs = self.vfs.write();
             vfs.iter_with_parse()
-                .map(|(path, content, parse_result)| {
-                    let uri: Uri =
-                        crate::path_to_uri(path).unwrap_or_else(|| "file:///".parse().unwrap());
-                    (uri, content, parse_result)
+                .filter_map(|(path, content, parse_result)| {
+                    // SKIP, never a sentinel. `file:///` as a fallback pointed
+                    // every unconvertible buffer at the filesystem root, so a
+                    // workspace-symbol hit navigated nowhere — and two such
+                    // buffers collapsed onto one key, attributing one file's
+                    // symbols to the other. The sibling sites already skip.
+                    let uri = crate::path_to_uri(path);
+                    if uri.is_none() {
+                        tracing::warn!("no file URI for {}; skipping", path.display());
+                    }
+                    Some((uri?, content, parse_result))
                 })
                 .collect()
         };

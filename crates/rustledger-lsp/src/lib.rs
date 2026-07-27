@@ -65,11 +65,28 @@ pub fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
 /// backslashes in place.
 #[must_use]
 pub fn path_to_uri(path: &std::path::Path) -> Option<Uri> {
-    url::Url::from_file_path(path)
-        .ok()?
-        .as_str()
-        .parse::<Uri>()
-        .ok()
+    let url = url::Url::from_file_path(path).ok()?;
+    // `url` encodes to the WHATWG path set, which leaves `[ ] ^ |` literal;
+    // `lsp-types` parses with `fluent_uri`, strict RFC 3986, where none of them
+    // is a `pchar`. Composing the lax encoder with the strict parser means a
+    // perfectly ordinary path like `Statements/[2026-01] bank.pdf` produces a
+    // string that will not parse, and the function returns `None` — no document
+    // link, no goto-definition, no diagnostics for that file.
+    //
+    // Everything after `file://` is the path: `from_file_path` leaves the
+    // authority empty except for a UNC share, whose host is a name and cannot
+    // contain these characters, so escaping them here cannot corrupt a host.
+    let mut out = String::with_capacity(url.as_str().len());
+    for ch in url.as_str().chars() {
+        match ch {
+            '[' => out.push_str("%5B"),
+            ']' => out.push_str("%5D"),
+            '^' => out.push_str("%5E"),
+            '|' => out.push_str("%7C"),
+            _ => out.push(ch),
+        }
+    }
+    out.parse::<Uri>().ok()
 }
 
 mod server;
@@ -137,6 +154,14 @@ mod uri_conversion_tests {
             "/tmp/Facturé/accented.bean",
             "/tmp/会計/cjk.bean",
             "/tmp/#hash/punct.bean",
+            // `url` leaves these literal (WHATWG path set) but `fluent_uri`
+            // refuses them (strict RFC 3986), so composing the two dropped a
+            // perfectly ordinary statement filename. The corpus originally had
+            // none of this class, which is why the gap survived review.
+            "/tmp/a[1].bean",
+            "/tmp/Statements/[2026-01] bank.pdf",
+            "/tmp/a^b.bean",
+            "/tmp/a|b.bean",
         ] {
             let path = std::path::Path::new(p);
             let u = path_to_uri(path).unwrap_or_else(|| panic!("to uri: {p}"));

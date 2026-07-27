@@ -190,11 +190,19 @@ fn file_uri(path: &str) -> Option<Uri> {
     let mut encoded = String::with_capacity(path.len());
     // A conservative allow-list: anything outside it is escaped. `/` stays a
     // separator, and `:` is kept so a Windows drive letter survives.
+    //
+    // A BACKSLASH is a separator too, and becomes `/`. `resolve_full_path`
+    // builds its result with `Path::join`, which uses the platform separator,
+    // so on Windows this function receives `C:\Users\a b\x.txt`. Escaping
+    // those to `%5C` yields `file:///C:%5CUsers%5C...`, which an editor will not
+    // open — the fix for the path lookup would have shipped with the click
+    // target still broken, on the one platform the bug was reported from.
     for b in path.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
                 encoded.push(b as char);
             }
+            b'\\' => encoded.push('/'),
             _ => encoded.push_str(&format!("%{b:02X}")),
         }
     }
@@ -546,7 +554,10 @@ mod uri_resolution_tests {
     /// might not have.
     #[test]
     fn a_relative_document_resolves_under_a_percent_encoded_directory() {
-        let dir = std::env::temp_dir().join("rledger lsp 1866");
+        // Unique per process: a fixed name collides when two `cargo test`
+        // processes run at once, or when a previous failed run left the
+        // directory behind.
+        let dir = std::env::temp_dir().join(format!("rledger lsp 1866 {}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create fixture dir");
         std::fs::write(dir.join("neighbor.txt"), b"invoice").expect("write doc");
@@ -597,5 +608,12 @@ mod uri_resolution_tests {
         // A POSIX path already starts with `/`, so it must not gain a fourth.
         let posix = file_uri("/home/a b/x.txt").expect("uri");
         assert_eq!(posix.as_str(), "file:///home/a%20b/x.txt");
+
+        // The shape `Path::join` ACTUALLY produces on Windows: backslashes.
+        // Escaping them to `%5C` gives a URI no editor will open, and the test
+        // above would not have caught it because a hand-written `C:/…` is not
+        // what the code receives there.
+        let native = file_uri(r"C:\Users\a b\repro\neighbor.txt").expect("uri");
+        assert_eq!(native.as_str(), "file:///C:/Users/a%20b/repro/neighbor.txt");
     }
 }

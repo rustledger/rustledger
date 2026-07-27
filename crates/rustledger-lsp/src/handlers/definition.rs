@@ -279,13 +279,17 @@ mod tests {
     fn cross_file_location_builds_uri_and_converts_line() {
         // `find_account_definition` returns a 1-based line (SourceFile::line_col);
         // the LSP Location must be 0-based, and the path becomes a file:// URI.
-        let loc = cross_file_location(std::path::Path::new("/ledger/accounts.beancount"), 5)
-            .expect("location");
-        assert_eq!(loc.uri.as_str(), "file:///ledger/accounts.beancount");
+        let path = crate::test_abs("ledger/accounts.beancount");
+        let loc = cross_file_location(&path, 5).expect("location");
+        assert_eq!(
+            crate::uri_to_path(&loc.uri).expect("uri inverts"),
+            path,
+            "the URI must name the file it was built from"
+        );
         assert_eq!(loc.range.start, Position::new(4, 0)); // 5 (1-based) -> 4 (0-based)
         assert_eq!(loc.range.end, Position::new(4, 0));
         // Line 1 (1-based) clamps to 0, not underflow.
-        let first = cross_file_location(std::path::Path::new("/a.beancount"), 1).unwrap();
+        let first = cross_file_location(&crate::test_abs("a.beancount"), 1).unwrap();
         assert_eq!(first.range.start, Position::new(0, 0));
     }
 }

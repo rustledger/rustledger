@@ -361,7 +361,11 @@ mod tests {
 
     #[test]
     fn test_resolve_path_to_uri() {
-        let base_dir = Some("/home/user/ledger".to_string());
+        let base_dir = Some(
+            crate::test_abs("home/user/ledger")
+                .to_string_lossy()
+                .into_owned(),
+        );
 
         let uri = resolve_path_to_uri("accounts.beancount", &base_dir);
         assert!(uri.is_some());
@@ -380,7 +384,7 @@ mod tests {
             tooltip: None,
             data: Some(serde_json::json!({
                 "path": "accounts.beancount",
-                "base_dir": "/home/user/ledger",
+                "base_dir": crate::test_abs("home/user/ledger").to_string_lossy(),
                 "kind": "include",
             })),
         };
@@ -535,17 +539,23 @@ mod tests {
 
     #[test]
     fn test_resolve_full_path() {
-        let base_dir = Some("/home/user/ledger".to_string());
+        let base = crate::test_abs("home/user/ledger");
+        let base_dir = Some(base.to_string_lossy().into_owned());
 
-        // Relative path
+        // Relative path: joined onto the base, with the platform's separator —
+        // `Path::join`, exactly as the loader does it.
         let resolved = resolve_full_path("accounts.beancount", &base_dir);
         assert!(resolved.is_some());
-        assert_eq!(resolved.unwrap(), "/home/user/ledger/accounts.beancount");
+        assert_eq!(
+            resolved.unwrap(),
+            base.join("accounts.beancount").to_string_lossy()
+        );
 
-        // Absolute path
-        let resolved = resolve_full_path("/absolute/path.beancount", &base_dir);
+        // Absolute path: passed through untouched, base ignored.
+        let absolute = crate::test_abs("absolute/path.beancount");
+        let resolved = resolve_full_path(&absolute.to_string_lossy(), &base_dir);
         assert!(resolved.is_some());
-        assert_eq!(resolved.unwrap(), "/absolute/path.beancount");
+        assert_eq!(resolved.unwrap(), absolute.to_string_lossy());
 
         // No base dir
         let resolved = resolve_full_path("relative.beancount", &None);
@@ -582,8 +592,19 @@ mod uri_resolution_tests {
                       2026-07-27 document Expenses:Probe \"neighbor.txt\"\n";
         std::fs::write(&ledger, source).expect("write ledger");
 
-        // The URI an editor actually sends: the space is encoded.
-        let uri_str = format!("file://{}", ledger.to_string_lossy().replace(' ', "%20"));
+        // The URI an editor actually sends. Built through `url` rather than by
+        // hand: an editor percent-encodes the space AND, on Windows, produces
+        // the three-slash drive form, which `format!("file://{}", ..)` does not.
+        // This is the client's job, not `proto`'s, so it is spelled out here
+        // rather than borrowed from `path_to_uri` — a test that builds its
+        // input with the code under test asserts only self-consistency.
+        let uri_str = url::Url::from_file_path(&ledger)
+            .expect("fixture path is absolute")
+            .to_string();
+        assert!(
+            uri_str.contains("%20"),
+            "the fixture must exercise encoding"
+        );
         let uri = Uri::from_str(&uri_str).expect("uri");
 
         let parse = rustledger_parser::parse(source);

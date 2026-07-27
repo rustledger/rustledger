@@ -2379,17 +2379,26 @@ mod tests {
     /// so must decode before comparison.
     #[test]
     fn did_close_evicts_diagnostics_across_uri_spellings() {
+        // What a cross-file publish would have cached, keyed the way that code
+        // path keys it: the path from the source map.
+        let path = crate::test_abs("tmp/rl-close/ledger.beancount");
+        // Spellings are derived from the canonical URI rather than written out,
+        // so they name this path on whatever platform is running.
+        let canonical = crate::path_to_uri(&path).expect("canonical uri");
+        let dir = canonical
+            .as_str()
+            .rsplit_once('/')
+            .expect("a URI with a directory")
+            .0
+            .to_string();
         for spelling in [
-            "file:///tmp/rl-close/./ledger.beancount",
-            "file:///tmp/rl-close/ledger%2Ebeancount",
-            "file:///tmp/rl-close/sub/../ledger.beancount",
+            format!("{dir}/./ledger.beancount"),
+            format!("{dir}/ledger%2Ebeancount"),
+            format!("{dir}/sub/../ledger.beancount"),
         ] {
             let (sender, _receiver) = crossbeam_channel::unbounded();
             let mut state = MainLoopState::new(sender, None);
-
-            // What a cross-file publish would have cached, keyed the way that
-            // code path keys it: the path from the source map.
-            let path = PathBuf::from("/tmp/rl-close/ledger.beancount");
+            let path = path.clone();
             state.diagnostics.insert(path.clone(), vec![]);
             state.cross_file_diag_paths.insert(path.clone());
 

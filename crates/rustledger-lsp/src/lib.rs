@@ -77,6 +77,26 @@ impl std::fmt::Display for PathUriError {
 
 impl std::error::Error for PathUriError {}
 
+/// An absolute path for tests, spelled the way THIS platform spells one.
+///
+/// `/home/user/ledger` is absolute on Unix and relative on Windows, so a test
+/// hard-coding it does not assert a weaker thing on Windows — it asserts
+/// nothing, because `path_to_uri` correctly refuses a relative path and the
+/// test panics before reaching its subject. Six tests failed that way the first
+/// time this crate's suite ran on Windows.
+///
+/// Prefixing a drive keeps each test asserting what it was written to assert on
+/// both platforms, which is the point of running them there at all. Tests whose
+/// SUBJECT is a POSIX-specific spelling belong in a `cfg(unix)` block instead.
+#[cfg(test)]
+pub(crate) fn test_abs(relative: &str) -> std::path::PathBuf {
+    if cfg!(windows) {
+        std::path::PathBuf::from(format!("C:\\{}", relative.replace('/', "\\")))
+    } else {
+        std::path::PathBuf::from(format!("/{relative}"))
+    }
+}
+
 pub mod proto;
 pub use ledger_state::{LedgerState, LspConfig, SharedLedgerState, new_shared_ledger_state};
 pub use main_loop::{run_main_loop, run_main_loop_with_exit_action};

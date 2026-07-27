@@ -185,6 +185,25 @@ jobs:
       - name: Forbid std::sync Mutex/RwLock in library code
         run: ./scripts/check-sync-primitives.sh
 
+  # Ratchet keeping `file:` URI <-> path conversion inside
+  # `rustledger-lsp/src/proto.rs` (#1868). Four hand-rolled converters coexisted
+  # in that crate, each wrong differently (no encoding / spaces only / no
+  # no decoding on the way back / a Windows separator escaped to %5C) and all four
+  # agreed on the ASCII paths anyone tests with. Same grep-ratchet, no-extra-
+  # toolchain pattern as the unsafe and sync-primitive invariants.
+  #
+  # No `should_build` gate: the scripts are what is being run, so a PR touching
+  # only them must still exercise them.
+  uri-boundary:
+    name: URI Boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Self-test the guard (a ratchet whose regex stopped matching says ok forever)
+        run: ./scripts/test-uri-boundary.sh
+      - name: "Confine file: URI conversion to the boundary module"
+        run: ./scripts/check-uri-boundary.sh
+
   # Plugin-test policies (Phase 5 of plugin-testing-quality plan, see #992).
   # Catches weak count assertions and `(partial)` test ports that tend to
   # silently mask plugin bugs.

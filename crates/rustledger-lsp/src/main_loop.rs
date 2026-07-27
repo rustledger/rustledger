@@ -179,14 +179,32 @@ pub struct MainLoopState {
     pub vfs: Arc<RwLock<Vfs>>,
     /// Sender for outgoing LSP messages.
     pub sender: Sender<lsp_server::Message>,
-    /// Cached diagnostics per file.
-    pub diagnostics: HashMap<Uri, Vec<lsp_types::Diagnostic>>,
-    /// URIs of *unopened* ledger files (reachable via `include`) that we last
+    /// Cached diagnostics per file, keyed by PATH, not by `Uri`.
+    ///
+    /// A `Uri` is a string, and one file has many spellings of it: `%2F` vs
+    /// `/`, a `.` segment, `C:` vs `c:`. Two spellings hash differently, so a
+    /// map keyed by `Uri` can hold the same file twice, and the `didClose`
+    /// that arrives in the client's spelling then fails to evict an entry
+    /// stored in ours — diagnostics for a closed file stay on screen with no
+    /// buffer left to clear them. Paths have no such freedom: `uri_to_path`
+    /// resolves the encoding and dot segments, so every spelling of one file
+    /// converges on one key.
+    ///
+    /// The URI exists at the protocol boundary and nowhere else, which is the
+    /// same reason the VFS is path-keyed. Deliberately NOT canonicalized:
+    /// `canonicalize` hits the filesystem, fails outright for a file that does
+    /// not exist yet, and resolves symlinks the user may have opened on
+    /// purpose. rust-analyzer's `AbsPathBuf` avoids it for those reasons.
+    pub diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// Paths of *unopened* ledger files (reachable via `include`) that we last
     /// published non-empty diagnostics for. Tracked so that, when their errors
     /// are fixed, we send an explicit empty diagnostic set to clear them — the
     /// LSP spec has no implicit "clear", and these files have no open buffer of
-    /// their own to drive a clear via `on_did_close`.
-    pub cross_file_diag_uris: std::collections::HashSet<Uri>,
+    /// their own to drive a clear via `on_did_close`. Path-keyed for the reason
+    /// above, and additionally because this set is compared against the VFS's
+    /// open paths: keying it by `Uri` meant round-tripping every open path
+    /// through the URI encoder just to compare it.
+    pub cross_file_diag_paths: std::collections::HashSet<PathBuf>,
     /// Whether shutdown was requested.
     pub shutdown_requested: bool,
     /// Set by the `exit` notification handler. The main loop checks
@@ -277,7 +295,7 @@ impl MainLoopState {
 
         Self {
             vfs: Arc::new(RwLock::new(Vfs::new())),
-            cross_file_diag_uris: std::collections::HashSet::new(),
+            cross_file_diag_paths: std::collections::HashSet::new(),
             sender,
             diagnostics: HashMap::new(),
             shutdown_requested: false,
@@ -1303,7 +1321,11 @@ impl MainLoopState {
         // verdict after the full pipeline. None means cold start
         // (no `publish_diagnostics` for this URI yet); the lens renders
         // a neutral title and never claims a verdict it can't back up.
-        let cached_diagnostics = self.diagnostics.get(uri).map(Vec::as_slice);
+        let cached_path = uri_to_path(uri).ok();
+        let cached_diagnostics = cached_path
+            .as_ref()
+            .and_then(|p| self.diagnostics.get(p))
+            .map(Vec::as_slice);
 
         let response = handle_code_lens(
             &params,
@@ -1660,14 +1682,15 @@ impl MainLoopState {
 
         tracing::info!("Document closed: {}", uri.as_str());
 
-        // Remove from VFS
+        // Remove from VFS and drop the cached diagnostics under the same key
+        // the VFS uses. The clear still goes out on the URI the client sent,
+        // which is what it will match against its own store.
         if let Ok(path) = uri_to_path(&uri) {
             self.vfs.write().close(&path);
+            self.diagnostics.remove(&path);
+            self.cross_file_diag_paths.remove(&path);
         }
-
-        // Clear diagnostics
-        self.diagnostics.remove(&uri);
-        self.send_diagnostics(&uri, vec![]);
+        self.send_diagnostics_to_uri(&uri, vec![]);
     }
 
     /// Handle workspace/didChangeWatchedFiles notification.
@@ -1938,9 +1961,11 @@ impl MainLoopState {
             current_file_id
         );
 
-        // Cache and send
-        self.diagnostics.insert(uri.clone(), diagnostics.clone());
-        self.send_diagnostics(uri, diagnostics);
+        // Cache under the path, send to the URI the client gave us.
+        if let Ok(path) = uri_to_path(uri) {
+            self.diagnostics.insert(path, diagnostics.clone());
+        }
+        self.send_diagnostics_to_uri(uri, diagnostics);
 
         // Publish (or clear) diagnostics for unopened included files.
         self.publish_cross_file_diagnostics(cross_file);
@@ -1950,7 +1975,7 @@ impl MainLoopState {
     /// file's diagnostics from a SINGLE whole-ledger validation (#1799).
     ///
     /// Returns `(current_file_diagnostics, cross_file)`, where `cross_file` is
-    /// one `(uri, diagnostics)` per unopened ledger file (diagnostics may be
+    /// one `(path, diagnostics)` per unopened ledger file (diagnostics may be
     /// empty — the caller clears those it had previously reported). This
     /// replaces the old per-file `all_diagnostics` loop, which re-ran the whole
     /// ledger's book+validate once per file: that O(files) cost per keystroke
@@ -1970,7 +1995,7 @@ impl MainLoopState {
         overlay: &[(u16, &[Spanned<Directive>])],
     ) -> (
         Vec<lsp_types::Diagnostic>,
-        Vec<(Uri, Vec<lsp_types::Diagnostic>)>,
+        Vec<(PathBuf, Vec<lsp_types::Diagnostic>)>,
     ) {
         let Some(ledger) = ledger_state.ledger() else {
             return (Vec::new(), Vec::new());
@@ -1988,7 +2013,7 @@ impl MainLoopState {
         // call; sources borrow the held ledger snapshot. Parsing each unopened
         // file is cheap next to the validation we now do only once.
         struct Unopened<'a> {
-            uri: Uri,
+            path: PathBuf,
             file_id: u16,
             source: &'a str,
             parse: ParseResult,
@@ -2008,23 +2033,11 @@ impl MainLoopState {
                 {
                     return None;
                 }
-                // NOTE: this `file://{path}` assembly matches the crate-wide
-                // convention (see `revalidate_open_documents`, `document_links`,
-                // and `uri_to_path`, which strips a plain `file://` prefix
-                // without percent-decoding). A path with characters that aren't
-                // URI-safe (spaces, `#`, `%`) would fail to parse; warn rather
-                // than drop it silently. A proper percent-encoding
-                // `path_to_uri` helper applied consistently across the crate is
-                // the broader fix.
-                let Ok(uri) = crate::path_to_uri(&f.path) else {
-                    tracing::warn!(
-                        "skipping cross-file diagnostics for {}: path is not a valid file:// URI",
-                        f.path.display()
-                    );
-                    return None;
-                };
+                // The path is carried, not a URI: it is what the diagnostics
+                // are keyed by, and it is only converted at the moment of
+                // sending. Encoding is `crate::proto`'s problem alone.
                 Some(Unopened {
-                    uri,
+                    path: f.path.clone(),
                     file_id: f.id as u16,
                     source: f.source.as_ref(),
                     parse: parse(&f.source),
@@ -2073,10 +2086,10 @@ impl MainLoopState {
         } else {
             Vec::new()
         };
-        let cross_file: Vec<(Uri, Vec<lsp_types::Diagnostic>)> = unopened
+        let cross_file: Vec<(PathBuf, Vec<lsp_types::Diagnostic>)> = unopened
             .into_iter()
             .zip(per_file)
-            .map(|(u, diags)| (u.uri, diags))
+            .map(|(u, diags)| (u.path, diags))
             .collect();
         (current_diags, cross_file)
     }
@@ -2094,43 +2107,59 @@ impl MainLoopState {
     #[allow(clippy::mutable_key_type)] // Uri has interior mutability but is safe as a set key here
     fn publish_cross_file_diagnostics(
         &mut self,
-        cross_file: Vec<(Uri, Vec<lsp_types::Diagnostic>)>,
+        cross_file: Vec<(PathBuf, Vec<lsp_types::Diagnostic>)>,
     ) {
         // Publish the files that have errors this round.
-        let mut erroring: std::collections::HashSet<Uri> = std::collections::HashSet::new();
-        for (uri, diags) in cross_file {
+        let mut erroring: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        for (path, diags) in cross_file {
             if diags.is_empty() {
                 continue;
             }
-            erroring.insert(uri.clone());
-            self.cross_file_diag_uris.insert(uri.clone());
-            self.diagnostics.insert(uri.clone(), diags.clone());
-            self.send_diagnostics(&uri, diags);
+            erroring.insert(path.clone());
+            self.cross_file_diag_paths.insert(path.clone());
+            self.diagnostics.insert(path.clone(), diags.clone());
+            self.send_diagnostics(&path, diags);
         }
 
-        // Clear any previously-tracked URI that is no longer erroring and is not
-        // currently open (open buffers manage their own diagnostics).
-        let open_uris: std::collections::HashSet<Uri> = self
-            .vfs
-            .read()
-            .paths()
-            .filter_map(|p| crate::path_to_uri(p).ok())
-            .collect();
-        let stale: Vec<Uri> = self
-            .cross_file_diag_uris
+        // Clear any previously-tracked file that is no longer erroring and is
+        // not currently open (open buffers manage their own diagnostics). Both
+        // sides of this comparison are paths straight from the VFS and the
+        // source map, so it no longer depends on two encoders agreeing.
+        let open_paths: std::collections::HashSet<PathBuf> =
+            self.vfs.read().paths().map(PathBuf::from).collect();
+        let stale: Vec<PathBuf> = self
+            .cross_file_diag_paths
             .iter()
-            .filter(|u| !erroring.contains(*u) && !open_uris.contains(*u))
+            .filter(|p| !erroring.contains(*p) && !open_paths.contains(*p))
             .cloned()
             .collect();
-        for uri in stale {
-            self.cross_file_diag_uris.remove(&uri);
-            self.diagnostics.remove(&uri);
-            self.send_diagnostics(&uri, vec![]);
+        for path in stale {
+            self.cross_file_diag_paths.remove(&path);
+            self.diagnostics.remove(&path);
+            self.send_diagnostics(&path, vec![]);
         }
     }
 
-    /// Send diagnostics to the client.
-    fn send_diagnostics(&self, uri: &Uri, diagnostics: Vec<lsp_types::Diagnostic>) {
+    /// Send diagnostics for a path, converting to a URI at the wire.
+    ///
+    /// A path with no representable `file:` URI cannot be addressed to the
+    /// client at all, so the only options are to warn or to lie; this warns.
+    fn send_diagnostics(&self, path: &std::path::Path, diagnostics: Vec<lsp_types::Diagnostic>) {
+        match crate::path_to_uri(path) {
+            Ok(uri) => self.send_diagnostics_to_uri(&uri, diagnostics),
+            Err(e) => tracing::warn!(
+                "no file URI for {}: {e}; cannot publish {} diagnostic(s)",
+                path.display(),
+                diagnostics.len()
+            ),
+        }
+    }
+
+    /// Send diagnostics to a URI the client itself supplied.
+    ///
+    /// Used on the request path, where echoing the client's own spelling back
+    /// is what its diagnostic store is keyed by.
+    fn send_diagnostics_to_uri(&self, uri: &Uri, diagnostics: Vec<lsp_types::Diagnostic>) {
         let params = PublishDiagnosticsParams {
             uri: uri.clone(),
             diagnostics,
@@ -2326,5 +2355,52 @@ mod tests {
 
         let handler = DispatchError::Handler("custom failure".into()).to_string();
         assert_eq!(handler, "custom failure");
+    }
+
+    /// Closing a document evicts its diagnostics even when the client spells
+    /// the URI differently than we do.
+    ///
+    /// A file has one path but many URIs. Cross-file diagnostics are published
+    /// under the URI WE build from the source map; a `didClose` arrives under
+    /// the URI the CLIENT built. While the cache was keyed by `Uri` those were
+    /// two entries, only one of which the close could reach, so the other
+    /// survived with no buffer left to clear it — and the balance code lens
+    /// reads exactly that cache for its verdict (#1264), so a closed file's
+    /// stale errors kept driving a lens.
+    ///
+    /// The three spellings below are the same file by every rule in RFC 3986:
+    /// a `.` segment, and a percent-encoded character that is unreserved and
+    /// so must decode before comparison.
+    #[test]
+    fn did_close_evicts_diagnostics_across_uri_spellings() {
+        for spelling in [
+            "file:///tmp/rl-close/./ledger.beancount",
+            "file:///tmp/rl-close/ledger%2Ebeancount",
+            "file:///tmp/rl-close/sub/../ledger.beancount",
+        ] {
+            let (sender, _receiver) = crossbeam_channel::unbounded();
+            let mut state = MainLoopState::new(sender, None);
+
+            // What a cross-file publish would have cached, keyed the way that
+            // code path keys it: the path from the source map.
+            let path = PathBuf::from("/tmp/rl-close/ledger.beancount");
+            state.diagnostics.insert(path.clone(), vec![]);
+            state.cross_file_diag_paths.insert(path.clone());
+
+            let uri: Uri = spelling.parse().expect("test URI parses");
+            state.on_did_close(lsp_types::DidCloseTextDocumentParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri },
+            });
+
+            assert!(
+                state.diagnostics.is_empty(),
+                "{spelling} left the cache populated: {:?}",
+                state.diagnostics.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                state.cross_file_diag_paths.is_empty(),
+                "{spelling} left the cross-file set populated"
+            );
+        }
     }
 }

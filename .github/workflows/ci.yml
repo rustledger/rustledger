@@ -229,6 +229,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
         with:
           toolchain: 1.97.0 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
+      # Required: sccache is RUSTC_WRAPPER at the workflow level, so a job that
+      # compiles Rust without installing it dies on cargo's `-vV` probe with
+      # "could not execute process sccache" — which is how this job failed the
+      # first time it ran.
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - name: Test rustledger-lsp on Windows
         run: cargo test -p rustledger-lsp

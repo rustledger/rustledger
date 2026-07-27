@@ -524,9 +524,18 @@ mod tests {
             "brackets must be percent-encoded: {}",
             target.as_str()
         );
+        // Against the CANONICAL path, because the resolver asks the OS. The raw
+        // `TempDir` path is not the same string as its resolved form on either
+        // platform with a symlinked or shortened temp directory: macOS gives
+        // `/var/...` where the real path is `/private/var/...`, and Windows
+        // gives the 8.3 `RUNNER~1` for `runneradmin`. Comparing against the raw
+        // path passed on Linux and nowhere else.
         assert_eq!(
             crate::uri_to_path(&target).expect("target inverts"),
-            crate::AbsPathBuf::new(dir.path().join(fname)).expect("tempdir is absolute")
+            dir.path()
+                .join(fname)
+                .canonicalize()
+                .expect("the fixture exists")
         );
     }
 

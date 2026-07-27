@@ -548,7 +548,13 @@ pub fn same_file(uri: &lsp_types::Uri, expected: &str) -> bool {
         rustledger_lsp::uri_to_path(uri),
         rustledger_lsp::uri_to_path(&expected),
     ) {
-        (Ok(a), Ok(b)) => a == b || a.canonicalize().ok() == b.canonicalize().ok(),
+        // `canonical_for_loader_lookup`, not `canonicalize`: the server's path
+        // comes from the loader's canonicalized source map and the test's from
+        // the temp dir it made, so this is the loader-spelling question, not
+        // the identity one. `AbsPathBuf` will not compile the latter.
+        (Ok(a), Ok(b)) => {
+            a == b || a.canonical_for_loader_lookup() == b.canonical_for_loader_lookup()
+        }
         _ => false,
     }
 }

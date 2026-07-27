@@ -97,7 +97,9 @@ pub(crate) fn test_abs(relative: &str) -> std::path::PathBuf {
     }
 }
 
+pub mod abs_path;
 pub mod proto;
+pub use abs_path::AbsPathBuf;
 pub use ledger_state::{LedgerState, LspConfig, SharedLedgerState, new_shared_ledger_state};
 pub use main_loop::{run_main_loop, run_main_loop_with_exit_action};
 pub use proto::{path_to_uri, uri_to_path};

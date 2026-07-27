@@ -5,6 +5,7 @@
 //! - Requests dispatched to threadpool with immutable snapshots
 //! - Revision counter enables cancellation of stale requests
 
+use crate::AbsPathBuf;
 use crate::handlers::call_hierarchy::{
     handle_incoming_calls, handle_outgoing_calls, handle_prepare_call_hierarchy,
 };
@@ -195,7 +196,7 @@ pub struct MainLoopState {
     /// `canonicalize` hits the filesystem, fails outright for a file that does
     /// not exist yet, and resolves symlinks the user may have opened on
     /// purpose. rust-analyzer's `AbsPathBuf` avoids it for those reasons.
-    pub diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    pub diagnostics: HashMap<AbsPathBuf, Vec<lsp_types::Diagnostic>>,
     /// Paths of *unopened* ledger files (reachable via `include`) that we last
     /// published non-empty diagnostics for. Tracked so that, when their errors
     /// are fixed, we send an explicit empty diagnostic set to clear them — the
@@ -204,7 +205,7 @@ pub struct MainLoopState {
     /// above, and additionally because this set is compared against the VFS's
     /// open paths: keying it by `Uri` meant round-tripping every open path
     /// through the URI encoder just to compare it.
-    pub cross_file_diag_paths: std::collections::HashSet<PathBuf>,
+    pub cross_file_diag_paths: std::collections::HashSet<AbsPathBuf>,
     /// Whether shutdown was requested.
     pub shutdown_requested: bool,
     /// Set by the `exit` notification handler. The main loop checks
@@ -360,7 +361,7 @@ impl MainLoopState {
     /// Uses cached parse result if available, avoiding re-parsing.
     fn get_document_data(&self, uri: &Uri) -> (String, Arc<ParseResult>) {
         if let Ok(path) = uri_to_path(uri)
-            && let Some((text, parse_result)) = self.vfs.write().get_document_data(&path)
+            && let Some((text, parse_result)) = self.vfs.write().get_document_data(path.as_path())
         {
             return (text, parse_result);
         }
@@ -744,7 +745,9 @@ impl MainLoopState {
         // Other ledger files so "find references" spans every `include`d file,
         // not just the open buffer. Collected under the locks (live content for
         // open buffers); the handler then parses lock-free.
-        let current_canonical = uri_to_path(uri).ok().and_then(|p| p.canonicalize().ok());
+        let current_canonical = uri_to_path(uri)
+            .ok()
+            .and_then(|p| p.canonical_for_loader_lookup());
         let other_files = self.other_ledger_files(current_canonical.as_deref());
 
         let response = handle_references(
@@ -993,7 +996,9 @@ impl MainLoopState {
         // other files are left dangling. Collected under the locks here (with
         // each file's live buffer content when open) so the handler parses with
         // no locks held.
-        let current_canonical = uri_to_path(uri).ok().and_then(|p| p.canonicalize().ok());
+        let current_canonical = uri_to_path(uri)
+            .ok()
+            .and_then(|p| p.canonical_for_loader_lookup());
         let other_files = self.other_ledger_files(current_canonical.as_deref());
 
         let response = handle_rename(
@@ -1293,7 +1298,10 @@ impl MainLoopState {
 
         // Get document content from VFS (on-type formatting doesn't need parse result)
         let text = if let Ok(path) = uri_to_path(uri) {
-            self.vfs.read().get_content(&path).unwrap_or_default()
+            self.vfs
+                .read()
+                .get_content(path.as_path())
+                .unwrap_or_default()
         } else {
             String::new()
         };
@@ -1471,7 +1479,10 @@ impl MainLoopState {
 
         // Get document content from VFS
         let text = if let Ok(path) = uri_to_path(uri) {
-            self.vfs.read().get_content(&path).unwrap_or_default()
+            self.vfs
+                .read()
+                .get_content(path.as_path())
+                .unwrap_or_default()
         } else {
             String::new()
         };
@@ -1645,7 +1656,9 @@ impl MainLoopState {
 
         // Store in VFS
         if let Ok(path) = uri_to_path(&uri) {
-            self.vfs.write().open(path, text.clone(), version);
+            self.vfs
+                .write()
+                .open(path.into_path_buf(), text.clone(), version);
         }
 
         // Bump revision (invalidates any in-flight requests)
@@ -1668,7 +1681,9 @@ impl MainLoopState {
 
             // Update VFS
             if let Ok(path) = uri_to_path(&uri) {
-                self.vfs.write().update(&path, text.clone(), version);
+                self.vfs
+                    .write()
+                    .update(path.as_path(), text.clone(), version);
             }
 
             // Bump revision
@@ -1689,7 +1704,7 @@ impl MainLoopState {
         // the VFS uses. The clear still goes out on the URI the client sent,
         // which is what it will match against its own store.
         if let Ok(path) = uri_to_path(&uri) {
-            self.vfs.write().close(&path);
+            self.vfs.write().close(path.as_path());
             self.diagnostics.remove(&path);
             self.cross_file_diag_paths.remove(&path);
         }
@@ -1817,7 +1832,9 @@ impl MainLoopState {
         // Canonicalize the current URI's path so we can both skip it when
         // collecting "other" buffer overlays and look up its file_id in
         // the ledger source map.
-        let current_canonical_path = uri_to_path(uri).ok().and_then(|p| p.canonicalize().ok());
+        let current_canonical_path = uri_to_path(uri)
+            .ok()
+            .and_then(|p| p.canonical_for_loader_lookup());
 
         // Collect fresh parses for every OTHER open buffer via the VFS.
         // Done before grabbing the ledger-state read lock so the VFS
@@ -2002,7 +2019,7 @@ impl MainLoopState {
         overlay: &[(u16, &[Spanned<Directive>])],
     ) -> (
         Vec<lsp_types::Diagnostic>,
-        Vec<(PathBuf, Vec<lsp_types::Diagnostic>)>,
+        Vec<(AbsPathBuf, Vec<lsp_types::Diagnostic>)>,
     ) {
         let Some(ledger) = ledger_state.ledger() else {
             return (Vec::new(), Vec::new());
@@ -2020,7 +2037,7 @@ impl MainLoopState {
         // call; sources borrow the held ledger snapshot. Parsing each unopened
         // file is cheap next to the validation we now do only once.
         struct Unopened<'a> {
-            path: PathBuf,
+            path: AbsPathBuf,
             file_id: u16,
             source: &'a str,
             parse: ParseResult,
@@ -2043,8 +2060,21 @@ impl MainLoopState {
                 // The path is carried, not a URI: it is what the diagnostics
                 // are keyed by, and it is only converted at the moment of
                 // sending. Encoding is `crate::proto`'s problem alone.
+                //
+                // The loader records absolute paths, so this holds; a relative
+                // one could not be a diagnostics key and has no URI either.
+                let path = match crate::AbsPathBuf::new(f.path.clone()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(
+                            "cross-file diagnostics: {} from the source map is unusable: {e}",
+                            f.path.display()
+                        );
+                        return None;
+                    }
+                };
                 Some(Unopened {
-                    path: f.path.clone(),
+                    path,
                     file_id: f.id as u16,
                     source: f.source.as_ref(),
                     parse: parse(&f.source),
@@ -2093,7 +2123,7 @@ impl MainLoopState {
         } else {
             Vec::new()
         };
-        let cross_file: Vec<(PathBuf, Vec<lsp_types::Diagnostic>)> = unopened
+        let cross_file: Vec<(AbsPathBuf, Vec<lsp_types::Diagnostic>)> = unopened
             .into_iter()
             .zip(per_file)
             .map(|(u, diags)| (u.path, diags))
@@ -2113,10 +2143,10 @@ impl MainLoopState {
     /// (and clear) their own diagnostics via didOpen/didChange/didClose.
     fn publish_cross_file_diagnostics(
         &mut self,
-        cross_file: Vec<(PathBuf, Vec<lsp_types::Diagnostic>)>,
+        cross_file: Vec<(AbsPathBuf, Vec<lsp_types::Diagnostic>)>,
     ) {
         // Publish the files that have errors this round.
-        let mut erroring: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut erroring: std::collections::HashSet<AbsPathBuf> = std::collections::HashSet::new();
         for (path, diags) in cross_file {
             if diags.is_empty() {
                 continue;
@@ -2131,9 +2161,15 @@ impl MainLoopState {
         // not currently open (open buffers manage their own diagnostics). Both
         // sides of this comparison are paths straight from the VFS and the
         // source map, so it no longer depends on two encoders agreeing.
-        let open_paths: std::collections::HashSet<PathBuf> =
-            self.vfs.read().paths().map(PathBuf::from).collect();
-        let stale: Vec<PathBuf> = self
+        // VFS paths came from `uri_to_path`, so they are already absolute;
+        // anything that somehow is not simply cannot be a diagnostics key.
+        let open_paths: std::collections::HashSet<AbsPathBuf> = self
+            .vfs
+            .read()
+            .paths()
+            .filter_map(|p| AbsPathBuf::new(p.clone()).ok())
+            .collect();
+        let stale: Vec<AbsPathBuf> = self
             .cross_file_diag_paths
             .iter()
             .filter(|p| !erroring.contains(*p) && !open_paths.contains(*p))
@@ -2381,7 +2417,8 @@ mod tests {
     fn did_close_evicts_diagnostics_across_uri_spellings() {
         // What a cross-file publish would have cached, keyed the way that code
         // path keys it: the path from the source map.
-        let path = crate::test_abs("tmp/rl-close/ledger.beancount");
+        let path = crate::AbsPathBuf::new(crate::test_abs("tmp/rl-close/ledger.beancount"))
+            .expect("test_abs is absolute");
         // Spellings are derived from the canonical URI rather than written out,
         // so they name this path on whatever platform is running.
         let canonical = crate::path_to_uri(&path).expect("canonical uri");

@@ -119,11 +119,15 @@ impl Server {
 
     /// Get the workspace root path from init params.
     fn get_workspace_root(&self) -> Option<std::path::PathBuf> {
+        // `uri_to_path` yields an `AbsPathBuf`; the loader API here wants a
+        // plain `PathBuf`, so the invariant is dropped deliberately at this
+        // one boundary rather than silently.
         self.init_params
             .workspace_folders
             .as_ref()
             .and_then(|folders| folders.first())
             .and_then(|folder| uri_to_path(&folder.uri).ok())
+            .map(crate::AbsPathBuf::into_path_buf)
     }
 
     /// Resolve an explicitly configured journal path.

@@ -8,7 +8,7 @@
 use ropey::Rope;
 use rustledger_parser::{ParseResult, parse};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// A document in the virtual file system.
@@ -83,28 +83,28 @@ impl Vfs {
     }
 
     /// Close a document in the VFS.
-    pub fn close(&mut self, path: &PathBuf) {
+    pub fn close(&mut self, path: &Path) {
         self.documents.remove(path);
     }
 
     /// Get a document by path (immutable).
-    pub fn get(&self, path: &PathBuf) -> Option<&Document> {
+    pub fn get(&self, path: &Path) -> Option<&Document> {
         self.documents.get(path)
     }
 
     /// Get a document by path (mutable, for parse caching).
-    pub fn get_mut(&mut self, path: &PathBuf) -> Option<&mut Document> {
+    pub fn get_mut(&mut self, path: &Path) -> Option<&mut Document> {
         self.documents.get_mut(path)
     }
 
     /// Get document content as a string.
-    pub fn get_content(&self, path: &PathBuf) -> Option<String> {
+    pub fn get_content(&self, path: &Path) -> Option<String> {
         self.documents.get(path).map(|d| d.text())
     }
 
     /// Get document content and cached parse result.
     /// This is the preferred method for request handlers.
-    pub fn get_document_data(&mut self, path: &PathBuf) -> Option<(String, Arc<ParseResult>)> {
+    pub fn get_document_data(&mut self, path: &Path) -> Option<(String, Arc<ParseResult>)> {
         self.documents.get_mut(path).map(|doc| {
             let text = doc.text();
             let parse_result = doc.parse_result();
@@ -113,7 +113,7 @@ impl Vfs {
     }
 
     /// Update a document's content.
-    pub fn update(&mut self, path: &PathBuf, content: String, version: i32) {
+    pub fn update(&mut self, path: &Path, content: String, version: i32) {
         if let Some(doc) = self.documents.get_mut(path) {
             doc.update(content, version);
         }

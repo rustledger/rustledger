@@ -507,7 +507,7 @@ mod tests {
         );
         assert_eq!(
             crate::uri_to_path(&target).expect("target inverts"),
-            dir.path().join(fname)
+            crate::AbsPathBuf::new(dir.path().join(fname)).expect("tempdir is absolute")
         );
     }
 

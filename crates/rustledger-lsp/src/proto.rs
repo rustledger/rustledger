@@ -9,9 +9,8 @@
 //! If you find yourself writing `format!("file://{}", ...)` or stripping a
 //! `file://` prefix, the function you want is already here.
 
-use crate::PathUriError;
+use crate::{AbsPathBuf, PathUriError};
 use lsp_types::Uri;
-use std::path::PathBuf;
 
 /// Convert an LSP URI to a file path.
 ///
@@ -33,7 +32,7 @@ use std::path::PathBuf;
 /// # Errors
 /// [`PathUriError`] naming which step failed, so a caller can log something
 /// more useful than "nothing happened".
-pub fn uri_to_path(uri: &Uri) -> Result<PathBuf, PathUriError> {
+pub fn uri_to_path(uri: &Uri) -> Result<AbsPathBuf, PathUriError> {
     let url = url::Url::parse(uri.as_str()).map_err(|_| PathUriError::NotAUri)?;
 
     // `Url::to_file_path` is SCHEME-BLIND — it inspects the host and nothing
@@ -96,7 +95,13 @@ pub fn uri_to_path(uri: &Uri) -> Result<PathBuf, PathUriError> {
         }
     }
 
-    url.to_file_path().map_err(|()| PathUriError::NotALocalFile)
+    // A `file:` URI's path is absolute by construction, so this cannot fail —
+    // but it is the check that makes that a fact rather than an assumption, and
+    // it is where every path in this crate acquires the invariant.
+    let path = url
+        .to_file_path()
+        .map_err(|()| PathUriError::NotALocalFile)?;
+    AbsPathBuf::new(path)
 }
 
 /// Convert a file path to an LSP URI.
@@ -355,7 +360,7 @@ mod uri_conversion_tests {
         #[cfg(unix)]
         assert_eq!(
             uri_to_path(&uri("file:///home/a/ledger/../shared/x.bean")),
-            Ok(std::path::PathBuf::from("/home/a/shared/x.bean"))
+            Ok(AbsPathBuf::new("/home/a/shared/x.bean").expect("absolute"))
         );
     }
 

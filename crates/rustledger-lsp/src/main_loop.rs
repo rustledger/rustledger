@@ -1656,6 +1656,22 @@ impl MainLoopState {
 
         // Store in VFS
         if let Ok(path) = uri_to_path(&uri) {
+            // Hand this file's diagnostics over from the cross-file publisher
+            // to the buffer BEFORE the buffer publishes its own.
+            //
+            // While the file was an unopened include, its errors went out under
+            // the URI WE build from the loader's canonical path. From now on
+            // they go out under the URI the CLIENT sent. Those are two
+            // spellings of one file whenever the ledger is reached through a
+            // symlink or a differently-cased path, and the client keys its
+            // diagnostic store by URI — so without an explicit clear it shows
+            // both sets, the stale one for a file it can see is open.
+            //
+            // `publish_cross_file_diagnostics` cannot do it: it deliberately
+            // leaves open files alone, so once this file is open it stops
+            // touching the entry at all and the old set is stranded.
+            self.release_cross_file_diagnostics(&path);
+
             self.vfs
                 .write()
                 .open(path.into_path_buf(), text.clone(), version);
@@ -1691,6 +1707,30 @@ impl MainLoopState {
 
             // Recompute diagnostics
             self.publish_diagnostics(&uri, &text);
+        }
+    }
+
+    /// Clear the cross-file diagnostics for a file that is now open.
+    ///
+    /// Matched in the LOADER's spelling, because that is what
+    /// `cross_file_diag_paths` holds and the path arriving here came from the
+    /// client. The clear is sent to the URI built from the TRACKED path, not
+    /// the client's, since that is the one the old set was published under and
+    /// the only one that will evict it.
+    fn release_cross_file_diagnostics(&mut self, opened: &AbsPathBuf) {
+        let Some(canonical) = opened.canonical_for_loader_lookup() else {
+            return;
+        };
+        let tracked: Vec<AbsPathBuf> = self
+            .cross_file_diag_paths
+            .iter()
+            .filter(|p| p.canonical_for_loader_lookup().as_deref() == Some(canonical.as_path()))
+            .cloned()
+            .collect();
+        for path in tracked {
+            self.cross_file_diag_paths.remove(&path);
+            self.diagnostics.remove(&path);
+            self.send_diagnostics(&path, vec![]);
         }
     }
 
@@ -2416,6 +2456,76 @@ mod tests {
 
         let handler = DispatchError::Handler("custom failure".into()).to_string();
         assert_eq!(handler, "custom failure");
+    }
+
+    /// Opening a cross-published file hands its diagnostics to the buffer.
+    ///
+    /// While unopened, an included file's errors are published under the URI
+    /// the SERVER builds from the loader's canonical path. Once open, the
+    /// buffer publishes under the URI the CLIENT sent. Those differ whenever
+    /// the ledger is reached through a symlink or a differently-cased path, and
+    /// a client keys its diagnostic store by URI — so the stale set stays on
+    /// screen for a file the user can see is open, next to the live one.
+    ///
+    /// `publish_cross_file_diagnostics` cannot clean this up: it skips files
+    /// that are open, so it stops touching the entry precisely when the entry
+    /// becomes wrong.
+    #[test]
+    fn opening_a_cross_published_file_clears_its_server_side_diagnostics() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = MainLoopState::new(sender, None);
+
+        // A real file, so the loader spelling resolves on every platform.
+        let dir = std::env::temp_dir().join(format!("rl-xfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("included.beancount");
+        std::fs::write(&file, "2024-01-01 open Assets:Cash USD\n").expect("write");
+
+        // What the cross-file publisher would have left: an entry keyed by the
+        // canonical path, published under the canonical URI.
+        let canonical =
+            crate::AbsPathBuf::new(file.canonicalize().expect("canon")).expect("absolute");
+        state.diagnostics.insert(canonical.clone(), vec![]);
+        state.cross_file_diag_paths.insert(canonical.clone());
+        while receiver.try_recv().is_ok() {} // drain setup noise
+
+        // The client opens it under its own spelling — the uncanonicalized
+        // path, which is what an editor actually sends.
+        let uri = crate::path_to_uri(&file).expect("uri");
+        state.on_did_open(lsp_types::DidOpenTextDocumentParams {
+            text_document: lsp_types::TextDocumentItem {
+                uri,
+                language_id: "beancount".to_string(),
+                version: 1,
+                text: "2024-01-01 open Assets:Cash USD\n".to_string(),
+            },
+        });
+
+        assert!(
+            state.cross_file_diag_paths.is_empty(),
+            "the tracked entry must be released: {:?}",
+            state.cross_file_diag_paths
+        );
+
+        // And an explicit empty publish must have gone out under the URI the
+        // old set was published under, or the client keeps showing it.
+        let canonical_uri = crate::path_to_uri(canonical.as_path()).expect("uri");
+        let mut cleared = false;
+        while let Ok(msg) = receiver.try_recv() {
+            if let lsp_server::Message::Notification(n) = msg
+                && n.method == "textDocument/publishDiagnostics"
+                && let Ok(p) =
+                    serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(n.params)
+                && p.uri.as_str() == canonical_uri.as_str() // ratchet-allow: uri-string-eq asserting the exact wire spelling
+                && p.diagnostics.is_empty()
+            {
+                cleared = true;
+            }
+        }
+        assert!(cleared, "no clear was sent to {}", canonical_uri.as_str());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Closing a document evicts its diagnostics even when the client spells

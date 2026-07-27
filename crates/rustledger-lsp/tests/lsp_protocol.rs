@@ -14,7 +14,7 @@ mod quirks;
 
 use std::time::{Duration, Instant};
 
-use harness::{LspTestClient, test_uri, uri_for};
+use harness::{LspTestClient, same_file, test_uri, uri_for};
 use lsp_types::request::{CodeLensRequest, CodeLensResolve, SemanticTokensFullRequest};
 use lsp_types::{CodeLensParams, SemanticTokensParams, TextDocumentIdentifier};
 
@@ -421,7 +421,7 @@ plugin \"beancount_reds_plugins.effective_date.effective_date\" \"{\n\
     let latest_payload = diagnostic_payloads
         .iter()
         .rev()
-        .find(|p| p.uri.as_str() == uri)
+        .find(|p| same_file(&p.uri, &uri))
         .unwrap_or_else(|| {
             panic!(
                 "no publishDiagnostics arrived for {uri}; captured \
@@ -530,7 +530,7 @@ fn real_balance_failure_round_trips_to_warning_lens() {
     let latest_payload = diagnostic_payloads
         .iter()
         .rev()
-        .find(|p| p.uri.as_str() == uri)
+        .find(|p| same_file(&p.uri, &uri))
         .unwrap_or_else(|| {
             panic!(
                 "no publishDiagnostics arrived for {uri}; captured \
@@ -698,7 +698,7 @@ fn multi_file_balance_lens_reflects_cross_file_aggregation() {
     let bank_diags = diagnostic_payloads
         .iter()
         .rev()
-        .find(|p| p.uri.as_str() == bank_uri)
+        .find(|p| same_file(&p.uri, &bank_uri))
         .unwrap_or_else(|| {
             panic!(
                 "no publishDiagnostics for {bank_uri}; captured: {:?}",
@@ -961,7 +961,7 @@ fn included_file_validation_errors_are_published() {
             let p: lsp_types::PublishDiagnosticsParams =
                 serde_json::from_value(n.params).expect("valid publishDiagnostics");
             seen.push(p.uri.as_str().to_string());
-            if p.uri.as_str() == bad_uri && !p.diagnostics.is_empty() {
+            if same_file(&p.uri, &bad_uri) && !p.diagnostics.is_empty() {
                 break Some(p);
             }
         }
@@ -1040,7 +1040,7 @@ fn included_file_diagnostics_are_cleared_when_fixed() {
             {
                 let p: lsp_types::PublishDiagnosticsParams =
                     serde_json::from_value(n.params).expect("valid publishDiagnostics");
-                if p.uri.as_str() == bad_uri && p.diagnostics.is_empty() == want_empty {
+                if same_file(&p.uri, &bad_uri) && p.diagnostics.is_empty() == want_empty {
                     return true;
                 }
             }
@@ -1132,7 +1132,7 @@ fn editing_a_non_ledger_buffer_keeps_unopened_file_diagnostics() {
             {
                 let p: lsp_types::PublishDiagnosticsParams =
                     serde_json::from_value(n.params).expect("valid publishDiagnostics");
-                if p.uri.as_str() == bad_uri && p.diagnostics.is_empty() == want_empty {
+                if same_file(&p.uri, &bad_uri) && p.diagnostics.is_empty() == want_empty {
                     return true;
                 }
             }
@@ -1178,7 +1178,7 @@ fn editing_a_non_ledger_buffer_keeps_unopened_file_diagnostics() {
             let p: lsp_types::PublishDiagnosticsParams =
                 serde_json::from_value(n.params).expect("valid publishDiagnostics");
             assert!(
-                !(p.uri.as_str() == bad_uri && p.diagnostics.is_empty()),
+                !(same_file(&p.uri, &bad_uri) && p.diagnostics.is_empty()),
                 "editing a non-ledger scratch buffer must not clear the unopened \
                  included file's diagnostics (#1813 review)"
             );
@@ -1371,11 +1371,11 @@ fn rename_account_spans_included_files() {
     let inc_uri = uri_for(&inc_path);
     let edited_uris: Vec<&str> = changes.keys().map(|u| u.as_str()).collect();
     assert!(
-        changes.keys().any(|u| u.as_str() == main_uri),
+        changes.keys().any(|u| same_file(u, &main_uri)),
         "rename must edit the open file; edited: {edited_uris:?}"
     );
     assert!(
-        changes.keys().any(|u| u.as_str() == inc_uri),
+        changes.keys().any(|u| same_file(u, &inc_uri)),
         "rename must also edit the included file (cross-file usage); edited: {edited_uris:?}"
     );
 }
@@ -1435,11 +1435,11 @@ fn references_span_included_files() {
     let inc_uri = uri_for(&inc_path);
     let uris: Vec<&str> = locations.iter().map(|l| l.uri.as_str()).collect();
     assert!(
-        locations.iter().any(|l| l.uri.as_str() == main_uri),
+        locations.iter().any(|l| same_file(&l.uri, &main_uri)),
         "references must include the open file's open directive; got: {uris:?}"
     );
     assert!(
-        locations.iter().any(|l| l.uri.as_str() == inc_uri),
+        locations.iter().any(|l| same_file(&l.uri, &inc_uri)),
         "references must include the usage in the included file; got: {uris:?}"
     );
 }

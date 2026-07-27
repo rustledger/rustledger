@@ -508,6 +508,34 @@ pub fn uri_for(path: &std::path::Path) -> String {
         .to_string()
 }
 
+/// Do these two URIs name the same file?
+///
+/// Compares PATHS, never the URI strings. One file has many URI spellings, and
+/// the server builds its own from the loader's canonicalized source-map path
+/// while a test builds one from the temp directory it created. On Linux those
+/// happen to be the same string. On Windows they are not — `std::env::temp_dir`
+/// hands back a path whose case, and sometimes 8.3 short form, differs from
+/// what `canonicalize` returns — so `p.uri.as_str() == expected` silently never
+/// matched and the test sat waiting for a notification that had already
+/// arrived, failing 15 seconds later on a timeout.
+///
+/// This is the same defect the diagnostics cache had, in a test rather than in
+/// the server: a `Uri` is a string, and a string is not an identity.
+#[must_use]
+pub fn same_file(uri: &lsp_types::Uri, expected: &str) -> bool {
+    let expected: lsp_types::Uri = match expected.parse() {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+    match (
+        rustledger_lsp::uri_to_path(uri),
+        rustledger_lsp::uri_to_path(&expected),
+    ) {
+        (Ok(a), Ok(b)) => a == b || a.canonicalize().ok() == b.canonicalize().ok(),
+        _ => false,
+    }
+}
+
 /// `Option` views of the response's result/error. lsp-server 0.10 stores these
 /// as a flat `response_result: Result<Value, ResponseError>`
 /// (rust-analyzer/lsp-server@0.10.0 reverted the 0.9 `ResponseKind` enum).

@@ -474,9 +474,20 @@ fn minimal_server_capabilities() -> serde_json::Value {
 /// Compose a typical `file://` URI for a test document. Use this so
 /// every test agrees on the URI format without each one having to
 /// remember the `file:///` prefix.
+///
+/// The name is anchored to an absolute path for the RUNNING platform, not
+/// pasted after `file:///`. `file:///smoke.beancount` has no drive letter, so
+/// on Windows it is not a local file at all: the server cannot resolve it,
+/// never answers, and the test fails 15 seconds later on a timeout rather than
+/// on anything to do with its subject.
 #[must_use]
 pub fn test_uri(name: &str) -> String {
-    format!("file:///{}", name)
+    let base = if cfg!(windows) {
+        std::path::PathBuf::from("C:\\lsp-tests")
+    } else {
+        std::path::PathBuf::from("/lsp-tests")
+    };
+    uri_for(&base.join(name))
 }
 
 /// The `file:` URI for a real path on disk.

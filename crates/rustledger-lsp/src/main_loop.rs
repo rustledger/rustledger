@@ -341,7 +341,7 @@ impl MainLoopState {
     /// Get document text and cached parse result for a URI.
     /// Uses cached parse result if available, avoiding re-parsing.
     fn get_document_data(&self, uri: &Uri) -> (String, Arc<ParseResult>) {
-        if let Some(path) = uri_to_path(uri)
+        if let Ok(path) = uri_to_path(uri)
             && let Some((text, parse_result)) = self.vfs.write().get_document_data(&path)
         {
             return (text, parse_result);
@@ -726,7 +726,7 @@ impl MainLoopState {
         // Other ledger files so "find references" spans every `include`d file,
         // not just the open buffer. Collected under the locks (live content for
         // open buffers); the handler then parses lock-free.
-        let current_canonical = uri_to_path(uri).and_then(|p| p.canonicalize().ok());
+        let current_canonical = uri_to_path(uri).ok().and_then(|p| p.canonicalize().ok());
         let other_files = self.other_ledger_files(current_canonical.as_deref());
 
         let response = handle_references(
@@ -886,10 +886,13 @@ impl MainLoopState {
                     // buffers collapsed onto one key, attributing one file's
                     // symbols to the other. The sibling sites already skip.
                     let uri = crate::path_to_uri(path);
-                    if uri.is_none() {
-                        tracing::warn!("no file URI for {}; skipping", path.display());
+                    match uri {
+                        Ok(uri) => Some((uri, content, parse_result)),
+                        Err(e) => {
+                            tracing::warn!("no file URI for {}: {e}; skipping", path.display());
+                            None
+                        }
                     }
-                    Some((uri?, content, parse_result))
                 })
                 .collect()
         };
@@ -921,7 +924,7 @@ impl MainLoopState {
                             .ok()
                             .is_none_or(|c| !open_canonical.contains(&c))
                     })
-                    .filter_map(|f| match crate::path_to_uri(&f.path).ok_or(()) {
+                    .filter_map(|f| match crate::path_to_uri(&f.path) {
                         Ok(uri) => Some((uri, f.source.to_string())),
                         Err(_) => {
                             tracing::warn!(
@@ -972,7 +975,7 @@ impl MainLoopState {
         // other files are left dangling. Collected under the locks here (with
         // each file's live buffer content when open) so the handler parses with
         // no locks held.
-        let current_canonical = uri_to_path(uri).and_then(|p| p.canonicalize().ok());
+        let current_canonical = uri_to_path(uri).ok().and_then(|p| p.canonicalize().ok());
         let other_files = self.other_ledger_files(current_canonical.as_deref());
 
         let response = handle_rename(
@@ -1011,7 +1014,7 @@ impl MainLoopState {
                 if canon.as_deref() == current_canonical {
                     continue;
                 }
-                let Some(uri) = crate::path_to_uri(&f.path) else {
+                let Ok(uri) = crate::path_to_uri(&f.path) else {
                     tracing::warn!(
                         "rename: skipping ledger file with a non-file:// URI: {}",
                         f.path.display()
@@ -1268,7 +1271,7 @@ impl MainLoopState {
         let uri = &params.text_document_position.text_document.uri;
 
         // Get document content from VFS (on-type formatting doesn't need parse result)
-        let text = if let Some(path) = uri_to_path(uri) {
+        let text = if let Ok(path) = uri_to_path(uri) {
             self.vfs.read().get_content(&path).unwrap_or_default()
         } else {
             String::new()
@@ -1442,7 +1445,7 @@ impl MainLoopState {
         let uri = &params.text_document_position_params.text_document.uri;
 
         // Get document content from VFS
-        let text = if let Some(path) = uri_to_path(uri) {
+        let text = if let Ok(path) = uri_to_path(uri) {
             self.vfs.read().get_content(&path).unwrap_or_default()
         } else {
             String::new()
@@ -1493,7 +1496,7 @@ impl MainLoopState {
         // because a Windows drive letter needs a third slash — the same bug the
         // other seven call sites still had, patched at this one.
         let uri: Uri = crate::path_to_uri(&path)
-            .ok_or_else(|| format!("not a file path: {}", path.display()))?;
+            .map_err(|e| format!("no file URI for {}: {e}", path.display()))?;
 
         let (text, parse_result) = self.get_document_data(&uri);
         let result =
@@ -1616,7 +1619,7 @@ impl MainLoopState {
         tracing::info!("Document opened: {}", uri.as_str());
 
         // Store in VFS
-        if let Some(path) = uri_to_path(&uri) {
+        if let Ok(path) = uri_to_path(&uri) {
             self.vfs.write().open(path, text.clone(), version);
         }
 
@@ -1639,7 +1642,7 @@ impl MainLoopState {
             tracing::debug!("Document changed: {}", uri.as_str());
 
             // Update VFS
-            if let Some(path) = uri_to_path(&uri) {
+            if let Ok(path) = uri_to_path(&uri) {
                 self.vfs.write().update(&path, text.clone(), version);
             }
 
@@ -1658,7 +1661,7 @@ impl MainLoopState {
         tracing::info!("Document closed: {}", uri.as_str());
 
         // Remove from VFS
-        if let Some(path) = uri_to_path(&uri) {
+        if let Ok(path) = uri_to_path(&uri) {
             self.vfs.write().close(&path);
         }
 
@@ -1678,7 +1681,7 @@ impl MainLoopState {
             tracing::debug!("File {:?}: {:?}", change.uri.as_str(), change.typ);
 
             // Check if the changed file is part of our journal
-            if let Some(path) = uri_to_path(&change.uri) {
+            if let Ok(path) = uri_to_path(&change.uri) {
                 let ledger_guard = self.ledger_state.read();
                 if ledger_guard.contains_file(&path) {
                     should_reload_journal = true;
@@ -1713,7 +1716,7 @@ impl MainLoopState {
             .into_iter()
             .filter_map(|path| {
                 let content = self.vfs.read().get_content(&path)?;
-                let uri = crate::path_to_uri(&path)?;
+                let uri = crate::path_to_uri(&path).ok()?;
                 Some((uri, content))
             })
             .collect();
@@ -1784,7 +1787,7 @@ impl MainLoopState {
         // Canonicalize the current URI's path so we can both skip it when
         // collecting "other" buffer overlays and look up its file_id in
         // the ledger source map.
-        let current_canonical_path = uri_to_path(uri).and_then(|p| p.canonicalize().ok());
+        let current_canonical_path = uri_to_path(uri).ok().and_then(|p| p.canonicalize().ok());
 
         // Collect fresh parses for every OTHER open buffer via the VFS.
         // Done before grabbing the ledger-state read lock so the VFS
@@ -2013,7 +2016,7 @@ impl MainLoopState {
                 // than drop it silently. A proper percent-encoding
                 // `path_to_uri` helper applied consistently across the crate is
                 // the broader fix.
-                let Some(uri) = crate::path_to_uri(&f.path) else {
+                let Ok(uri) = crate::path_to_uri(&f.path) else {
                     tracing::warn!(
                         "skipping cross-file diagnostics for {}: path is not a valid file:// URI",
                         f.path.display()
@@ -2111,7 +2114,7 @@ impl MainLoopState {
             .vfs
             .read()
             .paths()
-            .filter_map(|p| crate::path_to_uri(p))
+            .filter_map(|p| crate::path_to_uri(p).ok())
             .collect();
         let stale: Vec<Uri> = self
             .cross_file_diag_uris

@@ -119,7 +119,7 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
             resolved_path.clone()
         };
         if let Some(ref full_path) = target_path
-            && let Some(uri) = crate::path_to_uri(Path::new(full_path))
+            && let Ok(uri) = crate::path_to_uri(Path::new(full_path))
         {
             resolved.target = Some(uri);
         }
@@ -176,7 +176,7 @@ fn resolve_full_path(path: &str, base_dir: &Option<String>) -> Option<String> {
 /// Absolute paths never reach this function, which is why they kept working and
 /// made the bug look Windows-specific when it is not.
 fn get_base_directory(uri: &Uri) -> Option<String> {
-    let path = crate::uri_to_path(uri)?;
+    let path = crate::uri_to_path(uri).ok()?;
     path.parent().map(|p| p.to_string_lossy().to_string())
 }
 
@@ -271,7 +271,7 @@ fn parse_include_line(
 #[cfg(test)]
 fn resolve_path_to_uri(path: &str, base_dir: &Option<String>) -> Option<Uri> {
     let resolved = resolve_full_path(path, base_dir)?;
-    crate::path_to_uri(Path::new(&resolved))
+    crate::path_to_uri(Path::new(&resolved)).ok()
 }
 
 #[cfg(test)]

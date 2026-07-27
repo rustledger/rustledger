@@ -123,7 +123,7 @@ impl Server {
             .workspace_folders
             .as_ref()
             .and_then(|folders| folders.first())
-            .and_then(|folder| uri_to_path(&folder.uri))
+            .and_then(|folder| uri_to_path(&folder.uri).ok())
     }
 
     /// Resolve an explicitly configured journal path.

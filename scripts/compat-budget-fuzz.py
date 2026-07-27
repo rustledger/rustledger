@@ -39,6 +39,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import datetime
 import json
 import random
@@ -347,10 +348,13 @@ def expected_actual(path: str, decls, rows, d_from, d_to, children: bool):
                 weight = (p.price.currency, p.units.number * p.price.number)
             if weight is not None:
                 wccy, wnum = weight
-                if wccy == p.units.currency:
-                    moved[wccy] = wnum
-                else:
-                    moved[wccy] = wnum
+                # ONE assignment covers both rules the comment above states,
+                # because `moved` is keyed by currency: a weight in the SAME
+                # currency overwrites the units (it supersedes them), and one in
+                # a second currency adds a key (both moved). Spelling it as an
+                # if/else with identical branches only made it look like the two
+                # cases were unimplemented.
+                moved[wccy] = wnum
             for row_acct, ccy in rows:
                 if ccy not in moved or not covers(row_acct, p.account, children):
                     continue
@@ -429,7 +433,15 @@ def run_format(rledger, path, d_from, d_to, children, fmt):
     ]
     if children:
         args.append("--children")
-    return subprocess.run(args, capture_output=True, text=True, timeout=120)
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        # A hang used to abort the whole run with a traceback naming no seed, so
+        # CI reported a crash instead of the input that caused it. Synthesize a
+        # failing result and let the caller record it like any other divergence.
+        return subprocess.CompletedProcess(
+            args, returncode=124, stdout="", stderr="TIMEOUT after 120s"
+        )
 
 
 def check_rendered_formats(rledger, path, d_from, d_to, children, got, failures, seed):
@@ -747,8 +759,11 @@ def main() -> int:
     if args.self_test:
         return self_test()
 
-    tmp = Path("/tmp/compat-budget-fuzz")
-    tmp.mkdir(exist_ok=True)
+    # Per-RUN directory. A fixed path let two runs on one machine — two CI jobs,
+    # or a local run beside one — clobber each other's ledger between the write
+    # and the read, which surfaces as a divergence that does not reproduce.
+    tmp = Path(f"/tmp/compat-budget-fuzz/{args.seed}-{args.count}-{os.getpid()}")
+    tmp.mkdir(parents=True, exist_ok=True)
     path = str(tmp / "ledger.beancount")
     failures = defaultdict(list)
 

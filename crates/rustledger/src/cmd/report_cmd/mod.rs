@@ -219,7 +219,9 @@ pub enum Report {
         #[arg(short, long)]
         account: Option<String>,
         /// Start of the reporting window, inclusive (`YYYY-MM-DD`).
-        /// Defaults to the start of the current year.
+        /// Defaults to the start of the year `--to` falls in, so narrowing
+        /// `--to` narrows the window with it rather than silently reporting
+        /// from January of the CURRENT year against an older `--to`.
         /// (No short flag: `-f` is the global `--format`.)
         #[arg(long)]
         from: Option<String>,
@@ -878,6 +880,12 @@ pub(super) fn truncate_label(s: &str, width: usize) -> String {
     let s = sanitize_display(s);
     if s.chars().count() <= width {
         return s;
+    }
+    // A zero-width column holds nothing, not an ellipsis: the fallback below
+    // returns "…" for `width == 0`, which is one character wider than the
+    // column it was asked to fit.
+    if width == 0 {
+        return String::new();
     }
     let tail: String = s
         .chars()

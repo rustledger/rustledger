@@ -421,9 +421,11 @@ pub(crate) fn parse_budgets(directives: &[Directive]) -> (Vec<BudgetEntry>, Vec<
     let mut errors = Vec::new();
     for d in directives {
         let Directive::Custom(c) = d else { continue };
-        // The report surfaces BOTH doubtful and confident failures: the user
-        // asked about budgets, so a `custom "budget"` that could not be read is
-        // news. `rledger check` is stricter — see `BudgetRead`.
+        // Every failure, because there is only one kind: `addressed_to_us`
+        // already decided whether the directive is ours, so anything reaching
+        // `Invalid` is a budget that could not be read. `check` reports the same
+        // set — the report used to be the more talkative of the two, and is not
+        // any more.
         match read_budget(c) {
             BudgetRead::Read { entry, note } => {
                 out.push(entry);

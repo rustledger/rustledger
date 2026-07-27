@@ -252,7 +252,7 @@ A `custom "budget"` directive has Fava's shape but carries content rledger canno
 
 **Fix:** use one of `daily`, `weekly`, `monthly`, `quarterly` or `yearly` (each also accepted as the bare noun), and write one budget per directive.
 
-Only the confident cases are reported. A `custom "budget"` whose payload does not have the positional shape `<Account> "<interval>" <amount>` is NOT flagged: `custom` is beancount's open extension point and the name is not rledger's alone — beancount's own documented example is `custom "budget" "weekly < 1000.00 USD" 2016-02-28 TRUE 43.03 USD 23`. `rledger report budget` still reports those, because a user who asked about budgets is owed the news that one could not be read.
+Only directives rledger is confident are budgets get reported. Ownership is one rule: a real interval keyword in the interval slot, or an account and an amount in a payload short enough to be Fava's. A `custom "budget"` meeting neither is NOT flagged: `custom` is beancount's open extension point and the name is not rledger's alone — beancount's own documented example is `custom "budget" "weekly < 1000.00 USD" 2016-02-28 TRUE 43.03 USD 23`. `rledger report budget` still reports those, because a user who asked about budgets is owed the news that one could not be read.
 
 ## Option Errors (E7xxx)
 

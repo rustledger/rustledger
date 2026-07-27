@@ -14,7 +14,7 @@ mod quirks;
 
 use std::time::{Duration, Instant};
 
-use harness::{LspTestClient, test_uri};
+use harness::{LspTestClient, test_uri, uri_for};
 use lsp_types::request::{CodeLensRequest, CodeLensResolve, SemanticTokensFullRequest};
 use lsp_types::{CodeLensParams, SemanticTokensParams, TextDocumentIdentifier};
 
@@ -649,7 +649,7 @@ fn multi_file_balance_lens_reflects_cross_file_aggregation() {
     let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
     client.initialize();
 
-    let bank_uri = format!("file://{}", bank_path.display());
+    let bank_uri = uri_for(&bank_path);
     let source = std::fs::read_to_string(&bank_path).expect("read bank");
     client.open_document(&bank_uri, &source);
 
@@ -841,7 +841,7 @@ fn completion_resolve_returns_single_item_and_uses_journal() {
 
     // An *ephemeral* buffer distinct from the journal (mirrors a client's
     // __test__.bean completion buffer).
-    let buf_uri = format!("file://{}", tmp.path().join("__buf__.beancount").display());
+    let buf_uri = uri_for(&tmp.path().join("__buf__.beancount"));
     client.open_document(&buf_uri, "2024-03-01 * \"x\"\n  Assets:Bank:Checking\n");
 
     // Resolve an account completion item whose `data.uri` points at the
@@ -938,11 +938,11 @@ fn included_file_validation_errors_are_published() {
     client.initialize();
 
     // Open ONLY good.beancount; bad.beancount stays unopened.
-    let good_uri = format!("file://{}", good_path.display());
+    let good_uri = uri_for(&good_path);
     let good_src = std::fs::read_to_string(&good_path).expect("read good");
     client.open_document(&good_uri, &good_src);
 
-    let bad_uri = format!("file://{}", bad_path.display());
+    let bad_uri = uri_for(&bad_path);
 
     // Drain publishDiagnostics until bad.beancount's (non-empty) arrive.
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -1017,12 +1017,12 @@ fn included_file_diagnostics_are_cleared_when_fixed() {
 
     let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
     client.initialize();
-    let good_uri = format!("file://{}", good_path.display());
+    let good_uri = uri_for(&good_path);
     client.open_document(
         &good_uri,
         &std::fs::read_to_string(&good_path).expect("read good"),
     );
-    let bad_uri = format!("file://{}", bad_path.display());
+    let bad_uri = uri_for(&bad_path);
 
     // Drain publishDiagnostics until bad.beancount reaches the desired emptiness.
     let drain = |client: &mut LspTestClient, want_empty: bool| -> bool {
@@ -1109,12 +1109,12 @@ fn editing_a_non_ledger_buffer_keeps_unopened_file_diagnostics() {
     let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
     client.initialize();
 
-    let good_uri = format!("file://{}", good_path.display());
+    let good_uri = uri_for(&good_path);
     client.open_document(
         &good_uri,
         &std::fs::read_to_string(&good_path).expect("read good"),
     );
-    let bad_uri = format!("file://{}", bad_path.display());
+    let bad_uri = uri_for(&bad_path);
 
     // Phase 1: wait until bad.beancount's error is published.
     let wait_bad = |client: &mut LspTestClient, want_empty: bool| -> bool {
@@ -1144,7 +1144,7 @@ fn editing_a_non_ledger_buffer_keeps_unopened_file_diagnostics() {
     );
 
     // Phase 2: open + edit a scratch buffer that is NOT part of the ledger.
-    let scratch_uri = format!("file://{}", scratch_path.display());
+    let scratch_uri = uri_for(&scratch_path);
     client.open_document(&scratch_uri, "; scratch\n");
     client.notify::<lsp_types::notification::DidChangeTextDocument>(
         lsp_types::DidChangeTextDocumentParams {
@@ -1289,7 +1289,7 @@ fn workspace_symbol_finds_symbols_in_unopened_included_files() {
     let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
     client.initialize();
     // Open only main.beancount; inc.beancount stays unopened.
-    let main_uri = format!("file://{}", main_path.display());
+    let main_uri = uri_for(&main_path);
     client.open_document(
         &main_uri,
         &std::fs::read_to_string(&main_path).expect("read main"),
@@ -1345,7 +1345,7 @@ fn rename_account_spans_included_files() {
 
     let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
     client.initialize();
-    let main_uri = format!("file://{}", main_path.display());
+    let main_uri = uri_for(&main_path);
     client.open_document(
         &main_uri,
         &std::fs::read_to_string(&main_path).expect("read main"),
@@ -1368,7 +1368,7 @@ fn rename_account_spans_included_files() {
         .expect("rename returned an edit")
         .changes
         .expect("workspace edit has per-file changes");
-    let inc_uri = format!("file://{}", inc_path.display());
+    let inc_uri = uri_for(&inc_path);
     let edited_uris: Vec<&str> = changes.keys().map(|u| u.as_str()).collect();
     assert!(
         changes.keys().any(|u| u.as_str() == main_uri),
@@ -1410,7 +1410,7 @@ fn references_span_included_files() {
 
     let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
     client.initialize();
-    let main_uri = format!("file://{}", main_path.display());
+    let main_uri = uri_for(&main_path);
     client.open_document(
         &main_uri,
         &std::fs::read_to_string(&main_path).expect("read main"),
@@ -1432,7 +1432,7 @@ fn references_span_included_files() {
             partial_result_params: Default::default(),
         });
     let locations = locations.unwrap_or_default();
-    let inc_uri = format!("file://{}", inc_path.display());
+    let inc_uri = uri_for(&inc_path);
     let uris: Vec<&str> = locations.iter().map(|l| l.uri.as_str()).collect();
     assert!(
         locations.iter().any(|l| l.uri.as_str() == main_uri),

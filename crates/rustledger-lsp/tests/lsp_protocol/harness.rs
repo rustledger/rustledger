@@ -479,6 +479,24 @@ pub fn test_uri(name: &str) -> String {
     format!("file:///{}", name)
 }
 
+/// The `file:` URI for a real path on disk.
+///
+/// Through the crate's own converter, because these tests need A valid URI for
+/// a temp file — the URI is not their subject, the protocol behavior is.
+/// `format!("file://{}", path.display())` was used at fifteen sites and omits
+/// the third slash of a Windows drive URI and percent-encodes nothing, so every
+/// one of them failed the moment this suite first ran on Windows.
+///
+/// A test whose SUBJECT is the encoding must build its input independently
+/// instead — see `a_relative_document_resolves_under_a_percent_encoded_directory`.
+#[must_use]
+pub fn uri_for(path: &std::path::Path) -> String {
+    rustledger_lsp::path_to_uri(path)
+        .unwrap_or_else(|e| panic!("no file URI for {}: {e}", path.display()))
+        .as_str()
+        .to_string()
+}
+
 /// `Option` views of the response's result/error. lsp-server 0.10 stores these
 /// as a flat `response_result: Result<Value, ResponseError>`
 /// (rust-analyzer/lsp-server@0.10.0 reverted the 0.9 `ResponseKind` enum).

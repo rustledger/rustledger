@@ -314,7 +314,9 @@ This document catalogs all validation errors and warnings with their trigger con
 
 **Condition:** A `custom "budget"` directive that rledger is confident IS a budget carries content it cannot use.
 
-Confident is ONE rule: the interval slot holds a real interval keyword (`daily`, `weekly`, `monthly`, `quarterly`, `yearly`, or the bare noun of each), OR the first value names an account and the third is an amount. Either is strong evidence; neither occurs by coincidence in a payload written for something else.
+Confident is ONE rule, implemented as `rustledger_budget::addressed_to_us`: the interval slot holds a real interval keyword (`daily`, `weekly`, `monthly`, `quarterly`, `yearly`, or the bare noun of each), OR the first value names an account and the payload carries an amount in at most three values.
+
+The amount need not be in the third slot: `custom "budget" Expenses:Food 400.00 USD` is a budget with the interval word forgotten, and requiring the slot left it reported by nobody while `report budget` printed "No budgets declared" over a ledger that plainly declares one. What keeps another tool's payload out is the ARITY — Fava reads three values and tolerates a trailing note, so anything longer is a schema of its own (`custom "budget" Assets:Bank:Checking 1000.00 USD TRUE "monthly"` has four and is left alone). Either half is strong evidence; neither occurs by coincidence in a payload written for something else.
 
 A `custom "budget"` meeting neither test is not reported anywhere — not by `check`, not by the LSP, and not by `report budget`. `custom` is beancount's open extension point and the name is not rledger's alone: beancount's own documented example is `custom "budget" "weekly < 1000.00 USD" 2016-02-28 TRUE 43.03 USD 23`, and an envelope-budgeting tool might write `custom "budget" "envelope-groceries" "rollover" 250.00 USD`. Python accepts both silently, and so does rledger.
 

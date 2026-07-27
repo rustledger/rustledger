@@ -508,6 +508,23 @@ pub fn uri_for(path: &std::path::Path) -> String {
         .to_string()
 }
 
+/// The file name, for writing an `include` into a ledger fixture.
+///
+/// An `include` target is a beancount STRING, where `\` is an escape: an
+/// absolute Windows path written into one parses as `C:Users<tab>...` — `\t`
+/// really does become a tab — so the include silently resolves to nothing.
+/// Four fixtures did this, and only one of them failed; the other three went on
+/// passing on Windows while the ledger they set up was not the ledger they
+/// meant. Includes here are relative to the journal's own directory, which is
+/// how real ledgers are written anyway.
+#[must_use]
+pub fn include_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .expect("fixture paths have a file name")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Do these two URIs name the same file?
 ///
 /// Compares PATHS, never the URI strings. One file has many URI spellings, and

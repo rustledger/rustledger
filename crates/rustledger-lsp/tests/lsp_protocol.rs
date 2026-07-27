@@ -14,7 +14,7 @@ mod quirks;
 
 use std::time::{Duration, Instant};
 
-use harness::{LspTestClient, same_file, test_uri, uri_for};
+use harness::{LspTestClient, include_name, same_file, test_uri, uri_for};
 use lsp_types::request::{CodeLensRequest, CodeLensResolve, SemanticTokensFullRequest};
 use lsp_types::{CodeLensParams, SemanticTokensParams, TextDocumentIdentifier};
 
@@ -640,8 +640,13 @@ fn multi_file_balance_lens_reflects_cross_file_aggregation() {
         &journal_path,
         format!(
             "include \"{}\"\ninclude \"{}\"\n",
-            bank_path.display(),
-            credit_card_path.display()
+            // Relative, because a backslash is an ESCAPE inside a beancount
+            // string: an absolute Windows path embedded here parses as
+            // `C:Users<tab>...`, the include never resolves, and the test waits
+            // for a diagnostic that is never produced. Real ledgers are written
+            // this way too.
+            include_name(&bank_path),
+            include_name(&credit_card_path)
         ),
     )
     .expect("write journal.beancount");
@@ -928,8 +933,13 @@ fn included_file_validation_errors_are_published() {
         &journal_path,
         format!(
             "include \"{}\"\ninclude \"{}\"\n",
-            good_path.display(),
-            bad_path.display()
+            // Relative, because a backslash is an ESCAPE inside a beancount
+            // string: an absolute Windows path embedded here parses as
+            // `C:Users<tab>...`, the include never resolves, and the test waits
+            // for a diagnostic that is never produced. Real ledgers are written
+            // this way too.
+            include_name(&good_path),
+            include_name(&bad_path)
         ),
     )
     .expect("write journal");
@@ -1009,8 +1019,13 @@ fn included_file_diagnostics_are_cleared_when_fixed() {
         &journal_path,
         format!(
             "include \"{}\"\ninclude \"{}\"\n",
-            good_path.display(),
-            bad_path.display()
+            // Relative, because a backslash is an ESCAPE inside a beancount
+            // string: an absolute Windows path embedded here parses as
+            // `C:Users<tab>...`, the include never resolves, and the test waits
+            // for a diagnostic that is never produced. Real ledgers are written
+            // this way too.
+            include_name(&good_path),
+            include_name(&bad_path)
         ),
     )
     .expect("write journal");
@@ -1100,8 +1115,13 @@ fn editing_a_non_ledger_buffer_keeps_unopened_file_diagnostics() {
         &journal_path,
         format!(
             "include \"{}\"\ninclude \"{}\"\n",
-            good_path.display(),
-            bad_path.display()
+            // Relative, because a backslash is an ESCAPE inside a beancount
+            // string: an absolute Windows path embedded here parses as
+            // `C:Users<tab>...`, the include never resolves, and the test waits
+            // for a diagnostic that is never produced. Real ledgers are written
+            // this way too.
+            include_name(&good_path),
+            include_name(&bad_path)
         ),
     )
     .expect("write journal");
@@ -1280,8 +1300,13 @@ fn workspace_symbol_finds_symbols_in_unopened_included_files() {
         &journal_path,
         format!(
             "include \"{}\"\ninclude \"{}\"\n",
-            main_path.display(),
-            inc_path.display()
+            // Relative, because a backslash is an ESCAPE inside a beancount
+            // string: an absolute Windows path embedded here parses as
+            // `C:Users<tab>...`, the include never resolves, and the test waits
+            // for a diagnostic that is never produced. Real ledgers are written
+            // this way too.
+            include_name(&main_path),
+            include_name(&inc_path)
         ),
     )
     .expect("write journal");
@@ -1337,8 +1362,13 @@ fn rename_account_spans_included_files() {
         &journal_path,
         format!(
             "include \"{}\"\ninclude \"{}\"\n",
-            main_path.display(),
-            inc_path.display()
+            // Relative, because a backslash is an ESCAPE inside a beancount
+            // string: an absolute Windows path embedded here parses as
+            // `C:Users<tab>...`, the include never resolves, and the test waits
+            // for a diagnostic that is never produced. Real ledgers are written
+            // this way too.
+            include_name(&main_path),
+            include_name(&inc_path)
         ),
     )
     .expect("write journal");
@@ -1402,8 +1432,13 @@ fn references_span_included_files() {
         &journal_path,
         format!(
             "include \"{}\"\ninclude \"{}\"\n",
-            main_path.display(),
-            inc_path.display()
+            // Relative, because a backslash is an ESCAPE inside a beancount
+            // string: an absolute Windows path embedded here parses as
+            // `C:Users<tab>...`, the include never resolves, and the test waits
+            // for a diagnostic that is never produced. Real ledgers are written
+            // this way too.
+            include_name(&main_path),
+            include_name(&inc_path)
         ),
     )
     .expect("write journal");

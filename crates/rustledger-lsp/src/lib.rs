@@ -156,6 +156,36 @@ mod uri_conversion_tests {
         assert_eq!(path_to_uri(std::path::Path::new("relative/x.bean")), None);
     }
 
+    /// The shapes an editor actually sends, and where the answer changed.
+    ///
+    /// Every difference from the previous hand-rolled decoder is a correction,
+    /// which is worth pinning because "stricter parser" is otherwise an
+    /// unbounded claim:
+    ///
+    /// - A URI with a HOST (`file://server/share/x`) used to yield
+    ///   `server/share/x`, a RELATIVE path, so any caller testing `exists()`
+    ///   resolved it against the process's working directory. It is `None` here
+    ///   now, and `url` turns it into a real UNC path on Windows.
+    /// - A query or fragment used to be kept as part of the filename.
+    #[test]
+    fn editor_uri_shapes_resolve_or_are_refused() {
+        // A host component is not a local path on this platform.
+        #[cfg(not(windows))]
+        assert_eq!(uri_to_path(&uri("file://server/share/x.bean")), None);
+
+        // Query and fragment are URI syntax, not part of the filename.
+        for u in ["file:///home/a/x.bean?q=1", "file:///home/a/x.bean#frag"] {
+            assert_eq!(
+                uri_to_path(&uri(u)).expect(u),
+                std::path::PathBuf::from("/home/a/x.bean"),
+                "{u}"
+            );
+        }
+
+        // An unsaved buffer has no path, and did not before either.
+        assert_eq!(uri_to_path(&uri("untitled:Untitled-1")), None);
+    }
+
     /// A non-`file:` URI is not a path, and must not be coerced into one.
     #[test]
     fn a_non_file_uri_is_not_a_path() {

@@ -35,7 +35,69 @@ use std::path::PathBuf;
 /// more useful than "nothing happened".
 pub fn uri_to_path(uri: &Uri) -> Result<PathBuf, PathUriError> {
     let url = url::Url::parse(uri.as_str()).map_err(|_| PathUriError::NotAUri)?;
-    url.to_file_path().map_err(|()| PathUriError::NotALocalFile)
+
+    // `Url::to_file_path` is SCHEME-BLIND — it inspects the host and nothing
+    // else — so `fugitive:///home/rob/main.beancount`, VS Code's
+    // `git:/home/rob/main.beancount?{...}`, `vscode-notebook-cell:/...` and even
+    // `https://localhost/etc/passwd` all hand back a real filesystem path. The
+    // `strip_prefix("file://")` this module replaced rejected every one of them
+    // for free, so without this check the boundary is a REGRESSION on the case
+    // it was built to get right.
+    //
+    // These arrive in practice, not in theory: vim-fugitive gives a git-history
+    // buffer the `beancount` filetype, so a client attached by filetype sends
+    // `didOpen` for a `fugitive://` URI whose path is the live file's. That
+    // text would land in the VFS under the real path, serving every later
+    // completion and diagnostic from a stale revision, and its `didClose` would
+    // evict the real file outright.
+    if url.scheme() != "file" {
+        return Err(PathUriError::NotALocalFile);
+    }
+
+    let path = url
+        .to_file_path()
+        .map_err(|()| PathUriError::NotALocalFile)?;
+
+    // A segment that percent-DECODES into path syntax is a URI claiming one
+    // structure and denoting another. RFC 3986 removes dot segments BEFORE
+    // decoding, so `%2E%2E` is a segment literally NAMED `..` and `%2F` is a
+    // separator inside a single name — neither can exist on a real filesystem.
+    // `to_file_path` decodes first and lets the result act as syntax, so
+    // `file:///home/u/%2E%2E/secret` yields `/home/secret`, and
+    // `file:///a/b%2Fc/d` yields four components from three segments.
+    //
+    // Worth rejecting regardless of whether a trusted client would send it: the
+    // result goes straight to `vfs.open` and `Path::exists` with no
+    // confinement, and CLAUDE.md names path traversal a standing concern here.
+    // A plain (unencoded) `..` never reaches this loop — `Url::parse` has
+    // already removed it — so this fires only on the lying case.
+    // Read the segments off the RAW URI, not off `url`. `Url::parse` decodes
+    // `%2E` to `.` and then applies dot-segment removal, so by the time it has
+    // a parsed value the evidence is gone: `file:///home/u/%2E%2E/secret`
+    // arrives here as the innocent-looking `/home/secret`. `lsp_types::Uri` is
+    // `fluent_uri`, strict RFC 3986, which normalizes nothing — it still holds
+    // the string the client actually sent.
+    for segment in uri.path().as_str().split('/') {
+        let decoded = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
+        // Only an ENCODED segment can lie. A literal `..` is ordinary relative
+        // syntax that RFC 3986 resolves and `Url::parse` has already applied —
+        // `include "../shared/x.bean"` produces exactly that and must keep
+        // working. `%2E%2E` is a segment NAMED `..`, which is a different claim
+        // and an impossible file. Comparing against the raw text is what tells
+        // the two apart, and checking the decoded form alone rejected both.
+        if decoded == segment {
+            continue;
+        }
+        // `std::path::is_separator` rather than a literal `/` and `\\`: on Unix
+        // a backslash is an ORDINARY filename character, and rejecting it here
+        // refused the perfectly legal `/tmp/x\\y.bean`. The exhaustive byte
+        // sweep below caught that within a minute of it being written.
+        if decoded == "." || decoded == ".." || decoded.contains(std::path::is_separator) {
+            return Err(PathUriError::DeceptiveSegment);
+        }
+    }
+
+    Ok(path)
 }
 
 /// Convert a file path to an LSP URI.
@@ -48,20 +110,47 @@ pub fn uri_to_path(uri: &Uri) -> Result<PathBuf, PathUriError> {
 /// backslashes in place.
 /// # Errors
 /// [`PathUriError::NotAbsolute`] for a relative path, which has no `file:` URI.
+/// [`PathUriError::Unencodable`] if the result is still not a URI `lsp-types`
+/// will parse — the catch-all for any byte `url` emits that `fluent_uri`
+/// refuses. Both branches are live; neither is defensive padding.
 pub fn path_to_uri(path: &std::path::Path) -> Result<Uri, PathUriError> {
     let url = url::Url::from_file_path(path).map_err(|()| PathUriError::NotAbsolute)?;
+
+    // `from_file_path` copies `.` and `..` through verbatim, but `Url::parse`
+    // applies RFC 3986 remove_dot_segments — which is what `uri_to_path` gets,
+    // since it parses. Without this the two are not inverses:
+    // `/home/a/2026/../shared/x.bean` produced a URI that came back as
+    // `/home/a/shared/x.bean`, so a document link for an `include "../x"`
+    // named a URI matching no other URI the server emits for that same file,
+    // and an editor opened a second detached tab for an already-open buffer.
+    // Re-parsing borrows `url`'s own dot-segment removal rather than adding a
+    // hand-rolled copy of logic it already owns.
+    let url = url::Url::parse(url.as_str()).map_err(|_| PathUriError::Unencodable)?;
+
     // `url` encodes to the WHATWG path set, which leaves `[ ] ^ |` literal;
     // `lsp-types` parses with `fluent_uri`, strict RFC 3986, where none of them
     // is a `pchar`. Composing the lax encoder with the strict parser means a
     // perfectly ordinary path like `Statements/[2026-01] bank.pdf` produces a
-    // string that will not parse, and the function returns `None` — no document
-    // link, no goto-definition, no diagnostics for that file.
+    // string that will not parse, and the function fails — no document link, no
+    // goto-definition, no diagnostics for that file.
     //
-    // Everything after `file://` is the path: `from_file_path` leaves the
-    // authority empty except for a UNC share, whose host is a name and cannot
-    // contain these characters, so escaping them here cannot corrupt a host.
-    let mut out = String::with_capacity(url.as_str().len());
-    for ch in url.as_str().chars() {
+    // ONLY over the path. An earlier version ran this across the whole string
+    // on the reasoning that a UNC host "is a name and cannot contain these
+    // characters" — false for an IP literal: `file://[::1]/share/x.bean` is a
+    // legal URI that the pass turned into `file://%5B::1%5D/share/x.bean`,
+    // which neither `fluent_uri` nor `url` will parse. Escaping the authority
+    // can only ever corrupt it, since `url` has already encoded it correctly.
+    let full = url.as_str();
+    let path_part = url.path();
+    // `from_file_path` emits no query and no fragment, so the path is the tail.
+    debug_assert!(
+        full.ends_with(path_part),
+        "file URL has a query or fragment"
+    );
+    let split = full.len() - path_part.len();
+    let mut out = String::with_capacity(full.len());
+    out.push_str(&full[..split]);
+    for ch in full[split..].chars() {
         match ch {
             '[' => out.push_str("%5B"),
             ']' => out.push_str("%5D"),
@@ -75,6 +164,7 @@ pub fn path_to_uri(path: &std::path::Path) -> Result<Uri, PathUriError> {
 
 #[cfg(test)]
 mod uri_conversion_tests {
+
     use super::*;
     use std::str::FromStr;
 
@@ -197,14 +287,96 @@ mod uri_conversion_tests {
     /// A non-`file:` URI is not a path, and must not be coerced into one.
     #[test]
     fn a_non_file_uri_is_not_a_path() {
+        // The first two are the ORIGINAL cases, and both passed for the wrong
+        // reason: `untitled:Untitled-1` is cannot-be-a-base and
+        // `https://example.com` has a foreign host, so `to_file_path` refused
+        // them on grounds that have nothing to do with the scheme. Neither
+        // could ever have caught a missing scheme check, which is what this
+        // test is named for.
+        //
+        // The rest are the shapes that DID leak through: a hostless URI with a
+        // real absolute path. Editors send all of them for a beancount buffer.
+        for u in [
+            "untitled:Untitled-1",
+            "https://example.com/x.bean",
+            // vim-fugitive, viewing a file's git history
+            "fugitive:///home/rob/ledger/main.beancount",
+            // VS Code's built-in Git extension, opening a diff
+            "git:/home/rob/ledger/main.beancount?%7B%22ref%22%3A%22~%22%7D",
+            "vscode-notebook-cell:/home/rob/nb.ipynb#W0sZmlsZQ",
+            // `localhost` IS accepted as a local host by `to_file_path`, so
+            // only the scheme check stands between this and `/etc/passwd`.
+            "https://localhost/etc/passwd",
+        ] {
+            assert_eq!(
+                uri_to_path(&uri(u)),
+                Err(PathUriError::NotALocalFile),
+                "{u} must not resolve to a path"
+            );
+        }
+    }
+
+    /// A segment that decodes into path syntax names a file outside the
+    /// structure the URI shows.
+    ///
+    /// RFC 3986 removes dot segments BEFORE percent-decoding, so `%2E%2E` is a
+    /// segment literally named `..` and `%2F` is a separator inside one name.
+    /// `to_file_path` decodes first and lets the result act as syntax.
+    #[test]
+    fn a_segment_that_decodes_into_path_syntax_is_refused() {
+        for u in [
+            // was `/home/secret` — one directory above what the URI shows
+            "file:///home/u/%2E%2E/secret",
+            // was `/home/u/l/../../etc/passwd`
+            "file:///home/u/l/%2E%2E%2F%2E%2E%2Fetc/passwd",
+            // three segments in, four path components out
+            "file:///a/b%2Fc/d",
+        ] {
+            assert_eq!(
+                uri_to_path(&uri(u)),
+                Err(PathUriError::DeceptiveSegment),
+                "{u} must not resolve to a path"
+            );
+        }
+
+        // A plain `..` is removed by the parser long before this check, so an
+        // ordinary relative include still resolves rather than being refused.
         assert_eq!(
-            uri_to_path(&uri("untitled:Untitled-1")),
-            Err(PathUriError::NotALocalFile)
+            uri_to_path(&uri("file:///home/a/ledger/../shared/x.bean")),
+            Ok(std::path::PathBuf::from("/home/a/shared/x.bean"))
         );
-        assert_eq!(
-            uri_to_path(&uri("https://example.com/x.bean")),
-            Err(PathUriError::NotALocalFile)
-        );
+    }
+
+    /// The converters are inverses over dot segments.
+    ///
+    /// `from_file_path` copies `.` and `..` through verbatim while `Url::parse`
+    /// removes them, so `path_to_uri` used to emit a URI that `uri_to_path`
+    /// resolved to a DIFFERENT path. `resolve_full_path` builds document-link
+    /// targets with `Path::join`, which preserves the `../` from
+    /// `include "../shared/x.bean"`, so this was the shape it emitted: an
+    /// editor opened a second, detached tab for a file already open under the
+    /// normalized URI, and edits in one were invisible to the other.
+    #[cfg(unix)]
+    #[test]
+    fn dot_segments_are_normalized_so_the_pair_inverts() {
+        for (input, want) in [
+            ("/home/rob/2026/../shared/a.bean", "/home/rob/shared/a.bean"),
+            ("/home/rob/./a.bean", "/home/rob/a.bean"),
+            ("/a/b/../../c", "/c"),
+        ] {
+            let path = std::path::Path::new(input);
+            let uri = path_to_uri(path).unwrap_or_else(|e| panic!("{input}: {e}"));
+            assert!(
+                !uri.as_str().contains("/../") && !uri.as_str().contains("/./"),
+                "{input} produced un-normalized {}",
+                uri.as_str()
+            );
+            assert_eq!(
+                uri_to_path(&uri).unwrap_or_else(|e| panic!("{input}: {e}")),
+                std::path::PathBuf::from(want),
+                "{input}"
+            );
+        }
     }
 }
 
@@ -217,11 +389,16 @@ mod windows_shape_tests {
     ///
     /// `cfg(windows)` because it cannot be faked: `from_file_path` decides what
     /// is absolute using the HOST platform's rules, so on Linux `C:\x` is a
-    /// relative path and the function correctly refuses it. The main CI has no
-    /// Windows runner (`release-test.yml` does), so this runs for a developer on
-    /// Windows and in release testing rather than on every PR. Asserting a
+    /// relative path and the function correctly refuses it. Asserting a
     /// hand-written `C:/x` on Linux instead would test a shape the code never
     /// receives, which is how the backslash bug in #1867 got through.
+    ///
+    /// This runs in the `lsp-windows` CI job. An earlier version of this
+    /// comment claimed `release-test.yml` covered it — it does not: its two
+    /// `windows-latest` jobs download a published binary and run `rledger
+    /// check`, and no workflow in this repo ran `cargo test` on Windows at all,
+    /// so this assertion executed nowhere. A `cfg` that nothing compiles is an
+    /// assertion nobody makes.
     #[cfg(windows)]
     #[test]
     fn a_drive_letter_path_becomes_a_three_slash_uri() {
@@ -276,21 +453,36 @@ mod windows_shape_tests {
     /// `url` omits and `lsp-types` requires is applied regardless of platform.
     #[test]
     fn the_strict_parser_gap_is_closed_on_every_platform() {
-        // Built by hand rather than through `from_file_path`, so the assertion
-        // does not depend on what this platform calls absolute.
-        for (raw, want) in [
-            ("file:///tmp/a[1].bean", "file:///tmp/a%5B1%5D.bean"),
-            ("file:///tmp/a^b.bean", "file:///tmp/a%5Eb.bean"),
-            ("file:///tmp/a|b.bean", "file:///tmp/a%7Cb.bean"),
+        // Anchored to whatever THIS platform calls absolute, so it runs
+        // everywhere while still going through `path_to_uri`. An earlier
+        // version asserted only that `"file:///tmp/a[1].bean".parse::<Uri>()`
+        // fails and the escaped spelling parses — both properties of
+        // `fluent_uri`, true whether or not this crate escapes anything, so
+        // deleting the entire escape pass left it green. It was named as the
+        // portable guard for that pass and could not fail on it.
+        let base = if cfg!(windows) {
+            std::path::PathBuf::from("C:\\tmp")
+        } else {
+            std::path::PathBuf::from("/tmp")
+        };
+        for (name, want_tail) in [
+            ("a[1].bean", "a%5B1%5D.bean"),
+            ("a^b.bean", "a%5Eb.bean"),
+            ("a|b.bean", "a%7Cb.bean"),
+            ("[2026-01] bank.pdf", "%5B2026-01%5D%20bank.pdf"),
         ] {
-            // `url` produces the left-hand form; `lsp-types` refuses it.
+            let path = base.join(name);
+            let uri = path_to_uri(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(
-                raw.parse::<Uri>().is_err(),
-                "{raw} should be rejected by the strict parser"
+                uri.as_str().ends_with(want_tail),
+                "{name}: got {}, want a URI ending {want_tail}",
+                uri.as_str()
             );
-            assert!(
-                want.parse::<Uri>().is_ok(),
-                "{want} should be accepted once escaped"
+            // And it must invert, or escaping produced a URI naming a
+            // different file than the one asked about.
+            assert_eq!(
+                uri_to_path(&uri).unwrap_or_else(|e| panic!("{name}: {e}")),
+                path
             );
         }
     }

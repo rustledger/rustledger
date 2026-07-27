@@ -17,6 +17,7 @@ lsp-types.workspace = true
 # THE file-URI implementation. `lsp-types` 0.97 dropped `url::Url` for
 # `fluent_uri`, which has no path conversion; see `uri_to_path`.
 url.workspace = true
+percent-encoding.workspace = true
 
 # Document management
 ropey.workspace = true

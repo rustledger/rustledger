@@ -182,6 +182,9 @@ getrandom = { version = "0.2", features = ["js"] }
 lsp-server = "0.10"
 lsp-types = "0.97"
 url = "2.5"
+# Decoding individual URI path segments so `proto` can reject a segment that
+# percent-decodes into path syntax. Already in the tree via `url`.
+percent-encoding = "2.3"
 # Pin to `cr_lines` feature only (no `unicode_lines`) so ropey's line
 # breaks match `similar::TextDiff::from_lines` semantics: LF, CRLF, bare
 # CR — and nothing else. With default features ropey also splits on

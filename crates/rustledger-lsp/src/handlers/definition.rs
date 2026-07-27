@@ -77,7 +77,7 @@ pub fn handle_goto_definition(
 /// **0-based**, hence `line - 1`. A zero-width range at column 0 makes the
 /// editor jump to the start of the `open` line.
 fn cross_file_location(path: &std::path::Path, line_1based: u32) -> Option<Location> {
-    let uri: Uri = format!("file://{}", path.display()).parse().ok()?;
+    let uri: Uri = crate::path_to_uri(path)?;
     let line = line_1based.saturating_sub(1);
     Some(Location {
         uri,

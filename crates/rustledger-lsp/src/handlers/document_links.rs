@@ -119,7 +119,7 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
             resolved_path.clone()
         };
         if let Some(ref full_path) = target_path
-            && let Some(uri) = file_uri(full_path)
+            && let Some(uri) = crate::path_to_uri(Path::new(full_path))
         {
             resolved.target = Some(uri);
         }
@@ -178,37 +178,6 @@ fn resolve_full_path(path: &str, base_dir: &Option<String>) -> Option<String> {
 fn get_base_directory(uri: &Uri) -> Option<String> {
     let path = crate::uri_to_path(uri)?;
     path.parent().map(|p| p.to_string_lossy().to_string())
-}
-
-/// Build a `file:` URI for a resolved filesystem path.
-///
-/// Percent-encodes the characters that cannot appear literally, and gives
-/// Windows paths the third slash (`file:///C:/x`) that a drive letter needs.
-/// `format!("file://{path}")` did neither, so a target under a directory with a
-/// space produced a URI the editor could not open even once the path resolved.
-fn file_uri(path: &str) -> Option<Uri> {
-    let mut encoded = String::with_capacity(path.len());
-    // A conservative allow-list: anything outside it is escaped. `/` stays a
-    // separator, and `:` is kept so a Windows drive letter survives.
-    //
-    // A BACKSLASH is a separator too, and becomes `/`. `resolve_full_path`
-    // builds its result with `Path::join`, which uses the platform separator,
-    // so on Windows this function receives `C:\Users\a b\x.txt`. Escaping
-    // those to `%5C` yields `file:///C:%5CUsers%5C...`, which an editor will not
-    // open — the fix for the path lookup would have shipped with the click
-    // target still broken, on the one platform the bug was reported from.
-    for b in path.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
-                encoded.push(b as char);
-            }
-            b'\\' => encoded.push('/'),
-            _ => encoded.push_str(&format!("%{b:02X}")),
-        }
-    }
-    // `/foo` -> `file:///foo`; `C:/foo` -> `file:///C:/foo`.
-    let slash = if encoded.starts_with('/') { "" } else { "/" };
-    format!("file://{slash}{encoded}").parse::<Uri>().ok()
 }
 
 /// Create a document link for a path found in source.
@@ -302,7 +271,7 @@ fn parse_include_line(
 #[cfg(test)]
 fn resolve_path_to_uri(path: &str, base_dir: &Option<String>) -> Option<Uri> {
     let resolved = resolve_full_path(path, base_dir)?;
-    format!("file://{}", resolved).parse().ok()
+    crate::path_to_uri(Path::new(&resolved))
 }
 
 #[cfg(test)]
@@ -593,27 +562,5 @@ mod uri_resolution_tests {
         assert!(!target.contains(' '), "raw space in a URI: {target}");
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A Windows-shaped path gets the third slash a drive letter needs, and
-    /// keeps the drive colon literal rather than escaping it.
-    #[test]
-    fn a_drive_letter_path_becomes_a_three_slash_uri() {
-        let uri = file_uri("C:/Users/a b/repro/neighbor.txt").expect("uri");
-        assert_eq!(
-            uri.as_str(),
-            "file:///C:/Users/a%20b/repro/neighbor.txt",
-            "`file://C:/…` is not a valid file URI and the editor cannot open it"
-        );
-        // A POSIX path already starts with `/`, so it must not gain a fourth.
-        let posix = file_uri("/home/a b/x.txt").expect("uri");
-        assert_eq!(posix.as_str(), "file:///home/a%20b/x.txt");
-
-        // The shape `Path::join` ACTUALLY produces on Windows: backslashes.
-        // Escaping them to `%5C` gives a URI no editor will open, and the test
-        // above would not have caught it because a hand-written `C:/…` is not
-        // what the code receives there.
-        let native = file_uri(r"C:\Users\a b\repro\neighbor.txt").expect("uri");
-        assert_eq!(native.as_str(), "file:///C:/Users/a%20b/repro/neighbor.txt");
     }
 }

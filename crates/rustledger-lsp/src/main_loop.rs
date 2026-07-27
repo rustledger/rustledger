@@ -880,10 +880,8 @@ impl MainLoopState {
             let mut vfs = self.vfs.write();
             vfs.iter_with_parse()
                 .map(|(path, content, parse_result)| {
-                    let uri_str = format!("file://{}", path.display());
-                    let uri: Uri = uri_str
-                        .parse()
-                        .unwrap_or_else(|_| "file:///".parse().unwrap());
+                    let uri: Uri =
+                        crate::path_to_uri(path).unwrap_or_else(|| "file:///".parse().unwrap());
                     (uri, content, parse_result)
                 })
                 .collect()
@@ -916,16 +914,14 @@ impl MainLoopState {
                             .ok()
                             .is_none_or(|c| !open_canonical.contains(&c))
                     })
-                    .filter_map(|f| {
-                        match format!("file://{}", f.path.display()).parse::<Uri>() {
-                            Ok(uri) => Some((uri, f.source.to_string())),
-                            Err(_) => {
-                                tracing::warn!(
-                                    "workspace/symbol: skipping ledger file with a non-file:// URI: {}",
-                                    f.path.display()
-                                );
-                                None
-                            }
+                    .filter_map(|f| match crate::path_to_uri(&f.path).ok_or(()) {
+                        Ok(uri) => Some((uri, f.source.to_string())),
+                        Err(_) => {
+                            tracing::warn!(
+                                "workspace/symbol: skipping ledger file with a non-file:// URI: {}",
+                                f.path.display()
+                            );
+                            None
                         }
                     })
                     .collect()
@@ -1008,7 +1004,7 @@ impl MainLoopState {
                 if canon.as_deref() == current_canonical {
                     continue;
                 }
-                let Ok(uri) = format!("file://{}", f.path.display()).parse::<Uri>() else {
+                let Some(uri) = crate::path_to_uri(&f.path) else {
                     tracing::warn!(
                         "rename: skipping ledger file with a non-file:// URI: {}",
                         f.path.display()
@@ -1486,15 +1482,11 @@ impl MainLoopState {
             }
         };
 
-        // Convert path to URI
-        #[cfg(not(windows))]
-        let uri: Uri = format!("file://{}", path.display())
-            .parse()
-            .map_err(|e| format!("{:?}", e))?;
-        #[cfg(windows)]
-        let uri: Uri = format!("file:///{}", path.display())
-            .parse()
-            .map_err(|e| format!("{:?}", e))?;
+        // One converter for both platforms. The `cfg` split here existed
+        // because a Windows drive letter needs a third slash — the same bug the
+        // other seven call sites still had, patched at this one.
+        let uri: Uri = crate::path_to_uri(&path)
+            .ok_or_else(|| format!("not a file path: {}", path.display()))?;
 
         let (text, parse_result) = self.get_document_data(&uri);
         let result =
@@ -1714,8 +1706,7 @@ impl MainLoopState {
             .into_iter()
             .filter_map(|path| {
                 let content = self.vfs.read().get_content(&path)?;
-                let uri_str = format!("file://{}", path.display());
-                let uri = uri_str.parse::<Uri>().ok()?;
+                let uri = crate::path_to_uri(&path)?;
                 Some((uri, content))
             })
             .collect();
@@ -2015,7 +2006,7 @@ impl MainLoopState {
                 // than drop it silently. A proper percent-encoding
                 // `path_to_uri` helper applied consistently across the crate is
                 // the broader fix.
-                let Ok(uri) = format!("file://{}", f.path.display()).parse::<Uri>() else {
+                let Some(uri) = crate::path_to_uri(&f.path) else {
                     tracing::warn!(
                         "skipping cross-file diagnostics for {}: path is not a valid file:// URI",
                         f.path.display()
@@ -2113,7 +2104,7 @@ impl MainLoopState {
             .vfs
             .read()
             .paths()
-            .filter_map(|p| format!("file://{}", p.display()).parse::<Uri>().ok())
+            .filter_map(|p| crate::path_to_uri(p))
             .collect();
         let stale: Vec<Uri> = self
             .cross_file_diag_uris

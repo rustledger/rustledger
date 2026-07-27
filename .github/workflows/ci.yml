@@ -523,7 +523,7 @@ jobs:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate]
+    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, uri-boundary, lsp-platform, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate]
     steps:
       - name: Check results
         run: |
@@ -545,6 +545,18 @@ jobs:
             exit 1
           fi
 
+          # uri-boundary always runs (no should_build gate, because the
+          # scripts it runs are themselves what a PR may be changing), so its
+          # result is always required. It was advisory when first added, which
+          # meant the ratchet could report a violation and the PR would still
+          # be mergeable — a ratchet nobody has to satisfy is documentation.
+          uri_boundary="${{ needs.uri-boundary.result }}"
+          echo "uri-boundary result: $uri_boundary"
+          if [[ "$uri_boundary" != "success" ]]; then
+            echo "uri-boundary must pass"
+            exit 1
+          fi
+
           # If no code changes, the remaining build jobs are skipped - that's OK
           if [[ "${{ needs.changes.outputs.should_build }}" == "false" ]]; then
             echo "No code changes - build skipped (OK)"
@@ -555,7 +567,10 @@ jobs:
           # part of the gate (ADR-0004 Phase 3 / #1232): wire-format
           # drift in the generated TS / JSON Schema / Python artifacts
           # blocks merge just like any other failure.
-          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.sync-primitives.result }} ${{ needs.hot-path-collections.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bench-build.result }} ${{ needs.bindings-fresh.result }} ${{ needs.component-parity.result }}"
+          # lsp-platform (windows + macos) is in the gate: it found 25 real
+          # defects on its first runs, every one of them unreachable from
+          # Linux, so a red platform leg must block exactly like a red `ci`.
+          results="${{ needs.fmt.result }} ${{ needs.unsafe-invariant.result }} ${{ needs.sync-primitives.result }} ${{ needs.hot-path-collections.result }} ${{ needs.lsp-platform.result }} ${{ needs.ci.result }} ${{ needs.doctest.result }} ${{ needs.regressions.result }} ${{ needs.bench-build.result }} ${{ needs.bindings-fresh.result }} ${{ needs.component-parity.result }}"
           echo "Job results: $results"
 
           if echo "$results" | grep -qE '(failure|cancelled)'; then

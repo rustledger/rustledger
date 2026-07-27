@@ -131,9 +131,49 @@ if ./scripts/check-uri-boundary.sh >/dev/null 2>&1; then
     fail=1
 fi
 
+# Production code AFTER a test module must still be scanned. The original awk
+# exited at the first `#[cfg(test)] mod`, and real files have several, so the
+# ratchet reported "ok" on a hand-rolled converter appended below one.
+cat > "$fixture" <<'EOF'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() {
+        let _ = format!("file://{}", "/tmp/x");
+    }
+}
+
+pub fn sneaky(p: &std::path::Path) -> String { format!("file://{}", p.display()) }
+EOF
+if ./scripts/check-uri-boundary.sh >/dev/null 2>&1; then
+    echo "FAIL: code after a #[cfg(test)] mod was not scanned" >&2
+    fail=1
+fi
+
+# Two test modules, and clean code between and after them, must stay clean.
+cat > "$fixture" <<'EOF'
+#[cfg(test)]
+mod a {
+    fn x() { let _ = format!("file://{}", "/tmp/x"); }
+}
+
+pub fn between() {}
+
+#[cfg(test)]
+mod b {
+    fn y() { let _ = "file:///x".strip_prefix("file://"); }
+}
+
+pub fn after() {}
+EOF
+if ! ./scripts/check-uri-boundary.sh >/dev/null 2>&1; then
+    echo "FAIL: clean code around two test modules was flagged" >&2
+    fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
     echo "self-test FAILED" >&2
     exit 1
 fi
 
-echo "ok: check-uri-boundary.sh catches all 8 conversion shapes and 6 URI-string comparisons, honors both escape hatches, and scopes the test-module exemption."
+echo "ok: check-uri-boundary.sh catches all 8 conversion shapes and 6 URI-string comparisons, honors both escape hatches, and scopes the test-module exemption to the module BODY."

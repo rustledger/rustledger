@@ -2,6 +2,10 @@
 
 Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadmap/index.md); completed items land here so the roadmaps stay forward-only.
 
+### Breaking
+
+- **`rustledger-lsp` URI conversion is now fallible and typed** — `uri_to_path` and `path_to_uri` return `Result<AbsPathBuf, PathUriError>` / `Result<Uri, PathUriError>` instead of `Option`. `uri_to_path` also refuses a non-`file:` scheme and any URI whose path segment percent-decodes into path syntax, both of which previously resolved to real filesystem paths. Embedders calling these directly must handle the error; the variants name which step failed (PR #1869).
+
 ### Performance
 
 - **Source double-allocation removed** — `Arc<str>` for source code instead of clone (Phase 0.1, ~16% faster, 50% less source memory).

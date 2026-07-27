@@ -2158,21 +2158,40 @@ impl MainLoopState {
         }
 
         // Clear any previously-tracked file that is no longer erroring and is
-        // not currently open (open buffers manage their own diagnostics). Both
-        // sides of this comparison are paths straight from the VFS and the
-        // source map, so it no longer depends on two encoders agreeing.
-        // VFS paths came from `uri_to_path`, so they are already absolute;
-        // anything that somehow is not simply cannot be a diagnostics key.
-        let open_paths: std::collections::HashSet<AbsPathBuf> = self
+        // not currently open (open buffers manage their own diagnostics).
+        //
+        // Compared in the LOADER's spelling on both sides. `cross_file_diag_paths`
+        // holds `source_map` paths, which `DiskFileSystem::normalize` has
+        // canonicalized; VFS paths come from the client's URI and are
+        // deliberately never canonicalized. Those two are not the same string
+        // for the same file — guaranteed on Windows, where `canonicalize`
+        // always returns the `\\?\` verbatim form, and reachable on macOS
+        // through case or a symlinked ledger directory.
+        //
+        // An earlier version compared them raw, so a file the user had just
+        // OPENED failed the "is it open" test, was judged stale, and had its
+        // real errors cleared out from under a live buffer. The three sibling
+        // source-map cross-references in this file all canonicalize first;
+        // this one was the exception.
+        //
+        // A path that no longer resolves yields `None` and is treated as not
+        // open, which is right: a deleted file's diagnostics should clear.
+        let open_canonical: std::collections::HashSet<PathBuf> = self
             .vfs
             .read()
             .paths()
             .filter_map(|p| AbsPathBuf::new(p.clone()).ok())
+            .filter_map(|p| p.canonical_for_loader_lookup())
             .collect();
         let stale: Vec<AbsPathBuf> = self
             .cross_file_diag_paths
             .iter()
-            .filter(|p| !erroring.contains(*p) && !open_paths.contains(*p))
+            .filter(|p| {
+                !erroring.contains(*p)
+                    && !p
+                        .canonical_for_loader_lookup()
+                        .is_some_and(|c| open_canonical.contains(&c))
+            })
             .cloned()
             .collect();
         for path in stale {

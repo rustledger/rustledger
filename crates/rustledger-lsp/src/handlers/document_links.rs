@@ -119,7 +119,26 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
             resolved_path.clone()
         };
         if let Some(ref full_path) = target_path {
-            match crate::path_to_uri(Path::new(full_path)) {
+            // Resolve through the OS before converting. `full_path` is a
+            // `Path::join` of the ledger's base and a possibly-relative
+            // include, so it can carry `..` — and POSIX applies `..` AFTER
+            // symlink resolution, which no lexical pass can reproduce. With
+            // `/base/view -> /base/real/ledger`, `/base/view/../attachments/x`
+            // EXISTS (the kernel lands on `/base/real/attachments/x`) while any
+            // textual normalization yields `/base/attachments/x`, which does
+            // not. `path_to_uri` deliberately does not normalize for exactly
+            // this reason, so the resolution belongs here, where we already
+            // know whether the file is there.
+            //
+            // This also makes the target agree with the tooltip (which asks
+            // `exists()`) and with the loader (which canonicalizes its source
+            // map), so a link names the file `rledger check` actually reads.
+            // When the file does NOT exist there is nothing to resolve and the
+            // un-normalized path is the honest answer; the tooltip says
+            // "File not found" in that case anyway.
+            let resolved_target = std::fs::canonicalize(full_path)
+                .unwrap_or_else(|_| std::path::PathBuf::from(full_path));
+            match crate::path_to_uri(&resolved_target) {
                 Ok(uri) => resolved.target = Some(uri),
                 // Every sibling site warns; this one silently produced a link
                 // with no target, which an editor renders as unclickable text
@@ -568,6 +587,68 @@ mod uri_resolution_tests {
     use super::*;
     use std::str::FromStr;
 
+    /// A `..` that crosses a symlink resolves to the file the OS finds.
+    ///
+    /// POSIX applies `..` AFTER symlink resolution; a lexical pass does it
+    /// before, and the two name different files. `path_to_uri` briefly
+    /// normalized lexically so the two converters would be exact inverses,
+    /// which made this link's tooltip say "Open document" (it asks `exists()`,
+    /// so the OS answered) while its target named a file that does not exist.
+    ///
+    /// `cfg(unix)`: creating a symlink on Windows needs elevation or developer
+    /// mode, so the fixture cannot be built there.
+    #[cfg(unix)]
+    #[test]
+    fn a_dot_dot_across_a_symlink_resolves_the_way_the_os_does() {
+        let root = std::env::temp_dir().join(format!("rl-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("real/ledger")).expect("mkdir");
+        std::fs::create_dir_all(root.join("real/attachments")).expect("mkdir");
+        std::fs::write(root.join("real/attachments/jan.pdf"), b"pdf").expect("write");
+        let view = root.join("view");
+        std::os::unix::fs::symlink(root.join("real/ledger"), &view).expect("symlink");
+
+        let link = DocumentLink {
+            range: lsp_types::Range {
+                start: lsp_types::Position::new(0, 9),
+                end: lsp_types::Position::new(0, 30),
+            },
+            target: None,
+            tooltip: None,
+            data: Some(serde_json::json!({
+                "path": "../attachments/jan.pdf",
+                "base_dir": view.to_string_lossy(),
+                "kind": "document",
+            })),
+        };
+        let resolved = handle_document_link_resolve(link);
+
+        let tooltip = resolved.tooltip.clone().unwrap_or_default();
+        assert!(
+            tooltip.starts_with("Open document"),
+            "the OS finds this file, so the tooltip must say so: {tooltip}"
+        );
+        let target = resolved
+            .target
+            .expect("a resolvable document must be clickable");
+        let target_path = crate::uri_to_path(&target).expect("target inverts");
+        assert!(
+            target_path.as_path().exists(),
+            "the tooltip says the file exists, so the target must name one that \
+             does: {}",
+            target.as_str()
+        );
+        assert_eq!(
+            target_path.as_path(),
+            root.join("real/attachments/jan.pdf")
+                .canonicalize()
+                .expect("canon"),
+            "and it must be the file the OS resolves to"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A relative `document` path must resolve under a directory whose URI is
     /// percent-encoded (issue #1866).
     ///
@@ -579,6 +660,7 @@ mod uri_resolution_tests {
     /// portable trigger means this runs everywhere, rather than on the one OS CI
     /// might not have.
     #[test]
+
     fn a_relative_document_resolves_under_a_percent_encoded_directory() {
         // Unique per process: a fixed name collides when two `cargo test`
         // processes run at once, or when a previous failed run left the

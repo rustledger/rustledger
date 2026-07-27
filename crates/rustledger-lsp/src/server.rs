@@ -126,7 +126,21 @@ impl Server {
             .workspace_folders
             .as_ref()
             .and_then(|folders| folders.first())
-            .and_then(|folder| uri_to_path(&folder.uri).ok())
+            .and_then(|folder| {
+                uri_to_path(&folder.uri)
+                    .map_err(|e| {
+                        // The one converted site that kept a bare `.ok()`. A
+                        // client whose workspace folder is `vscode-remote://`,
+                        // a WSL UNC share, or `untitled:` silently gets NO
+                        // workspace root, so the ledger never loads and every
+                        // feature returns empty with nothing in the log.
+                        tracing::warn!(
+                            "workspace root {} is not a local path: {e}",
+                            folder.uri.as_str()
+                        );
+                    })
+                    .ok()
+            })
             .map(crate::AbsPathBuf::into_path_buf)
     }
 

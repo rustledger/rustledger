@@ -50,13 +50,45 @@ boundary="crates/rustledger-lsp/src/proto.rs"
 # WHATWG-vs-RFC-3986 encoding gap that `proto::path_to_uri` closes.
 forbidden='(format!\("file://|"file://"\.to_|push_str\("file://|(strip_prefix|starts_with|trim_start_matches)\("file://|(from_file_path|to_file_path)\()'
 
-# Print a file's non-test code: everything up to the trailing
-# `#[cfg(test)]`-attributed `mod`. Matches `check-sync-primitives.sh`.
+# Print a file's non-test code: every `#[cfg(test)]`-attributed `mod` BODY is
+# skipped, and everything else is printed.
+#
+# `check-sync-primitives.sh` exits at the first such module, on the assumption
+# that test modules come last. Rust does not require that, and
+# `document_links.rs` alone has three — so everything after the first was
+# unscanned, and appending a hand-rolled `file://` converter below it made this
+# script report "ok". A ratchet with a hole where the ninth copy would go is
+# worse than none, because it is believed.
+#
+# Braces are counted to find the end of each module rather than assuming one.
 strip_test_module() {
     awk '
+        # Remember a `#[cfg(test)]` so the `mod` on a following line is caught.
         /#\[cfg\(test\)\]/ { pending = 1; print; next }
         pending && /^[[:space:]]*$/ { print; next }
-        pending && /^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]/ { exit }
+        pending && /^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]/ {
+            pending = 0
+            # A `mod foo;` declaration has no body to skip.
+            if ($0 ~ /;[[:space:]]*$/) { print; next }
+            depth = 0
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                if (c == "{") depth++
+                else if (c == "}") depth--
+            }
+            # Consume until the body closes. Blank the lines rather than
+            # dropping them so grep -n line numbers stay true to the file.
+            while (depth > 0 && (getline line) > 0) {
+                for (i = 1; i <= length(line); i++) {
+                    c = substr(line, i, 1)
+                    if (c == "{") depth++
+                    else if (c == "}") depth--
+                }
+                print ""
+            }
+            print ""
+            next
+        }
         { pending = 0; print }
     ' "$1"
 }

@@ -1,11 +1,17 @@
 [package]
 name = "rustledger-lsp"
-# 0.22.0, not 0.21.x: `uri_to_path`/`path_to_uri` are `pub` and re-exported,
-# and their return type changed from `Option<PathBuf>` to
-# `Result<PathBuf, PathUriError>`. Under Cargo's 0.x rules that is a
-# semver-major break, and the repo's `cargo-semver-checks` job covers only
-# `rustledger-plugin-types`, so nothing else would have caught it.
-version = "0.22.0"
+# Lockstep with the workspace, like every other crate.
+#
+# This release DOES carry a breaking change to this crate's public API —
+# `uri_to_path`/`path_to_uri` went from `Option<PathBuf>` to
+# `Result<AbsPathBuf, PathUriError>` — and an earlier version of this line said
+# 0.22.0 to signal it. That does not work here: the release cut runs
+# `cargo set-version` over the whole workspace, so a hand-written version is
+# overwritten with whatever the tag says. The only effect was to invite a
+# downstream `rustledger-lsp = "0.22"` pin that no published crate would ever
+# satisfy. The break belongs in the release notes, which is where this repo's
+# consumers actually learn about one.
+version = "0.21.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

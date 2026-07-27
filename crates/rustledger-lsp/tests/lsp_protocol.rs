@@ -22,6 +22,29 @@ use lsp_types::{CodeLensParams, SemanticTokensParams, TextDocumentIdentifier};
 /// `textDocument/codeLens` request, get a response. If this test
 /// fails the harness itself is broken; every other test in this
 /// binary builds on it.
+/// `same_file` must not answer "yes" for two different files.
+///
+/// It once did, for any pair that does not exist on disk: it compared
+/// `canonicalize().ok()` on both sides and `None == None` is true. Every
+/// `test_uri` names a path that never exists, so thirteen assertions built on
+/// this helper would have matched a notification about a DIFFERENT file. No
+/// test failed, because each happens to have only one file in play — the bug
+/// was latent, not absent, and the next multi-file test would have inherited a
+/// guard that cannot fail.
+#[test]
+fn same_file_distinguishes_two_paths_that_do_not_exist() {
+    let a: lsp_types::Uri = test_uri("aaa.beancount").parse().expect("uri");
+    let b = test_uri("bbb.beancount");
+    assert!(
+        !same_file(&a, &b),
+        "different names must not be the same file"
+    );
+    assert!(
+        same_file(&a, &test_uri("aaa.beancount")),
+        "identical must match"
+    );
+}
+
 #[test]
 fn harness_smoke_initialize_and_codelens() {
     let mut client = LspTestClient::spawn();
@@ -598,17 +621,6 @@ fn real_balance_failure_round_trips_to_warning_lens() {
 /// `⚠`. The test passing means the validator's cross-file overlay
 /// AND the lens's verdict propagation both work.
 ///
-/// Gated on `cfg(unix)`: the `file://{path}` URI assembly below assumes
-/// the path starts with `/` (POSIX absolute), so on Windows it would
-/// produce `file://C:\...` (only two slashes plus drive letter) and
-/// fail Uri parsing — or worse, parse to a non-canonical URI that the
-/// server rejects and falls into single-file mode, producing a
-/// misleading `⚠` for "balance assertion failed" instead of a clean
-/// platform skip. `main_loop.rs` cfg-splits its URI assembly between
-/// Unix (`file://{}`) and Windows (`file:///{}`); a Windows-portable
-/// variant of this test would mirror that. Today CI is Linux-only, so
-/// the gate is a guardrail for the future.
-#[cfg(unix)]
 #[test]
 fn multi_file_balance_lens_reflects_cross_file_aggregation() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -823,7 +835,6 @@ fn scratch_file_not_in_journal_uses_single_file_mode() {
 /// `CompletionItem` (not an array — a protocol violation), and when a
 /// `journalFile` is configured its documentation must aggregate over the whole
 /// loaded ledger, not the ephemeral buffer the completion was triggered in.
-#[cfg(unix)]
 #[test]
 fn completion_resolve_returns_single_item_and_uses_journal() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -904,9 +915,6 @@ fn completion_resolve_returns_single_item_and_uses_journal() {
 /// open buffer, never received a `publishDiagnostics`, so the problem was
 /// completely invisible.
 ///
-/// `cfg(unix)`: the `file://{path}` URI assembly assumes a POSIX absolute path
-/// (see `multi_file_balance_lens_reflects_cross_file_aggregation`).
-#[cfg(unix)]
 #[test]
 fn included_file_validation_errors_are_published() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -995,7 +1003,6 @@ fn included_file_validation_errors_are_published() {
 /// fixed, its diagnostics must be explicitly CLEARED (an empty publish), not
 /// left lingering in the client. Exercises `publish_cross_file_diagnostics`'s
 /// stale-clearing path via a watched-file change that reloads the journal.
-#[cfg(unix)]
 #[test]
 fn included_file_diagnostics_are_cleared_when_fixed() {
     use lsp_types::{DidChangeWatchedFilesParams, FileChangeType, FileEvent};
@@ -1285,7 +1292,6 @@ fn async_request_invalidated_by_edit_still_gets_a_response() {
 /// Regression: `workspace/symbol` must search the whole loaded ledger, not just
 /// open buffers — an account declared in an unopened `include`d file must be
 /// findable. Pre-fix the search only consulted open documents.
-#[cfg(unix)]
 #[test]
 fn workspace_symbol_finds_symbols_in_unopened_included_files() {
     use lsp_types::request::WorkspaceSymbolRequest;
@@ -1340,7 +1346,6 @@ fn workspace_symbol_finds_symbols_in_unopened_included_files() {
 /// Regression: renaming an account used across `include`d files must produce
 /// edits for ALL files, not just the open one — otherwise the rename leaves
 /// dangling references in the other files and corrupts the ledger.
-#[cfg(unix)]
 #[test]
 #[allow(clippy::mutable_key_type)] // Uri keys in the WorkspaceEdit changes map are safe to read
 fn rename_account_spans_included_files() {
@@ -1412,7 +1417,6 @@ fn rename_account_spans_included_files() {
 
 /// Regression: find-references on an account used across `include`d files must
 /// return locations in ALL files, not just the open one.
-#[cfg(unix)]
 #[test]
 fn references_span_included_files() {
     use lsp_types::request::References;

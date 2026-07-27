@@ -552,8 +552,25 @@ pub fn same_file(uri: &lsp_types::Uri, expected: &str) -> bool {
         // comes from the loader's canonicalized source map and the test's from
         // the temp dir it made, so this is the loader-spelling question, not
         // the identity one. `AbsPathBuf` will not compile the latter.
+        //
+        // BOTH sides must resolve for the canonical comparison to mean
+        // anything. An earlier version wrote `a.canonical() == b.canonical()`,
+        // and for two paths that do not exist that is `None == None` — true.
+        // Every `test_uri` names a path that never exists, so this helper
+        // answered "same file" for ANY pair of unresolvable URIs, and thirteen
+        // assertions built on it matched whatever notification arrived first.
+        // The guard written to stop tests asserting nothing became one.
         (Ok(a), Ok(b)) => {
-            a == b || a.canonical_for_loader_lookup() == b.canonical_for_loader_lookup()
+            if a == b {
+                return true;
+            }
+            match (
+                a.canonical_for_loader_lookup(),
+                b.canonical_for_loader_lookup(),
+            ) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            }
         }
         _ => false,
     }

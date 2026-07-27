@@ -119,7 +119,7 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
             resolved_path.clone()
         };
         if let Some(ref full_path) = target_path
-            && let Ok(uri) = format!("file://{}", full_path).parse::<Uri>()
+            && let Some(uri) = file_uri(full_path)
         {
             resolved.target = Some(uri);
         }
@@ -161,14 +161,46 @@ fn resolve_full_path(path: &str, base_dir: &Option<String>) -> Option<String> {
 }
 
 /// Get the base directory from a file URI.
+///
+/// Through [`crate::uri_to_path`], the crate's one URI-to-path converter. This
+/// used to strip `file://` by hand and treat the remainder as a path, which
+/// skipped both things that converter does:
+///
+/// - **Percent-decoding.** A ledger in `Invoices 2026/` arrives as
+///   `Invoices%202026`, so every relative `document` path joined onto it failed
+///   `exists()` and rendered as "⚠ File not found" for a file that was there.
+/// - **The Windows leading slash.** `file:///C:/x` left `/C:/x`, and the drive
+///   colon arrives encoded as `%3A` besides, so on Windows NO relative document
+///   path ever resolved (issue #1866).
+///
+/// Absolute paths never reach this function, which is why they kept working and
+/// made the bug look Windows-specific when it is not.
 fn get_base_directory(uri: &Uri) -> Option<String> {
-    let uri_str = uri.as_str();
-    if let Some(path_str) = uri_str.strip_prefix("file://") {
-        let path = Path::new(path_str);
-        path.parent().map(|p| p.to_string_lossy().to_string())
-    } else {
-        None
+    let path = crate::uri_to_path(uri)?;
+    path.parent().map(|p| p.to_string_lossy().to_string())
+}
+
+/// Build a `file:` URI for a resolved filesystem path.
+///
+/// Percent-encodes the characters that cannot appear literally, and gives
+/// Windows paths the third slash (`file:///C:/x`) that a drive letter needs.
+/// `format!("file://{path}")` did neither, so a target under a directory with a
+/// space produced a URI the editor could not open even once the path resolved.
+fn file_uri(path: &str) -> Option<Uri> {
+    let mut encoded = String::with_capacity(path.len());
+    // A conservative allow-list: anything outside it is escaped. `/` stays a
+    // separator, and `:` is kept so a Windows drive letter survives.
+    for b in path.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+                encoded.push(b as char);
+            }
+            _ => encoded.push_str(&format!("%{b:02X}")),
+        }
     }
+    // `/foo` -> `file:///foo`; `C:/foo` -> `file:///C:/foo`.
+    let slash = if encoded.starts_with('/') { "" } else { "/" };
+    format!("file://{slash}{encoded}").parse::<Uri>().ok()
 }
 
 /// Create a document link for a path found in source.
@@ -494,5 +526,76 @@ mod tests {
         // No base dir
         let resolved = resolve_full_path("relative.beancount", &None);
         assert!(resolved.is_none());
+    }
+}
+
+#[cfg(test)]
+mod uri_resolution_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    /// A relative `document` path must resolve under a directory whose URI is
+    /// percent-encoded (issue #1866).
+    ///
+    /// The directory has a SPACE in it deliberately. The report came from
+    /// Windows, where `file:///C:/…` leaves both a leading slash and a `%3A`
+    /// drive colon, so no relative document path ever resolved. But the cause is
+    /// the URI decoding, not the platform: any encoded character breaks it, and
+    /// a space reproduces the same failure on Linux and macOS. Testing the
+    /// portable trigger means this runs everywhere, rather than on the one OS CI
+    /// might not have.
+    #[test]
+    fn a_relative_document_resolves_under_a_percent_encoded_directory() {
+        let dir = std::env::temp_dir().join("rledger lsp 1866");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        std::fs::write(dir.join("neighbor.txt"), b"invoice").expect("write doc");
+        let ledger = dir.join("main.beancount");
+        let source = "2020-01-01 open Expenses:Probe\n\
+                      2026-07-27 document Expenses:Probe \"neighbor.txt\"\n";
+        std::fs::write(&ledger, source).expect("write ledger");
+
+        // The URI an editor actually sends: the space is encoded.
+        let uri_str = format!("file://{}", ledger.to_string_lossy().replace(' ', "%20"));
+        let uri = Uri::from_str(&uri_str).expect("uri");
+
+        let parse = rustledger_parser::parse(source);
+        let params = DocumentLinkParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri },
+            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+            partial_result_params: lsp_types::PartialResultParams::default(),
+        };
+        let links = handle_document_links(&params, source, &parse, PositionEncoding::Utf16)
+            .expect("a document link");
+        assert_eq!(links.len(), 1, "{links:?}");
+
+        let resolved = handle_document_link_resolve(links.into_iter().next().unwrap());
+        let tooltip = resolved.tooltip.unwrap_or_default();
+        assert!(
+            tooltip.starts_with("Open document:"),
+            "the file exists, so the link must be openable, got {tooltip:?}"
+        );
+        // ...and the target must be a URI the editor can actually open, which
+        // means the space is encoded rather than embedded raw.
+        let target = resolved.target.expect("a target").as_str().to_string();
+        assert!(target.contains("%20"), "target not encoded: {target}");
+        assert!(!target.contains(' '), "raw space in a URI: {target}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Windows-shaped path gets the third slash a drive letter needs, and
+    /// keeps the drive colon literal rather than escaping it.
+    #[test]
+    fn a_drive_letter_path_becomes_a_three_slash_uri() {
+        let uri = file_uri("C:/Users/a b/repro/neighbor.txt").expect("uri");
+        assert_eq!(
+            uri.as_str(),
+            "file:///C:/Users/a%20b/repro/neighbor.txt",
+            "`file://C:/…` is not a valid file URI and the editor cannot open it"
+        );
+        // A POSIX path already starts with `/`, so it must not gain a fourth.
+        let posix = file_uri("/home/a b/x.txt").expect("uri");
+        assert_eq!(posix.as_str(), "file:///home/a%20b/x.txt");
     }
 }

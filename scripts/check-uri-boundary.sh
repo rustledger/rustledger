@@ -4,8 +4,9 @@
 #
 # Four separate hand-rolled converters existed at once in this crate, and each
 # was wrong in its own way: one escaped nothing, one escaped only spaces, one
-# stripped the `file://` prefix without decoding it (so a path containing
-# `%20` became a path containing a literal space), and one escaped a Windows
+# stripped the `file://` prefix without decoding it (so the URI for a path
+# with a space kept the literal `%20`, naming a file that does not exist), and
+# one escaped a Windows
 # path separator into `%5C`. They agreed on every ASCII-only path a developer
 # tests with, which is why all four survived review. `proto.rs` is now the one
 # place that knows the encoding, and this is the ratchet that keeps a fifth

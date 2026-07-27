@@ -944,9 +944,9 @@ impl MainLoopState {
                     })
                     .filter_map(|f| match crate::path_to_uri(&f.path) {
                         Ok(uri) => Some((uri, f.source.to_string())),
-                        Err(_) => {
+                        Err(e) => {
                             tracing::warn!(
-                                "workspace/symbol: skipping ledger file with a non-file:// URI: {}",
+                                "workspace/symbol: no file URI for {}: {e}; skipping",
                                 f.path.display()
                             );
                             None
@@ -1032,12 +1032,15 @@ impl MainLoopState {
                 if canon.as_deref() == current_canonical {
                     continue;
                 }
-                let Ok(uri) = crate::path_to_uri(&f.path) else {
-                    tracing::warn!(
-                        "rename: skipping ledger file with a non-file:// URI: {}",
-                        f.path.display()
-                    );
-                    continue;
+                let uri = match crate::path_to_uri(&f.path) {
+                    Ok(uri) => uri,
+                    Err(e) => {
+                        tracing::warn!(
+                            "rename: no file URI for {}: {e}; skipping",
+                            f.path.display()
+                        );
+                        continue;
+                    }
                 };
                 // Prefer the open buffer's live content over the on-disk source
                 // so cross-file edit ranges line up with the client's buffer.
@@ -2100,15 +2103,14 @@ impl MainLoopState {
 
     /// Publish or clear diagnostics for unopened included files.
     ///
-    /// Non-empty sets are published and their URIs tracked in
-    /// [`MainLoopState::cross_file_diag_uris`]. Any previously-tracked URI that
-    /// is NOT erroring this round is then explicitly cleared (empty publish) and
-    /// untracked — this covers a fixed error, an include-graph change, the
-    /// ledger becoming single-file/unavailable (so `cross_file` is empty), all
-    /// of which would otherwise leave stale errors in the client. URIs of files
-    /// currently open in a buffer are left alone: those buffers publish (and
-    /// clear) their own diagnostics via didOpen/didChange/didClose.
-    #[allow(clippy::mutable_key_type)] // Uri has interior mutability but is safe as a set key here
+    /// Non-empty sets are published and their paths tracked in
+    /// [`MainLoopState::cross_file_diag_paths`]. Any previously-tracked path
+    /// that is NOT erroring this round is then explicitly cleared (empty
+    /// publish) and untracked — this covers a fixed error, an include-graph
+    /// change, the ledger becoming single-file/unavailable (so `cross_file` is
+    /// empty), all of which would otherwise leave stale errors in the client.
+    /// Files currently open in a buffer are left alone: those buffers publish
+    /// (and clear) their own diagnostics via didOpen/didChange/didClose.
     fn publish_cross_file_diagnostics(
         &mut self,
         cross_file: Vec<(PathBuf, Vec<lsp_types::Diagnostic>)>,

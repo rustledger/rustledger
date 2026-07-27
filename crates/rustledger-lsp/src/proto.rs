@@ -349,6 +349,10 @@ mod uri_conversion_tests {
 
         // A plain `..` is removed by the parser long before this check, so an
         // ordinary relative include still resolves rather than being refused.
+        // POSIX-shaped, so `cfg(unix)`: the refusals above are platform-neutral
+        // (the segment check runs before `to_file_path`), but this one asserts a
+        // real resolved path.
+        #[cfg(unix)]
         assert_eq!(
             uri_to_path(&uri("file:///home/a/ledger/../shared/x.bean")),
             Ok(std::path::PathBuf::from("/home/a/shared/x.bean"))

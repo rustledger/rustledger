@@ -204,7 +204,7 @@ jobs:
       - name: "Confine file: URI conversion to the boundary module"
         run: ./scripts/check-uri-boundary.sh
 
-  # The ONLY job in this repo that runs `cargo test` on Windows.
+  # The ONLY job in this repo that runs `cargo test` off Linux.
   #
   # `rustledger-lsp` is where platform-specific path handling actually lives:
   # `url::Url::from_file_path` decides what is absolute using the HOST
@@ -217,13 +217,25 @@ jobs:
   # compiles is an assertion nobody makes.
   #
   # Scoped to the one crate rather than the workspace: this is about path/URI
-  # conversion, and a full Windows workspace run is a much larger commitment
-  # than the problem needs.
-  lsp-windows:
-    name: LSP (Windows)
+  # conversion, and a full cross-platform workspace run is a much larger
+  # commitment than the problem needs.
+  #
+  # macOS covers a DIFFERENT axis than Windows. Its filesystem is
+  # case-insensitive but case-PRESERVING, so `/Users/rob/Ledger.beancount` and
+  # `/users/rob/ledger.beancount` are one file with two paths that compare
+  # unequal — the same "a string is not an identity" failure the diagnostics
+  # cache had, on a platform where paths look POSIX and every other Linux
+  # assumption holds. Windows cannot surface that one: its separator and drive
+  # differences make such tests fail loudly rather than pass quietly.
+  lsp-platform:
+    name: LSP (${{ matrix.os }})
     needs: [changes]
     if: needs.changes.outputs.should_build == 'true'
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # one platform's failure must not hide the other's
+      matrix:
+        os: [windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable

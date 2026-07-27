@@ -70,6 +70,58 @@ while IFS= read -r f; do
     fi
 done < <(grep -rlE "$forbidden" crates/*/src --include='*.rs' 2>/dev/null | sort)
 
+# A SECOND rule, over `src/` AND `tests/`: never compare URIs as strings.
+#
+# One file has many URI spellings, so a string comparison answers "did these two
+# producers happen to spell it the same way", not "are these the same file". It
+# is the defect the diagnostics cache had (a `didClose` in the client's spelling
+# could not evict an entry stored in ours), and eleven more instances were then
+# found in the protocol tests, where the server's URI comes from the loader's
+# canonicalized path and the test's from the temp dir it made. On Linux those
+# are the same string; on Windows they are not, so every one of those
+# assertions silently never matched.
+#
+# `tests/` is in scope here, unlike the rule above: building a URI by hand is
+# legitimate in a test simulating an editor, but comparing two of them as
+# strings is wrong wherever it appears. Convert both sides with `uri_to_path`
+# and compare paths.
+#
+# KNOWN GAP, stated rather than papered over: this matches on the NAME, so it
+# needs one side to be called `uri`/`*_uri` or to be a `.uri` field. It caught
+# all twelve real instances and every realistic variant, but
+# `let a = some_uri(); a.as_str() == b` slips through. Banning every
+# `.as_str() ==` in the crate would close it at the cost of one unrelated line
+# today and a tax on every string comparison later; that trade is available if
+# this ever misses something real.
+uri_eq='\.as_str\(\) *[=!]= *[&]?[a-z_]*uri|uri\.as_str\(\) *[=!]='
+
+uri_eq_violations=""
+while IFS= read -r f; do
+    # Comment-only lines are skipped: the doc comments explaining this rule
+    # necessarily quote the pattern it bans.
+    hits="$(grep -nE "$uri_eq" "$f" \
+        | grep -vE '^[0-9]+:[[:space:]]*(//|/\*|\*)' \
+        | grep -v 'ratchet-allow: uri-string-eq' || true)"
+    if [ -n "$hits" ]; then
+        uri_eq_violations+="$f:"$'\n'"$(printf '%s\n' "$hits" | sed 's/^/    /')"$'\n'
+    fi
+done < <(grep -rlE "$uri_eq" crates/*/src crates/*/tests --include='*.rs' 2>/dev/null | sort)
+
+if [ -n "$uri_eq_violations" ]; then
+    echo "error: URIs compared as strings." >&2
+    echo "       A Uri is a string and a string is not a file identity: %2E vs ., a" >&2
+    echo "       dot segment, C: vs c:, and a canonicalized vs an uncanonicalized" >&2
+    echo "       parent all spell one file differently." >&2
+    echo "       Convert both sides with uri_to_path and compare the paths." >&2
+    echo "       Tests can use the harness's \`same_file\`." >&2
+    echo "       If a literal string comparison is genuinely what you mean, append" >&2
+    echo "         // ratchet-allow: uri-string-eq <reason>" >&2
+    echo "       to the line." >&2
+    echo >&2
+    printf '%s' "$uri_eq_violations" >&2
+    exit 1
+fi
+
 if [ -n "$violations" ]; then
     echo "error: file: URI assembled or parsed outside the boundary module." >&2
     echo "       Use rustledger_lsp::{path_to_uri, uri_to_path} (crates/rustledger-lsp/src/proto.rs)." >&2
@@ -83,4 +135,4 @@ if [ -n "$violations" ]; then
     exit 1
 fi
 
-echo "ok: file: URI conversion confined to $boundary."
+echo "ok: file: URI conversion confined to $boundary, and no URI compared as a string."

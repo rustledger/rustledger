@@ -20,7 +20,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 fixture="crates/rustledger-lsp/src/zz_uri_boundary_fixture.rs"
-trap 'rm -f "$fixture"' EXIT
+trap 'rm -f "$fixture" "crates/rustledger-lsp/tests/zz_uri_eq_fixture.rs"' EXIT
 
 fail=0
 
@@ -51,6 +51,47 @@ for line in "${must_catch[@]}"; do
         fail=1
     fi
 done
+
+# The second rule: URIs compared as strings. These are the shapes that actually
+# occurred — in the server's diagnostics cache and in eleven protocol tests.
+uri_eq_catch=(
+    'fn f(p: &P, b: &str) -> bool { p.uri.as_str() == b_uri }'
+    'fn f(l: &L) -> bool { l.uri.as_str() == main_uri }'
+    'fn f(u: &U) -> bool { u.as_str() == main_uri }'
+    'fn f(uri: &U, o: &str) -> bool { uri.as_str() == o }'
+    'fn f(a: &A) -> bool { a.uri.as_str() != b_uri }'
+)
+for line in "${uri_eq_catch[@]}"; do
+    printf '%s\n' "$line" > "$fixture"
+    if ./scripts/check-uri-boundary.sh >/dev/null 2>&1; then
+        echo "FAIL: URI string comparison not caught: $line" >&2
+        fail=1
+    fi
+done
+
+# It must apply to tests/ too, which is where eleven of the twelve were.
+test_fixture="crates/rustledger-lsp/tests/zz_uri_eq_fixture.rs"
+printf '%s\n' 'fn f(p: &P) -> bool { p.uri.as_str() == bad_uri }' > "$test_fixture"
+if ./scripts/check-uri-boundary.sh >/dev/null 2>&1; then
+    echo "FAIL: URI string comparison in tests/ not caught" >&2
+    fail=1
+fi
+rm -f "$test_fixture"
+
+# A comment quoting the pattern must NOT trip it — the docs for this very rule
+# have to be able to name what they ban.
+printf '%s\n' '/// Never write `p.uri.as_str() == other_uri`; compare paths.' > "$fixture"
+if ! ./scripts/check-uri-boundary.sh >/dev/null 2>&1; then
+    echo "FAIL: a comment quoting the banned pattern was flagged" >&2
+    fail=1
+fi
+
+# Its own escape hatch.
+printf '%s\n' 'fn f(p: &P) -> bool { p.uri.as_str() == b_uri } // ratchet-allow: uri-string-eq self-test' > "$fixture"
+if ! ./scripts/check-uri-boundary.sh >/dev/null 2>&1; then
+    echo "FAIL: ratchet-allow: uri-string-eq did not suppress" >&2
+    fail=1
+fi
 
 # The escape hatch must suppress a real violation.
 printf '%s\n' 'fn f(u: &url::Url) { let _ = u.to_file_path(); } // ratchet-allow: uri-boundary self-test' > "$fixture"
@@ -95,4 +136,4 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-echo "ok: check-uri-boundary.sh catches all 8 violation shapes, honors the escape hatch, and scopes the test-module exemption."
+echo "ok: check-uri-boundary.sh catches all 8 conversion shapes and 6 URI-string comparisons, honors both escape hatches, and scopes the test-module exemption."

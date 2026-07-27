@@ -101,7 +101,7 @@ toml = "1.0"
 # schema output is checked in: a schemars minor that changes ordering
 # or adds metadata fields would break the `bindings-fresh` CI gate on
 # every unrelated PR. Bump deliberately + regenerate.
-schemars = "=1.2.1"
+schemars = "=1.2.2"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

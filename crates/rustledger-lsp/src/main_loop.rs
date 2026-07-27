@@ -1739,7 +1739,11 @@ impl MainLoopState {
             .into_iter()
             .filter_map(|path| {
                 let content = self.vfs.read().get_content(&path)?;
-                let uri = crate::path_to_uri(&path).ok()?;
+                let uri = crate::path_to_uri(&path)
+                    .map_err(|e| {
+                        tracing::warn!("no file URI for {}: {e}; skipping", path.display());
+                    })
+                    .ok()?;
                 Some((uri, content))
             })
             .collect();

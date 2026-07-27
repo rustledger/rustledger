@@ -118,10 +118,14 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
         } else {
             resolved_path.clone()
         };
-        if let Some(ref full_path) = target_path
-            && let Ok(uri) = crate::path_to_uri(Path::new(full_path))
-        {
-            resolved.target = Some(uri);
+        if let Some(ref full_path) = target_path {
+            match crate::path_to_uri(Path::new(full_path)) {
+                Ok(uri) => resolved.target = Some(uri),
+                // Every sibling site warns; this one silently produced a link
+                // with no target, which an editor renders as unclickable text
+                // with no way to find out why.
+                Err(e) => tracing::warn!("document link: no file URI for {full_path}: {e}"),
+            }
         }
 
         // Set tooltip based on existence
@@ -149,6 +153,23 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
 }
 
 /// Resolve a path to its full filesystem path.
+///
+/// `Path::join`, matching `rustledger_loader`'s own `base_dir.join(include_path)`
+/// exactly — including that a backslash is NOT a separator on Unix.
+///
+/// A previous `file_uri` helper mapped `\` to `/` unconditionally while
+/// building the URI, so a Windows-authored `document "statements\jan.pdf"`
+/// opened on Linux got a link pointing at `statements/jan.pdf`. That looks
+/// friendlier and is wrong: the loader joins the literal string, so
+/// `rledger check` looks for a file NAMED `statements\jan.pdf` and reports it
+/// missing. The link went somewhere the ledger does not. The same code checked
+/// `exists()` on the un-normalized path, so the tooltip already said "File not
+/// found" while the target claimed otherwise — one helper disagreeing with both
+/// the loader and itself.
+///
+/// Showing what the loader will actually do is the point of the feature, so a
+/// dead link for a genuinely dead include is the correct answer. Fixing it
+/// belongs in the loader, for both tools at once, or nowhere.
 fn resolve_full_path(path: &str, base_dir: &Option<String>) -> Option<String> {
     if Path::new(path).is_absolute() {
         Some(path.to_string())
@@ -176,7 +197,14 @@ fn resolve_full_path(path: &str, base_dir: &Option<String>) -> Option<String> {
 /// Absolute paths never reach this function, which is why they kept working and
 /// made the bug look Windows-specific when it is not.
 fn get_base_directory(uri: &Uri) -> Option<String> {
-    let path = crate::uri_to_path(uri).ok()?;
+    let path = crate::uri_to_path(uri)
+        .map_err(|e| {
+            tracing::debug!(
+                "document links: no base directory for {}: {e}",
+                uri.as_str()
+            )
+        })
+        .ok()?;
     path.parent().map(|p| p.to_string_lossy().to_string())
 }
 
@@ -271,7 +299,9 @@ fn parse_include_line(
 #[cfg(test)]
 fn resolve_path_to_uri(path: &str, base_dir: &Option<String>) -> Option<Uri> {
     let resolved = resolve_full_path(path, base_dir)?;
-    crate::path_to_uri(Path::new(&resolved)).ok()
+    crate::path_to_uri(Path::new(&resolved))
+        .map_err(|e| tracing::warn!("document link: no file URI for {resolved}: {e}"))
+        .ok()
 }
 
 #[cfg(test)]
@@ -451,12 +481,29 @@ mod tests {
         let resolved = handle_document_link_resolve(link);
         let tooltip = resolved.tooltip.unwrap();
         // The key assertion: a literal document is NOT glob-detected, so it
-        // resolves as an existing document rather than "no files match". (The
-        // bracketed path won't round-trip through a `file://` URI — a separate,
-        // pre-existing encoding limitation — so we don't assert on `target`.)
+        // resolves as an existing document rather than "no files match".
         assert!(
             tooltip.contains("Open document"),
             "document with [] in name must resolve literally: {tooltip}"
+        );
+        // And it is CLICKABLE. This used to say the bracketed path "won't
+        // round-trip through a `file://` URI — a separate, pre-existing
+        // encoding limitation — so we don't assert on `target`", which is why
+        // the limitation survived: the one end-to-end test over the exact
+        // reported symptom declined to look at the thing that was broken.
+        // `url` leaves `[` and `]` literal and `fluent_uri` refuses them, so
+        // `target` was `None` and the link was dead.
+        let target = resolved
+            .target
+            .expect("a bracketed document must be clickable");
+        assert!(
+            target.as_str().ends_with("Statement%5B2024-01%5D.pdf"),
+            "brackets must be percent-encoded: {}",
+            target.as_str()
+        );
+        assert_eq!(
+            crate::uri_to_path(&target).expect("target inverts"),
+            dir.path().join(fname)
         );
     }
 

@@ -204,6 +204,35 @@ jobs:
       - name: "Confine file: URI conversion to the boundary module"
         run: ./scripts/check-uri-boundary.sh
 
+  # The ONLY job in this repo that runs `cargo test` on Windows.
+  #
+  # `rustledger-lsp` is where platform-specific path handling actually lives:
+  # `url::Url::from_file_path` decides what is absolute using the HOST
+  # platform's rules, so the drive-letter and UNC shapes cannot be faked on
+  # Linux — asserting a hand-written `C:/x` there tests a shape the code never
+  # receives, which is how the backslash bug in #1867 got through. The tests
+  # were therefore written `#[cfg(windows)]`, and then ran nowhere at all: the
+  # only `windows-latest` jobs in this repo download a published binary and run
+  # `rledger check`, so no Windows `cargo test` existed. A `cfg` that nothing
+  # compiles is an assertion nobody makes.
+  #
+  # Scoped to the one crate rather than the workspace: this is about path/URI
+  # conversion, and a full Windows workspace run is a much larger commitment
+  # than the problem needs.
+  lsp-windows:
+    name: LSP (Windows)
+    needs: [changes]
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        with:
+          toolchain: 1.97.0 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      - name: Test rustledger-lsp on Windows
+        run: cargo test -p rustledger-lsp
+
   # Plugin-test policies (Phase 5 of plugin-testing-quality plan, see #992).
   # Catches weak count assertions and `(partial)` test ports that tend to
   # silently mask plugin bugs.

@@ -54,10 +54,6 @@ pub fn uri_to_path(uri: &Uri) -> Result<PathBuf, PathUriError> {
         return Err(PathUriError::NotALocalFile);
     }
 
-    let path = url
-        .to_file_path()
-        .map_err(|()| PathUriError::NotALocalFile)?;
-
     // A segment that percent-DECODES into path syntax is a URI claiming one
     // structure and denoting another. RFC 3986 removes dot segments BEFORE
     // decoding, so `%2E%2E` is a segment literally NAMED `..` and `%2F` is a
@@ -69,8 +65,11 @@ pub fn uri_to_path(uri: &Uri) -> Result<PathBuf, PathUriError> {
     // Worth rejecting regardless of whether a trusted client would send it: the
     // result goes straight to `vfs.open` and `Path::exists` with no
     // confinement, and CLAUDE.md names path traversal a standing concern here.
-    // A plain (unencoded) `..` never reaches this loop — `Url::parse` has
-    // already removed it — so this fires only on the lying case.
+    //
+    // Checked BEFORE `to_file_path` so the error names the real problem rather
+    // than whatever the platform's path rules happen to object to first, which
+    // also lets the test for it assert the same thing on every platform.
+    //
     // Read the segments off the RAW URI, not off `url`. `Url::parse` decodes
     // `%2E` to `.` and then applies dot-segment removal, so by the time it has
     // a parsed value the evidence is gone: `file:///home/u/%2E%2E/secret`
@@ -97,7 +96,7 @@ pub fn uri_to_path(uri: &Uri) -> Result<PathBuf, PathUriError> {
         }
     }
 
-    Ok(path)
+    url.to_file_path().map_err(|()| PathUriError::NotALocalFile)
 }
 
 /// Convert a file path to an LSP URI.
@@ -179,6 +178,10 @@ mod uri_conversion_tests {
     /// `FacturÃ©/` and every feature taking a path looked in a directory that
     /// does not exist. `uri_to_path` has a dozen call sites, so this was not
     /// confined to one feature.
+    // POSIX paths and `file:///home/...` URIs: on Windows `/tmp/x` is not
+    // absolute and a driveless URI has no path, so this asserts a shape the
+    // code never receives there. The Windows shapes have their own module.
+    #[cfg(unix)]
     #[test]
     fn a_non_ascii_path_survives_the_round_trip() {
         for (encoded, want) in [
@@ -207,6 +210,10 @@ mod uri_conversion_tests {
 
     /// Both directions agree, which is what a URI a handler hands back to the
     /// editor depends on.
+    // POSIX paths and `file:///home/...` URIs: on Windows `/tmp/x` is not
+    // absolute and a driveless URI has no path, so this asserts a shape the
+    // code never receives there. The Windows shapes have their own module.
+    #[cfg(unix)]
     #[test]
     fn path_and_uri_round_trip() {
         for p in [
@@ -269,6 +276,7 @@ mod uri_conversion_tests {
         );
 
         // Query and fragment are URI syntax, not part of the filename.
+        #[cfg(unix)]
         for u in ["file:///home/a/x.bean?q=1", "file:///home/a/x.bean#frag"] {
             assert_eq!(
                 uri_to_path(&uri(u)).expect(u),

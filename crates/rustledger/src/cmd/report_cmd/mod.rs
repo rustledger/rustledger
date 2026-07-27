@@ -260,7 +260,13 @@ pub fn run(
     // Existence check → load → (only now) create pager → render → finish.
     // Both the load and any render error surface BEFORE the pager exists,
     // so a bad file never flashes the alternate screen.
-    let loaded = load(file, report, verbose, no_cache, &mut io::stderr())?;
+    let loaded = load(
+        file,
+        report,
+        verbose,
+        no_cache,
+        &mut DiagnosticsToWriter(io::stderr()),
+    )?;
 
     let use_pager = !no_pager && matches!(format, OutputFormat::Text);
     let pager_cmd = if use_pager {
@@ -287,7 +293,7 @@ pub fn run(
         file,
         format,
         &mut writer,
-        &mut io::stderr(),
+        &mut DiagnosticsToWriter(io::stderr()),
     );
     writer.finish();
     result
@@ -303,6 +309,83 @@ pub fn run(
 /// stderr. The on-disk parse cache stays enabled: the load phase is always
 /// invoked with `no_cache = false` (this entry point takes no `no_cache`
 /// parameter).
+/// One thing a report needs to tell the reader that its figures cannot.
+///
+/// STRUCTURED, not a formatted line. Each surface decides how to show it: the
+/// terminal writes `warning: <date>: <message>` to stderr, and `ag-rledger`
+/// emits a JSON object per diagnostic. A text sink forced the agent surface to
+/// reconstruct records by splitting on newlines, which a message carrying its
+/// own newline (the "no budgets declared" note quotes an example directive)
+/// silently broke into two.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Diagnostic {
+    /// The error code, for diagnostics that have one (`E11001`, `LOAD`).
+    pub code: Option<String>,
+    /// The date the diagnostic is about, not the date it was produced.
+    pub date: Option<NaiveDate>,
+    /// The account it concerns, when it can be attributed to one.
+    pub account: Option<String>,
+    /// What is wrong, phrased for a human.
+    pub message: String,
+}
+
+impl Diagnostic {
+    /// A diagnostic with only prose — what most report warnings are.
+    pub fn message(message: impl Into<String>) -> Self {
+        Self {
+            code: None,
+            date: None,
+            account: None,
+            message: message.into(),
+        }
+    }
+
+    /// The terminal rendering: what `rledger` writes to stderr.
+    #[must_use]
+    pub fn to_line(&self) -> String {
+        let mut out = String::from("warning: ");
+        if let Some(code) = &self.code {
+            out.push_str(code);
+            out.push_str(": ");
+        }
+        if let Some(date) = self.date {
+            out.push_str(&date.to_string());
+            out.push_str(": ");
+        }
+        out.push_str(&self.message);
+        out
+    }
+}
+
+/// Where a report's diagnostics go.
+///
+/// A trait rather than a writer so the agent surface can keep the fields. The
+/// CLI's implementation formats to stderr; `ag-rledger`'s collects records.
+pub trait Diagnostics {
+    /// Record one diagnostic.
+    fn emit(&mut self, diagnostic: Diagnostic);
+}
+
+/// Writes each diagnostic as a line — the terminal's behavior.
+pub struct DiagnosticsToWriter<W: io::Write>(pub W);
+
+impl<W: io::Write> Diagnostics for DiagnosticsToWriter<W> {
+    fn emit(&mut self, diagnostic: Diagnostic) {
+        // A failed WARNING write must never cost the reader the REPORT.
+        let _ = writeln!(self.0, "{}", diagnostic.to_line());
+    }
+}
+
+/// Keeps the records, for a caller that will serialize them.
+#[derive(Default)]
+pub struct CollectedDiagnostics(pub Vec<Diagnostic>);
+
+impl Diagnostics for CollectedDiagnostics {
+    fn emit(&mut self, diagnostic: Diagnostic) {
+        self.0.push(diagnostic);
+    }
+}
+
 /// `warnings` receives the report's diagnostics — budgets on accounts that are
 /// never opened, figures too large to represent, and the like.
 ///
@@ -320,7 +403,7 @@ pub fn run_with_writer<W: io::Write>(
     verbose: bool,
     format: &OutputFormat,
     out: &mut W,
-    warnings: &mut dyn io::Write,
+    warnings: &mut dyn Diagnostics,
 ) -> Result<()> {
     // Existence-check → load → render(buffer): the same two-phase split the
     // production `run()` uses, minus the pager. Producing identical report
@@ -373,7 +456,7 @@ fn load(
     report: &Report,
     verbose: bool,
     no_cache: bool,
-    warnings: &mut dyn io::Write,
+    warnings: &mut dyn Diagnostics,
 ) -> Result<LoadedReport> {
     // Check if file exists
     if !file.exists() {
@@ -409,7 +492,12 @@ fn load(
     // else — a confident, complete-looking report over a file that did not
     // parse, which is the failure the sink was introduced to end.
     for err in &ledger.errors {
-        let _ = writeln!(warnings, "{}: {}", err.code, err.message);
+        warnings.emit(Diagnostic {
+            code: Some(err.code.clone()),
+            date: None,
+            account: None,
+            message: err.message.clone(),
+        });
     }
 
     // Two views of the directive stream, chosen per-report below:
@@ -487,7 +575,7 @@ fn render<W: io::Write>(
     file: &PathBuf,
     format: &OutputFormat,
     writer: &mut W,
-    warnings: &mut dyn io::Write,
+    warnings: &mut dyn Diagnostics,
 ) -> Result<()> {
     let directives = &loaded.directives;
 

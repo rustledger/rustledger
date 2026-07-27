@@ -59,7 +59,7 @@ pub(super) fn report_budget<W: Write>(
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
-    warnings: &mut dyn Write,
+    warnings: &mut dyn super::Diagnostics,
 ) -> Result<()> {
     let budgets = Budgets::from_directives(directives);
 
@@ -106,12 +106,15 @@ pub(super) fn report_budget<W: Write>(
         // To the caller's sink, not the process's stderr: an agent envelope
         // cannot see the latter, and a warning it cannot see is the silent
         // misreport these exist to prevent.
-        // A failed WARNING write must not cost the reader the REPORT. `?` here
-        // meant `2>/dev/full` — a cron job whose log filesystem filled — lost
-        // the whole table and exited 101, but only on ledgers that happened to
-        // have a diagnostic, so the failure looked unrelated to disk state.
-        // The sibling reports already ignore it; this now matches them.
-        let _ = writeln!(warnings, "warning: {}: {}", e.date, e.reason);
+        // Structured: a `BudgetError` already carries the date and the account
+        // this is about, and flattening them into a line threw away exactly the
+        // fields an agent wants to key on.
+        warnings.emit(super::Diagnostic {
+            code: None,
+            date: Some(e.date),
+            account: e.account.as_ref().map(|a| a.as_str().to_string()),
+            message: e.reason.clone(),
+        });
     }
     render(
         &Rendering { types, ctx, format },
@@ -302,7 +305,7 @@ fn render<W: Write>(
     errors: &[BudgetError],
     rounding: &Rounding<'_>,
     writer: &mut W,
-    warnings: &mut dyn Write,
+    warnings: &mut dyn super::Diagnostics,
 ) -> Result<()> {
     // 9 parameters is over the lint's threshold; every one is genuinely
     // distinct here and bundling them would only move the list.
@@ -368,7 +371,7 @@ fn render<W: Write>(
             // not a data row. Without it three different empty reports were one
             // bare header line.
             if let Some(empty) = empty {
-                let _ = writeln!(warnings, "note: {}", empty_message(empty, filter));
+                warnings.emit(super::Diagnostic::message(empty_message(empty, filter)));
             }
             writeln!(
                 writer,

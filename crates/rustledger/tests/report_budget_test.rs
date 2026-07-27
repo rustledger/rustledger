@@ -2818,3 +2818,57 @@ fn json_totals_carry_the_type_and_the_ledgers_own_root() {
         "{json}"
     );
 }
+
+/// The agent surface carries diagnostics as RECORDS, with the fields the report
+/// already knew.
+///
+/// It used to receive formatted lines and rebuild records by splitting on
+/// newlines, which discarded the date and the account outright and broke any
+/// message carrying its own newline into two entries — and the "no budgets
+/// declared" note quotes an example directive on a second line.
+#[test]
+fn the_agent_envelope_carries_structured_diagnostics() {
+    let Some(bin) = option_env!("CARGO_BIN_EXE_ag-rledger").map(std::path::PathBuf::from) else {
+        eprintln!("skip: ag-rledger not built (needs --features ag-rledger)");
+        return;
+    };
+    if !bin.exists() {
+        eprintln!("skip: ag-rledger not built");
+        return;
+    }
+    let f = write_fixture(
+        "2024-01-01 open Expenses:Food USD\n\
+         2024-01-01 custom \"budget\" Expenses:Fodo \"monthly\" 400.00 USD\n",
+    );
+    let out = Command::new(&bin)
+        .args([
+            "report",
+            f.path().to_str().unwrap(),
+            "budget",
+            "--from",
+            "2024-01-01",
+            "--to",
+            "2024-02-01",
+        ])
+        .output()
+        .expect("run ag-rledger");
+    let body = String::from_utf8_lossy(&out.stdout);
+    // Field-by-field, not substring: the envelope is compact JSON, and matching
+    // on `"account": "..."` with a space would pass or fail on the serializer's
+    // whitespace rather than on the contract.
+    let envelope: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|e| panic!("envelope must be JSON: {e}\n{body}"));
+    let warnings = envelope["result"]["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the warning must reach the envelope at all: {body}"));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    // The date and the account are their own fields, not buried in prose.
+    assert_eq!(warnings[0]["account"], "Expenses:Fodo");
+    assert_eq!(warnings[0]["date"], "2024-01-01");
+    assert!(
+        warnings[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("no such account is opened")),
+        "{warnings:?}"
+    );
+}

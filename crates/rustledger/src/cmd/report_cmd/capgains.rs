@@ -370,18 +370,17 @@ pub(super) fn report_capgains<W: Write>(
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
-    warnings: &mut dyn Write,
+    warnings: &mut dyn super::Diagnostics,
 ) -> Result<()> {
     let (disposals, cross_currency) = to_disposals(gains, long_term_days);
     // A cross-currency disposal (sale price in a different currency than the lot's
     // cost basis) has no gain without an FX rate, so it is dropped from the rows.
     // Surface the count on stderr rather than silently omitting it.
     if cross_currency > 0 {
-        let _ = writeln!(
-            warnings,
-            "warning: {cross_currency} cross-currency disposal(s) omitted (sale price \
+        warnings.emit(super::Diagnostic::message(format!(
+            "{cross_currency} cross-currency disposal(s) omitted (sale price \
              in a different currency than the cost basis; no FX conversion applied)"
-        );
+        )));
     }
     let mut rows: Vec<Disposal> = disposals
         .into_iter()
@@ -977,7 +976,7 @@ mod tests {
                 &ctx,
                 f,
                 &mut buf,
-                &mut Vec::new(),
+                &mut crate::cmd::report_cmd::CollectedDiagnostics::default(),
             )
             .unwrap();
             String::from_utf8(buf).unwrap()
@@ -1299,7 +1298,7 @@ mod tests {
             &ctx,
             &OutputFormat::Csv,
             &mut buf,
-            &mut Vec::new(),
+            &mut crate::cmd::report_cmd::CollectedDiagnostics::default(),
         )
         .unwrap();
         String::from_utf8(buf).unwrap()
@@ -1379,7 +1378,7 @@ mod tests {
             &ctx,
             &OutputFormat::Text,
             &mut buf,
-            &mut Vec::new(),
+            &mut crate::cmd::report_cmd::CollectedDiagnostics::default(),
         )
         .unwrap();
         let out = String::from_utf8(buf).unwrap();
@@ -1444,7 +1443,7 @@ mod tests {
             &ctx,
             &OutputFormat::Text,
             &mut buf,
-            &mut Vec::new(),
+            &mut crate::cmd::report_cmd::CollectedDiagnostics::default(),
         )
         .unwrap();
         let out = String::from_utf8(buf).unwrap();

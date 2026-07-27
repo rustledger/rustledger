@@ -19,6 +19,7 @@
 use agcli::{
     ActionParam, AgentCli, Command, CommandError, CommandOutput, ExecutionContext, NextAction,
 };
+use rustledger::cmd::report_cmd::CollectedDiagnostics;
 use rustledger::config::Config;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -970,18 +971,40 @@ where
 /// to a stream this envelope discards.
 fn run_buffered_with_warnings<F>(command: &str, run: F) -> Result<CommandOutput, CommandError>
 where
-    F: FnOnce(&mut Vec<u8>, &mut Vec<u8>) -> anyhow::Result<i32>,
+    F: FnOnce(&mut Vec<u8>, &mut CollectedDiagnostics) -> anyhow::Result<i32>,
 {
     let mut stdout = Vec::new();
-    let mut warnings = Vec::new();
-    let exit_code = run(&mut stdout, &mut warnings).map_err(|e| command_failed(&e))?;
+    let mut diagnostics = CollectedDiagnostics::default();
+    let exit_code = run(&mut stdout, &mut diagnostics).map_err(|e| command_failed(&e))?;
     let stdout = String::from_utf8_lossy(&stdout).into_owned();
-    let warnings = String::from_utf8_lossy(&warnings).into_owned();
     let mut result = command_result(command, &stdout, exit_code);
-    if !warnings.trim().is_empty()
+    if !diagnostics.0.is_empty()
         && let Value::Object(map) = &mut result
     {
-        map.insert("warnings".to_string(), json!(split_diagnostics(&warnings)));
+        // One OBJECT per diagnostic, carrying the fields the report already
+        // knew. Reports used to hand over formatted lines, so this had to
+        // rebuild records by splitting on newlines — which a message carrying
+        // its own newline broke in half, and which discarded the date and the
+        // account outright.
+        let items: Vec<Value> = diagnostics
+            .0
+            .iter()
+            .map(|d| {
+                let mut o = serde_json::Map::new();
+                if let Some(code) = &d.code {
+                    o.insert("code".to_string(), json!(code));
+                }
+                if let Some(date) = d.date {
+                    o.insert("date".to_string(), json!(date.to_string()));
+                }
+                if let Some(account) = &d.account {
+                    o.insert("account".to_string(), json!(account));
+                }
+                o.insert("message".to_string(), json!(d.message));
+                Value::Object(o)
+            })
+            .collect();
+        map.insert("warnings".to_string(), json!(items));
     }
     Ok(CommandOutput::new(result)
         .exit_code(exit_code)
@@ -989,36 +1012,6 @@ where
             format!("ag-rledger {command} --help"),
             "Inspect command usage",
         )))
-}
-
-/// One array entry per DIAGNOSTIC, not per line.
-///
-/// A diagnostic may span lines — the "no budgets declared" note carries an
-/// example `custom` directive on a second one — so splitting the sink buffer on
-/// newlines turned a single message into two entries, the second looking like a
-/// separate warning with no context. A continuation is any line that does not
-/// begin a new diagnostic.
-fn split_diagnostics(buffer: &str) -> Vec<String> {
-    let starts_one = |line: &str| {
-        line.starts_with("warning:")
-            || line.starts_with("note:")
-            // Loader diagnostics lead with their code, e.g. `LOAD: …`, `E1001: …`.
-            || line.split_once(':').is_some_and(|(code, _)| {
-                !code.is_empty()
-                    && code.starts_with(|c: char| c.is_ascii_uppercase())
-                    && code.chars().all(|c| c.is_ascii_alphanumeric())
-            })
-    };
-    let mut out: Vec<String> = Vec::new();
-    for line in buffer.lines() {
-        if out.is_empty() || starts_one(line) {
-            out.push(line.to_string());
-        } else if let Some(last) = out.last_mut() {
-            last.push('\n');
-            last.push_str(line);
-        }
-    }
-    out
 }
 
 fn command_result(command: &str, stdout: &str, exit_code: i32) -> Value {

@@ -9,7 +9,7 @@
 use lsp_types::{DocumentLink, DocumentLinkParams, Range, Uri};
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::utils::{LineIndex, PositionEncoding};
 
@@ -23,8 +23,12 @@ pub fn handle_document_links(
     let mut links = Vec::new();
     let base_uri = &params.text_document.uri;
 
-    // Get the base directory from the document URI
-    let base_dir = get_base_directory(base_uri);
+    // The document's own URI is what the resolve phase gets. NOT a path
+    // string: `data` is JSON, a JSON string must be valid UTF-8, and a Unix
+    // path is arbitrary bytes — so any path put here is `to_string_lossy`'d and
+    // a directory whose name is not valid UTF-8 arrives as U+FFFD, naming
+    // something that does not exist (#1877). A URI is ASCII by construction and
+    // `proto::uri_to_path` inverts it exactly, so the bytes survive the trip.
     let line_index = LineIndex::new(source, encoding);
 
     for spanned in &parse_result.directives {
@@ -32,7 +36,7 @@ pub fn handle_document_links(
             // Create link for document path
             let path_str = doc.path.to_string();
             if let Some(link) =
-                create_document_link(&line_index, spanned.span.start, &path_str, &base_dir)
+                create_document_link(&line_index, spanned.span.start, &path_str, base_uri)
             {
                 links.push(link);
             }
@@ -44,7 +48,7 @@ pub fn handle_document_links(
     for (line_num, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.starts_with("include")
-            && let Some(link) = parse_include_line(line, line_num as u32, &line_index, &base_dir)
+            && let Some(link) = parse_include_line(line, line_num as u32, &line_index, base_uri)
         {
             links.push(link);
         }
@@ -60,14 +64,20 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
 
     if let Some(data) = &link.data {
         let path = data.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        let base_dir = data
-            .get("base_dir")
+        // The ledger's own URI -> its directory, losslessly. `uri_to_path`
+        // percent-decodes to real bytes, so a non-UTF-8 directory name survives
+        // (#1877); the old payload carried a `to_string_lossy` path string and
+        // turned those bytes into U+FFFD.
+        let base_dir: Option<PathBuf> = data
+            .get("base_uri")
             .and_then(|v| v.as_str())
-            .map(String::from);
+            .and_then(|s| s.parse::<Uri>().ok())
+            .and_then(|u| crate::uri_to_path(&u).ok())
+            .and_then(|p| p.parent().map(Path::to_path_buf));
         let kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("file");
 
         // Resolve the path
-        let resolved_path = resolve_full_path(path, &base_dir);
+        let resolved_path = resolve_full_path(path, base_dir.as_deref());
 
         // A glob `include` (e.g. `transactions/*.bean`) is valid — the loader
         // expands it on load — so a literal path-exists check wrongly reports
@@ -83,13 +93,21 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
         // allocation. `pattern_ok` distinguishes a syntactically invalid pattern
         // (the loader reports a distinct error) from one that matches nothing.
         let (glob_first, glob_count, pattern_ok) = if is_glob {
-            match resolved_path.as_ref().map(|p| glob::glob(p)) {
+            // `glob` takes a `&str` pattern, so a PATTERN under a non-UTF-8
+            // directory is still lossy — a limitation of that crate, not of the
+            // payload. The matches it returns are `PathBuf` and are kept as
+            // such, and the far commoner literal-path branch below is fully
+            // lossless now, which is what #1877 was about.
+            match resolved_path
+                .as_ref()
+                .map(|p| glob::glob(&p.to_string_lossy()))
+            {
                 Some(Ok(paths)) => {
-                    let mut first = None;
+                    let mut first: Option<PathBuf> = None;
                     let mut count = 0usize;
                     for entry in paths.flatten() {
                         if first.is_none() {
-                            first = Some(entry.to_string_lossy().into_owned());
+                            first = Some(entry);
                         }
                         count += 1;
                     }
@@ -136,14 +154,17 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
             // When the file does NOT exist there is nothing to resolve and the
             // un-normalized path is the honest answer; the tooltip says
             // "File not found" in that case anyway.
-            let resolved_target = std::fs::canonicalize(full_path)
-                .unwrap_or_else(|_| std::path::PathBuf::from(full_path));
+            let resolved_target =
+                std::fs::canonicalize(full_path).unwrap_or_else(|_| full_path.clone());
             match crate::path_to_uri(&resolved_target) {
                 Ok(uri) => resolved.target = Some(uri),
                 // Every sibling site warns; this one silently produced a link
                 // with no target, which an editor renders as unclickable text
                 // with no way to find out why.
-                Err(e) => tracing::warn!("document link: no file URI for {full_path}: {e}"),
+                Err(e) => tracing::warn!(
+                    "document link: no file URI for {}: {e}",
+                    full_path.display()
+                ),
             }
         }
 
@@ -189,42 +210,12 @@ pub fn handle_document_link_resolve(link: DocumentLink) -> DocumentLink {
 /// Showing what the loader will actually do is the point of the feature, so a
 /// dead link for a genuinely dead include is the correct answer. Fixing it
 /// belongs in the loader, for both tools at once, or nowhere.
-fn resolve_full_path(path: &str, base_dir: &Option<String>) -> Option<String> {
+fn resolve_full_path(path: &str, base_dir: Option<&Path>) -> Option<PathBuf> {
     if Path::new(path).is_absolute() {
-        Some(path.to_string())
-    } else if let Some(base) = base_dir {
-        let base_path = Path::new(base);
-        Some(base_path.join(path).to_string_lossy().to_string())
+        Some(PathBuf::from(path))
     } else {
-        None
+        base_dir.map(|base| base.join(path))
     }
-}
-
-/// Get the base directory from a file URI.
-///
-/// Through [`crate::uri_to_path`], the crate's one URI-to-path converter. This
-/// used to strip `file://` by hand and treat the remainder as a path, which
-/// skipped both things that converter does:
-///
-/// - **Percent-decoding.** A ledger in `Invoices 2026/` arrives as
-///   `Invoices%202026`, so every relative `document` path joined onto it failed
-///   `exists()` and rendered as "⚠ File not found" for a file that was there.
-/// - **The Windows leading slash.** `file:///C:/x` left `/C:/x`, and the drive
-///   colon arrives encoded as `%3A` besides, so on Windows NO relative document
-///   path ever resolved (issue #1866).
-///
-/// Absolute paths never reach this function, which is why they kept working and
-/// made the bug look Windows-specific when it is not.
-fn get_base_directory(uri: &Uri) -> Option<String> {
-    let path = crate::uri_to_path(uri)
-        .map_err(|e| {
-            tracing::debug!(
-                "document links: no base directory for {}: {e}",
-                uri.as_str()
-            )
-        })
-        .ok()?;
-    path.parent().map(|p| p.to_string_lossy().to_string())
 }
 
 /// Create a document link for a path found in source.
@@ -233,7 +224,7 @@ fn create_document_link(
     line_index: &LineIndex<'_>,
     directive_start: usize,
     path: &str,
-    base_dir: &Option<String>,
+    base_uri: &Uri,
 ) -> Option<DocumentLink> {
     let (start_line, _) = line_index.offset_to_position(directive_start);
 
@@ -261,7 +252,7 @@ fn create_document_link(
     // Store data for resolve - defer target resolution
     let data = serde_json::json!({
         "path": path,
-        "base_dir": base_dir,
+        "base_uri": base_uri.as_str(),
         "kind": "document",
     });
 
@@ -279,7 +270,7 @@ fn parse_include_line(
     line: &str,
     line_num: u32,
     line_index: &LineIndex<'_>,
-    base_dir: &Option<String>,
+    base_uri: &Uri,
 ) -> Option<DocumentLink> {
     // Match patterns like: include "path/to/file.beancount"
     let trimmed = line.trim();
@@ -302,7 +293,7 @@ fn parse_include_line(
     // Store data for resolve - defer target resolution
     let data = serde_json::json!({
         "path": path,
-        "base_dir": base_dir,
+        "base_uri": base_uri.as_str(),
         "kind": "include",
     });
 
@@ -316,11 +307,28 @@ fn parse_include_line(
 
 /// Resolve a relative path to a file URI (used in tests).
 #[cfg(test)]
-fn resolve_path_to_uri(path: &str, base_dir: &Option<String>) -> Option<Uri> {
+fn resolve_path_to_uri(path: &str, base_dir: Option<&Path>) -> Option<Uri> {
     let resolved = resolve_full_path(path, base_dir)?;
     crate::path_to_uri(Path::new(&resolved))
-        .map_err(|e| tracing::warn!("document link: no file URI for {resolved}: {e}"))
+        .map_err(|e| {
+            tracing::warn!("document link: no file URI for {}: {e}", resolved.display());
+        })
         .ok()
+}
+
+#[cfg(test)]
+/// A `base_uri` payload value for a DIRECTORY, as `handle_document_links`
+/// builds it from the open document's URI.
+///
+/// The resolve phase takes the URI's PARENT, so a test fixture has to name a
+/// file inside the directory it means — passing the directory itself would
+/// resolve one level too high. `handle_document_links` passes the ledger's own
+/// URI, hence the placeholder filename.
+fn dir_uri(dir: &std::path::Path) -> String {
+    crate::path_to_uri(&dir.join("main.beancount"))
+        .expect("test dir is absolute")
+        .as_str()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -331,10 +339,10 @@ mod tests {
     #[test]
     fn test_parse_include_line() {
         let line = r#"include "accounts.beancount""#;
-        let base_dir = Some("/home/user/ledger".to_string());
+        let base_uri = crate::path_to_uri(&crate::test_abs("home/user/ledger")).expect("uri");
         let line_index = LineIndex::new(line, PositionEncoding::Utf16);
 
-        let link = parse_include_line(line, 0, &line_index, &base_dir);
+        let link = parse_include_line(line, 0, &line_index, &base_uri);
         assert!(link.is_some());
 
         let link = link.unwrap();
@@ -380,13 +388,9 @@ mod tests {
 
     #[test]
     fn test_resolve_path_to_uri() {
-        let base_dir = Some(
-            crate::test_abs("home/user/ledger")
-                .to_string_lossy()
-                .into_owned(),
-        );
+        let base = crate::test_abs("home/user/ledger");
 
-        let uri = resolve_path_to_uri("accounts.beancount", &base_dir);
+        let uri = resolve_path_to_uri("accounts.beancount", Some(base.as_path()));
         assert!(uri.is_some());
         assert!(uri.unwrap().as_str().contains("accounts.beancount"));
     }
@@ -403,7 +407,7 @@ mod tests {
             tooltip: None,
             data: Some(serde_json::json!({
                 "path": "accounts.beancount",
-                "base_dir": crate::test_abs("home/user/ledger").to_string_lossy(),
+                "base_uri": dir_uri(&crate::test_abs("home/user/ledger")),
                 "kind": "include",
             })),
         };
@@ -439,7 +443,7 @@ mod tests {
             tooltip: None,
             data: Some(serde_json::json!({
                 "path": "*.bean",
-                "base_dir": dir.path().to_string_lossy(),
+                "base_uri": dir_uri(dir.path()),
                 "kind": "include",
             })),
         };
@@ -470,7 +474,7 @@ mod tests {
             tooltip: None,
             data: Some(serde_json::json!({
                 "path": "*.bean",
-                "base_dir": dir.path().to_string_lossy(),
+                "base_uri": dir_uri(dir.path()),
                 "kind": "include",
             })),
         };
@@ -497,7 +501,7 @@ mod tests {
             tooltip: None,
             data: Some(serde_json::json!({
                 "path": fname,
-                "base_dir": dir.path().to_string_lossy(),
+                "base_uri": dir_uri(dir.path()),
                 "kind": "document",
             })),
         };
@@ -561,7 +565,7 @@ mod tests {
             tooltip: None,
             data: Some(serde_json::json!({
                 "path": "foo[.bean",
-                "base_dir": dir.path().to_string_lossy(),
+                "base_uri": dir_uri(dir.path()),
                 "kind": "include",
             })),
         };
@@ -576,26 +580,22 @@ mod tests {
     #[test]
     fn test_resolve_full_path() {
         let base = crate::test_abs("home/user/ledger");
-        let base_dir = Some(base.to_string_lossy().into_owned());
 
         // Relative path: joined onto the base, with the platform's separator —
         // `Path::join`, exactly as the loader does it.
-        let resolved = resolve_full_path("accounts.beancount", &base_dir);
-        assert!(resolved.is_some());
+        let resolved = resolve_full_path("accounts.beancount", Some(base.as_path()));
         assert_eq!(
-            resolved.unwrap(),
-            base.join("accounts.beancount").to_string_lossy()
+            resolved.as_deref(),
+            Some(base.join("accounts.beancount").as_path())
         );
 
         // Absolute path: passed through untouched, base ignored.
         let absolute = crate::test_abs("absolute/path.beancount");
-        let resolved = resolve_full_path(&absolute.to_string_lossy(), &base_dir);
-        assert!(resolved.is_some());
-        assert_eq!(resolved.unwrap(), absolute.to_string_lossy());
+        let resolved = resolve_full_path(&absolute.to_string_lossy(), Some(base.as_path()));
+        assert_eq!(resolved.as_deref(), Some(absolute.as_path()));
 
         // No base dir
-        let resolved = resolve_full_path("relative.beancount", &None);
-        assert!(resolved.is_none());
+        assert_eq!(resolve_full_path("relative.beancount", None), None);
     }
 }
 
@@ -603,6 +603,75 @@ mod tests {
 mod uri_resolution_tests {
     use super::*;
     use std::str::FromStr;
+
+    /// A relative document resolves under a directory whose name is NOT valid
+    /// UTF-8 (#1877).
+    ///
+    /// A Unix path is arbitrary bytes. The link payload is JSON, and a JSON
+    /// string must be valid UTF-8, so the old `base_dir` path string went
+    /// through `to_string_lossy` and every non-UTF-8 byte became U+FFFD — the
+    /// payload named a directory that does not exist, and every relative
+    /// `include`/`document` under it rendered "⚠ File not found" for a file
+    /// that was right there.
+    ///
+    /// Carrying the ledger's URI instead is lossless: percent-encoding is
+    /// ASCII, and `uri_to_path` decodes back to the original bytes.
+    ///
+    /// `cfg(unix)` for `OsStrExt`: Windows filenames are UTF-16 and cannot
+    /// hold this byte sequence, so the case does not exist there.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_document_resolves_under_a_non_utf8_directory() {
+        use std::os::unix::ffi::OsStrExt;
+
+        // 0xFF is not valid UTF-8 in any position.
+        let root = std::env::temp_dir().join(format!("rl-1877-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join(std::ffi::OsStr::from_bytes(b"led\xffger"));
+        std::fs::create_dir_all(&dir).expect("create non-UTF-8 dir");
+        std::fs::write(dir.join("invoice.pdf"), b"pdf").expect("write doc");
+
+        assert!(
+            std::str::from_utf8(dir.as_os_str().as_bytes()).is_err(),
+            "the fixture must actually be non-UTF-8, or this proves nothing"
+        );
+
+        let link = DocumentLink {
+            range: lsp_types::Range {
+                start: lsp_types::Position::new(0, 9),
+                end: lsp_types::Position::new(0, 30),
+            },
+            target: None,
+            tooltip: None,
+            data: Some(serde_json::json!({
+                "path": "invoice.pdf",
+                "base_uri": dir_uri(&dir),
+                "kind": "document",
+            })),
+        };
+        let resolved = handle_document_link_resolve(link);
+
+        let tooltip = resolved.tooltip.clone().unwrap_or_default();
+        assert!(
+            tooltip.starts_with("Open document"),
+            "the file exists, so the tooltip must say so — got {tooltip:?}"
+        );
+        let target = resolved
+            .target
+            .expect("an existing document must be clickable");
+        let target_path = crate::uri_to_path(&target).expect("target inverts");
+        assert_eq!(
+            target_path
+                .canonical_for_loader_lookup()
+                .expect("target exists"),
+            dir.join("invoice.pdf")
+                .canonicalize()
+                .expect("fixture exists"),
+            "the target must name the real file, not a U+FFFD-mangled path"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// A `..` that crosses a symlink resolves to the file the OS finds.
     ///
@@ -634,7 +703,7 @@ mod uri_resolution_tests {
             tooltip: None,
             data: Some(serde_json::json!({
                 "path": "../attachments/jan.pdf",
-                "base_dir": view.to_string_lossy(),
+                "base_uri": dir_uri(&view),
                 "kind": "document",
             })),
         };

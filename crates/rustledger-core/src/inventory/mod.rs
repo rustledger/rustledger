@@ -809,6 +809,12 @@ impl Inventory {
     #[must_use]
     pub fn at_cost(&self) -> Self {
         let mut result = Self::new();
+        // Carry the source's poison. Without this the derived inventory reports
+        // clean while holding figures computed from ALREADY-clamped units — the
+        // silently-wrong case the flag exists to prevent, and worse than the
+        // panic it replaced. Found by probing the propagation claim rather than
+        // trusting it.
+        result.overflowed = self.overflowed;
 
         for pos in &self.positions {
             if pos.is_empty() {

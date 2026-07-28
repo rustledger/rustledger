@@ -103,6 +103,35 @@ fn book_value_multiplication_saturates() {
     assert_eq!(totals.len(), 1, "one cost currency");
 }
 
+/// The poison flag survives every operation that derives one inventory from
+/// another, and the round trips a consumer may put it through.
+///
+/// This is the load-bearing claim of the whole design: the clamped figure is
+/// only safe to expose because it travels with a marker. `at_cost` did NOT
+/// carry it at first — a source poisoned during `add` produced a derived
+/// inventory reporting clean, holding figures computed from clamped units.
+/// That is worse than the panic it replaced, because nothing looks wrong.
+#[test]
+fn the_overflow_flag_propagates() {
+    let mut inv = Inventory::new();
+    inv.add(Position::simple(Amount::new(Decimal::MAX, "USD")));
+    inv.add(Position::simple(Amount::new(Decimal::MAX, "USD")));
+    assert!(inv.overflowed(), "precondition");
+
+    assert!(inv.clone().overflowed(), "clone must carry it");
+    assert!(
+        inv.at_cost().overflowed(),
+        "at_cost derives from clamped units and must stay marked"
+    );
+
+    let json = serde_json::to_string(&inv).expect("serialize");
+    let back: Inventory = serde_json::from_str(&json).expect("deserialize");
+    assert!(
+        back.overflowed(),
+        "the flag must survive the wire format the FFI and wasm surfaces use"
+    );
+}
+
 /// Ordinary amounts are untouched — the checked arithmetic must not perturb
 /// any value that fits, which is every real ledger.
 #[test]

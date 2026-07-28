@@ -335,6 +335,13 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     pre-/post-hash NUMBER tokens like red (#1713); inputs with garbage
 ///     around `{a # b}` parse to different `CostNumber` values than v13
 ///     cached them as.
+/// v15: EOF now terminates a line in the parser's error-recovery walkers, so a
+///     malformed FINAL line without a trailing newline emits its diagnostic
+///     (#1884). Previously such a file parsed to zero errors and `rledger
+///     check` exited 0 on it. The cached `errors` differ, and a cache written
+///     by a pre-fix binary would serve the silent-pass result to a fixed one —
+///     resurrecting exactly the bug for every ledger already in the cache,
+///     which is the worst case since the symptom is "no error reported".
 /// v9: `CachedOptions` gained a `set_options: Vec<String>` field
 ///     (#1340). It was previously dropped, so a cache hit lost the
 ///     record of which options the file explicitly set — making
@@ -353,7 +360,7 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     silently ignored `option "display_precision" "USD:0.0001"` (formatting
 ///     fell back to inferred precision) and the other two settings. New fields
 ///     change the archived layout, so old bytes must be regenerated.
-const CACHE_VERSION: u32 = 14;
+const CACHE_VERSION: u32 = 15;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1056,7 +1063,11 @@ mod tests {
         // existing discriminants and payload encodings are unchanged (the
         // arrays below still pin them), and a fixture for the new variant
         // joins them.
-        const FIXTURE_VERSION: u32 = 14;
+        // v15 (#1884) changes WHICH parse errors are emitted, not how anything
+        // is archived, so the byte arrays below still pin the same encoding —
+        // only the fixture version moves. The assertions after this one prove
+        // that rather than assume it.
+        const FIXTURE_VERSION: u32 = 15;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1143,7 +1154,9 @@ mod tests {
         // v13 (#1700) added a CostNumber variant; MetaValue's archived
         // layout is untouched, so per the tripwire contract only the
         // fixture version moves.
-        const FIXTURE_VERSION: u32 = 14;
+        // v15 (#1884) is a parser-diagnostics change with no layout impact —
+        // same reasoning, and the hash assertion below is what verifies it.
+        const FIXTURE_VERSION: u32 = 15;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

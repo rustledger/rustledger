@@ -735,6 +735,17 @@ fn tl_custom_check(
     }
 }
 
+/// The `unexpected input` diagnostic for one catch-all transaction-body line.
+///
+/// Shared by the newline-terminated and EOF-terminated paths in
+/// [`tl_transaction_body_check`] so the two cannot drift.
+fn unexpected_body_input(line_start: usize, end: usize, bom_offset: u32) -> crate::ParseError {
+    crate::ParseError::new(
+        crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
+        Span::new(line_start + bom_offset as usize, end + bom_offset as usize),
+    )
+}
+
 /// `transaction_body_check` on green: a body line with catch-all tokens (outside
 /// `POSTING` / `META_ENTRY` nodes) is "unexpected input".
 fn tl_transaction_body_check(
@@ -761,12 +772,7 @@ fn tl_transaction_body_check(
                     }
                     if kind == K::NEWLINE {
                         if line_has_content && let Some(ls) = line_start {
-                            let span =
-                                Span::new(ls + bom_offset as usize, end + bom_offset as usize);
-                            out.push(crate::ParseError::new(
-                                crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
-                                span,
-                            ));
+                            out.push(unexpected_body_input(ls, end, bom_offset));
                         }
                         line_start = None;
                         line_has_content = false;
@@ -793,11 +799,60 @@ fn tl_transaction_body_check(
         }
         offset += len;
     }
+    // EOF terminates the final body line just as a newline would. Without this,
+    // a transaction whose last body line is junk AND whose file has no trailing
+    // newline reported one fewer error than the same file with one (#1884).
+    if past_header
+        && line_has_content
+        && let Some(ls) = line_start
+    {
+        out.push(unexpected_body_input(ls, offset, bom_offset));
+    }
+}
+
+/// Emit the recovery diagnostics for one `ERROR_NODE` line.
+///
+/// Split out of [`tl_error_node_check`] so the newline-terminated and the
+/// EOF-terminated line go through the SAME code. Inlining it at both call
+/// sites is how the two would drift.
+fn emit_error_node_line(
+    first_non_trivia: Option<crate::SyntaxKind>,
+    line_start: Option<usize>,
+    end: usize,
+    bom_offset: u32,
+    stripped: &str,
+    out: &mut Vec<crate::ParseError>,
+) {
+    use crate::SyntaxKind as K;
+    let is_section = first_non_trivia == Some(K::STAR);
+    let is_comment = matches!(first_non_trivia, Some(k) if is_comment_kind(k));
+    if is_section || is_comment || first_non_trivia.is_none() {
+        return;
+    }
+    let Some(ls) = line_start else { return };
+    let span = Span::new(ls + bom_offset as usize, end + bom_offset as usize);
+    let line_text = stripped.get(ls..end).unwrap_or("");
+    let primary = classify_recovery_error(line_text, span);
+    let primary_is_bom = matches!(primary.kind, crate::ParseErrorKind::BomInDirectiveBody);
+    out.push(primary);
+    if !primary_is_bom && line_text.contains(crate::bom::BOM_CHAR) {
+        out.push(
+            crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
+                .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
+        );
+    }
 }
 
 /// `error_node_check` on green: each `ERROR_NODE` line that is neither a section
 /// marker nor a column-0 comment emits a classified recovery error (+ a
 /// secondary BOM diagnostic when the line also contains a BOM byte).
+///
+/// A line is terminated by a NEWLINE **or by the end of input** — the trailing
+/// newline is optional, and beancount treats EOF as a terminator (its lexer
+/// does, so `bean-check` reports the same error with or without it). Without
+/// the EOF flush below, a malformed LAST line produced no diagnostic at all and
+/// `rledger check` exited 0 on a ledger it had not understood (#1884): two
+/// files differing by one `0a` byte gave opposite verdicts.
 fn tl_error_node_check(
     node: &rowan::GreenNodeData,
     base: usize,
@@ -818,26 +873,7 @@ fn tl_error_node_check(
                 line_start = Some(start);
             }
             if kind == K::NEWLINE {
-                let is_section = first_non_trivia == Some(K::STAR);
-                let is_comment = matches!(first_non_trivia, Some(k) if is_comment_kind(k));
-                if !is_section
-                    && !is_comment
-                    && first_non_trivia.is_some()
-                    && let Some(ls) = line_start
-                {
-                    let span = Span::new(ls + bom_offset as usize, end + bom_offset as usize);
-                    let line_text = stripped.get(ls..end).unwrap_or("");
-                    let primary = classify_recovery_error(line_text, span);
-                    let primary_is_bom =
-                        matches!(primary.kind, crate::ParseErrorKind::BomInDirectiveBody);
-                    out.push(primary);
-                    if !primary_is_bom && line_text.contains(crate::bom::BOM_CHAR) {
-                        out.push(
-                            crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
-                                .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
-                        );
-                    }
-                }
+                emit_error_node_line(first_non_trivia, line_start, end, bom_offset, stripped, out);
                 line_start = None;
                 first_non_trivia = None;
             } else if first_non_trivia.is_none() && !is_trivia_kind(kind) {
@@ -846,10 +882,24 @@ fn tl_error_node_check(
         }
         offset += len;
     }
+    // EOF terminates the final line just as a newline would.
+    emit_error_node_line(
+        first_non_trivia,
+        line_start,
+        offset,
+        bom_offset,
+        stripped,
+        out,
+    );
 }
 
 /// `section_marker_check` on green: emit an empty-string comment for each
 /// `*`-starting (org-mode section) line inside an `ERROR_NODE`.
+///
+/// EOF terminates the final line, same as [`tl_error_node_check`] — a file
+/// ending `* Section` with no trailing newline used to yield no comment at all.
+/// Cosmetic next to the error case, but the same defect, and leaving one of the
+/// three line-walkers newline-only is how the rule gets forgotten.
 fn tl_section_marker_check(
     node: &rowan::GreenNodeData,
     base: usize,
@@ -860,6 +910,19 @@ fn tl_section_marker_check(
     let mut line_start: Option<usize> = None;
     let mut first_non_trivia: Option<crate::SyntaxKind> = None;
     let mut offset = base;
+    let emit = |first_non_trivia: Option<crate::SyntaxKind>,
+                line_start: Option<usize>,
+                end: usize,
+                out: &mut Vec<Spanned<String>>| {
+        if first_non_trivia == Some(K::STAR)
+            && let Some(ls) = line_start
+        {
+            out.push(Spanned::new(
+                String::new(),
+                Span::new(ls + bom_offset as usize, end + bom_offset as usize),
+            ));
+        }
+    };
     for child in node.children() {
         let len = child_len(child);
         if let NodeOrToken::Token(t) = &child {
@@ -869,14 +932,7 @@ fn tl_section_marker_check(
                 line_start = Some(start);
             }
             if kind == K::NEWLINE {
-                if first_non_trivia == Some(K::STAR)
-                    && let Some(ls) = line_start
-                {
-                    out.push(Spanned::new(
-                        String::new(),
-                        Span::new(ls + bom_offset as usize, end + bom_offset as usize),
-                    ));
-                }
+                emit(first_non_trivia, line_start, end, out);
                 line_start = None;
                 first_non_trivia = None;
             } else if first_non_trivia.is_none() && !is_trivia_kind(kind) {
@@ -885,6 +941,7 @@ fn tl_section_marker_check(
         }
         offset += len;
     }
+    emit(first_non_trivia, line_start, offset, out);
 }
 
 #[cfg(test)]

@@ -293,6 +293,12 @@ describe('Tool Handlers', () => {
     // test, which is the point — the marker cannot outlive the defect, and
     // whoever fixes the binding is told to delete the `.fails` rather than
     // discovering a stale skip years later.
+    //
+    // #1884 is FIXED in the parser (EOF now terminates a line), but this
+    // package depends on the PUBLISHED `@rustledger/wasm`, so the marker
+    // clears on the next release rather than at that merge. When a release
+    // lands and this turns red, delete the `.fails` — that is the signal, not
+    // a regression.
     it.fails('should report validation errors', () => {
       const result = handleToolCall('validate', { source: '2024-01-01 invalid directive' });
       expect(result.content[0].text).toContain('error');
@@ -409,6 +415,12 @@ describe('Tool Handlers', () => {
     // test, which is the point — the marker cannot outlive the defect, and
     // whoever fixes the binding is told to delete the `.fails` rather than
     // discovering a stale skip years later.
+    //
+    // #1884 is FIXED in the parser (EOF now terminates a line), but this
+    // package depends on the PUBLISHED `@rustledger/wasm`, so the marker
+    // clears on the next release rather than at that merge. When a release
+    // lands and this turns red, delete the `.fails` — that is the signal, not
+    // a regression.
     it.fails('returns an error response when parsing fails', () => {
       // Pre-fix this would have silently produced a categorization
       // prompt with an empty accounts list; now it surfaces the parser
@@ -457,6 +469,12 @@ describe('Tool Handlers', () => {
     // test, which is the point — the marker cannot outlive the defect, and
     // whoever fixes the binding is told to delete the `.fails` rather than
     // discovering a stale skip years later.
+    //
+    // #1884 is FIXED in the parser (EOF now terminates a line), but this
+    // package depends on the PUBLISHED `@rustledger/wasm`, so the marker
+    // clears on the next release rather than at that merge. When a release
+    // lands and this turns red, delete the `.fails` — that is the signal, not
+    // a regression.
     it.fails('returns an error response when parsing fails', () => {
       const result = handleToolCall('import_review', {
         source: '@@@ not beancount @@@',

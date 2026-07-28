@@ -2168,6 +2168,18 @@ fn transaction_body_check(
                 }
             }
         }
+        // EOF terminates the final body line, same as a NEWLINE. Mirrors
+        // `green::tl_transaction_body_check` (#1884).
+        if past_header
+            && line_has_content
+            && let Some(ls) = line_start
+        {
+            let end: u32 = child.text_range().end().into();
+            out.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
+                Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize),
+            ));
+        }
     }
 }
 
@@ -2240,6 +2252,30 @@ fn error_node_check(
             }
             if first_non_trivia.is_none() && !is_trivia_kind(t.kind()) {
                 first_non_trivia = Some(t.kind());
+            }
+        }
+        // EOF terminates the final line exactly as a NEWLINE would. Mirrors
+        // `green::tl_error_node_check`; without it the two paths disagree on
+        // any input lacking a trailing newline, and a malformed last line
+        // produced no diagnostic at all (#1884).
+        let is_section = matches!(first_non_trivia, Some(crate::SyntaxKind::STAR));
+        let is_comment = matches!(first_non_trivia, Some(k) if is_comment_kind(k));
+        if !is_section
+            && !is_comment
+            && first_non_trivia.is_some()
+            && let Some(ls) = line_start
+        {
+            let end: u32 = child.text_range().end().into();
+            let span = Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
+            let line_text = stripped.get(ls as usize..end as usize).unwrap_or("");
+            let primary = classify_recovery_error(line_text, span);
+            let primary_is_bom = matches!(primary.kind, crate::ParseErrorKind::BomInDirectiveBody);
+            out.push(primary);
+            if !primary_is_bom && line_text.contains(crate::bom::BOM_CHAR) {
+                out.push(
+                    crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
+                        .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
+                );
             }
         }
     }
@@ -2481,6 +2517,14 @@ fn section_marker_check(
         if first_non_trivia.is_none() && !is_trivia_kind(t.kind()) {
             first_non_trivia = Some(t.kind());
         }
+    }
+    // EOF terminates the final line. Mirrors `green::tl_section_marker_check`.
+    if first_non_trivia == Some(crate::SyntaxKind::STAR)
+        && let Some(ls) = line_start
+    {
+        let end: u32 = child.text_range().end().into();
+        let span = Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
+        out.push(Spanned::new(String::new(), span));
     }
 }
 

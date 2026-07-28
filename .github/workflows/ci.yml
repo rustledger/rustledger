@@ -250,6 +250,68 @@ jobs:
       - name: Test rustledger-lsp on Windows
         run: cargo test -p rustledger-lsp
 
+  # Build + test the MCP server. Nothing did, until now.
+  #
+  # `packages/mcp-server` is published to npm as `@rustledger/mcp-server` and
+  # was covered by no PR job at all — only the release workflows touched it. An
+  # SDK MAJOR migration (#1879, monolithic `@modelcontextprotocol/sdk` v1 to the
+  # scoped v2 packages) went through with zero automated verification; it was
+  # checked by hand, which does not scale and does not repeat.
+  #
+  # No `should_build` gate: that filter is for Rust sources, and this package
+  # is TypeScript. Path-filtering on `packages/mcp-server/**` was tempting but
+  # would miss the case that actually bites — the server calls into
+  # `@rustledger/wasm`, so a Rust change can break it without touching a single
+  # file here.
+  mcp-server:
+    name: MCP Server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: packages/mcp-server/package-lock.json
+      - name: Install
+        working-directory: packages/mcp-server
+        run: npm ci
+      - name: Typecheck and build
+        working-directory: packages/mcp-server
+        run: npm run build
+      - name: Test
+        working-directory: packages/mcp-server
+        run: npm test
+      - name: Smoke the stdio server
+        working-directory: packages/mcp-server
+        run: |
+          # A green build does not mean the server speaks the protocol. This
+          # drives the real binary over stdio in BOTH negotiation directions,
+          # which is what the SDK v2 migration had to be checked by hand for.
+          set -euo pipefail
+          probe() {
+            local label="$1"; shift
+            local out
+            out=$(printf '%s\n' "$@" | timeout 60 node dist/index.js 2>/dev/null || true)
+            node -e '
+              const lines = require("fs").readFileSync(0, "utf8").trim().split("\n").filter(Boolean);
+              const msgs = lines.map(l => JSON.parse(l));
+              const err = msgs.find(m => m.error);
+              if (err) { console.error("  '"$label"': JSON-RPC error " + JSON.stringify(err.error)); process.exit(1); }
+              const tools = msgs.find(m => m.result && m.result.tools);
+              if (!tools || tools.result.tools.length === 0) { console.error("  '"$label"': no tools listed"); process.exit(1); }
+              console.log("  '"$label"': ok, " + tools.result.tools.length + " tools");
+            ' <<< "$out"
+          }
+          # A pre-2026 client: full initialize handshake.
+          probe "legacy handshake" \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+          # A 2026-07-28 client: stateless, no handshake at all.
+          probe "stateless" \
+            '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
   # Plugin-test policies (Phase 5 of plugin-testing-quality plan, see #992).
   # Catches weak count assertions and `(partial)` test ports that tend to
   # silently mask plugin bugs.
@@ -523,7 +585,7 @@ jobs:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, uri-boundary, lsp-platform, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate]
+    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, uri-boundary, lsp-platform, mcp-server, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate]
     steps:
       - name: Check results
         run: |
@@ -554,6 +616,16 @@ jobs:
           echo "uri-boundary result: $uri_boundary"
           if [[ "$uri_boundary" != "success" ]]; then
             echo "uri-boundary must pass"
+            exit 1
+          fi
+
+          # mcp-server always runs (no should_build gate — it is a TypeScript
+          # package, and a Rust change can break it through @rustledger/wasm
+          # without touching it), so its result is always required.
+          mcp="${{ needs.mcp-server.result }}"
+          echo "mcp-server result: $mcp"
+          if [[ "$mcp" != "success" ]]; then
+            echo "mcp-server must pass"
             exit 1
           fi
 

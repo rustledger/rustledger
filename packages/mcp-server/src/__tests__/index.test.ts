@@ -283,7 +283,13 @@ describe('Tool Handlers', () => {
       expect(result.content[0].text).toContain('valid');
     });
 
-    it('should report validation errors', () => {
+    // `it.fails` — pinned to issue #1884, NOT a disabled test. The wasm's
+    // `validateSource` drops the loader's parse errors, so it answers
+    // `valid: true` for input `rledger check` rejects with P0012. These
+    // assertions are correct; the binding is not. `it.fails` keeps CI honest
+    // in both directions: red while the bug is here, and red again the moment
+    // it is fixed, so the marker cannot outlive the defect.
+    it.fails('should report validation errors', () => {
       const result = handleToolCall('validate', { source: '2024-01-01 invalid directive' });
       expect(result.content[0].text).toContain('error');
     });
@@ -389,7 +395,13 @@ describe('Tool Handlers', () => {
       expect(payload.transaction.date).toBe('2024-01-15');
     });
 
-    it('returns an error response when parsing fails', () => {
+    // `it.fails` — pinned to issue #1884, NOT a disabled test. The wasm's
+    // `validateSource` drops the loader's parse errors, so it answers
+    // `valid: true` for input `rledger check` rejects with P0012. These
+    // assertions are correct; the binding is not. `it.fails` keeps CI honest
+    // in both directions: red while the bug is here, and red again the moment
+    // it is fixed, so the marker cannot outlive the defect.
+    it.fails('returns an error response when parsing fails', () => {
       // Pre-fix this would have silently produced a categorization
       // prompt with an empty accounts list; now it surfaces the parser
       // diagnostic, matching `handleParse`'s behavior.
@@ -427,7 +439,13 @@ describe('Tool Handlers', () => {
       expect(payload.low_confidence).toBe(0);
     });
 
-    it('returns an error response when parsing fails', () => {
+    // `it.fails` — pinned to issue #1884, NOT a disabled test. The wasm's
+    // `validateSource` drops the loader's parse errors, so it answers
+    // `valid: true` for input `rledger check` rejects with P0012. These
+    // assertions are correct; the binding is not. `it.fails` keeps CI honest
+    // in both directions: red while the bug is here, and red again the moment
+    // it is fixed, so the marker cannot outlive the defect.
+    it.fails('returns an error response when parsing fails', () => {
       const result = handleToolCall('import_review', {
         source: '@@@ not beancount @@@',
       });

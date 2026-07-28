@@ -63,15 +63,26 @@ pub(super) fn report_networth<W: Write>(
     let format_period = |date: rustledger_core::NaiveDate, period: &str| -> String {
         match period {
             "daily" => date.to_string(),
-            "weekly" => format!(
-                "{}-W{:02}",
-                date.year(),
-                jiff::fmt::strtime::format("%V", date)
-                    .unwrap_or_default()
-                    .trim()
-                    .parse::<u32>()
-                    .unwrap_or(0)
-            ),
+            // Bucket by the ISO week's Monday, then label from THAT date.
+            //
+            // Two bugs lived in the previous spelling. It paired the ISO week
+            // number (`%V`) with the CALENDAR year, and those disagree across a
+            // year boundary: 2024-12-31 is ISO 2025-W01 but was labeled
+            // `2024-W01`, colliding with the real 2024-W01 and silently summing
+            // two different weeks into one row (#1864). And it went through
+            // `format(...).unwrap_or_default().parse().unwrap_or(0)` — two
+            // silent fallbacks, either of which would have labeled every row
+            // `W00` and collapsed the whole report into a single bucket.
+            //
+            // `CalendarPeriod::Week` is the shared definition of "which week is
+            // this", already used by BQL's `DATE_TRUNC('WEEK', ...)`. Deriving
+            // both the bucket and its label from one `start_of` makes them
+            // agree by construction rather than by coincidence.
+            "weekly" => {
+                let start = rustledger_core::CalendarPeriod::Week.start_of(date);
+                let iso = start.iso_week_date();
+                format!("{}-W{:02}", iso.year(), iso.week())
+            }
             "yearly" => format!("{}", date.year()),
             _ => format!("{}-{:02}", date.year(), date.month()),
         }

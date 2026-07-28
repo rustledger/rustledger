@@ -260,11 +260,16 @@ impl Executor<'_> {
             "MONTH" => i64::from(date.month()),
             "DAY" => i64::from(date.day()),
             "QUARTER" => i64::from(rustledger_core::quarter_index0(date.month() as u32) + 1),
-            "WEEK" => {
-                // ISO week number via strftime %V
-                let week_str = jiff::fmt::strtime::format("%V", date).unwrap_or_default();
-                week_str.trim().parse::<i64>().unwrap_or(0)
-            }
+            // Typed accessor, not a `%V` format-then-parse round trip: that
+            // spelling carried `unwrap_or_default()` + `unwrap_or(0)`, so any
+            // failure silently reported week 0 rather than erroring (#1864).
+            //
+            // NOTE for callers: this is the ISO week NUMBER alone. Pairing it
+            // with `DATE_PART(date, 'YEAR')` to build a label is wrong at a year
+            // boundary — 2024-12-31 is week 1 of ISO year 2025, not 2024. BQL
+            // exposes no ISO-week-year field; use `DATE_TRUNC('WEEK', date)`,
+            // which returns the week's Monday and cannot be mismatched.
+            "WEEK" => i64::from(date.iso_week_date().week()),
             "WEEKDAY" | "DOW" => i64::from(date.weekday().to_monday_zero_offset()),
             "DOY" => {
                 let jan1 = jiff::civil::date(date.year(), 1, 1);

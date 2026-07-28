@@ -286,9 +286,13 @@ describe('Tool Handlers', () => {
     // `it.fails` — pinned to issue #1884, NOT a disabled test. The wasm's
     // `validateSource` drops the loader's parse errors, so it answers
     // `valid: true` for input `rledger check` rejects with P0012. These
-    // assertions are correct; the binding is not. `it.fails` keeps CI honest
-    // in both directions: red while the bug is here, and red again the moment
-    // it is fixed, so the marker cannot outlive the defect.
+    // assertions are correct; the binding is not.
+    //
+    // `it.fails` inverts the verdict: the suite is GREEN while this assertion
+    // fails, and turns RED if it ever passes. So fixing #1884 breaks this
+    // test, which is the point — the marker cannot outlive the defect, and
+    // whoever fixes the binding is told to delete the `.fails` rather than
+    // discovering a stale skip years later.
     it.fails('should report validation errors', () => {
       const result = handleToolCall('validate', { source: '2024-01-01 invalid directive' });
       expect(result.content[0].text).toContain('error');
@@ -398,9 +402,13 @@ describe('Tool Handlers', () => {
     // `it.fails` — pinned to issue #1884, NOT a disabled test. The wasm's
     // `validateSource` drops the loader's parse errors, so it answers
     // `valid: true` for input `rledger check` rejects with P0012. These
-    // assertions are correct; the binding is not. `it.fails` keeps CI honest
-    // in both directions: red while the bug is here, and red again the moment
-    // it is fixed, so the marker cannot outlive the defect.
+    // assertions are correct; the binding is not.
+    //
+    // `it.fails` inverts the verdict: the suite is GREEN while this assertion
+    // fails, and turns RED if it ever passes. So fixing #1884 breaks this
+    // test, which is the point — the marker cannot outlive the defect, and
+    // whoever fixes the binding is told to delete the `.fails` rather than
+    // discovering a stale skip years later.
     it.fails('returns an error response when parsing fails', () => {
       // Pre-fix this would have silently produced a categorization
       // prompt with an empty accounts list; now it surfaces the parser
@@ -442,9 +450,13 @@ describe('Tool Handlers', () => {
     // `it.fails` — pinned to issue #1884, NOT a disabled test. The wasm's
     // `validateSource` drops the loader's parse errors, so it answers
     // `valid: true` for input `rledger check` rejects with P0012. These
-    // assertions are correct; the binding is not. `it.fails` keeps CI honest
-    // in both directions: red while the bug is here, and red again the moment
-    // it is fixed, so the marker cannot outlive the defect.
+    // assertions are correct; the binding is not.
+    //
+    // `it.fails` inverts the verdict: the suite is GREEN while this assertion
+    // fails, and turns RED if it ever passes. So fixing #1884 breaks this
+    // test, which is the point — the marker cannot outlive the defect, and
+    // whoever fixes the binding is told to delete the `.fails` rather than
+    // discovering a stale skip years later.
     it.fails('returns an error response when parsing fails', () => {
       const result = handleToolCall('import_review', {
         source: '@@@ not beancount @@@',

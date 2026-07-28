@@ -187,8 +187,8 @@ jobs:
 
   # Ratchet keeping `file:` URI <-> path conversion inside
   # `rustledger-lsp/src/proto.rs` (#1868). Four hand-rolled converters coexisted
-  # in that crate, each wrong differently (no encoding / spaces only / no
-  # no decoding on the way back / a Windows separator escaped to %5C) and all four
+  # in that crate, each wrong differently: no encoding at all, spaces only, no
+  # decoding on the way back, a Windows separator escaped to %5C. All four
   # agreed on the ASCII paths anyone tests with. Same grep-ratchet, no-extra-
   # toolchain pattern as the unsafe and sync-primitive invariants.
   #

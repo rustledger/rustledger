@@ -16,12 +16,16 @@
 # `check-sync-primitives.sh` — deliberately a grep ratchet rather than a
 # `dylint` lint so it needs no extra (nightly) toolchain.
 #
-# Scope: `crates/*/src/` only, and within those files only non-test code —
-# a trailing `#[cfg(test)] mod ...` block is skipped, because a test that
-# simulates what an EDITOR sends must build the URI by hand; using our own
-# encoder there would only test the encoder against itself. Integration tests
-# live outside `src/` and aren't scanned. `proto.rs` itself is exempt: it is
-# the implementation.
+# Scope: `crates/*/src/`, and within those files only non-test code — the BODY
+# of every `#[cfg(test)] mod`, wherever it appears, is skipped, and scanning
+# resumes after it. Test modules are exempt because a test simulating what an
+# EDITOR sends must build the URI by hand; using our own encoder there would
+# only test the encoder against itself. Integration tests live outside `src/`
+# and aren't scanned by this rule. `proto.rs` itself is exempt: it is the
+# implementation.
+#
+# (The second rule below has a WIDER scope — it also scans `crates/*/tests`
+# and does not exempt test modules. See its own comment.)
 #
 # Escape hatch: append `// ratchet-allow: uri-boundary <reason>` to the line.
 #
@@ -145,7 +149,8 @@ if [ -n "$uri_eq_violations" ]; then
     echo "       dot segment, C: vs c:, and a canonicalized vs an uncanonicalized" >&2
     echo "       parent all spell one file differently." >&2
     echo "       Convert both sides with uri_to_path and compare the paths." >&2
-    echo "       Tests can use the harness's \`same_file\`." >&2
+    echo "       In rustledger-lsp's protocol tests, the harness's \`same_file\`" >&2
+    echo "       already does this." >&2
     echo "       If a literal string comparison is genuinely what you mean, append" >&2
     echo "         // ratchet-allow: uri-string-eq <reason>" >&2
     echo "       to the line." >&2

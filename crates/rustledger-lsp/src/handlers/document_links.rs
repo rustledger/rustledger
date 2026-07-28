@@ -617,9 +617,21 @@ mod uri_resolution_tests {
     /// Carrying the ledger's URI instead is lossless: percent-encoding is
     /// ASCII, and `uri_to_path` decodes back to the original bytes.
     ///
-    /// `cfg(unix)` for `OsStrExt`: Windows filenames are UTF-16 and cannot
-    /// hold this byte sequence, so the case does not exist there.
-    #[cfg(unix)]
+    /// `cfg(target_os = "linux")`, not `cfg(unix)`, and not a runtime skip.
+    ///
+    /// The fixture cannot be CREATED on the other two CI platforms, so the bug
+    /// is unreachable there rather than untested:
+    ///
+    /// - macOS: APFS/HFS+ enforce valid UTF-8 filenames. `create_dir_all`
+    ///   fails with `EILSEQ` "Illegal byte sequence" — measured, this test
+    ///   failed exactly that way on `macos-latest` before the gate.
+    /// - Windows: filenames are UTF-16; the byte sequence has no spelling.
+    ///
+    /// A runtime "skip if creation fails" would have been the tempting fix and
+    /// the wrong one — CLAUDE.md's rule is that an availability-gated test
+    /// which silently skips is a test that runs nowhere. A `cfg` states the
+    /// platform property instead, and the Linux leg always runs it.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_relative_document_resolves_under_a_non_utf8_directory() {
         use std::os::unix::ffi::OsStrExt;

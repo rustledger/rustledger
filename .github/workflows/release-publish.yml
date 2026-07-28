@@ -341,7 +341,7 @@ jobs:
   # nothing is latency-sensitive: the alternative is a per-consumer wait list
   # that has to be kept in sync with what each downstream repo fetches, and the
   # last time that drifted the scoop bucket quietly stopped tracking releases
-  # for a fortnight. Please don't narrow this back down per consumer.
+  # for 17 days. Please don't narrow this back down per consumer.
   wait-for-assets:
     name: Wait for release binaries
     runs-on: ubuntu-latest
@@ -362,21 +362,28 @@ jobs:
           # still building — which is exactly how v0.21.0's bucket update
           # failed (scoop-rustledger#4): dispatch at 02:25:53, Windows assets
           # at 02:39:38, and the bucket's 10-minute poll gave up 3m45s short.
-          linux_targets=(
+          # macOS is here because the list should match what release-build
+          # produces, not what today's consumers happen to read.
+          # Every target release-build produces. Keep this list complete: a
+          # missing platform is a consumer that can still race, which is the
+          # whole defect being fixed.
+          tarball_targets=(
             x86_64-unknown-linux-gnu
             x86_64-unknown-linux-musl
             aarch64-unknown-linux-gnu
             aarch64-unknown-linux-musl
+            x86_64-apple-darwin
+            aarch64-apple-darwin
           )
-          windows_targets=(
+          zip_targets=(
             x86_64-pc-windows-msvc
             aarch64-pc-windows-msvc
           )
           expected=()
-          for t in "${linux_targets[@]}"; do
+          for t in "${tarball_targets[@]}"; do
             expected+=("rustledger-${TAG}-${t}.tar.gz" "rustledger-${TAG}-${t}.tar.gz.sha256")
           done
-          for t in "${windows_targets[@]}"; do
+          for t in "${zip_targets[@]}"; do
             expected+=("rustledger-${TAG}-${t}.zip" "rustledger-${TAG}-${t}.zip.sha256")
           done
           deadline=$(( $(date +%s) + 1800 ))   # 30 min
@@ -463,8 +470,10 @@ jobs:
     # The bucket polls `<zip>.sha256` for 10 minutes and then errors, so
     # dispatching before the Windows zips exist just burns that budget. The
     # dispatch itself always succeeds, so this workflow stayed green while the
-    # bucket run failed and the manifest silently stopped tracking releases —
-    # it took a user report (scoop-rustledger#4) to notice, two days later.
+    # bucket run failed and the manifest silently stopped tracking releases.
+    # Nothing here noticed: it took a user report two days after the release
+    # (scoop-rustledger#4), and another fortnight before that report carried
+    # the error text that identified the cause.
     needs: wait-for-assets
     runs-on: ubuntu-latest
     steps:

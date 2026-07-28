@@ -333,7 +333,15 @@ jobs:
   # Gate: release-publish (trigger: release published) runs in parallel with
   # release-build (trigger: tag push), so binary-consuming jobs can race the
   # binary upload and fail with "no assets to download". Block them until the
-  # platform tarballs actually exist on the release.
+  # platform archives actually exist on the release.
+  #
+  # This waits for EVERY platform, not only the ones a given consumer reads.
+  # That costs the Linux-only consumers (docker, rustfava, aur) the extra few
+  # minutes the Windows builds take, which is worth it on a release path where
+  # nothing is latency-sensitive: the alternative is a per-consumer wait list
+  # that has to be kept in sync with what each downstream repo fetches, and the
+  # last time that drifted the scoop bucket quietly stopped tracking releases
+  # for a fortnight. Please don't narrow this back down per consumer.
   wait-for-assets:
     name: Wait for release binaries
     runs-on: ubuntu-latest
@@ -344,18 +352,32 @@ jobs:
           GH_REPO: ${{ github.repository }} # gh resolves the repo from this (no checkout)
           TAG: ${{ env.RELEASE_TAG }}
         run: |
-          # Wait for both the tarballs AND their .sha256 sidecars:
-          # update-aur-bin curls the .sha256 files (`curl -f`), and those
-          # can lag the tarball uploads.
-          targets=(
+          # Wait for both the archives AND their .sha256 sidecars: consumers
+          # curl the .sha256 files (`curl -f`), and those can lag the archive
+          # uploads.
+          #
+          # Windows is here because `update-scoop` depends on this job: the
+          # scoop bucket reads `<zip>.sha256` to fill in the manifest hash.
+          # Waiting only for Linux would let scoop dispatch while the zips are
+          # still building — which is exactly how v0.21.0's bucket update
+          # failed (scoop-rustledger#4): dispatch at 02:25:53, Windows assets
+          # at 02:39:38, and the bucket's 10-minute poll gave up 3m45s short.
+          linux_targets=(
             x86_64-unknown-linux-gnu
             x86_64-unknown-linux-musl
             aarch64-unknown-linux-gnu
             aarch64-unknown-linux-musl
           )
+          windows_targets=(
+            x86_64-pc-windows-msvc
+            aarch64-pc-windows-msvc
+          )
           expected=()
-          for t in "${targets[@]}"; do
+          for t in "${linux_targets[@]}"; do
             expected+=("rustledger-${TAG}-${t}.tar.gz" "rustledger-${TAG}-${t}.tar.gz.sha256")
+          done
+          for t in "${windows_targets[@]}"; do
+            expected+=("rustledger-${TAG}-${t}.zip" "rustledger-${TAG}-${t}.zip.sha256")
           done
           deadline=$(( $(date +%s) + 1800 ))   # 30 min
           while :; do
@@ -364,7 +386,7 @@ jobs:
             for a in "${expected[@]}"; do
               grep -qxF "$a" <<<"$assets" || missing+=("$a")
             done
-            if [ ${#missing[@]} -eq 0 ]; then echo "✓ all platform tarballs present"; exit 0; fi
+            if [ ${#missing[@]} -eq 0 ]; then echo "✓ all platform archives present"; exit 0; fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
               echo "::error::timed out waiting for release binaries:"
               printf '  - %s\n' "${missing[@]}"; exit 1
@@ -438,6 +460,12 @@ jobs:
   # Update Scoop bucket
   update-scoop:
     name: Update Scoop bucket
+    # The bucket polls `<zip>.sha256` for 10 minutes and then errors, so
+    # dispatching before the Windows zips exist just burns that budget. The
+    # dispatch itself always succeeds, so this workflow stayed green while the
+    # bucket run failed and the manifest silently stopped tracking releases —
+    # it took a user report (scoop-rustledger#4) to notice, two days later.
+    needs: wait-for-assets
     runs-on: ubuntu-latest
     steps:
       - name: Generate GitHub App token

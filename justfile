@@ -19,7 +19,7 @@ build-release:
 
 # Build WASM target
 build-wasm:
-    cargo build --target wasm32-unknown-unknown --release -p beancount-wasm
+    cargo build --target wasm32-unknown-unknown --release -p rustledger-wasm
 
 # Build with wasm-pack (for npm)
 build-wasm-pack:

@@ -133,7 +133,21 @@ impl Cost {
     /// Calculate the total cost for a given number of units.
     #[must_use]
     pub fn total_cost(&self, units: Decimal) -> Amount {
-        Amount::new(units * self.number, self.currency.clone())
+        // Saturating, not `*`. `Decimal`'s multiplication panics on overflow,
+        // and this is reached from `Position::book_value` -> `Inventory::
+        // book_value`, i.e. from any report that totals a cost basis — so a
+        // ledger holding large units at a large cost aborted the process
+        // (#1863). `Inventory` records the saturation in `overflowed()`.
+        //
+        // The product is negative exactly when the operands' signs differ.
+        let total = units.checked_mul(self.number).unwrap_or({
+            if units.is_sign_negative() == self.number.is_sign_negative() {
+                Decimal::MAX
+            } else {
+                Decimal::MIN
+            }
+        });
+        Amount::new(total, self.currency.clone())
     }
 }
 

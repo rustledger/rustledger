@@ -489,6 +489,15 @@ pub fn process_inventory_reduction(
                     ErrorCode::NoMatchingLot,
                     format!("cost spec: {:?}", posting.cost),
                 ),
+                // `reduce` cannot produce this today — overflow arises when
+                // ADDING to an inventory, which the booking engine routes
+                // through `try_add`. Handled explicitly rather than with a
+                // wildcard so a future emission site here is a compile error
+                // instead of a silently wrong diagnostic code.
+                rustledger_core::BookingError::Overflow { currency, .. } => (
+                    ErrorCode::ArithmeticOverflow,
+                    format!("currency: {currency}"),
+                ),
             };
             errors.push(
                 ValidationError::new(

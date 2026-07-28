@@ -820,7 +820,19 @@ fn run_booking(
         if let Directive::Transaction(txn) = &mut spanned.value {
             match engine.book_and_interpolate_with_gains(txn) {
                 Ok((result, txn_gains)) => {
-                    engine.apply(&result.transaction);
+                    // `apply_checked`: an arithmetic overflow here is a
+                    // property of the user's numbers, not a caller bug, and it
+                    // used to panic and take out every command including
+                    // `check` (#1863). Report it like any other booking error.
+                    if let Err(e) = engine.apply_checked(&result.transaction) {
+                        errors.push(LedgerError::error(
+                            "BOOK",
+                            format!(
+                                "{} ({}, \"{}\")",
+                                e, result.transaction.date, result.transaction.narration
+                            ),
+                        ));
+                    }
                     if let Some(g) = gains.as_deref_mut() {
                         g.extend(txn_gains);
                     }

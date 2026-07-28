@@ -316,17 +316,61 @@ pub(crate) fn infer_cost_currency_from_postings(transaction: &Transaction) -> Op
 /// reproduces the precise path's arithmetic byte-for-byte.
 trait WeightNum: Clone + Default + std::ops::AddAssign + std::ops::Mul<Output = Self> {
     fn from_decimal(d: Decimal) -> Self;
+
+    /// `self * rhs`, clamped instead of panicking.
+    ///
+    /// `Decimal`'s `*` PANICS on overflow, and this weight ladder runs during
+    /// interpolation on every costed posting — so units near `Decimal::MAX` at
+    /// a large per-unit cost aborted `rledger check` (#1863). `BigDecimal`
+    /// cannot overflow, so its impl is the plain product and the precise
+    /// residual tier is unaffected.
+    fn saturating_mul(self, rhs: Self) -> Self;
+
+    /// `self += rhs`, clamped instead of panicking. Same reasoning.
+    fn saturating_add_assign(&mut self, rhs: Self);
 }
 
 impl WeightNum for Decimal {
     fn from_decimal(d: Decimal) -> Self {
         d
     }
+
+    fn saturating_mul(self, rhs: Self) -> Self {
+        self.checked_mul(rhs).unwrap_or({
+            // A product is negative exactly when the operands' signs differ.
+            if self.is_sign_negative() == rhs.is_sign_negative() {
+                Self::MAX
+            } else {
+                Self::MIN
+            }
+        })
+    }
+
+    fn saturating_add_assign(&mut self, rhs: Self) {
+        *self = self.checked_add(rhs).unwrap_or({
+            // Mixed signs cannot overflow an addition, so the direction is
+            // whichever sign both operands share.
+            if self.is_sign_negative() || rhs.is_sign_negative() {
+                Self::MIN
+            } else {
+                Self::MAX
+            }
+        });
+    }
 }
 
 impl WeightNum for BigDecimal {
     fn from_decimal(d: Decimal) -> Self {
         to_big(d)
+    }
+
+    fn saturating_mul(self, rhs: Self) -> Self {
+        // Arbitrary precision: no ceiling to saturate at.
+        self * rhs
+    }
+
+    fn saturating_add_assign(&mut self, rhs: Self) {
+        *self += rhs;
     }
 }
 
@@ -383,20 +427,20 @@ fn cost_number_weight_generic<D: WeightNum>(
     // `per_unit`. `PerUnit` goes through multiplication.
     match *number {
         rustledger_core::CostNumber::Total { value: total } => {
-            D::from_decimal(total) * D::from_decimal(signum)
+            D::from_decimal(total).saturating_mul(D::from_decimal(signum))
         }
         rustledger_core::CostNumber::PerUnitFromTotal(b) => {
-            D::from_decimal(b.total) * D::from_decimal(signum)
+            D::from_decimal(b.total).saturating_mul(D::from_decimal(signum))
         }
         rustledger_core::CostNumber::PerUnit { value: per_unit } => {
-            D::from_decimal(units_number) * D::from_decimal(per_unit)
+            D::from_decimal(units_number).saturating_mul(D::from_decimal(per_unit))
         }
         // Compound `{a # b}` (beancount compound_amount): the cost totals
         // `N*a + b`, so the weight is the per-unit product (sign embedded
         // in `units`) plus the signed lump total (#1700).
         rustledger_core::CostNumber::Compound { per_unit, total } => {
-            let mut w = D::from_decimal(units_number) * D::from_decimal(per_unit);
-            w += D::from_decimal(total) * D::from_decimal(signum);
+            let mut w = D::from_decimal(units_number).saturating_mul(D::from_decimal(per_unit));
+            w.saturating_add_assign(D::from_decimal(total).saturating_mul(D::from_decimal(signum)));
             w
         }
     }

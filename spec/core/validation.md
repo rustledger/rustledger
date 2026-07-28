@@ -256,6 +256,31 @@ This document catalogs all validation errors and warnings with their trigger con
   Assets:Cash
 ```
 
+### BOOKING_ARITHMETIC_OVERFLOW
+
+**Code:** `E4004`
+
+**Condition:** A running inventory total, or a units-times-cost product, exceeds the representable numeric range (`Decimal` is 96-bit, about 7.9e28).
+
+**Message:** `Arithmetic overflow in {operation} for {currency} in {account}: the amount exceeds the representable range (about 7.9e28)`
+
+**Severity:** Error
+
+Not reachable from ordinary amounts. It requires figures near the ceiling, or a units-times-cost product that reaches it. The reported total is clamped and is **not** exact — the diagnostic is what marks it as unusable.
+
+```beancount
+2024-01-01 open Expenses:Food
+2024-01-01 open Assets:Cash
+
+2024-02-10 * "at the ceiling"
+  Expenses:Food   79228162514264337593543950335 USD
+  Assets:Cash    -79228162514264337593543950335 USD
+
+2024-02-11 * "and again — the running total cannot hold it"
+  Expenses:Food   79228162514264337593543950335 USD
+  Assets:Cash    -79228162514264337593543950335 USD
+```
+
 ### BOOKING_NEGATIVE_COST
 
 **Code:** `E4005`

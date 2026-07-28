@@ -199,6 +199,12 @@ Or use `rledger doctor missing-open` to generate them.
 
 **Fix**: Specify the exact lot using cost basis `{cost}` or date `{date}`.
 
+### E4004: Arithmetic Overflow
+
+**Cause**: A running total, or a units-times-cost product, exceeds the largest number rustledger can represent (about 7.9e28 — a 96-bit decimal). The reported figure is clamped and is **not** exact.
+
+**Fix**: Check the posting amounts for a misplaced decimal point or a stray run of digits. A real balance does not reach this range.
+
 ### E4005: Negative Cost
 
 **Cause**: A cost specification resolves to a negative amount.

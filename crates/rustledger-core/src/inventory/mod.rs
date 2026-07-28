@@ -154,6 +154,17 @@ pub enum BookingError {
         /// Units available.
         available: Decimal,
     },
+    /// Arithmetic exceeded `Decimal`'s range.
+    ///
+    /// Only reachable from amounts near `Decimal::MAX` (~7.9e28), which no
+    /// real ledger holds — but it is reachable from any file a user can
+    /// write, and it used to panic rather than report (#1863).
+    Overflow {
+        /// The currency whose running total overflowed.
+        currency: crate::Currency,
+        /// Which operation overflowed, for the message.
+        operation: &'static str,
+    },
     /// Currency mismatch between reduction and inventory.
     CurrencyMismatch {
         /// Expected currency.
@@ -161,6 +172,37 @@ pub enum BookingError {
         /// Got currency.
         got: crate::Currency,
     },
+}
+
+/// The clamped stand-in for a sum that does not fit in `Decimal`.
+///
+/// Direction is taken from the operands: two positives overflow upward, two
+/// negatives downward. Mixed signs cannot overflow an addition, so the
+/// `is_sign_negative` test on `b` is only ever reached with matching signs.
+///
+/// This value is deliberately NOT presented as a result on its own — every
+/// caller sets `Inventory::overflowed` alongside it, and `try_add` converts
+/// that into a `BookingError`. It exists so the process survives long enough
+/// to report, not so the number can be used.
+const fn saturated(a: Decimal, b: Decimal) -> Decimal {
+    if a.is_sign_negative() || b.is_sign_negative() {
+        Decimal::MIN
+    } else {
+        Decimal::MAX
+    }
+}
+
+/// The clamped stand-in for a PRODUCT that does not fit in `Decimal`.
+///
+/// A product is negative exactly when the operands' signs differ, so the
+/// direction is their xor — unlike [`saturated`], where mixed signs cannot
+/// overflow at all.
+const fn saturated_mul(a: Decimal, b: Decimal) -> Decimal {
+    if a.is_sign_negative() == b.is_sign_negative() {
+        Decimal::MAX
+    } else {
+        Decimal::MIN
+    }
 }
 
 impl fmt::Display for BookingError {
@@ -190,6 +232,14 @@ impl fmt::Display for BookingError {
             Self::CurrencyMismatch { expected, got } => {
                 write!(f, "Currency mismatch: expected {expected}, got {got}")
             }
+            Self::Overflow {
+                currency,
+                operation,
+            } => write!(
+                f,
+                "Arithmetic overflow in {operation} for {currency}: the amount exceeds \
+                 the representable range (about 7.9e28)"
+            ),
         }
     }
 }
@@ -269,6 +319,15 @@ impl fmt::Display for AccountedBookingError {
             BookingError::CurrencyMismatch { got, .. } => {
                 write!(f, "No matching lot for {} in {}", got, self.account)
             }
+            BookingError::Overflow {
+                currency,
+                operation,
+            } => write!(
+                f,
+                "Arithmetic overflow in {} for {} in {}: the amount exceeds the \
+                 representable range (about 7.9e28)",
+                operation, currency, self.account
+            ),
         }
     }
 }
@@ -332,6 +391,18 @@ pub struct Inventory {
     /// Not serialized - rebuilt on demand.
     #[serde(skip)]
     units_cache: FxHashMap<crate::Currency, Decimal>,
+    /// Set when any arithmetic in this inventory saturated at `Decimal`'s
+    /// range instead of producing the true value.
+    ///
+    /// `Decimal` is 96-bit (~7.9e28) and its `+`/`*` PANIC on overflow, so a
+    /// ledger holding amounts near `Decimal::MAX` used to abort `rledger
+    /// check` — the very command a user runs to find out what is wrong with
+    /// their file (#1863). Saturating keeps the process alive; this flag is
+    /// what stops the saturated number being reported as if it were exact.
+    ///
+    /// Propagated by every operation that derives one inventory from another,
+    /// so a total computed from a saturated inventory stays marked.
+    overflowed: bool,
 }
 
 impl PartialEq for Inventory {
@@ -494,11 +565,50 @@ impl Inventory {
             if pos.units.currency == units_currency
                 && let Some(book) = pos.book_value()
             {
-                *totals.entry(book.currency.clone()).or_default() += book.number;
+                // Checked: a derived total can overflow even when no single
+                // position does (#1863). Saturates rather than panicking; the
+                // caller sees `overflowed()` on the source inventory.
+                let slot = totals.entry(book.currency.clone()).or_default();
+                *slot = slot
+                    .checked_add(book.number)
+                    .unwrap_or_else(|| saturated(*slot, book.number));
             }
         }
 
         totals
+    }
+
+    /// Whether any arithmetic in this inventory saturated instead of
+    /// producing the true value.
+    ///
+    /// Sticky, and propagated by operations that derive one inventory from
+    /// another, so a total computed from a saturated inventory stays marked.
+    #[must_use]
+    pub const fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    /// [`Self::add`], reporting overflow instead of saturating silently.
+    ///
+    /// This is what the booking engine calls, so a ledger holding amounts near
+    /// `Decimal::MAX` produces a diagnostic naming the account and currency
+    /// rather than aborting the process (#1863).
+    ///
+    /// # Errors
+    /// [`BookingError::Overflow`] if the addition left `Decimal`'s range. The
+    /// inventory is still mutated (to the saturated value) — the error is the
+    /// signal that the stored number is not exact.
+    pub fn try_add(&mut self, position: Position) -> Result<(), BookingError> {
+        let currency = position.units.currency.clone();
+        let before = self.overflowed;
+        self.add(position);
+        if self.overflowed && !before {
+            return Err(BookingError::Overflow {
+                currency,
+                operation: "adding a position",
+            });
+        }
+        Ok(())
     }
 
     /// Add a position to the inventory.
@@ -510,11 +620,18 @@ impl Inventory {
     /// Lot aggregation for display purposes is handled separately at output time
     /// (e.g., in the query result formatter).
     ///
+    /// Arithmetic saturates rather than panicking, recording the fact in
+    /// [`Self::overflowed`]. Use [`Self::try_add`] where the overflow must be
+    /// reported rather than merely recorded.
+    ///
     /// # TLA+ Specification
     ///
     /// Implements `AddAmount` action from `Conservation.tla`:
     /// - Invariant: `inventory + totalReduced = totalAdded`
     /// - After add: `totalAdded' = totalAdded + amount`
+    ///
+    /// Note the spec models unbounded integers, so it cannot express the
+    /// saturation above — a regression there would not be caught by the model.
     ///
     /// See: `spec/tla/Conservation.tla`
     pub fn add(&mut self, position: Position) {
@@ -522,18 +639,43 @@ impl Inventory {
             return;
         }
 
-        // Update units cache
-        *self
+        // Checked, not `+=`. `Decimal`'s `+` panics on overflow, and this runs
+        // in the loader's booking phase, so a ledger holding amounts near
+        // `Decimal::MAX` aborted every command including `check` (#1863).
+        //
+        // Saturating rather than erroring keeps this signature: `add` has ~250
+        // call sites. The saturation is recorded in `overflowed` so it cannot
+        // pass for an exact result — `try_add` below turns it into a
+        // `BookingError`, and that is what the booking engine calls.
+        let cache = self
             .units_cache
             .entry(position.units.currency.clone())
-            .or_default() += position.units.number;
+            .or_default();
+        if let Some(sum) = cache.checked_add(position.units.number) {
+            *cache = sum;
+        } else {
+            *cache = saturated(*cache, position.units.number);
+            self.overflowed = true;
+        }
 
         // For positions without cost, use index for O(1) lookup
         if position.cost.is_none() {
             if let Some(&idx) = self.simple_index.get(&position.units.currency) {
                 // Merge with existing position
                 debug_assert!(self.positions[idx].cost.is_none());
-                self.positions[idx].units += &position.units;
+                // Same reasoning as the units cache above: checked, saturating,
+                // and flagged rather than panicking.
+                if let Some(sum) = self.positions[idx]
+                    .units
+                    .number
+                    .checked_add(position.units.number)
+                {
+                    self.positions[idx].units.number = sum;
+                } else {
+                    self.positions[idx].units.number =
+                        saturated(self.positions[idx].units.number, position.units.number);
+                    self.overflowed = true;
+                }
                 return;
             }
             // No existing position - add new one and index it
@@ -623,15 +765,22 @@ impl Inventory {
     /// Rebuild all caches (`simple_index` and `units_cache`) from positions.
     /// Called after operations that may invalidate caches (like retain or deserialization).
     fn rebuild_index(&mut self) {
+        let mut overflowed = false;
         self.simple_index.clear();
         self.units_cache.clear();
 
         for (idx, pos) in self.positions.iter().enumerate() {
             // Update units cache for all positions
-            *self
+            let slot = self
                 .units_cache
                 .entry(pos.units.currency.clone())
-                .or_default() += pos.units.number;
+                .or_default();
+            if let Some(sum) = slot.checked_add(pos.units.number) {
+                *slot = sum;
+            } else {
+                *slot = saturated(*slot, pos.units.number);
+                overflowed = true;
+            }
 
             // Update simple_index only for positions without cost
             if pos.cost.is_none() {
@@ -643,6 +792,7 @@ impl Inventory {
                 self.simple_index.insert(pos.units.currency.clone(), idx);
             }
         }
+        self.overflowed |= overflowed;
     }
 
     /// Merge this inventory with another.
@@ -666,8 +816,16 @@ impl Inventory {
             }
 
             if let Some(cost) = &pos.cost {
-                // Convert to cost basis
-                let total = pos.units.number * cost.number;
+                // Convert to cost basis. `checked_mul`, not `checked_add`: this
+                // is the one site of the five that MULTIPLIES, and it overflows
+                // on inputs far below `Decimal::MAX` — units 1e16 at cost 1e13
+                // is enough. Fixing only the additions would have moved the
+                // panic here rather than removed it (#1863).
+                let total = pos.units.number.checked_mul(cost.number);
+                if total.is_none() {
+                    result.overflowed = true;
+                }
+                let total = total.unwrap_or_else(|| saturated_mul(pos.units.number, cost.number));
                 result.add(Position::simple(Amount::new(total, &cost.currency)));
             } else {
                 // No cost, keep as-is

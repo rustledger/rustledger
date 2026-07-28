@@ -633,7 +633,12 @@ impl BookingEngine {
             // `CostSpec::resolve`). `apply`'s callers book first, which fills the
             // inferred currency into `cost_spec.currency`; direct-`apply` tests use
             // explicit-currency fixtures, which need no inference.
-            inv.add(Position::from_posting(units, posting.cost.as_ref(), date));
+            // `try_add`, not `add`: this is the user-reachable path into an
+            // inventory, and an overflow here used to panic and take out every
+            // command including `check` (#1863). The error carries the currency
+            // and is wrapped with the account by the caller.
+            inv.try_add(Position::from_posting(units, posting.cost.as_ref(), date))
+                .map_err(|e| convert_core_booking_error(e, &posting.account))?;
         }
         Ok(())
     }
@@ -655,8 +660,35 @@ impl BookingEngine {
     /// at market** (`rustledger-returns`), never `apply`, so a re-merged
     /// booking-failed transaction cannot over-sell it.
     pub fn apply(&mut self, txn: &Transaction) {
+        let _ = self.apply_checked(txn);
+    }
+
+    /// [`Self::apply`], returning an arithmetic overflow instead of dropping it.
+    ///
+    /// Only overflow is reported. A failed REDUCTION is still ignored here (see
+    /// `apply`'s contract: the transaction must already be booked, and the
+    /// `debug_assert` below catches a violating caller in debug builds).
+    /// Overflow is a different thing — not a caller-contract violation but a
+    /// property of the numbers in the user's file — so it must reach the
+    /// loader's error list rather than abort or vanish (#1863).
+    ///
+    /// # Errors
+    /// [`BookingError::Overflow`] if a posting's amount took an inventory
+    /// total outside `Decimal`'s range.
+    pub fn apply_checked(&mut self, txn: &Transaction) -> Result<(), BookingError> {
+        let mut overflow = None;
         for posting in &txn.postings {
             let reduced = self.try_apply_posting(posting, txn.date);
+            if let Err(e) = &reduced
+                && matches!(
+                    e,
+                    BookingError::Inventory(a)
+                        if matches!(a.error, rustledger_core::BookingError::Overflow { .. })
+                )
+            {
+                overflow.get_or_insert_with(|| e.clone());
+                continue;
+            }
             debug_assert!(
                 reduced.is_ok(),
                 "apply() reduction failed — the transaction must be booked \
@@ -668,6 +700,7 @@ impl BookingEngine {
             // Release builds keep the historical ignore-and-continue behavior.
             let _ = reduced;
         }
+        overflow.map_or(Ok(()), Err)
     }
 
     /// Book and interpolate a transaction.

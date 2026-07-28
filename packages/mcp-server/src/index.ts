@@ -2,16 +2,8 @@
 
 import { readFileSync } from "fs";
 import { createRequire } from "module";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  ListResourcesRequestSchema,
-  ReadResourceRequestSchema,
-  ListPromptsRequestSchema,
-  GetPromptRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { Server } from "@modelcontextprotocol/server";
 import { initSync } from "@rustledger/wasm";
 import * as rustledger from "@rustledger/wasm";
 
@@ -48,12 +40,12 @@ async function main(): Promise<void> {
   );
 
   // List available tools
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
+  server.setRequestHandler("tools/list", async () => {
     return { tools: TOOLS };
   });
 
   // Handle tool calls
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler("tools/call", async (request) => {
     const { name, arguments: args } = request.params;
 
     try {
@@ -72,12 +64,12 @@ async function main(): Promise<void> {
   });
 
   // List available resources
-  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  server.setRequestHandler("resources/list", async () => {
     return { resources: RESOURCES };
   });
 
   // Read resource contents
-  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  server.setRequestHandler("resources/read", async (request) => {
     const { uri } = request.params;
     const contents = getResourceContents(uri);
 
@@ -89,12 +81,12 @@ async function main(): Promise<void> {
   });
 
   // List available prompts
-  server.setRequestHandler(ListPromptsRequestSchema, async () => {
+  server.setRequestHandler("prompts/list", async () => {
     return { prompts: PROMPTS };
   });
 
   // Get prompt content
-  server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+  server.setRequestHandler("prompts/get", async (request) => {
     const { name, arguments: args } = request.params;
     return getPrompt(name, args);
   });

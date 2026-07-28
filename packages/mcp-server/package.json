@@ -31,8 +31,8 @@
   },
   "homepage": "https://rustledger.github.io",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "@rustledger/wasm": "^0.21.0"
+    "@rustledger/wasm": "^0.21.0",
+    "@modelcontextprotocol/server": "^2.0.0"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

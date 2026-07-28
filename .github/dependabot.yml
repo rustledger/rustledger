@@ -38,9 +38,16 @@ updates:
       codeql-action:
         patterns:
           - "github/codeql-action*"
-  # npm — MCP server. The MCP spec moves fast (2026-07-28 restructures the
-  # protocol core); without this entry the @modelcontextprotocol/sdk pin
-  # never gets update PRs and spec adoption stalls silently (issue #1767).
+  # npm — MCP server. The MCP spec moves fast, so the SDK pin needs update PRs
+  # or it silently rots.
+  #
+  # NOTE, learned the hard way on #1767: this cannot catch a spec adoption that
+  # arrives as a RENAME. The 2026-07-28 spec shipped as new scoped packages
+  # (@modelcontextprotocol/server et al.), not as a major bump of
+  # @modelcontextprotocol/sdk, and Dependabot tracks versions of a named
+  # package, not successors — so no entry here would ever have surfaced it. The
+  # comment that used to sit here claimed the opposite. Watch the upstream
+  # release notes for a restructure; this entry handles ordinary bumps only.
   - package-ecosystem: "npm"
     directory: "/packages/mcp-server"
     schedule:

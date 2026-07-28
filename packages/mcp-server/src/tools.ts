@@ -1,12 +1,14 @@
 // Tool definitions for the MCP server
 
-/// A JSON value, as JSON Schema keyword values actually are.
-///
-/// `unknown` was accepted by SDK v1 but not by v2, whose `tools/list` result
-/// types `inputSchema.properties` as JSON. `unknown` is wider than JSON — it
-/// admits functions, symbols and `undefined`, none of which survive
-/// serialization — so this is the honest type, not a workaround for the
-/// stricter signature.
+/**
+ * A JSON value, as JSON Schema keyword values actually are.
+ *
+ * `unknown` was accepted by SDK v1 but not by v2, whose `tools/list` result
+ * types `inputSchema.properties` as JSON. `unknown` is wider than JSON — it
+ * admits functions, symbols and `undefined`, none of which survive
+ * serialization — so this is the honest type, not a workaround for the
+ * stricter signature.
+ */
 export type JsonValue =
   | string
   | number

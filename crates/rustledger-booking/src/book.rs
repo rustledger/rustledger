@@ -694,6 +694,42 @@ impl BookingEngine {
     /// non-fatal preserves every existing caller's release-build behavior;
     /// only the overflow path is new.
     pub fn apply(&mut self, txn: &Transaction) -> Result<(), BookingError> {
+        // Snapshot every account this transaction touches, so an overflow
+        // partway through cannot leave the earlier postings applied.
+        //
+        // Without this, a transaction the loader then DROPS (`run_booking`'s
+        // `failed_indices`) still moved the running balances, and every later
+        // transaction booked against the corruption — silently wrong reports
+        // and lot matching, which is the outcome this whole change exists to
+        // prevent. `Inventory`'s positions are an `imbl::Vector`, so each
+        // clone is O(1) structural sharing.
+        //
+        // `None` records an account that did not exist yet, which must be
+        // REMOVED rather than restored to an empty inventory: `apply` is the
+        // only thing that creates entries here, and leaving a phantom empty
+        // one changes `into_inventories`' output.
+        let mut snapshot: FxHashMap<rustledger_core::Account, Option<Inventory>> =
+            FxHashMap::with_capacity_and_hasher(txn.postings.len(), Default::default());
+        for posting in &txn.postings {
+            snapshot
+                .entry(posting.account.clone())
+                .or_insert_with(|| self.inventories.get(&posting.account).cloned());
+        }
+        let rollback =
+            |engine: &mut Self,
+             snapshot: FxHashMap<rustledger_core::Account, Option<Inventory>>| {
+                for (account, prior) in snapshot {
+                    match prior {
+                        Some(inv) => {
+                            engine.inventories.insert(account, inv);
+                        }
+                        None => {
+                            engine.inventories.remove(&account);
+                        }
+                    }
+                }
+            };
+
         for posting in &txn.postings {
             let reduced = self.try_apply_posting(posting, txn.date);
             if matches!(
@@ -705,6 +741,7 @@ impl BookingEngine {
                     }
                 ))
             ) {
+                rollback(self, snapshot);
                 return reduced;
             }
             debug_assert!(
@@ -2270,6 +2307,46 @@ mod tests {
                 Directive::Transaction(t) if t.narration.as_ref() == "Sell at phantom cost basis"
             )),
             "failed sell must not appear in booked"
+        );
+    }
+
+    /// A transaction whose `apply` overflows partway must leave the running
+    /// balances exactly as it found them.
+    ///
+    /// The loader DROPS such a transaction (`run_booking`'s `failed_indices`),
+    /// so any posting applied before the failing one is a mutation from an
+    /// entry the user is told was rejected. Every later transaction then books
+    /// against it — wrong lot matching and wrong balances, reported as fact.
+    /// Found in review of #1863; the pad path had the identical defect.
+    #[test]
+    fn a_failed_apply_leaves_no_partial_mutation() {
+        let mut engine = BookingEngine::new();
+
+        // Park an account at the ceiling so the SECOND posting overflows.
+        let load = Transaction::new(date(2024, 1, 5), "load")
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(Decimal::MAX, "USD")));
+        engine.apply(&load).expect("one MAX position fits");
+
+        let bad = Transaction::new(date(2024, 2, 1), "partial")
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(10.00), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(Decimal::MAX, "USD")));
+        engine
+            .apply(&bad)
+            .expect_err("the second posting overflows");
+
+        let inventories = engine.into_inventories();
+        assert!(
+            !inventories.contains_key(&rustledger_core::Account::from("Assets:A")),
+            "an account first seen in the failed transaction must not survive it"
+        );
+        assert_eq!(
+            inventories
+                .get(&rustledger_core::Account::from("Assets:B"))
+                .expect("Assets:B predates the failed transaction")
+                .units(&rustledger_core::Currency::from("USD")),
+            Decimal::MAX,
+            "an account that predates the failed transaction must be restored to \
+             its prior value, not left doubled or cleared"
         );
     }
 }

@@ -546,10 +546,24 @@ fn emit_posting_line(
 fn starts_amount(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
     match tokens.get(i).map(|(k, _)| *k) {
         Some(SyntaxKind::NUMBER | SyntaxKind::CURRENCY | SyntaxKind::L_PAREN) => true,
-        Some(SyntaxKind::MINUS | SyntaxKind::PLUS) => matches!(
-            tokens.get(i + 1).map(|(k, _)| *k),
-            Some(SyntaxKind::NUMBER | SyntaxKind::L_PAREN),
-        ),
+        Some(SyntaxKind::MINUS | SyntaxKind::PLUS) => {
+            // Look PAST whitespace: beancount allows a space between a unary
+            // sign and its operand (`- 7.5 USD`, pinned by the lima fixture
+            // `Arithmetic.NumberExprNegative`). Requiring the operand to be
+            // adjacent left the sign outside the `AMOUNT` node as a flat
+            // `POSTING` child, where nothing reads it — so `- 7.5 USD` booked
+            // as **+7.5**, silently, and the user saw only a downstream
+            // "does not balance". Found while fixing the same silent drop for
+            // `-,123.00` (issue #1892 discussion).
+            let mut j = i + 1;
+            while matches!(tokens.get(j).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE)) {
+                j += 1;
+            }
+            matches!(
+                tokens.get(j).map(|(k, _)| *k),
+                Some(SyntaxKind::NUMBER | SyntaxKind::L_PAREN),
+            )
+        }
         _ => false,
     }
 }
@@ -597,7 +611,13 @@ fn emit_amount(
         return i;
     }
 
-    // Optional leading sign.
+    // Optional leading sign, plus any whitespace between it and its operand.
+    //
+    // The gap must be consumed INSIDE the node: leaving it outside closed the
+    // `AMOUNT` right after the sign, so `- 7.5 USD` produced two sibling
+    // amounts (`AMOUNT(MINUS)` and `AMOUNT(NUMBER CURRENCY)`) and the sign was
+    // never read — the posting booked as **+7.5**. `starts_amount` has already
+    // confirmed an operand follows, so this cannot swallow a trailing space.
     if matches!(
         tokens.get(i).map(|(k, _)| *k),
         Some(SyntaxKind::MINUS | SyntaxKind::PLUS),
@@ -605,6 +625,11 @@ fn emit_amount(
         let (kind, range) = (tokens[i].0, tokens[i].1.clone());
         builder.token(kind.into(), &source[range]);
         i += 1;
+        while matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE)) {
+            let range = tokens[i].1.clone();
+            builder.token(SyntaxKind::WHITESPACE.into(), &source[range]);
+            i += 1;
+        }
     }
 
     // First operand.

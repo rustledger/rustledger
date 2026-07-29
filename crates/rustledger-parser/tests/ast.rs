@@ -896,3 +896,77 @@ fn syntax_text_is_reexported_from_ast() {
     fn t<T>() {}
     t::<rustledger_parser::cst::ast::SyntaxText>();
 }
+
+/// A sign separated from its number must keep its sign, or be rejected —
+/// never silently become positive.
+///
+/// Both forms below used to book as POSITIVE with no diagnostic. `- 7.50` is
+/// valid beancount (the lima fixture `Arithmetic.NumberExprNegative` pins it)
+/// and must negate; `-,123.00` is malformed and must be reported. The shared
+/// cause was that `starts_amount` required the operand to be ADJACENT to the
+/// sign, so anything in between left the sign outside the `AMOUNT` node as a
+/// flat `POSTING` child that nothing reads (issue #1892 discussion).
+#[test]
+fn a_sign_separated_from_its_number_is_never_silently_dropped() {
+    // Valid: whitespace between sign and operand.
+    let r = rustledger_parser::parse(
+        "2020-01-02 * \"x\"\n  Assets:A  - 7.50 USD\n  Assets:B  7.50 USD\n",
+    );
+    assert!(
+        r.errors.is_empty(),
+        "`- 7.50` is valid beancount arithmetic: {:?}",
+        r.errors
+    );
+    let n = posting_number(&r, 0);
+    assert_eq!(
+        n.to_string(),
+        "-7.50",
+        "the sign must survive the gap, not be dropped"
+    );
+
+    // Malformed: a stray comma between sign and operand.
+    let r = rustledger_parser::parse("2020-01-02 * \"x\"\n  Assets:A  -,123.00 USD\n  Assets:B\n");
+    assert!(
+        !r.errors.is_empty(),
+        "`-,123.00` has no meaning and must be reported, not read as +123.00"
+    );
+}
+
+/// Well-formed grouped numerals keep working — the guard above must not
+/// reject the separators the parser has always accepted.
+#[test]
+fn grouped_numerals_still_parse() {
+    for (src, want) in [
+        ("1,234,567.89", "1234567.89"),
+        ("-1,234.00", "-1234.00"),
+        ("1,234", "1234"),
+        // A leading zero is legal grouping (1 digit + a group of 3);
+        // `Decimal` renders it normalized.
+        ("0,123.00", "123.00"),
+    ] {
+        let text = format!("2020-01-02 * \"x\"\n  Assets:A  {src} USD\n  Assets:B\n");
+        let r = rustledger_parser::parse(&text);
+        assert!(r.errors.is_empty(), "{src} must parse: {:?}", r.errors);
+        assert_eq!(
+            posting_number(&r, 0).to_string(),
+            want,
+            "{src} parsed to the wrong value"
+        );
+    }
+}
+
+/// The first posting's units number, for the assertions above.
+fn posting_number(r: &rustledger_parser::ParseResult, idx: usize) -> rustledger_core::Decimal {
+    let txn = r
+        .directives
+        .iter()
+        .find_map(|d| match &d.value {
+            rustledger_core::Directive::Transaction(t) => Some(t),
+            _ => None,
+        })
+        .expect("a transaction");
+    match txn.postings[idx].units.as_ref().expect("units") {
+        rustledger_core::IncompleteAmount::Complete(a) => a.number,
+        other => panic!("expected a complete amount, got {other:?}"),
+    }
+}

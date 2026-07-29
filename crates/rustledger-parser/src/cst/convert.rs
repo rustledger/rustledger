@@ -1056,6 +1056,34 @@ fn convert_posting(
             span,
         ));
     }
+    // The mirror of the guard above, for tokens dropped BEFORE the amount
+    // rather than after it.
+    //
+    // `starts_amount` only opens an `AMOUNT` at `NUMBER`, `CURRENCY`,
+    // `L_PAREN`, or a sign directly followed by one of those. Anything else
+    // becomes a flat `POSTING` child, and nothing downstream reads flat
+    // children — so `-,123.00 USD` parsed as `POSTING(MINUS COMMA
+    // AMOUNT(NUMBER CURRENCY))` and booked as **+123.00**, silently losing the
+    // sign. A stray comma is the way to hit this in practice, because a
+    // thousands separator only belongs INSIDE a `NUMBER` token (the lexer's
+    // grouping regex is strict) and a misplaced one splits the amount in two.
+    //
+    // Report rather than repair: `,123` and `-,123` have no agreed meaning, so
+    // guessing one would be inventing data. See issue #1892's discussion.
+    if let Some(range) = orphaned_amount_prefix(node.syntax()) {
+        let start: u32 = range.start().into();
+        let end: u32 = range.end().into();
+        let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(
+                "unexpected token before posting amount (a thousands separator \
+                 must be inside the number, as in `1,234.00`)"
+                    .to_string(),
+            ),
+            span,
+        ));
+    }
+
     let units = first_amount
         .and_then(ast::Amount::cast)
         .and_then(|amt| convert_amount_to_incomplete(&amt, errors, bom_offset));
@@ -1581,6 +1609,49 @@ fn convert_meta_entries(node: &crate::SyntaxNode) -> Metadata {
         meta.insert(key, value);
     }
     meta
+}
+
+/// The span of flat `POSTING` tokens sitting between the account and the
+/// amount, if any — tokens the conversion would otherwise discard in silence.
+///
+/// CANONICAL: both conversion paths consult this. The green path bails to red
+/// when it returns `Some` (red owns the diagnostic), so the two cannot disagree
+/// about which postings are well formed — the property `fuzz_green_eq_red`
+/// checks.
+///
+/// Trivia and the posting flag are not orphans, and neither is anything at or
+/// after the first `AMOUNT`: trailing junk is already reported separately.
+pub(super) fn orphaned_amount_prefix(node: &crate::SyntaxNode) -> Option<crate::TextRange> {
+    let mut seen_account = false;
+    let mut start: Option<crate::TextRange> = None;
+    let mut end: Option<crate::TextRange> = None;
+    for el in node.children_with_tokens() {
+        match el {
+            rowan::NodeOrToken::Node(n) => {
+                // The amount (or anything structured) ends the prefix.
+                if ast::Amount::can_cast(n.kind()) {
+                    break;
+                }
+            }
+            rowan::NodeOrToken::Token(t) => {
+                let kind = t.kind();
+                if kind == crate::SyntaxKind::ACCOUNT {
+                    seen_account = true;
+                    continue;
+                }
+                if !seen_account || is_trivia_kind(kind) || is_comment_kind(kind) {
+                    continue;
+                }
+                if kind == crate::SyntaxKind::NEWLINE {
+                    break;
+                }
+                start.get_or_insert(t.text_range());
+                end = Some(t.text_range());
+            }
+        }
+    }
+    let (s, e) = (start?, end?);
+    Some(crate::TextRange::new(s.start(), e.end()))
 }
 
 /// Returns true if a node's flat direct-child tokens contain a

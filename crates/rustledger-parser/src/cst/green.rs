@@ -328,6 +328,41 @@ fn posting_flag_char(kind: crate::SyntaxKind, text: &str) -> Option<char> {
     }
 }
 
+/// Green-side mirror of [`super::convert::orphaned_amount_prefix`]: is there a
+/// non-trivia token between the account and the amount?
+///
+/// The two walk the same shape over different representations (green nodes have
+/// no absolute ranges), so they answer the same question and are pinned
+/// together by `fuzz_green_eq_red`.
+fn green_has_orphaned_amount_prefix(node: &rowan::GreenNodeData) -> bool {
+    use crate::SyntaxKind as K;
+    let mut seen_account = false;
+    for child in node.children() {
+        match &child {
+            NodeOrToken::Node(n) => {
+                if crate::BeancountLanguage::kind_from_raw(n.kind()) == K::AMOUNT {
+                    return false;
+                }
+            }
+            NodeOrToken::Token(t) => {
+                let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
+                if kind == K::ACCOUNT {
+                    seen_account = true;
+                    continue;
+                }
+                if !seen_account || kind == K::WHITESPACE || is_comment_kind(kind) {
+                    continue;
+                }
+                if kind == K::NEWLINE {
+                    return false;
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Convert a `POSTING` green node (flag + account + non-arithmetic units + cost
 /// spec + price annotation + per-posting metadata + span + same-line trailing
 /// comments). Returns `None` for postings with a trailing-sibling amount or an
@@ -396,6 +431,13 @@ pub(super) fn convert_simple_posting(
         offset += len;
     }
     let account = account?;
+    // A token stranded between the account and the amount means the posting is
+    // malformed (e.g. `-,123.00 USD`, whose sign the conversion would drop in
+    // silence). Bail so red handles it and owns the diagnostic — keeping ONE
+    // definition of "well formed" across the two paths.
+    if green_has_orphaned_amount_prefix(node) {
+        return None;
+    }
     let end = newline_off.unwrap_or(base + u32::from(node.text_len()) as usize);
     Some(Spanned::new(
         Posting {

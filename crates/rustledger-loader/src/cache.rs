@@ -342,6 +342,14 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     by a pre-fix binary would serve the silent-pass result to a fixed one —
 ///     resurrecting exactly the bug for every ledger already in the cache,
 ///     which is the worst case since the symptom is "no error reported".
+/// v16: a sign separated from its operand is no longer dropped. `- 7.50 USD`
+///     (valid beancount) parsed as **+7.50**, and `-,123.00 USD` (malformed)
+///     parsed as **+123.00** with no diagnostic, because the sign landed
+///     outside the `AMOUNT` node where nothing read it. Cached postings from a
+///     pre-fix binary therefore hold the WRONG SIGN, and the malformed case
+///     also holds an empty `errors` list. Serving either to a fixed binary
+///     reproduces the original bug on every ledger already in the cache — and
+///     a flipped sign is silent, so nothing downstream would flag it.
 /// v9: `CachedOptions` gained a `set_options: Vec<String>` field
 ///     (#1340). It was previously dropped, so a cache hit lost the
 ///     record of which options the file explicitly set — making
@@ -360,7 +368,7 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     silently ignored `option "display_precision" "USD:0.0001"` (formatting
 ///     fell back to inferred precision) and the other two settings. New fields
 ///     change the archived layout, so old bytes must be regenerated.
-const CACHE_VERSION: u32 = 15;
+const CACHE_VERSION: u32 = 16;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1067,7 +1075,7 @@ mod tests {
         // is archived, so the byte arrays below still pin the same encoding —
         // only the fixture version moves. The assertions after this one prove
         // that rather than assume it.
-        const FIXTURE_VERSION: u32 = 15;
+        const FIXTURE_VERSION: u32 = 16;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1156,7 +1164,7 @@ mod tests {
         // fixture version moves.
         // v15 (#1884) is a parser-diagnostics change with no layout impact —
         // same reasoning, and the hash assertion below is what verifies it.
-        const FIXTURE_VERSION: u32 = 15;
+        const FIXTURE_VERSION: u32 = 16;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

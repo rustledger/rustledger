@@ -252,17 +252,13 @@ thread_local! {
 fn booking_error_code(err: &rustledger_booking::BookingError) -> rustledger_validate::ErrorCode {
     use rustledger_booking::BookingError as B;
     use rustledger_booking::InterpolationError as I;
-    use rustledger_core::BookingError as CoreB;
     use rustledger_validate::ErrorCode;
     match err {
-        B::Inventory(inner) => match inner.error {
-            CoreB::Overflow(_) => ErrorCode::ArithmeticOverflow,
-            CoreB::InsufficientUnits { .. } => ErrorCode::InsufficientUnits,
-            CoreB::AmbiguousMatch { .. } => ErrorCode::AmbiguousLotMatch,
-            CoreB::NoMatchingLot { .. } | CoreB::CurrencyMismatch { .. } => {
-                ErrorCode::NoMatchingLot
-            }
-        },
+        // Inventory failures share their classification with the Late
+        // validator, which provokes the same errors by replaying reductions.
+        B::Inventory(inner) => ErrorCode::for_booking_error(&inner.error),
+        // Interpolation failures have no validator counterpart: `check`
+        // reports them from booking, so the mapping lives here alone.
         B::Interpolation(I::Unrepresentable { .. }) => ErrorCode::ArithmeticOverflow,
         B::Interpolation(_) => ErrorCode::TransactionUnbalanced,
     }
@@ -390,6 +386,12 @@ pub(crate) fn run_ledger_validation(
     // reported both by `apply` here and by `update_inventories` there, word
     // for word. Keep one. Booking failures the validators cannot restate,
     // such as an unrepresentable interpolation, are unaffected.
+    //
+    // Matching on the rendered message is deliberate: it is the only signal
+    // precise enough to tell a restatement from a genuinely different finding
+    // (the two carry different spans, and several postings of one transaction
+    // legitimately share a code and date). If the wordings ever diverge the
+    // duplicate simply reappears — noise, never a lost diagnostic.
     let seen: std::collections::HashSet<(rustledger_validate::ErrorCode, String)> =
         errors.iter().map(|e| (e.code, e.message.clone())).collect();
     errors.extend(

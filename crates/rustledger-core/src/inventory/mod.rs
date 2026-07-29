@@ -176,10 +176,12 @@ pub enum BookingError {
 /// its `+`/`*` panic on overflow. There is no in-range answer to substitute,
 /// so the arithmetic reports instead of clamping.
 ///
-/// This type is the reporting channel for sites that own a currency and sit on
-/// a `Result` path. Others use a plain `Option` because they have no currency
-/// to name or no error channel to use — [`crate::Cost::total_cost`],
-/// [`sum_account_and_subaccounts`], and `rustledger_booking`'s weight ladder.
+/// Used where an operation MUTATES an inventory, so a caller that reports and
+/// continues needs to know which currency was left alone. Pure leaf arithmetic
+/// returns a plain `Option` instead and lets its caller supply the context:
+/// [`crate::Cost::total_cost`], [`sum_account_and_subaccounts`], and
+/// `rustledger_booking`'s weight ladder. The split is about who is positioned
+/// to write the diagnostic, not about which failures matter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverflowError {
     /// The currency whose running total left the range.

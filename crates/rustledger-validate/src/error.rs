@@ -93,6 +93,27 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// The code for an inventory-level booking failure.
+    ///
+    /// CANONICAL: the LSP surfaces booking errors it caught itself, and the
+    /// Late validator surfaces the ones it provokes by replaying reductions —
+    /// two call sites, one classification. They had byte-identical `match`
+    /// arms; a reclassification applied to one and not the other would give
+    /// the same ledger different codes in the editor and on the command line
+    /// (CLAUDE.md, Canonical-Function Discipline).
+    #[must_use]
+    pub const fn for_booking_error(err: &rustledger_core::BookingError) -> Self {
+        use rustledger_core::BookingError as B;
+        match err {
+            B::Overflow(_) => Self::ArithmeticOverflow,
+            B::InsufficientUnits { .. } => Self::InsufficientUnits,
+            B::AmbiguousMatch { .. } => Self::AmbiguousLotMatch,
+            B::NoMatchingLot { .. } | B::CurrencyMismatch { .. } => Self::NoMatchingLot,
+        }
+    }
+}
+
+impl ErrorCode {
     /// Every error-code variant. Used by the spec-drift guard test (and any
     /// catalog enumeration). MUST list every variant — keep it in sync with the
     /// enum; the exhaustive [`code`](Self::code) match is the compiler-enforced

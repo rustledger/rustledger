@@ -353,6 +353,16 @@ pub fn validate_transaction_balance(
     // validate transactions whose booking failed: without this it reported
     // "does not balance: residual 1e29 USD" where `check` reported that the
     // posting amount could not be computed at all (#1863).
+    //
+    // Returning silently is right ONLY because something else has already
+    // spoken: `check` reports the booking error, and the LSP surfaces it
+    // directly (`booking_error_code`). One case is not covered — a
+    // post-booking plugin that emits a posting with no units. Nothing in-tree
+    // does, and the plugin wire format permitting it is the deeper problem,
+    // but such a transaction would now pass silently where it previously drew
+    // a (misleading) E3001. Fixing it properly means the caller telling this
+    // validator whether booking succeeded, rather than it inferring from the
+    // postings.
     if txn.postings.iter().any(|p| p.amount().is_none()) {
         return;
     }
@@ -503,24 +513,23 @@ pub fn process_inventory_reduction(
             // On pre-booked directives, reduce() with a fully-specified cost
             // should not fail. If it does, report the error — this catches
             // bugs in the booking engine or standalone validation without booking.
-            let (code, context) = match &err {
-                rustledger_core::BookingError::InsufficientUnits { .. } => (
-                    ErrorCode::InsufficientUnits,
-                    format!("currency: {}", units.currency),
-                ),
-                rustledger_core::BookingError::AmbiguousMatch { .. } => (
-                    ErrorCode::AmbiguousLotMatch,
-                    "Specify cost, date, or label to disambiguate".to_string(),
-                ),
+            // Code from the canonical mapping (shared with the LSP); only the
+            // CONTEXT string is local, since it draws on this posting.
+            let code = ErrorCode::for_booking_error(&err);
+            let context = match &err {
+                rustledger_core::BookingError::InsufficientUnits { .. } => {
+                    format!("currency: {}", units.currency)
+                }
+                rustledger_core::BookingError::AmbiguousMatch { .. } => {
+                    "Specify cost, date, or label to disambiguate".to_string()
+                }
                 rustledger_core::BookingError::NoMatchingLot { .. }
-                | rustledger_core::BookingError::CurrencyMismatch { .. } => (
-                    ErrorCode::NoMatchingLot,
-                    format!("cost spec: {:?}", posting.cost),
-                ),
-                rustledger_core::BookingError::Overflow(e) => (
-                    ErrorCode::ArithmeticOverflow,
-                    format!("currency: {}", e.currency),
-                ),
+                | rustledger_core::BookingError::CurrencyMismatch { .. } => {
+                    format!("cost spec: {:?}", posting.cost)
+                }
+                rustledger_core::BookingError::Overflow(e) => {
+                    format!("currency: {}", e.currency)
+                }
             };
             errors.push(
                 ValidationError::new(

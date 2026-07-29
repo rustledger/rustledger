@@ -267,7 +267,31 @@ impl BookingEngine {
                     Some(rustledger_core::CostNumber::Compound { per_unit, total })
                         if !units.number.is_zero() =>
                     {
-                        let combined = units.number.abs() * per_unit + total;
+                        // Checked (#1863): `N*a + b` for a compound cost is a
+                        // product of two user-supplied numbers, so it leaves
+                        // `Decimal`'s range on inputs well inside it. This is
+                        // the ONE reachable site the first pass of the fix
+                        // missed — the sweep that was supposed to catch it ran
+                        // against a wrongly-assigned binary path and silently
+                        // tested nothing.
+                        let combined = units
+                            .number
+                            .abs()
+                            .checked_mul(per_unit)
+                            .and_then(|v| v.checked_add(total))
+                            .ok_or_else(|| {
+                                convert_core_booking_error(
+                                    rustledger_core::BookingError::Overflow(
+                                        rustledger_core::OverflowError {
+                                            currency: cost_spec
+                                                .currency
+                                                .clone()
+                                                .unwrap_or_else(|| units.currency.clone()),
+                                        },
+                                    ),
+                                    &posting.account,
+                                )
+                            })?;
                         Some(CostSpec {
                             number: Some(rustledger_core::CostNumber::PerUnitFromTotal(
                                 rustledger_core::BookedCost::new(

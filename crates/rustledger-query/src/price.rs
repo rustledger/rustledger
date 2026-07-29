@@ -536,14 +536,19 @@ impl PriceDatabase {
 
     /// Convert an amount to a target currency.
     ///
-    /// Returns the converted amount, or None if no price is available.
+    /// Returns the converted amount, or `None` if no price is available — or
+    /// if the converted value would leave `rust_decimal`'s range (#1863).
+    /// Both callers already keep the raw units when this returns `None`, which
+    /// is the right answer for an unrepresentable conversion too: showing the
+    /// original amount is honest, showing a clamped one is not.
     pub fn convert(&self, amount: &Amount, to_currency: &str, date: NaiveDate) -> Option<Amount> {
         if amount.currency == to_currency {
             return Some(amount.clone());
         }
 
         self.get_price(&amount.currency, to_currency, date)
-            .map(|price| Amount::new(amount.number * price, to_currency))
+            .and_then(|price| amount.number.checked_mul(price))
+            .map(|n| Amount::new(n, to_currency))
     }
 
     /// Adapt this price index to the returns engine's
@@ -560,13 +565,17 @@ impl PriceDatabase {
     }
 
     /// Convert an amount using the latest available price.
+    ///
+    /// `None` on no price OR on an unrepresentable product — see
+    /// [`Self::convert`] for why those share a return value.
     pub fn convert_latest(&self, amount: &Amount, to_currency: &str) -> Option<Amount> {
         if amount.currency == to_currency {
             return Some(amount.clone());
         }
 
         self.get_latest_price(&amount.currency, to_currency)
-            .map(|price| Amount::new(amount.number * price, to_currency))
+            .and_then(|price| amount.number.checked_mul(price))
+            .map(|n| Amount::new(n, to_currency))
     }
 
     /// Get all currencies that have prices defined.

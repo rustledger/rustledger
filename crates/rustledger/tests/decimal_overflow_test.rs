@@ -51,6 +51,32 @@ fn check(source: &str) -> (Option<i32>, String) {
     (Some(out.status.code().unwrap_or(-1)), combined)
 }
 
+/// Run `rledger query` and return `(exit_code, combined_output)`.
+fn query(source: &str, sql: &str) -> (Option<i32>, String) {
+    let dir = std::env::temp_dir().join(format!(
+        "rledger-overflow-q-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("ledger.beancount");
+    std::fs::write(&path, source).expect("write fixture");
+    let Some(bin) = common::rledger_binary() else {
+        eprintln!("Skipping: rledger binary not found");
+        return (None, String::new());
+    };
+    let out = Command::new(bin)
+        .arg("query")
+        .arg(&path)
+        .arg(sql)
+        .output()
+        .expect("run rledger query");
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    (Some(out.status.code().unwrap_or(-1)), combined)
+}
+
 /// The process survived and said something about it.
 fn assert_reported_not_panicked(code: Option<i32>, output: &str, what: &str) {
     let Some(code) = code else { return }; // binary unavailable; already logged
@@ -282,4 +308,51 @@ fn intermediate_overflow_in_a_balanced_transaction_is_clean() {
         !out.contains("representable range"),
         "a balanced transaction must never draw an overflow diagnostic:\n{out}"
     );
+}
+
+/// A compound cost `{a # b}`, whose `N*a + b` normalization multiplies two
+/// user-supplied numbers.
+///
+/// Found only after the panic sweep was rebuilt: the first sweep assigned its
+/// binary path with `BIN=$(cargo build ...; echo path)`, which captured the
+/// build banner, so every invocation failed with "command not found" and the
+/// run reported zero panics while testing nothing.
+#[test]
+fn compound_cost_normalization_is_reported() {
+    let (code, out) = check(
+        "2024-01-01 open Assets:S\n\
+         2024-01-01 open Assets:C\n\
+         2024-02-01 * \"compound cost\"\n\
+        \x20 Assets:S  10000000000000000 HOOL {10000000000000.00 # 40000000000000000000000000000 USD}\n\
+        \x20 Assets:C\n",
+    );
+    assert_reported_not_panicked(code, &out, "compound cost");
+}
+
+/// BQL surfaces are reachable from ledger input too, and a query cell showing
+/// a clamped total is indistinguishable from a real one.
+///
+/// `cost()` over an aggregated inventory and `value()` (which multiplies by a
+/// price) were both still panicking after the first pass.
+#[test]
+fn bql_cost_and_value_report_instead_of_panicking() {
+    let src = "2024-01-01 open Assets:S\n\
+               2024-01-01 open Assets:C\n\
+               2024-02-01 * \"buy\"\n\
+              \x20 Assets:S  10000000000000000 HOOL {10000000000000.00 USD}\n\
+              \x20 Assets:C  -10000000000000000 CASHU\n";
+    for sql in [
+        "SELECT account, cost(sum(position))",
+        "SELECT account, value(sum(position))",
+        "SELECT account, sum(position) AT COST",
+        "SELECT sum(cost(position))",
+    ] {
+        let (code, out) = query(src, sql);
+        let Some(code) = code else { return };
+        assert!(
+            !out.contains("panicked"),
+            "`{sql}` must not panic the CLI:\n{out}"
+        );
+        assert_ne!(code, 101, "`{sql}` exited 101 (a panic):\n{out}");
+    }
 }

@@ -37,8 +37,10 @@ pub(super) fn execute_query<W: Write>(
         .execute(&query)
         .with_context(|| "failed to execute query")?;
 
-    // Output results using display context for consistent number formatting
-    let ctx = &settings.display_context;
+    // Output results using display context for consistent number formatting.
+    // `render_commas` is resolved ONCE here, against the surface being written,
+    // so each writer receives a context it can use verbatim (#1892).
+    let ctx = &settings.display_context.for_surface(settings.format.into());
     match settings.format {
         super::OutputFormat::Text => write_text(&result, writer, settings.numberify, ctx)?,
         super::OutputFormat::Csv => write_csv(&result, writer, settings.numberify, ctx)?,
@@ -227,17 +229,8 @@ fn write_csv<W: Write>(
     numberify: bool,
     ctx: &DisplayContext,
 ) -> Result<()> {
-    // CSV is machine interchange, so `render_commas` is dropped here even when
-    // the ledger sets it: a thousands separator inside a numeric field forces
-    // the field to be quoted and then rejected by ordinary decimal parsers
-    // (issue #1892 — it broke a reconciliation script's `Decimal()`).
-    //
-    // This matches `write_json`, which never applied the flag. Precision is
-    // untouched: only the separator is suppressed, so a value still renders at
-    // the ledger's display precision.
-    let mut ctx = ctx.clone();
-    ctx.set_render_commas(false);
-    let ctx = &ctx;
+    // `ctx` already has `render_commas` resolved for this surface by the
+    // dispatcher, so it is used verbatim here.
 
     // Print header
     writeln!(writer, "{}", result.columns.join(","))?;
@@ -1895,31 +1888,47 @@ mod tests {
         );
     }
 
-    /// CSV is machine interchange: it must never emit thousands separators,
-    /// even when the ledger asks for them (#1892).
+    /// Machine-readable surfaces must never emit thousands separators, even
+    /// when the ledger asks for them (#1892).
     ///
     /// A separator forces the field to be quoted and then breaks ordinary
-    /// decimal parsers. JSON already behaved this way; CSV was the outlier.
+    /// decimal parsers. Asserted through the SAME surface resolution the
+    /// dispatcher performs, so this covers the wiring and not just the
+    /// writer: a future format mapped to the wrong `OutputSurface` fails here.
     #[test]
-    fn csv_never_emits_thousands_separators() {
+    fn machine_surfaces_never_emit_thousands_separators() {
+        use rustledger_core::OutputSurface;
         use rustledger_query::QueryResult;
-        let mut ctx = DisplayContext::new();
-        ctx.set_render_commas(true);
-        ctx.update(rust_decimal_macros::dec!(1234567.89), "USD");
+        let mut ledger_ctx = DisplayContext::new();
+        ledger_ctx.set_render_commas(true);
+        ledger_ctx.update(rust_decimal_macros::dec!(1234567.89), "USD");
 
         let mut result = QueryResult::new(vec!["sum".into()]);
         result.add_row(vec![Value::Number(rust_decimal_macros::dec!(1234567.89))]);
 
-        let mut out = Vec::new();
-        write_csv(&result, &mut out, false, &ctx).expect("write");
-        let csv = String::from_utf8(out).expect("utf8");
-        assert!(
-            csv.contains("1234567.89"),
-            "value must render unseparated: {csv}"
-        );
-        assert!(
-            !csv.contains("1,234,567.89") && !csv.contains('"'),
-            "no separators and therefore no quoting: {csv}"
-        );
+        for format in [
+            super::super::OutputFormat::Csv,
+            super::super::OutputFormat::Json,
+            super::super::OutputFormat::Beancount,
+        ] {
+            let surface: OutputSurface = format.into();
+            assert!(
+                !surface.renders_thousands_separators(),
+                "{format:?} is not a human-reading surface"
+            );
+            let ctx = ledger_ctx.for_surface(surface);
+
+            let mut out = Vec::new();
+            write_csv(&result, &mut out, false, &ctx).expect("write");
+            let csv = String::from_utf8(out).expect("utf8");
+            assert!(
+                csv.contains("1234567.89"),
+                "{format:?}: value must render unseparated: {csv}"
+            );
+            assert!(
+                !csv.contains("1,234,567.89") && !csv.contains('"'),
+                "{format:?}: no separators and therefore no quoting: {csv}"
+            );
+        }
     }
 }

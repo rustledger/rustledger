@@ -89,6 +89,19 @@ pub enum OutputFormat {
     Json,
 }
 
+impl From<&OutputFormat> for rustledger_core::OutputSurface {
+    /// Which consumer each report output format is written for.
+    ///
+    /// Exhaustive on purpose: a new format must state whether it is read by a
+    /// person or parsed by a program (#1892).
+    fn from(f: &OutputFormat) -> Self {
+        match f {
+            OutputFormat::Text => Self::Human,
+            OutputFormat::Csv | OutputFormat::Json => Self::Machine,
+        }
+    }
+}
+
 impl OutputFormat {
     /// Parse from a string (for config file values).
     #[must_use]
@@ -581,6 +594,12 @@ fn render<W: io::Write>(
 ) -> Result<()> {
     let directives = &loaded.directives;
 
+    // Thousands separators are resolved ONCE for the surface being written:
+    // they belong in a rendered table, never in CSV/JSON a program parses
+    // (#1892). Every renderer below takes this context rather than the raw
+    // ledger one.
+    let display_context = loaded.display_context.for_surface(format.into());
+
     // Balance-computing reports read the pad-expanded view when one
     // was built (the ledger has pads), otherwise the source stream
     // directly. `unwrap_or` makes the no-pad fast path explicit: same
@@ -597,7 +616,7 @@ fn render<W: io::Write>(
             balances::report_balances(
                 balance_input,
                 account.as_deref(),
-                &loaded.display_context,
+                &display_context,
                 format,
                 writer,
             )?;
@@ -606,7 +625,7 @@ fn render<W: io::Write>(
             balsheet::report_balsheet(
                 balance_input,
                 &loaded.account_types,
-                &loaded.display_context,
+                &display_context,
                 format,
                 writer,
             )?;
@@ -615,7 +634,7 @@ fn render<W: io::Write>(
             income::report_income(
                 balance_input,
                 &loaded.account_types,
-                &loaded.display_context,
+                &display_context,
                 format,
                 writer,
             )?;
@@ -628,7 +647,7 @@ fn render<W: io::Write>(
                 balance_input,
                 &loaded.account_types,
                 account.as_deref(),
-                &loaded.display_context,
+                &display_context,
                 format,
                 writer,
             )?;
@@ -642,7 +661,7 @@ fn render<W: io::Write>(
             networth::report_networth(
                 balance_input,
                 &loaded.account_types,
-                &loaded.display_context,
+                &display_context,
                 period,
                 currency.as_deref(),
                 account.as_deref(),
@@ -678,7 +697,7 @@ fn render<W: io::Write>(
                 currency.as_deref(),
                 end.as_deref(),
                 *by_group,
-                &loaded.display_context,
+                &display_context,
                 format,
                 writer,
                 warnings,
@@ -724,7 +743,7 @@ fn render<W: io::Write>(
                 &filter,
                 *long_term_days,
                 *irr,
-                &loaded.display_context,
+                &display_context,
                 format,
                 writer,
                 warnings,
@@ -784,7 +803,7 @@ fn render<W: io::Write>(
                 balance_input,
                 &filter,
                 &loaded.account_types,
-                &loaded.display_context,
+                &display_context,
                 format,
                 writer,
                 warnings,

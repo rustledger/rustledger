@@ -96,6 +96,21 @@ pub enum OutputFormat {
     Beancount,
 }
 
+impl From<OutputFormat> for rustledger_core::OutputSurface {
+    /// Which consumer each query output format is written for.
+    ///
+    /// Exhaustive on purpose: a new output format must state whether it is
+    /// read by a person, parsed by a program, or ledger text, rather than
+    /// silently inheriting whatever the previous arm did (#1892).
+    fn from(f: OutputFormat) -> Self {
+        match f {
+            OutputFormat::Text => Self::Human,
+            OutputFormat::Csv | OutputFormat::Json => Self::Machine,
+            OutputFormat::Beancount => Self::LedgerText,
+        }
+    }
+}
+
 impl std::fmt::Display for OutputFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

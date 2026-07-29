@@ -117,8 +117,9 @@ Separators are a **display** concern, so they appear in rendered output
 
 | Surface | Separators? |
 |---------|-------------|
-| `report`, `query` (text) | yes, when the option is set |
-| `query --format csv` / `json` | **no** — these are machine interchange, and a separator breaks ordinary decimal parsers |
+| `report`, `query` — text | yes, when the option is set |
+| `report`, `query` — `--format csv` / `json` | **no** — machine interchange, and a separator breaks ordinary decimal parsers |
+| `query --format beancount` | **no** — it is ledger text, so it follows the same rule as `format` |
 | `format` (the file on disk) | **no** — see below |
 
 `rledger format` deliberately writes numbers without separators even when this

@@ -71,7 +71,7 @@ pub use directive::{
     Metadata, Note, Open, Pad, Posting, Price, PriceAnnotation, PriceKind, Query, Transaction,
     booking_sort_key, parse_precision_meta, sort_directives,
 };
-pub use display_context::{DEFAULT_CURRENCY, DisplayContext, Precision};
+pub use display_context::{DEFAULT_CURRENCY, DisplayContext, OutputSurface, Precision};
 pub use extract::{
     DEFAULT_CURRENCIES, extract_accounts, extract_accounts_iter, extract_currencies,
     extract_currencies_iter, extract_links, extract_links_iter, extract_payees,

@@ -103,10 +103,19 @@ fn income_totals_render_at_ledger_precision() {
 }
 
 #[test]
-fn csv_amounts_with_render_commas_are_quoted() {
-    // `option "render_commas" "TRUE"` puts thousands separators in
-    // formatted numbers; CSV fields containing commas must be quoted
-    // (RFC-4180) or the row grows extra columns (review catch on U4).
+fn csv_omits_thousands_separators_under_render_commas() {
+    // SUPERSEDES `csv_amounts_with_render_commas_are_quoted` (#1750).
+    //
+    // That test encoded a real review catch: with separators in CSV fields,
+    // the fields MUST be quoted (RFC-4180) or a row grows extra columns. The
+    // quoting was correct — but #1892 showed that correctly-quoted
+    // `"2,357.65"` is still rejected by ordinary decimal parsers, so a
+    // consumer could read the row and not the number.
+    //
+    // CSV now omits separators entirely, which subsumes the original concern:
+    // no comma in the field means no quoting, so no column can be split. The
+    // column-count assertion below is kept from the original test, since that
+    // is the property #1750 actually protected.
     let bin = require_rledger!();
     let source = format!("option \"render_commas\" \"TRUE\"\n{MIXED_PRECISION}");
     let mut f = tempfile::Builder::new()
@@ -119,12 +128,15 @@ fn csv_amounts_with_render_commas_are_quoted() {
 
     let csv = run_report(&bin, &path, &["balances", "--format", "csv"]);
     assert!(
-        csv.contains("\"2,357.65\""),
-        "comma-bearing amounts must be CSV-quoted: {csv}",
+        csv.contains(",2357.65,"),
+        "CSV must render the amount unseparated and unquoted: {csv}",
     );
-    // Every data row must still have exactly the header's 4 columns when
-    // parsed with quote-awareness — approximate by checking no row has a
-    // bare (unquoted) thousands comma.
+    assert!(
+        !csv.contains("2,357.65"),
+        "no thousands separator may reach a machine-readable surface: {csv}",
+    );
+    // Retained from #1750: every data row still has exactly the header's 4
+    // columns. Now trivially true (nothing is quoted), which is the point.
     for line in csv.lines().skip(1) {
         let quoted_stripped: String = {
             let mut out = String::new();

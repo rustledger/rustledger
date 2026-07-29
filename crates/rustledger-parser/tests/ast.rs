@@ -970,3 +970,67 @@ fn posting_number(r: &rustledger_parser::ParseResult, idx: usize) -> rustledger_
         other => panic!("expected a complete amount, got {other:?}"),
     }
 }
+
+/// `balance` / `price` values must not silently degrade to "the first NUMBER
+/// token" (#1892 follow-up).
+///
+/// Both directives fall back to that when the value is not an evaluable
+/// expression, and the fallback read only the first token — so everything
+/// after it was discarded without a word. Three shapes were silently wrong.
+#[test]
+fn directive_values_are_not_truncated_to_the_first_number() {
+    // Parenthesized arithmetic used to yield the leading operand. The header
+    // skip stopped at the first NUMBER, which swallowed the opening `(`.
+    let r = rustledger_parser::parse("2021-09-19 balance Assets:A  (1 + 5) USD\n");
+    assert!(r.errors.is_empty(), "valid arithmetic: {:?}", r.errors);
+    assert_eq!(balance_number(&r).to_string(), "6", "(1 + 5) is 6, not 1");
+
+    // A split numeral is malformed and must be reported, not read as its
+    // first fragment — `1,23,4.50` yielded 1, a thousandfold error.
+    for src in ["1,23,4.50", "-,7.50", ",7.50"] {
+        let text = format!("2021-09-19 balance Assets:A  {src} USD\n");
+        let r = rustledger_parser::parse(&text);
+        assert!(
+            !r.errors.is_empty(),
+            "{src} must be reported, not truncated to its first number"
+        );
+    }
+    for src in ["1,23,4.50", "-,7.50"] {
+        let text = format!("2021-09-19 price HOOL  {src} USD\n");
+        let r = rustledger_parser::parse(&text);
+        assert!(!r.errors.is_empty(), "price {src} must be reported");
+    }
+}
+
+/// The shapes that are legal must keep working — including the two that
+/// legitimately carry more than one number.
+#[test]
+fn directive_values_accept_every_legal_shape() {
+    for (src, want) in [
+        ("7.50", "7.50"),
+        ("-7.50", "-7.50"),
+        ("- 7.50", "-7.50"),
+        ("1,234.50", "1234.50"),
+        ("0.25 + 0.75", "1.00"),
+        ("(1 + 5) / 2", "3"),
+        // `~ tolerance`: the second number belongs to the tolerance clause,
+        // not the value, so it must not read as a malformed multi-number.
+        ("100.00 ~ 0.05", "100.00"),
+    ] {
+        let text = format!("2021-09-19 balance Assets:A  {src} USD\n");
+        let r = rustledger_parser::parse(&text);
+        assert!(r.errors.is_empty(), "{src} must parse: {:?}", r.errors);
+        assert_eq!(balance_number(&r).to_string(), want, "{src} value");
+    }
+}
+
+/// The asserted amount of the first `balance` directive.
+fn balance_number(r: &rustledger_parser::ParseResult) -> rustledger_core::Decimal {
+    r.directives
+        .iter()
+        .find_map(|d| match &d.value {
+            rustledger_core::Directive::Balance(b) => Some(b.amount.number),
+            _ => None,
+        })
+        .expect("a balance directive")
+}

@@ -350,6 +350,13 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     also holds an empty `errors` list. Serving either to a fixed binary
 ///     reproduces the original bug on every ledger already in the cache — and
 ///     a flipped sign is silent, so nothing downstream would flag it.
+/// v17: `balance` / `price` values are no longer read as "the first NUMBER
+///     token". Parenthesized arithmetic evaluated to the leading operand
+///     (`(1 + 5) / 2.1 USD` asserted against **1**, not 2.857…), and a split
+///     numeral did the same (`1,23,4.50 USD` -> **1**, a thousandfold error).
+///     Cached directives from a pre-fix binary therefore hold those wrong
+///     VALUES, and the malformed cases also hold an empty `errors` list — both
+///     silent, so nothing downstream would flag them.
 /// v9: `CachedOptions` gained a `set_options: Vec<String>` field
 ///     (#1340). It was previously dropped, so a cache hit lost the
 ///     record of which options the file explicitly set — making
@@ -368,7 +375,7 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     silently ignored `option "display_precision" "USD:0.0001"` (formatting
 ///     fell back to inferred precision) and the other two settings. New fields
 ///     change the archived layout, so old bytes must be regenerated.
-const CACHE_VERSION: u32 = 16;
+const CACHE_VERSION: u32 = 17;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1075,7 +1082,7 @@ mod tests {
         // is archived, so the byte arrays below still pin the same encoding —
         // only the fixture version moves. The assertions after this one prove
         // that rather than assume it.
-        const FIXTURE_VERSION: u32 = 16;
+        const FIXTURE_VERSION: u32 = 17;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1164,7 +1171,7 @@ mod tests {
         // fixture version moves.
         // v15 (#1884) is a parser-diagnostics change with no layout impact —
         // same reasoning, and the hash assertion below is what verifies it.
-        const FIXTURE_VERSION: u32 = 16;
+        const FIXTURE_VERSION: u32 = 17;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

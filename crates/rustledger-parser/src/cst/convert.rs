@@ -552,6 +552,58 @@ fn convert_query(
     Some(Spanned::new(Directive::Query(q), span))
 }
 
+/// The span of a `balance` / `price` value that holds MORE than the single
+/// signed number those directives can represent — extra `NUMBER` tokens, or a
+/// misplaced `,`.
+///
+/// Both directives fall back to "take the first `NUMBER` token and apply a
+/// leading sign" when the value is not an arithmetic expression. That fallback
+/// reads only the first token, so anything after it was DISCARDED IN SILENCE:
+/// `price HOOL 1,23,4.50 USD` stored `1 USD`, a thousandfold error with exit 0.
+/// Postings have rejected the same shapes all along (the lexer's grouping regex
+/// is strict, and a split number never forms one `NUMBER` token) — this closes
+/// the same hole for the directive family (#1892 follow-up).
+///
+/// Deliberately NOT flagged:
+/// - a `~ tolerance` clause, whose second number is legitimate — the scan stops
+///   at the `TILDE`;
+/// - arithmetic (`0.25 + 0.75 USD`), which is evaluated before this is
+///   consulted, so a well-formed expression never reaches it.
+fn malformed_directive_value(node: &crate::SyntaxNode) -> Option<crate::TextRange> {
+    let mut numbers = 0usize;
+    let mut saw_comma = false;
+    let mut start: Option<crate::TextRange> = None;
+    let mut end: Option<crate::TextRange> = None;
+    for t in node
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+    {
+        match t.kind() {
+            // Tolerance begins; its number is not part of the value.
+            crate::SyntaxKind::TILDE => break,
+            // The trailing currency closes the value. A `price` directive's
+            // BASE currency precedes the number, so only break once a number
+            // has been seen.
+            crate::SyntaxKind::CURRENCY if numbers > 0 => break,
+            crate::SyntaxKind::NUMBER => {
+                numbers += 1;
+                start.get_or_insert(t.text_range());
+                end = Some(t.text_range());
+            }
+            crate::SyntaxKind::COMMA => {
+                saw_comma = true;
+                start.get_or_insert(t.text_range());
+                end = Some(t.text_range());
+            }
+            _ => {}
+        }
+    }
+    if !saw_comma && numbers <= 1 {
+        return None;
+    }
+    Some(crate::TextRange::new(start?.start(), end?.end()))
+}
+
 fn convert_price(
     node: &PriceDirective,
     bom_offset: u32,
@@ -562,6 +614,23 @@ fn convert_price(
     // Same arithmetic support as `convert_balance`: a price
     // directive's value can use `+`, `-`, `*`, `/`, and parens.
     let number = directive_arithmetic_value(node.syntax()).or_else(|| {
+        // The fallback keeps only the first NUMBER, so refuse a value that
+        // carries more than one — see `malformed_directive_value`.
+        if let Some(range) = malformed_directive_value(node.syntax()) {
+            let start: u32 = range.start().into();
+            let end: u32 = range.end().into();
+            let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+            errors.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError(
+                    "malformed amount: a thousands separator must be inside the \
+                     number (as in `-1,234.00`), and a `+`/`-` must be attached \
+                     to it"
+                        .to_string(),
+                ),
+                span,
+            ));
+            return None;
+        }
         let mut n = parse_decimal_token(node.number()?.text())?;
         if node_has_minus_before_number(node.syntax()) {
             n = -n;
@@ -594,6 +663,23 @@ fn convert_balance(
     // Falls back to the first NUMBER token if the expression
     // can't be evaluated, with the legacy sign-flip behavior.
     let number = directive_arithmetic_value(node.syntax()).or_else(|| {
+        // The fallback keeps only the first NUMBER, so refuse a value that
+        // carries more than one — see `malformed_directive_value`.
+        if let Some(range) = malformed_directive_value(node.syntax()) {
+            let start: u32 = range.start().into();
+            let end: u32 = range.end().into();
+            let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+            errors.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError(
+                    "malformed amount: a thousands separator must be inside the \
+                     number (as in `-1,234.00`), and a `+`/`-` must be attached \
+                     to it"
+                        .to_string(),
+                ),
+                span,
+            ));
+            return None;
+        }
         let mut n = parse_decimal_token(node.number()?.text())?;
         if node_has_minus_before_number(node.syntax()) {
             n = -n;
@@ -1271,7 +1357,24 @@ fn directive_arithmetic_value(node: &crate::SyntaxNode) -> Option<Decimal> {
         .children_with_tokens()
         .filter_map(rowan::NodeOrToken::into_token)
         .filter(|t| !is_trivia_kind(t.kind()))
-        .skip_while(|t| t.kind() != crate::SyntaxKind::NUMBER)
+        // Skip the directive header (DATE, keyword, ACCOUNT / base CURRENCY)
+        // and stop at the first token that can BEGIN a value.
+        //
+        // This used to skip to the first `NUMBER`, which also swallowed a
+        // leading `(`: `(1 + 5) / 2.1 USD` became `1 + 5 ) / 2.1`, failed to
+        // parse, and fell through to "take the first NUMBER" — so the
+        // directive silently asserted against **1**. A leading sign was
+        // likewise dropped and re-applied by the caller. Neither header token
+        // can be a `NUMBER`, `L_PAREN` or a sign, so this cannot over-skip.
+        .skip_while(|t| {
+            !matches!(
+                t.kind(),
+                crate::SyntaxKind::NUMBER
+                    | crate::SyntaxKind::L_PAREN
+                    | crate::SyntaxKind::MINUS
+                    | crate::SyntaxKind::PLUS
+            )
+        })
         .collect();
     let mut depth: i32 = 0;
     let mut first_currency_idx: Option<usize> = None;

@@ -112,6 +112,26 @@ Use commas as thousand separators.
 option "render_commas" "TRUE"
 ```
 
+Separators are a **display** concern, so they appear in rendered output
+(`report`, `query` text) and never in ledger text or machine-readable output:
+
+| Surface | Separators? |
+|---------|-------------|
+| `report`, `query` (text) | yes, when the option is set |
+| `query --format csv` / `json` | **no** — these are machine interchange, and a separator breaks ordinary decimal parsers |
+| `format` (the file on disk) | **no** — see below |
+
+`rledger format` deliberately writes numbers without separators even when this
+option is set: the formatter's job is one canonical on-disk representation, and
+`,` is locale-ambiguous. This differs from Beancount's `bean-format`, which
+leaves numerals untouched, though Beancount's own `printer` also drops them.
+
+The practical consequence: a file containing `1,234,567.89` will always be
+reported as unformatted by `format --check` (exit 1), which fails a CI
+formatting gate. Run `rledger format` once to canonicalize the file; it is
+stable from then on. The parser accepts separators on input either way, so
+existing files keep loading.
+
 ### inferred_tolerance_default
 
 Default tolerance for balance checking.

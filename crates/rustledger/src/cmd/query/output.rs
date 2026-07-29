@@ -67,6 +67,15 @@ fn write_text<W: Write>(
     // calling it per row would inflate the ledger's sample frequencies by N
     // and could shift the column's effective mode. Caught by Copilot review.
     let mut col_contexts: Vec<DisplayContext> = vec![DisplayContext::new(); result.columns.len()];
+    // `render_commas` is presentation policy for the whole table, not a
+    // per-column precision fact, so every column carries it regardless of what
+    // it holds. It used to arrive only as a side effect of the Number-column
+    // `update_from` below, which meant `SUM(number)` printed `1,234,567.89`
+    // while `SUM(position)` in the same query printed `1234567.89 USD`
+    // (issue #1892).
+    for col in &mut col_contexts {
+        col.set_render_commas(ctx.render_commas());
+    }
     let mut col_inherited: Vec<bool> = vec![false; result.columns.len()];
     for row in &result.rows {
         for (i, value) in row.iter().enumerate() {
@@ -218,6 +227,18 @@ fn write_csv<W: Write>(
     numberify: bool,
     ctx: &DisplayContext,
 ) -> Result<()> {
+    // CSV is machine interchange, so `render_commas` is dropped here even when
+    // the ledger sets it: a thousands separator inside a numeric field forces
+    // the field to be quoted and then rejected by ordinary decimal parsers
+    // (issue #1892 — it broke a reconciliation script's `Decimal()`).
+    //
+    // This matches `write_json`, which never applied the flag. Precision is
+    // untouched: only the separator is suppressed, so a value still renders at
+    // the ledger's display precision.
+    let mut ctx = ctx.clone();
+    ctx.set_render_commas(false);
+    let ctx = &ctx;
+
     // Print header
     writeln!(writer, "{}", result.columns.join(","))?;
 
@@ -1838,6 +1859,67 @@ mod tests {
         assert_eq!(
             last_cell, "0.00",
             "currency-named column drives padding regardless of PIVOT path; row was {data_row:?}"
+        );
+    }
+
+    /// `render_commas` is a property of the TABLE, not of a column's contents:
+    /// every column honors it, whatever kind of value it holds (#1892).
+    ///
+    /// It previously arrived only as a side effect of the Number-column
+    /// precision inheritance, so one query printed `SUM(number)` with
+    /// separators and `SUM(position)` without them.
+    #[test]
+    fn render_commas_applies_to_every_column_kind() {
+        use rustledger_core::{Amount, Position};
+        use rustledger_query::QueryResult;
+        let mut ctx = DisplayContext::new();
+        ctx.set_render_commas(true);
+        ctx.update(rust_decimal_macros::dec!(1234567.89), "USD");
+
+        let mut result = QueryResult::new(vec!["num".into(), "pos".into()]);
+        result.add_row(vec![
+            Value::Number(rust_decimal_macros::dec!(1234567.89)),
+            Value::Position(Box::new(Position::simple(Amount::new(
+                rust_decimal_macros::dec!(1234567.89),
+                "USD",
+            )))),
+        ]);
+
+        let mut out = Vec::new();
+        write_text(&result, &mut out, false, &ctx).expect("write");
+        let text = String::from_utf8(out).expect("utf8");
+        assert_eq!(
+            text.matches("1,234,567.89").count(),
+            2,
+            "both the Number and the Position column must carry separators:\n{text}"
+        );
+    }
+
+    /// CSV is machine interchange: it must never emit thousands separators,
+    /// even when the ledger asks for them (#1892).
+    ///
+    /// A separator forces the field to be quoted and then breaks ordinary
+    /// decimal parsers. JSON already behaved this way; CSV was the outlier.
+    #[test]
+    fn csv_never_emits_thousands_separators() {
+        use rustledger_query::QueryResult;
+        let mut ctx = DisplayContext::new();
+        ctx.set_render_commas(true);
+        ctx.update(rust_decimal_macros::dec!(1234567.89), "USD");
+
+        let mut result = QueryResult::new(vec!["sum".into()]);
+        result.add_row(vec![Value::Number(rust_decimal_macros::dec!(1234567.89))]);
+
+        let mut out = Vec::new();
+        write_csv(&result, &mut out, false, &ctx).expect("write");
+        let csv = String::from_utf8(out).expect("utf8");
+        assert!(
+            csv.contains("1234567.89"),
+            "value must render unseparated: {csv}"
+        );
+        assert!(
+            !csv.contains("1,234,567.89") && !csv.contains('"'),
+            "no separators and therefore no quoting: {csv}"
         );
     }
 }

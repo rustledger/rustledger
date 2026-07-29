@@ -166,9 +166,13 @@ fuzz_target!(|input: FuzzTransaction| {
             .with_synthesized_posting(posting)
             .with_synthesized_posting(counter);
 
-        // Ignore errors — we're building up state, some combos may fail
+        // Ignore errors — we're building up state, some combos may fail.
+        // That includes `apply`'s overflow error (#1863): the fuzzer generates
+        // arbitrary units and costs, so an out-of-range product is a legitimate
+        // input to explore past, not a crash. Unwrapping here would abort the
+        // run and report a false finding — the opposite of this target's job.
         if let Ok(result) = engine.book_and_interpolate(&txn) {
-            engine.apply(&result.transaction).expect("fixture fits in Decimal");
+            let _ = engine.apply(&result.transaction);
         }
     }
 

@@ -264,7 +264,7 @@ This document catalogs all validation errors and warnings with their trigger con
 of rledger's decimal type (a 96-bit type, roughly ±7.9×10²⁸ with ~28 significant
 digits).
 
-**Message:** `{currency} amount exceeds the representable range (±7.9e28); split the transaction or use smaller units`
+**Message:** `{currency} amount exceeds the representable range (±7.9e28); split the transaction, or denominate it in larger units (thousands, millions) so the number is smaller`
 
 **Severity:** Error
 

@@ -85,8 +85,9 @@ pub enum InterpolationError {
     /// fabricated figure presented as the user's own data.
     #[error(
         "amounts in this transaction exceed the {} range, so the {currency} \
-         posting amount cannot be computed; split the transaction or use \
-         smaller units",
+         posting amount cannot be computed; split the transaction, or \
+         denominate it in larger units (thousands, millions) so the number \
+         is smaller",
         "±7.9e28"
     )]
     Unrepresentable {
@@ -114,11 +115,12 @@ pub struct InterpolationResult {
 /// The distinction matters: a residual that cannot be represented is only
 /// FATAL when interpolation must actually solve an amount from it — that
 /// amount would be written into the posting as if the user had typed it. When
-/// every posting is explicit, interpolation has nothing to solve and the
-/// balance validator recomputes the residual in `BigDecimal`, reporting the
-/// exact imbalance (matching Python beancount, whose `decimal` context has no
-/// magnitude ceiling). Aborting here would replace that precise diagnostic
-/// with a vaguer one.
+/// there is nothing to solve (no elided posting AND no unresolved `{}` cost
+/// spec — see the gate after the posting loop), the balance validator
+/// recomputes the residual in `BigDecimal` and reports the exact imbalance,
+/// matching Python beancount, whose `decimal` context has no magnitude
+/// ceiling. Aborting here would replace that precise diagnostic with a vaguer
+/// one.
 fn accumulate_residual(
     residuals: &mut HashMap<Currency, Decimal>,
     unrepresentable: &mut std::collections::HashSet<Currency>,

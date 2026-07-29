@@ -666,8 +666,9 @@ impl BookingEngine {
     /// the ledger's numbers, not of the caller, so it is reported rather than
     /// asserted. A failed *reduction* keeps the historical
     /// debug-assert-then-ignore contract below: that means the caller applied
-    /// an unbooked transaction, which is a bug in the caller, and every
-    /// existing caller relies on release builds continuing past it.
+    /// an unbooked transaction, which is a bug in the caller. Keeping it
+    /// non-fatal preserves every existing caller's release-build behavior;
+    /// only the overflow path is new.
     pub fn apply(&mut self, txn: &Transaction) -> Result<(), BookingError> {
         for posting in &txn.postings {
             let reduced = self.try_apply_posting(posting, txn.date);

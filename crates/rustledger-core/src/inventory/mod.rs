@@ -174,7 +174,12 @@ pub enum BookingError {
 ///
 /// `rust_decimal` is a 96-bit type with a hard ~±7.9e28 magnitude ceiling and
 /// its `+`/`*` panic on overflow. There is no in-range answer to substitute,
-/// so every reachable site reports this instead.
+/// so the arithmetic reports instead of clamping.
+///
+/// This type is the reporting channel for sites that own a currency and sit on
+/// a `Result` path. Others use a plain `Option` because they have no currency
+/// to name or no error channel to use — [`crate::Cost::total_cost`],
+/// [`sum_account_and_subaccounts`], and `rustledger_booking`'s weight ladder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverflowError {
     /// The currency whose running total left the range.
@@ -186,7 +191,8 @@ impl fmt::Display for OverflowError {
         write!(
             f,
             "{} amount exceeds the representable range (±7.9e28); \
-             split the transaction or use smaller units",
+             split the transaction, or denominate it in larger units \
+             (thousands, millions) so the number is smaller",
             self.currency
         )
     }

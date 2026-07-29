@@ -622,9 +622,9 @@ fn convert_price(
             let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
             errors.push(crate::ParseError::new(
                 crate::ParseErrorKind::SyntaxError(
-                    "malformed amount: a thousands separator must be inside the \
-                     number (as in `-1,234.00`), and a `+`/`-` must be attached \
-                     to it"
+                    "malformed amount: expected one number, optionally signed, \
+                     or an arithmetic expression. A thousands separator must be \
+                     inside the number, as in `-1,234.00`"
                         .to_string(),
                 ),
                 span,
@@ -671,9 +671,9 @@ fn convert_balance(
             let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
             errors.push(crate::ParseError::new(
                 crate::ParseErrorKind::SyntaxError(
-                    "malformed amount: a thousands separator must be inside the \
-                     number (as in `-1,234.00`), and a `+`/`-` must be attached \
-                     to it"
+                    "malformed amount: expected one number, optionally signed, \
+                     or an arithmetic expression. A thousands separator must be \
+                     inside the number, as in `-1,234.00`"
                         .to_string(),
                 ),
                 span,
@@ -1163,7 +1163,7 @@ fn convert_posting(
         errors.push(crate::ParseError::new(
             crate::ParseErrorKind::SyntaxError(
                 "unexpected token before posting amount: a `+`/`-` must be \
-                 attached to a number, and a thousands separator must be \
+                 followed by a number, and a thousands separator must be \
                  inside one (as in `-1,234.00`)"
                     .to_string(),
             ),

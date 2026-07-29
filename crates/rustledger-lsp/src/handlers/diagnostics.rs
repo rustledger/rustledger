@@ -242,6 +242,32 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+/// Map a booking failure to the validation code that best describes it.
+///
+/// `rledger check` prints these under a single `BOOK` label, but LSP
+/// diagnostics carry a machine-readable code, so the classes are separated
+/// here. Only kinds that booking can actually return are listed; the catch-all
+/// keeps a new `BookingError` variant compiling rather than silently
+/// misclassifying it, at the cost of a less specific code until it is added.
+fn booking_error_code(err: &rustledger_booking::BookingError) -> rustledger_validate::ErrorCode {
+    use rustledger_booking::BookingError as B;
+    use rustledger_booking::InterpolationError as I;
+    use rustledger_core::BookingError as CoreB;
+    use rustledger_validate::ErrorCode;
+    match err {
+        B::Inventory(inner) => match inner.error {
+            CoreB::Overflow(_) => ErrorCode::ArithmeticOverflow,
+            CoreB::InsufficientUnits { .. } => ErrorCode::InsufficientUnits,
+            CoreB::AmbiguousMatch { .. } => ErrorCode::AmbiguousLotMatch,
+            CoreB::NoMatchingLot { .. } | CoreB::CurrencyMismatch { .. } => {
+                ErrorCode::NoMatchingLot
+            }
+        },
+        B::Interpolation(I::Unrepresentable { .. }) => ErrorCode::ArithmeticOverflow,
+        B::Interpolation(_) => ErrorCode::TransactionUnbalanced,
+    }
+}
+
 pub(crate) fn run_ledger_validation(
     mut booked_directives: Vec<Spanned<Directive>>,
     validation_options: ValidationOptions,
@@ -260,17 +286,42 @@ pub(crate) fn run_ledger_validation(
     // Use Strict booking method to match rledger check's default behavior.
     let mut booking_engine = BookingEngine::with_method(BookingMethod::Strict);
     booking_engine.register_account_methods(booked_directives.iter().map(|s| &s.value));
+    // Booking failures, surfaced as diagnostics below.
+    //
+    // `rledger check` reports these itself (`run_booking` pushes a BOOK error
+    // and drops the transaction before Late validation). The LSP used to drop
+    // the error on the floor and let validation re-derive something from the
+    // un-interpolated transaction, which produced a DIFFERENT and misleading
+    // message for the same file — "does not balance: residual 1e29 USD" where
+    // `check` said the posting amount could not be computed (#1863). The
+    // balance validator now declines to judge a transaction with unfilled
+    // postings, so without this the transaction would go silent instead.
+    let mut booking_errors: Vec<ValidationError> = Vec::new();
     for spanned in &mut booked_directives {
-        if let Directive::Transaction(txn) = &mut spanned.value
-            && let Ok(result) = booking_engine.book_and_interpolate(txn)
-        {
-            // An overflow leaves the transaction unbooked here; the
-            // validation pass below reports it as E4004 (#1863).
-            if booking_engine.apply(&result.transaction).is_ok() {
-                *txn = result.transaction;
-            }
+        let (span, file_id) = (spanned.span, spanned.file_id);
+        let Directive::Transaction(txn) = &mut spanned.value else {
+            continue;
+        };
+        let date = txn.date;
+        let outcome = booking_engine.book_and_interpolate(txn).and_then(|result| {
+            booking_engine.apply(&result.transaction)?;
+            Ok(result)
+        });
+        match outcome {
+            Ok(result) => *txn = result.transaction,
+            // Leave the transaction as-is: the remaining validators still
+            // check what they can (account lifecycle, currency constraints).
+            Err(e) => booking_errors.push(ValidationError::with_location(
+                booking_error_code(&e),
+                e.to_string(),
+                date,
+                &Spanned {
+                    value: (),
+                    span,
+                    file_id,
+                },
+            )),
         }
-        // If booking fails, we leave the transaction as-is and let validation catch it
     }
 
     let mut plugin_errors_out = Vec::new();
@@ -333,6 +384,19 @@ pub(crate) fn run_ledger_validation(
     let (session, late_errs) = session.run_late_spanned(&booked_directives, today);
     errors.extend(late_errs);
     errors.extend(session.finalize());
+    // The transaction stays in the validation input (so account-lifecycle and
+    // currency checks still run on it), which means a validator can re-derive
+    // the same failure from the same inventories — an inventory overflow is
+    // reported both by `apply` here and by `update_inventories` there, word
+    // for word. Keep one. Booking failures the validators cannot restate,
+    // such as an unrepresentable interpolation, are unaffected.
+    let seen: std::collections::HashSet<(rustledger_validate::ErrorCode, String)> =
+        errors.iter().map(|e| (e.code, e.message.clone())).collect();
+    errors.extend(
+        booking_errors
+            .into_iter()
+            .filter(|e| !seen.contains(&(e.code, e.message.clone()))),
+    );
 
     LedgerValidation {
         errors,
@@ -2517,5 +2581,67 @@ plugin "auto_accounts"
             "auto_accounts (from the ledger) must still synthesize opens for the \
              unopened file even when the current file's parse is broken — got {b_codes:?}"
         );
+    }
+
+    /// A booking failure must reach the editor as the SAME diagnostic
+    /// `rledger check` prints, not as something a validator re-derived from
+    /// the half-booked transaction (#1863).
+    ///
+    /// `check` books before Late validation and drops failed transactions, so
+    /// it reports "the posting amount cannot be computed". The LSP collapses
+    /// Early+Late into one pass and therefore still validates the failed
+    /// transaction; before this fix the balance validator judged its
+    /// un-interpolated postings and reported "does not balance: residual 1e29
+    /// USD" — pointing the user at an imbalance that would vanish once the
+    /// real error was fixed.
+    #[test]
+    fn booking_failures_reach_the_editor_with_checks_wording() {
+        let src = "2024-01-01 open Assets:Stock\n\
+                   2024-01-01 open Assets:Cash\n\
+                   2024-02-01 * \"x\"\n\
+                  \x20 Assets:Stock  10000000000000000 HOOL {10000000000000.00 USD}\n\
+                  \x20 Assets:Cash\n";
+        let parsed = rustledger_parser::parse(src);
+        let diags = all_diagnostics(&parsed, src, None, None, None, &[], PositionEncoding::Utf16);
+
+        assert_eq!(diags.len(), 1, "exactly one diagnostic: {diags:?}");
+        let d = &diags[0];
+        assert!(
+            d.message.contains("cannot be computed"),
+            "must be the booking failure `check` reports: {}",
+            d.message
+        );
+        assert!(
+            !d.message.contains("does not balance"),
+            "must NOT re-derive a balance error from the unfilled postings: {}",
+            d.message
+        );
+    }
+
+    /// The complement: an overflow must not silence a transaction that IS
+    /// genuinely unbalanced, and must not fire on one that balances.
+    #[test]
+    fn overflow_handling_does_not_disturb_ordinary_balance_checking() {
+        for (src, want) in [
+            (
+                "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-02-01 * \"x\"\n  Assets:A   10.00 USD\n  Assets:B  -10.00 USD\n",
+                None,
+            ),
+            (
+                "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-02-01 * \"x\"\n  Assets:A   10.00 USD\n  Assets:B   -7.00 USD\n",
+                Some("residual 3.00 USD"),
+            ),
+        ] {
+            let parsed = rustledger_parser::parse(src);
+            let diags =
+                all_diagnostics(&parsed, src, None, None, None, &[], PositionEncoding::Utf16);
+            match want {
+                None => assert!(diags.is_empty(), "balanced ledger must be clean: {diags:?}"),
+                Some(needle) => assert!(
+                    diags.iter().any(|d| d.message.contains(needle)),
+                    "expected {needle:?} in {diags:?}"
+                ),
+            }
+        }
     }
 }

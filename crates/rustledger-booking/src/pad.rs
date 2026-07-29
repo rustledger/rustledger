@@ -239,27 +239,30 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                         // from these same balances, so an overflow here means
                         // the pad target itself is out of range — report it
                         // rather than pad to a clamped figure.
-                        let applied = inventories
-                            .get_mut(&pending.pad.account)
-                            .map(|inv| {
-                                inv.add(Position::simple(Amount::new(
-                                    difference,
-                                    &bal.amount.currency,
-                                )))
-                            })
-                            .transpose()
-                            .and_then(|_| {
-                                inventories
-                                    .get_mut(&pending.pad.source_account)
-                                    .map(|inv| {
-                                        inv.add(Position::simple(Amount::new(
-                                            -difference,
-                                            &bal.amount.currency,
-                                        )))
-                                    })
-                                    .transpose()
-                            });
-                        if let Err(e) = applied {
+                        //
+                        // A pad is two halves of one entry, so it applies as a
+                        // unit: if the source overflows after the target
+                        // succeeded, the target is UNDONE. Leaving it applied
+                        // would credit the target without debiting the source
+                        // while emitting no synthetic transaction, so the
+                        // inventories and the directive list would disagree —
+                        // and a later assertion on the target could pass off a
+                        // pad that never happened. The undo is always
+                        // representable: it restores a total that existed a
+                        // moment ago.
+                        let currency = &bal.amount.currency;
+                        let mut apply = |account, number| {
+                            inventories
+                                .get_mut(account)
+                                .map(|inv| inv.add(Position::simple(Amount::new(number, currency))))
+                                .transpose()
+                        };
+                        if let Err(e) = apply(&pending.pad.account, difference) {
+                            errors.push(PadError::new(bal.date, e.to_string()));
+                            continue;
+                        }
+                        if let Err(e) = apply(&pending.pad.source_account, -difference) {
+                            drop(apply(&pending.pad.account, -difference));
                             errors.push(PadError::new(bal.date, e.to_string()));
                             continue;
                         }

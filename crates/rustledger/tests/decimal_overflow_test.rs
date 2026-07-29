@@ -210,3 +210,76 @@ fn ordinary_amounts_are_untouched() {
         "unexpected output:\n{out}"
     );
 }
+
+/// A pad that cannot be applied must leave NEITHER account changed.
+///
+/// A pad is two halves of one entry. When the source half overflows after the
+/// target half succeeded, an earlier version left the target credited, emitted
+/// no synthetic transaction, and reported the error — so a LATER assertion on
+/// the target passed off a pad that never happened. Sabotage-verified: dropping
+/// the undo makes the final assertion report
+/// `expected 0 USD, got 40000000000000000000000000000 USD`.
+#[test]
+fn a_failed_pad_credits_neither_account() {
+    let (code, out) = check(
+        "2024-01-01 open Assets:A\n\
+         2024-01-01 open Assets:Big\n\
+         2024-01-01 open Equity:O\n\
+         2024-01-05 * \"load the pad source close to the ceiling\"\n\
+        \x20 Assets:Big   70000000000000000000000000000 USD\n\
+        \x20 Equity:O    -70000000000000000000000000000 USD\n\
+         2024-02-01 pad Assets:A Equity:O\n\
+         2024-03-01 balance Assets:A  40000000000000000000000000000 USD\n\
+         2024-04-01 balance Assets:A  0 USD\n",
+    );
+    assert_reported_not_panicked(code, &out, "unappliable pad");
+    if code.is_none() {
+        return;
+    }
+    assert!(
+        out.contains("E4004"),
+        "the pad that could not be applied must be reported:\n{out}"
+    );
+    assert!(
+        !out.contains("E2001") && !out.contains("Balance failed"),
+        "the target must not keep a credit from a pad that was never emitted — \
+         the closing `balance Assets:A 0 USD` proves it was undone:\n{out}"
+    );
+}
+
+/// A transaction that BALANCES but whose running sum overflows partway.
+///
+/// Accumulation is order-dependent: `[+7e28, +7e28, -7e28, -7e28]` leaves
+/// `Decimal`'s range at the second posting even though the total is exactly
+/// zero. The fast tier therefore has no answer, and the only correct response
+/// is to escalate — reporting an error here would condemn a perfectly good
+/// transaction.
+///
+/// This is the sharpest test of the escalation: a fix that merely refused on
+/// overflow (rather than recomputing in `BigDecimal`) passes every other test
+/// in this file and fails this one.
+#[test]
+fn intermediate_overflow_in_a_balanced_transaction_is_clean() {
+    let (code, out) = check(
+        "2024-01-01 open Assets:A\n\
+         2024-01-01 open Assets:B\n\
+         2024-01-01 open Assets:C\n\
+         2024-01-01 open Assets:D\n\
+         2024-02-01 * \"balances exactly; the running sum does not\"\n\
+        \x20 Assets:A   70000000000000000000000000000 USD\n\
+        \x20 Assets:B   70000000000000000000000000000 USD\n\
+        \x20 Assets:C  -70000000000000000000000000000 USD\n\
+        \x20 Assets:D  -70000000000000000000000000000 USD\n",
+    );
+    let Some(code) = code else { return };
+    assert!(!out.contains("panicked"), "{out}");
+    assert_eq!(
+        code, 0,
+        "the true residual is zero, so this must pass cleanly — the fast tier \
+         overflowing is not evidence of an imbalance:\n{out}"
+    );
+    assert!(
+        !out.contains("representable range"),
+        "a balanced transaction must never draw an overflow diagnostic:\n{out}"
+    );
+}

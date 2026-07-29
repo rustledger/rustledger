@@ -230,9 +230,18 @@ pub fn validate_balance_late(
                             .transpose()
                             .err()
                     };
-                    // Add to the target account, subtract from the source.
-                    let overflow = pad_into(&bal.account, difference)
-                        .or_else(|| pad_into(&pending_pad.source_account, -difference));
+                    // Add to the target account, subtract from the source. A
+                    // pad is two halves of one entry, so if the source half
+                    // overflows the target half is UNDONE — otherwise the
+                    // target carries a credit with no matching debit, and a
+                    // later assertion on it could pass off a pad that never
+                    // happened. The undo restores a total that existed a
+                    // moment ago, so it cannot itself overflow.
+                    let overflow = pad_into(&bal.account, difference).or_else(|| {
+                        pad_into(&pending_pad.source_account, -difference).inspect(|_| {
+                            drop(pad_into(&bal.account, -difference));
+                        })
+                    });
 
                     if let Some(e) = overflow {
                         errors.push(

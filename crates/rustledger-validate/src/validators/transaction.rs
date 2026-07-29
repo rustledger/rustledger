@@ -340,6 +340,23 @@ pub fn validate_transaction_balance(
         return;
     }
 
+    // Same rule, other cause: a posting whose units interpolation never filled
+    // in. The residual of a half-filled transaction is an artifact of the
+    // failure, not a fact about the user's file — reporting it sends them
+    // hunting for an imbalance that would not exist once the real error is
+    // fixed.
+    //
+    // Unreachable from `rledger check`, whose pipeline books BEFORE Late
+    // validation and drops failed transactions (`run_booking`'s
+    // `failed_indices`), so every posting it sees is filled. It matters for
+    // the LSP, which collapses Early+Late into one pass and therefore does
+    // validate transactions whose booking failed: without this it reported
+    // "does not balance: residual 1e29 USD" where `check` reported that the
+    // posting amount could not be computed at all (#1863).
+    if txn.postings.iter().any(|p| p.amount().is_none()) {
+        return;
+    }
+
     // Fast path: use rust_decimal first. If ALL residuals are exactly zero,
     // the transaction definitely balances — skip the expensive BigDecimal
     // calculation. We only skip on exact zero (not "within tolerance")

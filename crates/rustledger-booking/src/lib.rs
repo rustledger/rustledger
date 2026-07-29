@@ -710,10 +710,18 @@ pub fn calculate_residual_precise(transaction: &Transaction) -> FxHashMap<Curren
 #[must_use]
 #[allow(clippy::implicit_hasher)]
 pub fn is_balanced(transaction: &Transaction, tolerances: &FxHashMap<Currency, Decimal>) -> bool {
-    // Overflow in the fast tier means the residual is far outside any
-    // tolerance, so the transaction is not balanced. (The validation pipeline
-    // does not come through here — it escalates to BigDecimal and reports the
-    // exact residual.)
+    // Overflow in the fast tier means this tier has no answer, NOT that the
+    // transaction is unbalanced: accumulation is order-dependent, so postings
+    // of `[+7e28, +7e28, -7e28, -7e28]` overflow the running sum even though
+    // they total exactly zero. Returning `false` is therefore a conservative
+    // under-approximation — it can report a balanced transaction as unbalanced,
+    // never the reverse.
+    //
+    // Acceptable only because this is a low-level primitive that the pipeline
+    // does not use (see the doc above): `validate_transaction_balance`
+    // escalates to `calculate_residual_precise`, which has no ceiling and gets
+    // the exact answer. A caller who needs that must do the same rather than
+    // trust this `false`.
     let Some(residuals) = calculate_residual(transaction) else {
         return false;
     };

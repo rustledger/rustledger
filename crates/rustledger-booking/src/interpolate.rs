@@ -420,13 +420,12 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                         let (curr, signed) = match price.kind {
                             rustledger_core::PriceKind::Unit => (
                                 price_amt.currency.clone(),
-                                if let Some(v) = amount
-                                    .number
-                                    .abs()
-                                    .checked_mul(price_amt.number)
-                                    .and_then(|v| v.checked_mul(amount.number.signum()))
-                                {
-                                    v
+                                if let Some(v) = amount.number.abs().checked_mul(price_amt.number) {
+                                    // `* signum` is exact: signum is -1, 0 or
+                                    // 1, and `-Decimal::MIN == Decimal::MAX`
+                                    // is representable, so only the price
+                                    // product above can leave the range.
+                                    v * amount.number.signum()
                                 } else {
                                     unrepresentable.insert(price_amt.currency.clone());
                                     continue;
@@ -442,14 +441,10 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                                 }
                                 (
                                     price_amt.currency.clone(),
-                                    if let Some(v) =
-                                        price_amt.number.checked_mul(amount.number.signum())
-                                    {
-                                        v
-                                    } else {
-                                        unrepresentable.insert(price_amt.currency.clone());
-                                        continue;
-                                    },
+                                    // Exact for the same reason as the
+                                    // per-unit branch: multiplying by a signum
+                                    // cannot leave the range.
+                                    price_amt.number * amount.number.signum(),
                                 )
                             }
                         };

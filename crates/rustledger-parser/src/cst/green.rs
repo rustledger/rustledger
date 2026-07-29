@@ -356,7 +356,10 @@ fn green_has_orphaned_amount_prefix(node: &rowan::GreenNodeData) -> bool {
                 if kind == K::NEWLINE {
                     return false;
                 }
-                return true;
+                // Same narrow set as red — see `orphaned_amount_prefix`.
+                if matches!(kind, K::MINUS | K::PLUS | K::COMMA) {
+                    return true;
+                }
             }
         }
     }

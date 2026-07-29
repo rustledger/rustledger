@@ -1619,8 +1619,23 @@ fn convert_meta_entries(node: &crate::SyntaxNode) -> Metadata {
 /// about which postings are well formed — the property `fuzz_green_eq_red`
 /// checks.
 ///
+/// Deliberately narrow: only a stray sign or comma counts. Those are the
+/// tokens that silently CHANGE A VALUE — a dropped `-` flips the sign, and a
+/// misplaced `,` splits a number. Any other junk between the account and the
+/// amount (a `✨` inside an account name, a mangled transaction header) is
+/// already reported as "unexpected input" by error recovery, and reporting it
+/// again here would double up on the same span with a message about thousands
+/// separators that does not describe the actual problem.
+///
 /// Trivia and the posting flag are not orphans, and neither is anything at or
 /// after the first `AMOUNT`: trailing junk is already reported separately.
+pub(super) const fn is_orphanable_amount_prefix(kind: crate::SyntaxKind) -> bool {
+    matches!(
+        kind,
+        crate::SyntaxKind::MINUS | crate::SyntaxKind::PLUS | crate::SyntaxKind::COMMA
+    )
+}
+
 pub(super) fn orphaned_amount_prefix(node: &crate::SyntaxNode) -> Option<crate::TextRange> {
     let mut seen_account = false;
     let mut start: Option<crate::TextRange> = None;
@@ -1644,6 +1659,9 @@ pub(super) fn orphaned_amount_prefix(node: &crate::SyntaxNode) -> Option<crate::
                 }
                 if kind == crate::SyntaxKind::NEWLINE {
                     break;
+                }
+                if !is_orphanable_amount_prefix(kind) {
+                    continue;
                 }
                 start.get_or_insert(t.text_range());
                 end = Some(t.text_range());

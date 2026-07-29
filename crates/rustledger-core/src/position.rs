@@ -110,10 +110,13 @@ impl Position {
 
     /// Calculate the book value (total cost) of this position.
     ///
-    /// Returns `None` if there is no cost.
+    /// Returns `None` if there is no cost, or if `units × cost` leaves
+    /// `rust_decimal`'s range (see [`Cost::total_cost`]).
     #[must_use]
     pub fn book_value(&self) -> Option<Amount> {
-        self.cost.as_ref().map(|c| c.total_cost(self.units.number))
+        self.cost
+            .as_ref()
+            .and_then(|c| c.total_cost(self.units.number))
     }
 
     /// Check if this position matches a cost specification.

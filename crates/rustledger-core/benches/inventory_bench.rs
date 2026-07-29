@@ -27,7 +27,8 @@ fn generate_inventory(num_positions: usize) -> Inventory {
             1 + (i % 28) as u32,
         ));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "STOCK"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "STOCK"), cost))
+            .expect("fixture fits in Decimal");
     }
 
     inv
@@ -48,7 +49,8 @@ fn bench_inventory_add(c: &mut Criterion) {
                 let mut inv = Inventory::new();
                 for i in 0..size {
                     let cost = Cost::new(dec!(100.00) + Decimal::from(i), "USD");
-                    inv.add(Position::with_cost(Amount::new(dec!(10), "STOCK"), cost));
+                    inv.add(Position::with_cost(Amount::new(dec!(10), "STOCK"), cost))
+                        .expect("fixture fits in Decimal");
                 }
                 std::hint::black_box(inv)
             });
@@ -97,7 +99,9 @@ fn bench_inventory_book_value(c: &mut Criterion) {
         let inv = generate_inventory(size);
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &inv, |b, inv| {
-            b.iter(|| std::hint::black_box(inv.book_value("STOCK")));
+            b.iter(|| {
+                std::hint::black_box(inv.book_value("STOCK").expect("fixture fits in Decimal"))
+            });
         });
     }
 
@@ -111,7 +115,7 @@ fn bench_inventory_at_cost(c: &mut Criterion) {
         let inv = generate_inventory(size);
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &inv, |b, inv| {
-            b.iter(|| std::hint::black_box(inv.at_cost()));
+            b.iter(|| std::hint::black_box(inv.at_cost().expect("fixture fits in Decimal")));
         });
     }
 
@@ -203,7 +207,7 @@ fn bench_inventory_merge(c: &mut Criterion) {
                 b.iter_batched(
                     || inv1.clone(),
                     |mut inv| {
-                        inv.merge(inv2);
+                        inv.merge(inv2).expect("fixture fits in Decimal");
                         std::hint::black_box(inv)
                     },
                     criterion::BatchSize::SmallInput,

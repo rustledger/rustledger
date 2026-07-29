@@ -96,7 +96,8 @@ fn main() {
                 inv.add(Position::with_cost(
                     Amount::new(Decimal::from(amount), "AAPL"),
                     cost.clone(),
-                ));
+                ))
+                .expect("fixture fits in Decimal");
                 total_added += amount;
             } else {
                 // Reduce — the model guard is `units <= inventory`; a failed

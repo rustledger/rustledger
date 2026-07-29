@@ -131,9 +131,17 @@ impl Cost {
     }
 
     /// Calculate the total cost for a given number of units.
+    ///
+    /// `None` when `units × number` leaves `rust_decimal`'s ~±7.9e28 range —
+    /// which happens for inputs well below the ceiling, since a product needs
+    /// the sum of its operands' digits (#1863). There is no in-range value to
+    /// substitute: a clamped cost basis would be rendered as an exact total.
     #[must_use]
-    pub fn total_cost(&self, units: Decimal) -> Amount {
-        Amount::new(units * self.number, self.currency.clone())
+    pub fn total_cost(&self, units: Decimal) -> Option<Amount> {
+        Some(Amount::new(
+            units.checked_mul(self.number)?,
+            self.currency.clone(),
+        ))
     }
 }
 
@@ -959,7 +967,7 @@ mod tests {
     #[test]
     fn test_cost_total() {
         let cost = Cost::new(dec!(150.00), "USD");
-        let total = cost.total_cost(dec!(10));
+        let total = cost.total_cost(dec!(10)).expect("fixture fits in Decimal");
         assert_eq!(total.number, dec!(1500.00));
         assert_eq!(total.currency, "USD");
     }

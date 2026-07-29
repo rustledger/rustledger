@@ -108,7 +108,9 @@ proptest! {
             .with_synthesized_posting(Posting::auto("Assets:Cash"));
 
         let filled = interpolate(&txn).expect("interpolation succeeds");
-        for (currency, residual) in calculate_residual(&filled.transaction) {
+        for (currency, residual) in
+            calculate_residual(&filled.transaction).expect("fixture fits in Decimal")
+        {
             prop_assert_eq!(
                 residual,
                 Decimal::ZERO,

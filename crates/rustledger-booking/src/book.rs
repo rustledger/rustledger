@@ -633,7 +633,13 @@ impl BookingEngine {
             // `CostSpec::resolve`). `apply`'s callers book first, which fills the
             // inferred currency into `cost_spec.currency`; direct-`apply` tests use
             // explicit-currency fixtures, which need no inference.
-            inv.add(Position::from_posting(units, posting.cost.as_ref(), date));
+            inv.add(Position::from_posting(units, posting.cost.as_ref(), date))
+                .map_err(|e| {
+                    convert_core_booking_error(
+                        rustledger_core::BookingError::Overflow(e),
+                        &posting.account,
+                    )
+                })?;
         }
         Ok(())
     }
@@ -654,9 +660,28 @@ impl BookingEngine {
     /// this lot-matching realization — e.g. the returns engine values **net units
     /// at market** (`rustledger-returns`), never `apply`, so a re-merged
     /// booking-failed transaction cannot over-sell it.
-    pub fn apply(&mut self, txn: &Transaction) {
+    /// # Errors
+    ///
+    /// [`BookingError`] only for arithmetic overflow (#1863) — a property of
+    /// the ledger's numbers, not of the caller, so it is reported rather than
+    /// asserted. A failed *reduction* keeps the historical
+    /// debug-assert-then-ignore contract below: that means the caller applied
+    /// an unbooked transaction, which is a bug in the caller, and every
+    /// existing caller relies on release builds continuing past it.
+    pub fn apply(&mut self, txn: &Transaction) -> Result<(), BookingError> {
         for posting in &txn.postings {
             let reduced = self.try_apply_posting(posting, txn.date);
+            if matches!(
+                reduced,
+                Err(BookingError::Inventory(
+                    rustledger_core::AccountedBookingError {
+                        error: rustledger_core::BookingError::Overflow(_),
+                        ..
+                    }
+                ))
+            ) {
+                return reduced;
+            }
             debug_assert!(
                 reduced.is_ok(),
                 "apply() reduction failed — the transaction must be booked \
@@ -668,6 +693,7 @@ impl BookingEngine {
             // Release builds keep the historical ignore-and-continue behavior.
             let _ = reduced;
         }
+        Ok(())
     }
 
     /// Book and interpolate a transaction.
@@ -741,11 +767,14 @@ pub fn book_transactions(
     let mut results = Vec::with_capacity(transactions.len());
 
     for txn in transactions {
-        let result = engine.book_and_interpolate(txn);
-        if let Ok(ref interpolated) = result {
+        // An apply-time overflow belongs to THIS transaction's result, so a
+        // caller iterating results sees it rather than silently getting a
+        // running balance that never absorbed the posting (#1863).
+        let result = engine.book_and_interpolate(txn).and_then(|interpolated| {
             // Apply the booked transaction (with filled-in costs), not the original
-            engine.apply(&interpolated.transaction);
-        }
+            engine.apply(&interpolated.transaction)?;
+            Ok(interpolated)
+        });
         results.push(result);
     }
 
@@ -801,8 +830,10 @@ pub fn book(directives: &[Directive], method: BookingMethod) -> LedgerBookResult
                 Ok(result) => {
                     // Apply the booked transaction (filled-in costs), not
                     // the original, so subsequent lot matching is correct.
-                    engine.apply(&result.transaction);
-                    booked_txns[i] = Some(result.transaction);
+                    match engine.apply(&result.transaction) {
+                        Ok(()) => booked_txns[i] = Some(result.transaction),
+                        Err(e) => booking_errors[i] = Some(e),
+                    }
                 }
                 Err(e) => booking_errors[i] = Some(e),
             }
@@ -855,7 +886,7 @@ mod tests {
                 Amount::new(dec!(-1500.00), "USD"),
             ));
 
-        engine.apply(&buy);
+        engine.apply(&buy).expect("fixture fits in Decimal");
 
         // Check inventory
         let inv = engine.inventory(&"Assets:Stock".into()).unwrap();
@@ -883,8 +914,12 @@ mod tests {
                     Amount::new(dec!(-100), "USD"),
                 ))
         };
-        engine.apply(&buy("lot-a"));
-        engine.apply(&buy("lot-b"));
+        engine
+            .apply(&buy("lot-a"))
+            .expect("fixture fits in Decimal");
+        engine
+            .apply(&buy("lot-b"))
+            .expect("fixture fits in Decimal");
 
         // Sell 5 X explicitly from lot-b.
         let mut sell_cost = CostSpec::empty()
@@ -931,7 +966,7 @@ mod tests {
                 Amount::new(dec!(-1500.00), "USD"),
             ));
 
-        engine.apply(&buy);
+        engine.apply(&buy).expect("fixture fits in Decimal");
 
         // Sell 5 AAPL at $175 with empty cost (needs lot matching)
         let sell = Transaction::new(date(2024, 6, 15), "Sell stock")
@@ -989,7 +1024,7 @@ mod tests {
                 Amount::new(dec!(-300.00), "USD"),
             ));
 
-        engine.apply(&buy);
+        engine.apply(&buy).expect("fixture fits in Decimal");
 
         // Check inventory
         let inv = engine.inventory(&"Assets:Stock".into()).unwrap();
@@ -1026,7 +1061,9 @@ mod tests {
 
         // Use book() to test the booking path with total cost
         let booked_buy = engine.book(&buy).unwrap();
-        engine.apply(&booked_buy.transaction);
+        engine
+            .apply(&booked_buy.transaction)
+            .expect("fixture fits in Decimal");
 
         // Check that per-unit cost was calculated (300/1.763)
         let buy_posting = &booked_buy.transaction.postings[0];
@@ -1093,7 +1130,9 @@ mod tests {
         let booked = engine
             .book_and_interpolate(&sell)
             .expect("booking should succeed");
-        engine.apply(&booked.transaction);
+        engine
+            .apply(&booked.transaction)
+            .expect("fixture fits in Decimal");
 
         let inv = engine.inventory(&"Assets:Stock".into()).unwrap();
 
@@ -1140,7 +1179,7 @@ mod tests {
                 Amount::new(dec!(-1500.00), "USD"),
             ));
 
-        engine.apply(&buy);
+        engine.apply(&buy).expect("fixture fits in Decimal");
 
         // Sell 5 AAPL with total price annotation (not per-unit)
         // Total price = $875 for 5 shares = $175/share
@@ -1277,7 +1316,7 @@ mod tests {
                 Amount::new(dec!(-1500.00), "USD"),
             ));
 
-        engine.apply(&buy);
+        engine.apply(&buy).expect("fixture fits in Decimal");
 
         // Now try to book another buy (augmentation, not reduction)
         // This has empty cost but same sign as inventory, so it's not a reduction
@@ -1347,7 +1386,7 @@ mod tests {
                 Amount::new(dec!(-1500.00), "USD"),
             ));
 
-        engine.apply(&buy);
+        engine.apply(&buy).expect("fixture fits in Decimal");
 
         // Sell at same price - zero gain
         let sell = Transaction::new(date(2024, 6, 15), "Sell stock")
@@ -1400,8 +1439,12 @@ mod tests {
                     Amount::new(-n * cost, "USD"),
                 ))
         };
-        engine.apply(&lot(date(2020, 1, 1), dec!(5), dec!(100)));
-        engine.apply(&lot(date(2020, 6, 1), dec!(5), dec!(120)));
+        engine
+            .apply(&lot(date(2020, 1, 1), dec!(5), dec!(100)))
+            .expect("fixture fits in Decimal");
+        engine
+            .apply(&lot(date(2020, 6, 1), dec!(5), dec!(120)))
+            .expect("fixture fits in Decimal");
 
         // Sell 8 @ 150: FIFO takes 5 from lot 1 (@100) then 3 from lot 2 (@120).
         let sell = Transaction::new(date(2021, 1, 1), "sell")
@@ -1435,20 +1478,24 @@ mod tests {
     fn test_book_total_price_single_lot_exact() {
         let mut engine = BookingEngine::new();
         // Buy 3 AAPL at $30 (basis 90).
-        engine.apply(
-            &Transaction::new(date(2024, 1, 1), "buy")
-                .with_synthesized_posting(
-                    Posting::new("Assets:Stock", Amount::new(dec!(3), "AAPL")).with_cost(
-                        CostSpec::empty()
-                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(30) })
-                            .with_currency("USD"),
-                    ),
-                )
-                .with_synthesized_posting(Posting::new(
-                    "Assets:Cash",
-                    Amount::new(dec!(-90), "USD"),
-                )),
-        );
+        engine
+            .apply(
+                &Transaction::new(date(2024, 1, 1), "buy")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(3), "AAPL")).with_cost(
+                            CostSpec::empty()
+                                .with_number(rustledger_core::CostNumber::PerUnit {
+                                    value: dec!(30),
+                                })
+                                .with_currency("USD"),
+                        ),
+                    )
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(-90), "USD"),
+                    )),
+            )
+            .expect("fixture fits in Decimal");
         // Sell all 3 for a TOTAL of $100 (100 / 3 does not terminate).
         let sell = Transaction::new(date(2024, 6, 1), "sell")
             .with_synthesized_posting(
@@ -1484,8 +1531,12 @@ mod tests {
                     Amount::new(-n * cost, "USD"),
                 ))
         };
-        engine.apply(&lot(date(2020, 1, 1), dec!(5), dec!(100)));
-        engine.apply(&lot(date(2020, 6, 1), dec!(5), dec!(120)));
+        engine
+            .apply(&lot(date(2020, 1, 1), dec!(5), dec!(100)))
+            .expect("fixture fits in Decimal");
+        engine
+            .apply(&lot(date(2020, 6, 1), dec!(5), dec!(120)))
+            .expect("fixture fits in Decimal");
         // Sell 8 for a TOTAL of $1200: FIFO 5 from lot 1, 3 from lot 2.
         let sell = Transaction::new(date(2021, 1, 1), "sell")
             .with_synthesized_posting(
@@ -1527,8 +1578,12 @@ mod tests {
                     Amount::new(-n * cost, "USD"),
                 ))
         };
-        engine.apply(&lot(date(2020, 1, 1), dec!(1), dec!(10)));
-        engine.apply(&lot(date(2020, 6, 1), dec!(2), dec!(10)));
+        engine
+            .apply(&lot(date(2020, 1, 1), dec!(1), dec!(10)))
+            .expect("fixture fits in Decimal");
+        engine
+            .apply(&lot(date(2020, 6, 1), dec!(2), dec!(10)))
+            .expect("fixture fits in Decimal");
         // Sell 3 for a round-dollar TOTAL of 100 (scale 0): FIFO 1 + 2. 100/3 does
         // not terminate — the shares must NOT be rounded to whole dollars.
         let sell = Transaction::new(date(2021, 1, 1), "sell")
@@ -1572,10 +1627,18 @@ mod tests {
                 )
                 .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(-n, "USD")))
         };
-        engine.apply(&lot(date(2020, 1, 1), dec!(3)));
-        engine.apply(&lot(date(2020, 2, 1), dec!(3)));
-        engine.apply(&lot(date(2020, 3, 1), dec!(3)));
-        engine.apply(&lot(date(2020, 4, 1), dec!(1)));
+        engine
+            .apply(&lot(date(2020, 1, 1), dec!(3)))
+            .expect("fixture fits in Decimal");
+        engine
+            .apply(&lot(date(2020, 2, 1), dec!(3)))
+            .expect("fixture fits in Decimal");
+        engine
+            .apply(&lot(date(2020, 3, 1), dec!(3)))
+            .expect("fixture fits in Decimal");
+        engine
+            .apply(&lot(date(2020, 4, 1), dec!(1)))
+            .expect("fixture fits in Decimal");
         // Sell all 10 for a round-dollar total of 2 (scale 0), FIFO 3+3+3+1.
         let sell = Transaction::new(date(2021, 1, 1), "sell")
             .with_synthesized_posting(
@@ -1603,20 +1666,24 @@ mod tests {
     fn test_book_cross_currency_disposal_records_both_currencies() {
         let mut engine = BookingEngine::new();
         // Buy 3 AAPL at cost 30 USD.
-        engine.apply(
-            &Transaction::new(date(2024, 1, 1), "buy")
-                .with_synthesized_posting(
-                    Posting::new("Assets:Stock", Amount::new(dec!(3), "AAPL")).with_cost(
-                        CostSpec::empty()
-                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(30) })
-                            .with_currency("USD"),
-                    ),
-                )
-                .with_synthesized_posting(Posting::new(
-                    "Assets:Cash",
-                    Amount::new(dec!(-90), "USD"),
-                )),
-        );
+        engine
+            .apply(
+                &Transaction::new(date(2024, 1, 1), "buy")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(3), "AAPL")).with_cost(
+                            CostSpec::empty()
+                                .with_number(rustledger_core::CostNumber::PerUnit {
+                                    value: dec!(30),
+                                })
+                                .with_currency("USD"),
+                        ),
+                    )
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(-90), "USD"),
+                    )),
+            )
+            .expect("fixture fits in Decimal");
         // Sell priced in EUR.
         let sell = Transaction::new(date(2024, 6, 1), "sell")
             .with_synthesized_posting(
@@ -1642,34 +1709,42 @@ mod tests {
     fn test_book_mixed_currency_lots_records_both() {
         let mut engine = BookingEngine::new(); // FIFO
         // Lot 1: 5 AAPL at 100 USD (2020). Lot 2: 5 AAPL at 90 EUR (2021).
-        engine.apply(
-            &Transaction::new(date(2020, 1, 1), "buy usd")
-                .with_synthesized_posting(
-                    Posting::new("Assets:Stock", Amount::new(dec!(5), "AAPL")).with_cost(
-                        CostSpec::empty()
-                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(100) })
-                            .with_currency("USD"),
-                    ),
-                )
-                .with_synthesized_posting(Posting::new(
-                    "Assets:Cash",
-                    Amount::new(dec!(-500), "USD"),
-                )),
-        );
-        engine.apply(
-            &Transaction::new(date(2021, 1, 1), "buy eur")
-                .with_synthesized_posting(
-                    Posting::new("Assets:Stock", Amount::new(dec!(5), "AAPL")).with_cost(
-                        CostSpec::empty()
-                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(90) })
-                            .with_currency("EUR"),
-                    ),
-                )
-                .with_synthesized_posting(Posting::new(
-                    "Assets:Cash",
-                    Amount::new(dec!(-450), "EUR"),
-                )),
-        );
+        engine
+            .apply(
+                &Transaction::new(date(2020, 1, 1), "buy usd")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(5), "AAPL")).with_cost(
+                            CostSpec::empty()
+                                .with_number(rustledger_core::CostNumber::PerUnit {
+                                    value: dec!(100),
+                                })
+                                .with_currency("USD"),
+                        ),
+                    )
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(-500), "USD"),
+                    )),
+            )
+            .expect("fixture fits in Decimal");
+        engine
+            .apply(
+                &Transaction::new(date(2021, 1, 1), "buy eur")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(5), "AAPL")).with_cost(
+                            CostSpec::empty()
+                                .with_number(rustledger_core::CostNumber::PerUnit {
+                                    value: dec!(90),
+                                })
+                                .with_currency("EUR"),
+                        ),
+                    )
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(-450), "EUR"),
+                    )),
+            )
+            .expect("fixture fits in Decimal");
         // Sell 8 @ 150 USD: FIFO takes 5 from the USD lot, 3 from the EUR lot.
         let sell = Transaction::new(date(2023, 1, 1), "sell")
             .with_synthesized_posting(
@@ -1701,20 +1776,24 @@ mod tests {
     fn test_book_short_cover_gain_sign_and_flag() {
         let mut engine = BookingEngine::new();
         // Open the short: sell 5 not held, at cost 100 (the price shorted at).
-        engine.apply(
-            &Transaction::new(date(2020, 1, 1), "open short")
-                .with_synthesized_posting(
-                    Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL")).with_cost(
-                        CostSpec::empty()
-                            .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(100) })
-                            .with_currency("USD"),
-                    ),
-                )
-                .with_synthesized_posting(Posting::new(
-                    "Assets:Cash",
-                    Amount::new(dec!(500), "USD"),
-                )),
-        );
+        engine
+            .apply(
+                &Transaction::new(date(2020, 1, 1), "open short")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL")).with_cost(
+                            CostSpec::empty()
+                                .with_number(rustledger_core::CostNumber::PerUnit {
+                                    value: dec!(100),
+                                })
+                                .with_currency("USD"),
+                        ),
+                    )
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(500), "USD"),
+                    )),
+            )
+            .expect("fixture fits in Decimal");
         // Cover: buy 5 back at 80.
         let cover = Transaction::new(date(2020, 6, 1), "cover")
             .with_synthesized_posting(
@@ -1766,7 +1845,9 @@ mod tests {
 
         // Book and apply the opening
         let booked = engine.book(&open).unwrap();
-        engine.apply(&booked.transaction);
+        engine
+            .apply(&booked.transaction)
+            .expect("fixture fits in Decimal");
 
         // Check that the cost spec was filled in with USD
         let cost_spec = booked.transaction.postings[0].cost.as_ref().unwrap();
@@ -1829,7 +1910,7 @@ mod tests {
                 ),
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-50), "USD")));
-        engine.apply(&buy1);
+        engine.apply(&buy1).expect("fixture fits in Decimal");
 
         // Lot 2: 100 ADA at $0.52 (2022-05-19)
         let buy2 = Transaction::new(date(2022, 5, 19), "Buy lot 2")
@@ -1842,7 +1923,7 @@ mod tests {
                 ),
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-52), "USD")));
-        engine.apply(&buy2);
+        engine.apply(&buy2).expect("fixture fits in Decimal");
 
         // Verify initial inventory: 200 ADA total
         let inv = engine.inventory(&"Assets:Crypto".into()).unwrap();
@@ -1856,7 +1937,9 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(25), "USD")));
         let booked1 = engine.book(&sell1).unwrap();
-        engine.apply(&booked1.transaction);
+        engine
+            .apply(&booked1.transaction)
+            .expect("fixture fits in Decimal");
 
         // Verify: 150 ADA remaining (50 in lot 1, 100 in lot 2)
         let inv = engine.inventory(&"Assets:Crypto".into()).unwrap();
@@ -1888,7 +1971,9 @@ mod tests {
         );
 
         // Apply and verify final inventory: 70 ADA remaining (all in lot 2)
-        engine.apply(&booked2.unwrap().transaction);
+        engine
+            .apply(&booked2.unwrap().transaction)
+            .expect("fixture fits in Decimal");
         let inv = engine.inventory(&"Assets:Crypto".into()).unwrap();
         assert_eq!(
             inv.units("ADA"),
@@ -1969,7 +2054,7 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(-150), "EUR")));
 
-        engine.apply(&buy1);
+        engine.apply(&buy1).expect("fixture fits in Decimal");
 
         // 2024-01-15: Sell 25 HOOG without cost spec (price-only)
         let sell = Transaction::new(date(2024, 1, 15), "Sell 25 HOOG without cost spec")
@@ -1979,7 +2064,7 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(40), "EUR")));
 
-        engine.apply(&sell);
+        engine.apply(&sell).expect("fixture fits in Decimal");
 
         // 2024-01-20: Buy 50 more HOOG {1.70 EUR} - this MUST succeed
         let buy2 = Transaction::new(date(2024, 1, 20), "Buy 50 more HOOG - should succeed")
@@ -2004,7 +2089,9 @@ mod tests {
         );
 
         let booked = result.unwrap();
-        engine.apply(&booked.transaction);
+        engine
+            .apply(&booked.transaction)
+            .expect("fixture fits in Decimal");
 
         // Verify final inventory state
         let inv = engine.inventory(&"Assets:Stocks".into()).unwrap();

@@ -524,7 +524,8 @@ impl<'a> Executor<'a> {
                                     let bal = account_balances
                                         .entry(posting.account.clone())
                                         .or_default();
-                                    bal.add(pos);
+                                    bal.add(pos)
+                                        .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                                 }
                             }
                         }
@@ -558,7 +559,8 @@ impl<'a> Executor<'a> {
                     let resolved = resolve_position(posting, txn.date);
                     if needs_account_balance && let Some(pos) = resolved.clone() {
                         let bal = account_balances.entry(posting.account.clone()).or_default();
-                        bal.add(pos);
+                        bal.add(pos)
+                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                     }
 
                     // Callers that only want the per-account totals (BALANCES, via
@@ -625,7 +627,9 @@ impl<'a> Executor<'a> {
                     // query doesn't read `balance`.
                     if needs_balance {
                         if let Some(pos) = resolved {
-                            cumulative_balance.add(pos);
+                            cumulative_balance
+                                .add(pos)
+                                .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                         }
                         ctx.balance = Some(cumulative_balance.clone());
                     }
@@ -825,7 +829,9 @@ impl<'a> Executor<'a> {
                         // Return inventory with just units (no cost info)
                         let mut units_inv = Inventory::new();
                         for pos in inv.positions() {
-                            units_inv.add(Position::simple(pos.units.clone()));
+                            units_inv
+                                .add(Position::simple(pos.units.clone()))
+                                .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                         }
                         Ok(Value::Inventory(Box::new(units_inv)))
                     }
@@ -1162,7 +1168,9 @@ impl<'a> Executor<'a> {
                             .collect();
                         let mut new_inv = Inventory::new();
                         for pos in filtered {
-                            new_inv.add(pos);
+                            new_inv
+                                .add(pos)
+                                .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                         }
                         Ok(Value::Inventory(Box::new(new_inv)))
                     }
@@ -1289,12 +1297,18 @@ impl<'a> Executor<'a> {
                         let mut result = Inventory::default();
                         for pos in inv.positions() {
                             if pos.units.currency == target_currency {
-                                result.add(Position::simple(pos.units.clone()));
+                                result
+                                    .add(Position::simple(pos.units.clone()))
+                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             } else if let Some(converted) = convert_amount(&pos.units) {
-                                result.add(Position::simple(converted));
+                                result
+                                    .add(Position::simple(converted))
+                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             } else {
                                 // No conversion available - keep original (Python beancount behavior)
-                                result.add(Position::simple(pos.units.clone()));
+                                result
+                                    .add(Position::simple(pos.units.clone()))
+                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             }
                         }
                         // If result has single currency matching target, return as Amount
@@ -1491,13 +1505,26 @@ impl<'a> Executor<'a> {
                         let mut result = Inventory::new();
                         for pos in inv.positions() {
                             if let Some(cost) = &pos.cost {
-                                let total = pos.units.number * cost.number;
-                                result.add(Position::simple(Amount::new(
-                                    total,
-                                    cost.currency.clone(),
-                                )));
+                                // Checked: `units * cost` leaves range on
+                                // inputs well below the ceiling (#1863).
+                                let total =
+                                    pos.units.number.checked_mul(cost.number).ok_or_else(|| {
+                                        QueryError::Evaluation(format!(
+                                            "{} cost basis exceeds the representable range \
+                                             (±7.9e28)",
+                                            cost.currency
+                                        ))
+                                    })?;
+                                result
+                                    .add(Position::simple(Amount::new(
+                                        total,
+                                        cost.currency.clone(),
+                                    )))
+                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             } else {
-                                result.add(Position::simple(pos.units.clone()));
+                                result
+                                    .add(Position::simple(pos.units.clone()))
+                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             }
                         }
                         Ok(Value::Inventory(Box::new(result)))
@@ -1866,7 +1893,8 @@ impl<'a> Executor<'a> {
                         } else {
                             pos.units.clone()
                         };
-                        out.add(rustledger_core::Position::simple(units));
+                        out.add(rustledger_core::Position::simple(units))
+                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                     }
                     return Ok(Value::Inventory(Box::new(out)));
                 }

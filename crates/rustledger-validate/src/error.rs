@@ -56,6 +56,8 @@ pub enum ErrorCode {
     InsufficientUnits,
     /// E4003: Ambiguous lot match in STRICT mode.
     AmbiguousLotMatch,
+    /// E4004: Arithmetic exceeded the representable decimal range.
+    ArithmeticOverflow,
     /// E4005: Cost amount is negative (cost must be non-negative).
     NegativeCost,
 
@@ -112,6 +114,7 @@ impl ErrorCode {
         Self::NoMatchingLot,
         Self::InsufficientUnits,
         Self::AmbiguousLotMatch,
+        Self::ArithmeticOverflow,
         Self::NegativeCost,
         Self::UndeclaredCurrency,
         Self::CurrencyNotAllowed,
@@ -149,6 +152,7 @@ impl ErrorCode {
             Self::NoMatchingLot => "E4001",
             Self::InsufficientUnits => "E4002",
             Self::AmbiguousLotMatch => "E4003",
+            Self::ArithmeticOverflow => "E4004",
             Self::NegativeCost => "E4005",
             // Currency errors
             Self::UndeclaredCurrency => "E5001",
@@ -233,6 +237,7 @@ impl ErrorCode {
             Self::NoMatchingLot => "No matching lot for reduction",
             Self::InsufficientUnits => "Not enough units in matching lots",
             Self::AmbiguousLotMatch => "Ambiguous lot match under STRICT booking",
+            Self::ArithmeticOverflow => "Amount exceeds the representable range",
             Self::NegativeCost => "Negative cost",
             Self::UndeclaredCurrency => "Currency used without a commodity declaration",
             Self::CurrencyNotAllowed => "Currency not allowed in this account",
@@ -361,6 +366,15 @@ impl ErrorCode {
                  disambiguate with the lot's cost `{10.00 USD}`, date `{2024-01-02}`, \
                  or label `{\"lot-a\"}` — or open the account with a non-strict \
                  method: `2024-01-01 open Assets:Stock \"FIFO\"`."
+            }
+            Self::ArithmeticOverflow => {
+                "An amount, or a running total, is larger than rledger's decimal type \
+                 can represent (about ±7.9×10²⁸ — a 96-bit type with ~28 significant \
+                 digits).\n\nrledger reports this instead of rounding or clamping: a \
+                 clamped figure would be printed as if it were exact, and two clamped \
+                 figures of opposite sign cancel to zero, which would make an \
+                 unbalanced transaction look balanced.\n\nFix: split the transaction, \
+                 or use larger units (thousands, millions) for the commodity."
             }
             Self::NegativeCost => {
                 "A posting's cost amount is negative — a cost basis must be \

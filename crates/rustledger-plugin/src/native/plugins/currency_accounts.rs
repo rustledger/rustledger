@@ -209,7 +209,10 @@ impl NativePlugin for CurrencyAccountsPlugin {
                         None => None,
                     };
                     let amount = match &number {
-                        Some(n) => rustledger_booking::cost_number_weight(units_num, n),
+                        // `None` from the weight ladder means the product left
+                        // `rust_decimal`'s range (#1863); the posting is then
+                        // skipped rather than grouped under a clamped weight.
+                        Some(n) => rustledger_booking::cost_number_weight(units_num, n)?,
                         // Empty `{}` — no determinable cost number; fall back
                         // to the units magnitude (pre-existing behavior; the
                         // spec is resolved by booking before plugins run).
@@ -225,7 +228,7 @@ impl NativePlugin for CurrencyAccountsPlugin {
                     } else {
                         PriceKind::Unit
                     };
-                    let amount = rustledger_booking::price_weight(units_num, price_num, kind);
+                    let amount = rustledger_booking::price_weight(units_num, price_num, kind)?;
                     Some((amount, currency))
                 } else {
                     Some((units_num, units.currency.clone()))

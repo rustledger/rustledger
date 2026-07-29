@@ -74,7 +74,7 @@ fn arb_inventory() -> impl Strategy<Value = Inventory> {
     prop::collection::vec(arb_position(), 0..10).prop_map(|positions| {
         let mut inv = Inventory::new();
         for pos in positions {
-            inv.add(pos);
+            inv.add(pos).expect("fixture fits in Decimal");
         }
         inv
     })
@@ -174,7 +174,7 @@ proptest! {
         let currency = pos.units.currency.clone();
         let before = inv.units(&currency);
         let mut after_inv = inv;
-        after_inv.add(pos.clone());
+        after_inv.add(pos.clone()).expect("fixture fits in Decimal");
         let after = after_inv.units(&currency);
 
         prop_assert_eq!(after, before + pos.units.number);
@@ -187,7 +187,7 @@ proptest! {
         inv2 in arb_inventory()
     ) {
         let mut merged = inv1.clone();
-        merged.merge(&inv2);
+        merged.merge(&inv2).expect("fixture fits in Decimal");
 
         // Check that units match for common currencies
         for currency in ["USD", "EUR", "GBP", "AAPL", "BTC"] {
@@ -211,7 +211,7 @@ proptest! {
         let mut expected_units: std::collections::HashMap<rustledger_core::Currency, Decimal> = std::collections::HashMap::new();
 
         for pos in &positions {
-            inv.add(pos.clone());
+            inv.add(pos.clone()).expect("fixture fits in Decimal");
             *expected_units.entry(pos.units.currency.clone()).or_default() += pos.units.number;
         }
 
@@ -232,7 +232,7 @@ proptest! {
         let mut inv = Inventory::new();
 
         for pos in positions {
-            inv.add(pos);
+            inv.add(pos).expect("fixture fits in Decimal");
         }
 
         // All positions should have non-negative units
@@ -249,7 +249,7 @@ proptest! {
     ) {
         let mut inv = Inventory::new();
         for pos in &positions {
-            inv.add(pos.clone());
+            inv.add(pos.clone()).expect("fixture fits in Decimal");
         }
 
         // Pick a currency and try to reduce more than available

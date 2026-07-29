@@ -314,19 +314,45 @@ pub(crate) fn infer_cost_currency_from_postings(transaction: &Transaction) -> Op
 /// `abs`/`signum` are taken on the source `Decimal` (exact — they add no
 /// digits); only the *multiplications* run in `D`, so `D = BigDecimal`
 /// reproduces the precise path's arithmetic byte-for-byte.
-trait WeightNum: Clone + Default + std::ops::AddAssign + std::ops::Mul<Output = Self> {
+/// Arithmetic is CHECKED, not saturating. `rust_decimal` has a hard 96-bit
+/// magnitude ceiling (~7.9e28) whose `+`/`*` panic on overflow, and clamping
+/// instead is not an option here: `Decimal::MIN == -Decimal::MAX` exactly, so a
+/// clamped debit and a clamped credit cancel to a residual of *precisely zero*
+/// and the transaction certifies as balanced (PR #1890 shipped that and was
+/// closed — a ledger off by 1e40 passed `rledger check`). So `D = Decimal`
+/// reports "cannot represent" and the caller escalates to `D = BigDecimal`,
+/// which has no ceiling and gives Python beancount's answer exactly.
+trait WeightNum: Clone + Default {
     fn from_decimal(d: Decimal) -> Self;
+    /// `None` when the product is outside this backend's range.
+    fn checked_mul(self, rhs: Self) -> Option<Self>;
+    /// `None` when the sum is outside this backend's range.
+    fn checked_add(self, rhs: Self) -> Option<Self>;
 }
 
 impl WeightNum for Decimal {
     fn from_decimal(d: Decimal) -> Self {
         d
     }
+    fn checked_mul(self, rhs: Self) -> Option<Self> {
+        Self::checked_mul(self, rhs)
+    }
+    fn checked_add(self, rhs: Self) -> Option<Self> {
+        Self::checked_add(self, rhs)
+    }
 }
 
 impl WeightNum for BigDecimal {
     fn from_decimal(d: Decimal) -> Self {
         to_big(d)
+    }
+    // Arbitrary precision and unbounded magnitude: these never fail, which is
+    // what makes BigDecimal a sound escalation target for the Decimal tier.
+    fn checked_mul(self, rhs: Self) -> Option<Self> {
+        Some(self * rhs)
+    }
+    fn checked_add(self, rhs: Self) -> Option<Self> {
+        Some(self + rhs)
     }
 }
 
@@ -355,18 +381,28 @@ pub(crate) fn cost_currency_of(
 /// Returns `None` for a posting with no cost spec, an empty `{}` spec (no
 /// determinable number), or when no cost currency resolves. `interpolate`
 /// instantiates this at `Decimal`.
+/// The weight arithmetic left this backend's range. Distinct from `Ok(None)`,
+/// which means the posting legitimately contributes no cost weight.
+struct Overflow;
+
 fn cost_weight<D: WeightNum>(
     posting: &rustledger_core::Posting,
     units: &Amount,
     infer_currency: impl FnOnce() -> Option<Currency>,
-) -> Option<(Currency, D)> {
-    let cost_spec = posting.cost.as_ref()?;
+) -> Result<Option<(Currency, D)>, Overflow> {
+    let Some(cost_spec) = posting.cost.as_ref() else {
+        return Ok(None);
+    };
     // Match the number FIRST so an empty `{}` spec short-circuits without
     // resolving (and possibly inferring) the cost currency.
-    let number = cost_spec.number.as_ref()?;
-    let weight = cost_number_weight_generic::<D>(units.number, number);
-    let cost_curr = cost_currency_of(posting, infer_currency)?;
-    Some((cost_curr, weight))
+    let Some(number) = cost_spec.number.as_ref() else {
+        return Ok(None);
+    };
+    let weight = cost_number_weight_generic::<D>(units.number, number).ok_or(Overflow)?;
+    let Some(cost_curr) = cost_currency_of(posting, infer_currency) else {
+        return Ok(None);
+    };
+    Ok(Some((cost_curr, weight)))
 }
 
 /// The `CostNumber`-variant weight arithmetic, generic over the numeric
@@ -376,28 +412,27 @@ fn cost_weight<D: WeightNum>(
 fn cost_number_weight_generic<D: WeightNum>(
     units_number: Decimal,
     number: &rustledger_core::CostNumber,
-) -> D {
+) -> Option<D> {
     let signum = units_number.signum();
     // `PerUnitFromTotal` and `Total` both carry a preserved total — using it
     // avoids the division-then-multiplication precision loss of recomputing from
     // `per_unit`. `PerUnit` goes through multiplication.
     match *number {
         rustledger_core::CostNumber::Total { value: total } => {
-            D::from_decimal(total) * D::from_decimal(signum)
+            D::from_decimal(total).checked_mul(D::from_decimal(signum))
         }
         rustledger_core::CostNumber::PerUnitFromTotal(b) => {
-            D::from_decimal(b.total) * D::from_decimal(signum)
+            D::from_decimal(b.total).checked_mul(D::from_decimal(signum))
         }
         rustledger_core::CostNumber::PerUnit { value: per_unit } => {
-            D::from_decimal(units_number) * D::from_decimal(per_unit)
+            D::from_decimal(units_number).checked_mul(D::from_decimal(per_unit))
         }
         // Compound `{a # b}` (beancount compound_amount): the cost totals
         // `N*a + b`, so the weight is the per-unit product (sign embedded
         // in `units`) plus the signed lump total (#1700).
         rustledger_core::CostNumber::Compound { per_unit, total } => {
-            let mut w = D::from_decimal(units_number) * D::from_decimal(per_unit);
-            w += D::from_decimal(total) * D::from_decimal(signum);
-            w
+            let w = D::from_decimal(units_number).checked_mul(D::from_decimal(per_unit))?;
+            w.checked_add(D::from_decimal(total).checked_mul(D::from_decimal(signum))?)
         }
     }
 }
@@ -413,8 +448,21 @@ fn cost_number_weight_generic<D: WeightNum>(
 /// `N·a + b` (#1700). Consumers surfacing a per-posting weight (BQL `weight`
 /// column, `currency_accounts` grouping) MUST use this rather than re-derive
 /// the ladder, or they drift from `rledger check` on those shapes.
+///
+/// Returns `None` when the weight is outside `rust_decimal`'s ~7.9e28 range.
+/// Callers that need an answer regardless must recompute in `BigDecimal` (as
+/// the balance validator does); callers that merely display a weight should
+/// omit it rather than substitute a clamped figure, which would be reported as
+/// exact.
+///
+/// Deliberately checked rather than saturating: `Decimal::MIN` is exactly
+/// `-Decimal::MAX`, so clamped opposite-sign weights cancel to a residual of
+/// zero and an unbalanced transaction certifies as balanced (#1863).
 #[must_use]
-pub fn cost_number_weight(units_number: Decimal, number: &rustledger_core::CostNumber) -> Decimal {
+pub fn cost_number_weight(
+    units_number: Decimal,
+    number: &rustledger_core::CostNumber,
+) -> Option<Decimal> {
     cost_number_weight_generic::<Decimal>(units_number, number)
 }
 
@@ -426,13 +474,13 @@ pub fn cost_number_weight(units_number: Decimal, number: &rustledger_core::CostN
 /// is a positive magnitude in the source, so the weight is
 /// `price × sign(units)` — credit-side postings flip to `−price`
 /// (issue #1052). Zero units weigh zero for both kinds. Same single-source
-/// rule as [`cost_number_weight`].
+/// rule as [`cost_number_weight`], including its `None`-on-overflow contract.
 #[must_use]
 pub fn price_weight(
     units_number: Decimal,
     price_number: Decimal,
     kind: rustledger_core::PriceKind,
-) -> Decimal {
+) -> Option<Decimal> {
     price_weight_generic::<Decimal>(units_number, price_number, kind)
 }
 
@@ -470,6 +518,10 @@ pub fn price_weight(
 ///
 /// Aligning the two would change BQL `weight` results, so it is deliberately
 /// left alone here — but do not describe this as "the rule `check` uses".
+///
+/// Also `None` when the weight leaves `rust_decimal`'s range: BQL's `weight`
+/// column and the budget report render this figure directly, and a clamped
+/// number displayed as an exact total is worse than a blank cell.
 #[must_use]
 pub fn posting_weight(posting: &rustledger_core::Posting) -> Option<Amount> {
     let units = posting.amount()?;
@@ -478,7 +530,7 @@ pub fn posting_weight(posting: &rustledger_core::Posting) -> Option<Amount> {
         && let Some(currency) = cost_spec.currency.clone()
     {
         return Some(Amount::new(
-            cost_number_weight(units.number, number),
+            cost_number_weight(units.number, number)?,
             currency,
         ));
     }
@@ -486,7 +538,7 @@ pub fn posting_weight(posting: &rustledger_core::Posting) -> Option<Amount> {
         && let Some(price_amt) = price_ann.amount()
     {
         return Some(Amount::new(
-            price_weight(units.number, price_amt.number, price_ann.kind),
+            price_weight(units.number, price_amt.number, price_ann.kind)?,
             price_amt.currency.clone(),
         ));
     }
@@ -503,16 +555,14 @@ fn price_weight_generic<D: WeightNum>(
     units_number: Decimal,
     price_number: Decimal,
     kind: rustledger_core::PriceKind,
-) -> D {
+) -> Option<D> {
     let signum = units_number.signum();
     match kind {
-        rustledger_core::PriceKind::Unit => {
-            D::from_decimal(units_number.abs())
-                * D::from_decimal(price_number)
-                * D::from_decimal(signum)
-        }
+        rustledger_core::PriceKind::Unit => D::from_decimal(units_number.abs())
+            .checked_mul(D::from_decimal(price_number))?
+            .checked_mul(D::from_decimal(signum)),
         rustledger_core::PriceKind::Total => {
-            D::from_decimal(price_number) * D::from_decimal(signum)
+            D::from_decimal(price_number).checked_mul(D::from_decimal(signum))
         }
     }
 }
@@ -532,7 +582,7 @@ fn price_weight_generic<D: WeightNum>(
 /// Weight rule (Beancount): a cost spec puts the weight in the cost currency
 /// (`cost` beats `price`); else a price annotation puts it in the price
 /// currency; else the weight is the units themselves.
-fn residual_weight<D: WeightNum>(transaction: &Transaction) -> FxHashMap<Currency, D> {
+fn residual_weight<D: WeightNum>(transaction: &Transaction) -> Option<FxHashMap<Currency, D>> {
     // Pre-allocate for typical case (1-2 currencies per transaction)
     let mut residuals: FxHashMap<Currency, D> =
         FxHashMap::with_capacity_and_hasher(transaction.postings.len().min(4), Default::default());
@@ -551,14 +601,24 @@ fn residual_weight<D: WeightNum>(transaction: &Transaction) -> FxHashMap<Currenc
             continue;
         };
 
+        // Accumulate `amount` into `currency`'s running residual, or bail out
+        // of the whole computation if the sum leaves `D`'s range.
+        macro_rules! accumulate {
+            ($currency:expr, $amount:expr) => {{
+                let slot = residuals.entry($currency).or_default();
+                *slot = std::mem::take(slot).checked_add($amount)?;
+            }};
+        }
+
         // Determine the "weight" of this posting for balance purposes.
         let cost_contribution = cost_weight::<D>(posting, units, || {
             get_inferred_currency(&mut inferred_cost_currency)
-        });
+        })
+        .ok()?;
 
         if let Some((currency, amount)) = cost_contribution {
             // Cost-based posting: weight is in the cost currency
-            *residuals.entry(currency).or_default() += amount;
+            accumulate!(currency, amount);
         } else if posting.cost.is_some() {
             // Cost spec exists but has no determinable cost number
             // (e.g., empty `{}`). The CANONICAL weight of a cost-tracked
@@ -572,21 +632,20 @@ fn residual_weight<D: WeightNum>(transaction: &Transaction) -> FxHashMap<Currenc
         } else if let Some(price) = &posting.price {
             // Price annotation: converts units to the price currency.
             if let Some(amt) = price.amount.as_ref().and_then(IncompleteAmount::as_amount) {
-                let signed = price_weight_generic::<D>(units.number, amt.number, price.kind);
-                *residuals.entry(amt.currency.clone()).or_default() += signed;
+                let signed = price_weight_generic::<D>(units.number, amt.number, price.kind)?;
+                accumulate!(amt.currency.clone(), signed);
             } else {
                 // Incomplete or bare-sigil price annotation — can't
                 // calculate a price-currency conversion, fall back to units.
-                *residuals.entry(units.currency.clone()).or_default() +=
-                    D::from_decimal(units.number);
+                accumulate!(units.currency.clone(), D::from_decimal(units.number));
             }
         } else {
             // Simple posting: weight is just the units
-            *residuals.entry(units.currency.clone()).or_default() += D::from_decimal(units.number);
+            accumulate!(units.currency.clone(), D::from_decimal(units.number));
         }
     }
 
-    residuals
+    Some(residuals)
 }
 
 /// Calculate the residual (imbalance) of a transaction.
@@ -606,7 +665,11 @@ fn residual_weight<D: WeightNum>(transaction: &Transaction) -> FxHashMap<Currenc
 // clippy::implicit_hasher still fires for a concrete `FxBuildHasher` (it wants
 // the fn generic over `S: BuildHasher`); the explicit fast hasher is the point.
 #[allow(clippy::implicit_hasher)]
-pub fn calculate_residual(transaction: &Transaction) -> FxHashMap<Currency, Decimal> {
+/// Returns `None` when the residual arithmetic leaves `rust_decimal`'s ~7.9e28
+/// range. `None` means "unknown", NOT "balanced" — a caller must escalate to
+/// [`calculate_residual_precise`], which cannot fail. Treating `None` as an
+/// empty map would certify an arbitrarily unbalanced transaction as clean.
+pub fn calculate_residual(transaction: &Transaction) -> Option<FxHashMap<Currency, Decimal>> {
     residual_weight::<Decimal>(transaction)
 }
 
@@ -629,7 +692,11 @@ fn to_big(d: Decimal) -> BigDecimal {
 #[must_use]
 #[allow(clippy::implicit_hasher)]
 pub fn calculate_residual_precise(transaction: &Transaction) -> FxHashMap<Currency, BigDecimal> {
+    // `BigDecimal`'s `WeightNum` ops are total, so `residual_weight` cannot
+    // return `None` here. This is the property that makes the Decimal tier's
+    // `None` recoverable rather than fatal.
     residual_weight::<BigDecimal>(transaction)
+        .expect("BigDecimal arithmetic is unbounded and cannot overflow")
 }
 
 /// Check if a transaction is balanced within the given tolerances
@@ -643,7 +710,13 @@ pub fn calculate_residual_precise(transaction: &Transaction) -> FxHashMap<Curren
 #[must_use]
 #[allow(clippy::implicit_hasher)]
 pub fn is_balanced(transaction: &Transaction, tolerances: &FxHashMap<Currency, Decimal>) -> bool {
-    let residuals = calculate_residual(transaction);
+    // Overflow in the fast tier means the residual is far outside any
+    // tolerance, so the transaction is not balanced. (The validation pipeline
+    // does not come through here — it escalates to BigDecimal and reports the
+    // exact residual.)
+    let Some(residuals) = calculate_residual(transaction) else {
+        return false;
+    };
 
     for (currency, residual) in residuals {
         let tolerance = tolerances.get(&currency).copied().unwrap_or(Decimal::ZERO); // Default 0 (exact balance for integer-only currencies)
@@ -719,7 +792,7 @@ mod tests {
         // PerUnit: units × per_unit.
         assert_eq!(
             cost_number_weight(dec!(10), &CostNumber::PerUnit { value: dec!(5.00) }),
-            dec!(50.00),
+            Some(dec!(50.00)),
         );
         // Total: preserved total, sign following units.
         assert_eq!(
@@ -729,7 +802,7 @@ mod tests {
                     value: dec!(100.00)
                 }
             ),
-            dec!(100.00),
+            Some(dec!(100.00)),
         );
         assert_eq!(
             cost_number_weight(
@@ -738,7 +811,7 @@ mod tests {
                     value: dec!(100.00)
                 }
             ),
-            dec!(-100.00),
+            Some(dec!(-100.00)),
         );
         // PerUnitFromTotal: the preserved total EXACTLY — not per_unit × units,
         // which for 100/3 would give 99.99999... at the 28-digit ceiling.
@@ -746,15 +819,15 @@ mod tests {
             per_unit: dec!(100.00) / dec!(3),
             total: dec!(100.00),
         });
-        assert_eq!(cost_number_weight(dec!(3), &booked), dec!(100.00));
-        assert_eq!(cost_number_weight(dec!(-3), &booked), dec!(-100.00));
+        assert_eq!(cost_number_weight(dec!(3), &booked), Some(dec!(100.00)));
+        assert_eq!(cost_number_weight(dec!(-3), &booked), Some(dec!(-100.00)));
         // Compound {a # b}: N·a + b, lump signed with units (#1700).
         let compound = CostNumber::Compound {
             per_unit: dec!(5.00),
             total: dec!(10.00),
         };
-        assert_eq!(cost_number_weight(dec!(10), &compound), dec!(60.00));
-        assert_eq!(cost_number_weight(dec!(-10), &compound), dec!(-60.00));
+        assert_eq!(cost_number_weight(dec!(10), &compound), Some(dec!(60.00)));
+        assert_eq!(cost_number_weight(dec!(-10), &compound), Some(dec!(-60.00)));
     }
 
     #[test]
@@ -763,26 +836,26 @@ mod tests {
         // `@` per-unit: units × price, sign through units.
         assert_eq!(
             price_weight(dec!(10), dec!(1.50), PriceKind::Unit),
-            dec!(15.00),
+            Some(dec!(15.00)),
         );
         assert_eq!(
             price_weight(dec!(-10), dec!(1.50), PriceKind::Unit),
-            dec!(-15.00),
+            Some(dec!(-15.00)),
         );
         // `@@` total: positive magnitude in source, sign follows units —
         // the #1052 credit-side flip.
         assert_eq!(
             price_weight(dec!(10), dec!(15.00), PriceKind::Total),
-            dec!(15.00),
+            Some(dec!(15.00)),
         );
         assert_eq!(
             price_weight(dec!(-10), dec!(15.00), PriceKind::Total),
-            dec!(-15.00),
+            Some(dec!(-15.00)),
         );
         // Zero units weigh zero for both kinds.
         assert_eq!(
             price_weight(dec!(0), dec!(15.00), PriceKind::Total),
-            dec!(0)
+            Some(dec!(0))
         );
     }
 
@@ -802,7 +875,7 @@ mod tests {
                 Amount::new(dec!(-50.00), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
     }
 
@@ -818,7 +891,7 @@ mod tests {
                 Amount::new(dec!(-45.00), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         assert_eq!(residual.get("USD"), Some(&dec!(5.00)));
     }
 
@@ -950,7 +1023,7 @@ mod tests {
                 Amount::new(dec!(-1500.00), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Cost posting contributes 10 * 150 = 1500 USD
         // Cash posting contributes -1500 USD
         // Residual should be 0
@@ -998,7 +1071,7 @@ mod tests {
             // simple
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-12.34), "USD")));
 
-        let fast = calculate_residual(&txn);
+        let fast = calculate_residual(&txn).expect("fixture fits in Decimal");
         let precise = calculate_residual_precise(&txn);
 
         assert_eq!(
@@ -1037,7 +1110,7 @@ mod tests {
                 Amount::new(dec!(-1500.00), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Total cost posting contributes 1500 * signum(10) = 1500 USD
         // Cash posting contributes -1500 USD
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
@@ -1061,7 +1134,7 @@ mod tests {
                 Amount::new(dec!(1500.00), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Total cost with negative units: 1500 * signum(-10) = -1500 USD
         // Cash posting contributes +1500 USD
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
@@ -1080,7 +1153,7 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-10), "AAPL")));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Empty cost spec posting doesn't contribute, only the second posting does
         assert_eq!(residual.get("AAPL"), Some(&dec!(-10)));
     }
@@ -1109,7 +1182,7 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1500), "USD")));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Pre-fix: residual[USD] = 0 (price-as-weight contributed
         // -1500, cancelling cash's +1500).
         // Post-fix: residual[USD] = +1500 (cost-unknown skipped, only
@@ -1158,7 +1231,7 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Price posting: |-100| * 0.85 * signum(-100) = -85 EUR
         // EUR posting: +85 EUR
         // Total: 0 EUR
@@ -1177,7 +1250,7 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Total price: 85 * signum(-100) = -85 EUR
         // EUR posting: +85 EUR
         assert_eq!(residual.get("EUR"), Some(&dec!(0)));
@@ -1196,7 +1269,7 @@ mod tests {
                 Amount::new(dec!(-100.30), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Price posting: |85| * 1.18 * signum(85) = 100.30 USD
         // USD posting: -100.30 USD
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
@@ -1216,7 +1289,7 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         assert_eq!(residual.get("EUR"), Some(&dec!(0)));
     }
 
@@ -1234,7 +1307,7 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:EUR", Amount::new(dec!(85.00), "EUR")));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         assert_eq!(residual.get("EUR"), Some(&dec!(0)));
     }
 
@@ -1252,7 +1325,7 @@ mod tests {
                 Amount::new(dec!(-100.00), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Falls back to units since no currency in incomplete amount
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
     }
@@ -1271,7 +1344,7 @@ mod tests {
                 Amount::new(dec!(-100.00), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
     }
 
@@ -1288,7 +1361,7 @@ mod tests {
                 Amount::new(dec!(-100.00), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Falls back to units
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
     }
@@ -1306,7 +1379,7 @@ mod tests {
                 Amount::new(dec!(-100.00), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
     }
 
@@ -1336,7 +1409,7 @@ mod tests {
                 Amount::new(dec!(-1510.00), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // 10 * 150 + 10 - 1510 = 0
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
     }
@@ -1365,7 +1438,7 @@ mod tests {
                 Amount::new(dec!(-250.00), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Stock posting with cost: -10 * 150 = -1500 USD (cost takes precedence)
         // Cash: +1750 USD
         // Gains: -250 USD
@@ -1404,7 +1477,7 @@ mod tests {
                 Amount::new(dec!(-500.00), "EUR"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
         assert_eq!(residual.get("EUR"), Some(&dec!(0)));
     }
@@ -1419,7 +1492,7 @@ mod tests {
             ))
             .with_synthesized_posting(Posting::auto("Assets:Cash")); // No units
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Only the complete posting is counted
         assert_eq!(residual.get("USD"), Some(&dec!(50.00)));
     }
@@ -1453,7 +1526,7 @@ mod tests {
                 Amount::new(dec!(-1000), "USD"),
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Cost posting should contribute 10 * 100 = 1000 USD (inferred from other posting)
         // Equity posting contributes -1000 USD
         // Residual should be 0
@@ -1479,7 +1552,7 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD")));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         assert_eq!(residual.get("USD"), Some(&dec!(0)));
     }
 
@@ -1500,7 +1573,7 @@ mod tests {
                 Amount::new(dec!(-1000), "USD"), // USD posting
             ));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Should use EUR (explicit) not USD (from other posting)
         assert_eq!(residual.get("EUR"), Some(&dec!(1000)));
         assert_eq!(residual.get("USD"), Some(&dec!(-1000)));
@@ -1521,7 +1594,7 @@ mod tests {
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1000), "USD")));
 
-        let residual = calculate_residual(&txn);
+        let residual = calculate_residual(&txn).expect("fixture fits in Decimal");
         // Should use EUR (from price annotation) not USD (from other posting)
         assert_eq!(residual.get("EUR"), Some(&dec!(1000)));
         assert_eq!(residual.get("USD"), Some(&dec!(-1000)));

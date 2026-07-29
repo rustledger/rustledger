@@ -161,6 +161,43 @@ pub enum BookingError {
         /// Got currency.
         got: crate::Currency,
     },
+    /// The arithmetic left `rust_decimal`'s ~±7.9e28 range (#1863).
+    ///
+    /// Reported rather than clamped: `Decimal::MIN == -Decimal::MAX`, so
+    /// clamped debits and credits cancel to a residual of exactly zero and an
+    /// arbitrarily unbalanced ledger certifies as clean. Reported rather than
+    /// panicked because ledger input must never abort the CLI.
+    Overflow(OverflowError),
+}
+
+/// A `Decimal` computation whose result cannot be represented.
+///
+/// `rust_decimal` is a 96-bit type with a hard ~±7.9e28 magnitude ceiling and
+/// its `+`/`*` panic on overflow. There is no in-range answer to substitute,
+/// so every reachable site reports this instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverflowError {
+    /// The currency whose running total left the range.
+    pub currency: crate::Currency,
+}
+
+impl fmt::Display for OverflowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} amount exceeds the representable range (±7.9e28); \
+             split the transaction or use smaller units",
+            self.currency
+        )
+    }
+}
+
+impl std::error::Error for OverflowError {}
+
+impl From<OverflowError> for BookingError {
+    fn from(e: OverflowError) -> Self {
+        Self::Overflow(e)
+    }
 }
 
 impl fmt::Display for BookingError {
@@ -190,6 +227,7 @@ impl fmt::Display for BookingError {
             Self::CurrencyMismatch { expected, got } => {
                 write!(f, "Currency mismatch: expected {expected}, got {got}")
             }
+            Self::Overflow(e) => write!(f, "{e}"),
         }
     }
 }
@@ -238,6 +276,9 @@ pub struct AccountedBookingError {
 impl fmt::Display for AccountedBookingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.error {
+            // The currency is already named in the inner message; the account
+            // is the context this wrapper exists to add.
+            BookingError::Overflow(e) => write!(f, "{}: {e}", self.account),
             BookingError::InsufficientUnits {
                 requested,
                 available,
@@ -486,19 +527,36 @@ impl Inventory {
     /// Get the total book value (cost basis) for a currency.
     ///
     /// Returns the sum of all cost bases for positions of the given currency.
-    #[must_use]
-    pub fn book_value(&self, units_currency: &str) -> FxHashMap<crate::Currency, Decimal> {
+    ///
+    /// # Errors
+    ///
+    /// [`OverflowError`] when a position's book value, or the running
+    /// per-currency total, leaves `rust_decimal`'s range.
+    pub fn book_value(
+        &self,
+        units_currency: &str,
+    ) -> Result<FxHashMap<crate::Currency, Decimal>, OverflowError> {
         let mut totals: FxHashMap<crate::Currency, Decimal> = FxHashMap::default();
 
         for pos in &self.positions {
-            if pos.units.currency == units_currency
-                && let Some(book) = pos.book_value()
-            {
-                *totals.entry(book.currency.clone()).or_default() += book.number;
+            if pos.units.currency == units_currency {
+                // NOT `pos.book_value()`: its `None` conflates "no cost" with
+                // "product out of range", and skipping the latter would drop a
+                // position from the total silently — the same class of bug as
+                // clamping it (#1863).
+                let Some(cost) = pos.cost.as_ref() else {
+                    continue;
+                };
+                let overflow = || OverflowError {
+                    currency: cost.currency.clone(),
+                };
+                let book = cost.total_cost(pos.units.number).ok_or_else(overflow)?;
+                let slot = totals.entry(book.currency.clone()).or_default();
+                *slot = slot.checked_add(book.number).ok_or_else(overflow)?;
             }
         }
 
-        totals
+        Ok(totals)
     }
 
     /// Add a position to the inventory.
@@ -517,37 +575,74 @@ impl Inventory {
     /// - After add: `totalAdded' = totalAdded + amount`
     ///
     /// See: `spec/tla/Conservation.tla`
-    pub fn add(&mut self, position: Position) {
+    ///
+    /// # Errors
+    ///
+    /// [`OverflowError`] when the running total for this currency leaves
+    /// `rust_decimal`'s ~±7.9e28 range. The inventory is left UNCHANGED — the
+    /// units cache is only committed once the merge is known to fit, so a
+    /// caller that reports the error and moves on does not carry a
+    /// half-applied position (#1863).
+    pub fn add(&mut self, position: Position) -> Result<(), OverflowError> {
         if position.is_empty() {
-            return;
+            return Ok(());
         }
 
-        // Update units cache
-        *self
+        let overflow = || OverflowError {
+            currency: position.units.currency.clone(),
+        };
+
+        // Compute both running totals BEFORE mutating anything, so an overflow
+        // leaves the inventory untouched rather than half-updated.
+        let cached = self
             .units_cache
-            .entry(position.units.currency.clone())
-            .or_default() += position.units.number;
+            .get(&position.units.currency)
+            .copied()
+            .unwrap_or_default();
+        let new_cached = cached
+            .checked_add(position.units.number)
+            .ok_or_else(overflow)?;
+
+        let merge_idx = position
+            .cost
+            .is_none()
+            .then(|| self.simple_index.get(&position.units.currency).copied())
+            .flatten();
+        let merged_units = merge_idx
+            .map(|idx| {
+                self.positions[idx]
+                    .units
+                    .number
+                    .checked_add(position.units.number)
+                    .ok_or_else(overflow)
+            })
+            .transpose()?;
+
+        self.units_cache
+            .insert(position.units.currency.clone(), new_cached);
 
         // For positions without cost, use index for O(1) lookup
         if position.cost.is_none() {
-            if let Some(&idx) = self.simple_index.get(&position.units.currency) {
+            if let Some(idx) = merge_idx {
                 // Merge with existing position
                 debug_assert!(self.positions[idx].cost.is_none());
-                self.positions[idx].units += &position.units;
-                return;
+                self.positions[idx].units.number =
+                    merged_units.expect("merged_units is Some whenever merge_idx is");
+                return Ok(());
             }
             // No existing position - add new one and index it
             let idx = self.positions.len();
             self.simple_index
                 .insert(position.units.currency.clone(), idx);
             self.positions.push_back(position);
-            return;
+            return Ok(());
         }
 
         // For positions with cost, just add as a new lot.
         // This is O(1) and keeps all lots separate, matching Python beancount behavior.
         // Lot aggregation for display purposes is handled separately in query output.
         self.positions.push_back(position);
+        Ok(())
     }
 
     /// Reduce positions from the inventory using the specified booking method.
@@ -646,18 +741,30 @@ impl Inventory {
     }
 
     /// Merge this inventory with another.
-    pub fn merge(&mut self, other: &Self) {
+    ///
+    /// # Errors
+    ///
+    /// [`OverflowError`] when a merged running total leaves `rust_decimal`'s
+    /// range. `self` keeps the positions merged before the failure.
+    pub fn merge(&mut self, other: &Self) -> Result<(), OverflowError> {
         for pos in &other.positions {
-            self.add(pos.clone());
+            self.add(pos.clone())?;
         }
+        Ok(())
     }
 
     /// Convert inventory to cost basis.
     ///
     /// Returns a new inventory where all positions are converted to their
     /// cost basis. Positions without cost are returned as-is.
-    #[must_use]
-    pub fn at_cost(&self) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`OverflowError`] when a `units × cost` product, or the running total
+    /// of those products, leaves `rust_decimal`'s range. Note this can fire on
+    /// inputs far below the ceiling — the product overflows when neither
+    /// operand does.
+    pub fn at_cost(&self) -> Result<Self, OverflowError> {
         let mut result = Self::new();
 
         for pos in &self.positions {
@@ -667,23 +774,33 @@ impl Inventory {
 
             if let Some(cost) = &pos.cost {
                 // Convert to cost basis
-                let total = pos.units.number * cost.number;
-                result.add(Position::simple(Amount::new(total, &cost.currency)));
+                let total =
+                    pos.units
+                        .number
+                        .checked_mul(cost.number)
+                        .ok_or_else(|| OverflowError {
+                            currency: cost.currency.clone(),
+                        })?;
+                result.add(Position::simple(Amount::new(total, &cost.currency)))?;
             } else {
                 // No cost, keep as-is
-                result.add(pos.clone());
+                result.add(pos.clone())?;
             }
         }
 
-        result
+        Ok(result)
     }
 
     /// Convert inventory to units only.
     ///
     /// Returns a new inventory where all positions have their cost removed,
     /// effectively aggregating by currency only.
-    #[must_use]
-    pub fn at_units(&self) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`OverflowError`] when stripping costs merges lots whose combined units
+    /// leave `rust_decimal`'s range.
+    pub fn at_units(&self) -> Result<Self, OverflowError> {
         let mut result = Self::new();
 
         for pos in &self.positions {
@@ -692,10 +809,10 @@ impl Inventory {
             }
 
             // Strip cost, keep only units
-            result.add(Position::simple(pos.units.clone()));
+            result.add(Position::simple(pos.units.clone()))?;
         }
 
-        result
+        Ok(result)
     }
 }
 
@@ -714,19 +831,25 @@ impl Inventory {
 /// difference differently — booking summed only the leaf account
 /// (`Inventory::units`) while the validator summed sub-accounts — so a pad
 /// targeting a non-leaf account inserted the wrong synthetic amount.
+///
+/// Returns `None` when the sum leaves `rust_decimal`'s range (`Decimal`'s
+/// `Sum` impl panics rather than wrapping). Both callers surface that as a
+/// diagnostic on the assertion/pad rather than asserting against a clamped
+/// total (#1863).
 pub fn sum_account_and_subaccounts<'a, I>(
     inventories: I,
     account: &str,
     currency: &Currency,
-) -> Decimal
+) -> Option<Decimal>
 where
     I: IntoIterator<Item = (&'a Account, &'a Inventory)>,
 {
     inventories
         .into_iter()
         .filter(|(inv_account, _)| is_subaccount_or_equal(inv_account.as_str(), account))
-        .map(|(_, inv)| inv.units(currency))
-        .sum()
+        .try_fold(Decimal::ZERO, |acc, (_, inv)| {
+            acc.checked_add(inv.units(currency))
+        })
 }
 
 impl fmt::Display for Inventory {
@@ -762,13 +885,27 @@ impl fmt::Display for Inventory {
     }
 }
 
-impl FromIterator<Position> for Inventory {
-    fn from_iter<I: IntoIterator<Item = Position>>(iter: I) -> Self {
+impl Inventory {
+    /// Build an inventory from positions.
+    ///
+    /// Replaces the former `FromIterator<Position>` impl, which was removed
+    /// deliberately: `from_iter` cannot report failure, so it had to swallow
+    /// the overflow from [`Self::add`] and hand back an inventory holding a
+    /// wrong total with nothing to indicate it (#1863). A `collect()` that can
+    /// silently lie is worse than no `collect()`.
+    ///
+    /// # Errors
+    ///
+    /// [`OverflowError`] when a running total leaves `rust_decimal`'s range.
+    pub fn try_from_positions<I>(iter: I) -> Result<Self, OverflowError>
+    where
+        I: IntoIterator<Item = Position>,
+    {
         let mut inv = Self::new();
         for pos in iter {
-            inv.add(pos);
+            inv.add(pos)?;
         }
-        inv
+        Ok(inv)
     }
 }
 
@@ -793,7 +930,8 @@ mod tests {
     #[test]
     fn test_add_simple() {
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(100), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(100), "USD")))
+            .expect("fixture fits in Decimal");
 
         assert!(!inv.is_empty());
         assert_eq!(inv.units("USD"), dec!(100));
@@ -802,8 +940,10 @@ mod tests {
     #[test]
     fn test_add_merge_simple() {
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(100), "USD")));
-        inv.add(Position::simple(Amount::new(dec!(50), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(100), "USD")))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::simple(Amount::new(dec!(50), "USD")))
+            .expect("fixture fits in Decimal");
 
         // Should merge into one position
         assert_eq!(inv.len(), 1);
@@ -817,8 +957,10 @@ mod tests {
         let cost1 = Cost::new(dec!(150.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(160.00), "USD").with_date(date(2024, 1, 15));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Should NOT merge - different costs
         assert_eq!(inv.len(), 2);
@@ -828,9 +970,12 @@ mod tests {
     #[test]
     fn test_currencies() {
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(100), "USD")));
-        inv.add(Position::simple(Amount::new(dec!(50), "EUR")));
-        inv.add(Position::simple(Amount::new(dec!(10), "AAPL")));
+        inv.add(Position::simple(Amount::new(dec!(100), "USD")))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::simple(Amount::new(dec!(50), "EUR")))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::simple(Amount::new(dec!(10), "AAPL")))
+            .expect("fixture fits in Decimal");
 
         let currencies = inv.currencies();
         assert_eq!(currencies.len(), 3);
@@ -843,7 +988,8 @@ mod tests {
     fn test_reduce_strict_unique() {
         let mut inv = Inventory::new();
         let cost = Cost::new(dec!(150.00), "USD").with_date(date(2024, 1, 1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         let result = inv
             .reduce(&Amount::new(dec!(-5), "AAPL"), None, BookingMethod::Strict)
@@ -861,8 +1007,10 @@ mod tests {
         let cost1 = Cost::new(dec!(150.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(160.00), "USD").with_date(date(2024, 1, 15));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Per Python beancount: a wildcard reduction (`-3 AAPL` with no cost
         // spec) against an inventory with lots at different costs is
@@ -887,8 +1035,10 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             cost.clone(),
-        ));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost));
+        ))
+        .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         let result = inv
             .reduce(&Amount::new(dec!(-3), "AAPL"), None, BookingMethod::Strict)
@@ -908,8 +1058,10 @@ mod tests {
         let cost1 = Cost::new(dec!(150.00), "USD").with_date(date(2024, 1, 15));
         let cost2 = Cost::new(dec!(150.00), "USD").with_date(date(2024, 2, 15));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         let result = inv
             .reduce(&Amount::new(dec!(-5), "AAPL"), None, BookingMethod::Strict)
@@ -927,8 +1079,10 @@ mod tests {
         let cost1 = Cost::new(dec!(150.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(160.00), "USD").with_date(date(2024, 1, 15));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Selling exactly the entire inventory (10 + 5 = 15) is unambiguous
         // even with mixed costs — the user is liquidating the position.
@@ -948,8 +1102,10 @@ mod tests {
         let cost1 = Cost::new(dec!(150.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(160.00), "USD").with_date(date(2024, 1, 15));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Reducing with cost spec should work
         let spec = CostSpec::empty().with_date(date(2024, 1, 1));
@@ -973,9 +1129,12 @@ mod tests {
         let cost2 = Cost::new(dec!(150.00), "USD").with_date(date(2024, 2, 1));
         let cost3 = Cost::new(dec!(200.00), "USD").with_date(date(2024, 3, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost3));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost3))
+            .expect("fixture fits in Decimal");
 
         // FIFO should reduce from oldest (cost 100) first
         let result = inv
@@ -995,9 +1154,12 @@ mod tests {
         let cost2 = Cost::new(dec!(150.00), "USD").with_date(date(2024, 2, 1));
         let cost3 = Cost::new(dec!(200.00), "USD").with_date(date(2024, 3, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost3));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost3))
+            .expect("fixture fits in Decimal");
 
         // LIFO should reduce from newest (cost 200) first
         let result = inv
@@ -1013,7 +1175,8 @@ mod tests {
     fn test_reduce_insufficient() {
         let mut inv = Inventory::new();
         let cost = Cost::new(dec!(150.00), "USD");
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         let result = inv.reduce(&Amount::new(dec!(-15), "AAPL"), None, BookingMethod::Fifo);
 
@@ -1030,17 +1193,20 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD");
         let cost2 = Cost::new(dec!(150.00), "USD");
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
-        let book = inv.book_value("AAPL");
+        let book = inv.book_value("AAPL").expect("fixture fits in Decimal");
         assert_eq!(book.get("USD"), Some(&dec!(1750.00))); // 10*100 + 5*150
     }
 
     #[test]
     fn test_display() {
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(100), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(100), "USD")))
+            .expect("fixture fits in Decimal");
 
         let s = format!("{inv}");
         assert!(s.contains("100 USD"));
@@ -1059,7 +1225,7 @@ mod tests {
             Position::simple(Amount::new(dec!(50), "USD")),
         ];
 
-        let inv: Inventory = positions.into_iter().collect();
+        let inv = Inventory::try_from_positions(positions).expect("fixture fits in Decimal");
         assert_eq!(inv.units("USD"), dec!(150));
     }
 
@@ -1075,12 +1241,14 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             cost.clone(),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         assert_eq!(inv.len(), 1);
         assert_eq!(inv.units("AAPL"), dec!(10));
 
         // Sell 10 shares - kept as separate lot for tracking
-        inv.add(Position::with_cost(Amount::new(dec!(-10), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(-10), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
         assert_eq!(inv.len(), 2); // Both lots kept
         assert_eq!(inv.units("AAPL"), dec!(0)); // Net units still zero
     }
@@ -1096,10 +1264,12 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             cost.clone(),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         // Sell 3 shares - kept as separate lot
-        inv.add(Position::with_cost(Amount::new(dec!(-3), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(-3), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
         assert_eq!(inv.len(), 2); // Both lots kept
         assert_eq!(inv.units("AAPL"), dec!(7)); // Net units correct
     }
@@ -1113,10 +1283,12 @@ mod tests {
         let cost2 = Cost::new(dec!(160.00), "USD").with_date(date(2024, 1, 15));
 
         // Buy 10 shares at 150
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
 
         // Sell 5 shares at 160 - should NOT cancel (different cost)
-        inv.add(Position::with_cost(Amount::new(dec!(-5), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(-5), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Should have two separate lots
         assert_eq!(inv.len(), 2);
@@ -1134,10 +1306,12 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             cost.clone(),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         // Buy 5 more shares with same cost - should NOT merge
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         // Should have two separate lots (different acquisitions)
         assert_eq!(inv.len(), 2);
@@ -1156,13 +1330,15 @@ mod tests {
         inv1.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             cost.clone(),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         // inv2: sell 10 shares
-        inv2.add(Position::with_cost(Amount::new(dec!(-10), "AAPL"), cost));
+        inv2.add(Position::with_cost(Amount::new(dec!(-10), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         // Merge keeps both lots, net units is zero
-        inv1.merge(&inv2);
+        inv1.merge(&inv2).expect("fixture fits in Decimal");
         assert_eq!(inv1.len(), 2); // Both lots preserved
         assert_eq!(inv1.units("AAPL"), dec!(0)); // Net units correct
     }
@@ -1181,9 +1357,12 @@ mod tests {
         let cost2 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 2, 1));
         let cost3 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 3, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost3));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost3))
+            .expect("fixture fits in Decimal");
 
         // HIFO with tied costs should reduce in some deterministic order
         let result = inv
@@ -1204,12 +1383,15 @@ mod tests {
         let cost_mid = Cost::new(dec!(100.00), "USD").with_date(date(2024, 2, 1));
         let cost_high = Cost::new(dec!(200.00), "USD").with_date(date(2024, 3, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_low));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_mid));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_low))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_mid))
+            .expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             cost_high,
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         // Reduce 15 shares - should take from highest cost (200) first
         let result = inv
@@ -1229,8 +1411,10 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(200.00), "USD").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Total: 20 shares, total cost = 10*100 + 10*200 = 3000, avg = 150/share
         // Reduce 5 shares using AVERAGE
@@ -1248,7 +1432,8 @@ mod tests {
         let mut inv = Inventory::new();
 
         let cost = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         // Reduce all shares
         let result = inv
@@ -1267,7 +1452,8 @@ mod tests {
     fn test_none_booking_augmentation() {
         // NONE booking with same-sign amounts should augment, not reduce
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(100), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(100), "USD")))
+            .expect("fixture fits in Decimal");
 
         // Adding more (same sign) - this is an augmentation
         let result = inv
@@ -1283,7 +1469,8 @@ mod tests {
     fn test_none_booking_reduction() {
         // NONE booking with opposite-sign should reduce
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(100), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(100), "USD")))
+            .expect("fixture fits in Decimal");
 
         let result = inv
             .reduce(&Amount::new(dec!(-30), "USD"), None, BookingMethod::None)
@@ -1296,7 +1483,8 @@ mod tests {
     #[test]
     fn test_none_booking_shorts_past_zero() {
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(100), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(100), "USD")))
+            .expect("fixture fits in Decimal");
 
         // NONE performs no booking: reducing past the balance shorts instead
         // of erroring (#1686 — previously InsufficientUnits, inconsistent
@@ -1313,7 +1501,8 @@ mod tests {
 
         // Add a lot with specific cost
         let cost = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         // Try to reduce with a cost spec that doesn't match
         let wrong_spec = CostSpec::empty().with_date(date(2024, 12, 31));
@@ -1331,7 +1520,8 @@ mod tests {
         let mut inv = Inventory::new();
 
         let cost = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         // Try to reduce more than available
         let result = inv.reduce(&Amount::new(dec!(-20), "AAPL"), None, BookingMethod::Fifo);
@@ -1357,8 +1547,10 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Reduce exactly 5 - should match the 5-share lot
         let result = inv
@@ -1381,8 +1573,10 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Reduce exactly 15 (total) - should succeed via total match exception
         let result = inv
@@ -1405,8 +1599,10 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Reduce 7 shares - doesn't match either lot exactly, not total
         let result = inv.reduce(
@@ -1425,7 +1621,8 @@ mod tests {
 
         // Short 10 shares
         let cost = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
-        inv.add(Position::with_cost(Amount::new(dec!(-10), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(-10), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         assert_eq!(inv.units("AAPL"), dec!(-10));
         assert!(!inv.is_empty());
@@ -1438,11 +1635,14 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(150.00), "USD").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2));
-        inv.add(Position::simple(Amount::new(dec!(100), "USD")));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::simple(Amount::new(dec!(100), "USD")))
+            .expect("fixture fits in Decimal");
 
-        let at_cost = inv.at_cost();
+        let at_cost = inv.at_cost().expect("fixture fits in Decimal");
 
         // AAPL converted: 10*100 + 5*150 = 1000 + 750 = 1750 USD
         // Plus 100 USD simple position = 1850 USD total
@@ -1457,10 +1657,12 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(150.00), "USD").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
-        let at_units = inv.at_units();
+        let at_units = inv.at_units().expect("fixture fits in Decimal");
 
         // All AAPL lots merged
         assert_eq!(at_units.units("AAPL"), dec!(15));
@@ -1471,7 +1673,8 @@ mod tests {
     #[test]
     fn test_add_empty_position() {
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(0), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(0), "USD")))
+            .expect("fixture fits in Decimal");
 
         assert!(inv.is_empty());
         assert_eq!(inv.len(), 0);
@@ -1482,7 +1685,8 @@ mod tests {
         let mut inv = Inventory::new();
 
         let cost = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         // Reduce all
         inv.reduce(&Amount::new(dec!(-10), "AAPL"), None, BookingMethod::Fifo)
@@ -1577,13 +1781,15 @@ mod tests {
 
         // Cost in USD
         let cost_usd = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_usd));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_usd))
+            .expect("fixture fits in Decimal");
 
         // Cost in EUR
         let cost_eur = Cost::new(dec!(90.00), "EUR").with_date(date(2024, 2, 1));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost_eur));
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost_eur))
+            .expect("fixture fits in Decimal");
 
-        let book = inv.book_value("AAPL");
+        let book = inv.book_value("AAPL").expect("fixture fits in Decimal");
         assert_eq!(book.get("USD"), Some(&dec!(1000.00)));
         assert_eq!(book.get("EUR"), Some(&dec!(450.00)));
     }
@@ -1593,7 +1799,8 @@ mod tests {
         let mut inv = Inventory::new();
 
         let cost = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         let result = inv.reduce(&Amount::new(dec!(-20), "AAPL"), None, BookingMethod::Hifo);
 
@@ -1608,7 +1815,8 @@ mod tests {
         let mut inv = Inventory::new();
 
         let cost = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         let result = inv.reduce(
             &Amount::new(dec!(-20), "AAPL"),
@@ -1645,11 +1853,13 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(150), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(160), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         let merge_spec = CostSpec::empty().with_merge();
         let result = inv
@@ -1676,7 +1886,8 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(150), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         let merge_spec = CostSpec::empty().with_merge();
         let result = inv.reduce(
@@ -1698,11 +1909,13 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(150), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(160), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         let merge_spec = CostSpec::empty().with_merge();
         let result = inv
@@ -1727,7 +1940,8 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(150), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         let merge_spec = CostSpec::empty().with_merge();
         let result = inv
@@ -1750,15 +1964,18 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(100), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(150), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(200), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         // Average cost: (1000 + 1500 + 2000) / 30 = 150 USD
         let merge_spec = CostSpec::empty().with_merge();
@@ -1784,11 +2001,13 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(150), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(130), "EUR"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         let merge_spec = CostSpec::empty().with_merge();
         let result = inv.reduce(
@@ -1825,9 +2044,12 @@ mod tests {
         let mut inv = Inventory::new();
 
         // Add in non-alphabetical order
-        inv.add(Position::simple(Amount::new(dec!(100), "USD")));
-        inv.add(Position::simple(Amount::new(dec!(50), "EUR")));
-        inv.add(Position::simple(Amount::new(dec!(10), "AAPL")));
+        inv.add(Position::simple(Amount::new(dec!(100), "USD")))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::simple(Amount::new(dec!(50), "EUR")))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::simple(Amount::new(dec!(10), "AAPL")))
+            .expect("fixture fits in Decimal");
 
         let display = format!("{inv}");
 
@@ -1851,8 +2073,10 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             cost_high,
-        ));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost_low));
+        ))
+        .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost_low))
+            .expect("fixture fits in Decimal");
 
         let display = format!("{inv}");
 
@@ -1867,7 +2091,8 @@ mod tests {
         let mut inv = Inventory::new();
 
         // No AAPL positions
-        inv.add(Position::simple(Amount::new(dec!(100), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(100), "USD")))
+            .expect("fixture fits in Decimal");
 
         let result = inv.reduce(&Amount::new(dec!(-10), "AAPL"), None, BookingMethod::Hifo);
 
@@ -1883,8 +2108,10 @@ mod tests {
         let cost_new = Cost::new(dec!(200.00), "USD").with_date(date(2024, 3, 1));
         let cost_old = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_new));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_old));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_new))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_old))
+            .expect("fixture fits in Decimal");
 
         // FIFO should reduce from oldest (cost 100) first
         let result = inv
@@ -1904,8 +2131,10 @@ mod tests {
         let cost_old = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost_new = Cost::new(dec!(200.00), "USD").with_date(date(2024, 3, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_old));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_new));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_old))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_new))
+            .expect("fixture fits in Decimal");
 
         // LIFO should reduce from newest (cost 200) first
         let result = inv
@@ -1937,8 +2166,10 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(200.00), "USD").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(7), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(7), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Reduce exactly 7 - should match the 7-share lot at cost 200
         let result = inv
@@ -1962,8 +2193,10 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(200.00), "USD").with_date(date(2024, 6, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Both lots are size 5 — should pick the first (oldest) one
         let result = inv
@@ -1987,8 +2220,10 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(200.00), "USD").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // With cost spec filtering to the 200 USD lot, should find unique match
         let spec = CostSpec::empty().with_number(crate::CostNumber::PerUnit {
@@ -2017,12 +2252,15 @@ mod tests {
         let cost_mid = Cost::new(dec!(150.00), "USD").with_date(date(2024, 2, 1));
         let cost_high = Cost::new(dec!(200.00), "USD").with_date(date(2024, 3, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_low));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_mid));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_low))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost_mid))
+            .expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             cost_high,
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         // Reduce 5 — should come from highest cost lot (200)
         let result = inv
@@ -2042,8 +2280,10 @@ mod tests {
         let cost_low = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost_high = Cost::new(dec!(200.00), "USD").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost_low));
-        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost_high));
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost_low))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(5), "AAPL"), cost_high))
+            .expect("fixture fits in Decimal");
 
         // Reduce 8: 5 from high (200) + 3 from low (100)
         let result = inv
@@ -2063,8 +2303,10 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(200.00), "EUR").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Filter to USD lots only
         let spec = CostSpec::empty().with_currency("USD");
@@ -2091,11 +2333,13 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(-10), "AAPL"),
             cost_low,
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(-10), "AAPL"),
             cost_high,
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         // Cover 5 shares (positive = reduce short position)
         // HIFO should pick the highest-cost short lot (200)
@@ -2117,8 +2361,10 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(200.00), "USD").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Average cost = (10*100 + 10*200) / 20 = 150
         let result = inv
@@ -2138,8 +2384,10 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(200.00), "USD").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         inv.reduce(&Amount::new(dec!(-5), "AAPL"), None, BookingMethod::Average)
             .unwrap();
@@ -2162,8 +2410,10 @@ mod tests {
         let cost1 = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
         let cost2 = Cost::new(dec!(200.00), "USD").with_date(date(2024, 2, 1));
 
-        inv.add(Position::with_cost(Amount::new(dec!(30), "AAPL"), cost1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2));
+        inv.add(Position::with_cost(Amount::new(dec!(30), "AAPL"), cost1))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2))
+            .expect("fixture fits in Decimal");
 
         // Average cost = (30*100 + 10*200) / 40 = 5000/40 = 125
         let result = inv
@@ -2185,7 +2435,8 @@ mod tests {
         let mut inv = Inventory::new();
 
         let cost = Cost::new(dec!(100.00), "USD").with_date(date(2024, 1, 1));
-        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost))
+            .expect("fixture fits in Decimal");
 
         let result = inv
             .reduce(&Amount::new(dec!(-5), "AAPL"), None, BookingMethod::None)
@@ -2201,7 +2452,8 @@ mod tests {
     fn test_none_booking_short_cover() {
         // Covering a short position with NONE booking
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(-100), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(-100), "USD")))
+            .expect("fixture fits in Decimal");
 
         // Positive amount should reduce the negative position
         let result = inv
@@ -2238,11 +2490,13 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(-10), "AAPL"),
             cost_old,
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(-10), "AAPL"),
             cost_new,
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         // Cover 5 shares — FIFO should pick oldest short (cost 100)
         let result = inv
@@ -2264,11 +2518,13 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(-10), "AAPL"),
             cost_old,
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(-10), "AAPL"),
             cost_new,
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         // Cover 5 shares — LIFO should pick newest short (cost 200)
         let result = inv
@@ -2314,10 +2570,12 @@ mod tests {
 
         // Step 1: buy 100 HOOG with cost
         let cost = Cost::new(dec!(1.50), "EUR").with_date(date(2024, 1, 10));
-        inv.add(Position::with_cost(Amount::new(dec!(100), "HOOG"), cost));
+        inv.add(Position::with_cost(Amount::new(dec!(100), "HOOG"), cost))
+            .expect("fixture fits in Decimal");
 
         // Step 2: sell 25 HOOG without cost spec (simple position)
-        inv.add(Position::simple(Amount::new(dec!(-25), "HOOG")));
+        inv.add(Position::simple(Amount::new(dec!(-25), "HOOG")))
+            .expect("fixture fits in Decimal");
 
         // Step 3: check if buying 50 HOOG with cost spec would be a reduction
         let buy_units = Amount::new(dec!(50), "HOOG");
@@ -2347,7 +2605,8 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(150), "USD").with_date(date(2024, 1, 1)),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
 
         let sell = Amount::new(dec!(-5), "AAPL"); // opposite sign of the held lot
         let buy = Amount::new(dec!(5), "AAPL"); // same sign
@@ -2367,18 +2626,24 @@ mod tests {
     #[test]
     fn sum_account_and_subaccounts_sums_children_not_prefix_siblings() {
         let mut bank = Inventory::new();
-        bank.add(Position::simple(Amount::new(dec!(10), "USD")));
+        bank.add(Position::simple(Amount::new(dec!(10), "USD")))
+            .expect("fixture fits in Decimal");
         let mut checking = Inventory::new(); // sub-account: included
-        checking.add(Position::simple(Amount::new(dec!(40), "USD")));
+        checking
+            .add(Position::simple(Amount::new(dec!(40), "USD")))
+            .expect("fixture fits in Decimal");
         let mut alias = Inventory::new(); // prefix sibling: excluded
-        alias.add(Position::simple(Amount::new(dec!(99), "USD")));
+        alias
+            .add(Position::simple(Amount::new(dec!(99), "USD")))
+            .expect("fixture fits in Decimal");
 
         let mut map: FxHashMap<Account, Inventory> = FxHashMap::default();
         map.insert(Account::from("Assets:Bank"), bank);
         map.insert(Account::from("Assets:Bank:Checking"), checking);
         map.insert(Account::from("Assets:BankAlias"), alias);
 
-        let total = sum_account_and_subaccounts(map.iter(), "Assets:Bank", &Currency::from("USD"));
+        let total = sum_account_and_subaccounts(map.iter(), "Assets:Bank", &Currency::from("USD"))
+            .expect("fixture fits in Decimal");
         assert_eq!(
             total,
             dec!(50),

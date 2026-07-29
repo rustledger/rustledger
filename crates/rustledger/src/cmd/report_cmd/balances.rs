@@ -15,7 +15,7 @@ pub(super) fn report_balances<W: Write>(
 ) -> Result<()> {
     // Single source of truth for per-account balances (see
     // `super::account_balances`); no report re-derives them itself.
-    let balances = super::account_balances(directives);
+    let balances = super::account_balances(directives)?;
 
     // Collect data for output. `cost` is the beancount-style lot annotation
     // (e.g. ` {150.00 USD}`) for held commodities, empty for plain currency.

@@ -97,7 +97,7 @@ proptest! {
         // Add all positions
         for pos in &positions {
             total_added += pos.units.number;
-            inv.add(pos.clone());
+            inv.add(pos.clone()).expect("fixture fits in Decimal");
         }
 
         // Reduce by arbitrary amounts — possibly more than is held.
@@ -150,7 +150,7 @@ proptest! {
         let mut inv = Inventory::new();
 
         for pos in &positions {
-            inv.add(pos.clone());
+            inv.add(pos.clone()).expect("fixture fits in Decimal");
         }
 
         // Try to reduce more than available — must fail, untouched.
@@ -202,11 +202,11 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(100), "USD").with_date(date1),
-        ));
+        )).expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(200), "USD").with_date(date2),
-        ));
+        )).expect("fixture fits in Decimal");
 
         // Reduce using FIFO
         let result = inv.reduce(
@@ -244,11 +244,11 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(100), "USD").with_date(date1),
-        ));
+        )).expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(200), "USD").with_date(date2),
-        ));
+        )).expect("fixture fits in Decimal");
 
         let result = inv.reduce(
             &Amount::new(dec!(-5), "AAPL"),
@@ -283,11 +283,11 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(Decimal::from(cost1), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(Decimal::from(cost2), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         let result = inv.reduce(
             &Amount::new(dec!(-5), "AAPL"),
@@ -331,7 +331,7 @@ proptest! {
         from_account.add(Position::with_cost(
             Amount::new(Decimal::from(amount), "USD"),
             Cost::new(dec!(1), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         let before_from = from_account.units("USD");
         let before_to = to_account.units("USD");
@@ -387,11 +387,11 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(Decimal::from(cost), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(Decimal::from(cost + 10), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         let result = inv.reduce(
             &Amount::new(dec!(-5), "AAPL"),
@@ -421,7 +421,7 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(units), "AAPL"),
             Cost::new(cost_dec, "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         let reduce_amount = Decimal::from(units / 2).max(Decimal::ONE);
 
@@ -468,7 +468,7 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(units), "AAPL"),
             Cost::new(dec!(100), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         // NONE should allow reduction
         let result = inv.reduce(
@@ -505,7 +505,7 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(total_added, "AAPL"),
             Cost::new(dec!(100), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         let to_reduce = Decimal::from(reduce_units).min(total_added);
         let result = inv.reduce(
@@ -554,11 +554,11 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(units1), "AAPL"),
             Cost::new(Decimal::from(cost1), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(units2), "AAPL"),
             Cost::new(Decimal::from(cost2), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         // AVERAGE should succeed
         let result = inv.reduce(
@@ -593,7 +593,7 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(total_added, "AAPL"),
             Cost::new(Decimal::from(cost), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         let result = inv.reduce(
             &Amount::new(-reduce_amount, "AAPL"),
@@ -639,14 +639,14 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(units_aapl), "AAPL"),
             Cost::new(dec!(100), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
         let total_added_aapl = Decimal::from(units_aapl);
 
         // Add GOOG
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(units_goog), "GOOG"),
             Cost::new(dec!(150), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
         let total_added_goog = Decimal::from(units_goog);
 
         // Reduce AAPL
@@ -703,11 +703,11 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(units_aapl), "AAPL"),
             Cost::new(dec!(100), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(units_goog), "GOOG"),
             Cost::new(dec!(150), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         // Try to reduce more than available for each currency
         let _ = inv.reduce(
@@ -748,11 +748,11 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(units_aapl), "AAPL"),
             Cost::new(dec!(100), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(units_goog), "GOOG"),
             Cost::new(dec!(150), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         // Record GOOG balance before AAPL operation
         let goog_before = inv.units("GOOG");
@@ -789,11 +789,11 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(add1), "AAPL"),
             Cost::new(dec!(100), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(add2), "AAPL"),
             Cost::new(dec!(110), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         let total_added = Decimal::from(add1 + add2);
         let mut total_reduced = Decimal::ZERO;
@@ -849,11 +849,11 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(lot1_size), "AAPL"),
             Cost::new(Decimal::from(cost1), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(lot2_size), "AAPL"),
             Cost::new(Decimal::from(cost2), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         // Reduce exactly lot1_size — should match lot1 exactly
         let result = inv.reduce(
@@ -895,7 +895,7 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(lot_size), "AAPL"),
             Cost::new(Decimal::from(cost), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         let reduce_amount = lot_size / 2 + 1; // Always > 0, always <= lot_size
         let reduce_amount = reduce_amount.min(lot_size);
@@ -935,11 +935,11 @@ proptest! {
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(lot_size), "AAPL"),
             Cost::new(Decimal::from(cost1), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(Decimal::from(lot_size), "AAPL"),
             Cost::new(Decimal::from(cost2), "USD").with_date(date),
-        ));
+        )).expect("fixture fits in Decimal");
 
         // Reduce less than lot_size (no exact match, not total)
         let reduce = lot_size - 1;
@@ -1003,7 +1003,7 @@ proptest! {
 
         let mut inv = Inventory::new();
         for pos in &positions {
-            inv.add(pos.clone());
+            inv.add(pos.clone()).expect("fixture fits in Decimal");
         }
 
         // Build a reduction that may be unsatisfiable in one of several ways.

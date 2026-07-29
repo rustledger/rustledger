@@ -75,6 +75,24 @@ pub enum InterpolationError {
         /// The residual amount.
         residual: Decimal,
     },
+
+    /// The weight arithmetic left `rust_decimal`'s ~7.9e28 range, so the
+    /// amount to interpolate cannot be represented (#1863).
+    ///
+    /// This is reported rather than clamped because an interpolated amount is
+    /// WRITTEN INTO the posting and then flows to every report, BQL result and
+    /// balance check as if the user had typed it. A saturated value there is a
+    /// fabricated figure presented as the user's own data.
+    #[error(
+        "amounts in this transaction exceed the {} range, so the {currency} \
+         posting amount cannot be computed; split the transaction or use \
+         smaller units",
+        "±7.9e28"
+    )]
+    Unrepresentable {
+        /// The currency group whose arithmetic left the range.
+        currency: Currency,
+    },
 }
 
 /// Result of interpolation.
@@ -86,6 +104,34 @@ pub struct InterpolationResult {
     pub filled_indices: Vec<usize>,
     /// Residuals after interpolation (should all be near zero).
     pub residuals: HashMap<Currency, Decimal>,
+}
+
+/// Add `amount` into `currency`'s running residual.
+///
+/// On overflow the currency is recorded in `unrepresentable` and its running
+/// total is left untouched, rather than panicking (#1863) or aborting outright.
+///
+/// The distinction matters: a residual that cannot be represented is only
+/// FATAL when interpolation must actually solve an amount from it — that
+/// amount would be written into the posting as if the user had typed it. When
+/// every posting is explicit, interpolation has nothing to solve and the
+/// balance validator recomputes the residual in `BigDecimal`, reporting the
+/// exact imbalance (matching Python beancount, whose `decimal` context has no
+/// magnitude ceiling). Aborting here would replace that precise diagnostic
+/// with a vaguer one.
+fn accumulate_residual(
+    residuals: &mut HashMap<Currency, Decimal>,
+    unrepresentable: &mut std::collections::HashSet<Currency>,
+    currency: &Currency,
+    amount: Decimal,
+) {
+    let slot = residuals.entry(currency.clone()).or_default();
+    match slot.checked_add(amount) {
+        Some(v) => *slot = v,
+        None => {
+            unrepresentable.insert(currency.clone());
+        }
+    }
 }
 
 /// Round an interpolated amount to match existing scale, but never round
@@ -163,6 +209,8 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // Pre-allocate for typical case (1-2 currencies per transaction)
     let num_postings = transaction.postings.len();
     let mut residuals: HashMap<Currency, Decimal> = HashMap::with_capacity(num_postings.min(4));
+    // Currencies whose running residual left `rust_decimal`'s range (#1863).
+    let mut unrepresentable: std::collections::HashSet<Currency> = std::collections::HashSet::new();
     let mut missing_by_currency: HashMap<Currency, Vec<usize>> = HashMap::with_capacity(2);
     let mut unassigned_missing: Vec<usize> = Vec::with_capacity(2);
 
@@ -234,9 +282,25 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                 // the SAME `CostNumber` ladder `calculate_residual` uses — so
                 // interpolation and the balance residual can no longer disagree
                 // (the rule: cost beats price; else price; else units).
-                let cost_contribution = crate::cost_weight::<Decimal>(posting, amount, || {
+                let Ok(cost_contribution) = crate::cost_weight::<Decimal>(posting, amount, || {
                     get_inferred_currency(&mut inferred_cost_currency)
-                });
+                }) else {
+                    // This posting's weight is out of range. Mark the
+                    // currency the weight WOULD have been denominated in —
+                    // marking `amount.currency` instead would leave the
+                    // cost currency's residual quietly short by this
+                    // posting while looking representable (#1863).
+                    let weight_currency = crate::cost_currency_of(posting, || {
+                        get_inferred_currency(&mut inferred_cost_currency)
+                    })
+                    .unwrap_or_else(|| amount.currency.clone());
+                    unrepresentable.insert(weight_currency);
+                    // `continue`, NOT `None`: falling through would reach
+                    // the `posting.cost.is_some()` branch and be counted as
+                    // an empty-`{}` cost unknown, turning an arithmetic
+                    // problem into a spurious #1026 "multiple unknowns".
+                    continue;
+                };
 
                 if let Some((currency, cost_amount)) = cost_contribution {
                     // Cost-based posting: weight is in the cost currency.
@@ -244,7 +308,12 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                     // `max_scale_by_currency` — see its declaration for the
                     // rationale (Python beancount with default
                     // `infer_tolerance_from_cost = False`).
-                    *residuals.entry(currency).or_default() += cost_amount;
+                    accumulate_residual(
+                        &mut residuals,
+                        &mut unrepresentable,
+                        &currency,
+                        cost_amount,
+                    );
                 } else if posting.cost.is_some() {
                     // Cost spec exists but has no determinable cost number (e.g.,
                     // an empty `{}` spec where the lot's cost will be filled by
@@ -351,7 +420,17 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                         let (curr, signed) = match price.kind {
                             rustledger_core::PriceKind::Unit => (
                                 price_amt.currency.clone(),
-                                amount.number.abs() * price_amt.number * amount.number.signum(),
+                                if let Some(v) = amount
+                                    .number
+                                    .abs()
+                                    .checked_mul(price_amt.number)
+                                    .and_then(|v| v.checked_mul(amount.number.signum()))
+                                {
+                                    v
+                                } else {
+                                    unrepresentable.insert(price_amt.currency.clone());
+                                    continue;
+                                },
                             ),
                             rustledger_core::PriceKind::Total => {
                                 let scale = price_amt.number.scale();
@@ -363,18 +442,35 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                                 }
                                 (
                                     price_amt.currency.clone(),
-                                    price_amt.number * amount.number.signum(),
+                                    if let Some(v) =
+                                        price_amt.number.checked_mul(amount.number.signum())
+                                    {
+                                        v
+                                    } else {
+                                        unrepresentable.insert(price_amt.currency.clone());
+                                        continue;
+                                    },
                                 )
                             }
                         };
-                        *residuals.entry(curr).or_default() += signed;
+                        accumulate_residual(&mut residuals, &mut unrepresentable, &curr, signed);
                     } else {
                         // Incomplete/empty price annotation — fall back to units
-                        *residuals.entry(amount.currency.clone()).or_default() += amount.number;
+                        accumulate_residual(
+                            &mut residuals,
+                            &mut unrepresentable,
+                            &amount.currency,
+                            amount.number,
+                        );
                     }
                 } else {
                     // Simple posting: weight is just the units
-                    *residuals.entry(amount.currency.clone()).or_default() += amount.number;
+                    accumulate_residual(
+                        &mut residuals,
+                        &mut unrepresentable,
+                        &amount.currency,
+                        amount.number,
+                    );
                 }
             }
             Some(IncompleteAmount::CurrencyOnly(currency)) => {
@@ -426,6 +522,32 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                 unassigned_missing.push(i);
             }
         }
+    }
+
+    // An out-of-range residual (#1863) is fatal ONLY if this transaction has
+    // something to interpolate: the solved amount is written into the posting
+    // and thereafter indistinguishable from user input, so it must never be
+    // derived from a total we could not compute. With nothing to solve, we
+    // return normally and the balance validator recomputes the residual in
+    // `BigDecimal` and reports the exact imbalance — strictly more useful than
+    // failing here, and what Python beancount prints.
+    if !unrepresentable.is_empty()
+        && (!missing_by_currency.is_empty()
+            || !cost_unknowns_by_currency.is_empty()
+            || !unassigned_missing.is_empty())
+    {
+        // Deterministic choice of currency for the message.
+        let mut names: Vec<&Currency> = unrepresentable.iter().collect();
+        names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        return Err(InterpolationError::Unrepresentable {
+            currency: (*names.first().expect("non-empty")).clone(),
+        });
+    }
+    // Nothing was solved, so hand back no residual for those currencies rather
+    // than the partial sum we stopped accumulating — a wrong number in a
+    // public field is exactly the failure mode this fix exists to remove.
+    for currency in &unrepresentable {
+        residuals.remove(currency);
     }
 
     // Check for multiple unknowns in the same currency group. An "unknown"
@@ -920,7 +1042,9 @@ mod tests {
         let result = interpolate(&txn).expect("interpolation should succeed");
 
         // The independent residual engine (sharing cost_weight) sees balance.
-        for (currency, value) in crate::calculate_residual(&result.transaction) {
+        for (currency, value) in
+            crate::calculate_residual(&result.transaction).expect("fixture fits in Decimal")
+        {
             assert!(
                 value.abs() < dec!(0.0001),
                 "interpolated result not balanced per calculate_residual: {value} {currency}"
@@ -1832,7 +1956,7 @@ mod tests {
             .with_synthesized_posting(Posting::auto("Income:Capital-Gains"));
 
         let mut engine = BookingEngine::new();
-        engine.apply(&buy);
+        engine.apply(&buy).expect("fixture fits in Decimal");
 
         // book_and_interpolate handles the empty `{}` lot match AND
         // runs interpolation on the booked transaction. The Income

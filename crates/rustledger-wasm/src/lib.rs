@@ -483,8 +483,11 @@ include "accounts.beancount"
             if let Directive::Transaction(txn) = directive
                 && let Ok(result) = engine.book_and_interpolate(txn)
             {
-                engine.apply(&result.transaction);
-                *txn = result.transaction;
+                // Same as the LSP: on overflow leave the transaction
+                // unbooked and let validation report E4004 (#1863).
+                if engine.apply(&result.transaction).is_ok() {
+                    *txn = result.transaction;
+                }
             }
         }
         // Sort by date for proper validation

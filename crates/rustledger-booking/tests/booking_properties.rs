@@ -122,7 +122,7 @@ proptest! {
                     let mut c = Cost::new(Decimal::from(*cost), COST_CURRENCY)
                         .with_date(day_date(*day));
                     c.label = label.map(|i| LABELS[i].to_string());
-                    inv.add(Position::with_cost(Amount::new(n, CURRENCY), c));
+                    inv.add(Position::with_cost(Amount::new(n, CURRENCY), c)).expect("fixture fits in Decimal");
                     expected_total += n;
                 }
                 Op::Sell { units, label } => {
@@ -213,7 +213,7 @@ proptest! {
                     "Assets:Cash",
                     Amount::new(-Decimal::from(*units) * cost_number, COST_CURRENCY),
                 ));
-            engine.apply(&buy);
+            engine.apply(&buy).expect("fixture fits in Decimal");
         }
 
         // Sell 1..=100% of the chosen lot, matched by its label.
@@ -250,7 +250,7 @@ proptest! {
             "reduction must carry the matched lot's label",
         );
 
-        engine.apply(&result.transaction);
+        engine.apply(&result.transaction).expect("fixture fits in Decimal");
         let inv = engine
             .inventory(&"Assets:S".into())
             .expect("account has inventory");

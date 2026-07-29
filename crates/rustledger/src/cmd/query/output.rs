@@ -717,11 +717,13 @@ mod tests {
         inv.add(Position::with_cost(
             Amount::new(dec!(8.373), "RGAGX"),
             Cost::new(dec!(128.99), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         inv.add(Position::with_cost(
             Amount::new(dec!(8.199), "RGAGX"),
             Cost::new(dec!(131.73), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         let value = Value::Inventory(Box::new(inv));
         let ctx = DisplayContext::new();
         let rendered = format_value(&value, false, &ctx);
@@ -779,7 +781,8 @@ mod tests {
 
         // Sub-cent residual: -0.0003183 USD is "zero at USD precision".
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(-0.0003183), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(-0.0003183), "USD")))
+            .expect("fixture fits in Decimal");
 
         let rendered = format_value(&Value::Inventory(Box::new(inv)), false, &ctx);
         assert_eq!(
@@ -820,7 +823,8 @@ mod tests {
         ctx.update(dec!(2.00), "USD");
 
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(-0.01), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(-0.01), "USD")))
+            .expect("fixture fits in Decimal");
 
         let rendered = format_value(&Value::Inventory(Box::new(inv)), false, &ctx);
         assert!(
@@ -848,7 +852,8 @@ mod tests {
         let amount_val = Value::Amount(Amount::new(over_scale, "USD"));
         let pos_val = Value::Position(Box::new(Position::simple(Amount::new(over_scale, "USD"))));
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(over_scale, "USD")));
+        inv.add(Position::simple(Amount::new(over_scale, "USD")))
+            .expect("fixture fits in Decimal");
         let inv_val = Value::Inventory(Box::new(inv));
 
         assert_eq!(format_value(&amount_val, true, &ctx), "-1202.01");
@@ -877,7 +882,8 @@ mod tests {
         ctx.update(dec!(2.00), "USD");
 
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(-0.0003183), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(-0.0003183), "USD")))
+            .expect("fixture fits in Decimal");
 
         let mut result = QueryResult::new(vec!["account".into(), "sum".into()]);
         result.add_row(vec![
@@ -918,7 +924,8 @@ mod tests {
         ctx.update(dec!(2.00), "USD");
 
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(-0.0003183), "USD")));
+        inv.add(Position::simple(Amount::new(dec!(-0.0003183), "USD")))
+            .expect("fixture fits in Decimal");
 
         let mut result = QueryResult::new(vec!["sum".into()]);
         result.add_row(vec![Value::Inventory(Box::new(inv))]);

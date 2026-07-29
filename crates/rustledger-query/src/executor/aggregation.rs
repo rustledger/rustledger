@@ -319,11 +319,15 @@ impl<'a> Executor<'a> {
                             match val {
                                 Value::Amount(amt) => {
                                     let pos = Position::simple(amt);
-                                    total_inventory.add(pos);
+                                    total_inventory
+                                        .add(pos)
+                                        .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                                     has_positions = true;
                                 }
                                 Value::Position(pos) => {
-                                    total_inventory.add(*pos);
+                                    total_inventory
+                                        .add(*pos)
+                                        .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                                     has_positions = true;
                                 }
                                 Value::Number(n) => {
@@ -348,17 +352,21 @@ impl<'a> Executor<'a> {
                             // If we have any amounts/positions, return as inventory
                             // (also add any plain numbers as __NUMBER__ currency)
                             if has_numbers && !total_number.is_zero() {
-                                total_inventory.add(Position::simple(Amount::new(
-                                    total_number,
-                                    "__NUMBER__".to_string(),
-                                )));
+                                total_inventory
+                                    .add(Position::simple(Amount::new(
+                                        total_number,
+                                        "__NUMBER__".to_string(),
+                                    )))
+                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             }
                             // Realize an AVERAGE-booked account as a single
                             // weighted-average pool: the journal keeps the real
                             // per-lot costs, but the account's balance merges
                             // them (matching its booking method).
                             if self.group_is_single_average_account(group) {
-                                total_inventory.merge_average();
+                                total_inventory
+                                    .merge_average()
+                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             }
                             Ok(Value::Inventory(Box::new(total_inventory)))
                         } else if has_numbers {
@@ -758,11 +766,15 @@ impl<'a> Executor<'a> {
                                 self.evaluate_subquery_expr(&func.args[0], row, column_map)?;
                             match val {
                                 Value::Amount(amt) => {
-                                    total_inventory.add(Position::simple(amt));
+                                    total_inventory
+                                        .add(Position::simple(amt))
+                                        .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                                     has_positions = true;
                                 }
                                 Value::Position(pos) => {
-                                    total_inventory.add(*pos);
+                                    total_inventory
+                                        .add(*pos)
+                                        .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                                     has_positions = true;
                                 }
                                 Value::Number(n) => {
@@ -784,10 +796,12 @@ impl<'a> Executor<'a> {
 
                         if has_positions {
                             if has_numbers && !total_number.is_zero() {
-                                total_inventory.add(Position::simple(Amount::new(
-                                    total_number,
-                                    "__NUMBER__".to_string(),
-                                )));
+                                total_inventory
+                                    .add(Position::simple(Amount::new(
+                                        total_number,
+                                        "__NUMBER__".to_string(),
+                                    )))
+                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             }
                             Ok(Value::Inventory(Box::new(total_inventory)))
                         } else if has_numbers {

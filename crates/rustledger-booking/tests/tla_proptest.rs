@@ -93,7 +93,7 @@ proptest! {
 
         if let Ok(interp_result) = result {
             // After interpolation, transaction should balance
-            let residuals = calculate_residual(&interp_result.transaction);
+            let residuals = calculate_residual(&interp_result.transaction).expect("fixture fits in Decimal");
 
             for (currency, residual) in &residuals {
                 prop_assert!(
@@ -189,8 +189,8 @@ proptest! {
             txn = txn.with_synthesized_posting(Posting::new(format!("Account:{i}"), amount.clone()));
         }
 
-        let residual1 = calculate_residual(&txn);
-        let residual2 = calculate_residual(&txn);
+        let residual1 = calculate_residual(&txn).expect("fixture fits in Decimal");
+        let residual2 = calculate_residual(&txn).expect("fixture fits in Decimal");
 
         for (currency, value1) in &residual1 {
             let value2 = residual2.get(currency).unwrap_or(&Decimal::ZERO);
@@ -227,7 +227,7 @@ proptest! {
             );
 
             // All residuals should be near zero
-            let residuals = calculate_residual(&interp_result.transaction);
+            let residuals = calculate_residual(&interp_result.transaction).expect("fixture fits in Decimal");
             for (currency, residual) in &residuals {
                 prop_assert!(
                     residual.abs() < dec!(0.01),
@@ -265,7 +265,7 @@ proptest! {
         );
 
         // Transaction should balance
-        let residuals = calculate_residual(&result.transaction);
+        let residuals = calculate_residual(&result.transaction).expect("fixture fits in Decimal");
         prop_assert!(
             residuals.get("USD").is_none_or(|r| r.abs() < dec!(0.01)),
             "Should balance"
@@ -287,7 +287,7 @@ proptest! {
 
         if let Ok(interp_result) = result {
             // Should succeed even though filled amount is zero
-            let residuals = calculate_residual(&interp_result.transaction);
+            let residuals = calculate_residual(&interp_result.transaction).expect("fixture fits in Decimal");
             for (currency, residual) in &residuals {
                 prop_assert!(
                     residual.abs() < dec!(0.01),

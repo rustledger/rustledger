@@ -136,7 +136,8 @@ fn replay_lot_selection(
                     inv.add(Position::with_cost(
                         Amount::new(units, CURRENCY),
                         lot_cost(key),
-                    ));
+                    ))
+                    .expect("fixture fits in Decimal");
                 }
                 "Reduce" => {
                     let units = dec(&params["units"]);
@@ -257,7 +258,8 @@ fn replay_every_strict_behavior() {
                     inv.add(Position::with_cost(
                         Amount::new(units, commodity(cur)),
                         Cost::new(Decimal::from(next_cost), "USD").with_date(day(1)),
-                    ));
+                    ))
+                    .expect("fixture fits in Decimal");
                     next_cost += 1;
                 }
                 "Reduce" => {
@@ -329,7 +331,8 @@ fn replay_every_average_behavior() {
                     inv.add(Position::with_cost(
                         Amount::new(dec(&params["units"]), CURRENCY),
                         Cost::new(dec(&params["cost"]), "USD").with_date(day(1)),
-                    ));
+                    ))
+                    .expect("fixture fits in Decimal");
                 }
                 "Reduce" => {
                     inv.reduce(
@@ -399,7 +402,8 @@ fn replay_every_none_behavior() {
             match action {
                 "AddUnits" => {
                     let units = dec(&params["units"]);
-                    inv.add(Position::simple(Amount::new(units, CURRENCY)));
+                    inv.add(Position::simple(Amount::new(units, CURRENCY)))
+                        .expect("fixture fits in Decimal");
                     added += units;
                 }
                 "Reduce" => {
@@ -472,7 +476,8 @@ fn replay_every_conservation_behavior() {
                     inv.add(Position::with_cost(
                         Amount::new(units, CURRENCY),
                         cost.clone(),
-                    ));
+                    ))
+                    .expect("fixture fits in Decimal");
                     total_added += units;
                 }
                 "Reduce" => {
@@ -538,7 +543,9 @@ fn replay_every_multi_currency_behavior() {
             let currency = params["currency"].as_str().expect("currency");
             let units = dec(&params["units"]);
             match action {
-                "Add" => inv.add(Position::simple(Amount::new(units, currency))),
+                "Add" => inv
+                    .add(Position::simple(Amount::new(units, currency)))
+                    .expect("fixture fits in Decimal"),
                 "Reduce" => {
                     inv.reduce(&Amount::new(-units, currency), None, BookingMethod::Fifo)
                         .unwrap_or_else(|e| {

@@ -818,9 +818,17 @@ fn run_booking(
     for &i in &order {
         let spanned = &mut directives[i];
         if let Directive::Transaction(txn) = &mut spanned.value {
-            match engine.book_and_interpolate_with_gains(txn) {
+            match engine
+                .book_and_interpolate_with_gains(txn)
+                .and_then(|(result, txn_gains)| {
+                    // Applying is part of booking this transaction: an
+                    // overflow here must fail it, not merely warn. Otherwise
+                    // the transaction counts as booked while the running
+                    // balance it should have updated silently did not (#1863).
+                    engine.apply(&result.transaction)?;
+                    Ok((result, txn_gains))
+                }) {
                 Ok((result, txn_gains)) => {
-                    engine.apply(&result.transaction);
                     if let Some(g) = gains.as_deref_mut() {
                         g.extend(txn_gains);
                     }

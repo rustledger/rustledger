@@ -168,7 +168,7 @@ fuzz_target!(|input: FuzzTransaction| {
 
         // Ignore errors — we're building up state, some combos may fail
         if let Ok(result) = engine.book_and_interpolate(&txn) {
-            engine.apply(&result.transaction);
+            engine.apply(&result.transaction).expect("fixture fits in Decimal");
         }
     }
 

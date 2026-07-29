@@ -275,13 +275,15 @@ fn test_inventory_hash_includes_cost() {
     inv1.add(Position::with_cost(
         Amount::new(dec!(10), "AAPL"),
         Cost::new(dec!(100), "USD"),
-    ));
+    ))
+    .expect("fixture fits in Decimal");
 
     let mut inv2 = Inventory::new();
     inv2.add(Position::with_cost(
         Amount::new(dec!(10), "AAPL"),
         Cost::new(dec!(200), "USD"),
-    ));
+    ))
+    .expect("fixture fits in Decimal");
 
     let hash1 = hash_single_value(&Value::Inventory(Box::new(inv1)));
     let hash2 = hash_single_value(&Value::Inventory(Box::new(inv2)));

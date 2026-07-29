@@ -1471,20 +1471,29 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
     // A bare directive list carries no ledger options, so classification and
     // the synthesized-summary account names fall back to beancount defaults
     // (#1806). The session's `clamp` uses the held options instead.
-    rustledger_ops::clamp::clamp_indexed(
+    // On overflow the opening-balance summary cannot be computed. The WIT
+    // signature has no error channel (`rustledger:ledger@3.0.0` returns a bare
+    // list), so we hand back the input UNCLAMPED rather than emit a summary
+    // built from a clamped total — the caller then sees real directives, never
+    // a fabricated opening balance (#1863). Surfacing this as a typed error
+    // needs a WIT contract change; tracked as follow-up.
+    let Ok(clamped) = rustledger_ops::clamp::clamp_indexed(
         &core,
         begin_date,
         end_date,
         &rustledger_ops::clamp::ClampAccounts::default(),
-    )
-    .into_iter()
-    .map(|(d, src)| match src.and_then(|j| orig_index.get(j)) {
-        // Pass-through: hand back the original WIT directive untouched.
-        Some(&i) => entries[i].clone(),
-        // Synthesized summary: build from core with the `<clamped>` source.
-        None => directive_from_core(&d, 0, "<clamped>"),
-    })
-    .collect()
+    ) else {
+        return entries;
+    };
+    clamped
+        .into_iter()
+        .map(|(d, src)| match src.and_then(|j| orig_index.get(j)) {
+            // Pass-through: hand back the original WIT directive untouched.
+            Some(&i) => entries[i].clone(),
+            // Synthesized summary: build from core with the `<clamped>` source.
+            None => directive_from_core(&d, 0, "<clamped>"),
+        })
+        .collect()
 }
 
 /// Run a BQL query against an already-loaded directive set (#1423).
@@ -2037,20 +2046,29 @@ impl SessionState {
         // `clamp` -> `directive_to_json(d, 0, "<clamped>")` mapping dropped.)
         // The held options drive classification + summary account names
         // (#1806), so a renamed-root ledger clamps into its own accounts.
-        rustledger_ops::clamp::clamp_indexed(
+        // See the note in the free-function `clamp` above: no WIT error
+        // channel, so an out-of-range opening balance degrades to unclamped
+        // output rather than a fabricated summary (#1863).
+        let Ok(clamped) = rustledger_ops::clamp::clamp_indexed(
             &self.directives,
             begin_date,
             end_date,
             &self.clamp_accounts(),
-        )
-        .into_iter()
-        .map(|(d, src)| {
-            let (line, file) = src
-                .and_then(|i| self.lines.get(i).copied().zip(self.files.get(i)))
-                .map_or((0, "<clamped>"), |(line, file)| (line, file.as_str()));
-            directive_from_core(&d, line, file)
-        })
-        .collect()
+        ) else {
+            // Same fallback as an unparsable date above: hand back every
+            // entry unclamped. Returning an empty list would silently drop the
+            // whole ledger, which is worse than not clamping.
+            return self.entries();
+        };
+        clamped
+            .into_iter()
+            .map(|(d, src)| {
+                let (line, file) = src
+                    .and_then(|i| self.lines.get(i).copied().zip(self.files.get(i)))
+                    .map_or((0, "<clamped>"), |(line, file)| (line, file.as_str()));
+                directive_from_core(&d, line, file)
+            })
+            .collect()
     }
 }
 

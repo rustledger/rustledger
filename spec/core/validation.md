@@ -256,6 +256,45 @@ This document catalogs all validation errors and warnings with their trigger con
   Assets:Cash
 ```
 
+### ARITHMETIC_OVERFLOW
+
+**Code:** `E4004`
+
+**Condition:** An amount, or a running total derived from one, exceeds the range
+of rledger's decimal type (a 96-bit type, roughly ±7.9×10²⁸ with ~28 significant
+digits).
+
+**Message:** `{currency} amount exceeds the representable range (±7.9e28); split the transaction or use smaller units`
+
+**Severity:** Error
+
+rledger reports this rather than rounding or clamping the value. Clamping would
+be unsound in both directions: a clamped figure is printed as if it were exact,
+and because `Decimal::MIN == -Decimal::MAX`, a clamped debit and a clamped credit
+cancel to a residual of exactly zero — an arbitrarily unbalanced transaction
+would certify as balanced.
+
+Note that a *product* can leave the range while both of its operands are far
+inside it, since a product needs roughly the sum of its operands' digits. A
+transaction can therefore parse cleanly and still overflow during booking.
+
+Python beancount does not have this limit: its `decimal` context keeps 28
+significant digits but has effectively unbounded magnitude. Where rledger can
+reach the same answer it does — a transaction whose postings are all explicit is
+checked in arbitrary precision, so its imbalance is reported exactly (E3001)
+rather than as an overflow. E4004 is emitted where a representable result is
+genuinely required: an interpolated posting amount, an inventory total, or a
+cost basis.
+
+```beancount
+2024-01-01 open Assets:Stock
+2024-01-01 open Assets:Cash
+
+2024-02-01 * "cost basis needs 33 digits"
+  Assets:Stock  10000000000000000 HOOL {10000000000000.00 USD}
+  Assets:Cash   ; ERROR: the interpolated USD amount cannot be represented
+```
+
 ### BOOKING_NEGATIVE_COST
 
 **Code:** `E4005`

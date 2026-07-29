@@ -18,13 +18,15 @@ fn tla_fifo_should_select_oldest_by_date_not_insertion_order() {
     inv.add(Position::with_cost(
         Amount::new(dec!(10), "AAPL"),
         Cost::new(dec!(150), "USD").with_date(rustledger_core::naive_date(2024, 1, 2).unwrap()),
-    ));
+    ))
+    .expect("fixture fits in Decimal");
 
     // State 3: Add lot with date=1 (OLDER, but added second)
     inv.add(Position::with_cost(
         Amount::new(dec!(10), "AAPL"),
         Cost::new(dec!(100), "USD").with_date(rustledger_core::naive_date(2024, 1, 1).unwrap()),
-    ));
+    ))
+    .expect("fixture fits in Decimal");
 
     // State 4: Reduce using FIFO
     let result = inv

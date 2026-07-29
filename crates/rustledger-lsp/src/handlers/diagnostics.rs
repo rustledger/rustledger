@@ -264,8 +264,11 @@ pub(crate) fn run_ledger_validation(
         if let Directive::Transaction(txn) = &mut spanned.value
             && let Ok(result) = booking_engine.book_and_interpolate(txn)
         {
-            booking_engine.apply(&result.transaction);
-            *txn = result.transaction;
+            // An overflow leaves the transaction unbooked here; the
+            // validation pass below reports it as E4004 (#1863).
+            if booking_engine.apply(&result.transaction).is_ok() {
+                *txn = result.transaction;
+            }
         }
         // If booking fails, we leave the transaction as-is and let validation catch it
     }

@@ -101,7 +101,7 @@ proptest! {
     ) {
         let mut inv = Inventory::new();
         for pos in &positions {
-            inv.add(pos.clone());
+            inv.add(pos.clone()).expect("fixture fits in Decimal");
         }
 
         let currency = if wrong_currency { "MSFT" } else { CURRENCY };

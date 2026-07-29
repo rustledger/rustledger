@@ -902,7 +902,7 @@ mod tests {
         // Independently value `account_balances`' inventories at market for the
         // same scope, then compare to `terminal_value`.
         let mut ab_total = Decimal::ZERO;
-        for (account, inv) in super::super::account_balances(&dirs) {
+        for (account, inv) in super::super::account_balances(&dirs).expect("fixture fits") {
             if !rustledger_core::is_subaccount_or_equal(account.as_str(), "Assets:Broker") {
                 continue;
             }

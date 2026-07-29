@@ -512,7 +512,9 @@ impl Executor<'_> {
             let overridden_row;
             let row = if track_balance {
                 if let Some(Value::Position(pos)) = position_idx.map(|i| &row[i]) {
-                    running_balance.add((**pos).clone());
+                    running_balance
+                        .add((**pos).clone())
+                        .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                 }
                 let mut r = row.clone();
                 if let Some(i) = balance_idx {
@@ -947,7 +949,9 @@ impl Executor<'_> {
                         });
 
                         if let Some(ref p) = pos {
-                            cumulative_balance.add(p.clone());
+                            cumulative_balance
+                                .add(p.clone())
+                                .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                         }
 
                         // Apply AT function if specified, using the at_mode
@@ -993,9 +997,16 @@ impl Executor<'_> {
                         // AT mode; that diverged from bean-query, where AT
                         // cost collapses the balance to cost-currency totals
                         // and AT units strips lots from the balance.
+                        // An out-of-range cost basis is reported, not
+                        // clamped: a query cell showing a saturated total is
+                        // indistinguishable from a real one (#1863).
                         let balance_for_row = match at_mode {
-                            AtMode::Cost => cumulative_balance.at_cost(),
-                            AtMode::Units => cumulative_balance.at_units(),
+                            AtMode::Cost => cumulative_balance
+                                .at_cost()
+                                .map_err(|e| QueryError::Evaluation(e.to_string()))?,
+                            AtMode::Units => cumulative_balance
+                                .at_units()
+                                .map_err(|e| QueryError::Evaluation(e.to_string()))?,
                             AtMode::None | AtMode::Other => cumulative_balance.clone(),
                         };
 
@@ -1056,12 +1067,16 @@ impl Executor<'_> {
                 match at_func.to_uppercase().as_str() {
                     "COST" => {
                         // Sum up cost basis
-                        let cost_inventory = balance.at_cost();
+                        let cost_inventory = balance
+                            .at_cost()
+                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                         Value::Inventory(Box::new(cost_inventory))
                     }
                     "UNITS" => {
                         // Just the units (remove cost info)
-                        let units_inventory = balance.at_units();
+                        let units_inventory = balance
+                            .at_units()
+                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                         Value::Inventory(Box::new(units_inventory))
                     }
                     _ => Value::Inventory(Box::new(balance.clone())),

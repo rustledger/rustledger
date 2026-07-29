@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use rustledger_core::{
     AccountTypes, Amount, CostNumber, CostSpec, Decimal, Directive, IncompleteAmount, Inventory,
-    Metadata, NaiveDate, Position, Posting, Span, Spanned, Transaction,
+    Metadata, NaiveDate, OverflowError, Position, Posting, Span, Spanned, Transaction,
 };
 
 /// Account configuration for clamp's synthesized summaries (#1806).
@@ -195,17 +195,23 @@ fn earnings_transaction(
 ///
 /// `accounts` supplies the classification and synthesized-summary account
 /// names (#1806); pass [`ClampAccounts::default`] for beancount defaults.
-#[must_use]
+///
+/// # Errors
+///
+/// [`OverflowError`] when a pre-`begin` running balance leaves
+/// `rust_decimal`'s range, so the opening-balance summary cannot be computed
+/// (#1863). Reported rather than clamped: the summary is emitted as a
+/// synthetic transaction that downstream consumers treat as real ledger data.
 pub fn clamp(
     directives: &[Directive],
     begin: NaiveDate,
     end: NaiveDate,
     accounts: &ClampAccounts,
-) -> Vec<Directive> {
-    clamp_indexed(directives, begin, end, accounts)
+) -> Result<Vec<Directive>, OverflowError> {
+    Ok(clamp_indexed(directives, begin, end, accounts)?
         .into_iter()
         .map(|(d, _)| d)
-        .collect()
+        .collect())
 }
 
 /// Like [`clamp`], but tags each output with its source-input index.
@@ -217,13 +223,12 @@ pub fn clamp(
 /// transaction or a carried-forward price keeps its real location, rather than
 /// every output being attributed to a synthetic `<clamped>` source (the loss
 /// that forced the JSON-path workaround in rustledger/rustledger#1425).
-#[must_use]
 pub fn clamp_indexed(
     directives: &[Directive],
     begin: NaiveDate,
     end: NaiveDate,
     accounts: &ClampAccounts,
-) -> Vec<(Directive, Option<usize>)> {
+) -> Result<Vec<(Directive, Option<usize>)>, OverflowError> {
     let mut balances: HashMap<String, Inventory> = HashMap::new();
     let mut latest_prices: HashMap<(String, String), (NaiveDate, Directive, usize)> =
         HashMap::new();
@@ -239,7 +244,10 @@ pub fn clamp_indexed(
                         if let Some(units) = p.units.as_ref().and_then(IncompleteAmount::as_amount)
                         {
                             let pos = posting_position(units, p.cost.as_ref(), t.date);
-                            balances.entry(p.account.to_string()).or_default().add(pos);
+                            balances
+                                .entry(p.account.to_string())
+                                .or_default()
+                                .add(pos)?;
                         }
                     }
                 }
@@ -280,8 +288,12 @@ pub fn clamp_indexed(
     for (account, inv) in &balances {
         if accounts.types.is_income_statement(account) {
             for position in inv.positions() {
-                *pnl.entry(position.units.currency.to_string()).or_default() +=
-                    position.units.number;
+                let slot = pnl.entry(position.units.currency.to_string()).or_default();
+                *slot = slot
+                    .checked_add(position.units.number)
+                    .ok_or_else(|| OverflowError {
+                        currency: position.units.currency.clone(),
+                    })?;
             }
         }
     }
@@ -314,7 +326,7 @@ pub fn clamp_indexed(
             // pass-throughs by `Option` ordering.
             .then_with(|| a.1.cmp(&b.1))
     });
-    all
+    Ok(all)
 }
 
 #[cfg(test)]
@@ -367,7 +379,8 @@ mod tests {
             previous_balances: "Vermogen:Beginsaldi".to_string(),
             previous_earnings: "Vermogen:Winst:Vorig".to_string(),
         };
-        let clamped = clamp(&directives, d(2024, 1, 1), d(2024, 12, 31), &accounts);
+        let clamped = clamp(&directives, d(2024, 1, 1), d(2024, 12, 31), &accounts)
+            .expect("fixture fits in Decimal");
 
         // The renamed asset account IS carried forward (string-match on
         // "Assets" would have classified it as non-balance-sheet and
@@ -412,7 +425,8 @@ mod tests {
                    2023-06-01 * \"pay\"\n  \
                    Assets:Bank  100.00 USD\n  \
                    Income:Salary  -100.00 USD\n";
-        let clamped = clamp(&dirs(src), d(2024, 1, 1), d(2024, 12, 31), &accounts);
+        let clamped = clamp(&dirs(src), d(2024, 1, 1), d(2024, 12, 31), &accounts)
+            .expect("fixture fits in Decimal");
         assert!(
             clamped
                 .iter()
@@ -444,7 +458,8 @@ mod tests {
             d(2024, 6, 1),
             d(2024, 12, 31),
             &ClampAccounts::default(),
-        );
+        )
+        .expect("fixture fits in Decimal");
         let summary = clamped
             .iter()
             .find(|dd| is_summary(dd) && mentions(dd, "Assets:Broker"))
@@ -482,7 +497,8 @@ mod tests {
             d(2024, 1, 1),
             d(2024, 12, 31),
             &ClampAccounts::default(),
-        );
+        )
+        .expect("fixture fits in Decimal");
 
         // The in-range transaction is a pass-through pointing back at its input
         // (index 1), so a caller can restore its real filename/lineno.
@@ -510,7 +526,8 @@ mod tests {
             d(2024, 1, 1),
             d(2024, 12, 31),
             &ClampAccounts::default(),
-        );
+        )
+        .expect("fixture fits in Decimal");
         let indexed: Vec<_> = out.into_iter().map(|(dir, _)| dir).collect();
         assert_eq!(
             plain, indexed,
@@ -529,7 +546,8 @@ mod tests {
             d(2024, 1, 1),
             d(2024, 12, 31),
             &ClampAccounts::default(),
-        );
+        )
+        .expect("fixture fits in Decimal");
 
         // No pre-begin entries survive.
         assert!(out.iter().all(|dir| dir.date() >= d(2024, 1, 1)));
@@ -553,7 +571,8 @@ mod tests {
             d(2024, 1, 1),
             d(2024, 12, 31),
             &ClampAccounts::default(),
-        );
+        )
+        .expect("fixture fits in Decimal");
         assert!(
             out.iter()
                 .all(|dir| !matches!(dir, Directive::Transaction(t)
@@ -569,7 +588,8 @@ mod tests {
             d(2024, 1, 1),
             d(2024, 12, 31),
             &ClampAccounts::default(),
-        );
+        )
+        .expect("fixture fits in Decimal");
         assert!(
             out.iter()
                 .all(|dir| !matches!(dir, Directive::Commodity(_)))
@@ -584,7 +604,8 @@ mod tests {
             d(2024, 1, 1),
             d(2024, 12, 31),
             &ClampAccounts::default(),
-        );
+        )
+        .expect("fixture fits in Decimal");
         assert!(out.iter().any(|dir| matches!(dir, Directive::Open(_))));
     }
 
@@ -598,7 +619,8 @@ mod tests {
             d(2024, 1, 1),
             d(2024, 12, 31),
             &ClampAccounts::default(),
-        );
+        )
+        .expect("fixture fits in Decimal");
         assert!(
             out.iter()
                 .any(|dir| mentions(dir, "Equity:Earnings:Previous")),
@@ -625,7 +647,8 @@ mod tests {
             d(2014, 1, 1),
             d(2015, 1, 1),
             &ClampAccounts::default(),
-        );
+        )
+        .expect("fixture fits in Decimal");
 
         let opening = out
             .iter()

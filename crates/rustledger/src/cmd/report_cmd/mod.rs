@@ -819,9 +819,16 @@ fn render<W: io::Write>(
 /// drift-guard test comparing the two on the same ledger.
 ///
 /// [`apply`]: rustledger_booking::BookingEngine::apply
+///
+/// # Errors
+///
+/// When a running balance leaves `rust_decimal`'s range (#1863). Reports print
+/// these inventories as exact totals, so an unrepresentable one must abort the
+/// report rather than render a clamped figure.
 pub(super) fn account_balances(
     directives: &[rustledger_core::Directive],
-) -> std::collections::BTreeMap<rustledger_core::Account, rustledger_core::Inventory> {
+) -> anyhow::Result<std::collections::BTreeMap<rustledger_core::Account, rustledger_core::Inventory>>
+{
     use rustledger_core::Directive;
     // Realize via the booking engine so held commodities carry their lots at
     // cost and reductions match those lots (FIFO/LIFO/etc. per each account's
@@ -832,12 +839,12 @@ pub(super) fn account_balances(
     engine.register_account_methods(directives.iter());
     for directive in directives {
         if let Directive::Transaction(txn) = directive {
-            engine.apply(txn);
+            engine.apply(txn)?;
         }
     }
     // FxHashMap has non-deterministic order; collect into a BTreeMap so report
     // rows come out account-sorted and stable across runs.
-    engine.into_inventories().into_iter().collect()
+    Ok(engine.into_inventories().into_iter().collect())
 }
 
 // CSV/JSON escaping: single-sourced in core. `escape_json` is the RFC-8259

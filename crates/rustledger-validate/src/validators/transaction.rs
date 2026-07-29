@@ -345,10 +345,12 @@ pub fn validate_transaction_balance(
     // calculation. We only skip on exact zero (not "within tolerance")
     // because Decimal arithmetic can lose precision during cost/price
     // multiplication, potentially under-reporting a non-zero residual.
-    let fast_residuals = rustledger_booking::calculate_residual(txn);
-    let all_zero = fast_residuals
-        .values()
-        .all(|residual| *residual == Decimal::ZERO);
+    // `None` = the fast tier's arithmetic left `rust_decimal`'s range, so it
+    // has no opinion; fall through to the exact tier rather than skipping.
+    // Short-circuiting on `None` here would pass an arbitrarily unbalanced
+    // transaction (#1863).
+    let all_zero = rustledger_booking::calculate_residual(txn)
+        .is_some_and(|residuals| residuals.values().all(|r| *r == Decimal::ZERO));
 
     if all_zero {
         return;
@@ -431,8 +433,17 @@ pub fn update_inventories(
 
         if is_reduction {
             process_inventory_reduction(inv, posting, units, booking_method, txn, errors);
-        } else {
-            process_inventory_addition(inv, posting, units, txn);
+        } else if let Err(e) = process_inventory_addition(inv, posting, units, txn) {
+            errors.push(
+                ValidationError::new(
+                    ErrorCode::ArithmeticOverflow,
+                    rustledger_core::BookingError::Overflow(e.clone())
+                        .with_account(posting.account.clone())
+                        .to_string(),
+                    txn.date,
+                )
+                .with_context(format!("currency: {}", e.currency)),
+            );
         }
     }
 }
@@ -489,6 +500,10 @@ pub fn process_inventory_reduction(
                     ErrorCode::NoMatchingLot,
                     format!("cost spec: {:?}", posting.cost),
                 ),
+                rustledger_core::BookingError::Overflow(e) => (
+                    ErrorCode::ArithmeticOverflow,
+                    format!("currency: {}", e.currency),
+                ),
             };
             errors.push(
                 ValidationError::new(
@@ -503,15 +518,20 @@ pub fn process_inventory_reduction(
 }
 
 /// Process an inventory addition (buying/adding units).
+///
+/// # Errors
+///
+/// [`rustledger_core::OverflowError`] when the account's running total leaves
+/// `rust_decimal`'s range (#1863).
 pub fn process_inventory_addition(
     inv: &mut Inventory,
     posting: &Posting,
     units: &Amount,
     txn: &Transaction,
-) {
+) -> Result<(), rustledger_core::OverflowError> {
     let position = rustledger_core::Position::from_posting(units, posting.cost.as_ref(), txn.date);
 
-    inv.add(position);
+    inv.add(position)
 }
 
 #[cfg(test)]

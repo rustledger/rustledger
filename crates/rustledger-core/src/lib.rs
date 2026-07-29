@@ -88,8 +88,8 @@ pub use identifiers::{
 pub use implicit_prices::extract_per_unit_price;
 pub use intern::{InternedStr, StringInterner};
 pub use inventory::{
-    AccountedBookingError, BookingError, BookingMethod, BookingResult, Inventory, ReductionScope,
-    sum_account_and_subaccounts,
+    AccountedBookingError, BookingError, BookingMethod, BookingResult, Inventory, OverflowError,
+    ReductionScope, sum_account_and_subaccounts,
 };
 pub use meta_json::{json_to_meta_value, meta_value_to_json, meta_value_type_tag};
 pub use position::Position;

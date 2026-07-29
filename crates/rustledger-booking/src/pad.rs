@@ -160,7 +160,15 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                     {
                         let position =
                             Position::from_posting(units, posting.cost.as_ref(), txn.date);
-                        inv.add(position);
+                        // A running balance that leaves range makes every pad
+                        // measured against it wrong, so report it here rather
+                        // than pad from a clamped total (#1863).
+                        if let Err(e) = inv.add(position) {
+                            errors.push(
+                                PadError::new(txn.date, e.to_string())
+                                    .with_account(posting.account.clone()),
+                            );
+                        }
                     }
                 }
             }
@@ -200,7 +208,22 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                         &bal.amount.currency,
                     );
 
-                    let difference = bal.amount.number - current;
+                    // A pad amount that cannot be represented must not be
+                    // clamped — the synthetic transaction it produces is
+                    // written into the ledger as if the user had entered it
+                    // (#1863).
+                    let Some(difference) = current.and_then(|c| bal.amount.number.checked_sub(c))
+                    else {
+                        errors.push(PadError::new(
+                            bal.date,
+                            format!(
+                                "cannot compute the pad amount for {}: the {} balance exceeds \
+                                 the representable range (±7.9e28)",
+                                bal.account, bal.amount.currency
+                            ),
+                        ));
+                        continue;
+                    };
 
                     if difference != Decimal::ZERO {
                         // Generate synthetic transaction
@@ -212,18 +235,33 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                             &bal.amount, // target balance for narration
                         );
 
-                        // Apply to inventories
-                        if let Some(inv) = inventories.get_mut(&pending.pad.account) {
-                            inv.add(Position::simple(Amount::new(
-                                difference,
-                                &bal.amount.currency,
-                            )));
-                        }
-                        if let Some(inv) = inventories.get_mut(&pending.pad.source_account) {
-                            inv.add(Position::simple(Amount::new(
-                                -difference,
-                                &bal.amount.currency,
-                            )));
+                        // Apply to inventories. `difference` was just derived
+                        // from these same balances, so an overflow here means
+                        // the pad target itself is out of range — report it
+                        // rather than pad to a clamped figure.
+                        let applied = inventories
+                            .get_mut(&pending.pad.account)
+                            .map(|inv| {
+                                inv.add(Position::simple(Amount::new(
+                                    difference,
+                                    &bal.amount.currency,
+                                )))
+                            })
+                            .transpose()
+                            .and_then(|_| {
+                                inventories
+                                    .get_mut(&pending.pad.source_account)
+                                    .map(|inv| {
+                                        inv.add(Position::simple(Amount::new(
+                                            -difference,
+                                            &bal.amount.currency,
+                                        )))
+                                    })
+                                    .transpose()
+                            });
+                        if let Err(e) = applied {
+                            errors.push(PadError::new(bal.date, e.to_string()));
+                            continue;
                         }
 
                         padding_transactions.push(pad_txn);

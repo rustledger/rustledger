@@ -9,7 +9,7 @@ use rust_decimal::prelude::Signed;
 
 use smallvec::{SmallVec, smallvec};
 
-use super::{BookingError, BookingMethod, BookingResult, Inventory, MatchedLots};
+use super::{BookingError, BookingMethod, BookingResult, Inventory, MatchedLots, OverflowError};
 use crate::{Amount, Cost, CostSpec, Currency, Position};
 
 /// Compute weighted-average cost from a set of positions.
@@ -37,7 +37,18 @@ fn average_cost_from_positions(
             } else {
                 cost_currency = Some(cost.currency.clone());
             }
-            total_cost += pos.units.number * cost.number;
+            // Checked: the product needs the sum of its operands' digits, so
+            // it can leave range well below the ceiling (#1863).
+            total_cost = pos
+                .units
+                .number
+                .checked_mul(cost.number)
+                .and_then(|v| total_cost.checked_add(v))
+                .ok_or_else(|| {
+                    BookingError::Overflow(OverflowError {
+                        currency: cost.currency.clone(),
+                    })
+                })?;
         }
     }
 
@@ -328,7 +339,26 @@ impl Inventory {
 
             // Calculate cost basis for this portion
             if let Some(cost) = &pos.cost {
-                cost_basis += take * cost.number;
+                // Checked, not clamped: a clamped cost basis becomes a
+                // fabricated capital gain (#1863).
+                //
+                // DEFENSE-IN-DEPTH, not a currently-reachable fix: no ledger
+                // was found that gets here with an overflowing accumulation —
+                // to sum two in-range cost bases past the ceiling, the
+                // reducing posting's own weight must exceed it too, and that
+                // is reported earlier (verified by removing this check and
+                // re-running the multi-lot fixtures, which still did not
+                // panic). Kept because reachability rests on those upstream
+                // checks, and a future caller reaching `reduce` directly must
+                // not resurrect the panic.
+                cost_basis = take
+                    .checked_mul(cost.number)
+                    .and_then(|v| cost_basis.checked_add(v))
+                    .ok_or_else(|| {
+                        BookingError::Overflow(OverflowError {
+                            currency: cost.currency.clone(),
+                        })
+                    })?;
                 cost_currency = Some(cost.currency.clone());
             }
 
@@ -437,9 +467,17 @@ impl Inventory {
             let available = pos.units.number.abs();
             let take = remaining.min(available);
 
-            // Calculate cost basis for this portion
+            // Calculate cost basis for this portion (checked — see the
+            // matching site in the FIFO/LIFO ladder above).
             if let Some(cost) = &pos.cost {
-                cost_basis += take * cost.number;
+                cost_basis = take
+                    .checked_mul(cost.number)
+                    .and_then(|v| cost_basis.checked_add(v))
+                    .ok_or_else(|| {
+                        BookingError::Overflow(OverflowError {
+                            currency: cost.currency.clone(),
+                        })
+                    })?;
             }
 
             // Record what we matched
@@ -475,7 +513,14 @@ impl Inventory {
             .filter(|p| p.units.currency == units.currency && !p.is_empty())
             .collect();
 
-        let total_units: Decimal = matching.iter().map(|p| p.units.number).sum();
+        let total_units: Decimal = matching
+            .iter()
+            .try_fold(Decimal::ZERO, |acc, p| acc.checked_add(p.units.number))
+            .ok_or_else(|| {
+                BookingError::Overflow(OverflowError {
+                    currency: units.currency.clone(),
+                })
+            })?;
 
         if total_units.is_zero() {
             return Err(BookingError::InsufficientUnits {
@@ -497,7 +542,17 @@ impl Inventory {
         let avg = average_cost_from_positions(&matching, total_units)?;
         let cost_basis = avg
             .as_ref()
-            .map(|(avg_cost, currency)| Amount::new(reduction * *avg_cost, currency.clone()));
+            .map(|(avg_cost, currency)| {
+                reduction
+                    .checked_mul(*avg_cost)
+                    .map(|n| Amount::new(n, currency.clone()))
+                    .ok_or_else(|| {
+                        BookingError::Overflow(OverflowError {
+                            currency: currency.clone(),
+                        })
+                    })
+            })
+            .transpose()?;
 
         // Build a position of `number` units of the reduced currency at the
         // average cost (or costless if the lots had no cost).
@@ -548,7 +603,13 @@ impl Inventory {
     /// costs; only this realized view merges them (matching hledger's pool
     /// model). A currency whose lots net to zero is removed; a currency whose
     /// lots have mismatched cost currencies is left untouched.
-    pub fn merge_average(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// [`OverflowError`] when a currency's lots sum outside `rust_decimal`'s
+    /// range. The merged view is a realized balance, so a clamped total would
+    /// be rendered as an exact position (#1863).
+    pub fn merge_average(&mut self) -> Result<(), OverflowError> {
         let currencies: std::collections::BTreeSet<Currency> = self
             .positions
             .iter()
@@ -563,7 +624,12 @@ impl Inventory {
                     .iter()
                     .filter(|p| p.units.currency == currency && p.cost.is_some())
                     .collect();
-                let total_units: Decimal = matching.iter().map(|p| p.units.number).sum();
+                let total_units: Decimal = matching
+                    .iter()
+                    .try_fold(Decimal::ZERO, |acc, p| acc.checked_add(p.units.number))
+                    .ok_or_else(|| OverflowError {
+                        currency: currency.clone(),
+                    })?;
                 let avg = if total_units.is_zero() {
                     None
                 } else {
@@ -590,6 +656,7 @@ impl Inventory {
             }
         }
         self.rebuild_index();
+        Ok(())
     }
 
     /// Cost merge `{*}`: merge all lots of the currency into a single
@@ -638,7 +705,14 @@ impl Inventory {
                 None => return self.reduce_average(units),
             };
 
-        let cost_basis = Some(Amount::new(reduction * avg_cost, cost_currency.clone()));
+        let cost_basis = Some(Amount::new(
+            reduction.checked_mul(avg_cost).ok_or_else(|| {
+                BookingError::Overflow(OverflowError {
+                    currency: cost_currency.clone(),
+                })
+            })?,
+            cost_currency.clone(),
+        ));
 
         // Return a single synthetic matched position representing the merged lot.
         // This prevents the booking engine from expanding the posting into multiple
@@ -690,7 +764,7 @@ impl Inventory {
         // Check we have enough in the right direction
         if total_units.signum() == units.number.signum() || total_units.is_zero() {
             // This is an augmentation, not a reduction - just add it
-            self.add(Position::simple(units.clone()));
+            self.add(Position::simple(units.clone()))?;
             return Ok(BookingResult {
                 matched: SmallVec::new(),
                 cost_basis: None,
@@ -715,7 +789,7 @@ impl Inventory {
             self.add(Position::simple(Amount::new(
                 (requested - available) * sign,
                 units.currency.clone(),
-            )));
+            )))?;
             return Ok(result);
         }
 
@@ -742,7 +816,17 @@ impl Inventory {
         }
 
         // Calculate cost basis
-        let cost_basis = pos.cost.as_ref().map(|c| c.total_cost(requested));
+        let cost_basis = pos
+            .cost
+            .as_ref()
+            .map(|c| {
+                c.total_cost(requested).ok_or_else(|| {
+                    BookingError::Overflow(OverflowError {
+                        currency: c.currency.clone(),
+                    })
+                })
+            })
+            .transpose()?;
 
         // Record matched
         let (matched, _) = pos.split(requested * pos.units.number.signum());
@@ -807,7 +891,7 @@ mod reduction_tests {
     fn mk(lots: impl IntoIterator<Item = Position>) -> Inventory {
         let mut i = Inventory::new();
         for l in lots {
-            i.add(l);
+            i.add(l).expect("fixture fits in Decimal");
         }
         i
     }
@@ -918,8 +1002,9 @@ mod reduction_tests {
         i.add(Position::with_cost(
             Amount::new(dec!(10), "OTH"), // different currency: must be ignored
             Cost::new(dec!(888), "USD").with_date(naive_date(2024, 1, 1).unwrap()),
-        ));
-        i.add(lot(10, 100, 2)); // the real STK lot
+        ))
+        .expect("fixture fits in Decimal");
+        i.add(lot(10, 100, 2)).expect("fixture fits in Decimal"); // the real STK lot
         i
     }
 
@@ -970,8 +1055,8 @@ mod reduction_tests {
         // `signum() != signum()` → `==` mutant (== would match the short
         // lot or nothing).
         let mut i = Inventory::new();
-        i.add(lot(-10, 50, 1)); // short lot, same sign as a sell
-        i.add(lot(10, 100, 2)); // long lot
+        i.add(lot(-10, 50, 1)).expect("fixture fits in Decimal"); // short lot, same sign as a sell
+        i.add(lot(10, 100, 2)).expect("fixture fits in Decimal"); // long lot
         let r = try_reduce(&i, &sell_stk(5), BookingMethod::Fifo);
         assert_eq!(basis(&r), dec!(500)); // 5 * 100 from the long lot only
         assert!(r.matched.iter().all(|p| p.units.number.is_sign_positive()));
@@ -988,7 +1073,7 @@ mod reduction_tests {
         // the disjunction), turning 0 matches into 1 and succeeding via
         // `try_reduce_from_lot` instead of erroring.
         let mut i = Inventory::new();
-        i.add(lot(-10, 100, 1)); // short STK only; a sell is the same sign
+        i.add(lot(-10, 100, 1)).expect("fixture fits in Decimal"); // short STK only; a sell is the same sign
         let res = i.try_reduce(
             &sell_stk(5),
             Some(&CostSpec::default()),
@@ -1193,11 +1278,12 @@ mod reduction_tests {
     #[test]
     fn reduce_average_only_matching_currency() {
         let mut i = Inventory::new();
-        i.add(lot(10, 100, 2));
+        i.add(lot(10, 100, 2)).expect("fixture fits in Decimal");
         i.add(Position::with_cost(
             Amount::new(dec!(10), "OTH"),
             Cost::new(dec!(888), "USD").with_date(naive_date(2024, 1, 1).unwrap()),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         let r = i
             .reduce(
                 &sell_stk(5),
@@ -1216,8 +1302,8 @@ mod reduction_tests {
         // (book.rs) expand the reduction into one posting per lot, emptying the
         // position and booking a garbage gain.
         let mut i = Inventory::new();
-        i.add(lot(10, 150, 1));
-        i.add(lot(10, 170, 2));
+        i.add(lot(10, 150, 1)).expect("fixture fits in Decimal");
+        i.add(lot(10, 170, 2)).expect("fixture fits in Decimal");
         let r = i
             .reduce(
                 &sell_stk(5),
@@ -1251,7 +1337,8 @@ mod reduction_tests {
         i.add(Position::with_cost(
             Amount::new(dec!(-10), "STK"),
             Cost::new(dec!(150), "USD"),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         let r = i
             .reduce(
                 &Amount::new(dec!(5), "STK"),
@@ -1270,13 +1357,14 @@ mod reduction_tests {
         // The realized balance of an AVERAGE account is one pool at the
         // weighted-average cost: (10*150 + 10*170 - 5*160) / 15 = 160.
         let mut i = Inventory::new();
-        i.add(lot(10, 150, 1));
-        i.add(lot(10, 170, 2));
+        i.add(lot(10, 150, 1)).expect("fixture fits in Decimal");
+        i.add(lot(10, 170, 2)).expect("fixture fits in Decimal");
         i.add(Position::with_cost(
             Amount::new(dec!(-5), "STK"),
             Cost::new(dec!(160), "USD"),
-        ));
-        i.merge_average();
+        ))
+        .expect("fixture fits in Decimal");
+        i.merge_average().expect("fixture fits in Decimal");
         let stk: Vec<&Position> = i
             .positions()
             .filter(|p| p.units.currency == "STK")
@@ -1289,12 +1377,13 @@ mod reduction_tests {
     #[test]
     fn merge_average_net_zero_removes_lots() {
         let mut i = Inventory::new();
-        i.add(lot(10, 150, 1));
+        i.add(lot(10, 150, 1)).expect("fixture fits in Decimal");
         i.add(Position::with_cost(
             Amount::new(dec!(-10), "STK"),
             Cost::new(dec!(160), "USD"),
-        ));
-        i.merge_average();
+        ))
+        .expect("fixture fits in Decimal");
+        i.merge_average().expect("fixture fits in Decimal");
         assert_eq!(
             i.positions().filter(|p| p.units.currency == "STK").count(),
             0
@@ -1304,9 +1393,10 @@ mod reduction_tests {
     #[test]
     fn merge_average_leaves_costless_positions_untouched() {
         let mut i = Inventory::new();
-        i.add(Position::simple(Amount::new(dec!(100), "USD")));
-        i.add(lot(10, 150, 1));
-        i.merge_average();
+        i.add(Position::simple(Amount::new(dec!(100), "USD")))
+            .expect("fixture fits in Decimal");
+        i.add(lot(10, 150, 1)).expect("fixture fits in Decimal");
+        i.merge_average().expect("fixture fits in Decimal");
         // Cash stays; the single STK lot stays a single lot.
         assert_eq!(i.units("USD"), dec!(100));
         assert_eq!(
@@ -1341,13 +1431,14 @@ mod reduction_tests {
         // sell) and an unrelated OTH lot must be excluded from the merge
         // AND survive in the inventory.
         let mut inv = Inventory::new();
-        inv.add(lot(10, 100, 1)); // long STK
-        inv.add(lot(30, 200, 2)); // long STK
-        inv.add(lot(-5, 999, 3)); // short STK — excluded by the sign filter
+        inv.add(lot(10, 100, 1)).expect("fixture fits in Decimal"); // long STK
+        inv.add(lot(30, 200, 2)).expect("fixture fits in Decimal"); // long STK
+        inv.add(lot(-5, 999, 3)).expect("fixture fits in Decimal"); // short STK — excluded by the sign filter
         inv.add(Position::with_cost(
             Amount::new(dec!(10), "OTH"), // different currency — excluded
             Cost::new(dec!(888), "USD").with_date(naive_date(2024, 1, 4).unwrap()),
-        ));
+        ))
+        .expect("fixture fits in Decimal");
         let spec = CostSpec {
             merge: true,
             ..CostSpec::default()
@@ -1376,7 +1467,8 @@ mod reduction_tests {
     #[test]
     fn reduce_none_exact_succeeds_over_reduction_shorts() {
         let mut inv = Inventory::new();
-        inv.add(Position::simple(Amount::new(dec!(10), "STK")));
+        inv.add(Position::simple(Amount::new(dec!(10), "STK")))
+            .expect("fixture fits in Decimal");
         assert!(
             inv.reduce(&sell_stk(10), None, BookingMethod::None).is_ok(),
             "exact NONE reduction should succeed"
@@ -1385,7 +1477,8 @@ mod reduction_tests {
         // instead of erroring (#1686 — previously InsufficientUnits, which
         // made the outcome depend on whether zero was crossed in one step).
         let mut inv2 = Inventory::new();
-        inv2.add(Position::simple(Amount::new(dec!(10), "STK")));
+        inv2.add(Position::simple(Amount::new(dec!(10), "STK")))
+            .expect("fixture fits in Decimal");
         assert!(
             inv2.reduce(&sell_stk(15), None, BookingMethod::None)
                 .is_ok(),

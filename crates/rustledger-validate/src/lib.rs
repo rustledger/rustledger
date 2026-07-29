@@ -1266,7 +1266,8 @@ mod tests {
         for (name, amt) in fixture {
             let acct = Account::from(name);
             let mut inv = Inventory::new();
-            inv.add(rustledger_core::Position::simple(Amount::new(amt, "USD")));
+            inv.add(rustledger_core::Position::simple(Amount::new(amt, "USD")))
+                .expect("fixture fits in Decimal");
             state.inventories.insert(acct.clone(), inv);
             state.inventory_accounts.insert(acct);
         }
@@ -1284,7 +1285,8 @@ mod tests {
             let indexed =
                 sum_account_subtree(&state.inventories, &state.inventory_accounts, &acct, &cur);
             let scan =
-                rustledger_core::sum_account_and_subaccounts(state.inventories.iter(), name, &cur);
+                rustledger_core::sum_account_and_subaccounts(state.inventories.iter(), name, &cur)
+                    .expect("fixture fits in Decimal");
             assert_eq!(indexed, scan, "indexed vs scan disagree for {name}");
         }
 

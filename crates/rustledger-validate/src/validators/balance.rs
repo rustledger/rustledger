@@ -217,21 +217,32 @@ pub fn validate_balance_late(
                 let difference = expected - actual;
 
                 if difference != Decimal::ZERO {
-                    // Add padding amount to target account
-                    if let Some(target_inv) = state.inventories.get_mut(&bal.account) {
-                        target_inv.add(Position::simple(Amount::new(
-                            difference,
-                            &bal.amount.currency,
-                        )));
-                    }
+                    // A pad amount that cannot be represented is reported, not
+                    // clamped — padding to a clamped figure would silently
+                    // satisfy the very assertion being checked (#1863).
+                    let mut pad_into = |account, number| {
+                        state
+                            .inventories
+                            .get_mut(account)
+                            .map(|inv| {
+                                inv.add(Position::simple(Amount::new(number, &bal.amount.currency)))
+                            })
+                            .transpose()
+                            .err()
+                    };
+                    // Add to the target account, subtract from the source.
+                    let overflow = pad_into(&bal.account, difference)
+                        .or_else(|| pad_into(&pending_pad.source_account, -difference));
 
-                    // Subtract padding amount from source account
-                    if let Some(source_inv) = state.inventories.get_mut(&pending_pad.source_account)
-                    {
-                        source_inv.add(Position::simple(Amount::new(
-                            -difference,
-                            &bal.amount.currency,
-                        )));
+                    if let Some(e) = overflow {
+                        errors.push(
+                            ValidationError::new(
+                                ErrorCode::ArithmeticOverflow,
+                                e.to_string(),
+                                bal.date,
+                            )
+                            .with_context(format!("account: {}", bal.account)),
+                        );
                     }
 
                     // Record that this pad covered the asserted currency.

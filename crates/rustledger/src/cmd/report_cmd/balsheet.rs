@@ -26,7 +26,7 @@ pub(super) fn report_balsheet<W: Write>(
     // ledger with `option "name_assets" "Activa"` must still fill the
     // balance sheet), never by hardcoded root prefixes.
     use rustledger_core::AccountTypeKind as K;
-    for (account, inv) in super::account_balances(directives) {
+    for (account, inv) in super::account_balances(directives)? {
         let section = match account_types.kind(&account) {
             Some(K::Assets) => &mut assets,
             Some(K::Liabilities) => &mut liabilities,

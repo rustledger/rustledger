@@ -1076,8 +1076,9 @@ fn convert_posting(
         let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
         errors.push(crate::ParseError::new(
             crate::ParseErrorKind::SyntaxError(
-                "unexpected token before posting amount (a thousands separator \
-                 must be inside the number, as in `1,234.00`)"
+                "unexpected token before posting amount: a `+`/`-` must be \
+                 attached to a number, and a thousands separator must be \
+                 inside one (as in `-1,234.00`)"
                     .to_string(),
             ),
             span,
@@ -1643,7 +1644,13 @@ pub(super) fn orphaned_amount_prefix(node: &crate::SyntaxNode) -> Option<crate::
     for el in node.children_with_tokens() {
         match el {
             rowan::NodeOrToken::Node(n) => {
-                // The amount (or anything structured) ends the prefix.
+                // Only the AMOUNT ends the prefix — deliberately NOT any
+                // structured node. A `COST_SPEC` or `PRICE_ANNOTATION` can
+                // legitimately precede the units, and a stray sign or comma
+                // sitting between one of those and the amount is just as
+                // orphaned as one right after the account. Their own commas
+                // live INSIDE their nodes, so this cannot false-positive on
+                // `{100.00 USD, 2020-01-01}`.
                 if ast::Amount::can_cast(n.kind()) {
                     break;
                 }
@@ -1654,11 +1661,16 @@ pub(super) fn orphaned_amount_prefix(node: &crate::SyntaxNode) -> Option<crate::
                     seen_account = true;
                     continue;
                 }
-                if !seen_account || is_trivia_kind(kind) || is_comment_kind(kind) {
-                    continue;
-                }
+                // NEWLINE FIRST: `is_trivia_kind` counts it as trivia, so
+                // testing that earlier would skip it and keep scanning past the
+                // end of the posting line — and would leave the check below
+                // unreachable. The green mirror stops at the newline, so
+                // getting this order wrong is also how the two paths drift.
                 if kind == crate::SyntaxKind::NEWLINE {
                     break;
+                }
+                if !seen_account || is_trivia_kind(kind) || is_comment_kind(kind) {
+                    continue;
                 }
                 if !is_orphanable_amount_prefix(kind) {
                     continue;

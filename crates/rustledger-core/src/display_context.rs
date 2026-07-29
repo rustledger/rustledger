@@ -337,11 +337,21 @@ impl DisplayContext {
     /// Only `render_commas` is affected — precision is a property of the data
     /// and is identical on every surface. See [`OutputSurface`] for why the
     /// distinction exists.
+    ///
+    /// Borrows unless the flag actually has to change, so the common cases
+    /// cost nothing: a ledger without `render_commas` (almost all of them) and
+    /// any human-facing surface both borrow. Only suppressing separators for a
+    /// machine or ledger-text surface clones, and that clone carries the
+    /// per-currency histograms — worth avoiding on a REPL's hot path, and
+    /// wasted entirely on the JSON writer, which ignores the context.
     #[must_use]
-    pub fn for_surface(&self, surface: OutputSurface) -> Self {
+    pub fn for_surface(&self, surface: OutputSurface) -> std::borrow::Cow<'_, Self> {
+        if !self.render_commas || surface.renders_thousands_separators() {
+            return std::borrow::Cow::Borrowed(self);
+        }
         let mut ctx = self.clone();
-        ctx.render_commas = self.render_commas && surface.renders_thousands_separators();
-        ctx
+        ctx.render_commas = false;
+        std::borrow::Cow::Owned(ctx)
     }
 
     /// Set the `render_commas` flag.
@@ -1803,6 +1813,36 @@ mod custom_directive_precision_tests {
             !OutputSurface::LedgerText.renders_thousands_separators(),
             "ledger text has one canonical form; `format` strips separators \
              and `query --format beancount` must agree with it"
+        );
+    }
+
+    /// `for_surface` avoids cloning whenever the flag does not have to change.
+    ///
+    /// The clone carries the per-currency histograms, and the JSON writer
+    /// ignores the context entirely, so paying for one on every query would be
+    /// pure waste (review catch on #1893). The two cases that matter most are
+    /// the cheap ones: a ledger that never set `render_commas`, and any
+    /// human-facing surface.
+    #[test]
+    fn for_surface_borrows_unless_the_flag_must_change() {
+        use std::borrow::Cow;
+
+        let mut plain = DisplayContext::new();
+        plain.set_fixed_precision("USD", 2);
+        assert!(
+            matches!(plain.for_surface(OutputSurface::Machine), Cow::Borrowed(_)),
+            "a ledger without render_commas never needs a clone"
+        );
+
+        let mut commas = DisplayContext::new();
+        commas.set_render_commas(true);
+        assert!(
+            matches!(commas.for_surface(OutputSurface::Human), Cow::Borrowed(_)),
+            "a human surface keeps the flag, so no clone"
+        );
+        assert!(
+            matches!(commas.for_surface(OutputSurface::Machine), Cow::Owned(_)),
+            "only actually suppressing separators clones"
         );
     }
 

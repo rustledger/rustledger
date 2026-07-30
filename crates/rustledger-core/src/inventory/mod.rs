@@ -489,6 +489,19 @@ impl Inventory {
         // transaction cannot be rolled back. Cheap insurance on a `pub` method
         // whose failure mode is silent corruption.
         let needed = needed.abs();
+
+        // `units_cache` and `simple_index` are `#[serde(skip)]`, so a
+        // deserialized inventory carries its positions with both caches empty
+        // until `rebuild_caches` runs. Reading them in that state answers
+        // "plenty of room" for an inventory sitting at the ceiling — an
+        // unsound `true`, which is the one direction this method must never
+        // fail in. Refuse to answer instead. `units()` handles the same gap by
+        // recomputing from `positions`; that is O(positions) and this is meant
+        // to be O(1), so the conservative answer is the right trade here.
+        if self.units_cache.is_empty() && !self.positions.is_empty() {
+            return false;
+        }
+
         let fits = |v: Decimal| {
             v.abs()
                 .checked_add(needed)
@@ -959,6 +972,43 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+
+    /// A deserialized inventory, whose caches are empty until rebuilt, must
+    /// not be reported as having headroom it does not have.
+    ///
+    /// `units_cache` and `simple_index` are `#[serde(skip)]`, so a round-trip
+    /// leaves `positions` populated and both caches empty. Reading them in that
+    /// state answers "plenty of room" for an inventory parked at the ceiling.
+    /// An unsound `true` makes `apply` skip the snapshot it needed, so this is
+    /// silent corruption rather than a wrong number (review catch on #1898).
+    #[test]
+    fn a_deserialized_inventory_refuses_to_claim_headroom() {
+        let mut inv = Inventory::new();
+        inv.add(Position::simple(Amount::new(Decimal::MAX, "USD")))
+            .expect("one MAX position fits");
+        assert!(!inv.add_headroom_for("USD", Decimal::ONE));
+
+        let round_tripped: Inventory =
+            serde_json::from_str(&serde_json::to_string(&inv).expect("serialize"))
+                .expect("deserialize");
+
+        // Precondition: this really is the caches-empty state, so the test
+        // cannot pass vacuously on an inventory that rebuilt them itself.
+        assert!(
+            !round_tripped.positions.is_empty(),
+            "the positions survive the round-trip"
+        );
+        assert!(
+            round_tripped.units_cache.is_empty(),
+            "...and the caches do not — that is what makes this dangerous"
+        );
+
+        assert!(
+            !round_tripped.add_headroom_for("USD", Decimal::ONE),
+            "the inventory still holds Decimal::MAX; an empty cache is \
+             'cannot prove', never 'plenty of room'"
+        );
+    }
 
     /// `add_headroom_for` treats `needed` as a magnitude, whatever sign it
     /// arrives with.

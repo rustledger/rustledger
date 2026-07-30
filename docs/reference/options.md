@@ -162,6 +162,12 @@ tiers — amount-scan inference, then the global option, then commodity
 metadata. Beancount ignores metadata keys it does not recognize, so a ledger
 carrying this still round-trips through Beancount and Fava.
 
+A commodity's declaration reaches every surface the global option does —
+`report` and `query` text as well as `format`. It does **not** override the
+surface rules in the table above: a commodity declaring `render_commas: TRUE`
+is still written unseparated to CSV and JSON, because suppression there is
+about the consumer's lack of a grammar, not about the ledger's preference.
+
 Groups are three digits, which is all the parser accepts. Other conventions
 (Indian lakh grouping, for instance) would need a grammar change first — the
 formatter must never emit text its own parser rejects.

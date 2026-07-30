@@ -302,9 +302,50 @@ The downloaded corpus (~800 files) is organized by upstream source under
 | `compat.yml` | Nightly (3 AM UTC) | Full compatibility suite |
 | `tla.yml` | Changes to TLA+/`inventory.rs`/booking | TLA+ model checking |
 | `mutation.yml` | Monthly / PR to verified modules | Mutation testing (`cargo-mutants`) |
-| `fuzz.yml` | Nightly / PR to parser, query, booking | Fuzzing |
+| `fuzz.yml` | Nightly / PR to parser, query, booking | Fuzzing (see below) |
 | `miri.yml` | Weekly | Miri (undefined-behavior checks) |
 | `kani.yml` | Weekly / PR to core, booking | Kani model checking |
+
+### Fuzzing: gate on PRs, discovery at night
+
+`fuzz.yml` runs in two modes, and the difference is deliberate.
+
+**On a PR** it replays the whole corpus (`-runs=0`) and then mutates for 30
+seconds. Replaying answers the question a PR actually needs answered: did this
+change break an input the fuzzer already knows is interesting? That takes
+seconds. It will *not* find a new bug in new code, and it is not meant to.
+
+**Nightly** it mutates for 30 minutes per target, minimizes the result with
+`cargo fuzz cmin`, and commits it to the `fuzz-corpus` data branch. Every PR
+afterwards replays that stronger corpus. This is what makes the short PR run
+defensible: discovery still happens, just on a schedule where latency is free.
+
+#### When the fuzzer finds a crash
+
+Commit the crashing input, alongside the fix, to:
+
+```
+crates/<crate>/fuzz/regressions/<target>/
+```
+
+Those files are seeded into every run, on top of whatever the corpus branch
+holds. The corpus branch is machine-maintained and minimized, so an input left
+only there can be dropped by a later `cmin`; an input in `regressions/` is
+permanent. That is the difference between "we fixed it" and "it cannot come
+back".
+
+#### Running a target locally
+
+```bash
+cargo +nightly fuzz run fuzz_parse                    # fuzz until interrupted
+cargo +nightly fuzz run fuzz_parse -- -runs=0         # replay the corpus, then exit
+cargo +nightly fuzz run fuzz_parse -- -max_total_time=60
+```
+
+Targets: `fuzz_parse`, `fuzz_parse_line`, `fuzz_green_eq_red`
+(rustledger-parser), `fuzz_query_parse`, `fuzz_query_execute`
+(rustledger-query), `fuzz_booking` (rustledger-booking), `fuzz_input_entry`
+(rustledger-ffi-wasi).
 
 ## Adding New Tests
 

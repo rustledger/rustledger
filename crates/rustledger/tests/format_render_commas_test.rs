@@ -272,3 +272,64 @@ fn grouping_round_trips_without_changing_any_value() {
         "group-then-ungroup must reproduce the original values exactly"
     );
 }
+
+/// `--ledger` works on a root that does NOT `check` clean.
+///
+/// That is often exactly when you reach for a formatter — mid-edit, with an
+/// unbalanced transaction or a failing assertion still in the file. Only the
+/// display declarations are taken from the root, and resolving them is a raw
+/// load: no booking, no plugins, so nothing downstream of parsing can refuse.
+#[test]
+fn a_root_that_does_not_check_clean_still_supplies_declarations() {
+    let dir = tempfile::Builder::new()
+        .prefix("fmt-commas-broken-")
+        .tempdir()
+        .expect("tempdir");
+    let root = dir.path().join("main.beancount");
+    let inc = dir.path().join("postings.beancount");
+
+    std::fs::write(
+        &root,
+        "option \"render_commas\" \"TRUE\"\n\
+         2020-01-01 open Assets:Local\n\
+         2020-01-02 * \"does not balance\"\n\
+        \x20 Assets:Local  1234567.89 IQD\n\
+        \x20 Assets:Local        -1.00 IQD\n\
+         2020-01-03 balance Assets:Local  999.00 IQD\n",
+    )
+    .expect("write root");
+    std::fs::write(
+        &inc,
+        "2020-01-02 * \"x\"\n\
+        \x20 Assets:Local  1234567.89 IQD\n\
+        \x20 Equity:Opening\n",
+    )
+    .expect("write include");
+
+    let bin = require_rledger!();
+
+    // Precondition: the root really is broken, so this test cannot pass
+    // vacuously on a ledger that happens to be fine.
+    let check = Command::new(AsRef::<std::path::Path>::as_ref(&bin))
+        .args(["check", root.to_str().expect("utf8")])
+        .output()
+        .expect("run check");
+    assert!(
+        !check.status.success(),
+        "fixture must NOT check clean, or this proves nothing"
+    );
+
+    let out = run(
+        bin.as_ref(),
+        &[
+            "format",
+            "--ledger",
+            root.to_str().expect("utf8"),
+            inc.to_str().expect("utf8"),
+        ],
+    );
+    assert!(
+        out.contains("1,234,567.89 IQD"),
+        "declarations must still be read from an unbalanced root: {out}"
+    );
+}

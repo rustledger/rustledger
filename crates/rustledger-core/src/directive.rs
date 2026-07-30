@@ -82,28 +82,40 @@ impl fmt::Display for MetaValue {
 /// Metadata is a key-value map attached to directives and postings.
 pub type Metadata = FxHashMap<String, MetaValue>;
 
-/// Read a boolean-valued metadata entry, accepting the spellings a ledger
-/// author might reasonably write.
+/// The spellings of a boolean accepted in ledger source.
+///
+/// Stated ONCE because a boolean can arrive two ways — `option "x" "TRUE"` and
+/// `x: TRUE` metadata — and they are the same concept to a ledger author. Two
+/// separate vocabularies would mean `render_commas: YES` grouping numerals
+/// while `option "render_commas" "YES"` warns and does nothing.
+///
+/// `None` means "not recognizably boolean": the option parser turns that into
+/// an E7002 warning, and metadata leaves the default in place.
+#[must_use]
+pub fn parse_bool_word(word: &str) -> Option<bool> {
+    if word.eq_ignore_ascii_case("true") || word == "1" {
+        Some(true)
+    } else if word.eq_ignore_ascii_case("false") || word == "0" {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Read a boolean-valued metadata entry.
 ///
 /// `TRUE` is an uppercase bare word, so depending on context the parser may
 /// classify it as a boolean, a currency, or a string rather than one canonical
 /// variant. Accepting all three keeps `render_commas: TRUE` working however it
 /// lexes, instead of silently ignoring the declaration — the failure mode that
-/// makes a display option look broken.
-///
-/// Returns `None` for anything not recognizably boolean, so callers can leave
-/// the default in place rather than guess.
+/// makes a display option look broken. The VALUE vocabulary is
+/// [`parse_bool_word`]'s, shared with the option parser.
 #[must_use]
 pub fn meta_value_as_bool(value: &MetaValue) -> Option<bool> {
-    let word = match value {
-        MetaValue::Bool(b) => return Some(*b),
-        MetaValue::String(s) => s.as_str(),
-        MetaValue::Currency(c) => c.as_str(),
-        _ => return None,
-    };
-    match word.to_ascii_uppercase().as_str() {
-        "TRUE" | "T" | "YES" | "1" => Some(true),
-        "FALSE" | "F" | "NO" | "0" => Some(false),
+    match value {
+        MetaValue::Bool(b) => Some(*b),
+        MetaValue::String(s) => parse_bool_word(s),
+        MetaValue::Currency(c) => parse_bool_word(c),
         _ => None,
     }
 }
@@ -1512,6 +1524,56 @@ impl fmt::Display for Directive {
             Self::Price(p) => write!(f, "{p}"),
             Self::Custom(c) => write!(f, "{c}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod bool_vocabulary_tests {
+    use super::*;
+
+    /// One concept, one vocabulary: what `option "x" "V"` accepts is exactly
+    /// what `x: V` metadata accepts.
+    ///
+    /// The loader's option parser calls [`parse_bool_word`] directly, so this
+    /// pins the shared set rather than a copy of it. Before they were unified,
+    /// metadata took `YES`/`T` while the option warned on them.
+    #[test]
+    fn options_and_metadata_accept_the_same_spellings() {
+        for word in ["TRUE", "true", "True", "1"] {
+            assert_eq!(parse_bool_word(word), Some(true), "{word}");
+        }
+        for word in ["FALSE", "false", "False", "0"] {
+            assert_eq!(parse_bool_word(word), Some(false), "{word}");
+        }
+        for word in ["YES", "NO", "T", "F", "on", "", "2", "maybe"] {
+            assert_eq!(
+                parse_bool_word(word),
+                None,
+                "{word} is not accepted by `option`, so metadata must not take \
+                 it either — the option parser warns (E7002) and metadata \
+                 leaves the default"
+            );
+        }
+    }
+
+    /// An uppercase bare word's token classification depends on context, so
+    /// the same declaration can arrive as three different `MetaValue`s.
+    #[test]
+    fn a_bare_word_is_read_however_it_lexed() {
+        assert_eq!(meta_value_as_bool(&MetaValue::Bool(true)), Some(true));
+        assert_eq!(
+            meta_value_as_bool(&MetaValue::String("TRUE".into())),
+            Some(true)
+        );
+        assert_eq!(
+            meta_value_as_bool(&MetaValue::Currency("TRUE".into())),
+            Some(true)
+        );
+        assert_eq!(
+            meta_value_as_bool(&MetaValue::Currency("FALSE".into())),
+            Some(false)
+        );
+        assert_eq!(meta_value_as_bool(&MetaValue::Currency("USD".into())), None);
     }
 }
 

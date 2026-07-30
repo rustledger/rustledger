@@ -414,10 +414,12 @@ impl Options {
                 self.booking_method = value.to_string();
             }
             "render_commas" => {
-                // Accept TRUE/FALSE, true/false, 1/0 (Python beancount compatibility)
-                let is_true = value.eq_ignore_ascii_case("true") || value == "1";
-                let is_false = value.eq_ignore_ascii_case("false") || value == "0";
-                if !is_true && !is_false {
+                // Accept TRUE/FALSE, true/false, 1/0 (Python beancount
+                // compatibility). Shared with `render_commas:` metadata so one
+                // concept has one vocabulary — see `parse_bool_word`.
+                let parsed = rustledger_core::parse_bool_word(value);
+                let is_true = parsed == Some(true);
+                if parsed.is_none() {
                     self.warnings.push(OptionWarning {
                         code: "E7002",
                         message: format!(

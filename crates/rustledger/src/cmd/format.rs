@@ -101,7 +101,7 @@ pub fn run_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
     let display_context = args
         .ledger
         .as_deref()
-        .map(load_display_context)
+        .map(|root| load_display_context(root, args.verbose))
         .transpose()?;
     let style = display_context
         .as_ref()
@@ -125,19 +125,28 @@ pub fn run_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
 
 /// Load `root` purely to obtain its resolved display declarations.
 ///
-/// Validation findings are ignored on purpose: `format` must keep working on a
-/// ledger that does not yet `check` clean — that is often exactly when you
-/// reach for it. A missing `include`, an unbalanced transaction or a failed
-/// assertion all still yield a usable display context, and only that context is
-/// taken from the load.
+/// Takes the RAW load and stops there — no booking, no plugins. `process`
+/// forwards `display_context` from the raw result untouched, so the extra work
+/// cannot change the answer, and skipping it means a ledger that fails to book
+/// still formats. That is the point: `format` must keep working on a ledger
+/// that does not yet `check` clean, which is often exactly when you reach for
+/// it. A missing `include`, an unbalanced transaction or a failed assertion all
+/// still yield a usable display context.
+///
+/// Goes through the shared cached loader for the same reason every other
+/// command does — a pre-commit hook invoking `format --ledger` should not
+/// re-parse the whole ledger on each run.
 ///
 /// A root that cannot be READ is a different matter and fails: the user named a
 /// file to take declarations from, so silently substituting defaults would
 /// format their ledger the wrong way and say nothing.
-fn load_display_context(root: &std::path::Path) -> Result<rustledger_core::DisplayContext> {
-    let loaded = rustledger_loader::load(root, &rustledger_loader::LoadOptions::default())
+fn load_display_context(
+    root: &std::path::Path,
+    verbose: bool,
+) -> Result<rustledger_core::DisplayContext> {
+    let (raw, _from_cache) = crate::cmd::loadcache::load_result_cached(root, false, verbose)
         .with_context(|| format!("failed to read ledger root {}", root.display()))?;
-    Ok(loaded.display_context)
+    Ok(raw.display_context)
 }
 
 fn format_file<W: Write>(

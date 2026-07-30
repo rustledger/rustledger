@@ -106,7 +106,7 @@ pub struct PostingAlignment {
 /// NOT a field of `PostingAlignment`: that type is `pub`, `Eq` and cached on
 /// `ParseResult`, so it cannot carry a lifetime. The invariant that pairs a
 /// cached alignment with the style it was measured under is stated on
-/// [`format_node_with_style`].
+/// `format_node_with_style` (crate-internal).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GroupingStyle<'a> {
     ctx: Option<&'a rustledger_core::DisplayContext>,
@@ -241,6 +241,11 @@ pub fn format_source_grouped(source: &str, style: GroupingStyle<'_>) -> String {
 /// different lengths) in debug builds; release builds skip the
 /// check. Identical-length mismatches still pass silently —
 /// the rustdoc-level contract remains the source of truth.
+///
+/// Formats under the DEFAULT grouping style, always: it reuses
+/// `ParseResult::alignment`, which is measured ungrouped, and the two
+/// must agree. A caller that needs a ledger's separators wants
+/// [`format_node_grouped`], which measures its own alignment.
 ///
 /// # Panics
 ///
@@ -749,6 +754,13 @@ pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAl
 
 /// [`format_node_with_alignment`] with an explicit grouping style.
 ///
+/// Deliberately NOT public. It is the one shape that can be called wrongly —
+/// see the invariant below — and every public entry point either measures the
+/// alignment itself (`format_node_grouped`) or is fixed to the default style,
+/// which is what `ParseResult::alignment` is measured under. Keeping this
+/// private makes the mismatch unstatable from outside the crate rather than
+/// merely documented.
+///
 /// INVARIANT: `alignment` must have been produced by [`compute_alignment`] with
 /// this same `style`. Grouping changes a numeral's width, so an alignment
 /// measured under a different style puts the currency column in the wrong place
@@ -757,7 +769,7 @@ pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAl
 /// `ParseResult::alignment` (computed at parse time, before any options are
 /// known) must pass `GroupingStyle::default()`.
 #[must_use]
-pub fn format_node_with_style(
+fn format_node_with_style(
     node: &crate::SyntaxNode,
     alignment: PostingAlignment,
     group: GroupingStyle<'_>,
@@ -972,7 +984,7 @@ pub fn format_node_range_with_alignment(
 /// [`format_node_range`] under an explicit grouping style, measuring the
 /// alignment itself.
 ///
-/// Prefer this over pairing [`format_node_range_with_style`] with a cached
+/// Prefer this over pairing a caller-supplied alignment with a
 /// alignment: the alignment MUST have been measured under the same style, and
 /// doing both here makes that unfalsifiable. Costs one `compute_alignment`
 /// walk, which is why the ungrouped hot path still uses the cached alignment.
@@ -989,11 +1001,11 @@ pub fn format_node_range_grouped(
 /// [`format_node_range_with_alignment`] with an explicit grouping style.
 ///
 /// Same `alignment`/`style` agreement invariant as
-/// [`format_node_with_style`]: `alignment` must have been measured by
+/// `format_node_with_style`: `alignment` must have been measured by
 /// `compute_alignment` under this same `style`, or the currency column will be
 /// off by the separators' width. The cached `ParseResult::alignment` is
 /// measured UNGROUPED, so it may only be paired with the default style.
-pub fn format_node_range_with_style(
+fn format_node_range_with_style(
     node: &crate::SyntaxNode,
     range: rowan::TextRange,
     alignment: PostingAlignment,

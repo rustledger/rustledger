@@ -26,6 +26,11 @@ jobs:
   miri:
     name: Miri
     runs-on: ubuntu-latest
+    # Explicit, because the default is GitHub's 6-hour job cap. Without this the
+    # job silently burned all six hours every Sunday and reported `cancelled`
+    # (four consecutive weeks, 2026-07-05 through 07-26) — a red X that looks
+    # like an infrastructure hiccup rather than "this job no longer fits".
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # nightly
@@ -58,15 +63,50 @@ jobs:
       # Miri-incompatible dependency applies: scope Miri away from it. We still
       # catch transitive-`unsafe` UB in our own logic via core + booking (+ their
       # deps: rust_decimal, bigdecimal, imbl, smallvec, ...).
+      #
+      # Proptest targets are skipped. Under Miri's ~100x slowdown a property at
+      # its default 256 cases is not a test, it is an outage: on 2026-06-28 one
+      # 18-test proptest binary took 5,951s and another 1,730s, and after this
+      # job was scoped to core+booking the remaining properties (including a
+      # 500-case one) pushed it past six hours every week.
+      #
+      # `PROPTEST_CASES` does NOT help: every one of these binaries calls
+      # `ProptestConfig::with_cases(N)`, which is `Config { cases: N,
+      # ..Config::default() }` — the literal overwrites the env-derived default.
+      # Setting it would look like a fix and change nothing.
+      #
+      # Nor does filtering by name: four of the properties are not `prop_*`
+      # prefixed (`try_reduce_predicts_reduce`, `interpolation_is_idempotent_*`,
+      # `interpolated_transaction_has_zero_residual`).
+      #
+      # So the list is DERIVED from the sources, not hardcoded. A new
+      # integration test is picked up automatically; a new proptest one is
+      # skipped automatically and named in the log. Hardcoding it would mean a
+      # future test file silently never runs under Miri.
+      #
+      # Coverage is not really reduced: neither crate has a single `proptest!`
+      # in `src/`, so the unit tests — where the transitive `unsafe` actually
+      # lives (imbl, smallvec, rust_decimal) — all still run. Properties keep
+      # their full case counts in the normal test suite; what Miri wants is the
+      # UB check, not the input exploration.
       - name: Run Miri on rowan-free crates
         run: |
-          echo "::group::rustledger-core"
-          cargo +nightly miri test --package rustledger-core --all-features
-          echo "::endgroup::"
-
-          echo "::group::rustledger-booking"
-          cargo +nightly miri test --package rustledger-booking --all-features
-          echo "::endgroup::"
+          set -euo pipefail
+          for crate in rustledger-core rustledger-booking; do
+            targets=(--lib)
+            for f in "crates/$crate/tests/"*.rs; do
+              [ -e "$f" ] || continue
+              name="$(basename "$f" .rs)"
+              if grep -q 'proptest!' "$f"; then
+                echo "skipping $crate/$name (proptest: too slow under Miri)"
+              else
+                targets+=(--test "$name")
+              fi
+            done
+            echo "::group::$crate ${targets[*]}"
+            cargo +nightly miri test --package "$crate" --all-features "${targets[@]}"
+            echo "::endgroup::"
+          done
         env:
           # -Zmiri-disable-isolation: some tests read the realtime clock
           # (e.g. "today"-based date helpers), which miri rejects under its
@@ -88,3 +128,5 @@ jobs:
           echo "- rustledger-booking" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Excluded — rowan's ThinArc is miri-incompatible under Stacked AND Tree Borrows: rustledger-parser, rustledger-query." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Proptest targets are skipped here (see the run step): at 256+ cases under Miri they took hours. They run at full case counts in the normal test suite; neither crate has a \`proptest!\` in \`src/\`, so the unit tests still run." >> $GITHUB_STEP_SUMMARY

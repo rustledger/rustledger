@@ -1825,17 +1825,28 @@ impl SessionState {
     /// options' `display_precision` overrides, then per-commodity
     /// `precision:` metadata) and renders through the same
     /// `canonicalize_directives` path as the free `format` interface —
-    /// only the config differs. `render_commas` is NOT set: ledger text
-    /// never carries thousands separators (`format_plain` ignores the
-    /// flag; it stays a report/query concern).
+    /// only the config differs. `render_commas` IS honored here: this path
+    /// holds the ledger's options, and a grouped numeral is something every
+    /// conforming reader must accept (the grammar admits it), so the parser —
+    /// not the file — is the machine boundary. `rledger format` still emits
+    /// ungrouped text because it has no options in scope.
     pub fn format(&self) -> Result<String, String> {
-        let ctx = rustledger_core::DisplayContext::from_directives(
+        let mut ctx = rustledger_core::DisplayContext::from_directives(
             self.directives.iter(),
             self.options
                 .display_precision
                 .iter()
                 .map(|(c, p)| (c.as_str(), *p)),
         );
+        // The session holds the ledger's options, so this path can honor
+        // `render_commas` on disk — the boundary a machine consumer crosses is
+        // the PARSER, and the grammar admits grouped numerals. (Contrast the
+        // csv/json surfaces, whose consumers have no grammar; those stay
+        // separator-free unconditionally.) `rledger format` still passes
+        // `false` because it is a per-file text transform with no options in
+        // scope; giving it a context is a separate decision about whether
+        // `format` becomes a ledger operation.
+        ctx.set_render_commas(self.options.render_commas);
         let config = rustledger_core::format::FormatConfig {
             number_display: Some(ctx),
             ..Default::default()

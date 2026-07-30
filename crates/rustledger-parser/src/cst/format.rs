@@ -1311,10 +1311,18 @@ fn amount_value_text(amt: &ast::Amount, group: GroupingStyle<'_>) -> String {
         buf.push('-');
     }
     if let Some(n) = amt.number() {
-        buf.push_str(&canonical_number(
-            n.text(),
-            group.groups(amt.currency().as_ref().map(ast::CurrencyName::text)),
-        ));
+        // `amt.currency()` is a CST child lookup, and `groups()` ignores the
+        // currency entirely under the default style — so resolving it first
+        // costs a tree walk to answer a question already settled. That is per
+        // posting, per PARSE, because `compute_alignment` runs on every parse
+        // (see `convert.rs`), long before anything asks to be formatted. It
+        // measured 1.35% of the load pipeline's instructions.
+        //
+        // Same short-circuit `emit_amount_expression` already applies to
+        // `run_currency`; these two sites were missed when that was added.
+        let grouped = group.groups_anything()
+            && group.groups(amt.currency().as_ref().map(ast::CurrencyName::text));
+        buf.push_str(&canonical_number(n.text(), grouped));
     }
     buf
 }
@@ -2128,10 +2136,18 @@ fn format_amount(amt: &ast::Amount, group: GroupingStyle<'_>) -> String {
         out.push('-');
     }
     if let Some(n) = amt.number() {
-        out.push_str(&canonical_number(
-            n.text(),
-            group.groups(amt.currency().as_ref().map(ast::CurrencyName::text)),
-        ));
+        // `amt.currency()` is a CST child lookup, and `groups()` ignores the
+        // currency entirely under the default style — so resolving it first
+        // costs a tree walk to answer a question already settled. That is per
+        // posting, per PARSE, because `compute_alignment` runs on every parse
+        // (see `convert.rs`), long before anything asks to be formatted. It
+        // measured 1.35% of the load pipeline's instructions.
+        //
+        // Same short-circuit `emit_amount_expression` already applies to
+        // `run_currency`; these two sites were missed when that was added.
+        let grouped = group.groups_anything()
+            && group.groups(amt.currency().as_ref().map(ast::CurrencyName::text));
+        out.push_str(&canonical_number(n.text(), grouped));
     }
     if let Some(c) = amt.currency() {
         if !out.is_empty() && !out.ends_with('-') {

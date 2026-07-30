@@ -2322,12 +2322,12 @@ fn emit_amount_subnode_expression(
 /// the ledger default instead is how `{1,234,567.89 USD}` came out grouped
 /// while a plain `1234567.89 USD` posting in the same file stayed bare — USD
 /// had declared `render_commas: FALSE` and only one of the two honored it.
-fn run_currency(tokens: &[crate::SyntaxToken]) -> Option<String> {
+fn run_currency(tokens: &[crate::SyntaxToken]) -> Option<&str> {
     tokens
         .iter()
         .rev()
         .find(|t| t.kind() == crate::SyntaxKind::CURRENCY)
-        .map(|t| t.text().to_string())
+        .map(rowan::SyntaxToken::text)
 }
 
 fn write_canonical_token_sequence(
@@ -2335,7 +2335,10 @@ fn write_canonical_token_sequence(
     group: GroupingStyle<'_>,
     out: &mut String,
 ) {
-    let run_group = group.groups(run_currency(tokens).as_deref());
+    // `&&` short-circuits, so a ledger that declares no grouping never pays
+    // for the currency scan. `format` walks whole ledgers; see the
+    // `profile_format` example.
+    let run_group = group.groups_anything() && group.groups(run_currency(tokens));
     let is_op = |k: crate::SyntaxKind| {
         matches!(
             k,
@@ -2386,12 +2389,13 @@ fn balance_tolerance(
     // `balance Assets:A 100.00 ~ 0.05 USD` — one currency covers the asserted
     // amount and the tolerance, and it trails both, so resolve it up front
     // rather than mid-walk.
-    let run_group = {
+    let run_group = group.groups_anything() && {
+        // Only materialized when something groups — see above.
         let toks: Vec<crate::SyntaxToken> = node
             .children_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)
             .collect();
-        group.groups(run_currency(&toks).as_deref())
+        group.groups(run_currency(&toks))
     };
     let mut past_tilde = false;
     let mut number: Option<String> = None;

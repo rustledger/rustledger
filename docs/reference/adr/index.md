@@ -17,6 +17,7 @@ ADRs document significant architectural decisions made during rustledger develop
 | [ADR-0005](0005-cst-conversion-performance.md) | CST Conversion Performance (parse cache; green-tree declined) | Accepted |
 | [ADR-0006](0006-wit-component-model-embedding.md) | WIT / Component-Model embedding contract | Proposed |
 | [ADR-0007](0007-average-booking-realization.md) | AVERAGE booking realizes a single weighted-average pool | Accepted |
+| [ADR-0008](0008-presentation-is-ledger-declared.md) | Presentation is declared by the ledger, resolved per surface | Accepted |
 
 ## About ADRs
 

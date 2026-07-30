@@ -129,6 +129,9 @@ The CSV/JSON row is absolute: it outranks both the option and any per-commodity
 declaration, because the reason there is the consumer's missing grammar rather
 than the ledger's preference.
 
+Why presentation is the ledger's to declare at all, and where that stops, is
+recorded in [ADR-0008](adr/0008-presentation-is-ledger-declared.md).
+
 ### Separators in the ledger file itself
 
 `rledger format` finds the ledger a file belongs to and honors its

@@ -1060,6 +1060,29 @@ impl MainLoopState {
     }
 
     /// Handle the textDocument/formatting request.
+    /// Run `f` with the grouping style that formatting `uri` should use.
+    ///
+    /// The style borrows the loaded ledger's `DisplayContext`, so it cannot
+    /// outlive the read guard — hence the closure rather than a return value.
+    /// Stated once here because all four formatting entry points (document,
+    /// range, and both `executeCommand` paths) need the same resolution, and
+    /// a per-site copy is how they would drift.
+    ///
+    /// A URI that does not resolve to a path yields the no-grouping default,
+    /// as does a buffer outside the loaded ledger — see
+    /// [`LedgerState::grouping_style_for`].
+    fn with_grouping_style<T>(
+        &self,
+        uri: &Uri,
+        f: impl FnOnce(rustledger_parser::format::GroupingStyle<'_>) -> T,
+    ) -> T {
+        let ledger_guard = self.ledger_state.read();
+        match uri_to_path(uri) {
+            Ok(path) => f(ledger_guard.grouping_style_for(path.as_path())),
+            Err(_) => f(rustledger_parser::format::GroupingStyle::default()),
+        }
+    }
+
     fn handle_formatting_request(
         &self,
         req: lsp_server::Request,
@@ -1070,7 +1093,9 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response = handle_formatting(&params, &text, &parse_result, self.position_encoding);
+        let response = self.with_grouping_style(uri, |style| {
+            handle_formatting(&params, &text, &parse_result, self.position_encoding, style)
+        });
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -1102,8 +1127,9 @@ impl MainLoopState {
         let uri = &params.text_document.uri;
         let (text, parse_result) = self.get_document_data(uri);
 
-        let response =
-            handle_range_formatting(&params, &text, &parse_result, self.position_encoding);
+        let response = self.with_grouping_style(uri, |style| {
+            handle_range_formatting(&params, &text, &parse_result, self.position_encoding, style)
+        });
 
         serde_json::to_value(response).map_err(|e| e.to_string())
     }
@@ -1511,8 +1537,16 @@ impl MainLoopState {
 
         if let Some(uri) = uri_from_args {
             let (text, parse_result) = self.get_document_data(&uri);
-            let result =
-                handle_execute_command(&params, &text, &parse_result, &uri, self.position_encoding);
+            let result = self.with_grouping_style(&uri, |style| {
+                handle_execute_command(
+                    &params,
+                    &text,
+                    &parse_result,
+                    &uri,
+                    self.position_encoding,
+                    style,
+                )
+            });
             self.send_show_message(result.show_message);
             return Ok(result.response.unwrap_or(serde_json::Value::Null));
         }
@@ -1535,8 +1569,16 @@ impl MainLoopState {
             .map_err(|e| format!("no file URI for {}: {e}", path.display()))?;
 
         let (text, parse_result) = self.get_document_data(&uri);
-        let result =
-            handle_execute_command(&params, &text, &parse_result, &uri, self.position_encoding);
+        let result = self.with_grouping_style(&uri, |style| {
+            handle_execute_command(
+                &params,
+                &text,
+                &parse_result,
+                &uri,
+                self.position_encoding,
+                style,
+            )
+        });
         self.send_show_message(result.show_message);
         Ok(result.response.unwrap_or(serde_json::Value::Null))
     }

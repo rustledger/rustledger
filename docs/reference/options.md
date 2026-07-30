@@ -121,8 +121,13 @@ forces the field to be quoted and is then rejected by ordinary decimal parsers.
 |---------|-------------|
 | `report`, `query` — text | yes, when the option is set |
 | `report`, `query` — `--format csv` / `json` | **never** — machine interchange with no grammar |
-| `query --format beancount` | **never** currently — a known inconsistency with `format`, since Beancount's own `print` does honor the option |
+| `query --format beancount` | yes — ledger text, same as `format` (matches Beancount's `print`) |
 | `format` (the file on disk) | only with `--ledger` — see below |
+| Editor format-on-save (LSP) | yes, when the open file belongs to a loaded ledger that asks for them |
+
+The CSV/JSON row is absolute: it outranks both the option and any per-commodity
+declaration, because the reason there is the consumer's missing grammar rather
+than the ledger's preference.
 
 ### Separators in the ledger file itself
 
@@ -144,6 +149,15 @@ whichever files happened to change.
 A grouped file is *canonical* for a ledger that asked for grouping, so
 `format --check` accepts it and formatting stays idempotent. Without
 `--ledger`, output is byte-identical to a ledger that declares nothing.
+
+**In an editor**, the language server needs no flag — it already knows the
+journal root, so format-on-save, range formatting, and the *Align Amounts*
+command all group when the ledger asks. The options come from the root, which
+is what makes this work on an `include`d file that has no `option` lines of its
+own. Two cases deliberately fall back to ungrouped: a file no journal includes
+(editing a stray `.beancount` must not inherit an unrelated ledger's style),
+and a ledger that has not finished loading (formatting still works rather than
+blocking on it).
 
 ### Per-commodity declarations
 

@@ -63,7 +63,10 @@
 
 use lsp_types::{DocumentRangeFormattingParams, Position, Range, TextEdit};
 use rustledger_parser::ParseResult;
-use rustledger_parser::format::{format_node_range_with_alignment, lf_to_crlf_outside_strings};
+use rustledger_parser::format::{
+    GroupingStyle, format_node_range_grouped, format_node_range_with_alignment,
+    lf_to_crlf_outside_strings,
+};
 
 use super::formatting::format_document;
 use super::utils::{LineIndex, PositionEncoding};
@@ -82,6 +85,7 @@ pub fn handle_range_formatting(
     source: &str,
     parse_result: &ParseResult,
     encoding: PositionEncoding,
+    style: GroupingStyle<'_>,
 ) -> Option<Vec<TextEdit>> {
     // Happy path: the file parses cleanly, run the minimal-diff
     // pipeline. The fallback below covers ONLY the case where
@@ -90,7 +94,7 @@ pub fn handle_range_formatting(
     // `format_document` returns None for the OTHER reason: no edits
     // needed) must still surface as None so the client sees a no-op,
     // not a coarse CST-snap reformat over an already-canonical file.
-    if let Some(all_edits) = format_document(source, parse_result, encoding) {
+    if let Some(all_edits) = format_document(source, parse_result, encoding, style) {
         return clip_edits_to_range(params, source, encoding, all_edits);
     }
     // Fallback: file has parse errors. Try the CST-snap path on the
@@ -100,7 +104,7 @@ pub fn handle_range_formatting(
     // intersected) we surface None, matching the "nothing to format"
     // shape the happy path returns on already-canonical input.
     if !parse_result.errors.is_empty() {
-        return fallback_cst_snap_edit(params, source, parse_result, encoding);
+        return fallback_cst_snap_edit(params, source, parse_result, encoding, style);
     }
     None
 }
@@ -231,6 +235,7 @@ fn fallback_cst_snap_edit(
     source: &str,
     parse_result: &ParseResult,
     encoding: PositionEncoding,
+    style: GroupingStyle<'_>,
 ) -> Option<Vec<TextEdit>> {
     let line_index = LineIndex::new(source, encoding);
     let orig_start =
@@ -276,8 +281,19 @@ fn fallback_cst_snap_edit(
     // matters on format-on-type clients that send a
     // rangeFormatting request per keystroke while the user is
     // editing through a parse error in a large ledger.
-    let (snap_cst, mut new_text) =
-        format_node_range_with_alignment(&node, cst_range, parse_result.alignment)?;
+    //
+    // When the ledger groups numerals that cached alignment is unusable —
+    // it was measured ungrouped, and a separator widens the number column
+    // — so pay for one `compute_alignment` under the real style instead.
+    // Emitting with mismatched alignment would misplace the currency
+    // column; emitting ungrouped would strip separators the file's other
+    // lines still carry. Grouping is opt-in, so the common path keeps the
+    // per-keystroke fast path.
+    let (snap_cst, mut new_text) = if style.groups_anything() {
+        format_node_range_grouped(&node, cst_range, style)?
+    } else {
+        format_node_range_with_alignment(&node, cst_range, parse_result.alignment)?
+    };
 
     // CRLF preservation: `format_node_range` always emits LF (it
     // re-uses the canonical-form pipeline, which is LF-only by
@@ -333,7 +349,16 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(0, 27),
         });
-        assert!(handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none());
+        assert!(
+            handle_range_formatting(
+                &p,
+                source,
+                &result,
+                PositionEncoding::Utf16,
+                GroupingStyle::default(),
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -344,8 +369,14 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(3, 0),
         });
-        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
-            .expect("expected edits");
+        let edits = handle_range_formatting(
+            &p,
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected edits");
         assert!(!edits.is_empty());
     }
 
@@ -362,8 +393,14 @@ mod tests {
             start: Position::new(4, 0),
             end: Position::new(7, 0),
         });
-        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
-            .expect("expected edits");
+        let edits = handle_range_formatting(
+            &p,
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected edits");
         for edit in &edits {
             // Inclusive lower bound, exclusive upper bound.
             assert!(
@@ -385,8 +422,14 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(3, 0),
         });
-        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
-            .unwrap_or_default();
+        let edits = handle_range_formatting(
+            &p,
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .unwrap_or_default();
         let line_index = LineIndex::new(source, PositionEncoding::Utf16);
         let range_start = line_index
             .position_to_offset(p.range.start.line, p.range.start.character)
@@ -421,8 +464,14 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(0, source.encode_utf16().count() as u32),
         });
-        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
-            .expect("expected edits");
+        let edits = handle_range_formatting(
+            &p,
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected edits");
         assert!(
             !edits.is_empty(),
             "the trailing-newline insertion must be kept"
@@ -447,8 +496,14 @@ mod tests {
             start: Position::new(1, 0),
             end: Position::new(1, line1.encode_utf16().count() as u32),
         });
-        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
-            .expect("EOL selection should preserve the line-replace edit");
+        let edits = handle_range_formatting(
+            &p,
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("EOL selection should preserve the line-replace edit");
         assert!(!edits.is_empty(), "got {edits:?}");
     }
 
@@ -462,7 +517,16 @@ mod tests {
             start: Position::new(0, 5),
             end: Position::new(0, 5),
         });
-        assert!(handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none());
+        assert!(
+            handle_range_formatting(
+                &p,
+                source,
+                &result,
+                PositionEncoding::Utf16,
+                GroupingStyle::default(),
+            )
+            .is_none()
+        );
     }
 
     /// Cursor on an empty line: the EOL snap MUST run after the
@@ -481,7 +545,14 @@ mod tests {
             end: Position::new(1, 0),
         });
         assert!(
-            handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none(),
+            handle_range_formatting(
+                &p,
+                source,
+                &result,
+                PositionEncoding::Utf16,
+                GroupingStyle::default(),
+            )
+            .is_none(),
             "empty range on '\\n' byte must NOT be widened by the snap"
         );
     }
@@ -503,8 +574,14 @@ mod tests {
             start: Position::new(1, 0),
             end: Position::new(1, line1.encode_utf16().count() as u32),
         });
-        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
-            .expect("CRLF EOL selection should preserve the line-replace edit");
+        let edits = handle_range_formatting(
+            &p,
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("CRLF EOL selection should preserve the line-replace edit");
         assert!(!edits.is_empty(), "got {edits:?}");
     }
 
@@ -519,8 +596,14 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(2, 0),
         });
-        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
-            .expect("whole-document CRLF selection should produce edits");
+        let edits = handle_range_formatting(
+            &p,
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("whole-document CRLF selection should produce edits");
         assert!(!edits.is_empty(), "got {edits:?}");
     }
 
@@ -539,7 +622,14 @@ mod tests {
             end: Position::new(1, 0),
         });
         assert!(
-            handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none(),
+            handle_range_formatting(
+                &p,
+                source,
+                &result,
+                PositionEncoding::Utf16,
+                GroupingStyle::default(),
+            )
+            .is_none(),
             "selection covers only ERROR_NODE; fallback must surface None",
         );
     }
@@ -565,8 +655,14 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(1, 0),
         });
-        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
-            .expect("CST-snap fallback must fire");
+        let edits = handle_range_formatting(
+            &p,
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("CST-snap fallback must fire");
         // Single TextEdit (the fallback is coarse-grained by design).
         assert_eq!(edits.len(), 1, "expected one fallback edit, got {edits:?}");
         let edit = &edits[0];
@@ -617,7 +713,14 @@ mod tests {
             end: Position::new(3, 0),
         });
         assert!(
-            handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none(),
+            handle_range_formatting(
+                &p,
+                source,
+                &result,
+                PositionEncoding::Utf16,
+                GroupingStyle::default(),
+            )
+            .is_none(),
             "selection covering valid + ERROR_NODE + valid must bail; \
              deleting the ERROR_NODE is content loss the user did not opt into",
         );
@@ -639,8 +742,14 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(1, 0),
         });
-        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
-            .expect("CRLF source still gets a fallback edit");
+        let edits = handle_range_formatting(
+            &p,
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("CRLF source still gets a fallback edit");
         assert_eq!(edits.len(), 1);
         let edit = &edits[0];
         assert!(
@@ -672,7 +781,14 @@ mod tests {
             end: Position::new(0, 5),
         });
         assert!(
-            handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none(),
+            handle_range_formatting(
+                &p,
+                source,
+                &result,
+                PositionEncoding::Utf16,
+                GroupingStyle::default(),
+            )
+            .is_none(),
             "cursor-only request on a parse-error file must return None, \
              matching empty_range_is_a_noop on the happy path",
         );
@@ -701,8 +817,14 @@ mod tests {
             start: Position::new(0, 0),
             end: Position::new(1, 0),
         });
-        let edits = handle_range_formatting(&p, source, &result, PositionEncoding::Utf16)
-            .expect("CST-snap fallback must fire on BOM-prefixed broken file");
+        let edits = handle_range_formatting(
+            &p,
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("CST-snap fallback must fire on BOM-prefixed broken file");
         assert_eq!(edits.len(), 1);
         let edit = &edits[0];
         // Edit's range.start must map to the byte AFTER the BOM:
@@ -737,7 +859,14 @@ mod tests {
             end: Position::new(1, 0),
         });
         assert!(
-            handle_range_formatting(&p, source, &result, PositionEncoding::Utf16).is_none(),
+            handle_range_formatting(
+                &p,
+                source,
+                &result,
+                PositionEncoding::Utf16,
+                GroupingStyle::default(),
+            )
+            .is_none(),
             "clean + canonical file must return None; fallback must not fire",
         );
     }

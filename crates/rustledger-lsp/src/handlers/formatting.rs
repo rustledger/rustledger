@@ -29,7 +29,9 @@ use lsp_types::{DocumentFormattingParams, Position, Range, TextEdit};
 use rustledger_parser::ParseResult;
 #[cfg(test)]
 use rustledger_parser::format::format_source;
-use rustledger_parser::format::{format_source_with_parsed, lf_to_crlf_outside_strings};
+use rustledger_parser::format::{
+    GroupingStyle, format_node_grouped, format_source_with_parsed, lf_to_crlf_outside_strings,
+};
 
 use super::utils::{LineIndex, PositionEncoding};
 
@@ -44,8 +46,9 @@ pub fn handle_formatting(
     source: &str,
     parse_result: &ParseResult,
     encoding: PositionEncoding,
+    style: GroupingStyle<'_>,
 ) -> Option<Vec<TextEdit>> {
-    if let Some(edits) = format_document(source, parse_result, encoding) {
+    if let Some(edits) = format_document(source, parse_result, encoding, style) {
         return Some(edits);
     }
     // Parse error or already canonical. The "already canonical" case
@@ -81,6 +84,7 @@ pub fn format_document(
     source: &str,
     parse_result: &ParseResult,
     encoding: PositionEncoding,
+    style: GroupingStyle<'_>,
 ) -> Option<Vec<TextEdit>> {
     if !parse_result.errors.is_empty() {
         return None;
@@ -94,7 +98,16 @@ pub fn format_document(
     // `format_source(source)`; pinned by
     // `format_source_with_parsed_matches_format_source` in the
     // parser crate's tests.
-    let mut formatted = format_source_with_parsed(parse_result, source);
+    let mut formatted = if style.groups_anything() {
+        // The alignment cached on `ParseResult` was measured WITHOUT
+        // grouping, and a grouped numeral is wider, so it cannot be
+        // reused here — see `format_node_with_style`'s invariant. Take
+        // the re-measuring path instead of emitting a misaligned
+        // currency column.
+        format_node_grouped(&parse_result.syntax_node(), style)
+    } else {
+        format_source_with_parsed(parse_result, source)
+    };
     if source.contains("\r\n") {
         formatted = lf_to_crlf_outside_strings(&formatted);
     }
@@ -394,8 +407,14 @@ mod tests {
     fn removes_trailing_whitespace() {
         let source = "2024-01-01 open Assets:Bank USD   \n";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
-            .expect("expected edits");
+        let edits = handle_formatting(
+            &params(),
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         assert_eq!(after, "2024-01-01 open Assets:Bank USD\n");
@@ -405,8 +424,14 @@ mod tests {
     fn converts_tabs_to_spaces() {
         let source = "2024-01-15 * \"Test\"\n\tAssets:Bank  -5.00 USD\n\tExpenses:Food\n";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
-            .expect("expected edits");
+        let edits = handle_formatting(
+            &params(),
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         assert!(!after.contains('\t'), "got {after:?}");
@@ -428,8 +453,14 @@ mod tests {
             result.errors
         );
 
-        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
-            .expect("expected edits");
+        let edits = handle_formatting(
+            &params(),
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
 
@@ -460,8 +491,14 @@ mod tests {
     Expenses:Food
 ";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
-            .expect("expected edits");
+        let edits = handle_formatting(
+            &params(),
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         assert!(after.contains("; my comment"), "got {after:?}");
@@ -476,8 +513,14 @@ mod tests {
   Expenses:Food
 ";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
-            .expect("expected edits");
+        let edits = handle_formatting(
+            &params(),
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         let cli = format_source(source);
@@ -488,8 +531,14 @@ mod tests {
     fn source_without_trailing_newline_gets_one() {
         let source = "; comment";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
-            .expect("expected edits");
+        let edits = handle_formatting(
+            &params(),
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         assert_eq!(after, "; comment\n");
@@ -503,8 +552,14 @@ mod tests {
         let source = "\n\n\n\n";
         let result = parse(source);
         assert_eq!(format_source(source), "\n");
-        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
-            .expect("blanks-only file should reflow to a single newline");
+        let edits = handle_formatting(
+            &params(),
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("blanks-only file should reflow to a single newline");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         assert_eq!(after, "\n");
@@ -514,8 +569,14 @@ mod tests {
     fn non_ascii_payee_roundtrips() {
         let source = "2024-01-15 * \"Café\"\n    Assets:Bank  -1.00 USD\n  Expenses:Food\n";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
-            .expect("expected edits");
+        let edits = handle_formatting(
+            &params(),
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         let cli = format_source(source);
@@ -538,8 +599,14 @@ mod tests {
   Expenses:Coffee
 ";
         let result = parse(source);
-        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
-            .expect("expected edits");
+        let edits = handle_formatting(
+            &params(),
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         let cli = format_source(source);
@@ -557,8 +624,14 @@ mod tests {
         let source = "2024-01-01 open Assets:Bank   \n2024-01-02 not_a_directive\n\tAssets:Bank\n";
         let result = parse(source);
         assert!(!result.errors.is_empty());
-        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16)
-            .expect("expected cleanup edits");
+        let edits = handle_formatting(
+            &params(),
+            source,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("expected cleanup edits");
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         assert!(!after.contains('\t'));
@@ -571,7 +644,15 @@ mod tests {
         let source = "2024-01-01 not_a_directive\n";
         let result = parse(source);
         assert!(!result.errors.is_empty());
-        assert!(format_document(source, &result, PositionEncoding::Utf16).is_none());
+        assert!(
+            format_document(
+                source,
+                &result,
+                PositionEncoding::Utf16,
+                GroupingStyle::default()
+            )
+            .is_none()
+        );
     }
 
     // --- surface_cleanup_edits regression tests -----------------------
@@ -702,5 +783,123 @@ mod tests {
             "expected exactly one non-Equal op; similar's compact pass changed semantics: {non_equal:?}"
         );
         assert_eq!(non_equal[0].tag(), DiffTag::Replace);
+    }
+}
+
+#[cfg(test)]
+mod grouping_tests {
+    use super::*;
+    use rustledger_core::DisplayContext;
+    use rustledger_parser::parse;
+
+    fn params() -> DocumentFormattingParams {
+        serde_json::from_value(serde_json::json!({
+            "textDocument": { "uri": "file:///t.beancount" },
+            "options": { "tabSize": 2, "insertSpaces": true }
+        }))
+        .expect("params")
+    }
+
+    fn apply(source: &str, edits: &[TextEdit]) -> String {
+        let mut out = source.to_string();
+        let mut sorted = edits.to_vec();
+        sorted.sort_by_key(|e| (e.range.start.line, e.range.start.character));
+        for edit in sorted.iter().rev() {
+            let idx = |line: u32, ch: u32| -> usize {
+                let mut off = 0usize;
+                for (n, l) in out.split('\n').enumerate() {
+                    if n as u32 == line {
+                        return off + ch as usize;
+                    }
+                    off += l.len() + 1;
+                }
+                out.len()
+            };
+            let s = idx(edit.range.start.line, edit.range.start.character);
+            let e = idx(edit.range.end.line, edit.range.end.character);
+            out.replace_range(s..e, &edit.new_text);
+        }
+        out
+    }
+
+    const SOURCE: &str = "2020-01-02 * \"x\"\n  Assets:Local  1234567.89 IQD\n  Equity:Opening\n";
+
+    /// Format-on-save honors the ledger's `render_commas`.
+    ///
+    /// The #1892 reporter edits in VS Code, so the CLI's `--ledger` flag alone
+    /// would not have reached them: format-on-save kept stripping the
+    /// separators they had typed.
+    #[test]
+    fn format_on_save_groups_when_the_ledger_asks() {
+        let mut ctx = DisplayContext::new();
+        ctx.set_render_commas(true);
+        let style = GroupingStyle::from_context(&ctx);
+
+        let result = parse(SOURCE);
+        let edits = handle_formatting(&params(), SOURCE, &result, PositionEncoding::Utf16, style)
+            .expect("grouping changes the buffer, so there must be edits");
+        let after = apply(SOURCE, &edits);
+        assert!(
+            after.contains("1,234,567.89 IQD"),
+            "expected grouped output, got:\n{after}"
+        );
+        // Idempotent: formatting the grouped buffer again is a no-op.
+        let reparsed = parse(&after);
+        assert!(
+            handle_formatting(&params(), &after, &reparsed, PositionEncoding::Utf16, style)
+                .is_none(),
+            "grouped output must already be canonical under the same style"
+        );
+    }
+
+    /// The default style is unchanged — separators are stripped, exactly as
+    /// before this feature existed.
+    #[test]
+    fn the_default_style_still_strips_separators() {
+        let grouped = "2020-01-02 * \"x\"\n  Assets:Local  1,234,567.89 IQD\n  Equity:Opening\n";
+        let result = parse(grouped);
+        let edits = handle_formatting(
+            &params(),
+            grouped,
+            &result,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        )
+        .expect("stripping changes the buffer");
+        let after = apply(grouped, &edits);
+        assert!(
+            after.contains("1234567.89 IQD") && !after.contains(','),
+            "default style strips: {after}"
+        );
+    }
+
+    /// Grouped output must still align its currency column.
+    ///
+    /// `format_document`'s fast path reuses the alignment cached on
+    /// `ParseResult`, which was measured UNGROUPED. Reusing it here would put
+    /// the currency column three characters off per separator.
+    #[test]
+    fn grouped_output_is_still_aligned() {
+        let source =
+            "2020-01-02 * \"x\"\n  Assets:Local  1234567.89 IQD\n  Assets:Other  1.00 IQD\n";
+        let mut ctx = DisplayContext::new();
+        ctx.set_render_commas(true);
+        let style = GroupingStyle::from_context(&ctx);
+
+        let result = parse(source);
+        let edits = handle_formatting(&params(), source, &result, PositionEncoding::Utf16, style)
+            .expect("edits");
+        let after = apply(source, &edits);
+
+        let cols: Vec<usize> = after
+            .lines()
+            .filter(|l| l.contains("IQD"))
+            .map(|l| l.find("IQD").expect("IQD"))
+            .collect();
+        assert_eq!(cols.len(), 2, "two posting lines: {after}");
+        assert_eq!(
+            cols[0], cols[1],
+            "currency column must line up under grouping:\n{after}"
+        );
     }
 }

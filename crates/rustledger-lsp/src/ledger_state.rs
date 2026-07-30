@@ -237,6 +237,31 @@ impl LedgerState {
         self.ledger.as_ref()
     }
 
+    /// How numerals should be grouped when formatting `path`.
+    ///
+    /// Formatting honors the ledger's `render_commas` (and any per-commodity
+    /// override) the same way `rledger format --ledger <root>` does — the
+    /// options come from the journal ROOT, which is the only place they can
+    /// come from, since the buffer being formatted is often an `include`d file
+    /// with no options of its own.
+    ///
+    /// Returns the no-grouping default in the two cases where those options
+    /// cannot be said to apply:
+    ///
+    /// - no ledger is loaded (startup race, or the load failed) — formatting
+    ///   must still work, so it falls back rather than blocking;
+    /// - the buffer is not part of the loaded ledger. Editing a stray
+    ///   `.beancount` file that no journal includes must not pick up an
+    ///   unrelated ledger's display policy.
+    pub fn grouping_style_for(&self, path: &Path) -> rustledger_parser::format::GroupingStyle<'_> {
+        match &self.ledger {
+            Some(ledger) if self.contains_file(path) => {
+                rustledger_parser::format::GroupingStyle::from_context(&ledger.display_context)
+            }
+            _ => rustledger_parser::format::GroupingStyle::default(),
+        }
+    }
+
     /// Get all included files.
     pub fn included_files(&self) -> &HashSet<PathBuf> {
         &self.included_files
@@ -354,4 +379,90 @@ pub type SharedLedgerState = Arc<RwLock<LedgerState>>;
 /// Create a new shared ledger state.
 pub fn new_shared_ledger_state() -> SharedLedgerState {
     Arc::new(RwLock::new(LedgerState::new()))
+}
+
+#[cfg(test)]
+mod grouping_style_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Writes a two-file ledger whose ROOT declares `render_commas`, plus an
+    /// unrelated file no journal includes. Returns (dir, root, included,
+    /// outsider).
+    fn ledger_with_grouping() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("main.beancount");
+        let included = dir.path().join("postings.beancount");
+        let outsider = dir.path().join("scratch.beancount");
+
+        let mut f = std::fs::File::create(&root).expect("create root");
+        writeln!(f, "option \"render_commas\" \"TRUE\"").unwrap();
+        writeln!(f, "include \"postings.beancount\"").unwrap();
+        writeln!(f, "2020-01-01 open Assets:Local").unwrap();
+        writeln!(f, "2020-01-01 open Equity:Opening").unwrap();
+
+        let mut f = std::fs::File::create(&included).expect("create include");
+        writeln!(f, "2020-01-02 * \"x\"").unwrap();
+        writeln!(f, "  Assets:Local     1234567.89 IQD").unwrap();
+        writeln!(f, "  Equity:Opening").unwrap();
+
+        std::fs::write(&outsider, "2020-01-01 open Assets:Other\n").expect("create outsider");
+        (dir, root, included, outsider)
+    }
+
+    /// The journal ROOT's options govern formatting of an INCLUDED buffer.
+    ///
+    /// This is the whole point of the gate: the file the user is editing
+    /// usually has no `option` lines of its own, exactly like the CLI's
+    /// `rledger format --ledger <root> <included-file>`.
+    #[test]
+    fn an_included_buffer_inherits_the_roots_grouping() {
+        let (_dir, root, included, _outsider) = ledger_with_grouping();
+        let mut state = LedgerState::new();
+        state.load(&root).expect("load");
+
+        assert!(
+            state.grouping_style_for(&root).groups_anything(),
+            "the root declared render_commas"
+        );
+        assert!(
+            state.grouping_style_for(&included).groups_anything(),
+            "an included file has no options of its own and must inherit the root's"
+        );
+    }
+
+    /// A buffer outside the loaded ledger must NOT pick up its display policy,
+    /// and neither must anything before a ledger has loaded.
+    #[test]
+    fn a_buffer_outside_the_ledger_does_not_group() {
+        let (_dir, root, _included, outsider) = ledger_with_grouping();
+
+        let fresh = LedgerState::new();
+        assert!(
+            !fresh.grouping_style_for(&root).groups_anything(),
+            "no ledger loaded yet (startup race, or load failed): formatting \
+             must still work, ungrouped"
+        );
+
+        let mut state = LedgerState::new();
+        state.load(&root).expect("load");
+        assert!(
+            !state.grouping_style_for(&outsider).groups_anything(),
+            "a stray file no journal includes must not inherit an unrelated \
+             ledger's grouping"
+        );
+    }
+
+    /// A ledger that declares nothing groups nothing — the overwhelmingly
+    /// common case, and the one that keeps the cached-alignment fast path.
+    #[test]
+    fn a_ledger_without_the_option_does_not_group() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("main.beancount");
+        std::fs::write(&root, "2020-01-01 open Assets:Local\n").expect("write");
+
+        let mut state = LedgerState::new();
+        state.load(&root).expect("load");
+        assert!(!state.grouping_style_for(&root).groups_anything());
+    }
 }

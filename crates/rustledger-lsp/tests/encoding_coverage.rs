@@ -77,7 +77,13 @@ fn formatting_positions_round_trip_under_both_encodings() {
         work_done_progress_params: Default::default(),
     };
     for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
-        if let Some(edits) = handle_formatting(&params, SOURCE, &parsed, encoding) {
+        if let Some(edits) = handle_formatting(
+            &params,
+            SOURCE,
+            &parsed,
+            encoding,
+            rustledger_parser::format::GroupingStyle::default(),
+        ) {
             for edit in edits {
                 assert_range_round_trips(edit.range, SOURCE, encoding);
             }

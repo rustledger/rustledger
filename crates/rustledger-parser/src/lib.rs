@@ -62,10 +62,10 @@ pub mod format {
     pub use crate::cst::format::{
         CanonicalizeError, GroupingStyle, PostingAlignment, canonicalize_directives,
         compute_alignment, cr_outside_strings_present, crlf_to_lf_outside_strings, format_node,
-        format_node_grouped, format_node_range, format_node_range_with_alignment,
-        format_node_with_alignment, format_node_with_style, format_source, format_source_grouped,
-        format_source_with_parsed, lf_to_crlf_outside_strings, try_format_source,
-        try_format_source_grouped,
+        format_node_grouped, format_node_range, format_node_range_grouped,
+        format_node_range_with_alignment, format_node_range_with_style, format_node_with_alignment,
+        format_node_with_style, format_source, format_source_grouped, format_source_with_parsed,
+        lf_to_crlf_outside_strings, try_format_source, try_format_source_grouped,
     };
 }
 

@@ -120,19 +120,32 @@ pub enum Precision {
 
 /// What kind of consumer an output surface is written for.
 ///
-/// Decides whether thousands separators appear. They are a HUMAN-READING
-/// affordance, so they belong only in rendered tables and reports:
+/// Decides whether thousands separators appear. The question is not "will a
+/// person read this" but **does the consumer have a grammar**:
 ///
-/// - **machine interchange** (CSV, JSON) must stay parseable — a separator
-///   forces the field to be quoted and is then rejected by ordinary decimal
-///   parsers (issue #1892);
-/// - **ledger text** (`format`, `query --format beancount`) has one canonical
-///   on-disk form, and `,` is locale-ambiguous.
+/// - **machine interchange** (CSV, JSON) does not. A separator forces the
+///   field to be quoted and is then rejected by ordinary decimal parsers —
+///   `Decimal(field)` breaks (issue #1892). Suppressed unconditionally, and
+///   that suppression outranks any ledger or per-commodity declaration.
+/// - **ledger text** (`format`, `query --format beancount`) does. Grouped
+///   numerals are part of Beancount syntax, so every conforming reader must
+///   accept them; the parser, not the file, is the machine boundary. Honors
+///   the ledger's declaration (#1896).
+/// - **rendered tables** read by a person likewise honor it.
 ///
 /// This exists so the rule is stated ONCE. It was previously re-derived per
 /// writer, and the surfaces had already drifted apart: `query --format
 /// beancount` emitted separators into ledger text while `format` stripped
 /// them, and CSV emitted them while JSON did not.
+///
+/// `LedgerText` initially suppressed them, on the premise that ledger text has
+/// one canonical on-disk form. #1896 abandoned that premise deliberately —
+/// `rledger format --ledger` now GROUPS, because a ledger that asks for
+/// separators should get them in the file it owns — which put the two ledger
+/// text producers back in disagreement until this arm followed. Beancount
+/// itself groups here: `grammar.py` calls `dcontext.set_commas(options
+/// ["render_commas"])` while parsing, and `printer.py` renders through that
+/// same context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputSurface {
     /// A rendered table or report read by a person.
@@ -146,11 +159,14 @@ pub enum OutputSurface {
 impl OutputSurface {
     /// Whether this surface renders thousands separators when the ledger asks
     /// for them.
+    ///
+    /// Only [`Self::Machine`] refuses, because only its consumers lack a
+    /// grammar that admits the separator.
     #[must_use]
     pub const fn renders_thousands_separators(self) -> bool {
         match self {
-            Self::Human => true,
-            Self::Machine | Self::LedgerText => false,
+            Self::Human | Self::LedgerText => true,
+            Self::Machine => false,
         }
     }
 }
@@ -1887,13 +1903,18 @@ mod custom_directive_precision_tests {
     /// `OutputSurface` variant cannot quietly default to rendering separators
     /// (#1892).
     #[test]
-    fn only_human_surfaces_render_thousands_separators() {
+    fn only_machine_surfaces_suppress_thousands_separators() {
         assert!(OutputSurface::Human.renders_thousands_separators());
-        assert!(!OutputSurface::Machine.renders_thousands_separators());
         assert!(
-            !OutputSurface::LedgerText.renders_thousands_separators(),
-            "ledger text has one canonical form; `format` strips separators \
-             and `query --format beancount` must agree with it"
+            !OutputSurface::Machine.renders_thousands_separators(),
+            "CSV/JSON consumers have no grammar admitting a separator; this \
+             suppression outranks any ledger or per-commodity declaration"
+        );
+        assert!(
+            OutputSurface::LedgerText.renders_thousands_separators(),
+            "grouped numerals are Beancount syntax, so every conforming \
+             reader accepts them — `format --ledger` groups and `query \
+             --format beancount` must agree with it (#1896)"
         );
     }
 

@@ -10,6 +10,7 @@ use lsp_types::{
 };
 use rustledger_core::Directive;
 use rustledger_parser::ParseResult;
+use rustledger_parser::format::GroupingStyle;
 use std::collections::HashMap;
 
 use super::formatting::format_document;
@@ -119,6 +120,7 @@ pub fn handle_execute_command(
     parse_result: &ParseResult,
     uri: &Uri,
     encoding: PositionEncoding,
+    style: GroupingStyle<'_>,
 ) -> ExecuteCommandResponse {
     match params.command.as_str() {
         "rledger.insertDate" => {
@@ -128,7 +130,7 @@ pub fn handle_execute_command(
             let silent = is_silent_invocation(&params.arguments);
             handle_sort_transactions(source, parse_result, uri, silent, encoding)
         }
-        "rledger.alignAmounts" => handle_align_amounts(source, parse_result, uri, encoding),
+        "rledger.alignAmounts" => handle_align_amounts(source, parse_result, uri, encoding, style),
         "rledger.showAccountBalance" => {
             handle_show_account_balance(&params.arguments, parse_result)
         }
@@ -279,8 +281,9 @@ fn handle_align_amounts(
     parse_result: &ParseResult,
     uri: &Uri,
     encoding: PositionEncoding,
+    style: GroupingStyle<'_>,
 ) -> ExecuteCommandResponse {
-    let Some(edits) = format_document(source, parse_result, encoding) else {
+    let Some(edits) = format_document(source, parse_result, encoding, style) else {
         // Parse errors: surface via window/showMessage so the user
         // actually sees the failure. executeCommand responses are
         // discarded by VS Code etc.; showMessage is the spec-mandated
@@ -635,7 +638,13 @@ mod tests {
             "2024-01-15 * \"Coffee\"\n  Assets:Bank:Checking -5.00 USD\n  Expenses:Food 5.00 USD\n";
         let result = parse(misaligned);
         let uri: Uri = "file:///test.beancount".parse().unwrap();
-        let response = handle_align_amounts(misaligned, &result, &uri, PositionEncoding::Utf16);
+        let response = handle_align_amounts(
+            misaligned,
+            &result,
+            &uri,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        );
         let out = response
             .response
             .expect("align should return a JSON response");
@@ -676,8 +685,13 @@ mod tests {
         // align") instead.
         let aligned = "2024-01-15 open Assets:Bank USD\n";
         let aligned_parsed = parse(aligned);
-        let response2 =
-            handle_align_amounts(aligned, &aligned_parsed, &uri, PositionEncoding::Utf16);
+        let response2 = handle_align_amounts(
+            aligned,
+            &aligned_parsed,
+            &uri,
+            PositionEncoding::Utf16,
+            GroupingStyle::default(),
+        );
         assert!(
             response2.response.is_none(),
             "no-op input should not return a workspace edit, got {:?}",

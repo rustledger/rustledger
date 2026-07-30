@@ -966,6 +966,39 @@ pub fn format_node_range_with_alignment(
     range: rowan::TextRange,
     alignment: PostingAlignment,
 ) -> Option<(rowan::TextRange, String)> {
+    format_node_range_with_style(node, range, alignment, GroupingStyle::default())
+}
+
+/// [`format_node_range`] under an explicit grouping style, measuring the
+/// alignment itself.
+///
+/// Prefer this over pairing [`format_node_range_with_style`] with a cached
+/// alignment: the alignment MUST have been measured under the same style, and
+/// doing both here makes that unfalsifiable. Costs one `compute_alignment`
+/// walk, which is why the ungrouped hot path still uses the cached alignment.
+pub fn format_node_range_grouped(
+    node: &crate::SyntaxNode,
+    range: rowan::TextRange,
+    style: GroupingStyle<'_>,
+) -> Option<(rowan::TextRange, String)> {
+    let source_file = SourceFile::cast(node.clone())?;
+    let alignment = compute_alignment(&source_file, style);
+    format_node_range_with_style(node, range, alignment, style)
+}
+
+/// [`format_node_range_with_alignment`] with an explicit grouping style.
+///
+/// Same `alignment`/`style` agreement invariant as
+/// [`format_node_with_style`]: `alignment` must have been measured by
+/// `compute_alignment` under this same `style`, or the currency column will be
+/// off by the separators' width. The cached `ParseResult::alignment` is
+/// measured UNGROUPED, so it may only be paired with the default style.
+pub fn format_node_range_with_style(
+    node: &crate::SyntaxNode,
+    range: rowan::TextRange,
+    alignment: PostingAlignment,
+    style: GroupingStyle<'_>,
+) -> Option<(rowan::TextRange, String)> {
     // Precondition check (debug-only). Same rationale as
     // `format_node_with_alignment`: the bare delegate already
     // validated the kind, so the most common call path (bare →
@@ -1108,7 +1141,7 @@ pub fn format_node_range_with_alignment(
                         out.push('\n');
                     }
                 }
-                emit_directive(&directive, alignment, GroupingStyle::default(), &mut out);
+                emit_directive(&directive, alignment, style, &mut out);
                 prev_was_directive = true;
             }
             rowan::NodeOrToken::Token(t) => {

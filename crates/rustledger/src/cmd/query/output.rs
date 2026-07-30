@@ -1890,6 +1890,62 @@ mod tests {
         );
     }
 
+    /// `query --format beancount` honors `render_commas`, agreeing with
+    /// `rledger format --ledger` on the same ledger (#1896).
+    ///
+    /// Both emit ledger text, whose reader has a grammar that admits grouped
+    /// numerals, so a ledger asking for separators gets them from both. This
+    /// arm used to suppress them, which was right while `format` stripped
+    /// unconditionally and wrong the moment `format --ledger` learned to
+    /// group. Asserted through the SAME surface resolution the dispatcher
+    /// performs, so the wiring is covered and not just the writer.
+    #[test]
+    fn beancount_output_honors_render_commas_like_format() {
+        use rustledger_core::OutputSurface;
+        use rustledger_query::QueryResult;
+
+        let surface: OutputSurface = super::super::OutputFormat::Beancount.into();
+        assert!(
+            surface.renders_thousands_separators(),
+            "ledger text has a grammar for separators"
+        );
+
+        let mut ledger_ctx = DisplayContext::new();
+        ledger_ctx.set_render_commas(true);
+        ledger_ctx.update(rust_decimal_macros::dec!(1234567.89), "USD");
+        let ctx = ledger_ctx.for_surface(surface);
+
+        let mut result = QueryResult::new(vec!["pos".into()]);
+        result.add_row(vec![Value::Position(Box::new(
+            rustledger_core::Position::simple(rustledger_core::Amount::new(
+                rust_decimal_macros::dec!(1234567.89),
+                "USD",
+            )),
+        ))]);
+
+        let mut out = Vec::new();
+        write_beancount(&result, &mut out, &ctx).expect("write");
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(
+            text.contains("1,234,567.89 USD"),
+            "must group, like `format --ledger` does: {text}"
+        );
+
+        // ...and a commodity opting out is still honored on this surface.
+        let mut opted_out = DisplayContext::new();
+        opted_out.set_render_commas(true);
+        opted_out.set_render_commas_for("USD", false);
+        opted_out.update(rust_decimal_macros::dec!(1234567.89), "USD");
+        let ctx = opted_out.for_surface(surface);
+        let mut out = Vec::new();
+        write_beancount(&result, &mut out, &ctx).expect("write");
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(
+            text.contains("1234567.89 USD") && !text.contains(','),
+            "USD declared render_commas: FALSE: {text}"
+        );
+    }
+
     /// A commodity's own `render_commas:` declaration reaches the query
     /// writer, on every column kind.
     ///
@@ -1948,10 +2004,12 @@ mod tests {
         let mut result = QueryResult::new(vec!["sum".into()]);
         result.add_row(vec![Value::Number(rust_decimal_macros::dec!(1234567.89))]);
 
+        // Beancount is deliberately absent: it is ledger text, whose reader
+        // has a grammar for separators, and it groups (#1896). See
+        // `beancount_output_honors_render_commas_like_format`.
         for format in [
             super::super::OutputFormat::Csv,
             super::super::OutputFormat::Json,
-            super::super::OutputFormat::Beancount,
         ] {
             let surface: OutputSurface = format.into();
             assert!(

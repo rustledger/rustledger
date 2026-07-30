@@ -1482,3 +1482,99 @@ fn references_span_included_files() {
         "references must include the usage in the included file; got: {uris:?}"
     );
 }
+
+/// Format-on-save groups numerals when the journal ROOT asks for it, on a
+/// buffer that is an `include`d file with no options of its own (#1896).
+///
+/// End-to-end through the real request dispatch, because the gate lives there:
+/// the handler resolves a `GroupingStyle` from the loaded ledger keyed on the
+/// buffer's own path. The unit tests cover the gate and the formatter
+/// separately; this covers the wiring between them.
+#[test]
+fn format_on_save_groups_an_included_buffer_per_the_root_options() {
+    use lsp_types::request::Formatting;
+    use lsp_types::{DocumentFormattingParams, FormattingOptions};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let journal_path = dir.path().join("journal.beancount");
+    let postings_path = dir.path().join("postings.beancount");
+
+    std::fs::write(
+        &postings_path,
+        "2024-01-02 * \"x\"\n  \
+           Assets:Bank  1234567.89 USD\n  \
+           Equity:Opening\n",
+    )
+    .expect("write postings");
+    std::fs::write(
+        &journal_path,
+        format!(
+            "option \"render_commas\" \"TRUE\"\n\
+             2024-01-01 open Assets:Bank\n\
+             2024-01-01 open Equity:Opening\n\
+             include \"{}\"\n",
+            include_name(&postings_path)
+        ),
+    )
+    .expect("write journal");
+
+    let mut client = LspTestClient::spawn_with_journal(Some(journal_path));
+    client.initialize();
+
+    let uri = uri_for(&postings_path);
+    let source = std::fs::read_to_string(&postings_path).expect("read postings");
+    client.open_document(&uri, &source);
+
+    let edits: Option<Vec<lsp_types::TextEdit>> =
+        client.request::<Formatting>(DocumentFormattingParams {
+            text_document: TextDocumentIdentifier {
+                uri: uri.parse().unwrap(),
+            },
+            options: FormattingOptions {
+                tab_size: 2,
+                insert_spaces: true,
+                ..Default::default()
+            },
+            work_done_progress_params: Default::default(),
+        });
+
+    let edits = edits.expect("grouping changes the buffer, so edits are expected");
+
+    // Apply the edits rather than inspecting them: these are MINIMAL diffs, so
+    // a grouped numeral arrives as an edit like `,234,` and never appears whole
+    // in any single `new_text`. Asserting on the concatenation would be
+    // asserting on the diff algorithm, not on the result the editor shows.
+    let after = apply_edits(&source, &edits);
+    assert!(
+        after.contains("1,234,567.89 USD"),
+        "the root's `render_commas` must reach an included buffer's \
+         format-on-save; buffer became:\n{after}"
+    );
+}
+
+/// Apply LSP `TextEdit`s to `source` the way a client would.
+///
+/// Edits are non-overlapping, so applying them from the end backwards keeps
+/// every remaining range valid. Test sources here are ASCII, so an LSP UTF-16
+/// character offset is a byte offset.
+fn apply_edits(source: &str, edits: &[lsp_types::TextEdit]) -> String {
+    let mut sorted = edits.to_vec();
+    sorted.sort_by_key(|e| (e.range.start.line, e.range.start.character));
+    let mut out = source.to_string();
+    for edit in sorted.iter().rev() {
+        let offset = |line: u32, character: u32| -> usize {
+            let mut off = 0usize;
+            for (n, l) in out.split('\n').enumerate() {
+                if n as u32 == line {
+                    return off + character as usize;
+                }
+                off += l.len() + 1;
+            }
+            out.len()
+        };
+        let start = offset(edit.range.start.line, edit.range.start.character);
+        let end = offset(edit.range.end.line, edit.range.end.character);
+        out.replace_range(start..end, &edit.new_text);
+    }
+    out
+}

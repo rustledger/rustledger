@@ -172,14 +172,15 @@ pub fn format_source(source: &str) -> String {
 
 /// [`format_source`], with the thousands-separator rule supplied by the caller.
 ///
-/// `group_digits` comes from the LEDGER, not from the tool: `option
-/// "render_commas"`, resolved by whoever holds the options (the CLI after a
-/// load, the LSP from its ledger state, the FFI session from its own). That is
-/// what keeps this a canonical form rather than a knob — the output is still a
-/// function of the input, the option simply travels with it.
+/// The style comes from the LEDGER, not from the tool: `option
+/// "render_commas"` and per-commodity `render_commas:`, resolved by whoever
+/// holds the options (the CLI after a load, the LSP from its ledger state, the
+/// FFI session from its own). That is what keeps this a canonical form rather
+/// than a knob — the output is still a function of the input, the declaration
+/// simply travels with it.
 ///
-/// `format_source` passes `false`, so every existing caller and every ledger
-/// that has not opted in is byte-for-byte unaffected.
+/// `format_source` passes [`GroupingStyle::default`], so every existing caller
+/// and every ledger that has not opted in is byte-for-byte unaffected.
 #[must_use]
 pub fn format_source_grouped(source: &str, style: GroupingStyle<'_>) -> String {
     let (stripped, _had_bom) = crate::bom::strip_leading(source);
@@ -4910,10 +4911,14 @@ mod tests {
         let _ = format_source_with_parsed(&parse_result, "different");
     }
 
-    /// `format_source_grouped(_, true)` imposes grouping, and the alignment
-    /// pre-pass measures the GROUPED width — so the currency column still lines
-    /// up. They agree because both read `PostingAlignment::group_digits`; a
-    /// separate parameter is how #1290's non-convergence happened.
+    /// A grouping style imposes separators, and the alignment pre-pass measures
+    /// the GROUPED width — so the currency column still lines up.
+    ///
+    /// They agree because `compute_alignment` and the emitters are handed the
+    /// SAME `GroupingStyle`. Measuring under one style and emitting under
+    /// another is the mismatch that would reproduce #1290, which is why the two
+    /// entry points that could express it are crate-private and every public
+    /// one either measures its own alignment or is fixed to the default style.
     #[test]
     fn grouped_formatting_aligns_and_is_idempotent() {
         let src = "\

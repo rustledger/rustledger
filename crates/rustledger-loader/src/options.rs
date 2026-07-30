@@ -376,17 +376,22 @@ impl Options {
                 }
             }
             "infer_tolerance_from_cost" => {
-                if !value.eq_ignore_ascii_case("true") && !value.eq_ignore_ascii_case("false") {
+                // Same vocabulary as every other boolean in ledger source
+                // (`parse_bool_word`). This arm used to take TRUE/FALSE only
+                // and warn on `1`, which Python beancount accepts as true for
+                // every boolean option.
+                let parsed = rustledger_core::parse_bool_word(value);
+                if parsed.is_none() {
                     self.warnings.push(OptionWarning {
                         code: "E7002",
                         message: format!(
-                            "Invalid value \"{value}\" for option \"{key}\": expected TRUE or FALSE"
+                            "Invalid value \"{value}\" for option \"{key}\": expected TRUE, FALSE, 1 or 0"
                         ),
                         option: key.to_string(),
                         value: value.to_string(),
                     });
                 }
-                self.infer_tolerance_from_cost = value.eq_ignore_ascii_case("true");
+                self.infer_tolerance_from_cost = parsed == Some(true);
             }
             "booking_method" => {
                 let valid_methods = [
@@ -423,7 +428,7 @@ impl Options {
                     self.warnings.push(OptionWarning {
                         code: "E7002",
                         message: format!(
-                            "Invalid value \"{value}\" for option \"{key}\": expected TRUE or FALSE"
+                            "Invalid value \"{value}\" for option \"{key}\": expected TRUE, FALSE, 1 or 0"
                         ),
                         option: key.to_string(),
                         value: value.to_string(),
@@ -816,7 +821,55 @@ mod tests {
 
         assert_eq!(opts.warnings.len(), 1);
         assert_eq!(opts.warnings[0].code, "E7002");
-        assert!(opts.warnings[0].message.contains("TRUE or FALSE"));
+        assert!(
+            opts.warnings[0].message.contains("TRUE, FALSE, 1 or 0"),
+            "the message must name the vocabulary actually accepted: {}",
+            opts.warnings[0].message
+        );
+    }
+
+    /// Every boolean option in ledger source shares one vocabulary, and the
+    /// E7002 message names it accurately.
+    ///
+    /// `infer_tolerance_from_cost` used to take TRUE/FALSE only and warn on
+    /// `1`, which Python beancount accepts as true for every boolean option;
+    /// `render_commas` took `1`/`0` as well. The message said "TRUE or FALSE"
+    /// on both. A test that only checks the rejected value cannot catch a
+    /// message that under-promises, so this asserts the accepted ones too.
+    #[test]
+    fn boolean_options_share_one_vocabulary() {
+        for key in ["infer_tolerance_from_cost", "render_commas"] {
+            for (value, expected) in [
+                ("TRUE", true),
+                ("true", true),
+                ("1", true),
+                ("FALSE", false),
+                ("false", false),
+                ("0", false),
+            ] {
+                let mut opts = Options::new();
+                opts.set(key, value);
+                assert!(
+                    opts.warnings.is_empty(),
+                    "{key} = {value:?} must be accepted without a warning: {:?}",
+                    opts.warnings
+                );
+                let actual = if key == "render_commas" {
+                    opts.render_commas
+                } else {
+                    opts.infer_tolerance_from_cost
+                };
+                assert_eq!(actual, expected, "{key} = {value:?}");
+            }
+
+            let mut opts = Options::new();
+            opts.set(key, "yes");
+            assert_eq!(
+                opts.warnings.len(),
+                1,
+                "{key}: `yes` is outside the shared vocabulary and must warn"
+            );
+        }
     }
 
     #[test]

@@ -147,7 +147,7 @@ jobs:
             if git ls-tree --name-only FETCH_HEAD -- "${{ matrix.target }}" | grep -q .; then
               git archive FETCH_HEAD "${{ matrix.target }}" \
                 | tar -x -C "$CORPUS" --strip-components=1
-              echo "corpus: $(find "$CORPUS" -type f | wc -l) inputs from the fuzz-corpus branch"
+              echo "corpus: $(find "$CORPUS" -type f 2>/dev/null | wc -l) inputs from the fuzz-corpus branch"
             else
               echo "corpus: the branch exists but holds nothing for ${{ matrix.target }} yet"
             fi
@@ -161,7 +161,7 @@ jobs:
           REGRESSIONS="crates/${{ matrix.crate }}/fuzz/regressions/${{ matrix.target }}"
           if [ -d "$REGRESSIONS" ]; then
             cp -a "$REGRESSIONS/." "$CORPUS/"
-            echo "seeded $(find "$REGRESSIONS" -type f | wc -l) in-tree crash regressions"
+            echo "seeded $(find "$REGRESSIONS" -type f 2>/dev/null | wc -l) in-tree crash regressions"
           fi
 
       - name: Determine mode
@@ -226,10 +226,17 @@ jobs:
           # (crash-/oom-/timeout-/leak-/mismatch-), so an unknown or future
           # failure type cannot slip through. `slow-unit-*` means an input was
           # slow but completed — surface it as a non-fatal warning rather than
-          # failing the build (#1342). `find` on a missing dir is empty under
-          # 2>/dev/null, so no separate existence/`ls` guard is needed.
-          crashes=$(find "$dir" -maxdepth 1 -type f ! -name 'slow-unit-*' 2>/dev/null)
-          slow=$(find "$dir" -maxdepth 1 -type f -name 'slow-unit-*' 2>/dev/null)
+          # failing the build (#1342).
+          #
+          # `|| true` because `find` EXITS NON-ZERO on a missing directory, and
+          # unlike the four steps this replaced, this one runs under
+          # `set -euo pipefail`. Without it a run that produced no artifacts
+          # dir at all would abort the check before it looked, failing the job
+          # precisely when nothing was wrong. `cargo fuzz` does create the dir
+          # today, which is why this is latent rather than breaking, but the
+          # check must not depend on that.
+          crashes=$(find "$dir" -maxdepth 1 -type f ! -name 'slow-unit-*' 2>/dev/null || true)
+          slow=$(find "$dir" -maxdepth 1 -type f -name 'slow-unit-*' 2>/dev/null || true)
           if [ -n "$slow" ]; then
             echo "::warning::Fuzzer found slow units (non-fatal); investigate for super-linear behavior:"
             echo "$slow"
@@ -347,9 +354,16 @@ jobs:
 
           # `download-artifact` with a pattern nests each artifact in its own
           # directory: dl-corpus/corpus-<target>/<inputs>.
+          # REPLACE each target's directory rather than merging into it.
+          # `cmin` shrinks a corpus by design, so copying over the top would
+          # resurrect every input it just dropped: the branch could only grow,
+          # PR replays would get monotonically slower, and minimization would
+          # buy nothing. A target with no artifact this run is left untouched,
+          # so one failed job never discards its corpus.
           for d in dl-corpus/corpus-*; do
             [ -d "$d" ] || continue
             target="$(basename "$d")"; target="${target#corpus-}"
+            rm -rf "${CORPUS:?}/$target"
             mkdir -p "$CORPUS/$target"
             cp -a "$d/." "$CORPUS/$target/"
           done

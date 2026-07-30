@@ -82,6 +82,32 @@ impl fmt::Display for MetaValue {
 /// Metadata is a key-value map attached to directives and postings.
 pub type Metadata = FxHashMap<String, MetaValue>;
 
+/// Read a boolean-valued metadata entry, accepting the spellings a ledger
+/// author might reasonably write.
+///
+/// `TRUE` is an uppercase bare word, so depending on context the parser may
+/// classify it as a boolean, a currency, or a string rather than one canonical
+/// variant. Accepting all three keeps `render_commas: TRUE` working however it
+/// lexes, instead of silently ignoring the declaration — the failure mode that
+/// makes a display option look broken.
+///
+/// Returns `None` for anything not recognizably boolean, so callers can leave
+/// the default in place rather than guess.
+#[must_use]
+pub fn meta_value_as_bool(value: &MetaValue) -> Option<bool> {
+    let word = match value {
+        MetaValue::Bool(b) => return Some(*b),
+        MetaValue::String(s) => s.as_str(),
+        MetaValue::Currency(c) => c.as_str(),
+        _ => return None,
+    };
+    match word.to_ascii_uppercase().as_str() {
+        "TRUE" | "T" | "YES" | "1" => Some(true),
+        "FALSE" | "F" | "NO" | "0" => Some(false),
+        _ => None,
+    }
+}
+
 /// Try to interpret a [`MetaValue`] as a non-negative integer ≤ `u32::MAX`.
 ///
 /// Used by the `precision` metadata feature on `commodity` directives (issue

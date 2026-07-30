@@ -337,7 +337,10 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // `ParseResult::alignment` rustdoc for the cache contract;
     // the equivalence with a fresh `compute_alignment` call is
     // pinned by `parse_result_alignment_cache::*` (lib.rs tests).
-    let alignment = crate::cst::format::compute_alignment(&source_file, false);
+    let alignment = crate::cst::format::compute_alignment(
+        &source_file,
+        crate::cst::format::GroupingStyle::default(),
+    );
 
     // Capture the green root before we drop `source_file`. The
     // `.green()` call returns a Cow so we promote to owned with

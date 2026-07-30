@@ -60,11 +60,11 @@ pub mod logos_lexer;
 /// exactly one site.
 pub mod format {
     pub use crate::cst::format::{
-        CanonicalizeError, PostingAlignment, canonicalize_directives, compute_alignment,
-        cr_outside_strings_present, crlf_to_lf_outside_strings, format_node, format_node_grouped,
-        format_node_range, format_node_range_with_alignment, format_node_with_alignment,
-        format_source, format_source_grouped, format_source_with_parsed,
-        lf_to_crlf_outside_strings, try_format_source,
+        CanonicalizeError, GroupingStyle, PostingAlignment, canonicalize_directives,
+        compute_alignment, cr_outside_strings_present, crlf_to_lf_outside_strings, format_node,
+        format_node_grouped, format_node_range, format_node_range_with_alignment,
+        format_node_with_alignment, format_node_with_style, format_source, format_source_grouped,
+        format_source_with_parsed, lf_to_crlf_outside_strings, try_format_source,
     };
 }
 
@@ -719,7 +719,6 @@ mod canonical_payload_excludes_alignment {
         // by 100. Real-world alignment would never be this wide
         // for the fixture, so we get a guaranteed-different cache.
         mutated.alignment = PostingAlignment {
-            group_digits: false,
             number_col: parsed.alignment.number_col + 100,
             number_width: parsed.alignment.number_width + 7,
         };
@@ -755,7 +754,7 @@ mod parse_result_alignment_cache {
         let result = parse(source);
         let source_file = SourceFile::cast(result.syntax_node())
             .expect("ParseResult::syntax_node() must be a SOURCE_FILE");
-        let fresh = compute_alignment(&source_file, false);
+        let fresh = compute_alignment(&source_file, crate::cst::format::GroupingStyle::default());
         assert_eq!(
             result.alignment, fresh,
             "ParseResult::alignment cache diverged from a fresh \

@@ -170,7 +170,19 @@ pub struct DisplayContext {
     distributions: HashMap<String, Distribution>,
 
     /// Whether to render commas in numbers (from `option "render_commas"`).
+    ///
+    /// The LEDGER-WIDE default. A commodity may override it — see
+    /// [`Self::render_commas_for`] — so a 4000:1 currency can be grouped
+    /// without also grouping two-digit USD amounts.
     render_commas: bool,
+    /// Per-commodity overrides of [`Self::render_commas`], from
+    /// `render_commas:` metadata on a `commodity` directive.
+    ///
+    /// Mirrors `fixed_precisions`: grouping and precision are both per-currency
+    /// display style, resolved by the same three tiers (inference / global
+    /// option / commodity metadata). Grouping had only the global tier, which
+    /// is the asymmetry this closes.
+    group_overrides: rustc_hash::FxHashMap<String, bool>,
 
     /// Fixed precision overrides (from `option "display_precision"`).
     /// These take precedence over inferred precision under any policy.
@@ -359,6 +371,34 @@ impl DisplayContext {
         self.render_commas = render_commas;
     }
 
+    /// Declare whether `currency` renders thousands separators, overriding the
+    /// ledger-wide [`Self::set_render_commas`].
+    pub fn set_render_commas_for(&mut self, currency: &str, render: bool) {
+        self.group_overrides.insert(currency.to_string(), render);
+    }
+
+    /// Whether `currency` renders thousands separators: its own declaration if
+    /// it has one, else the ledger-wide default.
+    ///
+    /// Numerals with no currency in scope — metadata values, `custom`
+    /// directive values — have nothing to look up and take the default.
+    #[must_use]
+    pub fn render_commas_for(&self, currency: &str) -> bool {
+        self.group_overrides
+            .get(currency)
+            .copied()
+            .unwrap_or(self.render_commas)
+    }
+
+    /// Whether ANY currency renders separators.
+    ///
+    /// Lets a caller skip the per-numeral lookup entirely for the overwhelming
+    /// majority of ledgers, which declare nothing.
+    #[must_use]
+    pub fn renders_any_commas(&self) -> bool {
+        self.render_commas || self.group_overrides.values().any(|v| *v)
+    }
+
     /// Get the `render_commas` flag.
     #[must_use]
     pub const fn render_commas(&self) -> bool {
@@ -505,6 +545,16 @@ impl DisplayContext {
                 && let Ok(precision) = crate::parse_precision_meta(value)
             {
                 ctx.set_fixed_precision(comm.currency.as_str(), precision);
+            }
+            // Same tier, same walk: per-commodity `render_commas: TRUE|FALSE`.
+            // Deliberately the same mechanism as `precision:` — beancount
+            // ignores metadata keys it does not know, so a ledger carrying this
+            // still round-trips through beancount and fava untouched.
+            if let Directive::Commodity(comm) = directive
+                && let Some(value) = comm.meta.get("render_commas")
+                && let Some(render) = crate::meta_value_as_bool(value)
+            {
+                ctx.set_render_commas_for(comm.currency.as_str(), render);
             }
         }
 

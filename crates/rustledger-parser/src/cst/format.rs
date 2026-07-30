@@ -96,14 +96,42 @@ pub struct PostingAlignment {
     /// Width of the number field; shorter numbers are left-padded
     /// with spaces so the currency column stays uniform.
     pub number_width: usize,
-    /// Whether numerals carry thousands separators.
+}
+
+/// How numerals are grouped, resolved per currency.
+///
+/// `Copy` on purpose: it rides [`PostingAlignment`], which the width pre-pass
+/// and the emitters both read. Handing them the style separately is how they
+/// could disagree about a numeral's width — the #1290 failure — so it travels
+/// with the layout it determines.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GroupingStyle<'a> {
+    ctx: Option<&'a rustledger_core::DisplayContext>,
+}
+
+impl<'a> GroupingStyle<'a> {
+    /// Grouping as declared by a ledger's display context.
     ///
-    /// Lives HERE rather than in a separate parameter because grouping changes
-    /// a numeral's width: the width pre-pass and the emitter must agree, and
-    /// they agree by construction if both read it off the same struct. Getting
-    /// that wrong is what made `rledger format` and `bean-format` fail to
-    /// converge in #1290.
-    pub group_digits: bool,
+    /// Returns the no-grouping style when the context groups nothing, so the
+    /// overwhelmingly common case costs no per-numeral lookups.
+    #[must_use]
+    pub fn from_context(ctx: &'a rustledger_core::DisplayContext) -> Self {
+        Self {
+            ctx: ctx.renders_any_commas().then_some(ctx),
+        }
+    }
+
+    /// Whether a numeral in `currency` is grouped. `None` for numerals with no
+    /// currency in scope (metadata values, `custom` values), which take the
+    /// ledger-wide default.
+    #[must_use]
+    pub fn groups(self, currency: Option<&str>) -> bool {
+        match (self.ctx, currency) {
+            (None, _) => false,
+            (Some(c), Some(cur)) => c.render_commas_for(cur),
+            (Some(c), None) => c.render_commas(),
+        }
+    }
 }
 
 /// Two-space indent for directive bodies (postings, metadata).
@@ -127,7 +155,7 @@ const INDENT: &str = "  ";
 /// promise that line endings are LF-only on output.
 #[must_use]
 pub fn format_source(source: &str) -> String {
-    format_source_grouped(source, false)
+    format_source_grouped(source, GroupingStyle::default())
 }
 
 /// [`format_source`], with the thousands-separator rule supplied by the caller.
@@ -141,11 +169,11 @@ pub fn format_source(source: &str) -> String {
 /// `format_source` passes `false`, so every existing caller and every ledger
 /// that has not opted in is byte-for-byte unaffected.
 #[must_use]
-pub fn format_source_grouped(source: &str, group_digits: bool) -> String {
+pub fn format_source_grouped(source: &str, style: GroupingStyle<'_>) -> String {
     let (stripped, _had_bom) = crate::bom::strip_leading(source);
     let normalized = crlf_to_lf_outside_strings(stripped);
     let parsed = SourceFile::parse(&normalized);
-    format_node_grouped(parsed.syntax(), group_digits)
+    format_node_grouped(parsed.syntax(), style)
 }
 
 /// Like [`format_source`] but reuses the caller's
@@ -418,11 +446,11 @@ where
     // It must carry the same grouping rule, or it would strip the separators
     // the first pass just wrote — which is exactly why this shim used to
     // preserve precision but not grouping.
-    let group = config
+    let style = config
         .number_display
         .as_ref()
-        .is_some_and(rustledger_core::DisplayContext::render_commas);
-    Ok(format_source_grouped(&raw, group))
+        .map_or_else(GroupingStyle::default, GroupingStyle::from_context);
+    Ok(format_source_grouped(&raw, style))
 }
 
 /// Error returned by [`canonicalize_directives`].
@@ -654,18 +682,18 @@ const fn advance_source_state(
 #[must_use]
 pub fn format_node(node: &crate::SyntaxNode) -> String {
     // The SOURCE_FILE precondition is asserted by `format_node_grouped`.
-    format_node_grouped(node, false)
+    format_node_grouped(node, GroupingStyle::default())
 }
 
 /// [`format_node`], with the thousands-separator rule supplied by the caller.
 #[must_use]
-pub fn format_node_grouped(node: &crate::SyntaxNode, group_digits: bool) -> String {
+pub fn format_node_grouped(node: &crate::SyntaxNode, style: GroupingStyle<'_>) -> String {
     // Precondition as in `format_node`.
     #[allow(clippy::expect_used)]
     let source_file =
         SourceFile::cast(node.clone()).expect("format_node_grouped called on non-SOURCE_FILE node");
-    let alignment = compute_alignment(&source_file, group_digits);
-    format_node_with_alignment(node, alignment)
+    let alignment = compute_alignment(&source_file, style);
+    format_node_with_style(node, alignment, style)
 }
 
 /// Like [`format_node`] but skips the per-call
@@ -689,6 +717,24 @@ pub fn format_node_grouped(node: &crate::SyntaxNode, group_digits: bool) -> Stri
 /// Panics if `node`'s kind is not `SOURCE_FILE`.
 #[must_use]
 pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAlignment) -> String {
+    format_node_with_style(node, alignment, GroupingStyle::default())
+}
+
+/// [`format_node_with_alignment`] with an explicit grouping style.
+///
+/// INVARIANT: `alignment` must have been produced by [`compute_alignment`] with
+/// this same `style`. Grouping changes a numeral's width, so an alignment
+/// measured under a different style puts the currency column in the wrong place
+/// — the #1290 non-convergence, reintroduced. The `_grouped` entry points
+/// derive both from one value and cannot mismatch; a caller reusing a cached
+/// `ParseResult::alignment` (computed at parse time, before any options are
+/// known) must pass `GroupingStyle::default()`.
+#[must_use]
+pub fn format_node_with_style(
+    node: &crate::SyntaxNode,
+    alignment: PostingAlignment,
+    group: GroupingStyle<'_>,
+) -> String {
     // Precondition check (debug-only). The bare `format_node`
     // delegate already validated the kind via the
     // `SourceFile::cast` it performs for `compute_alignment`, so
@@ -739,7 +785,7 @@ pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAl
                             out.push('\n');
                         }
                     }
-                    emit_directive(&directive, alignment, &mut out);
+                    emit_directive(&directive, alignment, group, &mut out);
                     prev_was_directive = true;
                 } else if n.kind() == crate::SyntaxKind::ERROR_NODE {
                     // Preserve unparsable content verbatim (#1335): `format`
@@ -864,7 +910,7 @@ pub fn format_node_range(
     // rationale. The selected subset always uses the full file's
     // alignment columns. Hot paths with a precomputed `PostingAlignment`
     // should call `format_node_range_with_alignment` instead.
-    let alignment = compute_alignment(&source_file, false);
+    let alignment = compute_alignment(&source_file, GroupingStyle::default());
     format_node_range_with_alignment(node, range, alignment)
 }
 
@@ -1035,7 +1081,7 @@ pub fn format_node_range_with_alignment(
                         out.push('\n');
                     }
                 }
-                emit_directive(&directive, alignment, &mut out);
+                emit_directive(&directive, alignment, GroupingStyle::default(), &mut out);
                 prev_was_directive = true;
             }
             rowan::NodeOrToken::Token(t) => {
@@ -1106,7 +1152,7 @@ fn range_intersects(child: rowan::TextRange, sel: rowan::TextRange) -> bool {
 /// `parse_result_alignment_cache::*` regression tests (7 fixtures) in
 /// this module.
 #[must_use]
-pub fn compute_alignment(sf: &SourceFile, group_digits: bool) -> PostingAlignment {
+pub fn compute_alignment(sf: &SourceFile, style: GroupingStyle<'_>) -> PostingAlignment {
     let mut max_lhs: usize = 0;
     let mut max_num: usize = 0;
     // Tracks postings that actually render a number — the only ones that
@@ -1142,7 +1188,7 @@ pub fn compute_alignment(sf: &SourceFile, group_digits: bool) -> PostingAlignmen
             // `amount_number_text` is the shared predicate that keeps
             // this pre-pass in lockstep with `emit_posting`.
             if let Some(amt) = p.amount()
-                && let Some(text) = amount_number_text(&amt, group_digits)
+                && let Some(text) = amount_number_text(&amt, style)
             {
                 any_aligned_posting = true;
                 max_lhs = max_lhs.max(lhs);
@@ -1151,17 +1197,13 @@ pub fn compute_alignment(sf: &SourceFile, group_digits: bool) -> PostingAlignmen
         }
     }
     if !any_aligned_posting {
-        return PostingAlignment {
-            group_digits,
-            ..PostingAlignment::default()
-        };
+        return PostingAlignment::default();
     }
     // 2 spaces between the longest account end and the number field,
     // matching the conventional Beancount layout.
     PostingAlignment {
         number_col: INDENT.len() + max_lhs + 2,
         number_width: max_num,
-        group_digits,
     }
 }
 
@@ -1176,7 +1218,7 @@ pub fn compute_alignment(sf: &SourceFile, group_digits: bool) -> PostingAlignmen
 /// disagree about which postings participate in alignment — the bug
 /// class behind #1290 (amount-less postings) and its currency-only
 /// sibling.
-fn amount_number_text(amt: &ast::Amount, group: bool) -> Option<String> {
+fn amount_number_text(amt: &ast::Amount, group: GroupingStyle<'_>) -> Option<String> {
     let text = amount_value_text(amt, group);
     (!text.is_empty()).then_some(text)
 }
@@ -1184,7 +1226,7 @@ fn amount_number_text(amt: &ast::Amount, group: bool) -> Option<String> {
 /// Render an amount's value portion (number or arithmetic
 /// expression) as a string, EXCLUDING the trailing currency.
 /// Mirrors the value half of [`format_amount`].
-fn amount_value_text(amt: &ast::Amount, group: bool) -> String {
+fn amount_value_text(amt: &ast::Amount, group: GroupingStyle<'_>) -> String {
     let mut buf = String::new();
     if amt.is_arithmetic() {
         emit_amount_subnode_expression(amt.syntax(), group, &mut buf);
@@ -1196,12 +1238,20 @@ fn amount_value_text(amt: &ast::Amount, group: bool) -> String {
         buf.push('-');
     }
     if let Some(n) = amt.number() {
-        buf.push_str(&canonical_number(n.text(), group));
+        buf.push_str(&canonical_number(
+            n.text(),
+            group.groups(amt.currency().as_ref().map(ast::CurrencyName::text)),
+        ));
     }
     buf
 }
 
-fn emit_directive(d: &ast::Directive, align: PostingAlignment, out: &mut String) {
+fn emit_directive(
+    d: &ast::Directive,
+    align: PostingAlignment,
+    group: GroupingStyle<'_>,
+    out: &mut String,
+) {
     // Leading inter-directive trivia: COMMENT tokens that sit
     // BEFORE the directive's first content token. Per phase-2.0
     // trivia attachment, these live inside the directive's syntax
@@ -1217,25 +1267,25 @@ fn emit_directive(d: &ast::Directive, align: PostingAlignment, out: &mut String)
 
     let len_before = out.len();
     match d {
-        ast::Directive::Open(d) => emit_open(d, align.group_digits, out),
-        ast::Directive::Close(d) => emit_close(d, align.group_digits, out),
-        ast::Directive::Commodity(d) => emit_commodity(d, align.group_digits, out),
-        ast::Directive::Note(d) => emit_note(d, align.group_digits, out),
-        ast::Directive::Event(d) => emit_event(d, align.group_digits, out),
-        ast::Directive::Query(d) => emit_query(d, align.group_digits, out),
-        ast::Directive::Pad(d) => emit_pad(d, align.group_digits, out),
-        ast::Directive::Document(d) => emit_document(d, align.group_digits, out),
-        ast::Directive::Price(d) => emit_price(d, align.group_digits, out),
-        ast::Directive::Balance(d) => emit_balance(d, align.group_digits, out),
-        ast::Directive::Custom(d) => emit_custom(d, align.group_digits, out),
+        ast::Directive::Open(d) => emit_open(d, group, out),
+        ast::Directive::Close(d) => emit_close(d, group, out),
+        ast::Directive::Commodity(d) => emit_commodity(d, group, out),
+        ast::Directive::Note(d) => emit_note(d, group, out),
+        ast::Directive::Event(d) => emit_event(d, group, out),
+        ast::Directive::Query(d) => emit_query(d, group, out),
+        ast::Directive::Pad(d) => emit_pad(d, group, out),
+        ast::Directive::Document(d) => emit_document(d, group, out),
+        ast::Directive::Price(d) => emit_price(d, group, out),
+        ast::Directive::Balance(d) => emit_balance(d, group, out),
+        ast::Directive::Custom(d) => emit_custom(d, group, out),
         ast::Directive::Option(d) => emit_option(d, out),
         ast::Directive::Include(d) => emit_include(d, out),
         ast::Directive::Plugin(d) => emit_plugin(d, out),
         ast::Directive::Pushtag(d) => emit_pushtag(d, out),
         ast::Directive::Poptag(d) => emit_poptag(d, out),
-        ast::Directive::Pushmeta(d) => emit_pushmeta(d, align.group_digits, out),
+        ast::Directive::Pushmeta(d) => emit_pushmeta(d, group, out),
         ast::Directive::Popmeta(d) => emit_popmeta(d, out),
-        ast::Directive::Transaction(d) => emit_transaction(d, align, out),
+        ast::Directive::Transaction(d) => emit_transaction(d, align, group, out),
     }
     // Splice the same-line trailing comment in: find the FIRST '\n'
     // after `len_before` (= end of the directive's header line in
@@ -1383,7 +1433,7 @@ fn collect_trailing_comment(node: &crate::SyntaxNode) -> Option<String> {
 
 // ---- Single-line directives ------------------------------------
 
-fn emit_open(d: &ast::OpenDirective, group: bool, out: &mut String) {
+fn emit_open(d: &ast::OpenDirective, group: GroupingStyle<'_>, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let account = d
         .account()
@@ -1407,7 +1457,7 @@ fn emit_open(d: &ast::OpenDirective, group: bool, out: &mut String) {
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_close(d: &ast::CloseDirective, group: bool, out: &mut String) {
+fn emit_close(d: &ast::CloseDirective, group: GroupingStyle<'_>, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let account = d
         .account()
@@ -1420,7 +1470,7 @@ fn emit_close(d: &ast::CloseDirective, group: bool, out: &mut String) {
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_commodity(d: &ast::CommodityDirective, group: bool, out: &mut String) {
+fn emit_commodity(d: &ast::CommodityDirective, group: GroupingStyle<'_>, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let currency = d
         .currency()
@@ -1433,7 +1483,7 @@ fn emit_commodity(d: &ast::CommodityDirective, group: bool, out: &mut String) {
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_note(d: &ast::NoteDirective, group: bool, out: &mut String) {
+fn emit_note(d: &ast::NoteDirective, group: GroupingStyle<'_>, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let account = d
         .account()
@@ -1449,7 +1499,7 @@ fn emit_note(d: &ast::NoteDirective, group: bool, out: &mut String) {
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_event(d: &ast::EventDirective, group: bool, out: &mut String) {
+fn emit_event(d: &ast::EventDirective, group: GroupingStyle<'_>, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let event_type = d
         .event_type()
@@ -1465,7 +1515,7 @@ fn emit_event(d: &ast::EventDirective, group: bool, out: &mut String) {
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_query(d: &ast::QueryDirective, group: bool, out: &mut String) {
+fn emit_query(d: &ast::QueryDirective, group: GroupingStyle<'_>, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let name = d.name().map(|s| s.text().to_string()).unwrap_or_default();
     let query = d.query().map(|s| s.text().to_string()).unwrap_or_default();
@@ -1478,7 +1528,7 @@ fn emit_query(d: &ast::QueryDirective, group: bool, out: &mut String) {
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_pad(d: &ast::PadDirective, group: bool, out: &mut String) {
+fn emit_pad(d: &ast::PadDirective, group: GroupingStyle<'_>, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let target = d
         .target_account()
@@ -1497,7 +1547,7 @@ fn emit_pad(d: &ast::PadDirective, group: bool, out: &mut String) {
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_document(d: &ast::DocumentDirective, group: bool, out: &mut String) {
+fn emit_document(d: &ast::DocumentDirective, group: GroupingStyle<'_>, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let account = d
         .account()
@@ -1542,7 +1592,7 @@ fn emit_document(d: &ast::DocumentDirective, group: bool, out: &mut String) {
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_price(d: &ast::PriceDirective, group: bool, out: &mut String) {
+fn emit_price(d: &ast::PriceDirective, group: GroupingStyle<'_>, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let base = d
         .base_currency()
@@ -1563,7 +1613,7 @@ fn emit_price(d: &ast::PriceDirective, group: bool, out: &mut String) {
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_balance(d: &ast::BalanceDirective, group: bool, out: &mut String) {
+fn emit_balance(d: &ast::BalanceDirective, group: GroupingStyle<'_>, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let account = d
         .account()
@@ -1593,7 +1643,7 @@ fn emit_balance(d: &ast::BalanceDirective, group: bool, out: &mut String) {
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
-fn emit_custom(d: &ast::CustomDirective, group: bool, out: &mut String) {
+fn emit_custom(d: &ast::CustomDirective, group: GroupingStyle<'_>, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let custom_type = d
         .custom_type()
@@ -1637,7 +1687,7 @@ fn emit_custom(d: &ast::CustomDirective, group: bool, out: &mut String) {
         }
         out.push(' ');
         if t.kind() == crate::SyntaxKind::NUMBER {
-            out.push_str(&canonical_number(t.text(), group));
+            out.push_str(&canonical_number(t.text(), group.groups(None)));
             if matches!(
                 tokens.get(i + 1).map(rowan::SyntaxToken::kind),
                 Some(crate::SyntaxKind::CURRENCY)
@@ -1702,7 +1752,7 @@ fn emit_poptag(d: &ast::PoptagDirective, out: &mut String) {
     out.push('\n');
 }
 
-fn emit_pushmeta(d: &ast::PushmetaDirective, group: bool, out: &mut String) {
+fn emit_pushmeta(d: &ast::PushmetaDirective, group: GroupingStyle<'_>, out: &mut String) {
     let key = d.key().map(|t| t.text().to_string()).unwrap_or_default();
     out.push_str("pushmeta ");
     out.push_str(&key);
@@ -1723,7 +1773,7 @@ fn emit_pushmeta(d: &ast::PushmetaDirective, group: bool, out: &mut String) {
         }
         out.push(' ');
         if t.kind() == crate::SyntaxKind::NUMBER {
-            out.push_str(&canonical_number(t.text(), group));
+            out.push_str(&canonical_number(t.text(), group.groups(None)));
         } else {
             out.push_str(t.text());
         }
@@ -1740,7 +1790,12 @@ fn emit_popmeta(d: &ast::PopmetaDirective, out: &mut String) {
 
 // ---- Transaction + Posting --------------------------------------
 
-fn emit_transaction(d: &ast::Transaction, align: PostingAlignment, out: &mut String) {
+fn emit_transaction(
+    d: &ast::Transaction,
+    align: PostingAlignment,
+    group: GroupingStyle<'_>,
+    out: &mut String,
+) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     out.push_str(&date);
     out.push(' ');
@@ -1809,9 +1864,9 @@ fn emit_transaction(d: &ast::Transaction, align: PostingAlignment, out: &mut Str
                 // A POSTING / META_ENTRY node is definitively past the header.
                 past_header = true;
                 if let Some(p) = ast::Posting::cast(n.clone()) {
-                    emit_posting(&p, align, out);
+                    emit_posting(&p, align, group, out);
                 } else if let Some(m) = ast::MetaEntry::cast(n) {
-                    emit_meta_entry(&m, INDENT, align.group_digits, out);
+                    emit_meta_entry(&m, INDENT, group, out);
                 }
             }
             rowan::NodeOrToken::Token(t) => {
@@ -1859,7 +1914,12 @@ fn transaction_flag_string(d: &ast::Transaction) -> String {
     }
 }
 
-fn emit_posting(p: &ast::Posting, align: PostingAlignment, out: &mut String) {
+fn emit_posting(
+    p: &ast::Posting,
+    align: PostingAlignment,
+    group: GroupingStyle<'_>,
+    out: &mut String,
+) {
     // Posting-trailing comment (same-line, before the posting-line
     // NEWLINE) — capture upfront so we can splice it back in just
     // before that NEWLINE, preserving the user's attachment intent.
@@ -1884,7 +1944,7 @@ fn emit_posting(p: &ast::Posting, align: PostingAlignment, out: &mut String) {
         // `amount_number_text` is the shared "does this render a number?"
         // predicate (see `compute_alignment`); a currency-only amount
         // returns `None` and prints no number.
-        if let Some(value) = amount_number_text(&amt, align.group_digits) {
+        if let Some(value) = amount_number_text(&amt, group) {
             // Two stages of padding:
             //   1) Account end → start of number field (`number_col`).
             //      Fall back to 2 spaces when the LHS already exceeds
@@ -1905,11 +1965,11 @@ fn emit_posting(p: &ast::Posting, align: PostingAlignment, out: &mut String) {
             }
             if let Some(cs) = p.cost_spec() {
                 out.push(' ');
-                out.push_str(&format_cost_spec(&cs, align.group_digits));
+                out.push_str(&format_cost_spec(&cs, group));
             }
             if let Some(pa) = p.price_annotation() {
                 out.push(' ');
-                out.push_str(&format_price_annotation(&pa, align.group_digits));
+                out.push_str(&format_price_annotation(&pa, group));
             }
         }
     }
@@ -1943,7 +2003,7 @@ fn emit_posting(p: &ast::Posting, align: PostingAlignment, out: &mut String) {
                 // re-emitted here as a body comment. META_ENTRY nodes only
                 // appear in the body, after `past_header` is already set.
                 if let Some(m) = ast::MetaEntry::cast(n) {
-                    emit_meta_entry(&m, "    ", align.group_digits, out);
+                    emit_meta_entry(&m, "    ", group, out);
                 }
             }
             rowan::NodeOrToken::Token(t) => {
@@ -1972,7 +2032,7 @@ fn emit_posting(p: &ast::Posting, align: PostingAlignment, out: &mut String) {
 /// arithmetic shapes, emits the expression with single-space
 /// separators (parens tight); for plain shapes, emits
 /// `NUMBER CURRENCY` with thousands separators stripped.
-fn format_amount(amt: &ast::Amount, group: bool) -> String {
+fn format_amount(amt: &ast::Amount, group: GroupingStyle<'_>) -> String {
     let mut out = String::new();
     if amt.is_arithmetic() {
         emit_amount_subnode_expression(amt.syntax(), group, &mut out);
@@ -1990,7 +2050,10 @@ fn format_amount(amt: &ast::Amount, group: bool) -> String {
         out.push('-');
     }
     if let Some(n) = amt.number() {
-        out.push_str(&canonical_number(n.text(), group));
+        out.push_str(&canonical_number(
+            n.text(),
+            group.groups(amt.currency().as_ref().map(ast::CurrencyName::text)),
+        ));
     }
     if let Some(c) = amt.currency() {
         if !out.is_empty() && !out.ends_with('-') {
@@ -2009,7 +2072,7 @@ fn format_amount(amt: &ast::Amount, group: bool) -> String {
 /// Commas separating cost components (`{N CCY, DATE, "label"}`)
 /// stay tight against the preceding token; every other adjacent
 /// token pair is joined with a single space.
-fn format_cost_spec(cs: &ast::CostSpec, group: bool) -> String {
+fn format_cost_spec(cs: &ast::CostSpec, group: GroupingStyle<'_>) -> String {
     let (open, close) = if cs.is_total() {
         ("{{", "}}")
     } else if cs.is_per_unit_plus_total() {
@@ -2054,7 +2117,7 @@ fn format_cost_spec(cs: &ast::CostSpec, group: bool) -> String {
 
 /// Canonical price annotation: `@ amount` (per-unit) or
 /// `@@ amount` (total).
-fn format_price_annotation(pa: &ast::PriceAnnotation, group: bool) -> String {
+fn format_price_annotation(pa: &ast::PriceAnnotation, group: GroupingStyle<'_>) -> String {
     let op = if pa.is_total() { "@@" } else { "@" };
     match pa.amount() {
         Some(a) => format!("{op} {}", format_amount(&a, group)),
@@ -2138,7 +2201,7 @@ fn canonical_number(text: &str, group: bool) -> String {
 /// `1 + 2) USD USD`). Sign drift in BALANCE / PRICE is silent data
 /// corruption — a balance assertion that previously asserted a
 /// debit would assert a credit after a round-trip.
-fn emit_amount_expression(node: &crate::SyntaxNode, group: bool, out: &mut String) {
+fn emit_amount_expression(node: &crate::SyntaxNode, group: GroupingStyle<'_>, out: &mut String) {
     let raw: Vec<crate::SyntaxToken> = node
         .children_with_tokens()
         .filter_map(rowan::NodeOrToken::into_token)
@@ -2173,7 +2236,11 @@ fn emit_amount_expression(node: &crate::SyntaxNode, group: bool, out: &mut Strin
 /// token minus the trailing `CURRENCY` (caller re-emits the
 /// currency itself). Used by [`format_amount`] for arithmetic
 /// posting amounts like `-(1.00 + 2.00) USD`.
-fn emit_amount_subnode_expression(node: &crate::SyntaxNode, group: bool, out: &mut String) {
+fn emit_amount_subnode_expression(
+    node: &crate::SyntaxNode,
+    group: GroupingStyle<'_>,
+    out: &mut String,
+) {
     let mut tokens: Vec<crate::SyntaxToken> = node
         .children_with_tokens()
         .filter_map(rowan::NodeOrToken::into_token)
@@ -2210,7 +2277,11 @@ fn emit_amount_subnode_expression(node: &crate::SyntaxNode, group: bool, out: &m
 /// its own rule. The corpus-level idempotence test
 /// (`idempotence_corpus_sweep`) is the safety net that catches
 /// drifts.
-fn write_canonical_token_sequence(tokens: &[crate::SyntaxToken], group: bool, out: &mut String) {
+fn write_canonical_token_sequence(
+    tokens: &[crate::SyntaxToken],
+    group: GroupingStyle<'_>,
+    out: &mut String,
+) {
     let is_op = |k: crate::SyntaxKind| {
         matches!(
             k,
@@ -2242,7 +2313,7 @@ fn write_canonical_token_sequence(tokens: &[crate::SyntaxToken], group: bool, ou
             out.push(' ');
         }
         if kind == crate::SyntaxKind::NUMBER {
-            out.push_str(&canonical_number(t.text(), group));
+            out.push_str(&canonical_number(t.text(), group.groups(None)));
         } else {
             out.push_str(t.text());
         }
@@ -2254,7 +2325,10 @@ fn write_canonical_token_sequence(tokens: &[crate::SyntaxToken], group: bool, ou
 /// Extract a balance directive's optional tolerance — the
 /// `NUMBER` after the first `TILDE`, plus an optional trailing
 /// `CURRENCY` at paren-depth 0.
-fn balance_tolerance(node: &crate::SyntaxNode, group: bool) -> Option<(String, Option<String>)> {
+fn balance_tolerance(
+    node: &crate::SyntaxNode,
+    group: GroupingStyle<'_>,
+) -> Option<(String, Option<String>)> {
     let mut past_tilde = false;
     let mut number: Option<String> = None;
     let mut currency: Option<String> = None;
@@ -2270,7 +2344,7 @@ fn balance_tolerance(node: &crate::SyntaxNode, group: bool) -> Option<(String, O
         }
         match t.kind() {
             crate::SyntaxKind::NUMBER if number.is_none() => {
-                number = Some(canonical_number(t.text(), group));
+                number = Some(canonical_number(t.text(), group.groups(None)));
             }
             crate::SyntaxKind::CURRENCY if number.is_some() && currency.is_none() => {
                 currency = Some(t.text().to_string());
@@ -2288,7 +2362,7 @@ fn balance_tolerance(node: &crate::SyntaxNode, group: bool) -> Option<(String, O
 /// value\n`). Most directive types don't have a `.meta_entries()`
 /// accessor on their typed wrapper; we walk the syntax node
 /// directly to stay uniform.
-fn emit_meta_entries_of(node: &crate::SyntaxNode, group: bool, out: &mut String) {
+fn emit_meta_entries_of(node: &crate::SyntaxNode, group: GroupingStyle<'_>, out: &mut String) {
     // Source-order walk so body-internal COMMENT lines are preserved
     // alongside the metadata entries (#1332). The header region (up to and
     // including the header-terminating NEWLINE) is skipped so the
@@ -2336,7 +2410,7 @@ fn emit_meta_entries_of(node: &crate::SyntaxNode, group: bool, out: &mut String)
 /// Two semantically-equivalent inputs (e.g. `foo: "bar"` and
 /// `foo:    "bar"`) produce byte-identical output — the
 /// gofmt-style invariant the file rustdoc promises.
-fn emit_meta_entry(m: &MetaEntry, indent: &str, group: bool, out: &mut String) {
+fn emit_meta_entry(m: &MetaEntry, indent: &str, group: GroupingStyle<'_>, out: &mut String) {
     out.push_str(indent);
     // Split the META_ENTRY's non-trivia tokens into [META_KEY,
     // value*]. The META_KEY token already includes the trailing
@@ -4534,7 +4608,7 @@ mod tests {
         for (label, source) in fixtures {
             let (node, _src) = parse_for_range(source);
             let source_file = SourceFile::cast(node.clone()).unwrap();
-            let alignment = compute_alignment(&source_file, false);
+            let alignment = compute_alignment(&source_file, GroupingStyle::default());
             assert_eq!(
                 format_node(&node),
                 format_node_with_alignment(&node, alignment),
@@ -4558,7 +4632,7 @@ mod tests {
 ";
         let (node, src) = parse_for_range(source);
         let source_file = SourceFile::cast(node.clone()).unwrap();
-        let alignment = compute_alignment(&source_file, false);
+        let alignment = compute_alignment(&source_file, GroupingStyle::default());
         // Pin the equivalence on three ranges: whole file,
         // cursor inside the first transaction, cursor inside the
         // second.
@@ -4719,7 +4793,7 @@ mod tests {
   Assets:VeryLongAccountName:Nested       12.00 USD
   Income:Sales                      -1234579.89 USD
 ";
-        let grouped = format_source_grouped(src, true);
+        let grouped = format_source_grouped(src, grouped_style(&all_commas()));
         assert!(
             grouped.contains("1,234,567.89") && grouped.contains("-1,234,579.89"),
             "grouping must be imposed regardless of the source form:\n{grouped}"
@@ -4735,7 +4809,7 @@ mod tests {
             "currency column must stay uniform under grouping: {cols:?}\n{grouped}"
         );
         assert_eq!(
-            format_source_grouped(&grouped, true),
+            format_source_grouped(&grouped, grouped_style(&all_commas())),
             grouped,
             "grouped formatting must be idempotent"
         );
@@ -4751,13 +4825,13 @@ mod tests {
   Assets:A  1,234,567.89 USD
   Assets:B     -1234567.89 USD
 ";
-        let on = format_source_grouped(mixed, true);
+        let on = format_source_grouped(mixed, grouped_style(&all_commas()));
         assert_eq!(on.matches(',').count(), 4, "both numerals grouped:\n{on}");
-        let off = format_source_grouped(mixed, false);
+        let off = format_source_grouped(mixed, GroupingStyle::default());
         assert!(!off.contains(','), "both numerals bare:\n{off}");
         // And each is a fixed point of its own rule.
-        assert_eq!(format_source_grouped(&on, true), on);
-        assert_eq!(format_source_grouped(&off, false), off);
+        assert_eq!(format_source_grouped(&on, grouped_style(&all_commas())), on);
+        assert_eq!(format_source_grouped(&off, GroupingStyle::default()), off);
     }
 
     /// The default entry point is untouched: every existing caller, and every
@@ -4769,7 +4843,10 @@ mod tests {
             format_source(src),
             "2020-01-02 balance Assets:A 1234.50 USD\n"
         );
-        assert_eq!(format_source(src), format_source_grouped(src, false));
+        assert_eq!(
+            format_source(src),
+            format_source_grouped(src, GroupingStyle::default())
+        );
     }
 
     /// Grouped output must re-parse to the SAME values — the formatter may not
@@ -4788,7 +4865,7 @@ mod tests {
             "1000000",
         ] {
             let src = format!("2020-01-02 balance Assets:A  {n} USD\n");
-            let grouped = format_source_grouped(&src, true);
+            let grouped = format_source_grouped(&src, grouped_style(&all_commas()));
             let reparsed = crate::parse(&grouped);
             assert!(
                 reparsed.errors.is_empty(),
@@ -4804,5 +4881,78 @@ mod tests {
             };
             assert_eq!(val(&before), val(&reparsed), "value changed for `{n}`");
         }
+    }
+
+    /// A ledger-wide context used by the grouping tests.
+    fn all_commas() -> rustledger_core::DisplayContext {
+        let mut c = rustledger_core::DisplayContext::new();
+        c.set_render_commas(true);
+        c
+    }
+
+    fn grouped_style(ctx: &rustledger_core::DisplayContext) -> GroupingStyle<'_> {
+        GroupingStyle::from_context(ctx)
+    }
+
+    /// A commodity may opt OUT of the ledger-wide default, so a 4000:1 currency
+    /// can be grouped without also grouping two-digit USD amounts — the reason
+    /// a single global boolean was not enough (#1892).
+    #[test]
+    fn grouping_is_resolved_per_commodity() {
+        let mut ctx = rustledger_core::DisplayContext::new();
+        ctx.set_render_commas(true);
+        ctx.set_render_commas_for("USD", false);
+
+        let src = "\
+2020-01-02 * \"two currencies\"
+  Assets:Local   1234567.89 IQD
+  Assets:Dollars 1234567.89 USD
+";
+        let out = format_source_grouped(src, GroupingStyle::from_context(&ctx));
+        assert!(
+            out.contains("1,234,567.89 IQD"),
+            "the ledger default applies to IQD:\n{out}"
+        );
+        assert!(
+            out.contains("1234567.89 USD") && !out.contains("1,234,567.89 USD"),
+            "USD opted out and must stay bare:\n{out}"
+        );
+    }
+
+    /// The inverse: grouping declared on ONE commodity while the ledger default
+    /// is off. This is the shape a user with a single hyperinflated currency
+    /// actually wants.
+    #[test]
+    fn a_single_commodity_can_opt_in() {
+        let mut ctx = rustledger_core::DisplayContext::new();
+        ctx.set_render_commas_for("IQD", true);
+
+        let src = "\
+2020-01-02 * \"two currencies\"
+  Assets:Local   1234567.89 IQD
+  Assets:Dollars 1234567.89 USD
+";
+        let out = format_source_grouped(src, GroupingStyle::from_context(&ctx));
+        assert!(out.contains("1,234,567.89 IQD"), "IQD opted in:\n{out}");
+        assert!(
+            out.contains("1234567.89 USD") && !out.contains("1,234,567.89 USD"),
+            "USD keeps the (off) default:\n{out}"
+        );
+    }
+
+    /// A context that groups nothing must produce the no-lookup style, so the
+    /// overwhelming majority of ledgers pay nothing per numeral.
+    #[test]
+    fn a_context_that_groups_nothing_yields_the_default_style() {
+        let mut ctx = rustledger_core::DisplayContext::new();
+        ctx.set_fixed_precision("USD", 2);
+        ctx.set_render_commas_for("USD", false);
+        assert!(!ctx.renders_any_commas());
+        let src = "2020-01-02 balance Assets:A  1234.50 USD\n";
+        assert_eq!(
+            format_source_grouped(src, GroupingStyle::from_context(&ctx)),
+            format_source(src),
+            "no declared grouping must be byte-identical to the default path"
+        );
     }
 }

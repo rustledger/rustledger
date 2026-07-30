@@ -163,7 +163,7 @@ fn format_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(
             "ag-rledger format [<file>...] [--output <file>] [--in-place] [-i] [--check] [--diff] \
-             [--ledger <root>] [--verbose] [-v]",
+             [--ledger <root>] [--no-ledger] [--verbose] [-v]",
         )
         .allow_unknown_flags()
         .allow_extra_args()
@@ -534,6 +534,7 @@ fn build_format_args(
         check: bool_flag(req, "check", None),
         diff: bool_flag(req, "diff", None),
         ledger: path_flag(req, "ledger", None),
+        no_ledger: bool_flag(req, "no-ledger", None),
         verbose: bool_flag(req, "verbose", Some("v")),
     })
 }

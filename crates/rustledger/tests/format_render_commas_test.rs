@@ -61,16 +61,29 @@ fn run(bin: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Without `--ledger`, output is exactly what it has always been. Every
-/// existing invocation and CI gate is unaffected.
+/// A file with no ledger above it formats exactly as it always has.
+///
+/// This used to assert that omitting `--ledger` was enough. It is not any
+/// more: `format` now discovers the nearest root, which is the point of doing
+/// so — see `format_discovers_the_nearest_root_journal`. What is unchanged is
+/// the case where there is nothing to discover, plus `--no-ledger`.
 #[test]
-fn without_the_flag_output_is_unchanged() {
+fn a_file_with_no_ledger_above_it_is_unchanged() {
     let bin = require_rledger!();
-    let (_d, _root, inc) = ledger();
-    let out = run(bin.as_ref(), &["format", &inc]);
+    let dir = tempfile::Builder::new()
+        .prefix("fmt-commas-lonely-")
+        .tempdir()
+        .expect("tempdir");
+    let lone = dir.path().join("scratch.beancount");
+    std::fs::write(
+        &lone,
+        "2020-01-02 * \"x\"\n\x20 Assets:Local  1234567.89 IQD\n\x20 Equity:Opening\n",
+    )
+    .expect("write");
+    let out = run(bin.as_ref(), &["format", lone.to_str().expect("utf8")]);
     assert!(
         !out.contains(','),
-        "no declarations in scope means no separators: {out}"
+        "nothing to discover means no separators: {out}"
     );
 }
 
@@ -248,7 +261,12 @@ fn grouping_round_trips_without_changing_any_value() {
     )
     .expect("write root");
 
-    let plain = run(bin.as_ref(), &["format", inc.to_str().expect("utf8")]);
+    // Both ungrouped renderings pass `--no-ledger`: the fixture's root is in
+    // this directory, so plain `format` would discover it and group.
+    let plain = run(
+        bin.as_ref(),
+        &["format", "--no-ledger", inc.to_str().expect("utf8")],
+    );
     let grouped = run(
         bin.as_ref(),
         &[
@@ -266,7 +284,12 @@ fn grouping_round_trips_without_changing_any_value() {
     // Ungroup the grouped output and compare to the plain baseline.
     let regrouped = dir.path().join("grouped.beancount");
     std::fs::write(&regrouped, grouped.as_bytes()).expect("write grouped");
-    let ungrouped = run(bin.as_ref(), &["format", regrouped.to_str().expect("utf8")]);
+    // `--no-ledger` is required: the fixture's root sits in this same
+    // directory, so plain `format` would discover it and group right back.
+    let ungrouped = run(
+        bin.as_ref(),
+        &["format", "--no-ledger", regrouped.to_str().expect("utf8")],
+    );
     assert_eq!(
         ungrouped, plain,
         "group-then-ungroup must reproduce the original values exactly"
@@ -331,5 +354,76 @@ fn a_root_that_does_not_check_clean_still_supplies_declarations() {
     assert!(
         out.contains("1,234,567.89 IQD"),
         "declarations must still be read from an unbalanced root: {out}"
+    );
+}
+
+/// With no flag at all, `format` finds the nearest root journal above the file
+/// and honors it — the same rule the language server applies on save.
+///
+/// Without this, a pre-commit `rledger format` strips the separators that
+/// format-on-save just wrote, and the two fight on every save.
+#[test]
+fn format_discovers_the_nearest_root_journal() {
+    let (_d, _root, inc) = ledger();
+    let bin = require_rledger!();
+    let out = run(bin.as_ref(), &["format", &inc]);
+    assert!(
+        out.contains("1,234,567.89 IQD"),
+        "the discovered root declares render_commas: {out}"
+    );
+    assert!(
+        out.contains("1234567.89 USD"),
+        "and its per-commodity opt-out is honored too: {out}"
+    );
+}
+
+/// Discovery is a guess, so it is confirmed against the files the ledger
+/// actually spans.
+///
+/// A scratch file, vendor export or fixture sitting beside someone's journal
+/// must not be reformatted to a ledger that has never heard of it. An
+/// explicitly named `--ledger` is different: the user pointed at it.
+#[test]
+fn a_file_outside_the_discovered_ledger_is_not_governed() {
+    let (dir, root, _inc) = ledger();
+    let stray = std::path::Path::new(&root)
+        .parent()
+        .expect("parent")
+        .join("stray.beancount");
+    std::fs::write(
+        &stray,
+        "2020-01-02 * \"not included anywhere\"\n\
+        \x20 Assets:Local  1234567.89 IQD\n\
+        \x20 Equity:Opening\n",
+    )
+    .expect("write stray");
+    let stray = stray.to_str().expect("utf8").to_owned();
+    let bin = require_rledger!();
+
+    let discovered = run(bin.as_ref(), &["format", &stray]);
+    assert!(
+        !discovered.contains(','),
+        "a stray file must not inherit the neighboring ledger: {discovered}"
+    );
+
+    // Naming the root explicitly is an instruction, not a guess.
+    let explicit = run(bin.as_ref(), &["format", "--ledger", &root, &stray]);
+    assert!(
+        explicit.contains("1,234,567.89 IQD"),
+        "an explicit --ledger governs whatever it is pointed at: {explicit}"
+    );
+    drop(dir);
+}
+
+/// `--no-ledger` restores the pure text transform, for a hook that must behave
+/// identically whatever surrounds a checkout.
+#[test]
+fn no_ledger_opts_out_of_discovery() {
+    let (_d, _root, inc) = ledger();
+    let bin = require_rledger!();
+    let out = run(bin.as_ref(), &["format", "--no-ledger", &inc]);
+    assert!(
+        !out.contains(','),
+        "--no-ledger means the file's own bytes decide: {out}"
     );
 }

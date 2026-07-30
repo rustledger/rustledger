@@ -122,8 +122,8 @@ forces the field to be quoted and is then rejected by ordinary decimal parsers.
 | `report`, `query` — text | yes, when the option is set |
 | `report`, `query` — `--format csv` / `json` | **never** — machine interchange with no grammar |
 | `query --format beancount` | yes — ledger text, same as `format` (matches Beancount's `print`) |
-| `format` (the file on disk) | only with `--ledger` — see below |
-| Editor format-on-save (LSP) | yes, when the open file belongs to a loaded ledger that asks for them |
+| `format` (the file on disk) | when the file's ledger declares them, see below |
+| Editor format-on-save (LSP) | same rule as `format` |
 
 The CSV/JSON row is absolute: it outranks both the option and any per-commodity
 declaration, because the reason there is the consumer's missing grammar rather
@@ -131,33 +131,50 @@ than the ledger's preference.
 
 ### Separators in the ledger file itself
 
-`rledger format` writes numbers without separators by default. Pass
-`--ledger <root>` to have it read the declarations above and apply them:
+`rledger format` finds the ledger a file belongs to and honors its
+declarations:
 
 ```console
-$ rledger format --ledger main.beancount postings.beancount
+$ rledger format postings.beancount
   Assets:Local    1,234,567.89 IQD
 ```
 
-The flag names where the declarations live, not what style to use. `format` is
-otherwise a per-file text transform that never loads a ledger, so it cannot see
+It looks for the nearest root journal at or above the file — `main.beancount`,
+`ledger.beancount`, `journal.beancount`, `index.beancount` and their `.bean`
+spellings, nearest first — which is the same rule the language server uses. A
+file therefore formats the same on save as it does in a pre-commit hook. This
+matters because `format` is otherwise a per-file text transform: it cannot see
 an `option` or `commodity` directive that sits in the root while the postings
-sit in an `include`d file. Naming the root is deterministic no matter which
-files are listed or in what order — which matters when a pre-commit hook passes
-whichever files happened to change.
+sit in an `include`d file.
+
+Discovery is a guess, so it is checked: a discovered ledger governs a file only
+if it actually `include`s it. A scratch file or vendor export sitting beside
+your journal is left alone.
+
+| Flag | Effect |
+|------|--------|
+| *(none)* | Use the nearest root journal that includes this file |
+| `--ledger <ROOT>` | Use exactly this root, and apply it to every file listed |
+| `--no-ledger` | Do not look for a ledger; format from the file's bytes alone |
+
+`--ledger` names *where the declarations live*, not what style to use, and it
+is obeyed without the containment check — you pointed at it. Use it when the
+root is somewhere discovery will not look, or to be explicit in CI. Use
+`--no-ledger` where output must depend only on the file's own content, whatever
+surrounds a checkout.
 
 A grouped file is *canonical* for a ledger that asked for grouping, so
-`format --check` accepts it and formatting stays idempotent. Without
-`--ledger`, output is byte-identical to a ledger that declares nothing.
+`format --check` accepts it and formatting stays idempotent. A ledger that
+declares nothing is unaffected by any of this, which bounds the blast radius of
+discovery: only a ledger that asked for separators can get them.
 
-**In an editor**, the language server needs no flag — it already knows the
-journal root, so format-on-save, range formatting, and the *Align Amounts*
-command all group when the ledger asks. The options come from the root, which
-is what makes this work on an `include`d file that has no `option` lines of its
-own. Two cases deliberately fall back to ungrouped: a file no journal includes
-(editing a stray `.beancount` must not inherit an unrelated ledger's style),
-and a ledger that has not finished loading (formatting still works rather than
-blocking on it).
+**In an editor**, the language server applies the same rule without any flag:
+format-on-save, range formatting, and the *Align Amounts* command all group
+when the ledger asks. It resolves the root from its own configuration or
+workspace rather than by walking up from the file, but the fallbacks match — a
+buffer no journal includes is left alone, and so is anything formatted before
+the ledger has finished loading (formatting still works rather than blocking on
+it).
 
 ### Per-commodity declarations
 

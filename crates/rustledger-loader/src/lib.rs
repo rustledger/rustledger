@@ -39,6 +39,7 @@
 #[cfg(feature = "cache")]
 pub mod cache;
 mod dedup;
+pub mod discover;
 mod options;
 mod phase;
 mod process;
@@ -60,6 +61,7 @@ pub use cache::{
     save_cache_entry,
 };
 pub use dedup::{reintern_directives, reintern_plain_directives};
+pub use discover::{COMMON_ROOT_NAMES, discover_journal_file, discover_journal_upward};
 pub use options::Options;
 pub use source_map::{SourceFile, SourceMap};
 pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};

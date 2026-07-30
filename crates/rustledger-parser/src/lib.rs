@@ -65,6 +65,7 @@ pub mod format {
         format_node_grouped, format_node_range, format_node_range_with_alignment,
         format_node_with_alignment, format_node_with_style, format_source, format_source_grouped,
         format_source_with_parsed, lf_to_crlf_outside_strings, try_format_source,
+        try_format_source_grouped,
     };
 }
 

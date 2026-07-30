@@ -121,6 +121,15 @@ impl<'a> GroupingStyle<'a> {
         }
     }
 
+    /// Whether this style groups anything at all.
+    ///
+    /// Lets a caller keep the fast precomputed-alignment path when nothing is
+    /// declared, which is the overwhelming majority of ledgers.
+    #[must_use]
+    pub const fn groups_anything(self) -> bool {
+        self.ctx.is_some()
+    }
+
     /// Whether a numeral in `currency` is grouped. `None` for numerals with no
     /// currency in scope (metadata values, `custom` values), which take the
     /// ledger-wide default.
@@ -300,14 +309,29 @@ pub fn format_source_with_parsed(parse_result: &crate::ParseResult, source: &str
 /// `source`. The caller decides whether to abort, render the
 /// errors, or fall back to a non-canonical pass.
 pub fn try_format_source(source: &str) -> Result<String, Vec<crate::ParseError>> {
+    try_format_source_grouped(source, GroupingStyle::default())
+}
+
+/// [`try_format_source`], with the grouping style supplied by the caller.
+///
+/// # Errors
+///
+/// As [`try_format_source`].
+pub fn try_format_source_grouped(
+    source: &str,
+    style: GroupingStyle<'_>,
+) -> Result<String, Vec<crate::ParseError>> {
     let result = crate::parse(source);
     if !result.errors.is_empty() {
         return Err(result.errors);
     }
-    // Reuse the parse + alignment we already produced for the
-    // error gate instead of letting `format_source` re-parse +
-    // re-walk every posting. Byte-identical output pinned by
-    // `format_source_with_parsed_matches_format_source`.
+    // Reuse the parse we already produced for the error gate rather than
+    // letting `format_source_grouped` re-parse. The alignment cached on
+    // `ParseResult` is computed WITHOUT grouping, so it can only be reused for
+    // the default style — see `format_node_with_style`'s invariant.
+    if style.groups(None) || style.groups_anything() {
+        return Ok(format_node_grouped(&result.syntax_node(), style));
+    }
     Ok(format_source_with_parsed(&result, source))
 }
 

@@ -112,26 +112,59 @@ Use commas as thousand separators.
 option "render_commas" "TRUE"
 ```
 
-Separators are a **display** concern, so they appear in rendered output
-(`report`, `query` text) and never in ledger text or machine-readable output:
+Where separators appear depends on whether the consumer has a **grammar**. A
+Beancount reader does — grouped numerals are part of the syntax, so every
+conforming reader accepts them. A CSV or JSON consumer does not: a separator
+forces the field to be quoted and is then rejected by ordinary decimal parsers.
 
 | Surface | Separators? |
 |---------|-------------|
 | `report`, `query` — text | yes, when the option is set |
-| `report`, `query` — `--format csv` / `json` | **no** — machine interchange, and a separator breaks ordinary decimal parsers |
-| `query --format beancount` | **no** — it is ledger text, so it follows the same rule as `format` |
-| `format` (the file on disk) | **no** — see below |
+| `report`, `query` — `--format csv` / `json` | **never** — machine interchange with no grammar |
+| `query --format beancount` | **never** currently — a known inconsistency with `format`, since Beancount's own `print` does honor the option |
+| `format` (the file on disk) | only with `--ledger` — see below |
 
-`rledger format` deliberately writes numbers without separators even when this
-option is set: the formatter's job is one canonical on-disk representation, and
-`,` is locale-ambiguous. This differs from Beancount's `bean-format`, which
-leaves numerals untouched, though Beancount's own `printer` also drops them.
+### Separators in the ledger file itself
 
-The practical consequence: a file containing `1,234,567.89` will always be
-reported as unformatted by `format --check` (exit 1), which fails a CI
-formatting gate. Run `rledger format` once to canonicalize the file; it is
-stable from then on. The parser accepts separators on input either way, so
-existing files keep loading.
+`rledger format` writes numbers without separators by default. Pass
+`--ledger <root>` to have it read the declarations above and apply them:
+
+```console
+$ rledger format --ledger main.beancount postings.beancount
+  Assets:Local    1,234,567.89 IQD
+```
+
+The flag names where the declarations live, not what style to use. `format` is
+otherwise a per-file text transform that never loads a ledger, so it cannot see
+an `option` or `commodity` directive that sits in the root while the postings
+sit in an `include`d file. Naming the root is deterministic no matter which
+files are listed or in what order — which matters when a pre-commit hook passes
+whichever files happened to change.
+
+A grouped file is *canonical* for a ledger that asked for grouping, so
+`format --check` accepts it and formatting stays idempotent. Without
+`--ledger`, output is byte-identical to a ledger that declares nothing.
+
+### Per-commodity declarations
+
+`render_commas` is the ledger-wide default; a commodity can override it:
+
+```beancount
+option "render_commas" "TRUE"
+
+2020-01-01 commodity IQD          ; grouped: amounts run to 10 digits
+2020-01-01 commodity USD
+  render_commas: FALSE            ; not grouped: amounts are 2-4 digits
+```
+
+This is the same metadata mechanism as `precision:`, resolved by the same
+tiers — amount-scan inference, then the global option, then commodity
+metadata. Beancount ignores metadata keys it does not recognize, so a ledger
+carrying this still round-trips through Beancount and Fava.
+
+Groups are three digits, which is all the parser accepts. Other conventions
+(Indian lakh grouping, for instance) would need a grammar change first — the
+formatter must never emit text its own parser rejects.
 
 ### inferred_tolerance_default
 

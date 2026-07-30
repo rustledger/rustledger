@@ -8,7 +8,9 @@
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
 use clap::Parser;
-use rustledger_parser::format::{cr_outside_strings_present, try_format_source};
+use rustledger_parser::format::{
+    GroupingStyle, cr_outside_strings_present, try_format_source_grouped,
+};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -41,6 +43,20 @@ pub struct Args {
     /// Show diff when using --check
     #[arg(long, requires = "check")]
     pub diff: bool,
+
+    /// Ledger root to read display declarations from (`option
+    /// "render_commas"`, per-commodity `render_commas:`).
+    ///
+    /// `format` is otherwise a per-file text transform: it never loads a
+    /// ledger, so it cannot see declarations that live in the root while the
+    /// postings live in an `include`d file. Naming the root explicitly is
+    /// deterministic regardless of which files are listed or in what order —
+    /// which matters because pre-commit hooks pass whichever files changed.
+    ///
+    /// This locates the declarations; it does not choose a style. Without it,
+    /// output is byte-identical to a ledger that declares nothing.
+    #[arg(long, value_name = "ROOT")]
+    pub ledger: Option<PathBuf>,
 
     /// Show verbose output
     #[arg(short, long)]
@@ -79,10 +95,22 @@ pub fn run_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
         anyhow::bail!("--output and --in-place cannot be used together");
     }
 
+    // Resolve the display declarations ONCE, so every file in one invocation is
+    // formatted identically. Loading per file would give the root separators
+    // and its includes none.
+    let display_context = args
+        .ledger
+        .as_deref()
+        .map(load_display_context)
+        .transpose()?;
+    let style = display_context
+        .as_ref()
+        .map_or_else(GroupingStyle::default, GroupingStyle::from_context);
+
     let mut any_needs_formatting = false;
 
     for file in &args.files {
-        let result = format_file(file, args, out)?;
+        let result = format_file(file, args, style, out)?;
         if result == ExitCode::from(1) {
             any_needs_formatting = true;
         }
@@ -95,7 +123,24 @@ pub fn run_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
     }
 }
 
-fn format_file<W: Write>(file: &PathBuf, args: &Args, out: &mut W) -> Result<ExitCode> {
+/// Load `root` purely to obtain its resolved display declarations.
+///
+/// Load ERRORS are ignored on purpose: `format` must keep working on a ledger
+/// that does not yet `check` clean — that is often exactly when you reach for
+/// it. Only the display context is taken; whatever the loader reports about
+/// balances or bookings is irrelevant here.
+fn load_display_context(root: &std::path::Path) -> Result<rustledger_core::DisplayContext> {
+    let loaded = rustledger_loader::load(root, &rustledger_loader::LoadOptions::default())
+        .with_context(|| format!("failed to read ledger root {}", root.display()))?;
+    Ok(loaded.display_context)
+}
+
+fn format_file<W: Write>(
+    file: &PathBuf,
+    args: &Args,
+    style: GroupingStyle<'_>,
+    out: &mut W,
+) -> Result<ExitCode> {
     if !file.exists() {
         anyhow::bail!("file not found: {}", file.display());
     }
@@ -112,7 +157,7 @@ fn format_file<W: Write>(file: &PathBuf, args: &Args, out: &mut W) -> Result<Exi
     let had_invalid_utf8 = std::str::from_utf8(&bytes).is_err();
     let original_content = String::from_utf8_lossy(&bytes).into_owned();
 
-    let formatted = match try_format_source(&original_content) {
+    let formatted = match try_format_source_grouped(&original_content, style) {
         Ok(out) => out,
         Err(errors) => {
             for err in &errors {

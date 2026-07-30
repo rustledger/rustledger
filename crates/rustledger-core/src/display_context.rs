@@ -249,6 +249,29 @@ impl DisplayContext {
         if other.render_commas {
             self.render_commas = true;
         }
+        // Per-commodity grouping declarations travel with the flag they
+        // override. Merging the ledger-wide bit alone silently downgraded a
+        // commodity's own `render_commas:` to the global default (#1896).
+        for (currency, render) in &other.group_overrides {
+            self.group_overrides
+                .entry(currency.clone())
+                .or_insert(*render);
+        }
+    }
+
+    /// Adopt `other`'s grouping policy wholesale: the ledger-wide flag and
+    /// every per-commodity override.
+    ///
+    /// Distinct from [`Self::update_from`], which merges precision *facts*
+    /// inferred from data and is one-way for grouping. Separator rendering is
+    /// presentation policy for a whole table, so a derived context — the query
+    /// writer's per-column contexts, say — must take it entire rather than
+    /// reconstruct it. Reconstructing it is exactly how `SUM(number)` came to
+    /// disagree with `SUM(position)` in one query (#1892), and how a
+    /// commodity's own declaration came to be dropped (#1896).
+    pub fn adopt_grouping_from(&mut self, other: &Self) {
+        self.render_commas = other.render_commas;
+        self.group_overrides.clone_from(&other.group_overrides);
     }
 
     /// Set the inference policy for [`Self::get_precision`].
@@ -351,18 +374,26 @@ impl DisplayContext {
     /// distinction exists.
     ///
     /// Borrows unless the flag actually has to change, so the common cases
-    /// cost nothing: a ledger without `render_commas` (almost all of them) and
+    /// cost nothing: a ledger where nothing groups (almost all of them) and
     /// any human-facing surface both borrow. Only suppressing separators for a
     /// machine or ledger-text surface clones, and that clone carries the
     /// per-currency histograms — worth avoiding on a REPL's hot path, and
     /// wasted entirely on the JSON writer, which ignores the context.
+    ///
+    /// The borrow test is [`Self::renders_any_commas`], not the ledger-wide
+    /// flag: a commodity may declare `render_commas: TRUE` while the ledger
+    /// default is off, and borrowing on the strength of the global flag alone
+    /// would leak that commodity's separators onto a machine surface.
     #[must_use]
     pub fn for_surface(&self, surface: OutputSurface) -> std::borrow::Cow<'_, Self> {
-        if !self.render_commas || surface.renders_thousands_separators() {
+        if !self.renders_any_commas() || surface.renders_thousands_separators() {
             return std::borrow::Cow::Borrowed(self);
         }
         let mut ctx = self.clone();
         ctx.render_commas = false;
+        // Suppression is absolute: a per-commodity opt-in must not survive
+        // onto a surface whose consumer has no grammar for separators.
+        ctx.group_overrides.clear();
         std::borrow::Cow::Owned(ctx)
     }
 
@@ -699,7 +730,7 @@ impl DisplayContext {
             let rounded = number.round_dp(effective_dp);
             let formatted = format!("{rounded}");
             let formatted = Self::ensure_decimal_places(&formatted, effective_dp);
-            if self.render_commas {
+            if self.render_commas_for(currency) {
                 Self::add_commas(&formatted)
             } else {
                 formatted
@@ -707,7 +738,7 @@ impl DisplayContext {
         } else {
             // No tracked precision - use natural formatting
             let formatted = number.normalize().to_string();
-            if self.render_commas {
+            if self.render_commas_for(currency) {
                 Self::add_commas(&formatted)
             } else {
                 formatted
@@ -790,7 +821,7 @@ impl DisplayContext {
             }
             None => number.normalize().to_string(),
         };
-        if self.render_commas {
+        if self.render_commas_for(currency) {
             Self::add_commas(&raw)
         } else {
             raw
@@ -1863,6 +1894,96 @@ mod custom_directive_precision_tests {
             !OutputSurface::LedgerText.renders_thousands_separators(),
             "ledger text has one canonical form; `format` strips separators \
              and `query --format beancount` must agree with it"
+        );
+    }
+
+    /// A commodity's own `render_commas` declaration governs report and query
+    /// text, not just `rledger format`.
+    ///
+    /// Review catch on #1896: the per-commodity overrides were parsed and
+    /// stored but only the CST formatter consulted them, so `format` and
+    /// `format_quantized` — which have the currency right there in the
+    /// signature — still asked the ledger-wide flag. A commodity opting out of
+    /// grouping was silently grouped in every report.
+    #[test]
+    fn a_commoditys_own_declaration_governs_report_text() {
+        let mut ctx = DisplayContext::new();
+        ctx.set_fixed_precision("USD", 2);
+        ctx.set_fixed_precision("IQD", 2);
+        ctx.set_render_commas(true);
+        ctx.set_render_commas_for("USD", false);
+
+        assert_eq!(
+            ctx.format(Decimal::from_str_exact("1234567.89").unwrap(), "USD"),
+            "1234567.89",
+            "USD declared render_commas: FALSE — a report must honor it"
+        );
+        assert_eq!(
+            ctx.format(Decimal::from_str_exact("1234567.89").unwrap(), "IQD"),
+            "1,234,567.89",
+            "IQD declared nothing and takes the ledger-wide default"
+        );
+        // The ledger-text path (`query --format beancount`) resolves per
+        // currency too, so the two surfaces cannot disagree.
+        assert_eq!(
+            ctx.format_quantized(Decimal::from_str_exact("1234567.89").unwrap(), "USD"),
+            "1234567.89"
+        );
+        assert_eq!(
+            ctx.format_quantized(Decimal::from_str_exact("1234567.89").unwrap(), "IQD"),
+            "1,234,567.89"
+        );
+
+        // And the inverse tier: nothing global, one commodity opting IN.
+        let mut opted_in = DisplayContext::new();
+        opted_in.set_fixed_precision("IQD", 2);
+        opted_in.set_render_commas_for("IQD", true);
+        assert_eq!(
+            opted_in.format(Decimal::from_str_exact("1234567.89").unwrap(), "IQD"),
+            "1,234,567.89"
+        );
+    }
+
+    /// Suppressing separators for a machine surface must clear the
+    /// per-commodity opt-ins too, not just the ledger-wide flag.
+    ///
+    /// The borrow fast path used to test `render_commas` alone. A ledger whose
+    /// global flag is off but which has one commodity declaring
+    /// `render_commas: TRUE` would take that path and hand the CSV writer a
+    /// context that still groups that commodity — `Decimal(field)` breaks on
+    /// the result.
+    #[test]
+    fn machine_surfaces_suppress_per_commodity_opt_ins() {
+        use std::borrow::Cow;
+
+        let mut ctx = DisplayContext::new();
+        ctx.set_fixed_precision("IQD", 2);
+        ctx.set_render_commas_for("IQD", true); // global stays FALSE
+
+        assert!(
+            !ctx.render_commas(),
+            "precondition: nothing is set ledger-wide"
+        );
+        assert!(ctx.renders_any_commas(), "but one commodity opts in");
+
+        let machine = ctx.for_surface(OutputSurface::Machine);
+        assert!(
+            matches!(machine, Cow::Owned(_)),
+            "the global flag is off, but an override still has to be cleared"
+        );
+        assert!(!machine.render_commas_for("IQD"));
+        assert_eq!(
+            machine.format(Decimal::from_str_exact("1234567.89").unwrap(), "IQD"),
+            "1234567.89",
+            "a CSV/JSON consumer has no grammar for separators"
+        );
+
+        // Human surface keeps the opt-in, and still borrows.
+        let human = ctx.for_surface(OutputSurface::Human);
+        assert!(matches!(human, Cow::Borrowed(_)));
+        assert_eq!(
+            human.format(Decimal::from_str_exact("1234567.89").unwrap(), "IQD"),
+            "1,234,567.89"
         );
     }
 

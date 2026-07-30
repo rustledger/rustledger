@@ -100,10 +100,13 @@ pub struct PostingAlignment {
 
 /// How numerals are grouped, resolved per currency.
 ///
-/// `Copy` on purpose: it rides [`PostingAlignment`], which the width pre-pass
-/// and the emitters both read. Handing them the style separately is how they
-/// could disagree about a numeral's width — the #1290 failure — so it travels
-/// with the layout it determines.
+/// `Copy` on purpose: it is threaded as a sibling of [`PostingAlignment`]
+/// through the width pre-pass and the emitters, which must agree about a
+/// numeral's width or the currency column drifts — the #1290 failure. It is
+/// NOT a field of `PostingAlignment`: that type is `pub`, `Eq` and cached on
+/// `ParseResult`, so it cannot carry a lifetime. The invariant that pairs a
+/// cached alignment with the style it was measured under is stated on
+/// [`format_node_with_style`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GroupingStyle<'a> {
     ctx: Option<&'a rustledger_core::DisplayContext>,
@@ -329,7 +332,7 @@ pub fn try_format_source_grouped(
     // letting `format_source_grouped` re-parse. The alignment cached on
     // `ParseResult` is computed WITHOUT grouping, so it can only be reused for
     // the default style — see `format_node_with_style`'s invariant.
-    if style.groups(None) || style.groups_anything() {
+    if style.groups_anything() {
         return Ok(format_node_grouped(&result.syntax_node(), style));
     }
     Ok(format_source_with_parsed(&result, source))
@@ -2185,10 +2188,16 @@ const fn is_trivia_kind(kind: crate::SyntaxKind) -> bool {
 /// accepts (`(\d{1,3}(,\d{3})*|\d+)(\.\d*)?`). Anything else — Indian lakh
 /// grouping, say — would emit text this parser then REJECTS, so widening this
 /// needs a lexer change first, not just a formatter one.
-fn canonical_number(text: &str, group: bool) -> String {
+fn canonical_number(text: &str, group: bool) -> std::borrow::Cow<'_, str> {
+    // The overwhelmingly common numeral is already canonical: no separators to
+    // strip and no grouping requested. Borrow it rather than allocating a copy
+    // per numeral on the default formatter path.
+    if !group && !text.contains(',') {
+        return std::borrow::Cow::Borrowed(text);
+    }
     let bare = text.replace(',', "");
     if !group {
-        return bare;
+        return std::borrow::Cow::Owned(bare);
     }
     let (int_part, frac) = match bare.split_once('.') {
         Some((i, f)) => (i, Some(f)),
@@ -2197,7 +2206,7 @@ fn canonical_number(text: &str, group: bool) -> String {
     // Defensive: a non-digit integer part is not ours to regroup. Unreachable
     // for a lexed NUMBER, whose sign is a separate token.
     if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
-        return bare;
+        return std::borrow::Cow::Owned(bare);
     }
     let n = int_part.len();
     let mut out = String::with_capacity(bare.len() + n / 3);
@@ -2211,7 +2220,7 @@ fn canonical_number(text: &str, group: bool) -> String {
         out.push('.');
         out.push_str(f);
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 /// Emit the arithmetic expression of a `PRICE` / `BALANCE`
@@ -2412,7 +2421,7 @@ fn balance_tolerance(
         }
         match t.kind() {
             crate::SyntaxKind::NUMBER if number.is_none() => {
-                number = Some(canonical_number(t.text(), run_group));
+                number = Some(canonical_number(t.text(), run_group).into_owned());
             }
             crate::SyntaxKind::CURRENCY if number.is_some() && currency.is_none() => {
                 currency = Some(t.text().to_string());

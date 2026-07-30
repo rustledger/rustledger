@@ -74,9 +74,11 @@ fn write_text<W: Write>(
     // it holds. It used to arrive only as a side effect of the Number-column
     // `update_from` below, which meant `SUM(number)` printed `1,234,567.89`
     // while `SUM(position)` in the same query printed `1234567.89 USD`
-    // (issue #1892).
+    // (issue #1892). Adopt the policy WHOLE — the ledger-wide flag plus every
+    // per-commodity override — rather than copying the global bit, which left
+    // a commodity's own `render_commas:` declaration unreadable here (#1896).
     for col in &mut col_contexts {
-        col.set_render_commas(ctx.render_commas());
+        col.adopt_grouping_from(ctx);
     }
     let mut col_inherited: Vec<bool> = vec![false; result.columns.len()];
     for row in &result.rows {
@@ -1885,6 +1887,46 @@ mod tests {
             text.matches("1,234,567.89").count(),
             2,
             "both the Number and the Position column must carry separators:\n{text}"
+        );
+    }
+
+    /// A commodity's own `render_commas:` declaration reaches the query
+    /// writer, on every column kind.
+    ///
+    /// The per-column contexts are built fresh and used to inherit only the
+    /// ledger-wide flag, so a commodity opting out was grouped anyway (#1896).
+    /// `Value::Number` has no currency in scope and necessarily takes the
+    /// ledger-wide default — that is why the opted-out commodity is asserted
+    /// through the columns that DO carry a currency.
+    #[test]
+    fn a_commoditys_own_grouping_declaration_reaches_the_query_writer() {
+        use rustledger_core::{Amount, Position};
+        use rustledger_query::QueryResult;
+        let mut ctx = DisplayContext::new();
+        ctx.set_render_commas(true);
+        ctx.set_render_commas_for("USD", false);
+        ctx.update(rust_decimal_macros::dec!(1234567.89), "USD");
+        ctx.update(rust_decimal_macros::dec!(1234567.89), "IQD");
+
+        let mut result = QueryResult::new(vec!["amt".into(), "pos".into()]);
+        result.add_row(vec![
+            Value::Amount(Amount::new(rust_decimal_macros::dec!(1234567.89), "USD")),
+            Value::Position(Box::new(Position::simple(Amount::new(
+                rust_decimal_macros::dec!(1234567.89),
+                "IQD",
+            )))),
+        ]);
+
+        let mut out = Vec::new();
+        write_text(&result, &mut out, false, &ctx).expect("write");
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(
+            text.contains("1234567.89 USD"),
+            "USD declared render_commas: FALSE and must not be grouped:\n{text}"
+        );
+        assert!(
+            text.contains("1,234,567.89 IQD"),
+            "IQD declared nothing and takes the ledger-wide TRUE:\n{text}"
         );
     }
 

@@ -1828,8 +1828,10 @@ impl SessionState {
     /// only the config differs. `render_commas` IS honored here: this path
     /// holds the ledger's options, and a grouped numeral is something every
     /// conforming reader must accept (the grammar admits it), so the parser —
-    /// not the file — is the machine boundary. `rledger format` still emits
-    /// ungrouped text because it has no options in scope.
+    /// not the file — is the machine boundary. `rledger format` groups only
+    /// when given `--ledger <root>`, which is how it brings a ledger's options
+    /// into scope; bare `rledger format <file>` has none and emits ungrouped
+    /// text.
     pub fn format(&self) -> Result<String, String> {
         let mut ctx = rustledger_core::DisplayContext::from_directives(
             self.directives.iter(),

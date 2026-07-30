@@ -1652,22 +1652,24 @@ fn emit_balance(d: &ast::BalanceDirective, group: GroupingStyle<'_>, out: &mut S
     out.push_str(&account);
     out.push(' ');
     emit_amount_expression(d.syntax(), group, out);
-    out.push(' ');
-    out.push_str(&currency);
-    // Optional `~ tolerance [CCY]` — walk raw tokens.
-    if let Some((tolerance, tol_currency)) = balance_tolerance(d.syntax(), group) {
+    // `balance ACCOUNT AMOUNT [~ TOLERANCE] CURRENCY` — ONE currency, trailing,
+    // covering both numbers. The tolerance's own `CURRENCY` token (if the source
+    // repeated it) is deliberately dropped: emitting it as well produced
+    // `0.00 USD ~ 1234.5 USD`, which is not the beancount form.
+    if let Some((tolerance, _tol_currency)) = balance_tolerance(d.syntax(), group) {
         out.push_str(" ~ ");
         out.push_str(&tolerance);
-        if let Some(c) = tol_currency {
-            out.push(' ');
-            out.push_str(&c);
-        }
     }
+    out.push(' ');
+    out.push_str(&currency);
     out.push('\n');
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
 fn emit_custom(d: &ast::CustomDirective, group: GroupingStyle<'_>, out: &mut String) {
+    // `custom` / `pushmeta` values are not denominated in anything, so
+    // they take the ledger-wide default.
+    let run_group = group.groups(None);
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let custom_type = d
         .custom_type()
@@ -1711,7 +1713,7 @@ fn emit_custom(d: &ast::CustomDirective, group: GroupingStyle<'_>, out: &mut Str
         }
         out.push(' ');
         if t.kind() == crate::SyntaxKind::NUMBER {
-            out.push_str(&canonical_number(t.text(), group.groups(None)));
+            out.push_str(&canonical_number(t.text(), run_group));
             if matches!(
                 tokens.get(i + 1).map(rowan::SyntaxToken::kind),
                 Some(crate::SyntaxKind::CURRENCY)
@@ -1777,6 +1779,9 @@ fn emit_poptag(d: &ast::PoptagDirective, out: &mut String) {
 }
 
 fn emit_pushmeta(d: &ast::PushmetaDirective, group: GroupingStyle<'_>, out: &mut String) {
+    // `custom` / `pushmeta` values are not denominated in anything, so
+    // they take the ledger-wide default.
+    let run_group = group.groups(None);
     let key = d.key().map(|t| t.text().to_string()).unwrap_or_default();
     out.push_str("pushmeta ");
     out.push_str(&key);
@@ -1797,7 +1802,7 @@ fn emit_pushmeta(d: &ast::PushmetaDirective, group: GroupingStyle<'_>, out: &mut
         }
         out.push(' ');
         if t.kind() == crate::SyntaxKind::NUMBER {
-            out.push_str(&canonical_number(t.text(), group.groups(None)));
+            out.push_str(&canonical_number(t.text(), run_group));
         } else {
             out.push_str(t.text());
         }
@@ -2246,6 +2251,15 @@ fn emit_amount_expression(node: &crate::SyntaxNode, group: GroupingStyle<'_>, ou
         match t.kind() {
             crate::SyntaxKind::L_PAREN => depth += 1,
             crate::SyntaxKind::R_PAREN => depth -= 1,
+            // A `~ tolerance` clause ENDS the asserted amount. `emit_balance`
+            // emits it separately via `balance_tolerance`, so running past the
+            // tilde here emitted it twice: `0.00 ~ 1234.5 USD` came out as
+            // `0.00 ~ 1234.5 USD ~ 1234.5 USD`. Stable but wrong, and very
+            // likely not valid beancount — its balance grammar takes at most
+            // one tolerance.
+            crate::SyntaxKind::TILDE if depth == 0 && first_currency_idx.is_none() => {
+                first_currency_idx = Some(i);
+            }
             crate::SyntaxKind::CURRENCY if depth == 0 && first_currency_idx.is_none() => {
                 first_currency_idx = Some(i);
             }
@@ -2301,11 +2315,27 @@ fn emit_amount_subnode_expression(
 /// its own rule. The corpus-level idempotence test
 /// (`idempotence_corpus_sweep`) is the safety net that catches
 /// drifts.
+/// The currency a token run is denominated in: the LAST `CURRENCY` token in it.
+///
+/// A cost spec (`{1234.56 USD}`) and a balance tolerance carry their own
+/// currency, and it is the one whose declaration governs their numerals. Taking
+/// the ledger default instead is how `{1,234,567.89 USD}` came out grouped
+/// while a plain `1234567.89 USD` posting in the same file stayed bare — USD
+/// had declared `render_commas: FALSE` and only one of the two honored it.
+fn run_currency(tokens: &[crate::SyntaxToken]) -> Option<String> {
+    tokens
+        .iter()
+        .rev()
+        .find(|t| t.kind() == crate::SyntaxKind::CURRENCY)
+        .map(|t| t.text().to_string())
+}
+
 fn write_canonical_token_sequence(
     tokens: &[crate::SyntaxToken],
     group: GroupingStyle<'_>,
     out: &mut String,
 ) {
+    let run_group = group.groups(run_currency(tokens).as_deref());
     let is_op = |k: crate::SyntaxKind| {
         matches!(
             k,
@@ -2337,7 +2367,7 @@ fn write_canonical_token_sequence(
             out.push(' ');
         }
         if kind == crate::SyntaxKind::NUMBER {
-            out.push_str(&canonical_number(t.text(), group.groups(None)));
+            out.push_str(&canonical_number(t.text(), run_group));
         } else {
             out.push_str(t.text());
         }
@@ -2353,6 +2383,16 @@ fn balance_tolerance(
     node: &crate::SyntaxNode,
     group: GroupingStyle<'_>,
 ) -> Option<(String, Option<String>)> {
+    // `balance Assets:A 100.00 ~ 0.05 USD` — one currency covers the asserted
+    // amount and the tolerance, and it trails both, so resolve it up front
+    // rather than mid-walk.
+    let run_group = {
+        let toks: Vec<crate::SyntaxToken> = node
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .collect();
+        group.groups(run_currency(&toks).as_deref())
+    };
     let mut past_tilde = false;
     let mut number: Option<String> = None;
     let mut currency: Option<String> = None;
@@ -2368,7 +2408,7 @@ fn balance_tolerance(
         }
         match t.kind() {
             crate::SyntaxKind::NUMBER if number.is_none() => {
-                number = Some(canonical_number(t.text(), group.groups(None)));
+                number = Some(canonical_number(t.text(), run_group));
             }
             crate::SyntaxKind::CURRENCY if number.is_some() && currency.is_none() => {
                 currency = Some(t.text().to_string());
@@ -2839,10 +2879,17 @@ mod tests {
 
     #[test]
     fn balance_with_tolerance_canonical() {
+        // Beancount's form is `AMOUNT ~ TOLERANCE CURRENCY` — ONE trailing
+        // currency covering both numbers, per its Precision & Tolerances docs
+        // (`319.020 ~ 0.002 RGAGX`). This test previously asserted
+        // `100.00 USD ~ 0.01 USD`, repeating the currency; that is not the
+        // beancount form, and the emitter produced it by running the amount
+        // expression past the tilde and then emitting the tolerance again.
+        // Input that repeats the currency now normalizes to the canonical form.
         let src = "2024-01-15 balance Assets:Cash 100.00 USD ~ 0.01 USD\n";
         assert_eq!(
             format_source(src),
-            "2024-01-15 balance Assets:Cash 100.00 USD ~ 0.01 USD\n"
+            "2024-01-15 balance Assets:Cash 100.00 ~ 0.01 USD\n"
         );
     }
 
@@ -4978,5 +5025,53 @@ mod tests {
             format_source(src),
             "no declared grouping must be byte-identical to the default path"
         );
+    }
+
+    /// `format` must not duplicate a balance tolerance.
+    ///
+    /// `emit_amount_expression` ran from the first NUMBER to the first
+    /// CURRENCY, which SWALLOWED the `~ tolerance` clause; `emit_balance` then
+    /// emitted it again via `balance_tolerance`. So
+    /// `balance Assets:A 0.00 ~ 1234.5 USD` was rewritten as
+    /// `... 0.00 ~ 1234.5 USD ~ 1234.5 USD` — stable across reformats, but
+    /// almost certainly not valid beancount, whose balance grammar takes at
+    /// most one tolerance. `--check` reported the ORIGINAL as unformatted, so a
+    /// CI gate pushed users into the corrupted form.
+    ///
+    /// Pre-existing on main; unrelated to grouping.
+    #[test]
+    fn balance_tolerance_is_emitted_exactly_once() {
+        for (src, want) in [
+            (
+                "2020-01-04 balance Assets:A 0.00 ~ 1234.5 USD\n",
+                "2020-01-04 balance Assets:A 0.00 ~ 1234.5 USD\n",
+            ),
+            // A source that repeats the currency collapses to the one-currency
+            // beancount form rather than keeping both.
+            (
+                "2020-01-04 balance Assets:A 0.00 USD ~ 0.05 USD\n",
+                "2020-01-04 balance Assets:A 0.00 ~ 0.05 USD\n",
+            ),
+            // No tolerance: unchanged.
+            (
+                "2020-01-04 balance Assets:A 1234.50 USD\n",
+                "2020-01-04 balance Assets:A 1234.50 USD\n",
+            ),
+            // Arithmetic still terminates at the currency, not the tilde.
+            (
+                "2020-01-04 balance Assets:A (1 + 5) / 2 USD\n",
+                "2020-01-04 balance Assets:A (1 + 5) / 2 USD\n",
+            ),
+        ] {
+            let out = format_source(src);
+            assert_eq!(out, want, "formatting {src:?}");
+            assert_eq!(format_source(&out), out, "not idempotent for {src:?}");
+            // And the output must still parse — a formatter may not emit text
+            // its own parser rejects.
+            assert!(
+                crate::parse(&out).errors.is_empty(),
+                "output must re-parse: {out}"
+            );
+        }
     }
 }

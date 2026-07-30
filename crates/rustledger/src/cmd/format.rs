@@ -125,10 +125,15 @@ pub fn run_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
 
 /// Load `root` purely to obtain its resolved display declarations.
 ///
-/// Load ERRORS are ignored on purpose: `format` must keep working on a ledger
-/// that does not yet `check` clean — that is often exactly when you reach for
-/// it. Only the display context is taken; whatever the loader reports about
-/// balances or bookings is irrelevant here.
+/// Validation findings are ignored on purpose: `format` must keep working on a
+/// ledger that does not yet `check` clean — that is often exactly when you
+/// reach for it. A missing `include`, an unbalanced transaction or a failed
+/// assertion all still yield a usable display context, and only that context is
+/// taken from the load.
+///
+/// A root that cannot be READ is a different matter and fails: the user named a
+/// file to take declarations from, so silently substituting defaults would
+/// format their ledger the wrong way and say nothing.
 fn load_display_context(root: &std::path::Path) -> Result<rustledger_core::DisplayContext> {
     let loaded = rustledger_loader::load(root, &rustledger_loader::LoadOptions::default())
         .with_context(|| format!("failed to read ledger root {}", root.display()))?;

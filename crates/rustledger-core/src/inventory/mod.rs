@@ -482,6 +482,13 @@ impl Inventory {
     /// solely to recover from overflow (#1897).
     #[must_use]
     pub fn add_headroom_for(&self, currency: &str, needed: Decimal) -> bool {
+        // Enforce the magnitude contract rather than trusting it. A negative
+        // `needed` would make the sums below SMALLER and hand back `true` when
+        // overflow is possible — and an unsound `true` here means `apply`
+        // skips the snapshot it needed, so earlier postings of a failing
+        // transaction cannot be rolled back. Cheap insurance on a `pub` method
+        // whose failure mode is silent corruption.
+        let needed = needed.abs();
         let fits = |v: Decimal| {
             v.abs()
                 .checked_add(needed)
@@ -952,6 +959,36 @@ impl Inventory {
 
 #[cfg(test)]
 mod tests {
+
+    /// `add_headroom_for` treats `needed` as a magnitude, whatever sign it
+    /// arrives with.
+    ///
+    /// A negative `needed` would make the internal sums smaller and return
+    /// `true` where overflow is possible. `apply` would then skip the snapshot
+    /// it needed, leaving a failing transaction's earlier postings applied —
+    /// silent corruption. Not reachable from the in-tree caller, which sums
+    /// absolute values, but this is a `pub` method (review catch on #1898).
+    #[test]
+    fn add_headroom_for_reads_needed_as_a_magnitude() {
+        let mut inv = Inventory::new();
+        inv.add(Position::simple(Amount::new(Decimal::MAX, "USD")))
+            .expect("one MAX position fits");
+
+        assert!(
+            !inv.add_headroom_for("USD", Decimal::ONE),
+            "at the ceiling, there is no room for one more unit"
+        );
+        assert!(
+            !inv.add_headroom_for("USD", -Decimal::ONE),
+            "and a negatively-signed magnitude must not manufacture room"
+        );
+        assert_eq!(
+            inv.add_headroom_for("USD", Decimal::ONE),
+            inv.add_headroom_for("USD", -Decimal::ONE),
+            "the sign of `needed` cannot change the answer"
+        );
+    }
+
     use super::*;
     use crate::Cost;
     use crate::NaiveDate;

@@ -668,6 +668,49 @@ impl BookingEngine {
         Ok(())
     }
 
+    /// Whether any `Inventory::add` this transaction performs could overflow.
+    ///
+    /// Conservative: `true` means "cannot prove otherwise", never "will". A
+    /// `false` lets [`Self::apply`] skip the rollback snapshot, which is pure
+    /// cost for the overwhelming majority of transactions (#1897).
+    ///
+    /// Sound because `add` is the ONLY operation whose failure `apply` rolls
+    /// back — `reduce` reports a missing lot, a caller precondition violation
+    /// that is deliberately non-fatal, never `Overflow`.
+    ///
+    /// The headroom offered to each account is the absolute magnitude of the
+    /// WHOLE transaction, not of that account's own postings. That over-states
+    /// what any one account can consume, which is the safe direction, and it
+    /// avoids grouping postings by account and currency — an allocation, which
+    /// is the thing being removed.
+    fn overflow_is_possible(&self, txn: &Transaction) -> bool {
+        let mut sum_abs = rustledger_core::Decimal::ZERO;
+        for posting in &txn.postings {
+            let Some(units) = posting.amount() else {
+                // An unfilled posting means booking did not complete; do not
+                // reason about arithmetic that has not been determined yet.
+                return true;
+            };
+            match sum_abs.checked_add(units.number.abs()) {
+                Some(next) => sum_abs = next,
+                // The magnitudes alone exceed the range — exactly the case the
+                // snapshot exists for.
+                None => return true,
+            }
+        }
+
+        !txn.postings.iter().all(|posting| {
+            let Some(units) = posting.amount() else {
+                return false;
+            };
+            // An account with no inventory yet starts from zero, so only the
+            // transaction's own magnitudes matter, and `sum_abs` is in range.
+            self.inventories
+                .get(&posting.account)
+                .is_none_or(|inv| inv.add_headroom_for(&units.currency, sum_abs))
+        })
+    }
+
     /// Apply a transaction's postings to the running inventories (update
     /// balances).
     ///
@@ -708,13 +751,23 @@ impl BookingEngine {
         // REMOVED rather than restored to an empty inventory: `apply` is the
         // only thing that creates entries here, and leaving a phantom empty
         // one changes `into_inventories`' output.
-        let mut snapshot: FxHashMap<rustledger_core::Account, Option<Inventory>> =
-            FxHashMap::with_capacity_and_hasher(txn.postings.len(), Default::default());
-        for posting in &txn.postings {
-            snapshot
-                .entry(posting.account.clone())
-                .or_insert_with(|| self.inventories.get(&posting.account).cloned());
-        }
+        // ...but only when overflow is actually possible. `imbl::Vector`'s clone
+        // is O(1), yet it leaves the chunks SHARED, so the next `Inventory::add`
+        // pays `Arc::make_mut` and copies a 64-`Position` chunk. Snapshotting
+        // every transaction cost 2.4x heap churn and 6% CPU on the nightly
+        // profile to guard a case needing values near 7.9e28 (#1897).
+        let snapshot: Option<FxHashMap<rustledger_core::Account, Option<Inventory>>> =
+            if self.overflow_is_possible(txn) {
+                let mut snap =
+                    FxHashMap::with_capacity_and_hasher(txn.postings.len(), Default::default());
+                for posting in &txn.postings {
+                    snap.entry(posting.account.clone())
+                        .or_insert_with(|| self.inventories.get(&posting.account).cloned());
+                }
+                Some(snap)
+            } else {
+                None
+            };
         let rollback =
             |engine: &mut Self,
              snapshot: FxHashMap<rustledger_core::Account, Option<Inventory>>| {
@@ -741,7 +794,20 @@ impl BookingEngine {
                     }
                 ))
             ) {
-                rollback(self, snapshot);
+                // `snapshot` is `Some` whenever this arm is reachable: the
+                // guard only returns false when no add can overflow, and
+                // overflow is the sole error that reaches here. Restoring
+                // nothing would be silent corruption, so a violated guard must
+                // be loud rather than quiet.
+                assert!(
+                    snapshot.is_some(),
+                    "overflow_is_possible() returned false but an overflow \
+                     occurred: the guard is unsound and the earlier postings \
+                     of this transaction cannot be rolled back"
+                );
+                if let Some(snapshot) = snapshot {
+                    rollback(self, snapshot);
+                }
                 return reduced;
             }
             debug_assert!(
@@ -2307,6 +2373,66 @@ mod tests {
                 Directive::Transaction(t) if t.narration.as_ref() == "Sell at phantom cost basis"
             )),
             "failed sell must not appear in booked"
+        );
+    }
+
+    /// The snapshot is skipped for ordinary transactions and kept whenever
+    /// overflow cannot be ruled out (#1897).
+    ///
+    /// Both directions matter. Skipping when overflow IS possible is silent
+    /// corruption; keeping it always is the 2.4x heap churn this guard exists
+    /// to remove. The third case is the one a naive guard gets wrong: the
+    /// posting is tiny, but the account it lands in already sits at the
+    /// ceiling, so the add still overflows.
+    #[test]
+    fn the_snapshot_is_skipped_only_when_overflow_is_impossible() {
+        let mut engine = BookingEngine::new();
+
+        let ordinary = Transaction::new(date(2024, 1, 1), "groceries")
+            .with_synthesized_posting(Posting::new(
+                "Assets:Bank",
+                Amount::new(dec!(-42.50), "USD"),
+            ))
+            .with_synthesized_posting(Posting::new(
+                "Expenses:Food",
+                Amount::new(dec!(42.50), "USD"),
+            ));
+        assert!(
+            !engine.overflow_is_possible(&ordinary),
+            "a two-posting transaction of ordinary magnitudes must take the \
+             fast path, or the guard buys nothing"
+        );
+        engine.apply(&ordinary).expect("applies");
+        assert!(
+            !engine.overflow_is_possible(&ordinary),
+            "and still does once the accounts hold a balance"
+        );
+
+        // Magnitudes alone exceed the range.
+        let huge = Transaction::new(date(2024, 1, 2), "huge")
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(Decimal::MAX, "USD")))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(Decimal::MAX, "USD")));
+        assert!(engine.overflow_is_possible(&huge));
+
+        // The case that makes the guard non-trivial: a SMALL posting into an
+        // account already parked at the ceiling.
+        let park = Transaction::new(date(2024, 1, 3), "park").with_synthesized_posting(
+            Posting::new("Assets:Full", Amount::new(Decimal::MAX, "USD")),
+        );
+        engine.apply(&park).expect("one MAX position fits");
+        let small_but_doomed = Transaction::new(date(2024, 1, 4), "small")
+            .with_synthesized_posting(Posting::new("Assets:Full", Amount::new(dec!(1.00), "USD")));
+        assert!(
+            engine.overflow_is_possible(&small_but_doomed),
+            "the posting is tiny but the destination is at the ceiling — a \
+             guard that looked only at the transaction would miss this"
+        );
+        // ...and the currency it cannot reach is unaffected.
+        let other_currency = Transaction::new(date(2024, 1, 4), "eur")
+            .with_synthesized_posting(Posting::new("Assets:Full", Amount::new(dec!(1.00), "EUR")));
+        assert!(
+            !engine.overflow_is_possible(&other_currency),
+            "the ceiling is per currency; EUR has room"
         );
     }
 

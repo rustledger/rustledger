@@ -467,6 +467,39 @@ impl Inventory {
         })
     }
 
+    /// Whether every `add` of `currency` totaling at most `needed` in absolute
+    /// value is guaranteed not to overflow.
+    ///
+    /// `add` overflows at exactly two `checked_add`s: the per-currency running
+    /// total, and — for a cost-less position — the single merged lot that
+    /// `simple_index` points at. Both operands are bounded here against
+    /// `needed`, so a `true` answer means no sequence of adds whose magnitudes
+    /// sum to `needed` can overflow either, at any intermediate step: every
+    /// partial sum is bounded by the total.
+    ///
+    /// Conservative by construction — `false` only ever means "cannot prove
+    /// it", never "will overflow". Callers use it to skip work that exists
+    /// solely to recover from overflow (#1897).
+    #[must_use]
+    pub fn add_headroom_for(&self, currency: &str, needed: Decimal) -> bool {
+        let fits = |v: Decimal| {
+            v.abs()
+                .checked_add(needed)
+                .is_some_and(|sum| sum <= Decimal::MAX)
+        };
+
+        let cached_ok = self.units_cache.get(currency).copied().is_none_or(fits);
+        if !cached_ok {
+            return false;
+        }
+        // Only a cost-less add merges, and `simple_index` names the one lot it
+        // would merge into.
+        self.simple_index
+            .get(currency)
+            .and_then(|idx| self.positions.get(*idx))
+            .is_none_or(|lot| fits(lot.units.number))
+    }
+
     /// Get all currencies in this inventory.
     #[must_use]
     pub fn currencies(&self) -> Vec<&str> {

@@ -78,56 +78,48 @@ jobs:
       # catch transitive-`unsafe` UB in our own logic via core + booking (+ their
       # deps: rust_decimal, bigdecimal, imbl, smallvec, ...).
       #
-      # Proptest targets are skipped. Under Miri's ~100x slowdown a property at
-      # its default 256 cases is not a test, it is an outage: on 2026-06-28 one
-      # 18-test proptest binary took 5,951s and another 1,730s, and after this
-      # job was scoped to core+booking the remaining properties (including a
-      # 500-case one) pushed it past six hours every week.
+      # HIGH-REPETITION targets are skipped. Miri's cost is per executed step,
+      # so repetition — not complexity — is what turns a test into an outage.
+      # Two categories, both measured on this job:
       #
-      # `PROPTEST_CASES` does NOT help: every one of these binaries calls
-      # `ProptestConfig::with_cases(N)`, which is `Config { cases: N,
-      # ..Config::default() }` — the literal overwrites the env-derived default.
-      # Setting it would look like a fix and change nothing.
+      #   proptest!            256+ cases per property. On 2026-06-28 one
+      #                        18-test binary took 5,951s and another 1,730s;
+      #                        a 500-case property then pushed the job past six
+      #                        hours every week.
+      #   spec/tla/behaviors   TLA+ corpus replay: 33,772 transitions across 11
+      #                        specs. 1.03s natively, still unfinished after 57
+      #                        minutes under Miri on 2026-07-31, starving the
+      #                        target queued behind it.
       #
-      # Nor does filtering by name: four of the properties are not `prop_*`
-      # prefixed (`try_reduce_predicts_reduce`, `interpolation_is_idempotent_*`,
-      # `interpolated_transaction_has_zero_residual`).
+      # Two obvious alternatives do NOT work, which is why the skip is shaped
+      # this way rather than as a knob:
       #
-      # So the list is DERIVED from the sources, not hardcoded. A new
-      # integration test is picked up automatically; a new proptest one is
-      # skipped automatically and named in the log. Hardcoding it would mean a
-      # future test file silently never runs under Miri.
+      #   `PROPTEST_CASES` is ignored — every binary calls
+      #   `ProptestConfig::with_cases(N)`, i.e. `Config { cases: N,
+      #   ..Config::default() }`, so the literal overwrites the env-derived
+      #   default. Setting it would look like a fix and change nothing.
       #
-      # Coverage is not really reduced: neither crate has a single `proptest!`
-      # in `src/`, so the unit tests — where the transitive `unsafe` actually
-      # lives (imbl, smallvec, rust_decimal) — all still run. Properties keep
-      # their full case counts in the normal test suite; what Miri wants is the
-      # UB check, not the input exploration.
+      #   Filtering by test NAME misses four properties that are not `prop_*`
+      #   prefixed (`try_reduce_predicts_reduce`,
+      #   `interpolation_is_idempotent_*`, `interpolated_transaction_has_zero_residual`).
+      #
+      # So the list is DERIVED from file contents, never hardcoded: a new suite
+      # of either kind is handled without editing this file, and a new ordinary
+      # test is picked up automatically. A hardcoded allowlist would mean a
+      # future test file silently never runs under Miri — the failure mode this
+      # job spent eight weeks demonstrating.
+      #
+      # Coverage cost is small. Neither crate has a `proptest!` in `src/`, so
+      # the unit tests — where the transitive `unsafe` actually lives (imbl,
+      # smallvec, rust_decimal) — all still run. Both categories keep full
+      # strength in the normal test suite, and TLA+ conformance is owned by
+      # tla.yml regardless.
       - name: Run Miri on ${{ matrix.crate }}
         run: |
           set -euo pipefail
           crate="${{ matrix.crate }}"
 
-          # Skip HIGH-REPETITION suites. The rule is not "skip proptest", it is
-          # "skip anything that runs one operation tens of thousands of times":
-          # Miri's cost is per executed step, so repetition is what turns a test
-          # into an outage. Two markers, both content-derived so a new suite of
-          # either kind is handled without editing this file:
-          #
-          #   proptest!            256+ cases per property. One 18-test binary
-          #                        took 5,951s on 2026-06-28.
-          #   spec/tla/behaviors   TLA+ corpus replay. 33,772 transitions across
-          #                        11 specs; 1.03s natively, and it had still
-          #                        not finished after 57 minutes under Miri
-          #                        (2026-07-31), consuming the whole budget and
-          #                        starving the target queued behind it.
-          #
-          # Neither loses meaningful coverage. Both exercise the same Inventory
-          # and Decimal paths the 444 lib tests already cover, just far more
-          # often; the marginal chance of the 33,772nd operation tripping UB
-          # that the first few hundred did not is negligible. Both keep their
-          # full strength in the normal test suite, and the TLA+ conformance
-          # story is owned by tla.yml regardless.
+          # Skip markers and rationale: see the comment block above this step.
           targets=(--lib)
           for f in "crates/$crate/tests/"*.rs; do
             [ -e "$f" ] || continue
@@ -177,5 +169,5 @@ jobs:
             echo ""
             echo "Excluded crates — rowan's ThinArc is miri-incompatible under Stacked AND Tree Borrows: rustledger-parser, rustledger-query."
             echo ""
-            echo "Proptest targets are skipped (see the run step): at 256+ cases under Miri they took hours. They run at full case counts in the normal test suite, and neither crate has a \`proptest!\` in \`src/\`, so the unit tests still run here."
+            echo "High-repetition targets are skipped (see the run step): proptest binaries at 256+ cases, and TLA+ corpus replay at 33,772 transitions. Miri's cost is per executed step, so repetition is what turns a test into an outage. Both keep full strength in the normal test suite; neither crate has a \`proptest!\` in \`src/\`, so the unit tests still run here, and TLA+ conformance is owned by tla.yml."
           } >> "$GITHUB_STEP_SUMMARY"

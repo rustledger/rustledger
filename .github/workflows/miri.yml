@@ -6,11 +6,15 @@
 # are miri-compatible; WASM/FFI crates and fs/wasmtime-heavy crates are
 # excluded because miri can't run their targets.
 #
-# Memory model: Stacked Borrows (miri's default). The job is scoped to the
-# rowan-free crates because rowan's `ThinArc` green tree trips miri under BOTH
-# Stacked Borrows AND Tree Borrows (a known, open aliasing-model question, not a
-# rowan bug), so no memory-model flag fixes it. See the "Run Miri on rowan-free
-# crates" step below for the full rationale and upstream references.
+# Memory model: Stacked Borrows (miri's default). Scoped to the rowan-free
+# crates because rowan's `ThinArc` green tree trips miri under BOTH Stacked
+# Borrows AND Tree Borrows (a known, open aliasing-model question, not a rowan
+# bug), so no memory-model flag fixes it. See the run step below for the full
+# rationale and upstream references.
+#
+# One crate per matrix job, each with its own timeout, and proptest targets
+# skipped — see the job and run step for why both were necessary to make this
+# fit at all.
 name: Miri
 on:
   schedule:
@@ -24,13 +28,23 @@ env:
   RUST_MIN_STACK: 8388608
 jobs:
   miri:
-    name: Miri
+    name: Miri (${{ matrix.crate }})
     runs-on: ubuntu-latest
     # Explicit, because the default is GitHub's 6-hour job cap. Without this the
     # job silently burned all six hours every Sunday and reported `cancelled`
     # (four consecutive weeks, 2026-07-05 through 07-26) — a red X that looks
     # like an infrastructure hiccup rather than "this job no longer fits".
+    #
+    # One crate per job, so the budget is PER CRATE rather than shared. Run
+    # sequentially they contend for a single ceiling, and whichever runs second
+    # is starved by whatever the first spent — so a slowdown in `core` reads as
+    # a `booking` failure. Splitting also halves wall clock, since the two are
+    # independent.
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [rustledger-core, rustledger-booking]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # nightly
@@ -89,24 +103,22 @@ jobs:
       # lives (imbl, smallvec, rust_decimal) — all still run. Properties keep
       # their full case counts in the normal test suite; what Miri wants is the
       # UB check, not the input exploration.
-      - name: Run Miri on rowan-free crates
+      - name: Run Miri on ${{ matrix.crate }}
         run: |
           set -euo pipefail
-          for crate in rustledger-core rustledger-booking; do
-            targets=(--lib)
-            for f in "crates/$crate/tests/"*.rs; do
-              [ -e "$f" ] || continue
-              name="$(basename "$f" .rs)"
-              if grep -q 'proptest!' "$f"; then
-                echo "skipping $crate/$name (proptest: too slow under Miri)"
-              else
-                targets+=(--test "$name")
-              fi
-            done
-            echo "::group::$crate ${targets[*]}"
-            cargo +nightly miri test --package "$crate" --all-features "${targets[@]}"
-            echo "::endgroup::"
+          crate="${{ matrix.crate }}"
+          targets=(--lib)
+          for f in "crates/$crate/tests/"*.rs; do
+            [ -e "$f" ] || continue
+            name="$(basename "$f" .rs)"
+            if grep -q 'proptest!' "$f"; then
+              echo "skipping $crate/$name (proptest: too slow under Miri)"
+            else
+              targets+=(--test "$name")
+            fi
           done
+          echo "running: cargo miri test -p $crate ${targets[*]}"
+          cargo +nightly miri test --package "$crate" --all-features "${targets[@]}"
         env:
           # -Zmiri-disable-isolation: some tests read the realtime clock
           # (e.g. "today"-based date helpers), which miri rejects under its
@@ -117,16 +129,12 @@ jobs:
           MIRIFLAGS: -Zmiri-symbolic-alignment-check -Zmiri-strict-provenance -Zmiri-disable-isolation
       - name: Summary
         run: |
-          echo "## Miri Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Miri checks for undefined behavior in unsafe Rust code." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Memory model: Stacked Borrows (miri default)." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Checked crates (rowan-free):" >> $GITHUB_STEP_SUMMARY
-          echo "- rustledger-core" >> $GITHUB_STEP_SUMMARY
-          echo "- rustledger-booking" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Excluded — rowan's ThinArc is miri-incompatible under Stacked AND Tree Borrows: rustledger-parser, rustledger-query." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Proptest targets are skipped here (see the run step): at 256+ cases under Miri they took hours. They run at full case counts in the normal test suite; neither crate has a \`proptest!\` in \`src/\`, so the unit tests still run." >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Miri: ${{ matrix.crate }}"
+            echo ""
+            echo "Memory model: Stacked Borrows (miri default)."
+            echo ""
+            echo "Excluded crates — rowan's ThinArc is miri-incompatible under Stacked AND Tree Borrows: rustledger-parser, rustledger-query."
+            echo ""
+            echo "Proptest targets are skipped (see the run step): at 256+ cases under Miri they took hours. They run at full case counts in the normal test suite, and neither crate has a \`proptest!\` in \`src/\`, so the unit tests still run here."
+          } >> "$GITHUB_STEP_SUMMARY"

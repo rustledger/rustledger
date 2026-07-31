@@ -714,12 +714,25 @@ jobs:
           # --baseline makes this step EXIT NON-ZERO (fail the job) if any
           # (file, query) pair that matched on main now fails — i.e. a BQL
           # regression. This is what blocks a JOURNAL-style drop from merging.
+          # Nightly sweeps the WHOLE eligible corpus; PRs keep a budget.
+          # Same split as the fuzz workflow, for the same reason: the BQL step
+          # runs ~17 file×query pairs per second, so a full sweep costs about
+          # eleven minutes — free on a schedule, not free on every PR. A
+          # divergence that only a rarely-selected file exposes is then found
+          # within a day instead of never.
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            MAX_FILES=100000   # effectively uncapped; the corpus is ~673
+          else
+            MAX_FILES=150
+          fi
+          echo "querying up to $MAX_FILES files (event: ${{ github.event_name }})"
           python3 scripts/compat-bql-test.py \
             --corpus tests/compatibility/bql-queries.toml \
             --files-from compat-check-results.jsonl \
             --rledger ./target/release/rledger \
             --output compat-bql-results.jsonl \
             --baseline .github/badges/previous-bql-results.jsonl \
+            --max-files "$MAX_FILES" \
             --github-output
       # `report budget` is arithmetic over generated data, so it is checked by
       # generation rather than by examples: the budgeted figure against a

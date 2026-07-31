@@ -61,7 +61,15 @@ MIN_CORPUS_SIZE = 15
 
 # Files we test against. 30 is enough breadth for representative coverage
 # without being slow; tune up if the corpus grows substantially.
-MAX_FILES = 30
+# Files queried per run, unless --max-files says otherwise.
+#
+# Raised from 30 after measuring the real cost: the BQL step ran 510 runs in
+# about 30 seconds (~17 runs/sec), so the old cap was saving seconds while
+# exercising 4% of the eligible corpus. 150 costs roughly two minutes and
+# covers ~22%; the nightly passes a cap high enough to take everything (see
+# compat.yml), which is the same gate-on-PR / full-sweep-nightly split the
+# fuzz workflow uses.
+MAX_FILES = 150
 
 # A query that returns 0 rows on more than this fraction of files isn't
 # really being tested by the corpus — flag it loudly so we know to add
@@ -854,7 +862,16 @@ def main() -> int:
     # step downstream consumes those names.
     print()
     print(f"Corpus queries:      {len(queries)}")
-    print(f"Files tested:        {len(valid)}")
+    # `valid` is every file BOTH tools parse with postings; `selected_pairs` is
+    # what this run actually queried, capped by --max-files. Reporting the
+    # former as "Files tested" overstated coverage by 22x at the old default
+    # (673 eligible, 30 queried) — and it is the one number a reader quotes.
+    _covered = 100 * len(selected_pairs) / len(valid) if valid else 0.0
+    print(f"Corpus files eligible: {len(valid)}")
+    print(
+        f"Files queried:       {len(selected_pairs)} "
+        f"({_covered:.0f}% of eligible; --max-files={args.max_files})"
+    )
     print(f"Runs tested:         {total}  (file × query)")
     print(f"Runs matching:       {matching}")
     print(f"Known Python diffs:  {known_py}")

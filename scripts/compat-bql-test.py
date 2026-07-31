@@ -59,8 +59,6 @@ DEFAULT_TEST_DIRS = [
 # fewer queries than this.
 MIN_CORPUS_SIZE = 15
 
-# Files we test against. 30 is enough breadth for representative coverage
-# without being slow; tune up if the corpus grows substantially.
 # Files queried per run, unless --max-files says otherwise.
 #
 # Raised from 30 after measuring the real cost: the BQL step ran 510 runs in

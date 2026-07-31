@@ -39,8 +39,29 @@ MARKER = "<!-- nightly-health -->"
 STALENESS = {"daily": timedelta(days=3), "weekly": timedelta(days=17), "monthly": timedelta(days=70)}
 
 
-def gh(*args: str) -> str:
-    return subprocess.run(["gh", *args], capture_output=True, text=True, check=False).stdout
+# Set when any `gh` invocation fails, so a broken token or a rate limit is
+# reported as a tooling problem rather than silently read as "no runs found" —
+# which would mark every workflow stale and replace a real report with a wrong
+# one. Louder than raising: a partial answer plus a visible error still tells
+# a human more than a stack trace in a job nobody watches.
+_GH_FAILED: list[str] = []
+
+
+def gh(*args: str, tolerate_missing: bool = False) -> str:
+    proc = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip().splitlines()
+        summary = detail[-1] if detail else f"exit {proc.returncode}"
+        # A workflow present in the tree but not yet on the default branch has
+        # no run history and 404s. That is "has not run yet", which the stale
+        # path already reports correctly — not a broken token. Recording it as
+        # a tooling failure would make every newly added scheduled workflow
+        # raise a spurious alarm on its first night.
+        if tolerate_missing and "not found" in summary.lower():
+            return ""
+        _GH_FAILED.append(f"gh {' '.join(args[:3])}: {summary}")
+        print(f"::error::gh {' '.join(args[:3])} failed: {summary}")
+    return proc.stdout
 
 
 def cadence(cron: str) -> str:
@@ -67,7 +88,15 @@ def scheduled_workflows() -> dict[str, str]:
         text = path.read_text()
         # Deliberately a regex rather than a YAML parse: `on:` parses as the
         # boolean True in YAML 1.1, which has bitten this repo's own tooling.
-        crons = re.findall(r"^\s*-\s*cron:\s*['\"]([^'\"]+)['\"]", text, re.M)
+        # Accepts quoted AND unquoted crons, and strips a trailing comment.
+        # Actions allows `cron: 0 8 * * *` bare, so a quoted-only regex would
+        # silently omit a future workflow — the same drift the derivation
+        # exists to prevent.
+        crons = [
+            m.strip().strip("'\"").strip()
+            for m in re.findall(r"^\s*-\s*cron:\s*([^#\n]+)", text, re.M)
+        ]
+        crons = [c for c in crons if c]
         if crons:
             out[path.name] = cadence(crons[0])
     return out
@@ -78,6 +107,7 @@ def latest_scheduled_run(workflow: str) -> dict | None:
         "run", "list", "--repo", REPO, "--workflow", workflow,
         "--event", "schedule", "--limit", "1",
         "--json", "conclusion,status,createdAt,databaseId,url",
+        tolerate_missing=True,
     )
     try:
         runs = json.loads(raw)
@@ -93,12 +123,20 @@ def main() -> int:
     ok: list[str] = []
 
     workflows = scheduled_workflows()
+    broken: list[str] = []
     if not workflows:
         # An empty list would otherwise report a clean bill of health while
         # checking nothing — the exact shape of vacuous pass this exists to
-        # prevent.
+        # prevent. Reported through the issue rather than as a job failure:
+        # exiting non-zero here would make the alarm one more failing
+        # scheduled workflow for nobody to notice, which is the problem it
+        # exists to solve.
         print("::error::found no scheduled workflows; the derivation is broken")
-        return 1
+        broken.append(
+            "- **the workflow derivation returned nothing** — "
+            "`scripts/nightly-health.py` found no `cron:` in `.github/workflows/*.yml`, "
+            "so nothing below was actually checked"
+        )
 
     for wf, period in sorted(workflows.items()):
         run = latest_scheduled_run(wf)
@@ -130,7 +168,7 @@ def main() -> int:
             ok.append(f"`{wf}`")
         print(f"{wf:24} {period:8} {concl:12} {age.days}d ago")
 
-    problems = failing + stale
+    problems = broken + failing + stale + [f"- tooling: {e}" for e in _GH_FAILED]
     body = [MARKER, ""]
     if problems:
         body.append(f"{len(problems)} scheduled workflow(s) need attention, as of {now:%Y-%m-%d %H:%M} UTC.")

@@ -107,18 +107,59 @@ jobs:
         run: |
           set -euo pipefail
           crate="${{ matrix.crate }}"
+
+          # Skip HIGH-REPETITION suites. The rule is not "skip proptest", it is
+          # "skip anything that runs one operation tens of thousands of times":
+          # Miri's cost is per executed step, so repetition is what turns a test
+          # into an outage. Two markers, both content-derived so a new suite of
+          # either kind is handled without editing this file:
+          #
+          #   proptest!            256+ cases per property. One 18-test binary
+          #                        took 5,951s on 2026-06-28.
+          #   spec/tla/behaviors   TLA+ corpus replay. 33,772 transitions across
+          #                        11 specs; 1.03s natively, and it had still
+          #                        not finished after 57 minutes under Miri
+          #                        (2026-07-31), consuming the whole budget and
+          #                        starving the target queued behind it.
+          #
+          # Neither loses meaningful coverage. Both exercise the same Inventory
+          # and Decimal paths the 444 lib tests already cover, just far more
+          # often; the marginal chance of the 33,772nd operation tripping UB
+          # that the first few hundred did not is negligible. Both keep their
+          # full strength in the normal test suite, and the TLA+ conformance
+          # story is owned by tla.yml regardless.
           targets=(--lib)
           for f in "crates/$crate/tests/"*.rs; do
             [ -e "$f" ] || continue
             name="$(basename "$f" .rs)"
             if grep -q 'proptest!' "$f"; then
-              echo "skipping $crate/$name (proptest: too slow under Miri)"
+              echo "skipping $crate/$name (proptest: repetition too costly under Miri)"
+            elif grep -q 'spec/tla/behaviors' "$f"; then
+              echo "skipping $crate/$name (TLA+ corpus replay: repetition too costly under Miri)"
             else
               targets+=(--test "$name")
             fi
           done
+
           echo "running: cargo miri test -p $crate ${targets[*]}"
-          cargo +nightly miri test --package "$crate" --all-features "${targets[@]}"
+          # Backstop: a per-invocation cap so the NEXT unexpectedly slow target
+          # is named and killed rather than silently eating the job budget the
+          # way tla_behavior_replay did. Deliberately fails rather than warning
+          # — a target too slow to run is a decision for a human, and a silent
+          # skip here is exactly how this job stayed dark for eight weeks.
+          # `rc=$?` inside `if ! cmd` would capture the NEGATION's status (0),
+          # not the command's — so the timeout branch below would never fire.
+          rc=0
+          timeout --signal=INT 2400 cargo +nightly miri test \
+            --package "$crate" --all-features "${targets[@]}" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            if [ "$rc" -eq 124 ] || [ "$rc" -eq 130 ]; then
+              echo "::error::Miri exceeded 40 minutes on $crate. Find which target"
+              echo "::error::is responsible in the log above and either optimize it or"
+              echo "::error::add a skip marker to the derivation in this workflow."
+            fi
+            exit "$rc"
+          fi
         env:
           # -Zmiri-disable-isolation: some tests read the realtime clock
           # (e.g. "today"-based date helpers), which miri rejects under its

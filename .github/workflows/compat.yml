@@ -707,6 +707,32 @@ jobs:
           # the fixtures fail to fetch. The live stale-mask gate runs inside the
           # main BQL step.
           python3 scripts/compat-bql-test.py --self-test
+      # Compare booked VALUES, not just shapes. The comprehensive test above
+      # compares `check_match`, `accounts_match`, `posting_count_match` and
+      # `error_presence_match` — how MANY postings there are and WHETHER there
+      # was an error. It never compares an amount, so a booking or
+      # interpolation bug that yields the right number of postings with the
+      # wrong numbers in them passes it silently. For an accounting tool that
+      # is the failure that matters most.
+      #
+      # Advisory, not gating: the first run surfaced two genuine divergences
+      # (#1909) and they need triage before this can block a merge. Flip
+      # `continue-on-error` off once the known set is at zero.
+      - name: Compare booked values against beancount
+        continue-on-error: true
+        run: |
+          python3 scripts/compat-values.py \
+            --rledger ./target/release/rledger \
+            --corpus tests/compatibility/files tests/regressions \
+            | tee compat-values.txt
+          {
+            echo "## Booked-value comparison"
+            echo ""
+            echo '```'
+            head -40 compat-values.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run BQL compatibility test
         id: bql_compat
         run: |

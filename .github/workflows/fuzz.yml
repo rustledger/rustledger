@@ -24,6 +24,7 @@ on:
       - 'crates/rustledger-parser/**'
       - 'crates/rustledger-query/**'
       - 'crates/rustledger-booking/**'
+      - 'crates/rustledger-loader/**'
       - 'crates/rustledger-ffi-wasi/**'
       - '.github/workflows/fuzz.yml'
   schedule:
@@ -49,6 +50,8 @@ on:
           - fuzz_query_parse
           - fuzz_query_execute
           - fuzz_booking
+          - fuzz_options
+          - fuzz_include_path
           - fuzz_input_entry
 permissions:
   contents: read
@@ -94,6 +97,10 @@ jobs:
             crate: rustledger-query
           - target: fuzz_booking
             crate: rustledger-booking
+          - target: fuzz_options
+            crate: rustledger-loader
+          - target: fuzz_include_path
+            crate: rustledger-loader
           - target: fuzz_input_entry
             crate: rustledger-ffi-wasi
     steps:

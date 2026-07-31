@@ -149,11 +149,18 @@ pub fn load_result_cached(
 /// Returns an error naming the file when the load reported any
 /// [`rustledger_loader::LoadError::ParseErrors`].
 pub fn bail_on_parse_errors(raw: &rustledger_loader::LoadResult, file: &Path) -> Result<()> {
-    let parse_failures = raw
+    // Sum the INNER errors, not the number of `ParseErrors` groups. There is
+    // one group per file, so counting groups would report "1 parse error" for
+    // a file with twenty, and for a tree of includes would count files rather
+    // than problems.
+    let parse_failures: usize = raw
         .errors
         .iter()
-        .filter(|e| matches!(e, rustledger_loader::LoadError::ParseErrors { .. }))
-        .count();
+        .filter_map(|e| match e {
+            rustledger_loader::LoadError::ParseErrors { errors, .. } => Some(errors.len()),
+            _ => None,
+        })
+        .sum();
     if parse_failures > 0 {
         anyhow::bail!(
             "{}: {parse_failures} parse error(s); refusing to report on a file that \

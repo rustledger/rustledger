@@ -89,6 +89,25 @@ fn validation_errors_still_report_as_beancount_does() {
         "2020-01-02 * \"x\"\n  Assets:A  5 USD\n  Assets:A -5 USD\n",
     );
 
+    // Precondition: the fixture must ACTUALLY fail validation, or this test
+    // passes while pinning nothing. `check` refuses it; `query` must not.
+    let checked = Command::new(AsRef::<std::path::Path>::as_ref(&bin))
+        .args(["check", &path])
+        .output()
+        .expect("run check");
+    assert!(
+        !checked.status.success(),
+        "fixture must fail validation for this test to mean anything"
+    );
+    assert!(
+        !String::from_utf8_lossy(&checked.stdout).contains("parse error")
+            && !String::from_utf8_lossy(&checked.stderr).contains("parse error"),
+        "...and must fail on VALIDATION, not parsing, or it is testing the \
+         other branch: {}{}",
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
+
     let out = Command::new(AsRef::<std::path::Path>::as_ref(&bin))
         .args(["query", "--format", "csv", &path, QUERY])
         .output()

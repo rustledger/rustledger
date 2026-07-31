@@ -22,16 +22,23 @@ use rustledger_loader::{Loader, VirtualFileSystem};
 use std::path::PathBuf;
 
 fuzz_target!(|include: String| {
-    // A `\0` cannot appear in a real path and makes the VFS keys ambiguous.
-    if include.contains('\0') {
+    // Escape EXACTLY what the Beancount lexer decodes, so the loader sees the
+    // fuzz string verbatim.
+    //
+    // `escape_default()` was wrong here: it emits `\u{..}` and `\x..`, which
+    // the lexer does not decode — on an unknown escape `decode_string_token`
+    // drops the backslash and keeps the character, so `\u{41}` reached the
+    // loader as the literal `u{41}`. The fuzzer was exploring a distorted
+    // space and reporting coverage it did not have.
+    let Some(literal) = escape_for_beancount(&include) else {
         return;
-    }
+    };
 
     let root = PathBuf::from("/ledger");
 
     let mut fs = VirtualFileSystem::new();
     // Inside the root: the legitimate ledger.
-    fs.add_file("/ledger/main.beancount", format!("include \"{}\"\n", include.escape_default()));
+    fs.add_file("/ledger/main.beancount", format!("include \"{literal}\"\n"));
     fs.add_file("/ledger/ok.beancount", "2020-01-01 open Assets:In\n");
     fs.add_file("/ledger/sub/ok.beancount", "2020-01-01 open Assets:Sub\n");
     // Outside the root: must never be reachable, however the include is spelled.
@@ -67,3 +74,26 @@ fuzz_target!(|include: String| {
         }
     }
 });
+
+/// Escape a string so the Beancount lexer reproduces it exactly.
+///
+/// The lexer decodes `\"`, `\\`, `\n`, `\t`, `\r` and, for any other
+/// escape, drops the backslash and keeps the character. So only those five
+/// may be emitted; a control character that is not one of them cannot survive
+/// the round trip, and cannot appear in a real path either, so those inputs
+/// are skipped rather than silently mangled.
+fn escape_for_beancount(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => return None,
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}

@@ -13,9 +13,10 @@
 //! - **Determinism.** The same key/value applied to two fresh `Options` must
 //!   produce the same warnings. A parser that depends on ambient state is
 //!   wrong in a way tests rarely catch.
-//! - **Idempotence of the error path.** Setting an option that WARNS must not
-//!   leave the value half-applied — a rejected option should not change what a
-//!   later reader sees relative to setting it twice.
+//! - **Warnings are never retracted.** Re-applying an option may add more
+//!   diagnosis (it does; see the note by that assertion), but a parser that
+//!   DROPPED a warning on re-application would be hiding a problem it had
+//!   already found.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -31,18 +32,13 @@ fuzz_target!(|data: (String, String)| {
     b.set(&key, &value);
 
     // Determinism: identical input, identical diagnosis.
+    // Compare the WHOLE warning, not just code and message: `OptionWarning`
+    // derives `PartialEq` and also carries `option` and `value`, so this
+    // catches a divergence that leaves the text identical.
     assert_eq!(
-        a.warnings.len(),
-        b.warnings.len(),
+        a.warnings, b.warnings,
         "Options::set is non-deterministic for key={key:?} value={value:?}"
     );
-    for (x, y) in a.warnings.iter().zip(b.warnings.iter()) {
-        assert_eq!(x.code, y.code, "warning code differs across identical runs");
-        assert_eq!(
-            x.message, y.message,
-            "warning message differs across identical runs"
-        );
-    }
 
     // NOT asserted: that re-applying an option produces the same diagnosis.
     // The first version of this target did, and the fuzzer refuted it in 45

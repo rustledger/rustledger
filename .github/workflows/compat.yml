@@ -721,6 +721,11 @@ jobs:
       - name: Compare booked values against beancount
         continue-on-error: true
         run: |
+          # `pipefail` because the pipe into `tee` would otherwise mask the
+          # script's exit status: a crashed comparison would leave an empty
+          # compat-values.txt and a green step, which is exactly the
+          # vacuous-pass shape this comparison exists to catch.
+          set -o pipefail
           python3 scripts/compat-values.py \
             --rledger ./target/release/rledger \
             --corpus tests/compatibility/files tests/regressions \

@@ -56,10 +56,16 @@ def beancount_totals(path: Path):
 
 
 def rledger_totals(binary: str, path: Path):
-    proc = subprocess.run(
-        [binary, "query", "--format", "csv", str(path), QUERY],
-        capture_output=True, text=True, timeout=120,
-    )
+    try:
+        proc = subprocess.run(
+            [binary, "query", "--format", "csv", str(path), QUERY],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        # One pathological file must not abort the sweep. Counting it as
+        # not-comparable keeps the other 700-odd results, which is the whole
+        # value of a corpus run.
+        return None
     if proc.returncode != 0:
         return None
     # `query` exits 0 even when the file failed to PARSE, emitting data from

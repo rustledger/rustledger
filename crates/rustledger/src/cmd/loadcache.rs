@@ -115,3 +115,52 @@ pub fn load_result_cached(
 
     Ok((result, false))
 }
+
+/// Refuse to report numbers derived from a file that failed to PARSE.
+///
+/// # Deliberate deviation from Python beancount
+///
+/// bean-query does NOT do this. Given a file with a lexer error it prints the
+/// rows it could recover and exits 0, and beancount's loader likewise returns
+/// the transactions it managed to parse. rledger matched that faithfully until
+/// #1908.
+///
+/// We deviate because the output is not merely incomplete, it is *plausible*:
+/// a truncated ledger yields numbers that look like an answer, with a success
+/// status, on stdout that another program is probably consuming. For a tool
+/// whose entire job is producing figures people rely on, confidently wrong is
+/// worse than loudly broken. `rledger check` already refuses the same file, so
+/// tolerating it here also made the CLI contradict itself: one command calls a
+/// file unusable while another reports on it and claims success.
+///
+/// Scoped deliberately to PARSE errors. Validation errors — an account never
+/// opened, a failed balance assertion — leave the entry stream complete and
+/// the arithmetic sound, so those still report exactly as beancount does. That
+/// is the common messy-ledger case and breaking it would be a real
+/// compatibility loss for no safety gain.
+///
+/// Deliberately NOT registered under `KNOWN_RUST_DIVERGENCES`: the BQL compat
+/// suite's `load_valid_files` already requires `python_ok AND rust_ok`, so a
+/// file neither tool can parse never reaches that comparison. Adding an entry
+/// would imply a divergence the metric can never observe.
+///
+/// # Errors
+///
+/// Returns an error naming the file when the load reported any
+/// [`rustledger_loader::LoadError::ParseErrors`].
+pub fn bail_on_parse_errors(raw: &rustledger_loader::LoadResult, file: &Path) -> Result<()> {
+    let parse_failures = raw
+        .errors
+        .iter()
+        .filter(|e| matches!(e, rustledger_loader::LoadError::ParseErrors { .. }))
+        .count();
+    if parse_failures > 0 {
+        anyhow::bail!(
+            "{}: {parse_failures} parse error(s); refusing to report on a file that \
+             did not parse. Run `rledger check {}` to see them.",
+            file.display(),
+            file.display(),
+        );
+    }
+    Ok(())
+}

@@ -168,6 +168,8 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     // `BEANCOUNT_DISABLE_LOAD_CACHE`.
     let (raw, _from_cache) =
         crate::cmd::loadcache::load_result_cached(file, args.no_cache, args.verbose)?;
+    // Deliberate deviation from bean-query (#1908) — see `bail_on_parse_errors`.
+    crate::cmd::loadcache::bail_on_parse_errors(&raw, file)?;
     let ledger = rustledger_loader::process(raw, &options)
         .with_context(|| format!("failed to load {}", file.display()))?;
 

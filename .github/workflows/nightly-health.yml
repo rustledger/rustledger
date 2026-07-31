@@ -1,0 +1,33 @@
+# Surface scheduled workflows that are failing or have stopped running.
+#
+# Miri failed every week from 2026-06-07 to 2026-07-26 and nobody noticed:
+# four genuine failures, then four six-hour timeouts reported as `cancelled`,
+# which reads like an infrastructure hiccup rather than a job that no longer
+# fits. Mutation has been failing since 2026-07-01. Nothing in the repository
+# turned either into a signal a human would see — the only `if: failure()`
+# steps anywhere upload artifacts.
+#
+# Runs at 08:00 UTC, after every nightly has finished (the latest is kani at
+# 06:00 Sunday), so it reports on the current night rather than yesterday's.
+name: Nightly Health
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+defaults:
+  run:
+    shell: bash
+jobs:
+  health:
+    name: Scheduled workflow health
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check scheduled workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/nightly-health.py

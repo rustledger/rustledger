@@ -161,31 +161,66 @@ pub fn validate_transaction_structure(
     }
 
     // Check for multiple missing amounts per currency (E3002).
-    // If >1 posting is missing an amount for the same currency, interpolation
-    // is ambiguous. We detect this by looking at postings where `amount()` is
-    // None AND the posting has no units at all (fully elided amount).
+    //
+    // Interpolation solves one unknown per currency group, so two elided
+    // postings are only ambiguous when they compete for the SAME residual.
+    // The grouping comes from `rustledger_booking::elided_unknown_groups` --
+    // the same function `interpolate` solves by -- rather than being re-derived
+    // here. It cannot be eyeballed from the posting: a per-unit cost or price
+    // redenominates the weight, so `HOOL {300.00 USD}` is an unknown in USD,
+    // not in HOOL (#1911).
+    //
+    // This block previously grouped by the units currency and then summed
+    // across every group, rejecting two elided postings that were in different
+    // currencies entirely (#1914). The grouping was also never populated: the
+    // hint used `as_amount()`, which is `None` for exactly the partial-units
+    // postings the rule is about, so everything landed in one bucket.
     {
-        let mut missing_count: FxHashMap<Option<&rustledger_core::Currency>, u32> =
-            FxHashMap::default();
-        for posting in &txn.postings {
-            if posting.amount().is_none() {
-                // Group by the currency hint from partial units, or None for fully elided
-                let currency = posting
-                    .units
-                    .as_ref()
-                    .and_then(|u| u.as_amount())
-                    .map(|a| &a.currency);
-                *missing_count.entry(currency).or_default() += 1;
+        let groups = rustledger_booking::elided_unknown_groups(txn);
+        let mut per_currency: FxHashMap<&rustledger_core::Currency, u32> = FxHashMap::default();
+        let mut unassigned = 0_u32;
+        for (_, group) in &groups {
+            match group {
+                rustledger_booking::UnknownGroup::Currency(c) => {
+                    *per_currency.entry(c).or_default() += 1;
+                }
+                rustledger_booking::UnknownGroup::Unassigned => unassigned += 1,
             }
         }
-        // If any group has >1 missing, or there are multiple groups of missing amounts
-        let total_missing: u32 = missing_count.values().sum();
-        if total_missing > 1 {
+
+        // A fully-elided posting has no currency of its own, so it can absorb
+        // any residual -- including one another unknown is already claiming.
+        // Beancount refuses the combination outright ("CategorizationError"),
+        // and so do we: more than one unknown in play alongside one is
+        // ambiguous no matter which currencies the others sit in.
+        let ambiguous = if unassigned > 0 {
+            groups.len() > 1
+        } else {
+            per_currency.values().any(|&n| n > 1)
+        };
+
+        if ambiguous {
+            let detail = per_currency
+                .iter()
+                .filter(|&(_, &n)| n > 1)
+                .map(|(c, n)| format!("{n} in {c}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let message = if detail.is_empty() {
+                format!(
+                    "Transaction has {} postings with missing amounts; at most one is allowed \
+                     when any of them has no currency to interpolate in",
+                    groups.len()
+                )
+            } else {
+                format!(
+                    "Transaction has multiple postings with missing amounts in the same \
+                     currency ({detail}); at most one per currency is allowed"
+                )
+            };
             errors.push(ValidationError::new(
                 ErrorCode::MultipleInterpolation,
-                format!(
-                    "Transaction has {total_missing} postings with missing amounts; at most one is allowed"
-                ),
+                message,
                 txn.date,
             ));
         }

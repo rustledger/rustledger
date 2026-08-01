@@ -30,7 +30,9 @@ pub use book::{
     BookedTransaction, BookingEngine, BookingError, CapitalGain, LedgerBookResult, book,
     book_transactions,
 };
-pub use interpolate::{InterpolationError, InterpolationResult, interpolate};
+pub use interpolate::{
+    InterpolationError, InterpolationResult, UnknownGroup, elided_unknown_groups, interpolate,
+};
 pub use pad::{
     PadError, PadResult, SYNTH_PAD_NARRATION_PREFIX, is_synthesized_pad, merge_with_padding,
     merge_with_padding_spanned, process_pads,

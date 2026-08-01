@@ -296,6 +296,100 @@ fn units_weight(
     UnitsWeight::Units
 }
 
+/// The currency a `NumberOnly` posting (`10 {300.00 USD}`) is denominated in:
+/// the cost currency, else the price currency. `None` means the number cannot
+/// be placed in a currency group yet.
+fn number_only_currency(posting: &rustledger_core::Posting) -> Option<Currency> {
+    posting
+        .cost
+        .as_ref()
+        .and_then(|c| c.currency.clone())
+        .or_else(|| {
+            // Pull currency from the price's complete amount, regardless of
+            // kind. Incomplete/empty prices contribute nothing here.
+            posting
+                .price
+                .as_ref()
+                .and_then(|p| p.amount.as_ref())
+                .and_then(IncompleteAmount::as_amount)
+                .map(|a| a.currency.clone())
+        })
+}
+
+/// Which residual an elided posting's unknown will be solved from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnknownGroup {
+    /// Solved from this currency's residual. For a posting carrying a per-unit
+    /// cost or price this is the COST/PRICE currency, not the units currency
+    /// (#1911) — that is the whole reason this cannot be eyeballed from the
+    /// posting's units.
+    Currency(Currency),
+    /// A fully-elided posting (`Assets:Cash` with no amount at all). Which
+    /// currency it absorbs is not knowable until the residuals are, so
+    /// interpolation assigns it late — and may split it across several
+    /// currencies.
+    Unassigned,
+}
+
+/// The currency group each of `txn`'s elided postings will be solved in.
+///
+/// **Canonical grouping.** [`interpolate`] solves per this grouping, and
+/// `rustledger-validate`'s E3002 check enforces "at most one unknown per group"
+/// against it. Both go through the same private `units_weight` classifier in
+/// this module, so the rule cannot drift
+/// between the pre-booking diagnostic and the solver that actually runs
+/// (#1914 — the validator previously grouped by the posting's own units
+/// currency, then summed across groups anyway, and rejected two elided
+/// postings that were in different currencies entirely).
+///
+/// Postings with a complete amount are omitted, as are shapes that
+/// [`interpolate`] refuses outright ([`InterpolationError::UnsolvableUnits`]):
+/// those get a precise message naming the offending annotation, which a
+/// generic "too many unknowns" would only obscure.
+#[must_use]
+pub fn elided_unknown_groups(txn: &Transaction) -> Vec<(usize, UnknownGroup)> {
+    let mut inferred_cost_currency: Option<Option<Currency>> = None;
+    let mut groups = Vec::new();
+
+    for (i, posting) in txn.postings.iter().enumerate() {
+        match &posting.units {
+            // Nothing to solve.
+            Some(IncompleteAmount::Complete(_)) => {}
+            Some(IncompleteAmount::CurrencyOnly(units_currency)) => {
+                match units_weight(posting, || {
+                    inferred_cost_currency
+                        .get_or_insert_with(|| crate::infer_cost_currency_from_postings(txn))
+                        .clone()
+                }) {
+                    UnitsWeight::Units => {
+                        groups.push((i, UnknownGroup::Currency(units_currency.clone())));
+                    }
+                    UnitsWeight::Scaled { currency, .. } => {
+                        groups.push((i, UnknownGroup::Currency(currency)));
+                    }
+                    UnitsWeight::Undetermined { .. } => {}
+                }
+            }
+            // A number with a currency in reach is not an unknown at all — it
+            // lands in that group as a known contribution.
+            Some(IncompleteAmount::NumberOnly(_)) => {
+                if number_only_currency(posting).is_none() {
+                    groups.push((i, UnknownGroup::Unassigned));
+                }
+            }
+            // A cost spec here is refused by `interpolate` (no commodity to
+            // write the solved number in), so it is not grouped.
+            None => {
+                if posting.cost.is_none() {
+                    groups.push((i, UnknownGroup::Unassigned));
+                }
+            }
+        }
+    }
+
+    groups
+}
+
 /// Interpolate missing amounts in a transaction.
 ///
 /// This function:
@@ -655,25 +749,8 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                 }
             }
             Some(IncompleteAmount::NumberOnly(number)) => {
-                // Number known, currency to be inferred
-                // Try to get currency from cost or price
-                let currency = posting
-                    .cost
-                    .as_ref()
-                    .and_then(|c| c.currency.clone())
-                    .or_else(|| {
-                        // Pull currency from the price's complete amount,
-                        // regardless of kind. Incomplete/empty prices
-                        // contribute nothing here.
-                        posting
-                            .price
-                            .as_ref()
-                            .and_then(|p| p.amount.as_ref())
-                            .and_then(IncompleteAmount::as_amount)
-                            .map(|a| a.currency.clone())
-                    });
-
-                if let Some(curr) = currency {
+                // Number known, currency to be inferred from cost or price.
+                if let Some(curr) = number_only_currency(posting) {
                     // We have currency from context, make it complete
                     *residuals.entry(curr.clone()).or_default() += *number;
                 } else {
@@ -2693,5 +2770,116 @@ mod tests {
             }
             other => panic!("expected MultipleMissing in USD, got {other:?}"),
         }
+    }
+
+    // ---- #1914: the canonical grouping the E3002 validator enforces ----
+
+    /// The grouping is not eyeballable from the posting: a per-unit cost
+    /// redenominates the weight, so `HOOL {300.00 USD}` is an unknown in USD.
+    #[test]
+    fn elided_groups_use_the_weight_currency_not_the_units_currency() {
+        let txn = Transaction::new(date(2010, 5, 28), "Buy")
+            .with_synthesized_posting(
+                units_currency_only("Assets:Stock", "HOOL")
+                    .with_cost(per_unit_cost(dec!(300.00), "USD")),
+            )
+            .with_synthesized_posting(units_currency_only("Assets:Euro", "EUR"))
+            .with_synthesized_posting(Posting::new("Assets:C", Amount::new(dec!(-600.00), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:D", Amount::new(dec!(-50.00), "EUR")));
+
+        let groups = elided_unknown_groups(&txn);
+        assert_eq!(
+            groups,
+            vec![
+                (0, UnknownGroup::Currency("USD".into())),
+                (1, UnknownGroup::Currency("EUR".into())),
+            ],
+            "the cost posting belongs to USD (where its weight lands), not HOOL"
+        );
+    }
+
+    /// A fully-elided posting cannot be placed until the residuals are known.
+    /// A `NumberOnly` posting with a currency in reach is not an unknown at all.
+    #[test]
+    fn elided_groups_classify_bare_and_number_only_postings() {
+        let mut number_only = Posting::auto("Assets:WithCost");
+        number_only.units = Some(IncompleteAmount::NumberOnly(dec!(10)));
+        let number_only = number_only.with_cost(per_unit_cost(dec!(300.00), "USD"));
+
+        let mut naked_number = Posting::auto("Assets:Naked");
+        naked_number.units = Some(IncompleteAmount::NumberOnly(dec!(10)));
+
+        let txn = Transaction::new(date(2010, 5, 28), "Mixed")
+            .with_synthesized_posting(Posting::auto("Assets:Bare"))
+            .with_synthesized_posting(number_only)
+            .with_synthesized_posting(naked_number)
+            .with_synthesized_posting(Posting::new("Assets:C", Amount::new(dec!(-600.00), "USD")));
+
+        let groups = elided_unknown_groups(&txn);
+        assert_eq!(
+            groups,
+            vec![(0, UnknownGroup::Unassigned), (2, UnknownGroup::Unassigned)],
+            "index 1 has a cost currency to land in, so it is not an unknown; \
+             index 3 is complete"
+        );
+    }
+
+    /// Drift guard. If this grouping ever disagrees with the one `interpolate`
+    /// actually solves by, the E3002 validator starts rejecting transactions
+    /// the solver would have handled — which is exactly bug #1914. Two unknowns
+    /// the grouping calls same-currency MUST make `interpolate` say so too, and
+    /// two it calls disjoint MUST interpolate cleanly.
+    #[test]
+    fn elided_groups_agree_with_what_interpolate_solves() {
+        let same = Transaction::new(date(2010, 5, 28), "Same group")
+            .with_synthesized_posting(
+                units_currency_only("Assets:Stock", "HOOL")
+                    .with_cost(per_unit_cost(dec!(300.00), "USD")),
+            )
+            .with_synthesized_posting(units_currency_only("Assets:Cash", "USD"))
+            .with_synthesized_posting(Posting::new("Assets:C", Amount::new(dec!(-600.00), "USD")));
+
+        let groups = elided_unknown_groups(&same);
+        let usd = UnknownGroup::Currency("USD".into());
+        assert_eq!(
+            groups.iter().filter(|(_, g)| *g == usd).count(),
+            2,
+            "grouping must see both unknowns in USD"
+        );
+        match interpolate(&same) {
+            Err(InterpolationError::MultipleMissing { currency, count }) => {
+                assert_eq!(
+                    currency,
+                    Currency::from("USD"),
+                    "same currency the grouping named"
+                );
+                assert_eq!(count, 2);
+            }
+            other => panic!("grouping says ambiguous in USD; interpolate says {other:?}"),
+        }
+
+        let disjoint = Transaction::new(date(2010, 5, 28), "Disjoint groups")
+            .with_synthesized_posting(
+                units_currency_only("Assets:Stock", "HOOL")
+                    .with_cost(per_unit_cost(dec!(300.00), "USD")),
+            )
+            .with_synthesized_posting(units_currency_only("Assets:Euro", "EUR"))
+            .with_synthesized_posting(Posting::new("Assets:C", Amount::new(dec!(-600.00), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:D", Amount::new(dec!(-50.00), "EUR")));
+
+        let groups = elided_unknown_groups(&disjoint);
+        let mut seen: Vec<_> = groups.iter().map(|(_, g)| g.clone()).collect();
+        seen.dedup();
+        assert_eq!(seen.len(), 2, "grouping must see two distinct groups");
+        let result = interpolate(&disjoint).expect("disjoint groups interpolate cleanly");
+        assert_eq!(
+            get_amount(&result.transaction.postings[0]).map(|a| a.number),
+            Some(dec!(2)),
+            "600.00 / 300.00"
+        );
+        assert_eq!(
+            get_amount(&result.transaction.postings[1]).map(|a| a.number),
+            Some(dec!(50.00))
+        );
     }
 }

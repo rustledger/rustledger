@@ -2902,6 +2902,101 @@ mod tests {
         );
     }
 
+    /// #1914: two elided postings in DIFFERENT currency groups are fine —
+    /// interpolation solves one unknown per group, so they never compete.
+    /// This block used to build a per-currency map and then sum across it,
+    /// rejecting the pair outright.
+    #[test]
+    fn test_e3002_two_missing_in_different_currencies_ok() {
+        let elided = |account: &str, currency: &str| Posting {
+            account: account.into(),
+            units: Some(rustledger_core::IncompleteAmount::CurrencyOnly(
+                currency.into(),
+            )),
+            cost: None,
+            price: None,
+            flag: None,
+            meta: Default::default(),
+            comments: vec![],
+            trailing_comments: vec![],
+        };
+
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:A")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:B")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:C")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:D")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "Two currencies")
+                    .with_synthesized_posting(elided("Assets:A", "USD"))
+                    .with_synthesized_posting(elided("Assets:B", "EUR"))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:C",
+                        Amount::new(dec!(-600.00), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:D",
+                        Amount::new(dec!(-50.00), "EUR"),
+                    )),
+            ),
+        ];
+
+        let errors = validate(&directives);
+
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.code == ErrorCode::MultipleInterpolation),
+            "USD and EUR unknowns do not compete; got: {errors:?}"
+        );
+    }
+
+    /// The same shape in ONE currency is still ambiguous, so the rule did not
+    /// simply get weaker.
+    #[test]
+    fn test_e3002_two_missing_in_same_currency_still_rejected() {
+        let elided = |account: &str, currency: &str| Posting {
+            account: account.into(),
+            units: Some(rustledger_core::IncompleteAmount::CurrencyOnly(
+                currency.into(),
+            )),
+            cost: None,
+            price: None,
+            flag: None,
+            meta: Default::default(),
+            comments: vec![],
+            trailing_comments: vec![],
+        };
+
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:A")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:B")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:C")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "One currency")
+                    .with_synthesized_posting(elided("Assets:A", "USD"))
+                    .with_synthesized_posting(elided("Assets:B", "USD"))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:C",
+                        Amount::new(dec!(-600.00), "USD"),
+                    )),
+            ),
+        ];
+
+        let errors = validate(&directives);
+
+        let e3002: Vec<_> = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::MultipleInterpolation)
+            .collect();
+        assert_eq!(e3002.len(), 1, "still ambiguous, got: {errors:?}");
+        assert!(
+            e3002[0].message.contains("USD"),
+            "the message should name the contested currency, got: {}",
+            e3002[0].message
+        );
+    }
+
     #[test]
     fn test_e7001_unknown_option() {
         // E7001: import_option_warnings converts loader warnings to validation errors

@@ -387,11 +387,23 @@ fn bare_price_currency(
             if i == self_index {
                 continue;
             }
-            let currency = crate::price_currency_of(posting).or_else(|| match &posting.units {
-                Some(IncompleteAmount::Complete(amount)) => Some(amount.currency.clone()),
-                Some(IncompleteAmount::CurrencyOnly(currency)) => Some(currency.clone()),
-                _ => None,
-            });
+            // Cost beats price beats units, the same ladder the residual scan
+            // walks. A cost-bearing posting weighs in its COST currency, so
+            // `HOOL {300.00 USD}` offers USD and never HOOL; reading the
+            // commodity off its units would put this sigil in a different
+            // group from a posting it actually competes with, and downgrade a
+            // "too many unknowns in USD" into a bare imbalance report. When a
+            // `{}` spec names no currency there is no candidate to offer, so
+            // contribute none rather than guess.
+            let currency = if posting.cost.is_some() {
+                crate::cost_currency_of(posting, || None)
+            } else {
+                crate::price_currency_of(posting).or_else(|| match &posting.units {
+                    Some(IncompleteAmount::Complete(amount)) => Some(amount.currency.clone()),
+                    Some(IncompleteAmount::CurrencyOnly(currency)) => Some(currency.clone()),
+                    _ => None,
+                })
+            };
             if let Some(currency) = currency
                 && !weights.contains(&currency)
             {
@@ -3335,5 +3347,34 @@ mod tests {
             Some(dec!(-50.00)),
             "the real imbalance survives to be reported"
         );
+    }
+
+    /// The fallback candidate list must use each posting's WEIGHT currency,
+    /// which for a cost-bearing posting is the COST currency. `HOOL {300.00
+    /// USD}` offers USD, never HOOL.
+    ///
+    /// Reading the commodity off its units instead put this sigil in a HOOL
+    /// group and the cost posting in a USD one, so two unknowns that genuinely
+    /// compete looked disjoint and the transaction was reported as a bare
+    /// imbalance rather than as over-constrained. Caught in review of #1919.
+    #[test]
+    fn bare_price_fallback_uses_cost_currency_not_units_currency() {
+        let mut elided_at_cost = Posting::auto("Assets:B");
+        elided_at_cost.units = Some(IncompleteAmount::CurrencyOnly("HOOL".into()));
+        let elided_at_cost = elided_at_cost.with_cost(per_unit_cost(dec!(300.00), "USD"));
+
+        // Every other posting is itself an unknown, so all residuals are zero
+        // and the fallback path is the one that runs.
+        let txn = Transaction::new(date(2010, 5, 28), "Both weigh in USD")
+            .with_synthesized_posting(bare_unit_price("Assets:A", dec!(100.00), "USD"))
+            .with_synthesized_posting(elided_at_cost);
+
+        match interpolate(&txn) {
+            Err(InterpolationError::MultipleMissing { currency, count }) => {
+                assert_eq!(currency, Currency::from("USD"), "not HOOL");
+                assert_eq!(count, 2, "the bare sigil AND the cost posting's units");
+            }
+            other => panic!("expected MultipleMissing in USD, got {other:?}"),
+        }
     }
 }

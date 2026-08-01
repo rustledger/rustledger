@@ -2163,3 +2163,64 @@ fn test_e1001_dedup_is_per_posting_not_account_date() {
         ledger.errors
     );
 }
+
+/// #1911 end-to-end: a units number elided next to a per-unit cost must be
+/// solved from the COST currency's residual and booked as a real lot.
+///
+/// The unit tests in `rustledger-booking` pin `interpolate` itself; this pins
+/// the whole pipeline (parse -> interpolate -> book -> validate), which is where
+/// the bug was found. Before the fix the posting was registered under HOOL,
+/// solved to `0 HOOL`, pruned, and the transaction was reported as unbalanced
+/// by the full `-600.00 USD`.
+#[test]
+fn test_units_number_elided_with_cost_is_solved_and_booked() {
+    use rustledger_loader::{LoadOptions, process};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("issue1911.beancount");
+    std::fs::write(
+        &path,
+        "2010-01-01 open Assets:Account1\n\
+         2010-01-01 open Assets:Account2\n\
+         \n\
+         2010-05-28 * \"units number elided beside a per-unit cost\"\n  \
+         Assets:Account1            HOOL {300.00 USD}\n  \
+         Assets:Account2    -600.00 USD\n",
+    )
+    .unwrap();
+
+    let raw = rustledger_loader::load_raw(&path).expect("load raw");
+    let ledger = process(raw, &LoadOptions::default()).expect("process");
+
+    assert!(
+        ledger.errors.is_empty(),
+        "should balance once the units are solved, got {:?}",
+        ledger.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+
+    let txn = ledger
+        .directives
+        .iter()
+        .find_map(|d| match &d.value {
+            rustledger_core::Directive::Transaction(t) => Some(t),
+            _ => None,
+        })
+        .expect("the transaction survived booking");
+
+    let stock = txn
+        .postings
+        .iter()
+        .find(|p| p.account.as_str() == "Assets:Account1")
+        .expect("the cost-carrying posting was not pruned");
+    let units = stock.amount().expect("units were filled in");
+
+    assert_eq!(
+        units.number,
+        rust_decimal_macros::dec!(2),
+        "600.00 / 300.00"
+    );
+    assert_eq!(
+        units.currency, "HOOL",
+        "written in the posting's own commodity, not the cost currency"
+    );
+}

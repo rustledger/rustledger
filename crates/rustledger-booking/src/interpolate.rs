@@ -60,6 +60,21 @@ pub enum InterpolationError {
         candidates: String,
     },
 
+    /// A posting's units number is missing and cannot be recovered from the
+    /// balance, because the posting's weight does not vary with that number
+    /// (#1911). See [`UnitsWeight::Undetermined`] for the cases.
+    ///
+    /// Reported rather than left unfilled: `validate_transaction_balance` skips
+    /// a transaction that still has an unfilled posting, so staying silent here
+    /// would accept an unbalanced transaction.
+    #[error("cannot interpolate the units number for the {account} posting: {reason}")]
+    UnsolvableUnits {
+        /// The account of the posting whose units could not be solved.
+        account: rustledger_core::Account,
+        /// Why the balance does not determine the number.
+        reason: &'static str,
+    },
+
     /// Cannot infer currency for a posting.
     #[error("cannot infer currency for posting to account {account}")]
     CannotInferCurrency {
@@ -151,6 +166,132 @@ fn round_interpolated(residual: Decimal, existing_scale: Option<u32>) -> Decimal
     } else {
         interpolated
     }
+}
+
+/// How a units-missing posting's balance weight depends on the number we are
+/// about to solve for.
+///
+/// The number is recovered from a residual, so the question is always "which
+/// currency's residual, and scaled by what?". For a plain posting the weight
+/// IS the units, and the answer is the units currency's residual unchanged.
+/// For a posting carrying a cost or price the weight is `units × multiplier`
+/// denominated in the cost/price currency, so the number is that currency's
+/// residual DIVIDED by the multiplier, written back in the posting's own units
+/// currency (#1911).
+///
+/// This mirrors the weight ladder in [`crate::cost_weight`] /
+/// [`crate::cost_number_weight_generic`] — inverted. A new `CostNumber` variant
+/// must be classified here as well as given a weight there; the `_ =>` arm
+/// below fails closed (refuse to solve) rather than guessing a multiplier.
+enum UnitsWeight {
+    /// `weight = units`, in the posting's own units currency: a plain posting,
+    /// or one whose price annotation is too incomplete to convert (matching the
+    /// "fall back to units" arm of the complete-units branch).
+    Units,
+    /// `weight = units × multiplier`, in `currency`. Only ever constructed with
+    /// a NON-ZERO multiplier, which is what makes the inverting division safe.
+    Scaled {
+        /// The currency the weight lands in, whose residual we solve from.
+        currency: Currency,
+        /// The non-zero per-unit factor.
+        multiplier: Decimal,
+    },
+    /// The weight does not depend on the units number, so no number can be
+    /// recovered from any residual. Carries the user-facing explanation.
+    ///
+    /// A total cost (`{{600 USD}}`) or total price (`@@ 600 USD`) contributes a
+    /// CONSTANT weight — every units number balances equally, so the input is
+    /// genuinely ambiguous rather than merely hard. A zero per-unit factor
+    /// collapses the weight to zero for the same reason. An empty `{}` spec has
+    /// no number to divide by, and a compound `{a # b}` weight
+    /// (`units×a + b×signum(units)`) admits two roots; we refuse rather than
+    /// pick one.
+    ///
+    /// Python beancount does not diagnose these — it crashes: `TypeError: bad
+    /// operand type for abs(): 'type'` on a total or zero cost, and
+    /// `AssertionError: Internal error; residual currency different than
+    /// missing currency` on a zero price. We report
+    /// [`InterpolationError::UnsolvableUnits`] instead.
+    ///
+    /// This MUST be an error and not a silent skip: `validate_transaction_balance`
+    /// deliberately returns without checking a transaction that still has an
+    /// unfilled posting, on the documented assumption that interpolation already
+    /// reported the real failure. Leaving one unfilled and quiet would accept an
+    /// unbalanced transaction outright.
+    Undetermined {
+        /// Why no number can be recovered, phrased for the ledger author.
+        reason: &'static str,
+    },
+}
+
+/// Classify how `posting`'s weight scales with its (missing) units number.
+fn units_weight(
+    posting: &rustledger_core::Posting,
+    infer_currency: impl FnOnce() -> Option<Currency>,
+) -> UnitsWeight {
+    // Cost beats price, exactly as in `cost_weight`: a posting with both
+    // annotations weighs at cost, so the price is not what we invert.
+    if let Some(cost_spec) = posting.cost.as_ref() {
+        return match cost_spec.number {
+            Some(CostNumber::PerUnit { value }) if !value.is_zero() => {
+                match crate::cost_currency_of(posting, infer_currency) {
+                    Some(currency) => UnitsWeight::Scaled {
+                        currency,
+                        multiplier: value,
+                    },
+                    // A per-unit cost whose currency we cannot name gives us a
+                    // multiplier but no residual to apply it to.
+                    None => UnitsWeight::Undetermined {
+                        reason: "the cost currency cannot be determined, so there is no \
+                                 residual to solve from; name it explicitly (e.g. `{300.00 USD}`)",
+                    },
+                }
+            }
+            Some(CostNumber::PerUnit { .. }) => UnitsWeight::Undetermined {
+                reason: "a zero per-unit cost makes every units number weigh zero, \
+                         so the balance cannot single one out",
+            },
+            Some(CostNumber::Total { .. } | CostNumber::PerUnitFromTotal(_)) => {
+                UnitsWeight::Undetermined {
+                    reason: "a total cost `{{...}}` contributes the same weight whatever the \
+                             units are, so the balance cannot single one out; write the cost \
+                             per unit (`{...}`) or state the units",
+                }
+            }
+            Some(CostNumber::Compound { .. }) => UnitsWeight::Undetermined {
+                reason: "a compound cost `{a # b}` can balance at two different \
+                         units numbers, one positive and one negative",
+            },
+            None => UnitsWeight::Undetermined {
+                reason: "an empty cost spec `{}` has no cost number to solve against, \
+                         and its own value is not known until lot matching",
+            },
+        };
+    }
+
+    if let Some(price) = posting.price.as_ref()
+        && let Some(price_amt) = price.amount.as_ref().and_then(IncompleteAmount::as_amount)
+    {
+        return match price.kind {
+            rustledger_core::PriceKind::Unit if !price_amt.number.is_zero() => {
+                UnitsWeight::Scaled {
+                    currency: price_amt.currency.clone(),
+                    multiplier: price_amt.number,
+                }
+            }
+            rustledger_core::PriceKind::Unit => UnitsWeight::Undetermined {
+                reason: "a zero per-unit price makes every units number weigh zero, \
+                         so the balance cannot single one out",
+            },
+            rustledger_core::PriceKind::Total => UnitsWeight::Undetermined {
+                reason: "a total price `@@ ...` contributes the same weight whatever the \
+                         units are, so the balance cannot single one out; write the price \
+                         per unit (`@ ...`) or state the units",
+            },
+        };
+    }
+
+    UnitsWeight::Units
 }
 
 /// Interpolate missing amounts in a transaction.
@@ -263,6 +404,14 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // Each is solved post-loop, but only when it is the SOLE unknown in its
     // cost currency group (else the group already errored on the count rule).
     let mut inferable_cost: Vec<(usize, Currency, Decimal)> = Vec::new();
+
+    // Units-missing postings whose weight is `units × multiplier` in some other
+    // currency (a per-unit cost or price): `index -> (units currency, factor)`.
+    // Their entry in `missing_by_currency` is keyed by the WEIGHT currency, so
+    // the fill step needs this to divide back out and to name the commodity it
+    // writes (#1911). Empty for every posting that weighs at its own units,
+    // which is the overwhelming majority — `HashMap::new` does not allocate.
+    let mut scaled_missing: HashMap<usize, (Currency, Decimal)> = HashMap::new();
 
     for (i, posting) in transaction.postings.iter().enumerate() {
         match &posting.units {
@@ -470,12 +619,38 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                     );
                 }
             }
-            Some(IncompleteAmount::CurrencyOnly(currency)) => {
-                // Currency known, number to be interpolated
-                missing_by_currency
-                    .entry(currency.clone())
-                    .or_default()
-                    .push(i);
+            Some(IncompleteAmount::CurrencyOnly(units_currency)) => {
+                // Currency known, number to be interpolated. The number comes
+                // from the residual of whichever currency this posting's WEIGHT
+                // lands in — the units currency only when no cost or price
+                // redenominates it (#1911).
+                match units_weight(posting, || {
+                    get_inferred_currency(&mut inferred_cost_currency)
+                }) {
+                    UnitsWeight::Units => {
+                        missing_by_currency
+                            .entry(units_currency.clone())
+                            .or_default()
+                            .push(i);
+                    }
+                    UnitsWeight::Scaled {
+                        currency,
+                        multiplier,
+                    } => {
+                        scaled_missing.insert(i, (units_currency.clone(), multiplier));
+                        missing_by_currency.entry(currency).or_default().push(i);
+                    }
+                    UnitsWeight::Undetermined { reason } => {
+                        // Unconditionally unsolvable: the multiplier is a
+                        // property of this posting alone, so no other posting
+                        // can rescue it and there is nothing to gain by
+                        // deferring the report.
+                        return Err(InterpolationError::UnsolvableUnits {
+                            account: posting.account.clone(),
+                            reason,
+                        });
+                    }
+                }
             }
             Some(IncompleteAmount::NumberOnly(number)) => {
                 // Number known, currency to be inferred
@@ -505,15 +680,21 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                 }
             }
             None => {
-                // Missing amount - try to determine currency from cost
-                if let Some(cost_spec) = &posting.cost
-                    && let Some(currency) = &cost_spec.currency
-                {
-                    missing_by_currency
-                        .entry(currency.clone())
-                        .or_default()
-                        .push(i);
-                    continue;
+                // No units at all. A cost spec names the COST currency, never
+                // the commodity being bought, so there is nothing to denominate
+                // a solved number in. Filling the cost currency here fabricated
+                // a lot: a bare `{300.00 USD}` became `600.00 USD {300.00 USD}`
+                // and the resulting imbalance was reported as an invented
+                // `179400.0000 USD`. Python beancount refuses the shape
+                // ("CategorizationError"); we count it as an unsolvable unknown
+                // so the user gets a balance error instead of fiction.
+                if posting.cost.is_some() {
+                    return Err(InterpolationError::UnsolvableUnits {
+                        account: posting.account.clone(),
+                        reason: "a cost spec names the cost currency, not the commodity being \
+                                 bought, so there is no currency to write the solved number in; \
+                                 state the commodity (e.g. `HOOL {300.00 USD}`)",
+                    });
                 }
                 // Can't determine currency yet
                 unassigned_missing.push(i);
@@ -659,21 +840,61 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     }
 
     // Fill in known-currency missing postings
-    for (currency, indices) in missing_by_currency {
+    for (weight_currency, indices) in missing_by_currency {
         let idx = indices[0];
-        let residual = residuals.get(&currency).copied().unwrap_or(Decimal::ZERO);
+        let residual = residuals
+            .get(&weight_currency)
+            .copied()
+            .unwrap_or(Decimal::ZERO);
 
-        let interpolated =
-            round_interpolated(residual, max_scale_by_currency.get(&currency).copied());
+        // `scaled_missing` is empty unless a cost or price redenominates this
+        // posting's weight, so the common path below is the original one: the
+        // residual is the number, in the currency it was keyed under.
+        let Some((units_currency, multiplier)) = scaled_missing.remove(&idx) else {
+            let interpolated = round_interpolated(
+                residual,
+                max_scale_by_currency.get(&weight_currency).copied(),
+            );
+            result.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
+                interpolated,
+                &weight_currency,
+            )));
+            filled_indices.push(idx);
+            // Reflect the actual interpolated amount (rounding may have moved it).
+            *residuals.entry(weight_currency).or_default() += interpolated;
+            continue;
+        };
+
+        // `weight = units × multiplier`, so invert: the number is the weight
+        // currency's residual divided by the factor, but quantized against the
+        // UNITS currency's observed scale — that is the currency it is written
+        // in. Beancount agrees on both halves: `HOOL {300.00 USD}` against
+        // `-600.00 USD` yields a bare `2 HOOL`, and gains a `.00` only once
+        // some other posting establishes a HOOL scale.
+        let Some(quotient) = residual.checked_div(multiplier) else {
+            return Err(InterpolationError::Unrepresentable {
+                currency: weight_currency,
+            });
+        };
+        let interpolated = round_interpolated(
+            quotient,
+            max_scale_by_currency.get(&units_currency).copied(),
+        );
 
         result.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
             interpolated,
-            &currency,
+            &units_currency,
         )));
         filled_indices.push(idx);
 
-        // Update residual to reflect actual interpolated amount (may have rounding difference)
-        *residuals.entry(currency).or_default() += interpolated;
+        // Fold back the WEIGHT the posting now contributes — the solved number
+        // scaled back up, not the number itself.
+        let Some(weight) = interpolated.checked_mul(multiplier) else {
+            return Err(InterpolationError::Unrepresentable {
+                currency: weight_currency,
+            });
+        };
+        *residuals.entry(weight_currency).or_default() += weight;
     }
 
     // Handle unassigned missing postings
@@ -2182,5 +2403,293 @@ mod tests {
             Some(dec!(0)),
             "NumberOnly leg's number must net the residual to zero"
         );
+    }
+
+    // ---- #1911: solving a missing units NUMBER when the units CURRENCY is
+    // known but a cost or price redenominates the posting's weight ----
+
+    /// `Assets:A  HOOL {300.00 USD}` — units currency written, number elided.
+    fn units_currency_only(account: &str, currency: &str) -> Posting {
+        Posting {
+            units: Some(IncompleteAmount::CurrencyOnly(currency.into())),
+            ..Posting::auto(account)
+        }
+    }
+
+    fn per_unit_cost(value: Decimal, currency: &str) -> CostSpec {
+        CostSpec::empty()
+            .with_number(CostNumber::PerUnit { value })
+            .with_currency(currency)
+    }
+
+    /// The `IncompleteInputs.UnitsMissingNumberWithCost` vector: the number is
+    /// `residual / cost_per_unit`, written in the UNITS currency.
+    #[test]
+    fn interpolates_units_number_from_per_unit_cost() {
+        let txn = Transaction::new(date(2010, 5, 28), "Buy")
+            .with_synthesized_posting(
+                units_currency_only("Assets:Account1", "HOOL")
+                    .with_cost(per_unit_cost(dec!(300.00), "USD")),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:Account2",
+                Amount::new(dec!(-600.00), "USD"),
+            ));
+
+        let result = interpolate(&txn).expect("solvable: 600.00 / 300.00");
+
+        assert_eq!(result.filled_indices, vec![0]);
+        let filled = get_amount(&result.transaction.postings[0]).expect("filled");
+        assert_eq!(filled.number, dec!(2), "600.00 / 300.00");
+        assert_eq!(
+            filled.currency, "HOOL",
+            "denominated in the posting's own commodity, NOT the cost currency"
+        );
+        assert_eq!(
+            result.residuals.get("USD").copied(),
+            Some(Decimal::ZERO),
+            "the solved units must weigh 600.00 USD and cancel the cash leg"
+        );
+    }
+
+    /// The inverse must actually invert the canonical forward weight function.
+    /// This is the drift guard: if `cost_number_weight` changes how a per-unit
+    /// cost weighs, solving by division silently stops agreeing with it, and
+    /// nothing else in the suite would notice.
+    #[test]
+    fn solved_units_reproduce_the_canonical_cost_weight() {
+        for (per_unit, cash) in [
+            (dec!(300.00), dec!(-600.00)),
+            (dec!(1.25), dec!(-100.00)),
+            // Negative cash: solved to negative units.
+            (dec!(300.00), dec!(600.00)),
+        ] {
+            let txn = Transaction::new(date(2010, 5, 28), "Buy")
+                .with_synthesized_posting(
+                    units_currency_only("Assets:Stock", "HOOL")
+                        .with_cost(per_unit_cost(per_unit, "USD")),
+                )
+                .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(cash, "USD")));
+
+            let result = interpolate(&txn).expect("solvable");
+            let solved = get_amount(&result.transaction.postings[0]).expect("filled");
+            let cost = result.transaction.postings[0]
+                .cost
+                .as_ref()
+                .and_then(|c| c.number.as_ref())
+                .expect("cost number");
+
+            let weight = crate::cost_number_weight(solved.number, cost).expect("in range");
+            assert_eq!(
+                weight, -cash,
+                "canonical weight of the solved units must cancel the cash leg \
+                 (per_unit={per_unit}, cash={cash})"
+            );
+        }
+    }
+
+    /// A per-unit PRICE scales the weight the same way a per-unit cost does,
+    /// so the same inversion applies.
+    #[test]
+    fn interpolates_units_number_from_per_unit_price() {
+        let txn = Transaction::new(date(2010, 5, 28), "Buy")
+            .with_synthesized_posting(units_currency_only("Assets:Account1", "HOOL").with_price(
+                rustledger_core::PriceAnnotation::unit(Amount::new(dec!(300.00), "USD")),
+            ))
+            .with_synthesized_posting(Posting::new(
+                "Assets:Account2",
+                Amount::new(dec!(-600.00), "USD"),
+            ));
+
+        let result = interpolate(&txn).expect("solvable: 600.00 / 300.00");
+        let filled = get_amount(&result.transaction.postings[0]).expect("filled");
+        assert_eq!(filled.number, dec!(2));
+        assert_eq!(filled.currency, "HOOL");
+        assert_eq!(result.residuals.get("USD").copied(), Some(Decimal::ZERO));
+    }
+
+    /// The quotient is quantized against the UNITS currency's observed scale,
+    /// not the cost currency's — the currency it is actually written in.
+    ///
+    /// Only the VALUE is asserted. Python beancount stores a scale here (`2.00`
+    /// where it stores a bare `2` without the extra HOOL posting) because it
+    /// quantizes at booking time; rledger stores the value and pads at render
+    /// via `DisplayContext`, so `rledger` also SHOWS `2.00` while holding `2`.
+    /// That is the presentation-versus-value split of ADR-0008 and #1909, not a
+    /// divergence: `2 == 2.00` as a quantity.
+    #[test]
+    fn solved_units_quantize_to_the_units_currency_scale() {
+        let txn = Transaction::new(date(2010, 5, 28), "Buy")
+            .with_synthesized_posting(
+                units_currency_only("Assets:Account1", "HOOL")
+                    .with_cost(per_unit_cost(dec!(300.00), "USD")),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:Account2",
+                Amount::new(dec!(-600.00), "USD"),
+            ))
+            .with_synthesized_posting(Posting::new(
+                "Assets:Other",
+                Amount::new(dec!(5.00), "HOOL"),
+            ));
+
+        let result = interpolate(&txn).expect("solvable");
+        let filled = get_amount(&result.transaction.postings[0]).expect("filled");
+        assert_eq!(filled.number, dec!(2), "600.00 / 300.00, written in HOOL");
+        assert_eq!(filled.currency, "HOOL");
+        assert_eq!(
+            result.residuals.get("USD").copied(),
+            Some(Decimal::ZERO),
+            "USD still cancels"
+        );
+        assert_eq!(
+            result.residuals.get("HOOL").copied(),
+            Some(dec!(5.00)),
+            "the cost-carrying posting must NOT absorb the HOOL residual: it \
+             weighs in USD only. Before #1911 it solved to -5.00 HOOL here — \
+             a lot with the wrong sign AND magnitude."
+        );
+    }
+
+    /// A cost-carrying posting weighs in the cost currency, so a residual in
+    /// its own units currency is none of its business. Previously this filled
+    /// `-10.00 HOOL {300.00 USD}`, fabricating a 3000 USD lot from thin air.
+    #[test]
+    fn cost_posting_does_not_absorb_its_units_currency_residual() {
+        let txn = Transaction::new(date(2010, 5, 28), "Buy")
+            .with_synthesized_posting(Posting::new(
+                "Assets:Account1",
+                Amount::new(dec!(10.00), "HOOL"),
+            ))
+            .with_synthesized_posting(
+                units_currency_only("Assets:Account2", "HOOL")
+                    .with_cost(per_unit_cost(dec!(300.00), "USD")),
+            );
+
+        let result = interpolate(&txn).expect("solves to zero, then fails to balance later");
+        assert_eq!(
+            result.transaction.postings.len(),
+            1,
+            "no USD residual to solve from, so the posting solves to zero units \
+             and is pruned by the zero-prune step — beancount drops it too"
+        );
+        assert_eq!(
+            result.residuals.get("HOOL").copied(),
+            Some(dec!(10.00)),
+            "the 10.00 HOOL imbalance survives to be reported"
+        );
+    }
+
+    /// Every shape whose weight does not vary with the units number must be
+    /// REFUSED, never silently left unfilled: `validate_transaction_balance`
+    /// skips a transaction containing an unfilled posting, so a silent skip
+    /// would accept an unbalanced transaction outright.
+    #[test]
+    fn refuses_units_whose_weight_does_not_vary_with_them() {
+        let cash = Posting::new("Assets:Cash", Amount::new(dec!(-600.00), "USD"));
+
+        let total_cost = CostSpec::empty()
+            .with_number(CostNumber::Total {
+                value: dec!(600.00),
+            })
+            .with_currency("USD");
+        let zero_cost = per_unit_cost(dec!(0.00), "USD");
+        let compound = CostSpec::empty()
+            .with_number(CostNumber::Compound {
+                per_unit: dec!(300.00),
+                total: dec!(5.00),
+            })
+            .with_currency("USD");
+        let empty_spec = CostSpec::empty().with_currency("USD");
+
+        let cases: Vec<(&str, Posting)> = vec![
+            (
+                "total cost",
+                units_currency_only("Assets:S", "HOOL").with_cost(total_cost),
+            ),
+            (
+                "zero per-unit cost",
+                units_currency_only("Assets:S", "HOOL").with_cost(zero_cost),
+            ),
+            (
+                "compound cost",
+                units_currency_only("Assets:S", "HOOL").with_cost(compound),
+            ),
+            (
+                "empty cost spec",
+                units_currency_only("Assets:S", "HOOL").with_cost(empty_spec),
+            ),
+            (
+                "total price",
+                units_currency_only("Assets:S", "HOOL").with_price(
+                    rustledger_core::PriceAnnotation::total(Amount::new(dec!(600.00), "USD")),
+                ),
+            ),
+            (
+                "zero per-unit price",
+                units_currency_only("Assets:S", "HOOL").with_price(
+                    rustledger_core::PriceAnnotation::unit(Amount::new(dec!(0.00), "USD")),
+                ),
+            ),
+            (
+                "cost spec but no units currency at all",
+                Posting::auto("Assets:S").with_cost(per_unit_cost(dec!(300.00), "USD")),
+            ),
+        ];
+
+        for (label, posting) in cases {
+            let txn = Transaction::new(date(2010, 5, 28), "Buy")
+                .with_synthesized_posting(posting)
+                .with_synthesized_posting(cash.clone());
+
+            match interpolate(&txn) {
+                Err(InterpolationError::UnsolvableUnits { account, reason }) => {
+                    assert_eq!(account.as_str(), "Assets:S", "{label}");
+                    assert!(!reason.is_empty(), "{label}: reason must explain why");
+                }
+                Err(other) => panic!("{label}: expected UnsolvableUnits, got {other}"),
+                Ok(result) => panic!(
+                    "{label}: expected a refusal, but interpolation returned {:?}. \
+                     An unfilled posting that does NOT error is silently accepted \
+                     by validate_transaction_balance.",
+                    result
+                        .transaction
+                        .postings
+                        .iter()
+                        .map(|p| p.units.clone())
+                        .collect::<Vec<_>>()
+                ),
+            }
+        }
+    }
+
+    /// Two solvable unknowns landing in the SAME weight currency stay ambiguous.
+    /// The cost posting is counted against USD (where its weight lands), not
+    /// HOOL, so it collides with the plain elided USD posting exactly as
+    /// beancount's `InterpolationError` does.
+    #[test]
+    fn two_unknowns_in_the_same_weight_currency_are_ambiguous() {
+        let txn = Transaction::new(date(2010, 5, 28), "Buy")
+            .with_synthesized_posting(
+                units_currency_only("Assets:Stock", "HOOL")
+                    .with_cost(per_unit_cost(dec!(300.00), "USD")),
+            )
+            .with_synthesized_posting(units_currency_only("Assets:Cash", "USD"))
+            .with_synthesized_posting(Posting::new(
+                "Assets:Other",
+                Amount::new(dec!(-600.00), "USD"),
+            ));
+
+        match interpolate(&txn) {
+            Err(InterpolationError::MultipleMissing { currency, count }) => {
+                assert_eq!(
+                    currency,
+                    Currency::from("USD"),
+                    "counted where the weights land"
+                );
+                assert_eq!(count, 2);
+            }
+            other => panic!("expected MultipleMissing in USD, got {other:?}"),
+        }
     }
 }

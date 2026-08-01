@@ -77,6 +77,34 @@ pub enum InterpolationError {
         reason: &'static str,
     },
 
+    /// A bare price sigil (`@` / `@@` with no amount) asks for the price to be
+    /// computed, but no single currency stands out to compute it in (#1915).
+    #[error(
+        "cannot tell which currency the bare price on the {account} posting should be \
+         computed in; write the price currency (e.g. `@ 1.20 USD`)"
+    )]
+    AmbiguousBarePriceCurrency {
+        /// The account of the posting carrying the bare sigil.
+        account: rustledger_core::Account,
+    },
+
+    /// Solving a bare price sigil from the residual gives a negative price
+    /// (#1915). Refused for the same reason as [`Self::NegativeInferredCost`]:
+    /// the balance is asking for something that is not a price.
+    #[error(
+        "the price of the {account} posting would have to be {price} {currency} to \
+         balance this transaction, and a negative price is not meaningful; check the \
+         signs of the other postings"
+    )]
+    NegativeInferredPrice {
+        /// The account of the posting carrying the bare sigil.
+        account: rustledger_core::Account,
+        /// The currency the price was solved in.
+        currency: Currency,
+        /// The (negative) solved price.
+        price: Decimal,
+    },
+
     /// Cannot infer currency for a posting.
     #[error("cannot infer currency for posting to account {account}")]
     CannotInferCurrency {
@@ -271,9 +299,16 @@ fn units_weight(
         };
     }
 
-    if let Some(price) = posting.price.as_ref()
-        && let Some(price_amt) = price.amount.as_ref().and_then(IncompleteAmount::as_amount)
-    {
+    if let Some(price) = posting.price.as_ref() {
+        let Some(price_amt) = price.amount.as_ref().and_then(IncompleteAmount::as_amount) else {
+            // A bare `@` sigil is itself a request to compute the price
+            // (#1915). Together with a missing units number that is two
+            // unknowns on one posting, and one residual cannot determine both.
+            return UnitsWeight::Undetermined {
+                reason: "the units number and the price are both missing, and a single \
+                         residual cannot determine two unknowns; write one of them",
+            };
+        };
         return match price.kind {
             rustledger_core::PriceKind::Unit if !price_amt.number.is_zero() => {
                 UnitsWeight::Scaled {
@@ -294,6 +329,64 @@ fn units_weight(
     }
 
     UnitsWeight::Units
+}
+
+/// The currency a bare price sigil (`@` / `@@` with no amount) resolves in.
+///
+/// The sigil means "compute this price", and the only thing that determines it
+/// is the residual the posting has to cancel — so the answer is the currency
+/// the transaction is out of balance in.
+///
+/// When nothing is known yet (every other posting is itself an unknown, so all
+/// residuals are zero) fall back to the currencies the other postings are
+/// denominated in. That is what lets the count rule name a group and say
+/// "two unknowns in USD" rather than failing with something vaguer.
+///
+/// `None` when no single currency stands out, in either pass.
+fn bare_price_currency(
+    txn: &Transaction,
+    self_index: usize,
+    residuals: &HashMap<Currency, Decimal>,
+) -> Option<Currency> {
+    let candidates: Vec<&Currency> = residuals
+        .iter()
+        .filter(|(_, value)| !value.is_zero())
+        .map(|(currency, _)| currency)
+        .collect();
+
+    if candidates.is_empty() {
+        // The other postings' WEIGHT currencies, not their units currencies:
+        // this posting has to cancel what they contribute to the balance, and
+        // a price annotation redenominates that. `? CAD @ 1.2 USD` weighs in
+        // USD, so a bare sigil facing it resolves in USD too — reading CAD off
+        // its units would put the two unknowns in different groups and hide a
+        // genuine ambiguity.
+        let mut weights: Vec<Currency> = Vec::new();
+        for (i, posting) in txn.postings.iter().enumerate() {
+            if i == self_index {
+                continue;
+            }
+            let currency = crate::price_currency_of(posting).or_else(|| match &posting.units {
+                Some(IncompleteAmount::Complete(amount)) => Some(amount.currency.clone()),
+                Some(IncompleteAmount::CurrencyOnly(currency)) => Some(currency.clone()),
+                _ => None,
+            });
+            if let Some(currency) = currency
+                && !weights.contains(&currency)
+            {
+                weights.push(currency);
+            }
+        }
+        return match weights.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        };
+    }
+
+    match candidates.as_slice() {
+        [only] => Some((*only).clone()),
+        _ => None,
+    }
 }
 
 /// The currency a `NumberOnly` posting (`10 {300.00 USD}`) is denominated in:
@@ -346,6 +439,13 @@ pub enum UnknownGroup {
 /// [`interpolate`] refuses outright ([`InterpolationError::UnsolvableUnits`]):
 /// those get a precise message naming the offending annotation, which a
 /// generic "too many unknowns" would only obscure.
+///
+/// Bare price sigils (`@` / `@@` with no amount) are also omitted, even though
+/// they ARE unknowns for the same one-per-group rule (#1915). Which group they
+/// fall in depends on the residuals, which this function deliberately does not
+/// compute — reproducing that here would be a second implementation of the
+/// grouping, the drift this function exists to prevent. `interpolate` reports
+/// them instead, one phase later.
 #[must_use]
 pub fn elided_unknown_groups(txn: &Transaction) -> Vec<(usize, UnknownGroup)> {
     let mut inferred_cost_currency: Option<Option<Currency>> = None;
@@ -482,15 +582,19 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     //   per_unit precision.
     let mut max_scale_by_currency: HashMap<Currency, u32> = HashMap::with_capacity(4);
 
-    // Track per-currency count of postings whose weight contribution is unknown
-    // because the cost spec is empty (e.g., `{}`) and resolution is deferred to
-    // the booking pass (lot matching). Each such posting is one unknown for
-    // interpolation accounting and gets added to the per-currency unknowns
-    // total alongside missing-amount postings (issue #1026). Without this,
-    // rledger would silently use a fallback weight (price annotation, if
-    // present) and accept transactions with more unknowns than the
-    // interpolation rule allows.
-    let mut cost_unknowns_by_currency: HashMap<Currency, usize> = HashMap::with_capacity(2);
+    // Per-currency count of postings whose WEIGHT contribution is unknown even
+    // though their units are written out. Two shapes qualify:
+    //
+    // - an empty cost spec (`{}`), whose cost basis is not known until booking
+    //   resolves the lot match (issue #1026). Without counting these, rledger
+    //   would silently fall back to the price annotation and accept
+    //   transactions with more unknowns than the interpolation rule allows.
+    // - a bare price sigil (`@` / `@@` with no amount), whose price is solved
+    //   from the residual further down (#1915).
+    //
+    // Each is one unknown for interpolation accounting, added to the
+    // per-currency total alongside missing-amount postings.
+    let mut weight_unknowns_by_currency: HashMap<Currency, usize> = HashMap::with_capacity(2);
 
     // Augmenting `{}` postings whose per-unit cost beancount infers from the
     // balance residual (issue #1705): `(posting index, cost currency, units)`.
@@ -500,6 +604,12 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // Each is solved post-loop, but only when it is the SOLE unknown in its
     // cost currency group (else the group already errored on the count rule).
     let mut inferable_cost: Vec<(usize, Currency, Decimal)> = Vec::new();
+
+    // Postings carrying a bare price sigil (`@` / `@@` with no amount), whose
+    // price is solved from the residual once the currency is known (#1915):
+    // `(posting index, units, sigil kind)`. Cost-bearing postings never appear
+    // here — cost beats price, so their sigil does not affect the balance.
+    let mut bare_price: Vec<(usize, Amount, rustledger_core::PriceKind)> = Vec::new();
 
     // Units-missing postings whose weight is `units × multiplier` in some other
     // currency (a per-unit cost or price): `index -> (units currency, factor)`.
@@ -577,7 +687,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                         get_inferred_currency(&mut inferred_cost_currency)
                     });
                     if let Some(curr) = cost_currency {
-                        *cost_unknowns_by_currency.entry(curr.clone()).or_default() += 1;
+                        *weight_unknowns_by_currency.entry(curr.clone()).or_default() += 1;
                         // An empty `{}` reaching here is an augmentation (a
                         // reduction's `{}` is filled by the booking pass
                         // first). Beancount infers its per-unit cost from the
@@ -697,13 +807,17 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                         };
                         accumulate_residual(&mut residuals, &mut unrepresentable, &curr, signed);
                     } else {
-                        // Incomplete/empty price annotation — fall back to units
-                        accumulate_residual(
-                            &mut residuals,
-                            &mut unrepresentable,
-                            &amount.currency,
-                            amount.number,
-                        );
+                        // A bare `@` / `@@` sigil with no amount is a REQUEST to
+                        // compute the price, so this posting's weight is unknown
+                        // rather than "the units" (#1915). Contributing the units
+                        // here would both answer the request with silence and let
+                        // an unbalanced transaction look balanced.
+                        //
+                        // Reached only when the posting has no cost spec (the cost
+                        // branches come first), which is right: cost beats price,
+                        // so alongside a cost the sigil is inert — it feeds implicit
+                        // price directives and never the balance.
+                        bare_price.push((i, amount.clone(), price.kind));
                     }
                 } else {
                     // Simple posting: weight is just the units
@@ -790,7 +904,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // failing here, and what Python beancount prints.
     if !unrepresentable.is_empty()
         && (!missing_by_currency.is_empty()
-            || !cost_unknowns_by_currency.is_empty()
+            || !weight_unknowns_by_currency.is_empty()
             || !unassigned_missing.is_empty())
     {
         // Deterministic choice of currency for the message.
@@ -807,11 +921,30 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
         residuals.remove(currency);
     }
 
+    // Resolve which currency each bare price sigil answers in, and register it
+    // as an unknown there BEFORE the count rule below — a posting whose price
+    // is still to be computed contributes an unknown weight to that currency
+    // exactly as an empty `{}` cost spec does (#1915).
+    let mut bare_price_solved: Vec<(usize, Amount, rustledger_core::PriceKind, Currency)> =
+        Vec::with_capacity(bare_price.len());
+    for (idx, units, kind) in bare_price {
+        let Some(currency) = bare_price_currency(transaction, idx, &residuals) else {
+            return Err(InterpolationError::AmbiguousBarePriceCurrency {
+                account: transaction.postings[idx].account.clone(),
+            });
+        };
+        *weight_unknowns_by_currency
+            .entry(currency.clone())
+            .or_default() += 1;
+        bare_price_solved.push((idx, units, kind, currency));
+    }
+
     // Check for multiple unknowns in the same currency group. An "unknown"
-    // is either a missing-amount posting or a posting with an empty cost
-    // spec (whose cost-basis weight contribution is unknown until booking
-    // resolves the lot match). Bean-check enforces "at most one unknown
-    // per currency group" — see issue #1026.
+    // is a missing-amount posting, a posting with an empty cost spec (whose
+    // cost-basis weight is unknown until booking resolves the lot match), or
+    // a posting whose price is still to be computed from a bare sigil.
+    // Bean-check enforces "at most one unknown per currency group" — see
+    // issue #1026.
     //
     // Iterate currencies in sorted order so the error message is
     // deterministic for the same input. HashMap iteration order is
@@ -819,7 +952,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // sorting would produce non-reproducible test output.
     let mut currencies_with_unknowns: Vec<&Currency> = missing_by_currency
         .keys()
-        .chain(cost_unknowns_by_currency.keys())
+        .chain(weight_unknowns_by_currency.keys())
         .collect();
     currencies_with_unknowns.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     currencies_with_unknowns.dedup();
@@ -827,11 +960,11 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
         let missing_count = missing_by_currency
             .get(currency)
             .map_or(0, std::vec::Vec::len);
-        let cost_unknown_count = cost_unknowns_by_currency
+        let weight_unknown_count = weight_unknowns_by_currency
             .get(currency)
             .copied()
             .unwrap_or(0);
-        let total = missing_count + cost_unknown_count;
+        let total = missing_count + weight_unknown_count;
         if total > 1 {
             return Err(InterpolationError::MultipleMissing {
                 currency: currency.clone(),
@@ -857,10 +990,10 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // Pick the lexicographically-smallest cost-unknown currency for the
     // error so the message is reproducible across runs.
     if !unassigned_missing.is_empty() {
-        let mut cost_unknown_keys: Vec<&Currency> = cost_unknowns_by_currency.keys().collect();
-        cost_unknown_keys.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-        if let Some(curr) = cost_unknown_keys.first() {
-            let count = cost_unknowns_by_currency.get(*curr).copied().unwrap_or(0);
+        let mut weight_unknown_keys: Vec<&Currency> = weight_unknowns_by_currency.keys().collect();
+        weight_unknown_keys.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        if let Some(curr) = weight_unknown_keys.first() {
+            let count = weight_unknowns_by_currency.get(*curr).copied().unwrap_or(0);
             return Err(InterpolationError::MultipleMissing {
                 currency: (*curr).clone(),
                 count: count + unassigned_missing.len(),
@@ -916,6 +1049,72 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
         // Fold the now-known cost weight into the residual so downstream
         // missing-amount solving sees a balanced cost currency.
         *residuals.entry(currency).or_default() += total * signum;
+    }
+
+    // Answer each bare price sigil from the residual it has to cancel (#1915).
+    //
+    // Runs beside the `{}` cost inference above and for the same reason: the
+    // solved weight has to land in the residual before any elided amount
+    // absorbs that currency. Each entry is guaranteed the sole unknown in its
+    // currency — the count rule rejected any group with more.
+    //
+    // `@` weighs `units × price` and `@@` weighs `total × signum(units)`, so
+    // invert each accordingly. NOT what Python beancount computes: it solves
+    // the MAGNITUDE, `|residual| / |units|`, which happens to balance only when
+    // the other side is opposite-signed. On `IncompleteInputs.PriceMissing`
+    // (`100.00 USD @` against a POSITIVE `120.00 CAD`) it fills `@1.2 CAD` and
+    // then reports the 240 CAD imbalance it just created. The value that would
+    // balance there is -1.2, and a negative price is not a price, so the honest
+    // answer is to refuse and say why.
+    for (idx, units, kind, currency) in bare_price_solved {
+        let residual = residuals.get(&currency).copied().unwrap_or(Decimal::ZERO);
+
+        if units.number.is_zero() {
+            // Zero units weigh nothing at any price, so the balance says
+            // nothing about this price. Harmless when the books already
+            // balance; otherwise the sigil cannot be the thing that fixes them.
+            if residual.is_zero() {
+                continue;
+            }
+            return Err(InterpolationError::AmbiguousBarePriceCurrency {
+                account: transaction.postings[idx].account.clone(),
+            });
+        }
+
+        let (solved, weight) = match kind {
+            rustledger_core::PriceKind::Unit => {
+                let Some(price) = (-residual).checked_div(units.number) else {
+                    return Err(InterpolationError::Unrepresentable { currency });
+                };
+                let Some(weight) = crate::price_weight(units.number, price, kind) else {
+                    return Err(InterpolationError::Unrepresentable { currency });
+                };
+                (price, weight)
+            }
+            rustledger_core::PriceKind::Total => {
+                // `weight = total × signum(units)`, and signum is ±1 here, so
+                // multiplying inverts it exactly.
+                let total = -residual * units.number.signum();
+                let Some(weight) = crate::price_weight(units.number, total, kind) else {
+                    return Err(InterpolationError::Unrepresentable { currency });
+                };
+                (total, weight)
+            }
+        };
+
+        if solved < Decimal::ZERO {
+            return Err(InterpolationError::NegativeInferredPrice {
+                account: transaction.postings[idx].account.clone(),
+                currency,
+                price: solved,
+            });
+        }
+
+        result.postings[idx].price = Some(rustledger_core::PriceAnnotation {
+            kind,
+            amount: Some(IncompleteAmount::Complete(Amount::new(solved, &currency))),
+        });
+        *residuals.entry(currency).or_default() += weight;
     }
 
     // Fill in known-currency missing postings
@@ -2881,5 +3080,183 @@ mod tests {
             get_amount(&result.transaction.postings[1]).map(|a| a.number),
             Some(dec!(50.00))
         );
+    }
+
+    // ---- #1915: a bare price sigil (`@` / `@@`) is a request to COMPUTE the
+    // price, not an absent price ----
+
+    fn bare_unit_price(account: &str, number: Decimal, currency: &str) -> Posting {
+        Posting::new(account, Amount::new(number, currency))
+            .with_price(rustledger_core::PriceAnnotation::unit_empty())
+    }
+
+    fn solved_price(posting: &Posting) -> Option<(Decimal, Currency, rustledger_core::PriceKind)> {
+        let price = posting.price.as_ref()?;
+        let amount = price
+            .amount
+            .as_ref()
+            .and_then(IncompleteAmount::as_amount)?;
+        Some((amount.number, amount.currency.clone(), price.kind))
+    }
+
+    /// `100.00 USD @` against `-50.00 EUR` has exactly one answer: 0.5 EUR.
+    #[test]
+    fn solves_a_bare_unit_price_from_the_residual() {
+        let txn = Transaction::new(date(2010, 5, 28), "Convert")
+            .with_synthesized_posting(bare_unit_price("Assets:A", dec!(100.00), "USD"))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-50.00), "EUR")));
+
+        let result = interpolate(&txn).expect("solvable");
+        let (number, currency, kind) =
+            solved_price(&result.transaction.postings[0]).expect("price filled");
+        assert_eq!(number, dec!(0.5));
+        assert_eq!(currency, Currency::from("EUR"));
+        assert_eq!(
+            kind,
+            rustledger_core::PriceKind::Unit,
+            "stays a per-unit `@`"
+        );
+        assert_eq!(
+            result.residuals.get("EUR").copied(),
+            Some(Decimal::ZERO),
+            "the solved price must make the transaction balance"
+        );
+    }
+
+    /// A `@@` sigil is answered with a TOTAL, and stays a `@@`. Python
+    /// beancount normalizes this to a per-unit price; keeping the form the
+    /// author chose is the ADR-0008 position, and the weight is identical.
+    #[test]
+    fn solves_a_bare_total_price_and_keeps_the_total_form() {
+        let txn = Transaction::new(date(2010, 5, 28), "Convert")
+            .with_synthesized_posting(
+                Posting::new("Assets:A", Amount::new(dec!(100.00), "USD"))
+                    .with_price(rustledger_core::PriceAnnotation::total_empty()),
+            )
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-50.00), "EUR")));
+
+        let result = interpolate(&txn).expect("solvable");
+        let (number, currency, kind) =
+            solved_price(&result.transaction.postings[0]).expect("price filled");
+        assert_eq!(number, dec!(50.00), "the TOTAL, not the 0.5 per-unit rate");
+        assert_eq!(currency, Currency::from("EUR"));
+        assert_eq!(kind, rustledger_core::PriceKind::Total);
+        assert_eq!(result.residuals.get("EUR").copied(), Some(Decimal::ZERO));
+    }
+
+    /// The sign convention, which is where Python beancount goes wrong. It
+    /// solves the MAGNITUDE (`|residual| / |units|`), so on
+    /// `IncompleteInputs.PriceMissing` it fills `@1.2 CAD` against a POSITIVE
+    /// `120.00 CAD` and then reports the 240 CAD imbalance it just created.
+    /// The value that balances is -1.2, and a negative price is not a price,
+    /// so refuse and say so.
+    #[test]
+    fn refuses_a_bare_price_that_would_have_to_be_negative() {
+        let txn = Transaction::new(date(2010, 5, 28), "PriceMissing vector")
+            .with_synthesized_posting(bare_unit_price("Assets:Account1", dec!(100.00), "USD"))
+            .with_synthesized_posting(Posting::new(
+                "Assets:Account2",
+                Amount::new(dec!(120.00), "CAD"),
+            ));
+
+        match interpolate(&txn) {
+            Err(InterpolationError::NegativeInferredPrice {
+                account,
+                currency,
+                price,
+            }) => {
+                assert_eq!(account.as_str(), "Assets:Account1");
+                assert_eq!(currency, Currency::from("CAD"));
+                assert_eq!(price, dec!(-1.2));
+            }
+            other => panic!("expected NegativeInferredPrice, got {other:?}"),
+        }
+    }
+
+    /// The sigil competes for a residual, so it is an unknown for the
+    /// one-per-currency-group rule — the whole point of #1915.
+    #[test]
+    fn a_bare_price_counts_as_an_unknown_in_its_group() {
+        let mut elided = Posting::auto("Assets:Cash");
+        elided.units = Some(IncompleteAmount::CurrencyOnly("USD".into()));
+
+        let txn = Transaction::new(date(2010, 5, 28), "Two unknowns in USD")
+            .with_synthesized_posting(bare_unit_price("Assets:A", dec!(100.00), "USD"))
+            .with_synthesized_posting(elided);
+
+        match interpolate(&txn) {
+            Err(InterpolationError::MultipleMissing { currency, count }) => {
+                assert_eq!(currency, Currency::from("USD"));
+                assert_eq!(count, 2, "the elided posting AND the bare price");
+            }
+            other => panic!("expected MultipleMissing in USD, got {other:?}"),
+        }
+    }
+
+    /// The group is the other postings' WEIGHT currency, not their units
+    /// currency: `? CAD @ 1.2 USD` weighs in USD, so a bare sigil facing it
+    /// resolves in USD and collides there. Reading CAD off the units would put
+    /// the two unknowns in different groups and hide the ambiguity — which is
+    /// exactly what an earlier draft of this fix did.
+    #[test]
+    fn a_bare_price_resolves_against_weight_currencies_not_units_currencies() {
+        let mut priced_elided = Posting::auto("Assets:Account2");
+        priced_elided.units = Some(IncompleteAmount::CurrencyOnly("CAD".into()));
+        let priced_elided = priced_elided.with_price(rustledger_core::PriceAnnotation::unit(
+            Amount::new(dec!(1.2), "USD"),
+        ));
+
+        let txn = Transaction::new(date(2010, 5, 28), "UnitsMissingNumberWithPrice vector")
+            .with_synthesized_posting(priced_elided)
+            .with_synthesized_posting(bare_unit_price("Assets:Account1", dec!(100.00), "USD"));
+
+        match interpolate(&txn) {
+            Err(InterpolationError::MultipleMissing { currency, count }) => {
+                assert_eq!(currency, Currency::from("USD"), "not CAD");
+                assert_eq!(count, 2);
+            }
+            other => panic!("expected MultipleMissing in USD, got {other:?}"),
+        }
+    }
+
+    /// Cost beats price, so alongside a cost the sigil never touches the
+    /// balance — it feeds implicit price directives only. Treating it as a
+    /// weight unknown there would reject transactions that are perfectly
+    /// determined by their cost basis.
+    #[test]
+    fn a_bare_price_beside_a_cost_is_inert() {
+        let txn = Transaction::new(date(2010, 5, 28), "Buy with a bare price")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(2), "HOOL"))
+                    .with_cost(per_unit_cost(dec!(300.00), "USD"))
+                    .with_price(rustledger_core::PriceAnnotation::unit_empty()),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(-600.00), "USD"),
+            ));
+
+        let result = interpolate(&txn).expect("the cost determines the weight");
+        assert_eq!(result.residuals.get("USD").copied(), Some(Decimal::ZERO));
+    }
+
+    /// Both the units number and the price missing is two unknowns on one
+    /// posting; one residual cannot determine both.
+    #[test]
+    fn refuses_a_bare_price_on_a_units_missing_posting() {
+        let mut both_missing = Posting::auto("Assets:A");
+        both_missing.units = Some(IncompleteAmount::CurrencyOnly("USD".into()));
+        let both_missing = both_missing.with_price(rustledger_core::PriceAnnotation::unit_empty());
+
+        let txn = Transaction::new(date(2010, 5, 28), "Two unknowns, one posting")
+            .with_synthesized_posting(both_missing)
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-100.00), "USD")));
+
+        match interpolate(&txn) {
+            Err(InterpolationError::UnsolvableUnits { account, .. }) => {
+                assert_eq!(account.as_str(), "Assets:A");
+            }
+            other => panic!("expected UnsolvableUnits, got {other:?}"),
+        }
     }
 }

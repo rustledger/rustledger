@@ -2224,3 +2224,61 @@ fn test_units_number_elided_with_cost_is_solved_and_booked() {
         "written in the posting's own commodity, not the cost currency"
     );
 }
+
+/// #1915 end-to-end: a bare `@` sigil asks for the price to be computed, and
+/// the whole pipeline must answer it rather than treating the posting as
+/// unpriced.
+#[test]
+fn test_bare_price_sigil_is_solved_from_the_residual() {
+    use rustledger_loader::{LoadOptions, process};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("issue1915.beancount");
+    std::fs::write(
+        &path,
+        "2010-01-01 open Assets:A\n\
+         2010-01-01 open Assets:B\n\
+         \n\
+         2010-05-28 * \"bare price sigil\"\n  \
+         Assets:A    100.00 USD @\n  \
+         Assets:B    -50.00 EUR\n",
+    )
+    .unwrap();
+
+    let raw = rustledger_loader::load_raw(&path).expect("load raw");
+    let ledger = process(raw, &LoadOptions::default()).expect("process");
+
+    assert!(
+        ledger.errors.is_empty(),
+        "should balance once the price is solved, got {:?}",
+        ledger.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+
+    let txn = ledger
+        .directives
+        .iter()
+        .find_map(|d| match &d.value {
+            rustledger_core::Directive::Transaction(t) => Some(t),
+            _ => None,
+        })
+        .expect("the transaction survived booking");
+
+    let priced = txn
+        .postings
+        .iter()
+        .find(|p| p.account.as_str() == "Assets:A")
+        .expect("posting present");
+    let price = priced
+        .price
+        .as_ref()
+        .and_then(|p| p.amount.as_ref())
+        .and_then(rustledger_core::IncompleteAmount::as_amount)
+        .expect("the bare sigil was answered");
+
+    assert_eq!(
+        price.number,
+        rust_decimal_macros::dec!(0.5),
+        "50.00 / 100.00"
+    );
+    assert_eq!(price.currency, "EUR");
+}

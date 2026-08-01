@@ -62,7 +62,9 @@ pub enum InterpolationError {
 
     /// A posting's units number is missing and cannot be recovered from the
     /// balance, because the posting's weight does not vary with that number
-    /// (#1911). See [`UnitsWeight::Undetermined`] for the cases.
+    /// (#1911). The cases are enumerated on the private `UnitsWeight` classifier
+    /// in this module: a total cost or price, a zero factor, an empty `{}` spec,
+    /// a compound cost, and a cost with no units currency to write into.
     ///
     /// Reported rather than left unfilled: `validate_transaction_balance` skips
     /// a transaction that still has an unfilled posting, so staying silent here

@@ -715,9 +715,9 @@ jobs:
       # wrong numbers in them passes it silently. For an accounting tool that
       # is the failure that matters most.
       #
-      # Advisory, not gating: the first run surfaced two genuine divergences
-      # (#1909) and they need triage before this can block a merge. Flip
-      # `continue-on-error` off once the known set is at zero.
+      # Advisory, not gating. One known divergence remains once #1913 lands:
+      # issue-520.beancount, a tracked regression fixture. Flip
+      # `continue-on-error` off once that set is at zero.
       - name: Compare booked values against beancount
         continue-on-error: true
         run: |

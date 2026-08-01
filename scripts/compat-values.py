@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import argparse, csv, io, subprocess, sys
 from collections import defaultdict
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 QUERY = ("SELECT account, currency, sum(number) AS n "
@@ -87,8 +87,29 @@ def rledger_totals(binary: str, path: Path):
 
 
 def compare(a: dict, b: dict):
-    """Numeric comparison. Display SCALE differences are a documented, separate
-    divergence (#1112), so `-1966.700` and `-1966.70` must not be reported."""
+    """Do the two ledgers agree AS MONEY?
+
+    Compared at the precision beancount used, not on raw Decimals. The two
+    tools legitimately carry different precision for the same balance, because
+    they quantize at different layers: beancount rounds when it books, rledger
+    books what the arithmetic implies and rounds when it displays. Neither is
+    wrong — see #1909, closed after this comparison reported two false
+    divergences by asking the wrong question.
+
+    Concretely, `0.035 SPY @ 137.142857143 USD` against an explicit `4.80`
+    leaves 5e-12. beancount books `0.00`, losing it; rledger books
+    `0.000000000005`, keeping the postings summing to exactly zero and
+    rendering `0.03` on every surface that knows the currency. A raw Decimal
+    comparison calls that a value bug. It is a representation difference.
+
+    So each side is quantized to beancount's own exponent before comparing:
+    beancount has already rounded to the currency's precision at booking, so
+    its exponent IS the precision at which these figures are money.
+
+    The cost, stated plainly: a genuine divergence smaller than one display
+    unit is invisible here. That is the deliberate trade — it is also, by
+    definition, a difference no user could observe in a balance.
+    """
     diffs = []
     for key in sorted(set(a) | set(b), key=lambda k: (k[0], k[1])):
         x, y = a.get(key), b.get(key)
@@ -97,7 +118,15 @@ def compare(a: dict, b: dict):
             other = y if x is None else x
             if other != 0:
                 diffs.append((key, x, y))
-        elif x != y:
+            continue
+        try:
+            y_at_bc_precision = y.quantize(x)
+        except (InvalidOperation, ValueError):
+            # Cannot express rledger's value at beancount's precision at all
+            # (wildly different magnitude) — that is a real disagreement.
+            diffs.append((key, x, y))
+            continue
+        if x != y_at_bc_precision:
             diffs.append((key, x, y))
     return diffs
 

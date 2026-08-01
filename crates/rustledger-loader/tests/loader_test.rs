@@ -2282,3 +2282,58 @@ fn test_bare_price_sigil_is_solved_from_the_residual() {
     );
     assert_eq!(price.currency, "EUR");
 }
+
+/// #1920 end-to-end: a units number written without a currency must keep its
+/// number and get only its currency, and a resulting imbalance must be
+/// REPORTED rather than papered over.
+///
+/// Before the fix this booked `999.00 USD` for a posting the author wrote as
+/// `120.00`, and `check` reported success.
+#[test]
+fn test_units_number_without_currency_keeps_its_number_and_reports_imbalance() {
+    use rustledger_loader::{LoadOptions, process};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("issue1920.beancount");
+    std::fs::write(
+        &path,
+        "2010-01-01 open Assets:A\n\
+         2010-01-01 open Assets:B\n\
+         \n\
+         2010-05-28 * \"currency omitted by typo\"\n  \
+         Assets:A    120.00\n  \
+         Assets:B   -999.00 USD\n",
+    )
+    .unwrap();
+
+    let raw = rustledger_loader::load_raw(&path).expect("load raw");
+    let ledger = process(raw, &LoadOptions::default()).expect("process");
+
+    assert!(
+        ledger.errors.iter().any(|e| e.code == "E3001"),
+        "the 879.00 USD imbalance must be reported, got {:?}",
+        ledger.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+
+    let txn = ledger
+        .directives
+        .iter()
+        .find_map(|d| match &d.value {
+            rustledger_core::Directive::Transaction(t) => Some(t),
+            _ => None,
+        })
+        .expect("transaction present");
+    let a = txn
+        .postings
+        .iter()
+        .find(|p| p.account.as_str() == "Assets:A")
+        .expect("posting present");
+    let units = a.amount().expect("units filled");
+
+    assert_eq!(
+        units.number,
+        rust_decimal_macros::dec!(120.00),
+        "the author's number, not the residual"
+    );
+    assert_eq!(units.currency, "USD");
+}

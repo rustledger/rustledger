@@ -444,26 +444,6 @@ fn bare_price_currency(
     }
 }
 
-/// The currency a `NumberOnly` posting (`10 {300.00 USD}`) is denominated in:
-/// the cost currency, else the price currency. `None` means the number cannot
-/// be placed in a currency group yet.
-fn number_only_currency(posting: &rustledger_core::Posting) -> Option<Currency> {
-    posting
-        .cost
-        .as_ref()
-        .and_then(|c| c.currency.clone())
-        .or_else(|| {
-            // Pull currency from the price's complete amount, regardless of
-            // kind. Incomplete/empty prices contribute nothing here.
-            posting
-                .price
-                .as_ref()
-                .and_then(|p| p.amount.as_ref())
-                .and_then(IncompleteAmount::as_amount)
-                .map(|a| a.currency.clone())
-        })
-}
-
 /// Which residual an elided posting's unknown will be solved from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnknownGroup {
@@ -525,13 +505,13 @@ pub fn elided_unknown_groups(txn: &Transaction) -> Vec<(usize, UnknownGroup)> {
                     UnitsWeight::Undetermined { .. } => {}
                 }
             }
-            // A number with a currency in reach is not an unknown at all — it
-            // lands in that group as a known contribution.
-            Some(IncompleteAmount::NumberOnly(_)) => {
-                if number_only_currency(posting).is_none() {
-                    groups.push((i, UnknownGroup::Unassigned));
-                }
-            }
+            // Never an unknown for this rule. The number is written, so such a
+            // posting contributes a KNOWN weight once its currency is read off
+            // the balance; it does not compete for a residual the way an elided
+            // posting does (#1920). With a cost or price present the currency is
+            // unknowable and `interpolate` refuses outright, which again is not
+            // this rule's business.
+            Some(IncompleteAmount::NumberOnly(_)) => {}
             // A cost spec here is refused by `interpolate` (no commodity to
             // write the solved number in), so it is not grouped.
             None => {
@@ -671,6 +651,12 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // `(posting index, units, sigil kind, price number)`.
     let mut price_number_known: Vec<(usize, Amount, rustledger_core::PriceKind, Decimal)> =
         Vec::new();
+    // Postings written as a number with the currency elided (`120.00`), whose
+    // units currency is read off the balance while the number itself is kept
+    // verbatim (#1920): `(posting index, number)`. Distinct from
+    // `unassigned_missing`, which has no number either and is SOLVED from the
+    // residual; conflating the two overwrote the author's number.
+    let mut number_only: Vec<(usize, Decimal)> = Vec::new();
 
     // Units-missing postings whose weight is `units × multiplier` in some other
     // currency (a per-unit cost or price): `index -> (units currency, factor)`.
@@ -933,14 +919,21 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                 }
             }
             Some(IncompleteAmount::NumberOnly(number)) => {
-                // Number known, currency to be inferred from cost or price.
-                if let Some(curr) = number_only_currency(posting) {
-                    // We have currency from context, make it complete
-                    *residuals.entry(curr.clone()).or_default() += *number;
-                } else {
-                    // Can't determine currency yet
-                    unassigned_missing.push(i);
+                // The number is written and only the currency is elided, so the
+                // author's number must survive: it is data, not something to
+                // solve for (#1920).
+                //
+                // A cost or price names ITS OWN currency, never the commodity
+                // being counted: `10 {300.00 USD}` is ten of something, and
+                // nothing in the transaction says what. Refuse rather than
+                // guess, which is what beancount does too
+                // ("Failed to categorize posting").
+                if posting.cost.is_some() || posting.price.is_some() {
+                    return Err(InterpolationError::CannotInferCurrency {
+                        account: posting.account.clone(),
+                    });
                 }
+                number_only.push((i, *number));
             }
             None => {
                 // No units at all. A cost spec names the COST currency, never
@@ -995,6 +988,36 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // as an unknown there BEFORE the count rule below — a posting whose price
     // is still to be computed contributes an unknown weight to that currency
     // exactly as an empty `{}` cost spec does (#1915).
+    // Give each number-with-no-currency posting its currency, keeping the
+    // number the author wrote (#1920). The currency is the one the transaction
+    // is out of balance in, which is the only thing that can identify it.
+    //
+    // Runs BEFORE the bare-price resolution below, because these postings
+    // contribute a KNOWN weight and a sigil should see the residual that is
+    // actually left over once they have.
+    for (idx, number) in number_only {
+        let mut nonzero = residuals.iter().filter(|(_, value)| !value.is_zero());
+        let currency = match (nonzero.next(), nonzero.next()) {
+            (Some((currency, _)), None) => currency.clone(),
+            // Nothing to read the currency off, or more than one candidate.
+            _ => {
+                return Err(InterpolationError::CannotInferCurrency {
+                    account: transaction.postings[idx].account.clone(),
+                });
+            }
+        };
+        result.postings[idx].units =
+            Some(IncompleteAmount::Complete(Amount::new(number, &currency)));
+        filled_indices.push(idx);
+        // The blanket unrepresentable gate ran further up, so guard here too:
+        // an overflow at this point would otherwise leave a partial residual in
+        // a public field while we have already written units into the posting.
+        accumulate_residual(&mut residuals, &mut unrepresentable, &currency, number);
+        if unrepresentable.contains(&currency) {
+            return Err(InterpolationError::Unrepresentable { currency });
+        }
+    }
+
     // Give each `@ 1.20` its price currency, keeping the number. Runs BEFORE the
     // bare-sigil resolution below, because these postings contribute a KNOWN
     // weight once denominated and a sigil should see what is actually left over.
@@ -2769,14 +2792,17 @@ mod tests {
     }
 
     #[test]
-    fn interpolate_number_only_infers_currency_and_balances() {
-        // A NumberOnly leg (`-100`, currency missing) infers its currency
-        // from its OWN price annotation (the arm only consults the
-        // posting's own cost/price, never siblings — a bare NumberOnly
-        // with no cost/price would route to the unassigned path instead).
-        // The `@ 1 USD` price is a currency hint with a unit multiplier,
-        // so the leg contributes `-100` to the residual via that arm's
-        // `residual += *number` — which this test kills.
+    fn interpolate_number_only_with_a_price_is_refused() {
+        // A NumberOnly leg (`-100`, currency missing) carrying `@ 1 USD`.
+        //
+        // This used to assert that the leg contributed `-100` to the USD
+        // residual, treating the PRICE currency as the units currency. It is
+        // not: `-100 @ 1 USD` is minus one hundred of something, and nothing
+        // in the transaction says what. Python beancount refuses the same
+        // input with "Could not resolve units currency" (#1920).
+        //
+        // The unit multiplier of 1 is what made the old behavior look
+        // harmless here; at any other price the residual was wrong as well.
         let txn = Transaction::new(date(2024, 1, 1), "number-only")
             .with_synthesized_posting(Posting::new("Expenses:X", Amount::new(dec!(100), "USD")))
             .with_synthesized_posting(
@@ -2786,12 +2812,12 @@ mod tests {
                         "USD",
                     ))),
             );
-        let r = interpolate(&txn).expect("interpolation should succeed");
-        assert_eq!(
-            r.residuals.get("USD").copied(),
-            Some(dec!(0)),
-            "NumberOnly leg's number must net the residual to zero"
-        );
+        match interpolate(&txn) {
+            Err(InterpolationError::CannotInferCurrency { account }) => {
+                assert_eq!(account.as_str(), "Assets:Cash");
+            }
+            other => panic!("expected CannotInferCurrency, got {other:?}"),
+        }
     }
 
     // ---- #1911: solving a missing units NUMBER when the units CURRENCY is
@@ -3128,9 +3154,11 @@ mod tests {
         let groups = elided_unknown_groups(&txn);
         assert_eq!(
             groups,
-            vec![(0, UnknownGroup::Unassigned), (2, UnknownGroup::Unassigned)],
-            "index 1 has a cost currency to land in, so it is not an unknown; \
-             index 3 is complete"
+            vec![(0, UnknownGroup::Unassigned)],
+            "only the fully-bare posting is an unknown. Index 1 and index 2 are \
+             NumberOnly: their number is written, so once a currency is read off \
+             the balance they contribute a KNOWN weight rather than competing for \
+             a residual (#1920). Index 3 is complete."
         );
     }
 
@@ -3547,6 +3575,101 @@ mod tests {
                 assert_eq!(count, 2);
             }
             other => panic!("expected MultipleMissing in USD, got {other:?}"),
+        }
+    }
+
+    // ---- #1920: a units number written without a currency ----
+
+    fn number_only(account: &str, number: Decimal) -> Posting {
+        Posting::with_incomplete(account, IncompleteAmount::NumberOnly(number))
+    }
+
+    /// The author's number is DATA, not something to solve for. Only the
+    /// currency is read off the balance.
+    ///
+    /// Previously such a posting joined `unassigned_missing` and was filled
+    /// from the residual, so `120.00` against `-999.00 USD` was booked as
+    /// `999.00 USD`: the number the author typed was replaced by whatever made
+    /// the books balance, and `check` reported success.
+    #[test]
+    fn number_only_keeps_its_number_and_only_gains_a_currency() {
+        let txn = Transaction::new(date(2010, 5, 28), "currency omitted")
+            .with_synthesized_posting(number_only("Assets:A", dec!(120.00)))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-999.00), "USD")));
+
+        let result = interpolate(&txn).expect("currency is inferable");
+        let filled = get_amount(&result.transaction.postings[0]).expect("filled");
+        assert_eq!(
+            filled.number,
+            dec!(120.00),
+            "the author's number, not 999.00"
+        );
+        assert_eq!(filled.currency, "USD");
+        assert_eq!(
+            result.residuals.get("USD").copied(),
+            Some(dec!(-879.00)),
+            "the imbalance must survive to be reported, not be papered over"
+        );
+    }
+
+    /// The same shape when it does balance: accepted, number intact. This is
+    /// what Python beancount does too.
+    #[test]
+    fn number_only_balances_when_the_number_is_right() {
+        let txn = Transaction::new(date(2010, 5, 28), "currency omitted, balanced")
+            .with_synthesized_posting(number_only("Assets:A", dec!(120.00)))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-120.00), "USD")));
+
+        let result = interpolate(&txn).expect("currency is inferable");
+        let filled = get_amount(&result.transaction.postings[0]).expect("filled");
+        assert_eq!(filled.number, dec!(120.00));
+        assert_eq!(filled.currency, "USD");
+        assert_eq!(result.residuals.get("USD").copied(), Some(Decimal::ZERO));
+    }
+
+    /// A cost or price names ITS OWN currency, never the commodity being
+    /// counted, so with either present the units currency is unknowable.
+    /// Beancount agrees ("Could not resolve units currency").
+    ///
+    /// Before this, both shapes left the posting unfilled AND unreported, so
+    /// `validate_transaction_balance` took its documented early return and an
+    /// arbitrarily unbalanced transaction passed silently.
+    #[test]
+    fn number_only_with_a_cost_or_price_is_refused() {
+        let cash = Posting::new("Assets:B", Amount::new(dec!(-999.00), "USD"));
+
+        let with_price = number_only("Assets:A", dec!(120.00)).with_price(
+            rustledger_core::PriceAnnotation::unit(Amount::new(dec!(1.2), "USD")),
+        );
+        let with_cost =
+            number_only("Assets:A", dec!(10)).with_cost(per_unit_cost(dec!(300.00), "USD"));
+
+        for (label, posting) in [("price", with_price), ("cost", with_cost)] {
+            let txn = Transaction::new(date(2010, 5, 28), "unknowable commodity")
+                .with_synthesized_posting(posting)
+                .with_synthesized_posting(cash.clone());
+            match interpolate(&txn) {
+                Err(InterpolationError::CannotInferCurrency { account }) => {
+                    assert_eq!(account.as_str(), "Assets:A", "{label}");
+                }
+                other => panic!("{label}: expected CannotInferCurrency, got {other:?}"),
+            }
+        }
+    }
+
+    /// No single currency to read off means no answer. Refuse rather than pick.
+    #[test]
+    fn number_only_is_refused_when_the_currency_is_ambiguous() {
+        let txn = Transaction::new(date(2010, 5, 28), "two candidate currencies")
+            .with_synthesized_posting(number_only("Assets:A", dec!(120.00)))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-50.00), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:C", Amount::new(dec!(-70.00), "EUR")));
+
+        match interpolate(&txn) {
+            Err(InterpolationError::CannotInferCurrency { account }) => {
+                assert_eq!(account.as_str(), "Assets:A");
+            }
+            other => panic!("expected CannotInferCurrency, got {other:?}"),
         }
     }
 }

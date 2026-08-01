@@ -88,6 +88,16 @@ pub enum InterpolationError {
         account: rustledger_core::Account,
     },
 
+    /// A bare price sigil cannot be answered from the balance for a reason
+    /// other than an ambiguous currency (#1915).
+    #[error("cannot compute the price for the {account} posting: {reason}")]
+    UnsolvablePrice {
+        /// The account of the posting carrying the bare sigil.
+        account: rustledger_core::Account,
+        /// Why the balance does not determine the price.
+        reason: &'static str,
+    },
+
     /// Solving a bare price sigil from the residual gives a negative price
     /// (#1915). Refused for the same reason as [`Self::NegativeInferredCost`]:
     /// the balance is asking for something that is not a price.
@@ -1109,8 +1119,13 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
             if residual.is_zero() {
                 continue;
             }
-            return Err(InterpolationError::AmbiguousBarePriceCurrency {
+            // The currency IS known here; what fails is the arithmetic, so do
+            // not send the user off to write a price currency they already
+            // have (or that would not help).
+            return Err(InterpolationError::UnsolvablePrice {
                 account: transaction.postings[idx].account.clone(),
+                reason: "the posting has zero units, so no price gives it any weight, \
+                         and the transaction does not balance without one",
             });
         }
 
@@ -3376,5 +3391,37 @@ mod tests {
             }
             other => panic!("expected MultipleMissing in USD, got {other:?}"),
         }
+    }
+
+    /// A zero-units posting carrying a bare sigil has a KNOWN currency; what
+    /// fails is that no price gives zero units any weight. The error must say
+    /// that, not send the author off to write a price currency they already
+    /// have. (Python beancount raises `decimal.DivisionByZero` on this input,
+    /// unguarded, where its sibling cost branch checks `units.number != ZERO`.)
+    #[test]
+    fn refuses_a_bare_price_on_zero_units_without_blaming_the_currency() {
+        let txn = Transaction::new(date(2010, 5, 28), "Zero units")
+            .with_synthesized_posting(bare_unit_price("Assets:A", dec!(0.00), "USD"))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-50.00), "EUR")));
+
+        match interpolate(&txn) {
+            Err(InterpolationError::UnsolvablePrice { account, reason }) => {
+                assert_eq!(account.as_str(), "Assets:A");
+                assert!(reason.contains("zero units"), "got: {reason}");
+            }
+            other => panic!("expected UnsolvablePrice, got {other:?}"),
+        }
+    }
+
+    /// Zero units AND a balanced book: the sigil is simply unanswerable and
+    /// harmless, so leave it rather than erroring.
+    #[test]
+    fn leaves_a_bare_price_on_zero_units_alone_when_the_books_balance() {
+        let txn = Transaction::new(date(2010, 5, 28), "Zero units, balanced")
+            .with_synthesized_posting(bare_unit_price("Assets:A", dec!(0.00), "USD"))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(0.00), "EUR")));
+
+        let result = interpolate(&txn).expect("harmless");
+        assert!(solved_price(&result.transaction.postings[0]).is_none());
     }
 }

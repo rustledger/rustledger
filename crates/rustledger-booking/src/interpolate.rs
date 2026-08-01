@@ -331,11 +331,19 @@ fn units_weight(
     UnitsWeight::Units
 }
 
-/// The currency a bare price sigil (`@` / `@@` with no amount) resolves in.
+/// The currency a bare price sigil resolves in.
 ///
-/// The sigil means "compute this price", and the only thing that determines it
-/// is the residual the posting has to cancel — so the answer is the currency
-/// the transaction is out of balance in.
+/// **A declared currency always wins.** `@ USD` (the form beancount's own
+/// parser docs call "recommended") states the answer's currency and leaves only
+/// the number to compute, so there is nothing to infer and nothing we are
+/// entitled to override. Inferring anyway would let `100.00 USD @ CAD` against
+/// `-50.00 EUR` be written back as `@ 0.50 EUR` — substituting a currency the
+/// author did not write, which is the same fabrication this module refuses
+/// everywhere else.
+///
+/// Only a fully bare `@` / `@@` needs inference, and then the answer is the
+/// currency the transaction is out of balance in: that is the residual the
+/// posting has to cancel.
 ///
 /// When nothing is known yet (every other posting is itself an unknown, so all
 /// residuals are zero) fall back to the currencies the other postings are
@@ -348,6 +356,19 @@ fn bare_price_currency(
     self_index: usize,
     residuals: &HashMap<Currency, Decimal>,
 ) -> Option<Currency> {
+    if let Some(declared) = txn.postings[self_index]
+        .price
+        .as_ref()
+        .and_then(|p| p.amount.as_ref())
+        .and_then(|a| match a {
+            IncompleteAmount::CurrencyOnly(currency) => Some(currency.clone()),
+            IncompleteAmount::Complete(amount) => Some(amount.currency.clone()),
+            IncompleteAmount::NumberOnly(_) => None,
+        })
+    {
+        return Some(declared);
+    }
+
     let candidates: Vec<&Currency> = residuals
         .iter()
         .filter(|(_, value)| !value.is_zero())
@@ -1079,6 +1100,17 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
             return Err(InterpolationError::AmbiguousBarePriceCurrency {
                 account: transaction.postings[idx].account.clone(),
             });
+        }
+
+        // Nothing to cancel in this currency, so the balance determines nothing
+        // and the honest answer is to leave the sigil unanswered. Reachable when
+        // the author DECLARED a price currency (`@ CAD`) that no other posting
+        // touches: writing the `@ 0 CAD` the arithmetic implies would put a
+        // fabricated rate in the ledger, and the real problem — the currency
+        // that actually fails to balance — is reported by the balance validator,
+        // which still runs because the units here are complete.
+        if residual.is_zero() {
+            continue;
         }
 
         let (solved, weight) = match kind {
@@ -3258,5 +3290,50 @@ mod tests {
             }
             other => panic!("expected UnsolvableUnits, got {other:?}"),
         }
+    }
+
+    /// `@ USD` — the form beancount's own parser docs call "recommended" —
+    /// states the answer's currency and leaves only the number to compute. The
+    /// declared currency must WIN over inference: `100.00 USD @ CAD` against
+    /// `-50.00 EUR` must not be written back as `@ 0.50 EUR`, substituting a
+    /// currency the author never wrote.
+    #[test]
+    fn a_declared_price_currency_is_not_overridden_by_inference() {
+        let declared = |currency: &str| {
+            Posting::new("Assets:A", Amount::new(dec!(100.00), "USD")).with_price(
+                rustledger_core::PriceAnnotation {
+                    kind: rustledger_core::PriceKind::Unit,
+                    amount: Some(IncompleteAmount::CurrencyOnly(currency.into())),
+                },
+            )
+        };
+
+        // Declared currency agrees with the residual: solve the number in it.
+        let agrees = Transaction::new(date(2010, 5, 28), "Declared EUR")
+            .with_synthesized_posting(declared("EUR"))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-50.00), "EUR")));
+        let result = interpolate(&agrees).expect("solvable");
+        let (number, currency, _) =
+            solved_price(&result.transaction.postings[0]).expect("price filled");
+        assert_eq!(number, dec!(0.5));
+        assert_eq!(currency, Currency::from("EUR"));
+
+        // Declared currency has nothing to cancel. The arithmetic would give
+        // `@ 0 CAD`; writing that would put a rate in the ledger that the author
+        // never chose and the balance never implied, so leave it unanswered and
+        // let the balance validator report the currency that actually fails.
+        let conflicts = Transaction::new(date(2010, 5, 28), "Declared CAD")
+            .with_synthesized_posting(declared("CAD"))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-50.00), "EUR")));
+        let result = interpolate(&conflicts).expect("no interpolation error");
+        assert!(
+            solved_price(&result.transaction.postings[0]).is_none(),
+            "must not invent a rate in a currency the balance says nothing about"
+        );
+        assert_eq!(
+            result.residuals.get("EUR").copied(),
+            Some(dec!(-50.00)),
+            "the real imbalance survives to be reported"
+        );
     }
 }

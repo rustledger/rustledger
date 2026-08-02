@@ -1567,6 +1567,53 @@ impl TokenView for &rowan::GreenTokenData {
         (*self).text()
     }
 }
+/// The `{*}` merge-flag state machine.
+///
+/// ONE implementation, driven by both token walkers: [`cost_spec_from_tokens`]
+/// feeds it inside its single pass, and [`super::ast::CostSpec::is_merge`]
+/// feeds it while walking the red tree. The rule was hand-mirrored in those two
+/// places until the 2026-08-01 mutation run showed EVERY mutant in this machine
+/// surviving on the `convert.rs` side: the only tests exercising the rule went
+/// through the `ast.rs` copy, so the canonical could have been broken outright
+/// without one test failing. That is the drift this module's `TokenView` doc
+/// says it exists to prevent, in the one place it had not been applied.
+///
+/// The rule: the flag is decided by the first non-whitespace, non-opener token
+/// after an opener (`*` means merge, anything else means not). A `*` elsewhere
+/// is the multiplication operator, as in `{500 * 2 USD}`, and a pass that
+/// re-arms on later openers flips the flag on malformed input where it must not.
+#[derive(Default)]
+pub(in crate::cst) struct MergeFlag {
+    past_opener: bool,
+    decided: bool,
+    merge: bool,
+}
+
+impl MergeFlag {
+    /// Feed the next token kind, in source order. Ignores everything once the
+    /// flag is decided.
+    pub(in crate::cst) const fn feed(&mut self, kind: crate::SyntaxKind) {
+        use crate::SyntaxKind as K;
+        if self.decided {
+            return;
+        }
+        match kind {
+            K::L_BRACE | K::L_DOUBLE_BRACE | K::L_BRACE_HASH => self.past_opener = true,
+            K::WHITESPACE => {}
+            K::STAR if self.past_opener => {
+                self.merge = true;
+                self.decided = true;
+            }
+            _ if self.past_opener => self.decided = true,
+            _ => {}
+        }
+    }
+
+    /// Whether the tokens fed so far describe a `{*}` merge cost.
+    pub(in crate::cst) const fn is_merge(&self) -> bool {
+        self.merge
+    }
+}
 
 /// Convert the direct child tokens of a `COST_SPEC` node into a [`CostSpec`]
 /// (forms `{N CCY}`, `{{T CCY}}`, `{N # T CCY}`, `{*}` merge, plus optional
@@ -1612,26 +1659,11 @@ pub(super) fn cost_spec_from_tokens(tokens: impl Iterator<Item = impl TokenView>
     let mut date_seen = false;
     let mut label: Option<String> = None;
     let mut label_seen = false;
-    let mut merge = false;
-    let mut merge_decided = false;
-    let mut past_opener = false;
+    let mut merge_flag = MergeFlag::default();
     for t in tokens {
         let kind = t.kind();
-        // Merge-flag machine (runs alongside the value machine below; openers
-        // and whitespace never decide, the first other token after an opener
-        // does).
-        if !merge_decided {
-            match kind {
-                K::L_BRACE | K::L_DOUBLE_BRACE | K::L_BRACE_HASH => past_opener = true,
-                K::WHITESPACE => {}
-                K::STAR if past_opener => {
-                    merge = true;
-                    merge_decided = true;
-                }
-                _ if past_opener => merge_decided = true,
-                _ => {}
-            }
-        }
+        // Runs alongside the value machine below; see `MergeFlag`.
+        merge_flag.feed(kind);
         match kind {
             K::L_DOUBLE_BRACE => is_total = true,
             K::NUMBER => {
@@ -1679,7 +1711,7 @@ pub(super) fn cost_spec_from_tokens(tokens: impl Iterator<Item = impl TokenView>
         currency,
         date,
         label,
-        merge,
+        merge: merge_flag.is_merge(),
     }
 }
 
@@ -4440,6 +4472,524 @@ mod tests {
              account_occurrences (got {:?}); rename should not hit garbled \
              mid-edit syntax",
             r.account_occurrences,
+        );
+    }
+
+    // ---- cost-spec token latches and the `{*}` merge machine ----
+    //
+    // Added after the 2026-08-01 mutation run: every mutant in these two
+    // machines survived. The merge rule was tested only through the `ast.rs`
+    // copy (now deleted, it delegates here), and nothing at all exercised the
+    // first-token latches, so a cost spec carrying a duplicate date, label or
+    // currency was untested in either tree walker.
+
+    /// Parse one posting's cost spec, or panic with the source for context.
+    fn cost_of(src: &str) -> CostSpec {
+        let result = parse_via_cst(src);
+        let Some(Directive::Transaction(txn)) = result.directives.first().map(|d| &d.value) else {
+            panic!("expected a transaction from {src:?}");
+        };
+        txn.postings
+            .first()
+            .and_then(|p| p.cost.clone())
+            .unwrap_or_else(|| panic!("expected a cost spec from {src:?}"))
+    }
+
+    fn posting_with_cost(spec: &str) -> String {
+        format!("2020-01-01 * \"t\"\n  Assets:A 1 HOOL {spec}\n  Assets:B\n")
+    }
+
+    /// A repeated DATE, STRING or CURRENCY keeps the FIRST occurrence. Malformed
+    /// input is the only way to get here, and "first wins" is what keeps the
+    /// green and red walkers agreeing on it.
+    #[test]
+    fn cost_spec_latches_the_first_date_label_and_currency() {
+        let cost = cost_of(&posting_with_cost(
+            "{2 USD, 2020-06-01, 2021-02-02, \"first\", \"second\"}",
+        ));
+        assert_eq!(cost.date, naive_date(2020, 6, 1), "the FIRST date wins");
+        assert_eq!(cost.label.as_deref(), Some("first"), "the FIRST label wins");
+        assert_eq!(
+            cost.currency
+                .as_ref()
+                .map(rustledger_core::Currency::as_str),
+            Some("USD"),
+            "the FIRST currency wins"
+        );
+
+        // Currency specifically, with nothing else competing.
+        let cost = cost_of(&posting_with_cost("{2 USD, EUR}"));
+        assert_eq!(
+            cost.currency
+                .as_ref()
+                .map(rustledger_core::Currency::as_str),
+            Some("USD")
+        );
+    }
+
+    /// The latch is on the first token of a KIND, not the first that parses.
+    ///
+    /// `9999-99-99` lexes as a DATE and fails to parse. The latch must still
+    /// close, leaving the date empty — falling through to a later, valid DATE
+    /// would make the two walkers disagree on malformed input, which is the
+    /// divergence class this design exists to prevent.
+    #[test]
+    fn cost_spec_latch_closes_on_an_unparsable_first_token() {
+        let cost = cost_of(&posting_with_cost("{2 USD, 9999-99-99, 2021-02-02}"));
+        assert_eq!(
+            cost.date, None,
+            "an unparsable first DATE must not let a later one through"
+        );
+    }
+
+    /// The merge flag is decided by the first non-whitespace, non-opener token
+    /// after an opener. Each row pins one arm of that machine.
+    #[test]
+    fn cost_spec_merge_flag_is_decided_by_the_first_token_after_an_opener() {
+        for (spec, expected, why) in [
+            ("{*}", true, "bare star directly after the opener"),
+            (
+                "{ * }",
+                true,
+                "whitespace never decides, so the star still does",
+            ),
+            ("{{*}}", true, "`{{` is an opener too"),
+            (
+                "{2 USD, *}",
+                false,
+                "the number decided it first; a later star cannot re-arm",
+            ),
+            (
+                "{500 * 2 USD}",
+                false,
+                "a star past the first token is multiplication",
+            ),
+        ] {
+            assert_eq!(
+                cost_of(&posting_with_cost(spec)).merge,
+                expected,
+                "{spec}: {why}"
+            );
+        }
+    }
+
+    /// The red-tree accessor and the token-level canonical must agree, since
+    /// they are now one machine fed by two walkers. Asserts on the exact pair
+    /// rather than on either alone, so deleting the delegation is caught.
+    #[test]
+    fn ast_is_merge_agrees_with_the_converted_cost_spec() {
+        for spec in [
+            "{*}",
+            "{ * }",
+            "{{*}}",
+            "{2 USD, *}",
+            "{500 * 2 USD}",
+            "{2 USD}",
+        ] {
+            let src = posting_with_cost(spec);
+            let converted = cost_of(&src).merge;
+
+            let parsed = crate::parse(&src);
+            let root = ast::SourceFile::cast(parsed.syntax_node()).expect("source file");
+            let from_ast = root
+                .syntax()
+                .descendants()
+                .find_map(ast::CostSpec::cast)
+                .map_or_else(|| panic!("no CostSpec node in {src:?}"), |cs| cs.is_merge());
+
+            assert_eq!(
+                from_ast, converted,
+                "{spec}: ast::CostSpec::is_merge disagrees with the converted CostSpec"
+            );
+        }
+    }
+
+    /// `MergeFlag` guards `past_opener` because a token stream may begin before
+    /// the opener. Both tree walkers happen to start AT the opener, so this is
+    /// unreachable through them and only a direct feed can pin it -- but the
+    /// guard is what stops a leading `*` (or any leading token) from deciding
+    /// the flag, and it costs nothing to keep it honest.
+    #[test]
+    fn merge_flag_ignores_tokens_before_the_opener() {
+        use crate::SyntaxKind as K;
+
+        // A star BEFORE any opener is not a merge marker: nothing has opened
+        // yet, so it cannot be the first token after an opener.
+        let mut flag = MergeFlag::default();
+        for kind in [K::STAR, K::L_BRACE, K::R_BRACE] {
+            flag.feed(kind);
+        }
+        assert!(
+            !flag.is_merge(),
+            "a star before the opener must not decide the flag"
+        );
+
+        // And a non-star before the opener must not close the machine early,
+        // or the real `{*}` that follows would be missed.
+        let mut flag = MergeFlag::default();
+        for kind in [K::NUMBER, K::L_BRACE, K::STAR, K::R_BRACE] {
+            flag.feed(kind);
+        }
+        assert!(
+            flag.is_merge(),
+            "a token before the opener must not consume the decision"
+        );
+    }
+
+    /// Every diagnostic span in this module is built as `offset + bom_offset`,
+    /// and a wrong offset puts the editor's squiggle on the wrong text.
+    ///
+    /// The error paths were already exercised, but only for the PRESENCE of an
+    /// error, so the 2026-08-01 mutation run could flip `+` to `-` or `*` in
+    /// five different span computations without a single failure. Each row
+    /// below drives one of them and asserts the exact range, once with no BOM
+    /// and once with one, so the addition itself is pinned rather than merely
+    /// the arithmetic happening to agree at zero.
+    #[test]
+    fn diagnostic_spans_point_at_the_offending_text_with_and_without_a_bom() {
+        // (label, source, the substring the span must cover)
+        let cases = [
+            (
+                "price with two numbers",
+                "2024-01-15 price HOOL 1 2 USD\n",
+                "1 2",
+            ),
+            (
+                "balance with two numbers",
+                "2024-01-15 balance Assets:Cash 1 2 USD\n",
+                "1 2",
+            ),
+            (
+                "posting with a second amount",
+                "2024-01-15 *\n  Assets:A 5 USD + 3 USD\n  Assets:B\n",
+                // Underlined from the END of the first amount on purpose, so
+                // the reader sees `5 USD + 3 USD` and not just the tail.
+                " + 3 USD",
+            ),
+            (
+                // A `+`/`-` binds to the amount as its sign, so the orphan that
+                // actually reaches this path is a stray comma - someone writing
+                // `1,234` with the separator outside the number.
+                "orphaned comma before a posting amount",
+                "2024-01-15 *\n  Assets:A , 1,234.00 USD\n  Assets:B\n",
+                ",",
+            ),
+        ];
+
+        for (label, src, needle) in cases {
+            for bom in [false, true] {
+                let full = if bom {
+                    format!("\u{FEFF}{src}")
+                } else {
+                    src.to_string()
+                };
+                let result = parse_via_cst(&full);
+                let bom_len = if bom { "\u{FEFF}".len() } else { 0 };
+
+                let expected_start = src
+                    .find(needle)
+                    .unwrap_or_else(|| panic!("{label}: {needle:?} not in the fixture"))
+                    + bom_len;
+                let expected_end = expected_start + needle.len();
+
+                let hit = result
+                    .errors
+                    .iter()
+                    .find(|e| e.span.start == expected_start && e.span.end == expected_end);
+                assert!(
+                    hit.is_some(),
+                    "{label} (bom={bom}): expected an error spanning {expected_start}..{expected_end} \
+                     (the {needle:?}), got {:?}",
+                    result
+                        .errors
+                        .iter()
+                        .map(|e| (e.span.start, e.span.end))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    /// A leading `-` on a `price`/`balance` number is a separate MINUS token,
+    /// so the converter has to re-apply the sign the AST accessor drops. Both
+    /// the negation and the scanner that finds it were untested.
+    #[test]
+    fn negative_numbers_in_price_and_balance_keep_their_sign() {
+        // SPACED, so the sign is its own MINUS token and the AST accessor
+        // hands back an unsigned number. `-1.50` written closed up lexes as a
+        // single signed NUMBER and never reaches the scanner at all.
+        let result = parse_via_cst("2024-01-15 price HOOL - 1.50 USD\n");
+        let Some(Directive::Price(p)) = result.directives.first().map(|d| &d.value) else {
+            panic!("expected a Price, got {:?}", result.directives);
+        };
+        assert_eq!(p.amount.number, rust_decimal_macros::dec!(-1.50));
+
+        let result = parse_via_cst("2024-01-15 balance Assets:Cash - 1.50 USD\n");
+        let Some(Directive::Balance(b)) = result.directives.first().map(|d| &d.value) else {
+            panic!("expected a Balance, got {:?}", result.directives);
+        };
+        assert_eq!(b.amount.number, rust_decimal_macros::dec!(-1.50));
+
+        // And the positive case must stay positive: a scanner that reports
+        // "minus" for everything would pass the assertions above alone.
+        let result = parse_via_cst("2024-01-15 price HOOL 1.50 USD\n");
+        let Some(Directive::Price(p)) = result.directives.first().map(|d| &d.value) else {
+            panic!("expected a Price");
+        };
+        assert_eq!(p.amount.number, rust_decimal_macros::dec!(1.50));
+    }
+
+    /// `price` puts the BASE currency BEFORE the number, so the scan that
+    /// rejects a two-number value may only stop at a currency once a number has
+    /// been seen. Getting that guard wrong makes every `price` directive look
+    /// malformed, or stops rejecting the thing it exists to reject.
+    #[test]
+    fn price_base_currency_before_the_number_is_not_a_malformed_value() {
+        let result = parse_via_cst("2024-01-15 price HOOL 1.50 USD\n");
+        assert!(
+            result.errors.is_empty(),
+            "a well-formed price must not be reported as malformed: {:?}",
+            result.errors
+        );
+        assert_eq!(result.directives.len(), 1);
+
+        // Two numbers still must be rejected.
+        let result = parse_via_cst("2024-01-15 price HOOL 1 2 USD\n");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| format!("{:?}", e.kind).contains("malformed amount")),
+            "two numbers must still be refused: {:?}",
+            result.errors
+        );
+    }
+
+    /// Only `+`, `-` and `,` are orphanable. A posting FLAG sits between the
+    /// account and the amount too, and treating it as an orphan would reject
+    /// perfectly ordinary input.
+    #[test]
+    fn a_posting_flag_is_not_an_orphaned_amount_prefix() {
+        let result = parse_via_cst("2024-01-15 *\n  ! Assets:A 5 USD\n  Assets:B\n");
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| format!("{:?}", e.kind).contains("unexpected token before posting amount")),
+            "a posting flag is not an orphan: {:?}",
+            result.errors
+        );
+    }
+
+    /// Both diagnostics inside posting-amount conversion carry spans built with
+    /// the BOM offset, and neither was pinned. An arithmetic expression that
+    /// cannot be evaluated and a number past the Decimal ceiling are the two
+    /// ways in.
+    #[test]
+    fn posting_amount_diagnostics_point_at_the_offending_amount() {
+        // 30 digits: past `rust_decimal`'s ~28-digit ceiling.
+        let huge = "1".repeat(30);
+        let cases = [
+            (
+                // The span covers the whole AMOUNT node, currency included:
+                // the expression is what is wrong, but the amount is what the
+                // reader has to replace.
+                "unevaluatable arithmetic",
+                "2024-01-15 *\n  Assets:A (1/0) USD\n  Assets:B\n".to_string(),
+                "(1/0) USD".to_string(),
+            ),
+            (
+                "number past the Decimal ceiling",
+                format!("2024-01-15 *\n  Assets:A {huge} USD\n  Assets:B\n"),
+                huge,
+            ),
+        ];
+
+        for (label, src, needle) in cases {
+            for bom in [false, true] {
+                let full = if bom {
+                    format!("\u{FEFF}{src}")
+                } else {
+                    src.clone()
+                };
+                let bom_len = if bom { "\u{FEFF}".len() } else { 0 };
+                let result = parse_via_cst(&full);
+
+                let start = src.find(&needle).expect("needle present") + bom_len;
+                let end = start + needle.len();
+                assert!(
+                    result
+                        .errors
+                        .iter()
+                        .any(|e| e.span.start == start && e.span.end == end),
+                    "{label} (bom={bom}): expected a span {start}..{end}, got {:?}",
+                    result
+                        .errors
+                        .iter()
+                        .map(|e| (e.span.start, e.span.end))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    /// The trailing currency closes a directive value, and it must only do so
+    /// once a number has been seen (a `price` names its base currency first).
+    /// Without the break, a stray number after the currency would be counted
+    /// and a well-formed directive rejected.
+    #[test]
+    fn a_trailing_currency_closes_the_value_scan() {
+        let result = parse_via_cst("2024-01-15 price HOOL 1.50 USD 2\n");
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| format!("{:?}", e.kind).contains("malformed amount")),
+            "the scan must stop at the closing currency, so the stray `2` is not \
+             a second number of the VALUE: {:?}",
+            result.errors
+        );
+    }
+
+    /// Only tokens AFTER the account can be orphans, and only `+`, `-` and `,`
+    /// qualify. Both halves of that were untested, so each row here would be
+    /// reported as an orphan by a slightly wrong predicate.
+    #[test]
+    fn orphan_detection_ignores_pre_account_and_non_sign_tokens() {
+        let orphan_reported = |src: &str| {
+            parse_via_cst(src)
+                .errors
+                .iter()
+                .any(|e| format!("{:?}", e.kind).contains("unexpected token before posting amount"))
+        };
+
+        assert!(
+            !orphan_reported("2024-01-15 *\n  , Assets:A 1 USD\n  Assets:B\n"),
+            "a comma BEFORE the account is not an orphaned amount prefix"
+        );
+        assert!(
+            !orphan_reported("2024-01-15 *\n  Assets:A \"note\" 1 USD\n  Assets:B\n"),
+            "a non-sign token between account and amount is not an orphan"
+        );
+        // The genuine orphan still is one, so the assertions above cannot pass
+        // by the detector simply never firing.
+        assert!(
+            orphan_reported("2024-01-15 *\n  Assets:A , 1 USD\n  Assets:B\n"),
+            "a comma after the account IS an orphan"
+        );
+    }
+
+    /// A posting's trailing comment is collected up to the newline. Stopping on
+    /// the wrong condition silently drops every one of them.
+    #[test]
+    fn posting_trailing_comment_is_captured() {
+        let result = parse_via_cst("2024-01-15 *\n  Assets:A 1 USD ; why\n  Assets:B\n");
+        let Some(Directive::Transaction(txn)) = result.directives.first().map(|d| &d.value) else {
+            panic!("expected a transaction");
+        };
+        let first = &txn.postings[0];
+        assert!(
+            first.trailing_comments.iter().any(|c| c.contains("why")),
+            "expected the trailing comment on the posting, got {:?}",
+            first.trailing_comments
+        );
+    }
+
+    /// The sign scanner behind `price`/`balance` fallback conversion.
+    ///
+    /// Reaching it takes work: `directive_arithmetic_value` runs first and
+    /// handles ordinary unary minus, so `- 1.50` never gets here. The fallback
+    /// only runs when the arithmetic parse declines, and `- 1.50 - USD` is one
+    /// such shape -- error recovery tolerates the trailing operator, the
+    /// arithmetic parse gives up, and the AST accessor then hands back an
+    /// UNSIGNED number that this scanner has to re-sign.
+    ///
+    /// Probed for rather than assumed: the whole test suite and all 995 corpus
+    /// files leave this branch cold, so it looked like dead code until an
+    /// adversarial sweep found the inputs. Worth stating, because deleting it
+    /// on that first impression would have been wrong.
+    #[test]
+    fn price_and_balance_fallback_re_signs_a_leading_minus() {
+        let number_of = |src: &str| -> Decimal {
+            let r = parse_via_cst(src);
+            match r.directives.first().map(|d| &d.value) {
+                Some(Directive::Price(p)) => p.amount.number,
+                Some(Directive::Balance(b)) => b.amount.number,
+                other => panic!("expected price/balance from {src:?}, got {other:?}"),
+            }
+        };
+
+        // MINUS before the number: re-signed.
+        assert_eq!(
+            number_of("2024-01-15 price HOOL - 1.50 - USD\n"),
+            rust_decimal_macros::dec!(-1.50)
+        );
+        assert_eq!(
+            number_of("2024-01-15 balance Assets:C - 1.50 - USD\n"),
+            rust_decimal_macros::dec!(-1.50)
+        );
+
+        // NUMBER first: the scan stops there, so a LATER minus must not flip
+        // the sign. Without this the "stop at the number" arm is free to vanish.
+        assert_eq!(
+            number_of("2024-01-15 price HOOL 1.50 - USD\n"),
+            rust_decimal_macros::dec!(1.50)
+        );
+        assert_eq!(
+            number_of("2024-01-15 balance Assets:C 1.50 - USD\n"),
+            rust_decimal_macros::dec!(1.50)
+        );
+    }
+
+    /// The red conversion path is a mirror of the green one, kept for the
+    /// `green_eq_red` differential fuzz target. Production parses via green, so
+    /// a test written against `parse_via_cst` exercises the mirror only where
+    /// the two SHARE a helper -- which is why the 2026-08-01 mutation run
+    /// showed red-only code uncovered even though its green twin was tested.
+    ///
+    /// These drive `parse_red_only` directly, and assert the two paths agree,
+    /// so the mirror cannot rot silently.
+    #[test]
+    fn red_path_matches_green_on_posting_comments_and_orphan_detection() {
+        let orphan_msg = "unexpected token before posting amount";
+
+        // Trailing comment on a posting line, collected by the red converter's
+        // own scan up to the terminating NEWLINE.
+        let src = "2024-01-15 *\n  Assets:A 1 USD ; why\n  Assets:B\n";
+        for (label, result) in [("green", parse_via_cst(src)), ("red", parse_red_only(src))] {
+            let Some(Directive::Transaction(txn)) = result.directives.first().map(|d| &d.value)
+            else {
+                panic!("{label}: expected a transaction");
+            };
+            assert!(
+                txn.postings[0]
+                    .trailing_comments
+                    .iter()
+                    .any(|c| c.contains("why")),
+                "{label}: trailing comment lost, got {:?}",
+                txn.postings[0].trailing_comments
+            );
+        }
+
+        // Orphan detection, through the red converter: a comma after the
+        // account is one, a comma before it and a non-sign token are not.
+        let orphan_reported = |src: &str| {
+            parse_red_only(src)
+                .errors
+                .iter()
+                .any(|e| format!("{:?}", e.kind).contains(orphan_msg))
+        };
+        assert!(
+            orphan_reported("2024-01-15 *\n  Assets:A , 1 USD\n  Assets:B\n"),
+            "red: a comma after the account IS an orphan"
+        );
+        assert!(
+            !orphan_reported("2024-01-15 *\n  , Assets:A 1 USD\n  Assets:B\n"),
+            "red: a comma BEFORE the account is not"
+        );
+        assert!(
+            !orphan_reported("2024-01-15 *\n  Assets:A \"note\" 1 USD\n  Assets:B\n"),
+            "red: a non-sign token between account and amount is not"
         );
     }
 }

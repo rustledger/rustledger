@@ -1153,21 +1153,16 @@ impl CostSpec {
     /// matters.
     #[must_use]
     pub fn is_merge(&self) -> bool {
-        let mut past_opener = false;
+        // Delegates rather than re-deriving: this used to be a hand-mirrored
+        // copy of the machine in `cost_spec_from_tokens`, and the 2026-08-01
+        // mutation run showed the copy was the only one under test.
+        let mut flag = super::convert::MergeFlag::default();
         for el in self.syntax().children_with_tokens() {
             if let rowan::NodeOrToken::Token(t) = el {
-                match t.kind() {
-                    SyntaxKind::L_BRACE | SyntaxKind::L_DOUBLE_BRACE | SyntaxKind::L_BRACE_HASH => {
-                        past_opener = true;
-                    }
-                    SyntaxKind::WHITESPACE if past_opener => {}
-                    SyntaxKind::STAR if past_opener => return true,
-                    _ if past_opener => return false,
-                    _ => {}
-                }
+                flag.feed(t.kind());
             }
         }
-        false
+        flag.is_merge()
     }
 }
 

@@ -805,31 +805,32 @@ fn extract_custom_values(node: &crate::SyntaxNode) -> Vec<MetaValue> {
         // One value at a time through the shared discriminator — this is what
         // gives custom directives the same MINUS-sign, Tag/Link and
         // `NUMBER CURRENCY` → Amount handling as metadata entries.
-        if let Some((value, next)) = value_tokens_to_meta(&raw, i) {
+        // ONE advance for both branches, so the loop provably terminates.
+        //
+        // It used to advance in two places, and only the value branch was
+        // guarded. That left the `else` free to move `i` BACKWARD, which does
+        // not merely spin: stepping back re-enters the branch above, pushes
+        // another value, steps forward, and repeats — allocating without
+        // bound. Memory runs out before any per-test timeout can fire, so on
+        // CI it takes the whole runner down and surfaces as "the runner has
+        // received a shutdown signal", indistinguishable from infrastructure.
+        // Two full mutation runs lost the same three parser shards to it
+        // (runs 30765289550 and 30768895946) before the cause was found.
+        //
+        // `value_tokens_to_meta` returns the index past what it consumed, so
+        // the assert is the contract and the clamp is the belt: in release a
+        // violation costs one wasted token rather than the process.
+        let next = if let Some((value, consumed)) = value_tokens_to_meta(&raw, i) {
             values.push(value);
-            // `value_tokens_to_meta` must return the index PAST what it
-            // consumed. Both halves of this line matter and they do different
-            // jobs:
-            //
-            // The assert makes a violated contract fail loudly under test.
-            // Clamping alone would silently repair it — the loop would step one
-            // token at a time, re-discriminate, and usually produce the same
-            // values, so a genuinely broken advance would look fine. Measured:
-            // clamping without this turned seventeen index mutants from
-            // detected-by-timeout into simply undetected.
-            //
-            // The clamp keeps release builds from hanging on a violation, which
-            // is what the same seventeen mutants did before either existed. A
-            // parser that spins forever on malformed input is worse than one
-            // that errors, and a hang is invisible in review.
-            debug_assert!(
-                next > i,
-                "value_tokens_to_meta must advance: returned {next} at {i}"
-            );
-            i = next.max(i + 1);
+            consumed
         } else {
-            i += 1;
-        }
+            i + 1
+        };
+        debug_assert!(
+            next > i,
+            "value_tokens_to_meta must advance: returned {next} at {i}"
+        );
+        i = next.max(i + 1);
     }
     values
 }

@@ -87,6 +87,21 @@ jobs:
             esac
           }
 
+          # PARALLEL CARGO JOBS PER SHARD. `rustledger-parser` gets fewer.
+          # Measured on run 30765289550: three of its four shards were
+          # SIGTERMed by the runner at 32-47 minutes (exit 143, "runner has
+          # received a shutdown signal") while all four `core` shards of the
+          # same duration finished. The parser's suite is the heavy one
+          # (proptest, fuzz-corpus replay, insta snapshots), so four concurrent
+          # test binaries is the likelier cause than runner flakiness. Halving
+          # it spends wall-clock that sharding has freed up.
+          jobs_for() {
+            case "$1" in
+              rustledger-parser) echo 2 ;;
+              *) echo 4 ;;
+            esac
+          }
+
           # SHARD INDICES ARE ZERO-BASED: `--shard k/n` wants k in 0..n-1.
           # cargo-mutants' own `--help` says "specify as e.g. 1/4", which reads
           # as one-based and is not. Verified against cargo-mutants 27.1.0 on a
@@ -101,7 +116,7 @@ jobs:
             n=$(shards_for "$pkg")
             i=0
             while [ "$i" -lt "$n" ]; do
-              ENTRIES="$ENTRIES{\"package\":\"$pkg\",\"shard\":$i,\"shards\":$n},"
+              ENTRIES="$ENTRIES{\"package\":\"$pkg\",\"shard\":$i,\"shards\":$n,\"jobs\":$(jobs_for "$pkg")},"
               i=$((i + 1))
             done
           done
@@ -134,6 +149,7 @@ jobs:
           TIMEOUT="${{ github.event.inputs.timeout || '300' }}"
           echo "Mutating package: ${{ matrix.package }}"
           echo "Shard: ${{ matrix.shard }} of ${{ matrix.shards }}"
+          echo "Parallel cargo jobs: ${{ matrix.jobs }}"
           echo "Timeout per mutant: ${TIMEOUT}s"
           echo ""
 
@@ -142,7 +158,7 @@ jobs:
           # for jobs that actually finish.
           cargo mutants \
             --timeout "$TIMEOUT" \
-            --jobs 4 \
+            --jobs "${{ matrix.jobs }}" \
             --package "${{ matrix.package }}" \
             --shard "${{ matrix.shard }}/${{ matrix.shards }}" \
             -- --all-features \
@@ -279,3 +295,68 @@ jobs:
           GITHUB_ANNOTATIONS: '1'
           MUTATION_FLOOR: '10'
         run: scripts/per-plugin-mutation-report.sh
+
+  # A shard the runner TERMINATES produces no result at all: the sweep is cut
+  # off mid-list and every later step is skipped, so nothing inside that job
+  # can report what happened. From the outside it looks identical to a shard
+  # that finished and found problems, and the run's `failure` conclusion means
+  # two completely different things -- one is "coverage is imperfect", the
+  # other is "we did not measure". Conflating them is how a scheduled job stops
+  # being read (see #1907).
+  #
+  # This runs regardless of the shards' outcome and says which happened.
+  summarize:
+    name: Mutation summary
+    needs: [select-packages, mutants]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Classify each shard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --paginate --jq '.jobs[] | select(.name | startswith("Mutate"))
+              | {name, conclusion, run: ([.steps[] | select(.name=="Run mutation testing") | .conclusion] | first)}' \
+            > jobs.jsonl
+
+          # A shard whose sweep step never reached a conclusion of its own was
+          # killed from outside; one that ran to completion measured something,
+          # whatever the verdict.
+          measured=$(jq -r 'select(.run=="success") | .name' jobs.jsonl | wc -l | tr -d ' ')
+          truncated=$(jq -r 'select(.run!="success") | .name' jobs.jsonl | wc -l | tr -d ' ')
+          total=$((measured + truncated))
+
+          {
+            echo "## Mutation run"
+            echo ""
+            echo "| shards | outcome |"
+            echo "|---:|---|"
+            echo "| $measured | measured (the sweep finished) |"
+            echo "| $truncated | **truncated** (the runner terminated the job; NOT a mutant result) |"
+            echo ""
+            if [ "$truncated" -gt 0 ]; then
+              echo "Truncated shards, which measured nothing:"
+              echo ""
+              jq -r 'select(.run!="success") | "- `\(.name)`"' jobs.jsonl
+              echo ""
+              echo "These are infrastructure, not findings. Re-run them before reading"
+              echo "the numbers as coverage: a truncated shard reports no surviving"
+              echo "mutants simply because it never got to them."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "measured=$measured truncated=$truncated of $total"
+
+          # Fail on truncation so the run's conclusion means "incomplete", which
+          # is true and actionable. Surviving mutants alone do not fail a shard,
+          # so this does not swallow that signal.
+          if [ "$truncated" -gt 0 ]; then
+            echo "::error::$truncated of $total shards were terminated by the runner and measured nothing."
+            exit 1
+          fi

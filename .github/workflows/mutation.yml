@@ -225,8 +225,12 @@ jobs:
       - name: Upload mutation results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          # Per-package name so parallel matrix jobs don't clobber each other.
-          name: mutation-results-${{ matrix.package }}
+          # Per-package AND per-shard: `upload-artifact@v4+` REJECTS a
+          # duplicate name outright, so four shards of one package all
+          # uploading `mutation-results-<package>` would fail the job (and
+          # before v4 would have silently overwritten, losing three quarters
+          # of the results, which is worse).
+          name: mutation-results-${{ matrix.package }}-shard${{ matrix.shard }}of${{ matrix.shards }}
           path: |
             mutants.out/
             mutants-output.txt

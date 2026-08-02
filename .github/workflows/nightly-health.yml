@@ -27,6 +27,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Runs BEFORE the live check and is allowed to fail the job. The live
+      # check deliberately exits 0 whatever it finds, so a logic bug in this
+      # script would otherwise surface only as a quietly wrong issue body —
+      # the same "results produced but never read" failure it exists to catch.
+      - name: Self-test
+        run: python3 scripts/nightly-health.py --self-test
       - name: Check scheduled workflows
         env:
           GH_TOKEN: ${{ github.token }}

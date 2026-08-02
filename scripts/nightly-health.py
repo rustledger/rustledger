@@ -116,6 +116,86 @@ def latest_scheduled_run(workflow: str) -> dict | None:
     return runs[0] if runs else None
 
 
+def later_successful_manual_run(workflow: str, after: datetime) -> dict | None:
+    """A `workflow_dispatch` run of `workflow` that succeeded after `after`.
+
+    A scheduled workflow whose fix has already been verified by hand is a
+    different state from one nobody has touched, and only reading
+    `--event schedule` cannot tell them apart. Miri is the case that prompted
+    this: its fix (#1901, #1904) was confirmed by dispatch on 2026-08-01 and
+    finished in 3 minutes where it had been running to the 60-minute cap, but
+    the report went on naming it a plain failure against a scheduled run from
+    six days earlier. An alarm that keeps flagging something already fixed is
+    one people learn to skim, which is the failure mode this whole script
+    exists to prevent.
+
+    Deliberately does NOT clear the entry. A green manual run says the code is
+    fixed; it says nothing about whether the cron still fires, which is the
+    other half of what this watches (see STALE). So it annotates and the
+    workflow stays listed until a SCHEDULED run proves it.
+    """
+    raw = gh(
+        "run", "list", "--repo", REPO, "--workflow", workflow,
+        "--event", "workflow_dispatch", "--status", "success", "--limit", "1",
+        "--json", "conclusion,createdAt,url",
+        tolerate_missing=True,
+    )
+    try:
+        runs = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not runs:
+        return None
+    created = datetime.fromisoformat(runs[0]["createdAt"].replace("Z", "+00:00"))
+    return runs[0] if created > after else None
+
+
+def self_test() -> int:
+    """Prove the manual-run annotation fires when it should and not otherwise.
+
+    This script is only useful if it is trusted, and the one thing that
+    destroys trust is a wrong entry. The date guard in
+    `later_successful_manual_run` is the part that can silently invert: get the
+    comparison backwards and every long-fixed workflow grows a reassuring
+    "already fixed" note that is not true. Nothing else in CI exercises this
+    file, so it checks itself.
+    """
+    global gh
+    real_gh = gh
+    sched = datetime(2026, 7, 26, 6, 0, tzinfo=timezone.utc)
+
+    def stub(payload: str):
+        def fake(*args, **kwargs):
+            return payload
+        return fake
+
+    cases = [
+        ("newer manual success annotates",
+         '[{"conclusion":"success","createdAt":"2026-08-01T01:53:00Z","url":"u"}]', True),
+        ("older manual success does NOT annotate",
+         '[{"conclusion":"success","createdAt":"2026-07-20T01:00:00Z","url":"u"}]', False),
+        ("same instant does NOT annotate",
+         '[{"conclusion":"success","createdAt":"2026-07-26T06:00:00Z","url":"u"}]', False),
+        ("no manual runs at all", "[]", False),
+        ("unparsable response", "not json", False),
+    ]
+
+    failures = 0
+    for label, payload, expected in cases:
+        gh = stub(payload)
+        got = later_successful_manual_run("miri.yml", sched) is not None
+        ok = got == expected
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}: annotated={got} expected={expected}")
+
+    gh = real_gh
+    if failures:
+        print(f"::error::nightly-health self-test: {failures} case(s) failed")
+        return 1
+    print("nightly-health self-test: all cases passed")
+    return 0
+
+
 def main() -> int:
     now = datetime.now(timezone.utc)
     failing: list[str] = []
@@ -163,7 +243,18 @@ def main() -> int:
                 f"([{concl}]({run['url']}))"
             )
         elif concl != "success":
-            failing.append(f"- `{wf}` ({period}) — last run **{concl}** ([log]({run['url']}))")
+            entry = f"- `{wf}` ({period}) — last scheduled run **{concl}** ([log]({run['url']}))"
+            manual = later_successful_manual_run(wf, created)
+            if manual:
+                since = (now - datetime.fromisoformat(
+                    manual["createdAt"].replace("Z", "+00:00")
+                )).days
+                entry += (
+                    f", but a [manual run]({manual['url']}) has succeeded since "
+                    f"({since}d ago) — a fix is likely already in; still listed "
+                    "until a SCHEDULED run confirms the cron itself"
+                )
+            failing.append(entry)
         else:
             ok.append(f"`{wf}`")
         print(f"{wf:24} {period:8} {concl:12} {age.days}d ago")
@@ -221,4 +312,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        raise SystemExit(self_test())
     sys.exit(main())

@@ -60,29 +60,65 @@ jobs:
           # Curated audit set: core + parser + the critical pipeline crates
           # (CLI, LSP and WASM are intentionally excluded — too slow / not the
           # correctness-critical core).
-          ALL='["rustledger-core","rustledger-parser","rustledger-booking","rustledger-validate","rustledger-loader","rustledger-plugin"]'
+          ALL='rustledger-core rustledger-parser rustledger-booking rustledger-validate rustledger-loader rustledger-plugin'
           if [ "$INPUT" = "all" ] || [ "${{ github.event_name }}" = "schedule" ]; then
-            MATRIX="$ALL"
+            PACKAGES="$ALL"
           elif [ -n "$INPUT" ]; then
-            # Manual comma-separated input -> JSON array of packages.
-            MATRIX=$(printf '%s' "$INPUT" | tr ',' '\n' | sed '/^$/d; s/^/"/; s/$/"/' | paste -sd, - | sed 's/^/[/; s/$/]/')
+            PACKAGES=$(printf '%s' "$INPUT" | tr ',' ' ')
           else
             # pull_request (path-triggered): curated default.
-            MATRIX='["rustledger-core"]'
+            PACKAGES='rustledger-core'
           fi
-          echo "Selected packages: $MATRIX"
+
+          # SHARD COUNT PER PACKAGE, from measured wall-clock on the
+          # 2026-08-01 run: core 162min, parser 81min AND KILLED before
+          # finishing, everything else under 20. One runner per package meant
+          # the two big crates either ran to the cap or were lost whole, so
+          # their results were a lower bound rather than an answer — a full
+          # local sweep of ONE parser file found 127 surviving mutants where
+          # the crate-wide CI run had ever reported 69.
+          #
+          # Sharding splits the mutant list, so each job finishes well inside
+          # the cap and a lost runner costs one shard instead of a crate.
+          shards_for() {
+            case "$1" in
+              rustledger-core|rustledger-parser) echo 4 ;;
+              *) echo 1 ;;
+            esac
+          }
+
+          # SHARD INDICES ARE ZERO-BASED: `--shard k/n` wants k in 0..n-1.
+          # cargo-mutants' own `--help` says "specify as e.g. 1/4", which reads
+          # as one-based and is not. Verified against cargo-mutants 27.1.0 on a
+          # 93-mutant crate: shards 0,1,2 of 3 return 31 each and partition the
+          # list exactly, while `3/3` returns NOTHING and runs green. Numbering
+          # from 1 therefore skips the whole k=0 shard and reports success for
+          # an empty one - a quarter of the crate silently untested. The guard
+          # in the run step exists because that failure is invisible otherwise.
+          ENTRIES=''
+          for pkg in $PACKAGES; do
+            [ -n "$pkg" ] || continue
+            n=$(shards_for "$pkg")
+            i=0
+            while [ "$i" -lt "$n" ]; do
+              ENTRIES="$ENTRIES{\"package\":\"$pkg\",\"shard\":$i,\"shards\":$n},"
+              i=$((i + 1))
+            done
+          done
+          MATRIX="[${ENTRIES%,}]"
+          echo "Selected: $MATRIX"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
   mutants:
-    name: Mutate ${{ matrix.package }}
+    name: Mutate ${{ matrix.package }} ${{ matrix.shard }}/${{ matrix.shards }}
     needs: select-packages
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
     strategy:
       # One package's timeout/failure must not cancel the others.
       fail-fast: false
       matrix:
-        package: ${{ fromJSON(needs.select-packages.outputs.matrix) }}
+        include: ${{ fromJSON(needs.select-packages.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
@@ -97,14 +133,18 @@ jobs:
         run: |
           TIMEOUT="${{ github.event.inputs.timeout || '300' }}"
           echo "Mutating package: ${{ matrix.package }}"
+          echo "Shard: ${{ matrix.shard }} of ${{ matrix.shards }}"
           echo "Timeout per mutant: ${TIMEOUT}s"
           echo ""
 
-          # Run mutants with timeout and parallel jobs
+          # `--shard k/n` splits the generated mutant list; every shard still
+          # builds the crate once, so this trades a little repeated build time
+          # for jobs that actually finish.
           cargo mutants \
             --timeout "$TIMEOUT" \
             --jobs 4 \
             --package "${{ matrix.package }}" \
+            --shard "${{ matrix.shard }}/${{ matrix.shards }}" \
             -- --all-features \
             2>&1 | tee mutants-output.txt
       - name: Parse results
@@ -130,6 +170,24 @@ jobs:
           fi
 
           TOTAL=$((CAUGHT + MISSED + TIMEOUT))
+
+          # A shard that tested NOTHING is a bug, not a clean bill of health.
+          # An out-of-range shard index produces exactly this: cargo-mutants
+          # exits 0 having run no mutants, so without the check the job is
+          # green and a slice of the crate goes unexamined. Unviable-only is
+          # possible in principle, so read the listed count too before failing.
+          if [ "$TOTAL" -eq 0 ]; then
+            LISTED=$(cargo mutants --package "${{ matrix.package }}" \
+              --shard "${{ matrix.shard }}/${{ matrix.shards }}" --list 2>/dev/null \
+              | grep -cE '^crates/.*\.rs:[0-9]+:[0-9]+:' || true)
+            if [ "${LISTED:-0}" -eq 0 ]; then
+              echo "::error::shard ${{ matrix.shard }}/${{ matrix.shards }} of \
+          ${{ matrix.package }} generated no mutants at all. Shard indices are \
+          ZERO-based (0..n-1); an out-of-range index runs nothing and exits 0."
+              exit 1
+            fi
+          fi
+
           if [ "$TOTAL" -gt 0 ]; then
             SCORE=$((CAUGHT * 100 / TOTAL))
           else

@@ -1,9 +1,0 @@
-{"conclusion":"success","name":"Mutate rustledger-core 1/4","run":"success"}
-{"conclusion":"success","name":"Mutate rustledger-validate 0/1","run":"success"}
-{"conclusion":"success","name":"Mutate rustledger-core 0/4","run":"success"}
-{"conclusion":"success","name":"Mutate rustledger-booking 0/1","run":"success"}
-{"conclusion":"success","name":"Mutate rustledger-core 2/4","run":"success"}
-{"conclusion":"success","name":"Mutate rustledger-core 3/4","run":"success"}
-{"conclusion":"success","name":"Mutate rustledger-parser 0/4","run":"success"}
-{"conclusion":"success","name":"Mutate rustledger-plugin 0/1","run":"success"}
-{"conclusion":"success","name":"Mutate rustledger-loader 0/1","run":"success"}

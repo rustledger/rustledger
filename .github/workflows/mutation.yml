@@ -320,17 +320,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Into RUNNER_TEMP, not the workspace: a file called `jobs.jsonl`
+          # sitting at the repo root reads like a checked-in fixture.
+          JOBS="$RUNNER_TEMP/mutation-jobs.jsonl"
           gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
             --paginate --jq '.jobs[] | select(.name | startswith("Mutate"))
               | {name, conclusion, run: ([.steps[] | select(.name=="Run mutation testing") | .conclusion] | first)}' \
-            > jobs.jsonl
+            > "$JOBS"
 
-          # A shard whose sweep step never reached a conclusion of its own was
-          # killed from outside; one that ran to completion measured something,
-          # whatever the verdict.
-          measured=$(jq -r 'select(.run=="success") | .name' jobs.jsonl | wc -l | tr -d ' ')
-          truncated=$(jq -r 'select(.run!="success") | .name' jobs.jsonl | wc -l | tr -d ' ')
-          total=$((measured + truncated))
+          # Split on whether the sweep step SUCCEEDED. That is the honest
+          # distinction available here: a shard whose sweep did not succeed
+          # produced no numbers, whether the runner killed it (exit 143, the
+          # observed case) or cargo-mutants itself failed. Both mean "not
+          # measured"; neither means "mutants survived", because a shard that
+          # completes with survivors still exits 0. The conclusions are printed
+          # so the reader can tell which happened rather than being told.
+          measured=$(jq -r 'select(.run=="success") | .name' "$JOBS" | wc -l | tr -d ' ')
+          incomplete=$(jq -r 'select(.run!="success") | .name' "$JOBS" | wc -l | tr -d ' ')
+          total=$((measured + incomplete))
 
           {
             echo "## Mutation run"
@@ -338,25 +345,28 @@ jobs:
             echo "| shards | outcome |"
             echo "|---:|---|"
             echo "| $measured | measured (the sweep finished) |"
-            echo "| $truncated | **truncated** (the runner terminated the job; NOT a mutant result) |"
+            echo "| $incomplete | **did not complete the sweep** (no result; NOT surviving mutants) |"
             echo ""
-            if [ "$truncated" -gt 0 ]; then
-              echo "Truncated shards, which measured nothing:"
+            if [ "$incomplete" -gt 0 ]; then
+              echo "Shards that measured nothing:"
               echo ""
-              jq -r 'select(.run!="success") | "- `\(.name)`"' jobs.jsonl
+              jq -r 'select(.run!="success")
+                | "- `\(.name)` — job `\(.conclusion)`, sweep step `\(.run // "did not run")`"' "$JOBS"
               echo ""
-              echo "These are infrastructure, not findings. Re-run them before reading"
-              echo "the numbers as coverage: a truncated shard reports no surviving"
-              echo "mutants simply because it never got to them."
+              echo "Re-run these before reading the numbers as coverage: a shard"
+              echo "that stopped early reports no surviving mutants simply because"
+              echo "it never reached them. Every occurrence so far has been the"
+              echo "runner terminating the job (exit 143), which is infrastructure"
+              echo "rather than a finding."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "measured=$measured truncated=$truncated of $total"
+          echo "measured=$measured incomplete=$incomplete of $total"
 
-          # Fail on truncation so the run's conclusion means "incomplete", which
-          # is true and actionable. Surviving mutants alone do not fail a shard,
-          # so this does not swallow that signal.
-          if [ "$truncated" -gt 0 ]; then
-            echo "::error::$truncated of $total shards were terminated by the runner and measured nothing."
+          # Fail when a sweep did not complete, so the run's conclusion means
+          # "incomplete", which is true and actionable. Surviving mutants alone
+          # do not fail a shard, so this swallows nothing.
+          if [ "$incomplete" -gt 0 ]; then
+            echo "::error::$incomplete of $total shards did not complete their sweep and measured nothing."
             exit 1
           fi

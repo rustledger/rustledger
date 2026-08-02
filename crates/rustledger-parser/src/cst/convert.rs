@@ -3066,6 +3066,16 @@ fn fixup_directive_spans(
 mod tests {
     use super::*;
 
+    /// Match a `SyntaxError` by message prefix rather than by `Debug` output.
+    /// The `Debug` rendering of `ParseErrorKind` can change without any
+    /// semantic change, and an assertion that reads it would fail for no
+    /// reason; the variant plus the message prefix is the real contract.
+    fn has_syntax_error(result: &ParseResult, prefix: &str) -> bool {
+        result.errors.iter().any(
+            |e| matches!(&e.kind, crate::ParseErrorKind::SyntaxError(m) if m.starts_with(prefix)),
+        )
+    }
+
     fn assert_directive_count(result: &ParseResult, expected: usize) {
         assert_eq!(
             result.directives.len(),
@@ -4756,10 +4766,7 @@ mod tests {
         // Two numbers still must be rejected.
         let result = parse_via_cst("2024-01-15 price HOOL 1 2 USD\n");
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| format!("{:?}", e.kind).contains("malformed amount")),
+            has_syntax_error(&result, "malformed amount"),
             "two numbers must still be refused: {:?}",
             result.errors
         );
@@ -4772,10 +4779,7 @@ mod tests {
     fn a_posting_flag_is_not_an_orphaned_amount_prefix() {
         let result = parse_via_cst("2024-01-15 *\n  ! Assets:A 5 USD\n  Assets:B\n");
         assert!(
-            !result
-                .errors
-                .iter()
-                .any(|e| format!("{:?}", e.kind).contains("unexpected token before posting amount")),
+            !has_syntax_error(&result, "unexpected token before posting amount"),
             "a posting flag is not an orphan: {:?}",
             result.errors
         );
@@ -4841,10 +4845,7 @@ mod tests {
     fn a_trailing_currency_closes_the_value_scan() {
         let result = parse_via_cst("2024-01-15 price HOOL 1.50 USD 2\n");
         assert!(
-            !result
-                .errors
-                .iter()
-                .any(|e| format!("{:?}", e.kind).contains("malformed amount")),
+            !has_syntax_error(&result, "malformed amount"),
             "the scan must stop at the closing currency, so the stray `2` is not \
              a second number of the VALUE: {:?}",
             result.errors
@@ -4857,10 +4858,10 @@ mod tests {
     #[test]
     fn orphan_detection_ignores_pre_account_and_non_sign_tokens() {
         let orphan_reported = |src: &str| {
-            parse_via_cst(src)
-                .errors
-                .iter()
-                .any(|e| format!("{:?}", e.kind).contains("unexpected token before posting amount"))
+            has_syntax_error(
+                &parse_via_cst(src),
+                "unexpected token before posting amount",
+            )
         };
 
         assert!(
@@ -4973,12 +4974,7 @@ mod tests {
 
         // Orphan detection, through the red converter: a comma after the
         // account is one, a comma before it and a non-sign token are not.
-        let orphan_reported = |src: &str| {
-            parse_red_only(src)
-                .errors
-                .iter()
-                .any(|e| format!("{:?}", e.kind).contains(orphan_msg))
-        };
+        let orphan_reported = |src: &str| has_syntax_error(&parse_red_only(src), orphan_msg);
         assert!(
             orphan_reported("2024-01-15 *\n  Assets:A , 1 USD\n  Assets:B\n"),
             "red: a comma after the account IS an orphan"

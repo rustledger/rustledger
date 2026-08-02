@@ -807,7 +807,26 @@ fn extract_custom_values(node: &crate::SyntaxNode) -> Vec<MetaValue> {
         // `NUMBER CURRENCY` → Amount handling as metadata entries.
         if let Some((value, next)) = value_tokens_to_meta(&raw, i) {
             values.push(value);
-            i = next;
+            // `value_tokens_to_meta` must return the index PAST what it
+            // consumed. Both halves of this line matter and they do different
+            // jobs:
+            //
+            // The assert makes a violated contract fail loudly under test.
+            // Clamping alone would silently repair it — the loop would step one
+            // token at a time, re-discriminate, and usually produce the same
+            // values, so a genuinely broken advance would look fine. Measured:
+            // clamping without this turned seventeen index mutants from
+            // detected-by-timeout into simply undetected.
+            //
+            // The clamp keeps release builds from hanging on a violation, which
+            // is what the same seventeen mutants did before either existed. A
+            // parser that spins forever on malformed input is worse than one
+            // that errors, and a hang is invisible in review.
+            debug_assert!(
+                next > i,
+                "value_tokens_to_meta must advance: returned {next} at {i}"
+            );
+            i = next.max(i + 1);
         } else {
             i += 1;
         }
@@ -1970,6 +1989,15 @@ pub(super) fn meta_value_from_tokens(tokens: impl Iterator<Item = impl TokenView
                 _ => {}
             }
         }
+        // Gates the sign machine so a MINUS in or before the key position is
+        // not read as a value's sign. No input reachable through the parser
+        // exercises it: the key is always the first meaningful token, and the
+        // malformed shapes that would put a MINUS ahead of it (`- key: 42`,
+        // `-key: 42`, `key- : 42`) yield no metadata entry at all. Kept as a
+        // guard on the token contract rather than deleted, since this helper
+        // is shared with the green walker and takes whatever tokens it is
+        // handed. Flipping this comparison survives mutation testing for the
+        // same reason -- recorded so the next reader does not hunt for a test.
         if kind == K::META_KEY {
             past_key = true;
         }
@@ -4986,6 +5014,229 @@ mod tests {
         assert!(
             !orphan_reported("2024-01-15 *\n  Assets:A \"note\" 1 USD\n  Assets:B\n"),
             "red: a non-sign token between account and amount is not"
+        );
+    }
+
+    // ---- metadata and custom values: the other token-level canonical ----
+    //
+    // `meta_value_from_tokens` is the twin of `cost_spec_from_tokens` and had
+    // the same shape of gap: first-of-kind latches and a sign machine that no
+    // test touched. `value_tokens_to_meta` is the sibling used by custom
+    // directives and the red path.
+
+    fn meta_of(entries: &str) -> rustledger_core::Metadata {
+        let src = format!("2024-01-15 open Assets:A\n{entries}");
+        let result = parse_via_cst(&src);
+        let Some(Directive::Open(open)) = result.directives.first().map(|d| &d.value) else {
+            panic!("expected an Open from {src:?}, errors {:?}", result.errors);
+        };
+        open.meta.clone()
+    }
+
+    fn custom_values(line: &str) -> Vec<MetaValue> {
+        let result = parse_via_cst(line);
+        let Some(Directive::Custom(c)) = result.directives.first().map(|d| &d.value) else {
+            panic!(
+                "expected a Custom from {line:?}, errors {:?}",
+                result.errors
+            );
+        };
+        c.values.clone()
+    }
+
+    /// Every value kind a metadata entry can carry. Deleting any one arm made
+    /// that kind silently fall through to the next candidate in the priority
+    /// order, which is invisible unless the kind is asserted directly.
+    #[test]
+    fn metadata_values_cover_every_kind() {
+        let meta = meta_of(
+            "  str: \"hello\"\n  num: 42\n  amt: 42 USD\n  dt: 2024-06-01\n  \
+             acct: Assets:B\n  cur: USD\n  yes: TRUE\n  no: FALSE\n  \
+             tg: #mytag\n  lk: ^mylink\n",
+        );
+        let got = |k: &str| meta.get(k).cloned().unwrap_or(MetaValue::None);
+
+        assert_eq!(got("str"), MetaValue::String("hello".into()));
+        assert_eq!(got("num"), MetaValue::Int(42));
+        assert_eq!(
+            got("amt"),
+            MetaValue::Amount(Amount::new(rust_decimal_macros::dec!(42), "USD"))
+        );
+        assert_eq!(got("dt"), MetaValue::Date(naive_date(2024, 6, 1).unwrap()));
+        assert_eq!(got("acct"), MetaValue::Account(Account::new("Assets:B")));
+        assert_eq!(got("cur"), MetaValue::Currency(Currency::new("USD")));
+        assert_eq!(got("yes"), MetaValue::Bool(true));
+        assert_eq!(got("no"), MetaValue::Bool(false));
+        assert_eq!(got("tg"), MetaValue::Tag(Tag::new("mytag")));
+        assert_eq!(got("lk"), MetaValue::Link(Link::new("mylink")));
+    }
+
+    /// First-of-kind latching, the same rule `cost_spec_from_tokens` uses. A
+    /// repeated token of any kind keeps the FIRST, and nothing exercised that
+    /// for metadata, so every latch guard could be flipped freely.
+    #[test]
+    fn metadata_latches_the_first_token_of_each_kind() {
+        let meta = meta_of(
+            "  s: \"one\" \"two\"\n  n: 1 2\n  c: USD EUR\n  d: 2024-06-01 2025-07-02\n  \
+             a: Assets:First Assets:Second\n  b: TRUE FALSE\n  t: #first #second\n",
+        );
+        let got = |k: &str| meta.get(k).cloned().unwrap_or(MetaValue::None);
+
+        assert_eq!(got("s"), MetaValue::String("one".into()));
+        assert_eq!(got("n"), MetaValue::Int(1));
+        assert_eq!(got("d"), MetaValue::Date(naive_date(2024, 6, 1).unwrap()));
+        assert_eq!(got("a"), MetaValue::Account(Account::new("Assets:First")));
+        assert_eq!(got("b"), MetaValue::Bool(true), "TRUE came first");
+        assert_eq!(got("t"), MetaValue::Tag(Tag::new("first")));
+        // `c` pairs a number-less currency run: the FIRST currency wins.
+        assert_eq!(got("c"), MetaValue::Currency(Currency::new("USD")));
+    }
+
+    /// The sign machine: a MINUS after the key negates the number, and one
+    /// AFTER the number does not, because the first NUMBER closes the decision.
+    #[test]
+    fn metadata_minus_applies_only_before_the_number() {
+        let meta = meta_of("  neg: -42\n  negamt: -42 USD\n  after: 42 - 1\n");
+        let got = |k: &str| meta.get(k).cloned().unwrap_or(MetaValue::None);
+
+        assert_eq!(got("neg"), MetaValue::Int(-42));
+        assert_eq!(
+            got("negamt"),
+            MetaValue::Amount(Amount::new(rust_decimal_macros::dec!(-42), "USD")),
+            "the sign applies to the amount too"
+        );
+        assert_eq!(
+            got("after"),
+            MetaValue::Int(42),
+            "a minus past the number is not a sign; the first NUMBER closes it"
+        );
+    }
+
+    /// `value_tokens_to_meta` walks a token run and returns the NEXT index, so
+    /// a wrong advance either drops values or repeats them. Custom directives
+    /// are the surface that reads several values in a row, which makes the
+    /// advance observable.
+    #[test]
+    fn custom_directive_values_advance_one_value_at_a_time() {
+        assert_eq!(
+            custom_values("2024-01-15 custom \"b\" FALSE TRUE FALSE\n"),
+            vec![
+                MetaValue::Bool(false),
+                MetaValue::Bool(true),
+                MetaValue::Bool(false)
+            ],
+            "each bool consumes exactly one token"
+        );
+
+        assert_eq!(
+            custom_values("2024-01-15 custom \"b\" 42 USD TRUE\n"),
+            vec![
+                MetaValue::Amount(Amount::new(rust_decimal_macros::dec!(42), "USD")),
+                MetaValue::Bool(true)
+            ],
+            "NUMBER + CURRENCY consumes TWO tokens and the next value still lands"
+        );
+
+        assert_eq!(
+            custom_values("2024-01-15 custom \"b\" USD TRUE\n"),
+            vec![
+                MetaValue::Currency(Currency::new("USD")),
+                MetaValue::Bool(true)
+            ],
+            "a lone CURRENCY is a value in its own right, not an amount fragment"
+        );
+
+        assert_eq!(
+            custom_values("2024-01-15 custom \"b\" -42 #tag ^link 2024-06-01 Assets:B\n"),
+            vec![
+                MetaValue::Int(-42),
+                MetaValue::Tag(Tag::new("tag")),
+                MetaValue::Link(Link::new("link")),
+                MetaValue::Date(naive_date(2024, 6, 1).unwrap()),
+                MetaValue::Account(Account::new("Assets:B")),
+            ],
+            "MINUS + NUMBER consumes two tokens; the rest follow in order"
+        );
+    }
+
+    /// The bool and tag/link latches, in the order that actually exercises the
+    /// SECOND arm of each pair. `TRUE FALSE` only proves the first arm latches;
+    /// reversing it is what pins the guard on the other one.
+    #[test]
+    fn metadata_latches_bool_and_taglink_in_either_order() {
+        let meta = meta_of("  b: FALSE TRUE\n  tl: #tag ^link\n  lt: ^link #tag\n");
+        let got = |k: &str| meta.get(k).cloned().unwrap_or(MetaValue::None);
+
+        assert_eq!(
+            got("b"),
+            MetaValue::Bool(false),
+            "FALSE came first, so the later TRUE must not overwrite it"
+        );
+        assert_eq!(
+            got("tl"),
+            MetaValue::Tag(Tag::new("tag")),
+            "tag and link share one slot; the tag came first"
+        );
+        assert_eq!(
+            got("lt"),
+            MetaValue::Link(Link::new("link")),
+            "and the link wins when it comes first"
+        );
+    }
+
+    /// `extract_custom_values` advances by the index the discriminator returns.
+    /// A helper that failed to advance would spin the loop forever, so the
+    /// caller clamps. This pins that a long run of values terminates and is
+    /// read in order -- a hang here would let malformed input stall the parser.
+    #[test]
+    fn custom_values_terminate_on_a_long_run() {
+        let values = custom_values(
+            "2024-01-15 custom \"b\" 1 USD 2 EUR TRUE FALSE #a ^b 2024-06-01 Assets:X \"s\"\n",
+        );
+        assert_eq!(
+            values.len(),
+            9,
+            "every value consumed exactly once, got {values:?}"
+        );
+        assert_eq!(
+            values.first(),
+            Some(&MetaValue::Amount(Amount::new(
+                rust_decimal_macros::dec!(1),
+                "USD"
+            )))
+        );
+        assert_eq!(values.last(), Some(&MetaValue::String("s".into())));
+    }
+
+    /// The scan skips the directive header (date, keyword, and the type-name
+    /// string) before reading values, steps past tokens that are not values,
+    /// and terminates when there are none. Each of those is a separate step in
+    /// the loop and none had a test.
+    #[test]
+    fn custom_directive_scan_skips_the_header_and_non_values() {
+        assert_eq!(
+            custom_values("2024-01-15 custom \"b\"\n"),
+            vec![],
+            "the type name is the header, not a value, and no values is valid"
+        );
+
+        assert_eq!(
+            custom_values("2024-01-15 custom \"b\" \"x\" 42\n"),
+            vec![MetaValue::String("x".into()), MetaValue::Int(42)],
+            "the FIRST string is the type name; a later one IS a value"
+        );
+
+        // A `*` is not a value, so the scan must step over it rather than
+        // stall. Both positions matter: before any value, and between two.
+        assert_eq!(
+            custom_values("2024-01-15 custom \"b\" * 42\n"),
+            vec![MetaValue::Int(42)],
+            "a non-value token before the first value is stepped over"
+        );
+        assert_eq!(
+            custom_values("2024-01-15 custom \"b\" 42 * 7\n"),
+            vec![MetaValue::Int(42), MetaValue::Int(7)],
+            "and between two values"
         );
     }
 }

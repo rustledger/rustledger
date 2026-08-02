@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = "rustledger/rustledger"
+DEFAULT_BRANCH = "main"
 ISSUE_TITLE = "Scheduled workflow health"
 MARKER = "<!-- nightly-health -->"
 
@@ -136,7 +137,13 @@ def later_successful_manual_run(workflow: str, after: datetime) -> dict | None:
     """
     raw = gh(
         "run", "list", "--repo", REPO, "--workflow", workflow,
-        "--event", "workflow_dispatch", "--status", "success", "--limit", "1",
+        "--event", "workflow_dispatch", "--status", "success",
+        # DEFAULT BRANCH ONLY. A dispatch on a feature branch proves nothing
+        # about the scheduled run, which fires against `main`, so counting one
+        # would produce exactly the false reassurance this annotation exists to
+        # avoid: "a fix is likely already in" while `main` is still broken.
+        "--branch", DEFAULT_BRANCH,
+        "--limit", "1",
         "--json", "conclusion,createdAt,url",
         tolerate_missing=True,
     )
@@ -164,8 +171,15 @@ def self_test() -> int:
     real_gh = gh
     sched = datetime(2026, 7, 26, 6, 0, tzinfo=timezone.utc)
 
+    # Records the argv so the test can assert the QUERY, not just the answer.
+    # Stubbing only the return value would let a regression that drops
+    # `--event`, `--status` or `--branch` keep this green while the live
+    # annotation silently went wrong.
+    seen_args: list[tuple[str, ...]] = []
+
     def stub(payload: str):
         def fake(*args, **kwargs):
+            seen_args.append(args)
             return payload
         return fake
 
@@ -187,6 +201,20 @@ def self_test() -> int:
         ok = got == expected
         failures += not ok
         print(f"  {'ok  ' if ok else 'FAIL'} {label}: annotated={got} expected={expected}")
+
+    # The query shape itself: these four flags are what make the answer mean
+    # "a later manual run on the branch the cron uses".
+    required = [
+        ("--event", "workflow_dispatch"),
+        ("--status", "success"),
+        ("--branch", DEFAULT_BRANCH),
+        ("--workflow", "miri.yml"),
+    ]
+    argv = seen_args[-1] if seen_args else ()
+    for flag, value in required:
+        ok = flag in argv and argv[argv.index(flag) + 1] == value
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} query passes {flag} {value}")
 
     gh = real_gh
     if failures:

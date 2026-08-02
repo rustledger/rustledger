@@ -1034,3 +1034,200 @@ fn balance_number(r: &rustledger_parser::ParseResult) -> rustledger_core::Decima
         })
         .expect("a balance directive")
 }
+
+/// Every transaction-flag form, checked against `classify()` AND the whole
+/// predicate vector.
+///
+/// The existing tests above assert one variant via `classify()` alone, which
+/// leaves each `is_*` free to return a constant and each `cast` arm free to
+/// vanish: the 2026-08-01 mutation run replaced all six predicates with `true`
+/// or `false` and deleted cast arms without a failure. Asserting the FULL
+/// vector per input is what pins them, because exactly one predicate may hold.
+#[test]
+fn transaction_flag_classifies_every_form_and_its_predicates() {
+    use rustledger_parser::cst::ast::TransactionFlagKind as K;
+
+    // (source flag, expected kind)
+    let cases = [
+        ("*", K::Star),
+        ("!", K::Pending),
+        ("#", K::Hash),
+        ("txn", K::Txn),
+        // A one-character CURRENCY is a flag; see `cast`'s length guard.
+        ("P", K::CurrencyLetter),
+        // `?` and `&` are the only characters in the lexer's flag regex that
+        // are NOT also valid one-letter currencies, so they are the only ones
+        // that reach `Letter`. `P S T C U R M` all lex as CURRENCY and land on
+        // `CurrencyLetter` instead, despite the regex listing them.
+        ("?", K::Letter),
+    ];
+
+    for (text, want) in cases {
+        let src = format!("2024-01-15 {text} \"x\"\n  Assets:Cash  -5 USD\n");
+        let f = parse(&src);
+        let Directive::Transaction(t) = single_directive(&f) else {
+            panic!("{text}: expected a transaction");
+        };
+        let flag = t.flag().unwrap_or_else(|| panic!("{text}: no flag"));
+
+        assert_eq!(
+            std::mem::discriminant(&flag.classify()),
+            std::mem::discriminant(&want),
+            "{text}: classify"
+        );
+        // Exactly one predicate holds, and it is the one matching `want`.
+        let got = [
+            ("star", flag.is_star(), matches!(want, K::Star)),
+            ("pending", flag.is_pending(), matches!(want, K::Pending)),
+            ("hash", flag.is_hash(), matches!(want, K::Hash)),
+            ("txn", flag.is_txn(), matches!(want, K::Txn)),
+            ("letter", flag.is_letter_flag(), matches!(want, K::Letter)),
+            (
+                "currency_letter",
+                flag.is_currency_letter(),
+                matches!(want, K::CurrencyLetter),
+            ),
+        ];
+        for (name, actual, expected) in got {
+            assert_eq!(actual, expected, "{text}: is_{name}");
+        }
+        assert_eq!(
+            got.iter().filter(|(_, a, _)| *a).count(),
+            1,
+            "{text}: exactly one predicate must hold"
+        );
+    }
+}
+
+/// A multi-character CURRENCY is NOT a flag. Without this the length guard can
+/// be replaced with `true` and `2024-01-15 USD "x"` starts parsing as a flagged
+/// transaction.
+#[test]
+fn multi_character_currency_is_not_a_transaction_flag() {
+    // Not routed through `single_directive`: with no valid flag this is not a
+    // transaction at all, so the directive list is empty. Asserting on the
+    // typed tree keeps the test about the flag rather than about how far
+    // recovery got.
+    let f = parse("2024-01-15 USD \"x\"\n  Assets:Cash  -5 USD\n");
+    let flagged = f
+        .directives()
+        .filter_map(|d| match d {
+            Directive::Transaction(t) => Some(t),
+            _ => None,
+        })
+        .any(|t| t.flag().is_some());
+    assert!(
+        !flagged,
+        "a 3-letter currency must not classify as a transaction flag"
+    );
+
+    // The single-letter form still does, so the assertion above cannot pass
+    // merely because nothing parsed.
+    let f = parse("2024-01-15 P \"x\"\n  Assets:Cash  -5 USD\n");
+    let Directive::Transaction(t) = single_directive(&f) else {
+        panic!("expected a transaction for the single-letter flag");
+    };
+    assert!(t.flag().is_some(), "a 1-letter currency IS a flag");
+}
+
+/// The same for posting flags, which share the machinery minus `Txn`.
+#[test]
+fn posting_flag_classifies_every_form_and_its_predicates() {
+    use rustledger_parser::cst::ast::PostingFlagKind as K;
+
+    let cases = [
+        ("*", K::Star),
+        ("!", K::Pending),
+        ("#", K::Hash),
+        ("?", K::Letter),
+        ("P", K::CurrencyLetter),
+    ];
+
+    for (text, want) in cases {
+        let src = format!("2024-01-15 * \"x\"\n  {text} Assets:Cash  -5 USD\n");
+        let f = parse(&src);
+        let Directive::Transaction(t) = single_directive(&f) else {
+            panic!("{text}: expected a transaction");
+        };
+        let p = t
+            .postings()
+            .next()
+            .unwrap_or_else(|| panic!("{text}: no posting"));
+        let flag = p.flag().unwrap_or_else(|| panic!("{text}: no flag"));
+
+        assert_eq!(
+            std::mem::discriminant(&flag.classify()),
+            std::mem::discriminant(&want),
+            "{text}: classify"
+        );
+        let got = [
+            ("star", flag.is_star(), matches!(want, K::Star)),
+            ("pending", flag.is_pending(), matches!(want, K::Pending)),
+            ("hash", flag.is_hash(), matches!(want, K::Hash)),
+            ("letter", flag.is_letter_flag(), matches!(want, K::Letter)),
+            (
+                "currency_letter",
+                flag.is_currency_letter(),
+                matches!(want, K::CurrencyLetter),
+            ),
+        ];
+        for (name, actual, expected) in got {
+            assert_eq!(actual, expected, "{text}: is_{name}");
+        }
+        assert_eq!(
+            got.iter().filter(|(_, a, _)| *a).count(),
+            1,
+            "{text}: exactly one predicate must hold"
+        );
+    }
+}
+
+/// `TransactionFlag::cast` / `PostingFlag::cast` accept a CURRENCY token only
+/// when it is one character long.
+///
+/// Driven directly rather than through a parse, because the parser filters
+/// multi-character currencies out of the flag position before the AST layer
+/// ever sees them — so no source text can reach this guard. `cast` is public
+/// API though, and a caller holding an arbitrary token (the LSP walks tokens
+/// this way) can reach it, which is exactly what the guard is for.
+#[test]
+fn cast_rejects_a_multi_character_currency_token() {
+    use rustledger_parser::SyntaxKind;
+    use rustledger_parser::cst::ast::{PostingFlag, TransactionFlag};
+
+    let f = parse("2024-01-15 open Assets:Cash USD\n2024-01-15 open Assets:B C\n");
+    let currencies: Vec<_> = f
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(rustledger_parser::NodeOrToken::into_token)
+        .filter(|t| t.kind() == SyntaxKind::CURRENCY)
+        .collect();
+
+    let multi = currencies
+        .iter()
+        .find(|t| t.text() == "USD")
+        .expect("a 3-letter CURRENCY token");
+    let single = currencies
+        .iter()
+        .find(|t| t.text() == "C")
+        .expect("a 1-letter CURRENCY token");
+
+    assert!(
+        TransactionFlag::cast(multi.clone()).is_none(),
+        "a 3-letter currency is not a transaction flag"
+    );
+    assert!(
+        PostingFlag::cast(multi.clone()).is_none(),
+        "a 3-letter currency is not a posting flag"
+    );
+    // The single-character form still casts, so the assertions above cannot
+    // pass merely because `cast` rejects every CURRENCY.
+    assert!(
+        TransactionFlag::cast(single.clone()).is_some(),
+        "a 1-letter currency IS a transaction flag"
+    );
+    assert!(
+        PostingFlag::cast(single.clone()).is_some(),
+        "a 1-letter currency IS a posting flag"
+    );
+}

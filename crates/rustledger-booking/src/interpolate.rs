@@ -341,6 +341,27 @@ fn units_weight(
     UnitsWeight::Units
 }
 
+/// The price currency the author WROTE, whether or not they also wrote a
+/// number: both `@ 1.20 USD` and `@ USD` say USD.
+///
+/// Deliberately wider than [`crate::price_currency_of`], which reads only a
+/// COMPLETE price amount and so cannot see `@ USD` at all. That is the right
+/// reading where a price's numeric contribution is what matters, but here the
+/// question is "which currency does this posting's weight land in", and
+/// `@ USD` answers it perfectly well. Using the narrow one made a posting
+/// priced `@ USD` offer its UNITS currency as a candidate instead.
+fn declared_price_currency(posting: &rustledger_core::Posting) -> Option<Currency> {
+    posting
+        .price
+        .as_ref()
+        .and_then(|p| p.amount.as_ref())
+        .and_then(|amount| match amount {
+            IncompleteAmount::Complete(amount) => Some(amount.currency.clone()),
+            IncompleteAmount::CurrencyOnly(currency) => Some(currency.clone()),
+            IncompleteAmount::NumberOnly(_) => None,
+        })
+}
+
 /// The currency a bare price sigil resolves in.
 ///
 /// **A declared currency always wins.** `@ USD` (the form beancount's own
@@ -366,16 +387,7 @@ fn bare_price_currency(
     self_index: usize,
     residuals: &HashMap<Currency, Decimal>,
 ) -> Option<Currency> {
-    if let Some(declared) = txn.postings[self_index]
-        .price
-        .as_ref()
-        .and_then(|p| p.amount.as_ref())
-        .and_then(|a| match a {
-            IncompleteAmount::CurrencyOnly(currency) => Some(currency.clone()),
-            IncompleteAmount::Complete(amount) => Some(amount.currency.clone()),
-            IncompleteAmount::NumberOnly(_) => None,
-        })
-    {
+    if let Some(declared) = declared_price_currency(&txn.postings[self_index]) {
         return Some(declared);
     }
 
@@ -408,7 +420,7 @@ fn bare_price_currency(
             let currency = if posting.cost.is_some() {
                 crate::cost_currency_of(posting, || None)
             } else {
-                crate::price_currency_of(posting).or_else(|| match &posting.units {
+                declared_price_currency(posting).or_else(|| match &posting.units {
                     Some(IncompleteAmount::Complete(amount)) => Some(amount.currency.clone()),
                     Some(IncompleteAmount::CurrencyOnly(currency)) => Some(currency.clone()),
                     _ => None,
@@ -654,6 +666,12 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // here — cost beats price, so their sigil does not affect the balance.
     let mut bare_price: Vec<(usize, Amount, rustledger_core::PriceKind)> = Vec::new();
 
+    // Postings priced `@ 1.20` — price number written, price currency elided.
+    // Only the currency is inferred; the number is kept verbatim:
+    // `(posting index, units, sigil kind, price number)`.
+    let mut price_number_known: Vec<(usize, Amount, rustledger_core::PriceKind, Decimal)> =
+        Vec::new();
+
     // Units-missing postings whose weight is `units × multiplier` in some other
     // currency (a per-unit cost or price): `index -> (units currency, factor)`.
     // Their entry in `missing_by_currency` is keyed by the WEIGHT currency, so
@@ -849,12 +867,21 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                             }
                         };
                         accumulate_residual(&mut residuals, &mut unrepresentable, &curr, signed);
+                    } else if let Some(IncompleteAmount::NumberOnly(price_number)) =
+                        price.amount.as_ref()
+                    {
+                        // `@ 1.20` — the price NUMBER is written and only its
+                        // currency is elided. The number is data, so keep it and
+                        // infer just the currency, exactly as the units path does
+                        // for a bare `120.00`. Treating this as a sigil overwrote
+                        // the author's rate with whatever balanced the books.
+                        price_number_known.push((i, amount.clone(), price.kind, *price_number));
                     } else {
-                        // A bare `@` / `@@` sigil with no amount is a REQUEST to
-                        // compute the price, so this posting's weight is unknown
-                        // rather than "the units" (#1915). Contributing the units
-                        // here would both answer the request with silence and let
-                        // an unbalanced transaction look balanced.
+                        // A bare `@` / `@@` sigil, or `@ USD`: the NUMBER is to be
+                        // computed, so this posting's weight is unknown rather than
+                        // "the units" (#1915). Contributing the units here would
+                        // both answer the request with silence and let an
+                        // unbalanced transaction look balanced.
                         //
                         // Reached only when the posting has no cost spec (the cost
                         // branches come first), which is right: cost beats price,
@@ -968,6 +995,31 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // as an unknown there BEFORE the count rule below — a posting whose price
     // is still to be computed contributes an unknown weight to that currency
     // exactly as an empty `{}` cost spec does (#1915).
+    // Give each `@ 1.20` its price currency, keeping the number. Runs BEFORE the
+    // bare-sigil resolution below, because these postings contribute a KNOWN
+    // weight once denominated and a sigil should see what is actually left over.
+    for (idx, units, kind, price_number) in price_number_known {
+        let Some(currency) = bare_price_currency(transaction, idx, &residuals) else {
+            return Err(InterpolationError::AmbiguousBarePriceCurrency {
+                account: transaction.postings[idx].account.clone(),
+            });
+        };
+        let Some(weight) = crate::price_weight(units.number, price_number, kind) else {
+            return Err(InterpolationError::Unrepresentable { currency });
+        };
+        result.postings[idx].price = Some(rustledger_core::PriceAnnotation {
+            kind,
+            amount: Some(IncompleteAmount::Complete(Amount::new(
+                price_number,
+                &currency,
+            ))),
+        });
+        accumulate_residual(&mut residuals, &mut unrepresentable, &currency, weight);
+        if unrepresentable.contains(&currency) {
+            return Err(InterpolationError::Unrepresentable { currency });
+        }
+    }
+
     let mut bare_price_solved: Vec<(usize, Amount, rustledger_core::PriceKind, Currency)> =
         Vec::with_capacity(bare_price.len());
     for (idx, units, kind) in bare_price {
@@ -3423,5 +3475,78 @@ mod tests {
 
         let result = interpolate(&txn).expect("harmless");
         assert!(solved_price(&result.transaction.postings[0]).is_none());
+    }
+
+    /// `@ 1.20` writes the price NUMBER and elides only its currency. The
+    /// number is data: infer the currency, keep the number.
+    ///
+    /// Treating it as a sigil overwrote the author's rate with whatever
+    /// balanced the books (`1.20` became `1.00`), and diverged from
+    /// `calculate_residual`, which has its own test pinning that an incomplete
+    /// price with a number does NOT get re-solved. Caught in review of #1919.
+    #[test]
+    fn price_number_without_a_currency_keeps_its_number() {
+        let priced = |number: Decimal| {
+            Posting::new("Assets:A", Amount::new(dec!(100.00), "USD")).with_price(
+                rustledger_core::PriceAnnotation::unit_incomplete(IncompleteAmount::NumberOnly(
+                    number,
+                )),
+            )
+        };
+
+        // Does not balance: 100.00 x 1.20 = 120.00 against -100.00.
+        let off = Transaction::new(date(2010, 5, 28), "rate written, currency elided")
+            .with_synthesized_posting(priced(dec!(1.20)))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-100.00), "USD")));
+        let result = interpolate(&off).expect("currency is inferable");
+        let (number, currency, _) =
+            solved_price(&result.transaction.postings[0]).expect("price completed");
+        assert_eq!(number, dec!(1.20), "the author's rate, not a re-solved one");
+        assert_eq!(currency, Currency::from("USD"));
+        assert_eq!(
+            result.residuals.get("USD").copied(),
+            Some(dec!(20.0000)),
+            "the imbalance the author's own rate implies must survive to be reported"
+        );
+
+        // And when the rate does balance, it is simply accepted.
+        let ok = Transaction::new(date(2010, 5, 28), "rate written, balances")
+            .with_synthesized_posting(priced(dec!(1.20)))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-120.00), "USD")));
+        let result = interpolate(&ok).expect("currency is inferable");
+        assert_eq!(
+            solved_price(&result.transaction.postings[0]).map(|(n, _, _)| n),
+            Some(dec!(1.20))
+        );
+        assert_eq!(result.residuals.get("USD").copied(), Some(Decimal::ZERO));
+    }
+
+    /// The fallback candidate scan must see a price currency written WITHOUT a
+    /// number (`@ USD`). `crate::price_currency_of` reads only a complete price
+    /// amount, so using it made a posting priced `@ USD` offer its units
+    /// currency instead, splitting two unknowns that genuinely compete.
+    /// Caught in review of #1919.
+    #[test]
+    fn bare_price_fallback_sees_a_currency_only_price() {
+        let bare = bare_unit_price("Assets:A", dec!(100.00), "EUR");
+        let at_usd = Posting::new("Assets:B", Amount::new(dec!(200.00), "CAD")).with_price(
+            rustledger_core::PriceAnnotation::unit_incomplete(IncompleteAmount::CurrencyOnly(
+                "USD".into(),
+            )),
+        );
+
+        // Both prices are still to be computed, so every residual is zero and
+        // the fallback path is the one that runs.
+        let txn = Transaction::new(date(2010, 5, 28), "both weigh in USD")
+            .with_synthesized_posting(bare)
+            .with_synthesized_posting(at_usd);
+
+        match interpolate(&txn) {
+            Err(InterpolationError::MultipleMissing { currency, count }) => {
+                assert_eq!(currency, Currency::from("USD"), "not CAD, and not EUR");
+                assert_eq!(count, 2);
+            }
+            other => panic!("expected MultipleMissing in USD, got {other:?}"),
+        }
     }
 }

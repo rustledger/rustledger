@@ -375,7 +375,14 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     silently ignored `option "display_precision" "USD:0.0001"` (formatting
 ///     fell back to inferred precision) and the other two settings. New fields
 ///     change the archived layout, so old bytes must be regenerated.
-const CACHE_VERSION: u32 = 17;
+/// v18: arithmetic in a COST SPEC is now evaluated rather than truncated to
+///     its first operand (#1939). `{10.00 * 3 USD}` previously archived a
+///     cost of `10.00`; it now archives `30.00`. The layout is unchanged, so
+///     nothing here would REJECT the old bytes — which is exactly why the
+///     bump is required: a stale cache would keep serving the truncated cost
+///     basis, and the file would keep failing to balance, on a build that has
+///     the fix. Verified by hitting precisely that during development.
+const CACHE_VERSION: u32 = 18;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1082,7 +1089,12 @@ mod tests {
         // is archived, so the byte arrays below still pin the same encoding —
         // only the fixture version moves. The assertions after this one prove
         // that rather than assume it.
-        const FIXTURE_VERSION: u32 = 17;
+        // v18 (#1939) changes the cost-spec NUMBER a parse produces
+        // (`{10.00 * 3 USD}` archives 30.00, not 10.00). That is a value, not a
+        // layout: the `CostNumber` discriminants and payload encodings the byte
+        // arrays below pin are untouched, and those assertions prove it rather
+        // than take this comment's word for it.
+        const FIXTURE_VERSION: u32 = 18;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1171,7 +1183,9 @@ mod tests {
         // fixture version moves.
         // v15 (#1884) is a parser-diagnostics change with no layout impact —
         // same reasoning, and the hash assertion below is what verifies it.
-        const FIXTURE_VERSION: u32 = 17;
+        // v18 (#1939) evaluates arithmetic in a cost spec; `MetaValue` is not
+        // involved at all, so the hash below must be unchanged — and is.
+        const FIXTURE_VERSION: u32 = 18;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

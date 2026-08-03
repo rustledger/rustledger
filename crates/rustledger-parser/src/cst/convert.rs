@@ -1465,9 +1465,9 @@ fn amount_expression_tokens(amt: &ast::Amount) -> Vec<crate::SyntaxToken> {
 }
 
 /// `expr := term (('+' | '-') term)*` - left-associative.
-fn parse_arith_expr(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Option<Decimal> {
+fn parse_arith_expr<T: TokenView>(tokens: &[T], cursor: &mut usize) -> Option<Decimal> {
     let mut result = parse_arith_term(tokens, cursor)?;
-    while let Some(op) = tokens.get(*cursor).map(crate::SyntaxToken::kind) {
+    while let Some(op) = tokens.get(*cursor).map(TokenView::kind) {
         match op {
             crate::SyntaxKind::PLUS => {
                 *cursor += 1;
@@ -1486,9 +1486,9 @@ fn parse_arith_expr(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Option
 }
 
 /// `term := primary (('*' | '/') primary)*` - left-associative.
-fn parse_arith_term(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Option<Decimal> {
+fn parse_arith_term<T: TokenView>(tokens: &[T], cursor: &mut usize) -> Option<Decimal> {
     let mut result = parse_arith_primary(tokens, cursor)?;
-    while let Some(op) = tokens.get(*cursor).map(crate::SyntaxToken::kind) {
+    while let Some(op) = tokens.get(*cursor).map(TokenView::kind) {
         match op {
             crate::SyntaxKind::STAR => {
                 *cursor += 1;
@@ -1510,7 +1510,7 @@ fn parse_arith_term(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Option
 }
 
 /// `primary := '(' expr ')' | '-' primary | '+' primary | NUMBER`.
-fn parse_arith_primary(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Option<Decimal> {
+fn parse_arith_primary<T: TokenView>(tokens: &[T], cursor: &mut usize) -> Option<Decimal> {
     let t = tokens.get(*cursor)?;
     match t.kind() {
         crate::SyntaxKind::L_PAREN => {
@@ -1545,6 +1545,87 @@ fn parse_arith_primary(tokens: &[crate::SyntaxToken], cursor: &mut usize) -> Opt
     }
 }
 
+/// The slice of a cost-spec segment holding its NUMBER expression: from the
+/// first token that can begin a value up to the first `CURRENCY` at paren
+/// depth 0.
+///
+/// Depth matters because a currency cannot appear inside the parens of a
+/// numeric expression, but stopping at the first `CURRENCY` unconditionally
+/// would be wrong the moment one ever could.
+fn cost_number_region<T: TokenView>(seg: &[T]) -> &[T] {
+    use crate::SyntaxKind as K;
+    let start = seg
+        .iter()
+        .position(|t| matches!(t.kind(), K::NUMBER | K::L_PAREN | K::MINUS | K::PLUS))
+        .unwrap_or(seg.len());
+    let mut depth = 0i32;
+    let mut end = seg.len();
+    for (i, t) in seg.iter().enumerate().skip(start) {
+        match t.kind() {
+            K::L_PAREN => depth += 1,
+            K::R_PAREN => depth -= 1,
+            K::CURRENCY if depth == 0 => {
+                end = i;
+                break;
+            }
+            // A comma ends the number region too (`{10 USD, 2014-02-25}`);
+            // without this a malformed spec could drag the date into the
+            // expression and fail the whole parse instead of just the number.
+            K::COMMA if depth == 0 => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    &seg[start..end]
+}
+
+/// Evaluate a cost-spec number region, but ONLY when it is genuinely
+/// arithmetic.
+///
+/// Returns `None` for a bare `NUMBER` so the caller keeps its existing
+/// single-token latch. That is not laziness: the latch carries legacy sign
+/// handling and is what every current test pins, so routing plain numbers
+/// through the evaluator would be a behavior change smuggled in beside a bug
+/// fix.
+///
+/// Why this exists at all: the price path has always evaluated expressions
+/// (`convert_amount_to_incomplete` -> `evaluate_amount_expression`) while the
+/// cost path latched the first `NUMBER` token and silently dropped the rest, so
+/// `{10.00 * 3 USD}` booked a cost of 10.00. Same computation, two
+/// implementations, nothing asserting agreement — the exact drift shape
+/// CLAUDE.md's Canonical-Function Discipline describes. The fix is to share the
+/// evaluator, not to teach this path its own arithmetic (#1939).
+fn cost_region_value<T: TokenView>(seg: &[T]) -> Option<Decimal> {
+    use crate::SyntaxKind as K;
+    // Trivia first. `cost_spec_from_tokens` is handed EVERY child token,
+    // whitespace included, and the evaluator refuses any token it does not
+    // recognize — so without this the region is `10.00 WS * WS 3` and every
+    // expression silently falls back to the latched first number, i.e. the bug
+    // this is meant to fix, still there but now with more code. The other two
+    // evaluators (`directive_arithmetic_value`, `amount_expression_tokens`)
+    // both filter trivia for the same reason.
+    let kept: Vec<&T> = seg.iter().filter(|t| !is_trivia_kind(t.kind())).collect();
+    let region = cost_number_region(&kept);
+    if !region.iter().any(|t| {
+        matches!(
+            t.kind(),
+            K::PLUS | K::MINUS | K::STAR | K::SLASH | K::L_PAREN
+        )
+    }) {
+        return None;
+    }
+    let mut cursor = 0usize;
+    let value = parse_arith_expr(region, &mut cursor)?;
+    // Trailing tokens mean the expression is malformed; refuse rather than
+    // silently dropping them, matching `evaluate_amount_expression`.
+    if cursor != region.len() {
+        return None;
+    }
+    Some(value)
+}
+
 fn convert_cost_spec(cs: &ast::CostSpec) -> CostSpec {
     cost_spec_from_tokens(
         cs.syntax()
@@ -1564,6 +1645,15 @@ pub(super) trait TokenView {
     fn kind(&self) -> crate::SyntaxKind;
     /// The token's source text.
     fn text(&self) -> &str;
+}
+
+impl<T: TokenView> TokenView for &T {
+    fn kind(&self) -> crate::SyntaxKind {
+        (*self).kind()
+    }
+    fn text(&self) -> &str {
+        (*self).text()
+    }
 }
 
 impl TokenView for rowan::SyntaxToken<crate::BeancountLanguage> {
@@ -1668,6 +1758,10 @@ impl MergeFlag {
 /// (another historical divergence).
 pub(super) fn cost_spec_from_tokens(tokens: impl Iterator<Item = impl TokenView>) -> CostSpec {
     use crate::SyntaxKind as K;
+    // Materialized because the arithmetic evaluator needs random access
+    // (backtracking over a `(`...`)` group). Cost specs are a handful of
+    // tokens, so the allocation is not on any hot path worth defending.
+    let toks: Vec<_> = tokens.collect();
     let mut is_total = false;
     let mut first_number: Option<Decimal> = None; // latched (plain path)
     let mut seen_number = false;
@@ -1680,7 +1774,7 @@ pub(super) fn cost_spec_from_tokens(tokens: impl Iterator<Item = impl TokenView>
     let mut label: Option<String> = None;
     let mut label_seen = false;
     let mut merge_flag = MergeFlag::default();
-    for t in tokens {
+    for t in &toks {
         let kind = t.kind();
         // Runs alongside the value machine below; see `MergeFlag`.
         merge_flag.feed(kind);
@@ -1714,6 +1808,30 @@ pub(super) fn cost_spec_from_tokens(tokens: impl Iterator<Item = impl TokenView>
             _ => {}
         }
     }
+    // ARITHMETIC OVERRIDE. The latches above take the first NUMBER of each
+    // region, which is right for `{10.00 USD}` and wrong for `{10.00 * 3 USD}`.
+    // Evaluate each region and override only when it really is an expression;
+    // `cost_region_value` returns None for a bare number so the latched value
+    // (and its legacy sign handling) stands. See #1939.
+    let hash_at = toks
+        .iter()
+        .position(|t| matches!(t.kind(), K::HASH | K::L_BRACE_HASH));
+    match hash_at {
+        Some(i) => {
+            if let Some(v) = cost_region_value(&toks[..i]) {
+                pre_hash = Some(v);
+            }
+            if let Some(v) = cost_region_value(&toks[i + 1..]) {
+                post_hash_total = Some(v);
+            }
+        }
+        None => {
+            if let Some(v) = cost_region_value(&toks) {
+                first_number = Some(v);
+            }
+        }
+    }
+
     let number = if past_hash {
         Some(CostNumber::Compound {
             per_unit: pre_hash.unwrap_or_default(),

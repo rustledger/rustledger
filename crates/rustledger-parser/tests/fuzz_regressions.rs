@@ -100,3 +100,45 @@ fn cost_spec_arithmetic_green_eq_red() {
         );
     }
 }
+
+/// A NEGATIVE cost kept its sign only by accident before #1939, and did not.
+///
+/// This was NOT the bug being hunted — it surfaced as unexplained corpus
+/// baseline drift on two `TotalsAndSigns` fixtures while fixing the arithmetic
+/// truncation, and turned out to be the same root cause wearing a different
+/// hat. `{-200.00 USD}` starts with a `MINUS`, which the token latch never
+/// treated as part of the number, so the cost was booked as **+200.00**: the
+/// sign of a cost basis, silently inverted. Routing it through the shared
+/// evaluator (which handles unary minus) fixes it, and both fixtures now agree
+/// with beancount exactly.
+///
+/// Kept as its own test because "arithmetic is evaluated" and "a leading sign
+/// is part of the number" are different claims, and a future refactor could
+/// easily satisfy one while breaking the other.
+#[test]
+fn negative_cost_keeps_its_sign() {
+    for (src, want) in [
+        (
+            "2013-05-18 * \"t\"\n  Assets:A  -10 MSFT {-200.00 USD}\n  Assets:B  2000.00 USD\n",
+            "Some(PerUnit { value: -200.00 })",
+        ),
+        (
+            "2013-05-18 * \"t\"\n  Assets:A  -10 MSFT {# -200.00 USD}\n  Assets:B  200.00 USD\n",
+            "Some(Compound { per_unit: 0, total: -200.00 })",
+        ),
+    ] {
+        let parsed = rustledger_parser::parse(src);
+        let mut seen = 0;
+        for d in &parsed.directives {
+            if let rustledger_core::Directive::Transaction(t) = &**d {
+                for p in &t.postings {
+                    if let Some(cs) = &p.cost {
+                        seen += 1;
+                        assert_eq!(format!("{:?}", cs.number), want, "for: {src}");
+                    }
+                }
+            }
+        }
+        assert_eq!(seen, 1, "fixture must exercise exactly one cost spec");
+    }
+}

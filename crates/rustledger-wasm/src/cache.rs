@@ -35,7 +35,13 @@ use crate::types::{Error, LedgerOptions};
 /// deserialized happily — serving a truncated or sign-flipped cost basis on a
 /// build that has the fix. This cache archives the same parsed directives as
 /// the loader cache, so it needs the same bump for the same reason.
-pub const CACHE_VERSION: u32 = 4;
+/// v5 (#1944): arithmetic is evaluated in METADATA values and BALANCE
+/// TOLERANCES too. Same reasoning as v4 and the loader's v19 — the archived
+/// layout does not move, so a v4 blob would be accepted and its directives
+/// deserialized with the truncated tolerance still in them. Any parser change
+/// that alters a VALUE has to bump both caches, not just the loader's; missing
+/// this one on the previous PR is what prompted the rule.
+pub const CACHE_VERSION: u32 = 5;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

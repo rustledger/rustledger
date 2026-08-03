@@ -238,6 +238,49 @@ jobs:
                   kill "$SAMPLER_PID" 2>/dev/null || true
                 fi' EXIT
 
+          # MEMORY CAP - why a mutation job needs one at all.
+          #
+          # Measured on run 30782530785 with the sampler above. Steady state
+          # was ~13.5 GB available; in a single 30-second window it fell to
+          # 179 MB with one `rustledger_parser` TEST BINARY at 12048 MB RSS
+          # and a second at 3049 MB, on a 16 GB runner. Disk was never a
+          # factor (86 GB free throughout). The runner agent was the thing
+          # that died, which is why the job reports SIGTERM and a "shutdown
+          # signal" rather than any error of ours.
+          #
+          # This is inherent to mutation testing, not one bad mutant: the tool
+          # deliberately compiles broken code, and some of it allocates without
+          # bound. `--timeout` only bounds WALL CLOCK, so a mutant that eats
+          # 12 GB in well under 300s is never caught by it - it takes the
+          # runner down first, losing the whole shard's results including the
+          # hundreds of mutants already tested.
+          #
+          # RLIMIT_AS is inherited by every descendant (cargo, rustc, the test
+          # binaries), so the runaway hits an allocation failure and dies as a
+          # FAILING TEST - which mutation testing scores as CAUGHT, the correct
+          # outcome - instead of killing the VM.
+          #
+          # WHY 6 GB AND NOT LESS. A cap set near legitimate usage would be
+          # WORSE than the crash it prevents: healthy mutants would die on
+          # allocation failure and score as CAUGHT, quietly INFLATING the
+          # mutation score while testing nothing. A crashed shard is at least
+          # loud. So the cap is set roughly 10x above measured honest peak
+          # (rustc topped out around 650 MB in the same samples) - high enough
+          # that only a genuine runaway can reach it, low enough that two
+          # concurrent slots stay inside the 16 GB runner.
+          #
+          # Verified locally: a full clean build plus the entire
+          # `rustledger-parser` suite passes under this exact limit, and a
+          # process asking for more gets MemoryError.
+          #
+          # This bounds ANY SINGLE process, which is the failure that was
+          # actually observed. It does not bound the sum, so N slots each
+          # legitimately near the cap could still exhaust the VM - not seen in
+          # practice (honest peak is ~0.65 GB), but it is why raising this
+          # number and raising `jobs_for()` have to be considered together.
+          ulimit -v 6291456
+          echo "RESOURCE ulimit_v_kb=$(ulimit -v)"
+
           echo "RESOURCE baseline follows (before any mutant runs)"
           df -h / "${TMPDIR:-/tmp}" | sed 's/^/RESOURCE df /'
           free -m | sed 's/^/RESOURCE free /'

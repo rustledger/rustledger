@@ -29,7 +29,13 @@ use crate::types::{Error, LedgerOptions};
 /// v2 (#1597): `Error` gained `code`/`phase`/`hint`/`file`/`end_line`/
 /// `end_column`, changing its rkyv archived layout — a v1 blob must be rejected
 /// and re-parsed rather than misread under the new layout.
-pub const CACHE_VERSION: u32 = 3;
+/// v4 (#1939): arithmetic in a COST SPEC is evaluated rather than truncated to
+/// its first operand, and a leading `-` is now part of the number. The archived
+/// LAYOUT is unchanged, so a v3 blob would be accepted and its `Vec<Directive>`
+/// deserialized happily — serving a truncated or sign-flipped cost basis on a
+/// build that has the fix. This cache archives the same parsed directives as
+/// the loader cache, so it needs the same bump for the same reason.
+pub const CACHE_VERSION: u32 = 4;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

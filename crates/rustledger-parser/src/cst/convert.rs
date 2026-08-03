@@ -1584,11 +1584,16 @@ fn cost_number_region<T: TokenView>(seg: &[T]) -> &[T] {
 /// Evaluate a cost-spec number region, but ONLY when it is genuinely
 /// arithmetic.
 ///
-/// Returns `None` for a bare `NUMBER` so the caller keeps its existing
-/// single-token latch. That is not laziness: the latch carries legacy sign
-/// handling and is what every current test pins, so routing plain numbers
-/// through the evaluator would be a behavior change smuggled in beside a bug
-/// fix.
+/// Returns `None` for an UNSIGNED bare `NUMBER` so the caller keeps its
+/// existing single-token latch, leaving the overwhelmingly common case on the
+/// allocation-free path.
+///
+/// A SIGNED number is not in that set: `MINUS`/`PLUS` counts as an operator, so
+/// `{-200.00 USD}` routes through the evaluator. That is deliberate and is
+/// itself a fix — the latch only ever read `NUMBER` tokens and never applied a
+/// leading sign, so a negative cost was booked as POSITIVE. An earlier draft of
+/// this comment claimed the latch "carries legacy sign handling"; it does not,
+/// and the two `TotalsAndSigns` corpus fixtures prove it.
 ///
 /// Why this exists at all: the price path has always evaluated expressions
 /// (`convert_amount_to_incomplete` -> `evaluate_amount_expression`) while the
@@ -1809,10 +1814,11 @@ pub(super) fn cost_spec_from_tokens(tokens: impl Iterator<Item = impl TokenView>
         }
     }
     // ARITHMETIC OVERRIDE. The latches above take the first NUMBER of each
-    // region, which is right for `{10.00 USD}` and wrong for `{10.00 * 3 USD}`.
-    // Evaluate each region and override only when it really is an expression;
-    // `cost_region_value` returns None for a bare number so the latched value
-    // (and its legacy sign handling) stands. See #1939.
+    // region, which is right for `{10.00 USD}` and wrong for both
+    // `{10.00 * 3 USD}` and `{-200.00 USD}` — the latch reads NUMBER tokens
+    // only, so it truncated the first and dropped the sign of the second.
+    // `cost_region_value` returns None for an unsigned bare number, so that
+    // case keeps the latch untouched. See #1939.
     let hash_at = toks
         .iter()
         .position(|t| matches!(t.kind(), K::HASH | K::L_BRACE_HASH));

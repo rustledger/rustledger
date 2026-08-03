@@ -61,9 +61,14 @@ fn cost_spec_arithmetic_is_evaluated() {
             for p in &t.postings {
                 if let Some(cs) = &p.cost {
                     seen += 1;
+                    // The typed accessor, not a Debug string: the value is the
+                    // claim, and coupling to formatting makes the test fail for
+                    // reasons that are not about cost bases.
                     assert_eq!(
-                        format!("{:?}", cs.number),
-                        "Some(PerUnit { value: 30.00 })",
+                        cs.number
+                            .as_ref()
+                            .and_then(rustledger_core::CostNumber::per_unit),
+                        Some(rust_decimal_macros::dec!(30.00)),
                         "cost spec arithmetic must be evaluated, not truncated",
                     );
                 }
@@ -117,28 +122,53 @@ fn cost_spec_arithmetic_green_eq_red() {
 /// easily satisfy one while breaking the other.
 #[test]
 fn negative_cost_keeps_its_sign() {
-    for (src, want) in [
-        (
-            "2013-05-18 * \"t\"\n  Assets:A  -10 MSFT {-200.00 USD}\n  Assets:B  2000.00 USD\n",
-            "Some(PerUnit { value: -200.00 })",
-        ),
-        (
-            "2013-05-18 * \"t\"\n  Assets:A  -10 MSFT {# -200.00 USD}\n  Assets:B  200.00 USD\n",
-            "Some(Compound { per_unit: 0, total: -200.00 })",
-        ),
-    ] {
-        let parsed = rustledger_parser::parse(src);
-        let mut seen = 0;
-        for d in &parsed.directives {
-            if let rustledger_core::Directive::Transaction(t) = &**d {
-                for p in &t.postings {
-                    if let Some(cs) = &p.cost {
-                        seen += 1;
-                        assert_eq!(format!("{:?}", cs.number), want, "for: {src}");
-                    }
+    use rust_decimal_macros::dec;
+    use rustledger_core::CostNumber;
+
+    // Matched structurally rather than via Debug strings. `Compound` carries
+    // BOTH halves and neither `per_unit()` nor `total()` can express it (both
+    // return None by design, since the effective per-unit is unknown until the
+    // units are), so a typed accessor alone cannot state this claim.
+    let parsed = rustledger_parser::parse(
+        "2013-05-18 * \"t\"\n  Assets:A  -10 MSFT {-200.00 USD}\n  Assets:B  2000.00 USD\n",
+    );
+    let mut seen = 0;
+    for d in &parsed.directives {
+        if let rustledger_core::Directive::Transaction(t) = &**d {
+            for p in &t.postings {
+                if let Some(cs) = &p.cost {
+                    seen += 1;
+                    assert!(
+                        matches!(cs.number, Some(CostNumber::PerUnit { value }) if value == dec!(-200.00)),
+                        "a negative per-unit cost must keep its sign, got {:?}",
+                        cs.number,
+                    );
                 }
             }
         }
-        assert_eq!(seen, 1, "fixture must exercise exactly one cost spec");
     }
+    assert_eq!(seen, 1, "fixture must exercise exactly one cost spec");
+
+    let parsed = rustledger_parser::parse(
+        "2013-05-18 * \"t\"\n  Assets:A  -10 MSFT {# -200.00 USD}\n  Assets:B  200.00 USD\n",
+    );
+    let mut seen = 0;
+    for d in &parsed.directives {
+        if let rustledger_core::Directive::Transaction(t) = &**d {
+            for p in &t.postings {
+                if let Some(cs) = &p.cost {
+                    seen += 1;
+                    assert!(
+                        matches!(
+                            cs.number,
+                            Some(CostNumber::Compound { total, .. }) if total == dec!(-200.00)
+                        ),
+                        "a negative TOTAL cost must keep its sign, got {:?}",
+                        cs.number,
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(seen, 1, "fixture must exercise exactly one cost spec");
 }

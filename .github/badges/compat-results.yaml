@@ -1,5 +1,5 @@
 # Rustledger Compatibility Results
-# Generated: 2026-08-03T04:53:43Z
+# Generated: 2026-08-03T12:54:57Z
 
 summary:
   total_files: 812
@@ -7,6 +7,7 @@ summary:
   check_exit_match_pct: 100
   full_match_pct: 100
   bql_match_pct: 95
+  bql_raw_match_pct: 89
   regressions: 0
 
 check_compatibility:
@@ -31,6 +32,11 @@ bql_compatibility:
   queries_tested: 2550
   queries_matching: 2282
   match_pct: 95
+  # Raw = nothing masked. Reported next to match_pct so the size of
+  # KNOWN_*_DIVERGENCES is visible rather than inferable; the gap
+  # between the two moves whenever pins are added (#1902).
+  raw_match_pct: 89
+  known_divergences: 162
 
 regressions:
   count: 0

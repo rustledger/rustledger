@@ -726,6 +726,13 @@ jobs:
           # compat-values.txt and a green step, which is exactly the
           # vacuous-pass shape this comparison exists to catch.
           set -o pipefail
+          # Self-test FIRST: it asserts the error axis can report a
+          # disagreement, using fixtures with known answers. A sweep that only
+          # ever prints zeros is indistinguishable from one that is silently
+          # broken, and this script shipped exactly that bug once (an
+          # ImportError would have marked every file "undecidable" and passed).
+          python3 scripts/compat-values.py \
+            --rledger ./target/release/rledger --self-test
           python3 scripts/compat-values.py \
             --rledger ./target/release/rledger \
             --corpus tests/compatibility/files tests/regressions \

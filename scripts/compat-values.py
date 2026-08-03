@@ -13,10 +13,38 @@ file. That is sensitive to interpolation (an elided amount filled wrongly),
 booking (a reduction matched against the wrong lot), and sign handling, while
 being insensitive to directive ORDER and to display scale — which is a known,
 documented divergence and not what this is hunting.
+
+SECOND AXIS: do the two tools AGREE ON WHETHER THE FILE IS WRONG?
+
+The value comparison can only run on files both tools accept, so it used to
+drop every other file into one undifferentiated `skipped` count. That hid the
+most interesting disagreement there is. A file beancount books cleanly and
+rledger REJECTS is a false rejection — #1914 was exactly that, an E3002 rule
+applied to the whole transaction instead of per currency group — and it was
+invisible here, indistinguishable from a file with unbooked postings.
+
+So the skip bucket is now split, and the two directions of disagreement are
+reported as FINDINGS rather than skips:
+
+    rledger rejects, beancount accepts   -> likely false rejection (ours)
+    beancount rejects, rledger accepts   -> likely missed detection (ours),
+                                            or a deliberate deviation
+
+Deliberately NOT compared: the error TAXONOMIES. beancount raises Python
+exception classes (`ValidationError`, `BalanceError`) and rledger emits codes
+(`E3001`); there is no honest one-to-one mapping between them, and inventing
+one would produce confident nonsense. The assertion is only on the thing both
+tools genuinely answer — does this file pass — and the kinds and codes are
+printed alongside so a human can act on a disagreement without guessing.
+
+This axis is why #1915 (`100.00 USD @` read as "no price") is reachable at
+all. The units were `100.00 USD` before and after the fix, so the value
+comparison above cannot see it in principle; what changed was that buggy
+rledger raised E3001 on a file beancount accepts.
 """
 from __future__ import annotations
 
-import argparse, csv, io, subprocess, sys
+import argparse, csv, io, re, subprocess, sys
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -35,6 +63,63 @@ QUERY = ("SELECT account, currency, sum(number) AS n "
 # with any error at all left 499 of 758 unexamined, and 302 of those are fully
 # booked — more files than were being compared.
 NON_FATAL_ERRORS = {"ValidationError", "BalanceError", "DocumentError", "PadError"}
+
+
+# Deliberate deviations where the two tools are EXPECTED to disagree about
+# whether a file errs. Keyed by (basename, direction) so a pin covers one file
+# and one direction only — a blanket per-file mask would also hide the opposite
+# disagreement appearing later, which is the failure mode the BQL registry's
+# surgical-pin rule exists to prevent.
+#
+# direction is "rledger_only" (we reject, beancount accepts) or
+# "beancount_only" (beancount rejects, we accept).
+#
+# EMPTY ON PURPOSE at introduction. Entries get added only with a written
+# reason after a corpus run shows them, never pre-emptively to make the first
+# run look clean — an unexplained disagreement is the finding this axis exists
+# to produce.
+KNOWN_ERROR_DIVERGENCES: dict[tuple[str, str], str] = {}
+
+
+def beancount_errors(path: Path):
+    """(errored, kinds) per Python beancount, or (None, set()) if it crashed.
+
+    Uses ALL errors, not just the fatal ones. `NON_FATAL_ERRORS` answers a
+    different question — "are the booked amounts still comparable" — and a
+    `BalanceError` very much counts as beancount saying the file is wrong.
+    """
+    # An ImportError is NOT a per-file "undecidable". Swallowing it would mark
+    # every file undecidable and let the step pass having compared nothing —
+    # the silent-skip shape CLAUDE.md calls out ("availability-gated tests must
+    # fail loudly somewhere"). Let it propagate and kill the run.
+    from beancount import loader
+
+    try:
+        _, errors, _ = loader.load_file(str(path))
+    except Exception:
+        return None, set()
+    return bool(errors), {type(e).__name__ for e in errors}
+
+
+def rledger_errors(binary: str, path: Path):
+    """(errored, codes) per `rledger check`, or (None, set()) if undecidable.
+
+    `check` is the right probe rather than reusing the `query` run above:
+    query exits 0 on a file that failed to parse (#1908), so it cannot answer
+    "is this file acceptable" at all.
+    """
+    try:
+        proc = subprocess.run(
+            [binary, "check", str(path)],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None, set()
+    # Any letter prefix, not just E: the parser emits P0012 and friends. The
+    # first corpus run reported the one genuine finding as "(no code)" because
+    # this said `E` — the diagnostic was useless exactly when it mattered.
+    codes = set(re.findall(r"\b[A-Z]\d{4}\b", proc.stdout + proc.stderr))
+    return proc.returncode != 0, codes
 
 
 def beancount_totals(path: Path):
@@ -131,20 +216,158 @@ def compare(a: dict, b: dict):
     return diffs
 
 
+def classify_error_agreement(binary: str, path: Path):
+    """Which bucket does this file fall in, and what to print for it.
+
+    Returns (bucket, detail) where bucket is one of "agree", "undecidable",
+    "pinned", "rledger_only", "beancount_only".
+    """
+    bc_err, bc_kinds = beancount_errors(path)
+    rl_err, rl_codes = rledger_errors(binary, path)
+    if bc_err is None or rl_err is None:
+        return "undecidable", ()
+    # A beancount LoadError means beancount could not assemble the ledger at
+    # all — nearly always a third-party plugin this environment cannot import
+    # (beancount_reds_plugins, tariochbctools). Its entry stream is then
+    # incomplete, so "beancount rejects and we do not" says nothing about
+    # rledger. 19 of the first corpus run's 20 disagreements were exactly this.
+    # Counting them as findings would bury the one that was real.
+    if bc_err and "LoadError" in bc_kinds:
+        return "undecidable", ()
+    if bc_err == rl_err:
+        return "agree", ()
+    direction = "rledger_only" if rl_err else "beancount_only"
+    reason = KNOWN_ERROR_DIVERGENCES.get((path.name, direction))
+    if reason is not None:
+        return "pinned", (direction, reason)
+    return direction, sorted(rl_codes if rl_err else bc_kinds)
+
+
+def self_test(binary: str) -> int:
+    """Prove the axis can report DIRTY, not merely survive a clean corpus.
+
+    A sweep that only ever prints zeros is indistinguishable from one that is
+    silently broken — this file already shipped one such bug today, where an
+    ImportError would have marked every file "undecidable" and passed. So the
+    check is run against fixtures with KNOWN answers, including one genuine
+    disagreement, and it asserts the pin suppresses that disagreement and
+    nothing else.
+    """
+    import tempfile
+
+    cases = {
+        # both accept
+        "st_clean.beancount": (
+            "2018-01-01 open Assets:A\n"
+            "2018-01-01 open Expenses:B\n"
+            '2018-07-07 * "fine"\n'
+            "  Assets:A   -10.00 USD\n"
+            "  Expenses:B  10.00 USD\n"
+        ),
+        # both reject
+        "st_both_bad.beancount": (
+            "2018-01-01 open Assets:A\n"
+            "2018-01-01 open Assets:B\n"
+            '2018-07-07 * "unbalanced"\n'
+            "  Assets:A   100.00 USD\n"
+            "  Assets:B   -50.00 EUR\n"
+        ),
+        # rledger rejects, beancount accepts — the Python #877-equivalent that
+        # CLAUDE.md records as a deliberate deviation (two-phase validation).
+        "st_rledger_only.beancount": (
+            "2018-01-01 open Assets:A\n"
+            '2018-07-07 * "elided zero into an unopened account"\n'
+            "  Assets:A            0.00 USD\n"
+            "  Expenses:NeverOpened\n"
+        ),
+    }
+    failures = []
+
+    def check(cond, msg):
+        if not cond:
+            failures.append(msg)
+
+    with tempfile.TemporaryDirectory() as td:
+        paths = {}
+        for name, body in cases.items():
+            p = Path(td) / name
+            p.write_text(body)
+            paths[name] = p
+
+        got = {n: classify_error_agreement(binary, p)[0] for n, p in paths.items()}
+        check(got["st_clean.beancount"] == "agree",
+              f"clean file must agree, got {got['st_clean.beancount']}")
+        check(got["st_both_bad.beancount"] == "agree",
+              f"both-reject must agree, got {got['st_both_bad.beancount']}")
+        # THE important one: the axis must be able to say "dirty".
+        check(got["st_rledger_only.beancount"] == "rledger_only",
+              "a file rledger rejects and beancount accepts must be reported, "
+              f"got {got['st_rledger_only.beancount']}")
+
+        # And the pin must suppress exactly that one, in that one direction.
+        KNOWN_ERROR_DIVERGENCES[("st_rledger_only.beancount", "rledger_only")] = "self-test"
+        try:
+            check(classify_error_agreement(binary, paths["st_rledger_only.beancount"])[0]
+                  == "pinned", "a pinned divergence must land in the pinned bucket")
+            KNOWN_ERROR_DIVERGENCES.pop(("st_rledger_only.beancount", "rledger_only"))
+            KNOWN_ERROR_DIVERGENCES[("st_rledger_only.beancount", "beancount_only")] = "wrong way"
+            check(classify_error_agreement(binary, paths["st_rledger_only.beancount"])[0]
+                  == "rledger_only",
+                  "a pin in the OPPOSITE direction must NOT suppress the finding")
+        finally:
+            KNOWN_ERROR_DIVERGENCES.pop(("st_rledger_only.beancount", "rledger_only"), None)
+            KNOWN_ERROR_DIVERGENCES.pop(("st_rledger_only.beancount", "beancount_only"), None)
+
+    for f in failures:
+        print(f"SELF-TEST FAILED: {f}")
+    if failures:
+        return 1
+    print("self-test OK: error axis reports agreement, reports disagreement, "
+          "and pins are direction-scoped")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rledger", default="./target/release/rledger")
-    ap.add_argument("--corpus", nargs="+", required=True)
+    ap.add_argument("--corpus", nargs="+")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--self-test", action="store_true",
+                    help="verify the error axis on fixtures with known answers")
     args = ap.parse_args()
 
+    if args.self_test:
+        return self_test(args.rledger)
+
+    if not args.corpus:
+        ap.error("--corpus is required unless --self-test is given")
     files = sorted(p for d in args.corpus for p in Path(d).rglob("*.beancount"))
     if args.limit:
         files = files[: args.limit]
 
     compared = skipped = 0
     divergent = []
+    err_agree = err_undecidable = 0
+    rledger_only, beancount_only, pinned = [], [], []
+
     for path in files:
+        # --- axis 2: do the tools agree the file is acceptable? ------------
+        # Runs for EVERY file, including ones the value comparison cannot use.
+        # That is the point: the files it cannot use are where a false
+        # rejection hides.
+        bucket, detail = classify_error_agreement(args.rledger, path)
+        if bucket == "undecidable":
+            err_undecidable += 1
+        elif bucket == "agree":
+            err_agree += 1
+        elif bucket == "pinned":
+            pinned.append((path, detail))
+        elif bucket == "rledger_only":
+            rledger_only.append((path, detail))
+        else:
+            beancount_only.append((path, detail))
+
+        # --- axis 1: booked values (unchanged) -----------------------------
         try:
             bc = beancount_totals(path)
         except Exception:
@@ -161,6 +384,24 @@ def main() -> int:
         if diffs:
             divergent.append((path, diffs))
 
+    # Errors first: a file rledger wrongly rejects is a louder problem than a
+    # value that differs in the last place, and the CI step only lifts the
+    # first 40 lines of this output into the job summary.
+    print("=== ERROR AGREEMENT (does each tool accept the file?) ===")
+    print(f"files checked:        {len(files)}")
+    print(f"agree:                {err_agree}")
+    print(f"undecidable:          {err_undecidable}  (beancount LoadError — usually a "
+          f"third-party plugin this environment cannot import — or a tool crash/timeout)")
+    print(f"known deviations:     {len(pinned)}  (pinned, see KNOWN_ERROR_DIVERGENCES)")
+    print(f"rledger rejects, beancount accepts: {len(rledger_only)}  <-- likely OURS")
+    print(f"beancount rejects, rledger accepts: {len(beancount_only)}")
+    for path, codes in rledger_only[:15]:
+        print(f"    rledger-only: {path}  {' '.join(codes) or '(no code)'}")
+    for path, kinds in beancount_only[:15]:
+        print(f"    beancount-only: {path}  {' '.join(kinds) or '(no kind)'}")
+    print()
+
+    print("=== BOOKED VALUES ===")
     print(f"compared {compared} files, skipped {skipped} "
           f"(errors in either tool, or unbooked postings)")
     print(f"files with a VALUE divergence: {len(divergent)}\n")

@@ -384,7 +384,49 @@ impl<'a> Executor<'a> {
                                 "expected 1 argument".to_string(),
                             ));
                         }
-                        // Find chronologically first posting (by transaction date)
+                        // Find chronologically first posting (by transaction date).
+                        //
+                        // Deliberately stricter than Python: see beanquery#279.
+                        // beanquery's `balance` column MUTATES a shared
+                        // accumulator each time it is evaluated
+                        // (`sources/beancount.py`), and its `FIRST.update`
+                        // evaluates the operand only on a group's first row —
+                        // so the postings after it never reach the accumulator
+                        // and every later group reads a stale balance. The
+                        // symptom is that the same `FIRST(balance)` returns
+                        // different numbers depending on what ELSE is in the
+                        // SELECT list, because adding `LAST(balance)` forces
+                        // evaluation on every row and repairs the accumulator.
+                        //
+                        // rledger cannot have that bug by construction: the
+                        // running balance is materialized onto each row during
+                        // the scan (`execution.rs`, `track_balance`), so column
+                        // reads are pure and no aggregate can change what
+                        // another aggregate sees. Evaluating the operand once,
+                        // here, is therefore safe.
+                        //
+                        // One genuine semantic difference remains, independent
+                        // of that bug: "first" here means the chronologically
+                        // earliest posting, where beanquery means the first row
+                        // it happened to scan. So reordering entries that have
+                        // DIFFERENT dates cannot change our answer, but it can
+                        // change beanquery's.
+                        //
+                        // Ties are NOT broken by this: `min_by_key` keeps the
+                        // earliest-scanned of several postings sharing the
+                        // minimum date, so a same-date reorder moves our answer
+                        // too. That is deterministic for a given input (rows
+                        // arrive in `booking_sort_key` order) and matches what
+                        // Python does with a tie, so it is left alone rather
+                        // than invented here — BQL has no defined tie-break and
+                        // picking one would be a divergence with no upstream
+                        // behavior to compare against.
+                        //
+                        // Registered in `KNOWN_PYTHON_DIVERGENCES`
+                        // (scripts/compat-bql-test.py) with the root-cause
+                        // writeup in tests/compatibility/exclusions.toml, and
+                        // re-verifiable via
+                        // scripts/verify-first-balance-divergence.py.
                         if let Some(ctx) = group.iter().min_by_key(|c| c.transaction.date) {
                             self.evaluate_expr(&func.args[0], ctx)
                         } else {

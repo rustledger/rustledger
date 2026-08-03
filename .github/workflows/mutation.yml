@@ -227,7 +227,16 @@ jobs:
           # leave a stray process for "Cleaning up orphan processes" to report.
           # `sleep` is a child of the subshell and outlives a bare kill of the
           # parent, so take both.
-          trap 'pkill -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+          #
+          # The emptiness guard is about log hygiene, not safety: an unset
+          # SAMPLER_PID makes `pkill` print its usage block and `kill` print
+          # "not a pid or valid job spec" (verified - neither targets another
+          # process). Both would land in the log at exactly the moment this
+          # sampler exists to make readable, so keep them out of it.
+          trap 'if [ -n "${SAMPLER_PID:-}" ]; then
+                  pkill -P "$SAMPLER_PID" 2>/dev/null || true
+                  kill "$SAMPLER_PID" 2>/dev/null || true
+                fi' EXIT
 
           echo "RESOURCE baseline follows (before any mutant runs)"
           df -h / "${TMPDIR:-/tmp}" | sed 's/^/RESOURCE df /'

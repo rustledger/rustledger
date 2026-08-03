@@ -228,7 +228,18 @@ def compare(a: dict, b: dict):
 
 
 def _dec(text):
-    """CSV cell -> Decimal, or None for an empty cell."""
+    """Numeric field -> Decimal, or None if absent or unparsable.
+
+    Used for both CSV cells and the JSON amount strings rledger emits, hence
+    the deliberately format-neutral name.
+
+    Unparsable maps to None rather than raising, which is a real trade: a
+    malformed number reads as "field absent" instead of crashing the sweep.
+    That is the right side for a corpus tool - one pathological file must not
+    abort the other 700 - but it means a garbled field shows up as a
+    present/absent divergence rather than a parse failure. The comparison still
+    REPORTS it either way, which is what matters; only the label differs.
+    """
     text = (text or "").strip()
     if not text:
         return None

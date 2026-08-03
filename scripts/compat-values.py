@@ -227,6 +227,56 @@ def compare(a: dict, b: dict):
     return diffs
 
 
+# Deliberate or accepted per-posting divergences, keyed by (basename, FIELD).
+#
+# Keyed by field, not by file, for the same reason the BQL registry pins per
+# (file, query): a whole-file mask would also swallow a DIFFERENT field
+# diverging on that file later, which is precisely the regression a registry is
+# supposed to keep visible.
+#
+# Every entry carries why. An entry without a reason is indistinguishable from
+# one added to make a run look clean.
+KNOWN_POSTING_DIVERGENCES: dict[tuple[str, str], str] = {
+    # rust_decimal's ~28-29 significant-digit ceiling. The price here needs 30
+    # to round-trip, so we store a value truncated at the coefficient limit.
+    # CLAUDE.md records this as NOT fixable locally: the recovery side channel
+    # was prototyped and rejected (PR #1613). No real ledger carries a literal
+    # this precise.
+    ("chapter-4_src_transactions.beancount", "price_number"):
+        "rust_decimal 28-29 digit ceiling; documented limitation (#1240, PR #1613)",
+    ("chapter-5_src_transactions.beancount", "price_number"):
+        "rust_decimal 28-29 digit ceiling; documented limitation (#1240, PR #1613)",
+
+    # `100.00 USD @` with `120.00 CAD`: both postings positive, so the price
+    # would have to be -1.20 CAD. beancount computes the MAGNITUDE (+1.2);
+    # #1919 decided to refuse a negative inferred price and say so, because a
+    # negative price is not meaningful and silently flipping the sign hides a
+    # sign error in the user's own ledger. Deliberate, and the error message
+    # names the fix.
+    ("test-cases_IncompleteInputs.PriceMissing.beancount", "price_number"):
+        "negative inferred price refused by design (#1919)",
+    ("test-cases_IncompleteInputs.PriceMissing.beancount", "price_currency"):
+        "negative inferred price refused by design (#1919)",
+    ("test-cases_IncompleteInputs.PriceMissingNumber.beancount", "price_number"):
+        "negative inferred price refused by design (#1919)",
+    ("test-cases_IncompleteInputs.PriceMissingNumber.beancount", "price_currency"):
+        "negative inferred price refused by design (#1919)",
+
+    # Tracked regression fixture; the booked-value axis has reported it for as
+    # long as it has existed and compat.yml documents it by name.
+    ("issue-520.beancount", "number"): "tracked regression fixture (issue-520)",
+    ("issue-520.beancount", "currency"): "tracked regression fixture (issue-520)",
+    ("issue-520.beancount", "price_number"): "tracked regression fixture (issue-520)",
+    ("issue-520.beancount", "price_currency"): "tracked regression fixture (issue-520)",
+    # NOT pinned on purpose:
+    #   - the `{# total}` / `{per # }` compound-cost divergence (#1943): real,
+    #     undecided, and it should stay in anyone's face until it is decided.
+    #   - `UnitsMissingNumberWithCost` cost_date, and `ZeroPrices` — unexamined
+    #     beyond first triage, so pinning them would be asserting a conclusion
+    #     nobody has reached.
+}
+
+
 def _dec(text):
     """Numeric field -> Decimal, or None if absent or unparsable.
 
@@ -384,7 +434,7 @@ def compare_postings(bc_rows, rl_rows):
     """
     diffs = []
     if len(bc_rows) != len(rl_rows):
-        diffs.append(("<row count>", len(bc_rows), len(rl_rows)))
+        diffs.append(("<row count>", "<row count>", len(bc_rows), len(rl_rows)))
         return diffs
 
     fields = ("date", "account", "number", "currency", "cost_number",
@@ -394,7 +444,7 @@ def compare_postings(bc_rows, rl_rows):
         for name, x, y in zip(fields, bc, rl):
             ok = _num_agrees(x, y) if name in numeric else (x or None) == (y or None)
             if not ok:
-                diffs.append((f"{bc[1]} {bc[0]} {name}", x, y))
+                diffs.append((f"{bc[1]} {bc[0]} {name}", name, x, y))
     return diffs
 
 
@@ -531,14 +581,45 @@ def self_test(binary: str) -> int:
     check(compare_postings([row(cost="12.00")], [row(cost="12.01")]) != [],
           "a difference AT beancount's own precision must still be reported")
 
+    # --- the posting registry ---------------------------------------------
+    # Same property the error-axis pin test asserts: a pin must suppress the
+    # thing it names and NOTHING else. Keyed by field rather than by file, so
+    # the check that matters is that a pin on a different field leaves the
+    # finding visible.
+    pdiffs = compare_postings([row()], [row(cost="13.00")])
+    fields = {d[1] for d in pdiffs}
+    check(fields == {"cost_number"},
+          f"a wrong cost must be reported as the cost_number field, got {fields}")
+
+    KNOWN_POSTING_DIVERGENCES[("self_test.beancount", "cost_number")] = "self-test"
+    KNOWN_POSTING_DIVERGENCES[("self_test.beancount", "price_number")] = "wrong field"
+    try:
+        suppressed = [
+            d for d in pdiffs
+            if ("self_test.beancount", d[1]) not in KNOWN_POSTING_DIVERGENCES
+        ]
+        check(suppressed == [], "a pin on the reported field must suppress it")
+
+        other = compare_postings([row()], [row(cost_date="2018-03-01")])
+        still = [
+            d for d in other
+            if ("self_test.beancount", d[1]) not in KNOWN_POSTING_DIVERGENCES
+        ]
+        check(still != [],
+              "a pin on cost_number/price_number must NOT suppress a cost_date finding")
+    finally:
+        KNOWN_POSTING_DIVERGENCES.pop(("self_test.beancount", "cost_number"), None)
+        KNOWN_POSTING_DIVERGENCES.pop(("self_test.beancount", "price_number"), None)
+
     for f in failures:
         print(f"SELF-TEST FAILED: {f}")
     if failures:
         return 1
     print("self-test OK: error axis reports agreement, reports disagreement, "
           "and pins are direction-scoped; posting axis reports wrong cost, "
-          "lot date, price and row count, and tolerates representation-only "
-          "differences without tolerating real ones")
+          "lot date, price and row count, tolerates representation-only "
+          "differences without tolerating real ones, and its pins are "
+          "field-scoped")
     return 0
 
 
@@ -563,7 +644,7 @@ def main() -> int:
     compared = skipped = 0
     divergent = []
     err_agree = err_undecidable = 0
-    posting_compared = posting_skipped = 0
+    posting_compared = posting_skipped = posting_pinned = 0
     posting_divergent = []
     rledger_only, beancount_only, pinned = [], [], []
 
@@ -616,8 +697,15 @@ def main() -> int:
             else:
                 posting_compared += 1
                 pdiffs = compare_postings(bcp, rlp)
-                if pdiffs:
-                    posting_divergent.append((path, pdiffs))
+                kept, pinned_here = [], 0
+                for where, field, x, y in pdiffs:
+                    if (path.name, field) in KNOWN_POSTING_DIVERGENCES:
+                        pinned_here += 1
+                    else:
+                        kept.append((where, x, y))
+                posting_pinned += pinned_here
+                if kept:
+                    posting_divergent.append((path, kept))
 
     # Errors first: a file rledger wrongly rejects is a louder problem than a
     # value that differs in the last place, and the CI step only lifts the
@@ -648,6 +736,8 @@ def main() -> int:
 
     print("=== PER-POSTING (cost, price, lot date) ===")
     print(f"compared {posting_compared} files, skipped {posting_skipped}")
+    print(f"known deviations:     {posting_pinned} field(s) pinned "
+          f"(see KNOWN_POSTING_DIVERGENCES)")
     print(f"files with a POSTING divergence: {len(posting_divergent)}\n")
     for path, diffs in posting_divergent[:25]:
         print(f"  {path}")

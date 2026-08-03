@@ -153,6 +153,87 @@ jobs:
           echo "Timeout per mutant: ${TIMEOUT}s"
           echo ""
 
+          # WHY THIS SAMPLER EXISTS
+          #
+          # `rustledger-parser` shards keep dying with exit 143 (SIGTERM) plus
+          # "The runner has received a shutdown signal", 25-47 minutes into a
+          # 240-minute budget. That is the runner VM going away underneath us,
+          # not our own timeout and not a cargo-mutants failure.
+          #
+          # Two rounds of fixes were aimed at guesses. `--jobs 4 -> 2` (run
+          # 30765289550) and the convert.rs unbounded-loop fix (#1926) each
+          # recovered some shards and left others dying, which is what you get
+          # from treating a symptom you cannot see. NOTHING in the job records
+          # disk or memory, so the logs cannot distinguish the candidates:
+          #
+          #   disk        cargo-mutants keeps one full build tree PER --jobs
+          #               slot, and the runner documents only ~14 GB free.
+          #               Measured locally at 1.7 GB for two slots, so this is
+          #               the WEAKEST of the three - but "weakest" was measured
+          #               on a short run, and it costs nothing to sample.
+          #   memory      several concurrent rustc/test processes. The parser
+          #               suite is the heavy one (proptest, fuzz-corpus replay,
+          #               insta), which fits the fact that only this package
+          #               dies. Leading candidate.
+          #   infra       GitHub reclaiming the VM, nothing to do with us.
+          #
+          # The sampler writes to STDOUT on purpose. When the VM is reclaimed
+          # the post-job steps are skipped and the artifact upload never runs
+          # (that is why every previous failure uploaded nothing), but the log
+          # stream is preserved right up to the kill. Stdout is the only
+          # channel that survives the failure being diagnosed.
+          #
+          # Read it with: grep '^RESOURCE' in the failed job's log. The last
+          # line before the kill is the verdict. If free disk or free memory
+          # is collapsing, it is ours to fix; if both look healthy, it is
+          # infrastructure and the fix is retry/self-hosted, not more tuning.
+          # cargo-mutants scratch lives at $TMPDIR/cargo-mutants-<dir>-*.tmp,
+          # one per --jobs slot, and is removed on exit. Verified against
+          # cargo-mutants 27.1.0.
+          #
+          # EVERY sample below is failure-proofed with `|| true`, and the
+          # subshell turns `set -e` OFF. That is not defensive padding, it is
+          # the bug this sampler was born with: the step runs under bash
+          # `-eo pipefail`, the scratch glob matches nothing until cargo-mutants
+          # has started, so `du` exits 1, so the assignment exits 1, so `set -e`
+          # killed the sampler on its FIRST iteration. It produced no output at
+          # all, which is the one failure mode an instrument must not have -
+          # a silent no-op looks exactly like "nothing to report". Caught by
+          # running the block standalone before pushing it.
+          (
+            set +e
+            while true; do
+              root_avail=$(df -m --output=avail / 2>/dev/null | tail -1 | tr -d ' ' || true)
+              tmp_avail=$(df -m --output=avail "${TMPDIR:-/tmp}" 2>/dev/null | tail -1 | tr -d ' ' || true)
+              mem_avail=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || true)
+              swap_free=$(awk '/SwapFree/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || true)
+              scratch=$({ du -sm "${TMPDIR:-/tmp}"/cargo-mutants-*.tmp 2>/dev/null || true; } \
+                | awk '{s+=$1} END {print s+0}' || true)
+              # Name the heaviest processes, not just the shortfall. "memory
+              # ran out" does not tell you what to change; "two rustc at 3 GB
+              # each" says lower --jobs, and "one test binary at 9 GB" says
+              # fix the test.
+              top=$({ ps -eo rss=,comm= --sort=-rss 2>/dev/null || true; } | head -3 \
+                | awk '{printf "%s:%dMB ", $2, $1/1024}' || true)
+              echo "RESOURCE t=$(date -u +%H:%M:%S) root_avail_mb=${root_avail:--1}" \
+                   "tmp_avail_mb=${tmp_avail:--1} mem_avail_mb=${mem_avail:--1}" \
+                   "swap_free_mb=${swap_free:--1} mutants_scratch_mb=${scratch:--1}" \
+                   "top_rss=[${top}]"
+              sleep 30
+            done
+          ) &
+          SAMPLER_PID=$!
+          # Stop sampling however this step ends, so a passing run does not
+          # leave a stray process for "Cleaning up orphan processes" to report.
+          # `sleep` is a child of the subshell and outlives a bare kill of the
+          # parent, so take both.
+          trap 'pkill -P "$SAMPLER_PID" 2>/dev/null || true; kill "$SAMPLER_PID" 2>/dev/null || true' EXIT
+
+          echo "RESOURCE baseline follows (before any mutant runs)"
+          df -h / "${TMPDIR:-/tmp}" | sed 's/^/RESOURCE df /'
+          free -m | sed 's/^/RESOURCE free /'
+          nproc | sed 's/^/RESOURCE nproc /'
+
           # `--shard k/n` splits the generated mutant list; every shard still
           # builds the crate once, so this trades a little repeated build time
           # for jobs that actually finish.

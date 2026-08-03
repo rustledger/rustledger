@@ -383,6 +383,44 @@ def rledger_postings(binary: str, path: Path):
     return sorted(rows, key=_row_sort_key)
 
 
+def _decimal_sort_token(v: Decimal) -> str:
+    """A canonical, LOSSLESS, context-free token for ordering Decimals.
+
+    Two properties are required, and neither is "sorts numerically":
+
+    1. numerically equal values must produce the SAME token, or the two sides
+       order differently and every row after the divergence is compared against
+       the wrong partner;
+    2. numerically different values must produce DIFFERENT tokens, or distinct
+       rows collide and the pairing is arbitrary.
+
+    The first version satisfied neither reliably. It used `f"{+v:+040.10f}"`,
+    which rounds to 10 fractional digits — and the values this comparison most
+    cares about are precisely the ones that do not survive that: the
+    `rust_decimal` ceiling cases carry ~30 FRACTIONAL digits, so distinct
+    prices flattened to the same key. Unary `+` also applies the active
+    `decimal` context, so the token depended on ambient state the caller never
+    set deliberately.
+
+    `as_tuple()` is context-free. Trailing zeros are stripped by hand (rather
+    than via `normalize()`, which consults the context too) so `0.10` and `0.1`
+    agree, and an all-zero coefficient drops its sign so `-0.00` and `0.00`
+    agree — the tools do not reliably agree on the sign of zero.
+    """
+    sign, digits, exponent = v.as_tuple()
+    if not isinstance(exponent, int):  # NaN / Infinity carry a string exponent
+        return f"S{exponent}"
+    digits = list(digits)
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    if digits == [0]:
+        sign, exponent = 0, 0
+    # Ordering need only be TOTAL and identical on both sides; it does not have
+    # to be numeric, and pretending otherwise is what invited the rounding.
+    return f"{sign}|{exponent:+08d}|{''.join(str(d) for d in digits)}"
+
+
 def _row_sort_key(row):
     """Total order over rows, tolerating None in any numeric slot.
 
@@ -395,13 +433,7 @@ def _row_sort_key(row):
         if v is None:
             out.append((1, ""))
         elif isinstance(v, Decimal):
-            # `+v` collapses -0.00 to 0.00. Decimal keeps the sign of zero, and
-            # the two tools do not always agree on it, so without this the two
-            # sides sort differently and every row after the first signed zero
-            # is compared against the wrong partner. That showed up as a file
-            # reporting five bogus `number` differences that were really one
-            # misalignment.
-            out.append((0, f"{+v:+040.10f}"))
+            out.append((0, _decimal_sort_token(v)))
         else:
             out.append((0, str(v)))
     return out
@@ -610,6 +642,22 @@ def self_test(binary: str) -> int:
     finally:
         KNOWN_POSTING_DIVERGENCES.pop(("self_test.beancount", "cost_number"), None)
         KNOWN_POSTING_DIVERGENCES.pop(("self_test.beancount", "price_number"), None)
+
+    # --- the decimal sort token -------------------------------------------
+    # Equal values must share a token or the two sides misalign; different
+    # values must not, or distinct rows collide. The last two cases are the
+    # ones the original `:.10f` token got wrong.
+    for a, b, want_same in [
+        ("0.10", "0.1", True),
+        ("1", "1.0", True),
+        ("-0.00", "0.00", True),
+        ("12.00", "12.000", True),
+        ("0.009693877551020408163265306122", "0.0096938775510204081632653061", False),
+        ("1.00000000001", "1.00000000002", False),
+    ]:
+        same = _decimal_sort_token(Decimal(a)) == _decimal_sort_token(Decimal(b))
+        check(same == want_same,
+              f"sort token for {a} vs {b}: same={same}, expected {want_same}")
 
     for f in failures:
         print(f"SELF-TEST FAILED: {f}")

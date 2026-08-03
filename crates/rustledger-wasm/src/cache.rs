@@ -41,7 +41,11 @@ use crate::types::{Error, LedgerOptions};
 /// deserialized with the truncated tolerance still in them. Any parser change
 /// that alters a VALUE has to bump both caches, not just the loader's; missing
 /// this one on the previous PR is what prompted the rule.
-pub const CACHE_VERSION: u32 = 5;
+/// v6 (#1930): account names accept any non-ASCII character inside a
+/// component, so a ledger that previously failed to parse now yields
+/// directives. Layout again unchanged, so a v5 blob would be accepted and the
+/// cached PARSE FAILURE served on a build that can read the file.
+pub const CACHE_VERSION: u32 = 6;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

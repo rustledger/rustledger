@@ -388,7 +388,12 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     layout — and again the reason the bump is mandatory: a stale cache
 ///     would keep serving the truncated tolerance and keep rejecting a file
 ///     the fixed build accepts.
-const CACHE_VERSION: u32 = 19;
+/// v20: account names accept any NON-ASCII character inside a component
+///     (#1930). A ledger that previously failed to parse now yields
+///     directives, and one that parsed may gain account names it did not
+///     have. Layout unchanged, so old bytes would be accepted and a cached
+///     PARSE FAILURE served on a build that can read the file.
+const CACHE_VERSION: u32 = 20;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1097,12 +1102,14 @@ mod tests {
         // that rather than assume it.
         // v19 (#1944) does the same for metadata values and balance
         // tolerances: values move, `CostNumber`'s archived layout does not.
+        // v20 (#1930) widens the account-name character set; no archived
+        // layout moves, only which inputs produce directives at all.
         // v18 (#1939) changes the cost-spec NUMBER a parse produces
         // (`{10.00 * 3 USD}` archives 30.00, not 10.00). That is a value, not a
         // layout: the `CostNumber` discriminants and payload encodings the byte
         // arrays below pin are untouched, and those assertions prove it rather
         // than take this comment's word for it.
-        const FIXTURE_VERSION: u32 = 19;
+        const FIXTURE_VERSION: u32 = 20;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1197,7 +1204,9 @@ mod tests {
         // text produces (`2 * 3` -> Int(6) rather than Int(2)). The variants
         // and their archived encodings are untouched, so the hash below must
         // still match — and the assertion, not this comment, is what proves it.
-        const FIXTURE_VERSION: u32 = 19;
+        // v20 (#1930) is an account-name lexer change; `MetaValue` is
+        // untouched and the hash below must still match.
+        const FIXTURE_VERSION: u32 = 20;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

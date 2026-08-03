@@ -1174,3 +1174,44 @@ fn parse_without_occurrences_skips_indices_but_matches_directives() {
         "options must be identical"
     );
 }
+
+/// #1930: any NON-ASCII character is valid inside an account-name component.
+///
+/// Found by the beancount oracle's error axis: `Assets:CORP✨` is a committed
+/// fixture in fava-portfolio-returns that beancount loads and rledger rejected
+/// with P0012. Probing beancount showed its real rule is broader than "Unicode
+/// letters" — symbols (`So`), arrows, and `No` digits all pass — so restricting
+/// to `\p{L}` meant refusing files that exist.
+///
+/// The ASCII cases are the point of the test, not padding: they pin the
+/// boundary that makes the widening safe. Every character with syntactic
+/// meaning in beancount is ASCII, so an account name still cannot swallow a
+/// price annotation or a cost brace.
+#[test]
+fn account_names_accept_any_non_ascii_but_no_ascii_punctuation() {
+    for name in [
+        "Assets:CORP✨", // So — the reported case
+        "Assets:CORP½",  // No
+        "Assets:CORP→",  // Sm
+        "Assets:CORPé",  // L, already worked
+        "Assets:CORP、", // ideographic punctuation
+    ] {
+        assert!(
+            rustledger_parser::is_valid_account_name(name),
+            "{name} must be accepted (beancount accepts it)",
+        );
+    }
+    for name in [
+        "Assets:CORP_x", // ASCII punctuation
+        "Assets:CORP.x",
+        "Assets:CORP@x", // would collide with the price sigil
+        "Assets:CORP{x", // would collide with a cost spec
+        "Assets:corp✨", // component must start ASCII-uppercase
+        "Assets:✨x",    // ...and a symbol is not a valid start
+    ] {
+        assert!(
+            !rustledger_parser::is_valid_account_name(name),
+            "{name} must be rejected (beancount rejects it)",
+        );
+    }
+}

@@ -119,10 +119,13 @@ mod tests {
         let t = types();
         // Single component: an account is Type:Component+.
         assert!(validate_account_name("Assets", &t).is_some());
-        // Arbitrary non-ASCII characters mid-component (the old check only
-        // rejected invalid ASCII).
-        assert!(validate_account_name("Assets:N\u{2116}1", &t).is_some()); // №
-        assert!(validate_account_name("Assets:Cash\u{1F600}", &t).is_some()); // emoji
+        // Non-ASCII mid-component is VALID as of #1930 — beancount accepts it,
+        // and this validator's rule IS the lexer, so it follows automatically.
+        // These two assertions used to require rejection; they were pinning a
+        // stricter-than-beancount rule, checked against beancount before being
+        // flipped.
+        assert!(validate_account_name("Assets:N\u{2116}1", &t).is_none()); // №
+        assert!(validate_account_name("Assets:Cash\u{1F600}", &t).is_none()); // emoji
         // Lowercase sub-component start.
         assert!(validate_account_name("Assets:cash", &t).is_some());
         // Empty / structural.

@@ -91,7 +91,24 @@ pub enum Token<'src> {
     /// The first component starts with an uppercase letter (`\p{Lu}`), a
     /// letter without case like CJK ideographs (`\p{Lo}`), or a titlecase
     /// letter (`\p{Lt}`). Sub-components may also start with a digit.
-    /// Subsequent characters can be any Unicode letter, digit, or hyphen.
+    /// Subsequent characters can be any Unicode letter, digit, hyphen, or ANY
+    /// non-ASCII character.
+    ///
+    /// The non-ASCII allowance (#1930) matches what beancount actually accepts,
+    /// which is broader than letters: `Assets:CORP✨` (`So`), `Assets:CORP½`
+    /// (`No`) and `Assets:CORP→` all load there, and a committed fixture in
+    /// fava-portfolio-returns uses one — so rejecting them meant refusing real
+    /// files. Determined by probing beancount rather than reading its grammar.
+    ///
+    /// Restricted to NON-ASCII on purpose, and that is the safety argument:
+    /// every character with syntactic meaning in beancount (`@ # ^ { } " ; , *
+    /// ! ~ ( ) :`) is ASCII, so widening here cannot let an account name
+    /// swallow a price annotation, tag or cost brace. beancount agrees on that
+    /// boundary — it rejects `Assets:CORP@x`, `CORP#x`, `CORP_x` and `CORP.x`.
+    ///
+    /// The COMPONENT START is deliberately untouched: beancount requires an
+    /// ASCII uppercase letter or digit there (`Assets:corp✨` and `Assets:✨x`
+    /// are both rejected by it), and so do we.
     ///
     /// Note: The beancount v3 spec restricts the first character to ASCII
     /// `[A-Z]`, but this is an artifact of the C flex lexer's poor Unicode
@@ -99,7 +116,9 @@ pub enum Token<'src> {
     /// beancount/beancount#161, #398, #733).
     ///
     /// The account type prefix is validated later against options (`name_assets`, etc.).
-    #[regex(r"[\p{Lu}\p{Lo}\p{Lt}][\p{L}0-9-]*(:([\p{Lu}\p{Lo}\p{Lt}0-9][\p{L}0-9-]*)+)+")]
+    #[regex(
+        r"[\p{Lu}\p{Lo}\p{Lt}][\p{L}0-9\-\x{80}-\x{10FFFF}]*(:([\p{Lu}\p{Lo}\p{Lt}0-9][\p{L}0-9\-\x{80}-\x{10FFFF}]*)+)+"
+    )]
     Account(&'src str),
 
     /// A currency/commodity code like USD, EUR, AAPL, BTC, or single-char tickers like T, V, F.
@@ -773,17 +792,28 @@ mod tests {
     #[test]
     fn test_tokenize_account_unicode() {
         // Unicode uppercase letters and CJK characters are valid at the
-        // start of account components. Emoji and symbols are not.
-
-        // Non-letter (emoji) after valid ASCII start — still invalid
+        // START of account components. Emoji and symbols are not — there.
+        //
+        // INSIDE a component they now are (#1930). This assertion used to
+        // require the opposite; beancount accepts `Assets:CORP✨` and a
+        // committed fava-portfolio-returns fixture uses it, so the old
+        // expectation was pinning a stricter-than-beancount rule that made us
+        // refuse real files. Verified against beancount before flipping it.
         let tokens = tokenize("Assets:CORP✨");
         assert!(
-            !matches!(tokens[0].0, Token::Account("Assets:CORP✨")),
-            "Unicode emoji in account name should not tokenize as a valid Account"
+            matches!(tokens[0].0, Token::Account("Assets:CORP✨")),
+            "a non-ASCII symbol inside a component is a valid Account (beancount accepts it)"
         );
         assert!(
-            tokens.iter().any(|(t, _)| matches!(t, Token::Error(_))),
-            "Unicode emoji should produce at least one Error token"
+            !tokens.iter().any(|(t, _)| matches!(t, Token::Error(_))),
+            "the whole name lexes cleanly now; no Error token should remain"
+        );
+        // The boundary that keeps the widening safe: ASCII punctuation still
+        // terminates the account, so a price sigil cannot be swallowed into it.
+        let tokens = tokenize("Assets:CORP@2.00");
+        assert!(
+            matches!(tokens[0].0, Token::Account("Assets:CORP")),
+            "an ASCII `@` must still end the account name, not join it"
         );
 
         // CJK sub-component start — now valid (CJK ideographs are \p{Lo})
@@ -1322,12 +1352,18 @@ mod tests {
         assert!(!ok("assets:Cash"));
         assert!(!ok("Assets:cash"));
         assert!(!ok("Assets:\u{e9}cash")); // é — lowercase letter start
-        // Invalid: characters outside letters/digits/hyphen.
+        // Invalid: ASCII characters outside letters/digits/hyphen. The ASCII
+        // restriction is the safety boundary — every character with syntactic
+        // meaning in beancount is ASCII, so these can never be absorbed into an
+        // account name.
         assert!(!ok("Assets:Ca sh"));
         assert!(!ok("Assets:Cash!"));
-        assert!(!ok("Assets:N\u{2116}1")); // № (numero sign, So)
-        assert!(!ok("Assets:Cash\u{1F600}")); // emoji
         assert!(!ok("Assets:Ca_sh")); // underscore is currency-only
+        // Valid since #1930: ANY non-ASCII inside a component. beancount
+        // accepts all of these; requiring `\p{L}` here meant rejecting files
+        // that exist.
+        assert!(ok("Assets:N\u{2116}1")); // № numero sign (No)
+        assert!(ok("Assets:Cash\u{1F600}")); // emoji (So)
         // Invalid: structural.
         assert!(!ok(""));
         assert!(!ok("Assets:"));

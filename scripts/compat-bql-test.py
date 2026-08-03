@@ -915,6 +915,15 @@ def main() -> int:
     real_mismatches = total - matching - known_div
     effective_match = matching + known_div
     pct = effective_match * 100 // total if total > 0 else 0
+    # The RAW rate: what matched with nothing masked. `pct` is the number that
+    # gets quoted (release notes, badge, the job summary), and quoting it alone
+    # invites exactly the doubt #1902 raised - is the headline real, or is it
+    # the registry doing the work? Printing both makes the masking's size
+    # visible instead of inferable, and it moves: #1927 pinned 51 more pairs
+    # (all proven upstream bugs), which widened the gap between these two by
+    # about 2 points in a single PR. A reader who sees only the effective
+    # figure cannot tell that happened.
+    raw_pct = matching * 100 // total if total > 0 else 0
 
     # Per-query empty-result rate. A query that returns 0 rows on >50%
     # of files isn't actually being tested by the corpus and should
@@ -944,10 +953,14 @@ def main() -> int:
     )
     print(f"Runs tested:         {total}  (file × query)")
     print(f"Runs matching:       {matching}")
+    print(f"Raw match:           {matching}/{total} ({raw_pct}%)  [nothing masked]")
     print(f"Known Python diffs:  {known_py}")
     print(f"Known Rust diffs:    {known_rs}")
     print(f"Real mismatches:     {real_mismatches}")
-    print(f"Effective match:     {effective_match}/{total} ({pct}%)")
+    print(
+        f"Effective match:     {effective_match}/{total} ({pct}%)"
+        f"  [+{known_div} masked, {pct - raw_pct} pts over raw]"
+    )
 
     # Empty-result warnings — corpus signal, not a test failure
     print()
@@ -1028,6 +1041,7 @@ def main() -> int:
                 f.write(f"bql_known_python={known_py}\n")
                 f.write(f"bql_known_rust={known_rs}\n")
                 f.write(f"bql_pct={pct}\n")
+                f.write(f"bql_raw_pct={raw_pct}\n")
                 f.write(f"bql_weak_queries={len(weak)}\n")
 
     # Stale-mask gate. A KNOWN_*_DIVERGENCE entry whose pair now MATCHES

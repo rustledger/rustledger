@@ -811,6 +811,7 @@ jobs:
             check_exit_match_pct: ${{ steps.compat_test.outputs.check_match_pct }}
             full_match_pct: ${{ steps.compat_test.outputs.full_pct }}
             bql_match_pct: ${{ steps.bql_compat.outputs.bql_pct }}
+            bql_raw_match_pct: ${{ steps.bql_compat.outputs.bql_raw_pct }}
             regressions: ${{ steps.compat_test.outputs.regression_count }}
 
           check_compatibility:
@@ -835,6 +836,11 @@ jobs:
             queries_tested: ${{ steps.bql_compat.outputs.bql_total }}
             queries_matching: ${{ steps.bql_compat.outputs.bql_match }}
             match_pct: ${{ steps.bql_compat.outputs.bql_pct }}
+            # Raw = nothing masked. Reported next to match_pct so the size of
+            # KNOWN_*_DIVERGENCES is visible rather than inferable; the gap
+            # between the two moves whenever pins are added (#1902).
+            raw_match_pct: ${{ steps.bql_compat.outputs.bql_raw_pct }}
+            known_divergences: ${{ steps.bql_compat.outputs.bql_known_divergences }}
 
           regressions:
             count: ${{ steps.compat_test.outputs.regression_count }}
@@ -863,6 +869,7 @@ jobs:
           error_pct = int(os.environ.get('ERROR_PCT', 0))
           full_pct = int(os.environ.get('FULL_PCT', 0))
           bql_pct = int(os.environ.get('BQL_PCT', 0))
+          bql_raw_pct = int(os.environ.get('BQL_RAW_PCT', 0))
           regression_count = int(os.environ.get('REGRESSION_COUNT', 0))
 
           now = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -1047,7 +1054,7 @@ jobs:
           print(f"Posting count match: {posting_pct}%")
           print(f"Error presence match: {error_pct}%")
           print(f"Full AST match: {full_pct}%")
-          print(f"BQL match: {bql_pct}%")
+          print(f"BQL match: {bql_pct}% (raw {bql_raw_pct}%, {bql_pct - bql_raw_pct} pts masked)")
           if regression_count > 0:
               print(f"⚠️ Regressions detected: {regression_count}")
           EOF
@@ -1058,6 +1065,7 @@ jobs:
           ERROR_PCT: ${{ steps.compat_test.outputs.error_pct }}
           FULL_PCT: ${{ steps.compat_test.outputs.full_pct }}
           BQL_PCT: ${{ steps.bql_compat.outputs.bql_pct }}
+          BQL_RAW_PCT: ${{ steps.bql_compat.outputs.bql_raw_pct }}
           REGRESSION_COUNT: ${{ steps.compat_test.outputs.regression_count }}
       - name: Update summary
         run: |
@@ -1070,6 +1078,8 @@ jobs:
           | **Check exit match** | **${{ steps.compat_test.outputs.check_match_pct }}%** |
           | **Full AST match** | **${{ steps.compat_test.outputs.full_pct }}%** |
           | **BQL match** | **${{ steps.bql_compat.outputs.bql_pct }}%** |
+          | BQL match (raw, nothing masked) | ${{ steps.bql_compat.outputs.bql_raw_pct }}% |
+          | BQL known divergences masked | ${{ steps.bql_compat.outputs.bql_known_divergences }} |
           | Regressions | ${{ steps.compat_test.outputs.regression_count }} |
           | JSON parse failures | ${{ steps.compat_test.outputs.json_parse_failures }} |
 

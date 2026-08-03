@@ -1153,11 +1153,30 @@ jobs:
             // Parse key metrics from the summary section
             const checkMatch = resultsYaml.match(/check_exit_match_pct:\s*([\d.]+)/);
             const bqlMatch = resultsYaml.match(/bql_match_pct:\s*([\d.]+)/);
+            // RAW = nothing masked, and the count of what was. This comment is the
+            // most-read surface in the repo, so it is where quoting the effective
+            // figure alone does the most damage: #1927 pinned 51 proven-upstream
+            // pairs in one PR and moved effective from 93% to 95% with raw
+            // unchanged underneath. Anyone reading only the headline saw
+            // compatibility improve when nothing about rledger had (#1902).
+            //
+            // The keys do not collide: `bql_raw_match_pct` does not contain the
+            // substring `bql_match_pct`.
+            const bqlRawMatch = resultsYaml.match(/bql_raw_match_pct:\s*([\d.]+)/);
+            const bqlKnown = resultsYaml.match(/known_divergences:\s*(\d+)/);
             const totalFiles = resultsYaml.match(/total_files:\s*(\d+)/);
             const fullMatch = resultsYaml.match(/full_match_pct:\s*([\d.]+)/);
 
             const checkRate = checkMatch ? checkMatch[1] : 'N/A';
             const bqlRate = bqlMatch ? bqlMatch[1] : 'N/A';
+            // Degrade to the old single-figure cell rather than printing 'N/A'
+            // noise: a re-run against an artifact from before #1929 has no raw key.
+            const bqlRawRate = bqlRawMatch ? bqlRawMatch[1] : null;
+            const bqlMasked = bqlKnown ? bqlKnown[1] : null;
+            const bqlCell = bqlRawRate === null
+              ? `${bqlRate}%`
+              : `${bqlRate}% (raw ${bqlRawRate}%`
+                + (bqlMasked === null ? '' : `, ${bqlMasked} masked`) + ')';
             const total = totalFiles ? totalFiles[1] : '?';
             const fullRate = fullMatch ? fullMatch[1] : 'N/A';
 
@@ -1168,7 +1187,7 @@ jobs:
             | Metric | Result |
             |--------|--------|
             | **Check Compatibility** | ${checkRate}% |
-            | **BQL Compatibility** | ${bqlRate}% |
+            | **BQL Compatibility** | ${bqlCell} |
             | **Full AST Match** | ${fullRate}% |
             | **Total Files** | ${total} |
 
@@ -1177,6 +1196,10 @@ jobs:
 
             - **Check**: Exit codes and error counts match \`bean-check\`
             - **BQL**: Query results match \`bean-query\`
+              The headline is the EFFECTIVE rate, after pairs where beanquery
+              itself is wrong are masked. **raw** is the same run with nothing
+              masked. A widening gap means the registry grew, not that rledger
+              changed.
             - **Files**: ~800 test files downloaded from 10+ beancount repositories
 
             </details>

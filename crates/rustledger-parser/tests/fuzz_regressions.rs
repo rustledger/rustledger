@@ -172,3 +172,80 @@ fn negative_cost_keeps_its_sign() {
     }
     assert_eq!(seen, 1, "fixture must exercise exactly one cost spec");
 }
+
+/// #1944: the same truncation as #1939, in the two OTHER number-bearing
+/// positions that never reached the shared evaluator.
+///
+/// Both were found by sweeping the eleven `parse_decimal_token` call sites
+/// against the three evaluator entry points, after #1939 turned out to be an
+/// instance of a class rather than a one-off.
+#[test]
+fn arithmetic_is_evaluated_in_metadata_and_tolerances() {
+    // Metadata: silent. Any plugin or query reading `num` got a third of it.
+    let meta_src = concat!(
+        "2013-05-18 * \"t\"\n",
+        "  num: 2 * 3\n",
+        "  Assets:A   10.00 USD\n",
+        "  Assets:B  -10.00 USD\n",
+    );
+    let parsed = rustledger_parser::parse(meta_src);
+    let mut checked = false;
+    for d in &parsed.directives {
+        if let rustledger_core::Directive::Transaction(t) = &**d {
+            assert_eq!(
+                format!("{:?}", t.meta.get("num")),
+                "Some(Int(6))",
+                "metadata arithmetic must be evaluated (beancount reports 6)",
+            );
+            checked = true;
+        }
+    }
+    assert!(checked, "fixture must exercise a transaction");
+
+    // Tolerance: worse than silent — it REJECTED a file beancount accepts,
+    // and the E2002 message printed the truncated figure.
+    let tol_src = concat!(
+        "2013-01-01 open Assets:A\n",
+        "2013-01-01 open Assets:B\n",
+        "2013-05-18 * \"t\"\n",
+        "  Assets:A   10.008 USD\n",
+        "  Assets:B  -10.008 USD\n",
+        "2014-01-01 balance Assets:A   10.00 ~ 0.005 * 2 USD\n",
+    );
+    let parsed = rustledger_parser::parse(tol_src);
+    let mut seen = 0;
+    for d in &parsed.directives {
+        if let rustledger_core::Directive::Balance(b) = &**d {
+            seen += 1;
+            assert_eq!(
+                format!("{:?}", b.tolerance),
+                "Some(0.010)",
+                "tolerance arithmetic must be evaluated; 0.005 would reject a valid file",
+            );
+        }
+    }
+    assert_eq!(seen, 1, "fixture must exercise one balance directive");
+}
+
+/// Both new positions must agree across the green and red conversion paths,
+/// for the same reason the cost-spec fix carries this guard.
+#[test]
+fn metadata_and_tolerance_arithmetic_green_eq_red() {
+    for src in [
+        "2013-05-18 * \"t\"\n  num: 2 * 3\n  Assets:A  1.00 USD\n  Assets:B  -1.00 USD\n",
+        "2013-05-18 * \"t\"\n  num: -(5662.23 + 22.3)\n  Assets:A  1.00 USD\n  Assets:B  -1.00 USD\n",
+        "2014-01-01 balance Assets:A  10.00 ~ 0.005 * 2 USD\n",
+        "2014-01-01 balance Assets:A  10.00 ~ 0.005 USD\n",
+        // Malformed: must degrade identically, not merely fail identically.
+        "2013-05-18 * \"t\"\n  num: 2 * \n  Assets:A  1.00 USD\n  Assets:B  -1.00 USD\n",
+        "2014-01-01 balance Assets:A  10.00 ~ 1 / 0 USD\n",
+    ] {
+        let green = rustledger_parser::parse(src);
+        let red = rustledger_parser::cst::parse_red_only(src);
+        assert_eq!(
+            format!("{:?}", green.directives),
+            format!("{:?}", red.directives),
+            "green and red must agree for: {src}",
+        );
+    }
+}

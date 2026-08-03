@@ -711,19 +711,31 @@ fn convert_balance(
 /// the asserted balance); the tolerance NUMBER comes second.
 /// Walk raw tokens until TILDE, then collect the next NUMBER.
 fn extract_balance_tolerance(node: &crate::SyntaxNode) -> Option<Decimal> {
-    let mut past_tilde = false;
-    for el in node.children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
-            continue;
-        };
-        if past_tilde && t.kind() == crate::SyntaxKind::NUMBER {
-            return parse_decimal_token(t.text());
-        }
-        if t.kind() == crate::SyntaxKind::TILDE {
-            past_tilde = true;
-        }
+    // Everything after the TILDE, trivia dropped. The tolerance is its own
+    // expression region: `10.00 ~ 0.005 * 2 USD` asserts a tolerance of 0.010.
+    //
+    // Taking the first NUMBER instead (as this did) truncated it to 0.005 and
+    // REJECTED files beancount accepts — and the E2002 message printed the
+    // truncated figure, so the diagnostic advertised the bug (#1944). Same
+    // root cause as the cost-spec truncation in #1939: a number-bearing
+    // position that never reached the shared evaluator.
+    let tail: Vec<crate::SyntaxToken> = node
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .skip_while(|t| t.kind() != crate::SyntaxKind::TILDE)
+        .skip(1)
+        .filter(|t| !is_trivia_kind(t.kind()))
+        .collect();
+    if tail.is_empty() {
+        return None;
     }
-    None
+    if let Some(value) = cost_region_value(&tail) {
+        return Some(value);
+    }
+    // Not arithmetic: the plain first NUMBER, as before.
+    tail.iter()
+        .find(|t| t.kind() == crate::SyntaxKind::NUMBER)
+        .and_then(|t| parse_decimal_token(t.text()))
 }
 
 fn convert_pad(
@@ -2074,6 +2086,11 @@ fn meta_value_from_entry(entry: &MetaEntry) -> MetaValue {
 /// (legacy priority where `parse_amount` runs before `parse_signed_number`).
 pub(super) fn meta_value_from_tokens(tokens: impl Iterator<Item = impl TokenView>) -> MetaValue {
     use crate::SyntaxKind as K;
+    // Materialized so the arithmetic evaluator can look at the value region as
+    // a slice. `key: 2 * 3` is 6 in beancount and was 2 here — the same
+    // first-NUMBER truncation as the cost spec in #1939, in a third place
+    // (#1944).
+    let toks: Vec<_> = tokens.collect();
     let mut string_t: Option<String> = None;
     let mut number_t: Option<String> = None;
     let mut currency_t: Option<String> = None;
@@ -2085,7 +2102,7 @@ pub(super) fn meta_value_from_tokens(tokens: impl Iterator<Item = impl TokenView
     let mut minus = false;
     let mut minus_decided = false;
 
-    for t in tokens {
+    for t in &toks {
         let kind = t.kind();
         // First-of-kind value tokens (the `first_token` accessor semantics).
         match kind {
@@ -2132,6 +2149,27 @@ pub(super) fn meta_value_from_tokens(tokens: impl Iterator<Item = impl TokenView
         && let Some(decoded) = decode_string_token(&s)
     {
         return MetaValue::String(decoded);
+    }
+    // Arithmetic override, mirroring the cost-spec fix. Only when the value
+    // region really is an expression; a bare number keeps the latch above and
+    // its `Int` vs `Number` discrimination, which is archived (cache v11) and
+    // must not shift for ordinary metadata.
+    //
+    // The sign is NOT reapplied on this path: a leading MINUS is part of the
+    // expression the evaluator already consumed, so `minus` would double it.
+    let value_region: Vec<&_> = toks
+        .iter()
+        .skip_while(|t| t.kind() != K::META_KEY)
+        .filter(|t| !is_trivia_kind(t.kind()) && t.kind() != K::META_KEY)
+        .collect();
+    if let Some(dec) = cost_region_value(&value_region) {
+        if let Some(c) = currency_t {
+            return MetaValue::Amount(Amount::new(dec, Currency::new(&c)));
+        }
+        // Render the RESULT to decide Int vs Number, so `2 * 3` is Int(6) —
+        // what beancount reports — rather than inheriting the first operand's
+        // spelling.
+        return number_meta_value(&dec.to_string(), dec);
     }
     if let Some(nt) = number_t
         && let Some(mut dec) = parse_decimal_token(&nt)
@@ -5217,8 +5255,19 @@ mod tests {
         assert_eq!(got("c"), MetaValue::Currency(Currency::new("USD")));
     }
 
-    /// The sign machine: a MINUS after the key negates the number, and one
-    /// AFTER the number does not, because the first NUMBER closes the decision.
+    /// The sign machine: a MINUS after the key negates the number.
+    ///
+    /// The third case CHANGED with #1944. It used to assert that `42 - 1` is
+    /// `Int(42)` — "a minus past the number is not a sign; the first NUMBER
+    /// closes it". That described the truncation faithfully but was never the
+    /// right answer: beancount evaluates it and reports **41**, verified
+    /// directly against the oracle before this expectation was touched. The
+    /// old assertion was pinning a bug as intended behavior, which is why it
+    /// took a differential comparison rather than a reading to notice.
+    ///
+    /// The sign machine itself is unchanged and still pinned by the first two
+    /// cases: a leading MINUS is now consumed by the expression evaluator
+    /// instead of a separate flag, and reaches the same values.
     #[test]
     fn metadata_minus_applies_only_before_the_number() {
         let meta = meta_of("  neg: -42\n  negamt: -42 USD\n  after: 42 - 1\n");
@@ -5232,8 +5281,8 @@ mod tests {
         );
         assert_eq!(
             got("after"),
-            MetaValue::Int(42),
-            "a minus past the number is not a sign; the first NUMBER closes it"
+            MetaValue::Int(41),
+            "an expression in a metadata value is evaluated, matching beancount"
         );
     }
 

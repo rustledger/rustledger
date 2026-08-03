@@ -44,13 +44,24 @@ rledger raised E3001 on a file beancount accepts.
 """
 from __future__ import annotations
 
-import argparse, csv, io, re, subprocess, sys
+import argparse, csv, io, json, re, subprocess, sys
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 QUERY = ("SELECT account, currency, sum(number) AS n "
          "GROUP BY account, currency ORDER BY account, currency")
+
+
+# Axis 3 reads these columns from rledger. The reference side comes from the
+# beancount PYTHON API, deliberately NOT from bean-query: beanquery has bugs of
+# its own (beanquery#279 is pinned in the BQL suite for exactly this reason),
+# and an oracle that inherits the reference implementation's query-layer bugs is
+# not an oracle. This asks beancount what it BOOKED.
+POSTING_QUERY = (
+    "SELECT date, account, number, currency, cost_number, cost_currency, "
+    "cost_date, price ORDER BY date, account, number, currency"
+)
 
 
 # Error classes that do NOT stop beancount booking the transactions it parsed.
@@ -216,6 +227,166 @@ def compare(a: dict, b: dict):
     return diffs
 
 
+def _dec(text):
+    """CSV cell -> Decimal, or None for an empty cell."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except InvalidOperation:
+        return None
+
+
+def beancount_postings(path: Path):
+    """Per-posting rows from beancount, or None if not comparable.
+
+    Row shape matches POSTING_QUERY:
+      (date, account, number, currency,
+       cost_number, cost_currency, cost_date, price_number, price_currency)
+    """
+    from beancount import loader
+    from beancount.core import data
+
+    try:
+        entries, errors, _ = loader.load_file(str(path))
+    except Exception:
+        return None
+    if errors and not {type(e).__name__ for e in errors} <= NON_FATAL_ERRORS:
+        return None
+
+    rows = []
+    for e in entries:
+        if not isinstance(e, data.Transaction):
+            continue
+        for p in e.postings:
+            if p.units is None or p.units.number is None:
+                return None  # unbooked; nothing meaningful to compare
+            c, pr = p.cost, p.price
+            rows.append((
+                str(e.date), p.account, p.units.number, p.units.currency,
+                getattr(c, "number", None), getattr(c, "currency", None),
+                str(c.date) if getattr(c, "date", None) else None,
+                pr.number if pr else None, pr.currency if pr else None,
+            ))
+    return sorted(rows, key=_row_sort_key)
+
+
+def rledger_postings(binary: str, path: Path):
+    """The same rows from rledger, or None if not comparable.
+
+    JSON, NOT CSV, and that is the whole ballgame. CSV renders every number
+    through `DisplayContext`, so a price written `56.0763 USD` in a ledger whose
+    USD is mostly 2-decimal comes back as `56.08`. The first corpus run of this
+    axis reported 32 files diverging on `price_number` for exactly that reason —
+    every one of them the harness comparing beancount's STORED value against
+    rledger's RENDERED one, and none of them a defect. `--format json` carries
+    the stored value (verified: same file, same posting, `56.0763`).
+
+    The lesson generalizes: a differential oracle must not read the other side
+    through a presentation layer.
+    """
+    try:
+        proc = subprocess.run(
+            [binary, "query", "--format", "json", str(path), POSTING_QUERY],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0 or "parse errors" in proc.stderr:
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    def amount(v):
+        """(number, currency) from a JSON amount, or (None, None)."""
+        if not isinstance(v, dict):
+            return None, None
+        return _dec(v.get("number")), v.get("currency") or None
+
+    rows = []
+    for r in payload.get("rows", []):
+        price_n, price_c = amount(r.get("price"))
+        rows.append((
+            r.get("date") or "",
+            r.get("account") or "",
+            _dec(r.get("number")),
+            r.get("currency") or "",
+            _dec(r.get("cost_number")),
+            r.get("cost_currency") or None,
+            r.get("cost_date") or None,
+            price_n, price_c,
+        ))
+    return sorted(rows, key=_row_sort_key)
+
+
+def _row_sort_key(row):
+    """Total order over rows, tolerating None in any numeric slot.
+
+    Sorting has to be identical on both sides or the comparison reports
+    permutation as divergence. `None` cannot be compared to `Decimal`, so every
+    slot is mapped to a (is_none, value) pair with a string fallback.
+    """
+    out = []
+    for v in row:
+        if v is None:
+            out.append((1, ""))
+        elif isinstance(v, Decimal):
+            # `+v` collapses -0.00 to 0.00. Decimal keeps the sign of zero, and
+            # the two tools do not always agree on it, so without this the two
+            # sides sort differently and every row after the first signed zero
+            # is compared against the wrong partner. That showed up as a file
+            # reporting five bogus `number` differences that were really one
+            # misalignment.
+            out.append((0, f"{+v:+040.10f}"))
+        else:
+            out.append((0, str(v)))
+    return out
+
+
+def _num_agrees(bc, rl):
+    """Same money? Quantized to beancount's exponent, per the #1909 lesson.
+
+    The two tools legitimately carry different precision for the same figure
+    because they quantize at different layers — beancount rounds when it books,
+    rledger books what the arithmetic implies and rounds when it displays.
+    Comparing raw Decimals reported two false divergences once already, which is
+    why `compare()` above does the same thing for units.
+    """
+    if bc is None or rl is None:
+        return bc is None and rl is None
+    try:
+        return bc == rl.quantize(bc)
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def compare_postings(bc_rows, rl_rows):
+    """Field-level differences between two per-posting row sets.
+
+    Dates, accounts, currencies and LOT DATES compare exactly — a lot date is
+    either the right lot or it is not, and softening that would defeat the
+    reason this axis exists. Only the three money fields get the precision
+    tolerance.
+    """
+    diffs = []
+    if len(bc_rows) != len(rl_rows):
+        diffs.append(("<row count>", len(bc_rows), len(rl_rows)))
+        return diffs
+
+    fields = ("date", "account", "number", "currency", "cost_number",
+              "cost_currency", "cost_date", "price_number", "price_currency")
+    numeric = {"number", "cost_number", "price_number"}
+    for bc, rl in zip(bc_rows, rl_rows):
+        for name, x, y in zip(fields, bc, rl):
+            ok = _num_agrees(x, y) if name in numeric else (x or None) == (y or None)
+            if not ok:
+                diffs.append((f"{bc[1]} {bc[0]} {name}", x, y))
+    return diffs
+
+
 def classify_error_agreement(binary: str, path: Path):
     """Which bucket does this file fall in, and what to print for it.
 
@@ -318,12 +489,45 @@ def self_test(binary: str) -> int:
             KNOWN_ERROR_DIVERGENCES.pop(("st_rledger_only.beancount", "rledger_only"), None)
             KNOWN_ERROR_DIVERGENCES.pop(("st_rledger_only.beancount", "beancount_only"), None)
 
+    # --- axis 3: the comparator itself -----------------------------------
+    # Exercised directly on synthetic rows rather than through a fixture,
+    # because the interesting cases are ones no ledger we have produces on
+    # demand: a wrong lot date, a wrong cost, and — the one that matters most —
+    # a difference that is REPRESENTATION and must NOT be reported.
+    def row(number="10", cost="12.00", cost_date="2018-02-01",
+            price_n=None, price_c=None):
+        return ("2018-02-01", "Assets:B", Decimal(number), "CORP",
+                Decimal(cost) if cost is not None else None,
+                "USD" if cost is not None else None,
+                cost_date, price_n, price_c)
+
+    check(compare_postings([row()], [row()]) == [],
+          "identical rows must produce no diff")
+    check(compare_postings([row()], [row(cost="13.00")]) != [],
+          "a wrong COST must be reported")
+    check(compare_postings([row()], [row(cost_date="2018-03-01")]) != [],
+          "a wrong LOT DATE must be reported")
+    check(compare_postings([row()], [row(price_n=Decimal("15.00"), price_c="USD")]) != [],
+          "a price appearing on only one side must be reported")
+    check(compare_postings([row()], [row(), row()]) != [],
+          "a row-count mismatch must be reported")
+    # Representation, not money: beancount books 12.00, rledger carries more
+    # places. #1909 was closed after this exact shape was reported as a bug.
+    check(compare_postings([row(cost="12.00")],
+                           [row(cost="12.000000000005")]) == [],
+          "a sub-display-unit difference must NOT be reported")
+    # ...but the tolerance must not become a license to differ.
+    check(compare_postings([row(cost="12.00")], [row(cost="12.01")]) != [],
+          "a difference AT beancount's own precision must still be reported")
+
     for f in failures:
         print(f"SELF-TEST FAILED: {f}")
     if failures:
         return 1
     print("self-test OK: error axis reports agreement, reports disagreement, "
-          "and pins are direction-scoped")
+          "and pins are direction-scoped; posting axis reports wrong cost, "
+          "lot date, price and row count, and tolerates representation-only "
+          "differences without tolerating real ones")
     return 0
 
 
@@ -348,6 +552,8 @@ def main() -> int:
     compared = skipped = 0
     divergent = []
     err_agree = err_undecidable = 0
+    posting_compared = posting_skipped = 0
+    posting_divergent = []
     rledger_only, beancount_only, pinned = [], [], []
 
     for path in files:
@@ -384,6 +590,24 @@ def main() -> int:
         if diffs:
             divergent.append((path, diffs))
 
+        # --- axis 3: per-posting cost, price and lot date ------------------
+        # The sums above cancel compensating per-posting errors, and never look
+        # at cost or price at all. #1915 is the case in point: `100.00 USD @`
+        # was read as "no price", and the UNITS were identical before and after
+        # the fix, so no sum could ever have shown it.
+        bcp = beancount_postings(path)
+        if bcp is None:
+            posting_skipped += 1
+        else:
+            rlp = rledger_postings(args.rledger, path)
+            if rlp is None:
+                posting_skipped += 1
+            else:
+                posting_compared += 1
+                pdiffs = compare_postings(bcp, rlp)
+                if pdiffs:
+                    posting_divergent.append((path, pdiffs))
+
     # Errors first: a file rledger wrongly rejects is a louder problem than a
     # value that differs in the last place, and the CI step only lifts the
     # first 40 lines of this output into the job summary.
@@ -409,6 +633,15 @@ def main() -> int:
         print(f"  {path}")
         for (acct, cur), x, y in diffs[:6]:
             print(f"      {acct} {cur}:  beancount={x}  rledger={y}")
+    print()
+
+    print("=== PER-POSTING (cost, price, lot date) ===")
+    print(f"compared {posting_compared} files, skipped {posting_skipped}")
+    print(f"files with a POSTING divergence: {len(posting_divergent)}\n")
+    for path, diffs in posting_divergent[:25]:
+        print(f"  {path}")
+        for where, x, y in diffs[:6]:
+            print(f"      {where}:  beancount={x}  rledger={y}")
     return 0
 
 

@@ -268,9 +268,27 @@ KNOWN_POSTING_DIVERGENCES: dict[tuple[str, str], str] = {
     ("issue-520.beancount", "currency"): "tracked regression fixture (issue-520)",
     ("issue-520.beancount", "price_number"): "tracked regression fixture (issue-520)",
     ("issue-520.beancount", "price_currency"): "tracked regression fixture (issue-520)",
+    # The `{# total}` / `{per # }` compound-cost divergence, DECIDED in #1943:
+    # we keep our behavior. beancount treats a `#` spec as incomplete and
+    # solves it from the residual, discarding the written number when the two
+    # disagree — `{# 9.95}` against -19.90 cash books 1.990, not 0.995. We
+    # honor what the author wrote and report E3001 on the inconsistency,
+    # because silently replacing a cost basis propagates into capital gains
+    # and every cost-denominated report with nothing to indicate it.
+    #
+    # All three are parser-lima parser fixtures exercising edge syntax; no
+    # real-world corpus file hits this. The reasoning also lives at the
+    # canonical site (`cost_number_weight` in rustledger-booking).
+    ("test-cases_Balance.TotalCost.beancount", "cost_number"):
+        "compound `#` cost: we honor the written number, beancount solves from "
+        "the residual (#1943, deliberate)",
+    ("test-cases_ParseLots.CostTotalCostOnly.beancount", "cost_number"):
+        "compound `#` cost: we honor the written number, beancount solves from "
+        "the residual (#1943, deliberate)",
+    ("test-cases_ParseLots.CostTotalEmptyTotal.beancount", "cost_number"):
+        "compound `#` cost: we honor the written number, beancount solves from "
+        "the residual (#1943, deliberate)",
     # NOT pinned on purpose:
-    #   - the `{# total}` / `{per # }` compound-cost divergence (#1943): real,
-    #     undecided, and it should stay in anyone's face until it is decided.
     #   - `UnitsMissingNumberWithCost` cost_date, and `ZeroPrices` — unexamined
     #     beyond first triage, so pinning them would be asserting a conclusion
     #     nobody has reached.

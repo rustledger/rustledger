@@ -432,6 +432,30 @@ fn cost_number_weight_generic<D: WeightNum>(
         // Compound `{a # b}` (beancount compound_amount): the cost totals
         // `N*a + b`, so the weight is the per-unit product (sign embedded
         // in `units`) plus the signed lump total (#1700).
+        //
+        // DELIBERATE DIVERGENCE FROM PYTHON — see #1943.
+        //
+        // We compute the weight from what the author WROTE. beancount instead
+        // treats a `#` cost spec as incomplete and SOLVES it from the residual,
+        // discarding the written number when the two disagree:
+        //
+        //   10 AAPL {# 9.95 USD} against -9.95 USD    both -> 0.995   (agree)
+        //   10 AAPL {# 9.95 USD} against -19.90 USD   beancount -> 1.990
+        //                                             ours      -> 0.995, E3001
+        //   20 AAPL {45.23 # USD} against -45.23 USD  beancount -> 2.2615
+        //                                             ours      -> 45.23,  E3001
+        //
+        // In the second row the user typed a total of 9.95 and beancount books
+        // 19.90. Silently replacing a cost basis is the failure an accounting
+        // tool should least want: it propagates into capital gains and every
+        // cost-denominated report with nothing to indicate it. E3001 instead
+        // says the file is inconsistent, which is true and actionable.
+        //
+        // The cost of the deviation: we reject three `parser-lima` fixtures
+        // beancount accepts. No real-world file in the compat corpus hits it.
+        // Registered in `KNOWN_POSTING_DIVERGENCES` (scripts/compat-values.py)
+        // so the oracle does not re-report it, and pinned by
+        // `compound_cost_uses_the_written_numbers` below.
         rustledger_core::CostNumber::Compound { per_unit, total } => {
             let w = D::from_decimal(units_number).checked_mul(D::from_decimal(per_unit))?;
             w.checked_add(D::from_decimal(total).checked_mul(D::from_decimal(signum))?)
@@ -838,6 +862,47 @@ mod tests {
         };
         assert_eq!(cost_number_weight(dec!(10), &compound), Some(dec!(60.00)));
         assert_eq!(cost_number_weight(dec!(-10), &compound), Some(dec!(-60.00)));
+    }
+
+    /// #1943: a compound `{a # b}` cost weighs what the AUTHOR WROTE.
+    ///
+    /// Deliberately stricter than Python. beancount treats a `#` spec as
+    /// incomplete and solves it from the residual, so `{# 9.95 USD}` on 10
+    /// units against -19.90 cash books a per-unit cost of 1.990 — discarding
+    /// the 9.95 the user typed. We weigh the written total and let the balance
+    /// validator report the inconsistency as E3001.
+    ///
+    /// Pinned here because the divergence is easy to "fix" by accident: making
+    /// the weight follow the residual would make three parser-lima fixtures
+    /// pass and would silently reintroduce cost bases the user never wrote.
+    #[test]
+    fn compound_cost_uses_the_written_numbers() {
+        use rust_decimal_macros::dec;
+        use rustledger_core::CostNumber;
+        // `{# 9.95}` — per-unit 0, total 9.95, 10 units.
+        assert_eq!(
+            cost_number_weight(
+                dec!(10),
+                &CostNumber::Compound {
+                    per_unit: dec!(0),
+                    total: dec!(9.95),
+                }
+            ),
+            Some(dec!(9.95)),
+            "the weight is the WRITTEN total, not one solved from the residual",
+        );
+        // `{45.23 # }` — per-unit 45.23, total 0, 20 units.
+        assert_eq!(
+            cost_number_weight(
+                dec!(20),
+                &CostNumber::Compound {
+                    per_unit: dec!(45.23),
+                    total: dec!(0),
+                }
+            ),
+            Some(dec!(904.60)),
+            "a written per-unit stays per-unit; beancount would divide by units",
+        );
     }
 
     #[test]

@@ -400,6 +400,25 @@ const VALID_BOOKING_METHODS: &[&str] = &[
 /// v3 and we already agree with it there. A blanket rule over non-transaction
 /// directives would break the two cases that are currently right, which is why
 /// this is a per-directive call rather than one check in the dispatcher.
+///
+/// REPORTS BUT DOES NOT DROP, and that is a deliberate divergence in the error
+/// SET (both tools still reject the file). beancount treats this as a parser
+/// syntax error, so the directive never exists and every later reference to it
+/// cascades:
+///
+///   2018-06-01 open Assets:N #tag
+///   2018-06-02 * "t"
+///     Assets:N   1.00 USD
+///     ...
+///
+///   beancount   ParserSyntaxError + ValidationError: unknown account Assets:N
+///   rledger     the tag error alone; the account is still opened
+///
+/// Keeping the directive means the user gets one error naming the real
+/// problem instead of that error plus a cascade of unopened-account noise
+/// pointing at innocent lines. The compat oracle will not flag the difference
+/// - its error axis compares only WHETHER a file errs, not which errors - so
+/// it is written down here rather than left to be rediscovered.
 fn reject_tags_and_links(
     node: &crate::SyntaxNode,
     directive: &str,

@@ -1301,10 +1301,11 @@ fn metadata_keys_need_at_least_two_characters() {
         "a single-character key must be rejected (beancount: LexerError)",
     );
     for key in ["kk", "k1", "k-", "k_", "abc"] {
+        let parsed = parse(key);
         assert!(
-            parse(key).errors.is_empty(),
+            parsed.errors.is_empty(),
             "{key}: must still be accepted (beancount accepts it), got {:?}",
-            parse(key).errors,
+            parsed.errors,
         );
     }
     // Already agreed before this change, kept so a future edit to the rule

@@ -47,16 +47,28 @@ on:
         # of its 93 minutes, waiting on mutants that hang. See the
         # `shards_for` note below for why re-sharding is the wrong lever.
         #
-        # 120s is still ~100x the measured baseline test (`Unmutated baseline
-        # in 113s build + 1s test`), so a legitimate test has enormous room.
+        # 180s is ~150x the measured baseline test (`Unmutated baseline in
+        # 113s build + 1s test`), so a legitimate test has enormous room.
         #
-        # And the failure direction is safe: the score is
+        # The failure direction is safe: the score is
         # CAUGHT / (CAUGHT + MISSED + TIMEOUT), so a TIMEOUT sits in the
         # denominator only. Cutting this too far makes the score DROP, which is
         # loud — the opposite of the memory cap in #1928, where too tight would
-        # have silently inflated it. If the next run shows a score fall, this
-        # is the first thing to look at.
-        default: '120'
+        # have silently inflated it.
+        #
+        # WHY 180 AND NOT 120. 120 was tried first (run 30876745352) and was
+        # measurably too aggressive. It took the worst shard 93 -> 78 minutes,
+        # but its timeouts went 8 -> 12: four mutants that previously COMPLETED
+        # and were scored now expire instead. A TIMEOUT is not a CAUGHT, so
+        # those four moved from the numerator to the denominator and the shard
+        # score fell 84.2% -> 83.1% without any test getting worse. That is a
+        # false signal, in the safe direction but still false.
+        #
+        # 180 sits above the four (they finish between 120s and 300s) while
+        # still cutting the eight genuine hangs from 300s. Re-measure if the
+        # timeout count moves off 8 again: it is the tell that this number is
+        # in the wrong place.
+        default: '180'
         type: string
 permissions:
   contents: read

@@ -20,9 +20,9 @@
     "full_match": 7
   },
   "synthetic-proptest": {
-    "total": 50,
-    "check_match": 50,
-    "full_match": 50
+    "total": 500,
+    "check_match": 500,
+    "full_match": 500
   },
   "regressions": {
     "total": 26,

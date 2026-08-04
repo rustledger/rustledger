@@ -57,6 +57,32 @@ use crate::types::{Error, LedgerOptions};
 /// errors. Same reasoning as the loader's v24.
 pub const CACHE_VERSION: u32 = 10;
 
+/// The `rustledger-loader` cache version this one was last reconciled with.
+///
+/// Both caches archive the same parsed `Vec<Directive>`. A parser change that
+/// alters PARSER OUTPUT therefore invalidates both, and bumping only one leaves
+/// the other serving stale directives on a build that has the fix.
+///
+/// That is not hypothetical: on #1942 (cost-spec arithmetic) only the loader
+/// version moved, and a stale WASM blob would have kept serving a truncated
+/// cost basis. It was caught in review, by a person, not by anything here.
+///
+/// So this pins the pair. If the assertion below fails, ask which kind of
+/// change moved the loader version:
+///
+///   parser OUTPUT changed  -> bump `CACHE_VERSION` above too, then update
+///                             this pin to match
+///   loader-internal only   -> only update this pin (layout of a loader-side
+///                             struct moved; our archived directives did not)
+///
+/// The question is the point; the pin exists to force it to be asked.
+/// Test-only: the pin exists to be asserted, and gating it keeps a non-test
+/// build free of a constant nothing reads. The doc above stays here rather
+/// than in the test module so a reader of this file meets the contract next
+/// to `CACHE_VERSION`, which is the thing they came to change.
+#[cfg(test)]
+const LOADER_CACHE_VERSION_PIN: u32 = 23;
+
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";
 
@@ -187,6 +213,29 @@ pub fn hash_sources(sources: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The two caches archive the same parsed directives, so they have to move
+    /// together whenever PARSER OUTPUT changes.
+    ///
+    /// This is the guard for the failure that actually happened on #1942: the
+    /// loader version was bumped, this one was not, and a stale WASM blob would
+    /// have served a truncated cost basis on a fixed build. Review caught it;
+    /// nothing in the test suite did.
+    #[test]
+    fn loader_cache_version_is_pinned() {
+        assert_eq!(
+            rustledger_loader::cache::CACHE_VERSION,
+            LOADER_CACHE_VERSION_PIN,
+            "the rustledger-loader cache version moved and this one did not. \
+             If PARSER OUTPUT changed, bump CACHE_VERSION in this file too and \
+             then update LOADER_CACHE_VERSION_PIN to match. If the loader \
+             change was internal to the loader (its own struct layout) and our \
+             archived directives are unaffected, update the pin alone. See \
+             #1942, where only the loader moved and a stale blob would have \
+             kept serving a truncated cost basis.",
+        );
+    }
+
     use super::*;
 
     #[test]

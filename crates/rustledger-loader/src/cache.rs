@@ -282,6 +282,7 @@ impl CacheEntry {
 const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 
 /// Cache version - increment when format changes.
+///
 /// v1: Initial release with string-based Decimal/NaiveDate
 /// v2: Binary Decimal (16 bytes) and `NaiveDate` (i32 days)
 /// v3: Fixed account type defaults in `CachedOptions`
@@ -407,7 +408,13 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 /// v24: tags and links are no longer accepted as `custom` / `pushmeta`
 ///     values (#1958), so a file using them moves from clean to erroring and
 ///     a stale cache would serve the old clean parse.
-const CACHE_VERSION: u32 = 24;
+///
+/// Public so `rustledger-wasm` can pin its own cache version against this one.
+/// Both caches archive the same `Vec<Directive>`, so a parser change that
+/// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
+/// bumped, which review caught rather than any test. See
+/// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
+pub const CACHE_VERSION: u32 = 24;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]

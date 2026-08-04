@@ -1314,6 +1314,7 @@ fn metadata_keys_need_at_least_two_characters() {
         !parse("A").errors.is_empty(),
         "an uppercase start must stay rejected",
     );
+}
 
 /// #1954: a `^link` is not a valid metadata value; a `#tag` is.
 ///

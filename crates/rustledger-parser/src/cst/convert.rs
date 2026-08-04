@@ -2428,14 +2428,6 @@ fn walk_top_level_once(
     }
 }
 
-/// Walk every `COST_SPEC` node in the tree and emit a
-/// `SyntaxError("unclosed cost specification: missing '}'")` for
-/// any spec whose opener (`{`, `{{`, or `{#`) doesn't have a
-/// matching closer at the spec's depth-0. Mirrors the legacy
-/// parser's deferred-error emission at `parser.rs:705-707` so a
-/// `10 AAPL {150 USD\n` posting or an EOF-truncated cost block
-/// surfaces a diagnostic instead of silently producing a half-
-/// built cost spec.
 /// A `^link` is not a valid metadata VALUE (#1954).
 ///
 /// beancount's grammar has no production for it — `ref: ^inv-1` fails with
@@ -2490,6 +2482,14 @@ fn extract_link_metadata_value_errors(
     out
 }
 
+/// Walk every `COST_SPEC` node in the tree and emit a
+/// `SyntaxError("unclosed cost specification: missing '}'")` for
+/// any spec whose opener (`{`, `{{`, or `{#`) doesn't have a
+/// matching closer at the spec's depth-0. Mirrors the legacy
+/// parser's deferred-error emission at `parser.rs:705-707` so a
+/// `10 AAPL {150 USD\n` posting or an EOF-truncated cost block
+/// surfaces a diagnostic instead of silently producing a half-
+/// built cost spec.
 fn extract_unclosed_cost_brace_errors(
     source_file: &SourceFile,
     bom_offset: u32,

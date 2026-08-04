@@ -45,7 +45,10 @@ use crate::types::{Error, LedgerOptions};
 /// component, so a ledger that previously failed to parse now yields
 /// directives. Layout again unchanged, so a v5 blob would be accepted and the
 /// cached PARSE FAILURE served on a build that can read the file.
-pub const CACHE_VERSION: u32 = 6;
+/// v7 (#1949): trailing tags/links on most directives are now parse
+/// errors, so a previously-clean file can carry errors. Same reasoning as the
+/// loader's v21; both caches move when a parser change alters output.
+pub const CACHE_VERSION: u32 = 7;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

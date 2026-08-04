@@ -1226,3 +1226,62 @@ fn account_names_accept_any_non_ascii_but_no_ascii_punctuation() {
         );
     }
 }
+
+/// #1949: a `#tag` or `^link` is a parse error on directives that do not take
+/// one — and is still fine where beancount allows it.
+///
+/// The accept half is not padding. beancount v3 DOES take tags and links on
+/// `note` and `document`, and we already agreed with it there, so a blanket
+/// "reject trailing tokens on non-transaction directives" would have broken
+/// the two cases that were already right. That is why the check is a
+/// per-directive call rather than one rule in the dispatcher.
+#[test]
+fn tags_and_links_are_rejected_only_where_beancount_rejects_them() {
+    let pre = "2018-01-01 open Assets:CORP\n2018-01-01 open Equity:Opening\n";
+    for (body, what) in [
+        ("2018-06-01 open Assets:New #tag\n", "open/tag"),
+        ("2018-06-01 open Assets:New ^lnk\n", "open/link"),
+        ("2018-06-01 close Assets:CORP #tag\n", "close/tag"),
+        (
+            "2018-06-01 balance Assets:CORP 0.00 USD #tag\n",
+            "balance/tag",
+        ),
+        ("2018-06-01 commodity EUR #tag\n", "commodity/tag"),
+        ("2018-06-01 event \"loc\" \"here\" #tag\n", "event/tag"),
+        ("2018-06-01 price EUR 1.10 USD #tag\n", "price/tag"),
+        (
+            "2018-06-01 pad Assets:CORP Equity:Opening #tag\n",
+            "pad/tag",
+        ),
+    ] {
+        let parsed = rustledger_parser::parse(&format!("{pre}{body}"));
+        assert!(
+            !parsed.errors.is_empty(),
+            "{what}: must be a parse error (beancount rejects it)",
+        );
+    }
+    for (body, what) in [
+        ("2018-06-01 note Assets:CORP \"n\" #tag\n", "note/tag"),
+        ("2018-06-01 note Assets:CORP \"n\" ^lnk\n", "note/link"),
+        (
+            "2018-06-01 document Assets:CORP \"/tmp/x.pdf\" #tag\n",
+            "document/tag",
+        ),
+    ] {
+        let parsed = rustledger_parser::parse(&format!("{pre}{body}"));
+        assert!(
+            parsed.errors.is_empty(),
+            "{what}: must parse cleanly (beancount accepts it), got {:?}",
+            parsed.errors,
+        );
+    }
+    // A metadata VALUE may be a tag. The check scans DIRECT child tokens only,
+    // and metadata lives in child NODES — this is the input a descendant walk
+    // would wrongly reject, which is the worse mistake of the two.
+    let parsed = rustledger_parser::parse("2018-01-01 open Assets:A\n  category: #groceries\n");
+    assert!(
+        parsed.errors.is_empty(),
+        "a tag-valued metadata entry must still parse, got {:?}",
+        parsed.errors,
+    );
+}

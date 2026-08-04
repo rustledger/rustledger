@@ -383,12 +383,64 @@ const VALID_BOOKING_METHODS: &[&str] = &[
     "AVERAGE",
 ];
 
+/// Reject `#tag` / `^link` tokens on a directive that does not take them.
+///
+/// beancount allows tags and links on TRANSACTIONS, and in v3 on `note` and
+/// `document` — nowhere else. rledger accepted them everywhere, silently: each
+/// `convert_*` reads the fields it wants and ignores the rest, so a trailing
+/// token was never objected to by anything. `2018-06-01 open Assets:A #tag`
+/// loaded clean here and is a parse error there (#1949).
+///
+/// Deliberately scans DIRECT child tokens only. Metadata lives in `META_ENTRY`
+/// child NODES, and a metadata VALUE may legitimately be a tag (`k: #x`), so a
+/// descendant walk would reject valid input — the opposite mistake, and a worse
+/// one.
+///
+/// Not called from `note` or `document`: both take tags and links in beancount
+/// v3 and we already agree with it there. A blanket rule over non-transaction
+/// directives would break the two cases that are currently right, which is why
+/// this is a per-directive call rather than one check in the dispatcher.
+fn reject_tags_and_links(
+    node: &crate::SyntaxNode,
+    directive: &str,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) {
+    use crate::SyntaxKind as K;
+    for t in node
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+    {
+        let kind = t.kind();
+        if !matches!(kind, K::TAG | K::LINK) {
+            continue;
+        }
+        let what = if kind == K::TAG { "tag" } else { "link" };
+        let range = t.text_range();
+        let off = bom_offset as usize;
+        let span = Span::new(
+            usize::from(range.start()) + off,
+            usize::from(range.end()) + off,
+        );
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(format!(
+                "a {directive} directive does not take a {what} ({}); \
+                 tags and links belong to transactions, and to note and \
+                 document directives",
+                t.text()
+            )),
+            span,
+        ));
+    }
+}
+
 fn convert_open(
     node: &OpenDirective,
     bom_offset: u32,
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
+    reject_tags_and_links(node.syntax(), "open", bom_offset, errors);
     let account = Account::new(node.account()?.text());
     let currencies: Vec<Currency> = node.currencies().map(|c| Currency::new(c.text())).collect();
     let booking = node.booking_method().and_then(|s| s.text_decoded());
@@ -420,6 +472,7 @@ fn convert_close(
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
+    reject_tags_and_links(node.syntax(), "close", bom_offset, errors);
     let account = Account::new(node.account()?.text());
     let meta = convert_meta_entries(node.syntax());
 
@@ -438,6 +491,7 @@ fn convert_commodity(
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
+    reject_tags_and_links(node.syntax(), "commodity", bom_offset, errors);
     let currency = Currency::new(node.currency()?.text());
     let meta = convert_meta_entries(node.syntax());
 
@@ -521,6 +575,7 @@ fn convert_event(
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
+    reject_tags_and_links(node.syntax(), "event", bom_offset, errors);
     let event_type = node.event_type()?.text_decoded()?;
     let value = node.value()?.text_decoded()?;
     let meta = convert_meta_entries(node.syntax());
@@ -613,6 +668,7 @@ fn convert_price(
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
+    reject_tags_and_links(node.syntax(), "price", bom_offset, errors);
     let base_currency = Currency::new(node.base_currency()?.text());
     // Same arithmetic support as `convert_balance`: a price
     // directive's value can use `+`, `-`, `*`, `/`, and parens.
@@ -660,6 +716,7 @@ fn convert_balance(
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
+    reject_tags_and_links(node.syntax(), "balance", bom_offset, errors);
     let account = Account::new(node.account()?.text());
     // Beancount accepts arithmetic in the balance assertion's
     // value (`balance Assets:X 0.25 + 0.75 GBP` ≡ 1.00 GBP).
@@ -744,6 +801,7 @@ fn convert_pad(
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
+    reject_tags_and_links(node.syntax(), "pad", bom_offset, errors);
     let account = Account::new(node.target_account()?.text());
     let source_account = Account::new(node.source_account()?.text());
     let meta = convert_meta_entries(node.syntax());

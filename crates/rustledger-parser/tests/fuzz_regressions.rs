@@ -193,8 +193,8 @@ fn arithmetic_is_evaluated_in_metadata_and_tolerances() {
     for d in &parsed.directives {
         if let rustledger_core::Directive::Transaction(t) = &**d {
             assert_eq!(
-                format!("{:?}", t.meta.get("num")),
-                "Some(Int(6))",
+                t.meta.get("num"),
+                Some(&rustledger_core::MetaValue::Int(6)),
                 "metadata arithmetic must be evaluated (beancount reports 6)",
             );
             checked = true;
@@ -218,8 +218,8 @@ fn arithmetic_is_evaluated_in_metadata_and_tolerances() {
         if let rustledger_core::Directive::Balance(b) = &**d {
             seen += 1;
             assert_eq!(
-                format!("{:?}", b.tolerance),
-                "Some(0.010)",
+                b.tolerance,
+                Some(rust_decimal_macros::dec!(0.010)),
                 "tolerance arithmetic must be evaluated; 0.005 would reject a valid file",
             );
         }

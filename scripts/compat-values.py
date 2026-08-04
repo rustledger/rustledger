@@ -718,6 +718,29 @@ def self_test(binary: str) -> int:
     check(compare_postings([zero_price], [no_price]) != [],
           "a ZERO price and NO price must not be treated as the same thing")
 
+    # ...and END TO END, through the extractor where the bug actually was.
+    # The two checks above exercise `compare_postings`, but the defect lived in
+    # `beancount_postings`: `pr.number if pr else None` against an `Amount`
+    # whose `__bool__` reads its number. Reverting that line would leave the
+    # checks above passing, so on their own they guard the wrong function —
+    # which is the failure this whole self-test exists to prevent.
+    with tempfile.TemporaryDirectory() as td:
+        zp = Path(td) / "zero_price.beancount"
+        zp.write_text(
+            "2014-01-01 open Equity:C\n"
+            "2014-04-20 *\n"
+            "  Equity:C   100 USD @ 0 XFER\n"
+            "  Equity:C  -100 USD\n"
+        )
+        rows = beancount_postings(zp)
+        check(rows is not None, "the zero-price fixture must be comparable at all")
+        if rows:
+            priced = [r for r in rows if r[7] is not None or r[8] is not None]
+            check(
+                len(priced) == 1 and priced[0][7] == Decimal("0") and priced[0][8] == "XFER",
+                f"a zero price must survive extraction as 0 XFER, got {[(r[7], r[8]) for r in rows]}",
+            )
+
     for f in failures:
         print(f"SELF-TEST FAILED: {f}")
     if failures:

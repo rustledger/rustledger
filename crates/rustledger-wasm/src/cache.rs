@@ -51,7 +51,9 @@ use crate::types::{Error, LedgerOptions};
 /// v8 (#1955): metadata keys need two or more characters, so a
 /// previously-clean file can carry errors. Same reasoning as the loader's
 /// v22; both caches move when a parser change alters output.
-pub const CACHE_VERSION: u32 = 8;
+/// v9 (#1954): link-valued metadata is now a parse error, so a
+/// previously-clean file can carry errors. Same reasoning as the loader's v23.
+pub const CACHE_VERSION: u32 = 9;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

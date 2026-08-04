@@ -1314,4 +1314,67 @@ fn metadata_keys_need_at_least_two_characters() {
         !parse("A").errors.is_empty(),
         "an uppercase start must stay rejected",
     );
+
+/// #1954: a `^link` is not a valid metadata value; a `#tag` is.
+///
+/// The asymmetry is the point. Tags and links lex as sibling kinds and are
+/// handled as a pair almost everywhere, so rejecting both is the natural
+/// mistake — and it would break input beancount accepts. The accept cases
+/// below are what stop a future edit from making it.
+#[test]
+fn a_link_is_not_a_valid_metadata_value() {
+    let p = rustledger_parser::parse;
+    assert!(
+        !p("2018-01-01 open Assets:A\n  ref: ^inv-1\n")
+            .errors
+            .is_empty(),
+        "a link as a metadata value must be rejected (beancount rejects it)",
+    );
+    for (src, what) in [
+        // NOTE the `^lnk` on the transaction: without a `^` anywhere in the
+        // source the whole scan is skipped by its `contains('^')` guard, so a
+        // tag-only fixture would pass even if the scan rejected TAG too. That
+        // is exactly what the first version of this test did — it asserted
+        // nothing about the scan's contents.
+        (
+            "2018-01-01 * \"t\" ^lnk\n  cat: #groceries\n  Assets:A  1.00 USD\n  Assets:B -1.00 USD\n",
+            "tag as a metadata value, in a file that DOES contain a link",
+        ),
+        (
+            "2018-01-01 open Assets:A\n  cat: #groceries\n",
+            "tag as a metadata value",
+        ),
+        (
+            "2018-01-01 * \"t\" ^inv-1\n  Assets:A  1.00 USD\n  Assets:B -1.00 USD\n",
+            "link on a TRANSACTION, where links belong",
+        ),
+        (
+            "2018-01-01 * \"t\" #tag ^inv-1\n  Assets:A  1.00 USD\n  Assets:B -1.00 USD\n",
+            "tag and link together on a transaction",
+        ),
+    ] {
+        let parsed = p(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "{what}: must still parse cleanly, got {:?}",
+            parsed.errors,
+        );
+    }
+    // Green and red must agree; the scan lives in the shared entry point so
+    // this is a guard on that staying true.
+    for src in [
+        "2018-01-01 open Assets:A\n  ref: ^inv-1\n",
+        "2018-01-01 open Assets:A\n  cat: #groceries\n",
+        "2018-01-01 * \"t\" ^inv-1\n  Assets:A  1.00 USD\n  Assets:B -1.00 USD\n",
+    ] {
+        let green = rustledger_parser::parse(src);
+        let red = rustledger_parser::cst::parse_red_only(src);
+        assert_eq!(
+            green.errors.len(),
+            red.errors.len(),
+            "green/red error-count mismatch for {src}: {:?} vs {:?}",
+            green.errors,
+            red.errors,
+        );
+    }
 }

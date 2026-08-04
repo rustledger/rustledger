@@ -148,6 +148,11 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     if stripped.contains('{') {
         errors.extend(extract_unclosed_cost_brace_errors(&source_file, bom_offset));
     }
+    // Same guard trick as above: no '^' in the source means no LINK token can
+    // exist, so the whole-tree scan is skipped on the common case.
+    if stripped.contains('^') {
+        errors.extend(extract_link_metadata_value_errors(&source_file, bom_offset));
+    }
     errors.extend(inline_errors);
     let warnings = Vec::new();
 
@@ -2431,6 +2436,60 @@ fn walk_top_level_once(
 /// `10 AAPL {150 USD\n` posting or an EOF-truncated cost block
 /// surfaces a diagnostic instead of silently producing a half-
 /// built cost spec.
+/// A `^link` is not a valid metadata VALUE (#1954).
+///
+/// beancount's grammar has no production for it — `ref: ^inv-1` fails with
+/// `syntax error, unexpected LINK, expecting end of file or EOL` — while a
+/// `#tag` in the same position is perfectly valid there. We accepted both.
+///
+/// Deliberately asymmetric, and that asymmetry is the whole point: rejecting
+/// TAG here as well would break input beancount accepts, which is the mistake
+/// #1953 avoided in the mirror-image case. Tags and links lex as sibling kinds
+/// and are handled as a pair almost everywhere in this file, so the pairing is
+/// the natural thing to reach for and the wrong thing to do.
+///
+/// Scoped to `META_ENTRY` nodes. A link on a TRANSACTION (`* "x" ^lnk`) is a
+/// direct child of the transaction, not of a metadata entry, so it is
+/// untouched — as it must be, that being the one place links belong.
+///
+/// NOT extended to `custom` / `pushmeta` values, which run through
+/// `value_tokens_to_meta` rather than this path. beancount rejects BOTH a tag
+/// and a link there, so it is a different rule needing its own evidence;
+/// filed separately rather than folded in here.
+fn extract_link_metadata_value_errors(
+    source_file: &SourceFile,
+    bom_offset: u32,
+) -> Vec<crate::ParseError> {
+    let mut out = Vec::new();
+    for entry in source_file.syntax().descendants() {
+        if entry.kind() != crate::SyntaxKind::META_ENTRY {
+            continue;
+        }
+        for el in entry.children_with_tokens() {
+            let rowan::NodeOrToken::Token(t) = el else {
+                continue;
+            };
+            if t.kind() != crate::SyntaxKind::LINK {
+                continue;
+            }
+            let range = t.text_range();
+            let off = bom_offset as usize;
+            out.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError(format!(
+                    "a link ({}) is not a valid metadata value; beancount \
+                     accepts a tag here but not a link",
+                    t.text()
+                )),
+                Span::new(
+                    usize::from(range.start()) + off,
+                    usize::from(range.end()) + off,
+                ),
+            ));
+        }
+    }
+    out
+}
+
 fn extract_unclosed_cost_brace_errors(
     source_file: &SourceFile,
     bom_offset: u32,

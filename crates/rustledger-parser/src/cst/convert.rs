@@ -153,6 +153,13 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     if stripped.contains('^') {
         errors.extend(extract_link_metadata_value_errors(&source_file, bom_offset));
     }
+    // Ditto for the custom/pushmeta rules, which also care about '#'.
+    if stripped.contains('^') || stripped.contains('#') {
+        errors.extend(extract_custom_pushmeta_taglink_errors(
+            &source_file,
+            bom_offset,
+        ));
+    }
     errors.extend(inline_errors);
     let warnings = Vec::new();
 
@@ -2490,6 +2497,70 @@ fn extract_link_metadata_value_errors(
 /// `10 AAPL {150 USD\n` posting or an EOF-truncated cost block
 /// surfaces a diagnostic instead of silently producing a half-
 /// built cost spec.
+/// Tags and links are not valid `custom` or `pushmeta` VALUES (#1958).
+///
+/// Two different rules, and conflating them is the trap here:
+///
+/// | position          | `#tag`   | `^link`  |
+/// |-------------------|----------|----------|
+/// | metadata value    | valid    | rejected |
+/// | `pushmeta k: ...` | valid    | rejected |
+/// | `custom "t" ...`  | rejected | rejected |
+///
+/// `pushmeta` follows the METADATA rule - it pushes a metadata key/value, so a
+/// tag is fine there and only a link is not. `custom` is stricter than both and
+/// takes neither. Checked against beancount per position, each with a control
+/// on the same directive.
+///
+/// This is why the check cannot live inside `value_tokens_to_meta`, which both
+/// callers share: one rule in the shared helper would either let a tag through
+/// in `custom` or wrongly reject one in `pushmeta`. It is the same shape as
+/// #1953 (`note`/`document` DO take both) and #1954 (a tag is valid where a
+/// link is not) - three times now the right answer has split a pair that lexes
+/// and reads as one.
+fn extract_custom_pushmeta_taglink_errors(
+    source_file: &SourceFile,
+    bom_offset: u32,
+) -> Vec<crate::ParseError> {
+    use crate::SyntaxKind as K;
+    let mut out = Vec::new();
+    for node in source_file.syntax().descendants() {
+        let (reject_tag, what) = match node.kind() {
+            K::CUSTOM_DIRECTIVE => (true, "custom"),
+            K::PUSHMETA_DIRECTIVE => (false, "pushmeta"),
+            _ => continue,
+        };
+        for el in node.children_with_tokens() {
+            let rowan::NodeOrToken::Token(t) = el else {
+                continue;
+            };
+            let kind = t.kind();
+            let bad = match kind {
+                K::LINK => true,
+                K::TAG => reject_tag,
+                _ => false,
+            };
+            if !bad {
+                continue;
+            }
+            let noun = if kind == K::TAG { "tag" } else { "link" };
+            let range = t.text_range();
+            let off = bom_offset as usize;
+            out.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError(format!(
+                    "a {noun} ({}) is not a valid {what} value",
+                    t.text()
+                )),
+                Span::new(
+                    usize::from(range.start()) + off,
+                    usize::from(range.end()) + off,
+                ),
+            ));
+        }
+    }
+    out
+}
+
 fn extract_unclosed_cost_brace_errors(
     source_file: &SourceFile,
     bom_offset: u32,

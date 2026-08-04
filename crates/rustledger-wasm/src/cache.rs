@@ -53,7 +53,9 @@ use crate::types::{Error, LedgerOptions};
 /// v22; both caches move when a parser change alters output.
 /// v9 (#1954): link-valued metadata is now a parse error, so a
 /// previously-clean file can carry errors. Same reasoning as the loader's v23.
-pub const CACHE_VERSION: u32 = 9;
+/// v10 (#1958): tags/links in custom and pushmeta values are now parse
+/// errors. Same reasoning as the loader's v24.
+pub const CACHE_VERSION: u32 = 10;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

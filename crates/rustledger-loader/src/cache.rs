@@ -404,7 +404,10 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 /// v23: a `^link` is no longer accepted as a metadata VALUE (#1954), so a
 ///     file using `ref: ^x` moves from clean to erroring. A stale cache would
 ///     serve the old clean parse.
-const CACHE_VERSION: u32 = 23;
+/// v24: tags and links are no longer accepted as `custom` / `pushmeta`
+///     values (#1958), so a file using them moves from clean to erroring and
+///     a stale cache would serve the old clean parse.
+const CACHE_VERSION: u32 = 24;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1120,7 +1123,7 @@ mod tests {
         // layout: the `CostNumber` discriminants and payload encodings the byte
         // arrays below pin are untouched, and those assertions prove it rather
         // than take this comment's word for it.
-        const FIXTURE_VERSION: u32 = 23;
+        const FIXTURE_VERSION: u32 = 24;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1217,7 +1220,7 @@ mod tests {
         // still match — and the assertion, not this comment, is what proves it.
         // v20 (#1930) is an account-name lexer change; `MetaValue` is
         // untouched and the hash below must still match.
-        const FIXTURE_VERSION: u32 = 23;
+        const FIXTURE_VERSION: u32 = 24;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

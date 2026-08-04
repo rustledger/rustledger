@@ -275,16 +275,23 @@ fn test_parse_custom_directive() {
     assert_eq!(count_directive_type(&result, "custom"), 1);
 }
 
-/// Regression: custom directive values must preserve a leading `MINUS` sign and
-/// carry `Tag`/`Link` values. `extract_custom_values` previously had no `MINUS`
-/// arm (so `-50.00` emitted `+50.00`) and dropped tags/links entirely. All three
-/// value-token extractors now share `value_tokens_to_meta`.
+/// Regression: custom directive values must preserve a leading `MINUS` sign.
+/// `extract_custom_values` previously had no `MINUS` arm, so `-50.00` emitted
+/// `+50.00`. All three value-token extractors share `value_tokens_to_meta`.
+///
+/// The tag/link half of this test was REMOVED with #1958. It asserted that a
+/// custom directive carries `Tag`/`Link` values, which beancount does not
+/// accept at all — `custom "budget" -50.00 USD #quarterly ...` is a
+/// `ParserSyntaxError: unexpected TAG` there and produces no directive.
+/// Checked against beancount before the expectation was changed. The sign
+/// claim is untouched and is what this test is actually for; rejection is
+/// covered by `custom_and_pushmeta_reject_taglinks_by_their_own_rules`.
 #[test]
 fn test_custom_directive_preserves_sign_and_tag_link() {
     use rust_decimal_macros::dec;
     use rustledger_core::{Amount, Currency, MetaValue};
 
-    let source = r#"2024-01-01 custom "budget" -50.00 USD #quarterly ^plan-2024 TRUE"#;
+    let source = r#"2024-01-01 custom "budget" -50.00 USD TRUE"#;
     let result = parse_ok(source);
     let spanned = result
         .directives
@@ -300,9 +307,6 @@ fn test_custom_directive_preserves_sign_and_tag_link() {
         vec![
             // Signed amount keeps its sign (was emitted as +50.00).
             MetaValue::Amount(Amount::new(dec!(-50.00), Currency::new("USD"))),
-            // Tag and Link are no longer dropped.
-            MetaValue::Tag("quarterly".into()),
-            MetaValue::Link("plan-2024".into()),
             MetaValue::Bool(true),
         ],
         "custom values: {:?}",
@@ -1376,6 +1380,76 @@ fn a_link_is_not_a_valid_metadata_value() {
             "green/red error-count mismatch for {src}: {:?} vs {:?}",
             green.errors,
             red.errors,
+        );
+    }
+}
+
+/// #1958: tags and links in `custom` / `pushmeta` values — two DIFFERENT rules.
+///
+/// `pushmeta` follows the metadata rule (a tag is valid, a link is not);
+/// `custom` takes neither. The pushmeta-tag accept case is the load-bearing
+/// one: `value_tokens_to_meta` serves both callers, so a single check in that
+/// shared helper would either let a tag through in `custom` or wrongly reject
+/// one here. This test is what makes that mistake fail.
+#[test]
+fn custom_and_pushmeta_reject_taglinks_by_their_own_rules() {
+    let p = rustledger_parser::parse;
+    for (src, what) in [
+        ("2024-01-15 custom \"b\" ^link\n", "custom: link"),
+        ("2024-01-15 custom \"b\" #tag\n", "custom: tag"),
+        (
+            "pushmeta ref: ^x\n2018-01-01 open Assets:A\npopmeta ref:\n",
+            "pushmeta: link",
+        ),
+    ] {
+        assert!(
+            !p(src).errors.is_empty(),
+            "{what}: must be rejected (beancount rejects it)"
+        );
+    }
+    for (src, what) in [
+        // THE asymmetry. A tag is valid in a pushmeta value and must survive.
+        (
+            "pushmeta ref: #t\n2018-01-01 open Assets:A\npopmeta ref:\n",
+            "pushmeta: tag",
+        ),
+        (
+            "2024-01-15 custom \"b\" \"s\" 42 TRUE\n",
+            "custom: string/number/bool",
+        ),
+        ("2024-01-15 custom \"b\" 2024-06-01\n", "custom: date"),
+        ("2024-01-15 custom \"b\" Assets:A\n", "custom: account"),
+        (
+            "pushmeta ref: 42\n2018-01-01 open Assets:A\npopmeta ref:\n",
+            "pushmeta: number",
+        ),
+        // Links and tags where they DO belong, in a file containing both
+        // sigils so the scan runs rather than being skipped by its guard.
+        (
+            "2018-01-01 open Assets:A\n2018-01-01 open Assets:B\n\
+             2018-06-01 * \"t\" #tg ^lk\n  Assets:A  1.00 USD\n  Assets:B -1.00 USD\n",
+            "tag and link on a transaction",
+        ),
+    ] {
+        let parsed = p(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "{what}: must parse cleanly, got {:?}",
+            parsed.errors
+        );
+    }
+    for src in [
+        "2024-01-15 custom \"b\" #tag\n",
+        "pushmeta ref: #t\n2018-01-01 open Assets:A\npopmeta ref:\n",
+    ] {
+        let green = rustledger_parser::parse(src);
+        let red = rustledger_parser::cst::parse_red_only(src);
+        assert_eq!(
+            green.errors.len(),
+            red.errors.len(),
+            "green/red mismatch for {src}: {:?} vs {:?}",
+            green.errors,
+            red.errors
         );
     }
 }

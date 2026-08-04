@@ -16,7 +16,6 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
 
 /// One ledger per shape whose parser output changed in the 2026-08 series.
 /// Each is a case where a stale cache would have served a materially wrong
@@ -75,11 +74,42 @@ fn shapes() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-fn temp_dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("rledger_cache_props_{name}"));
-    let _ = fs::remove_dir_all(&d);
-    fs::create_dir_all(&d).expect("temp dir");
-    d
+/// Fail fast if the cache env vars are set.
+///
+/// `save_cache_entry` / `load_cache_entry` read process env, so an inherited
+/// `BEANCOUNT_LOAD_CACHE_FILENAME` would redirect these writes out of the
+/// fixture — silently making the round-trip assert nothing, or clobbering a
+/// developer's real cache file. The unit tests in `cache.rs` guard themselves
+/// the same way (`assert_clean_cache_env`); this is that check, for a test
+/// binary that cannot see it.
+///
+/// CLAUDE.md warns against asserting environment as a precondition (#1729).
+/// The exception earns itself here: the alternative is not a hermetic test but
+/// a test that writes somewhere unexpected, and failing loudly beats that.
+fn assert_clean_cache_env() {
+    for var in [
+        rustledger_loader::CACHE_FILENAME_ENV,
+        rustledger_loader::DISABLE_CACHE_ENV,
+    ] {
+        assert!(
+            std::env::var_os(var).is_none(),
+            "unset {var} before running this test - it redirects or disables \
+             the cache these properties are about",
+        );
+    }
+}
+
+/// A fixture directory unique to this process and call.
+///
+/// Not a fixed name under `std::env::temp_dir()`: two concurrent `cargo test`
+/// processes would land on the same path, and the cleanup at the start would
+/// delete the other run's fixture out from under it. `TempDir` also removes
+/// itself when dropped, so a failing assertion does not leave litter behind.
+fn fixture_dir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("rledger_cache_props_")
+        .tempdir()
+        .expect("temp dir")
 }
 
 /// Parsing, archiving and reading back must yield the SAME directives.
@@ -89,9 +119,10 @@ fn temp_dir(name: &str) -> PathBuf {
 /// field that fails to survive shows up, including ones no accessor exposes.
 #[test]
 fn cache_roundtrip_preserves_parsed_directives() {
+    assert_clean_cache_env();
     for (name, source) in shapes() {
-        let dir = temp_dir(name);
-        let file = dir.join("main.beancount");
+        let dir = fixture_dir();
+        let file = dir.path().join("main.beancount");
         let mut f = fs::File::create(&file).expect("create");
         f.write_all(source.as_bytes()).expect("write");
         drop(f);
@@ -125,7 +156,6 @@ fn cache_roundtrip_preserves_parsed_directives() {
             "{name}: directives did not survive the cache round-trip",
         );
         rustledger_loader::invalidate_cache(&file);
-        let _ = fs::remove_dir_all(&dir);
     }
 }
 
@@ -138,8 +168,9 @@ fn cache_roundtrip_preserves_parsed_directives() {
 /// number on screen.
 #[test]
 fn a_stale_version_is_refused_rather_than_reinterpreted() {
-    let dir = temp_dir("stale_version");
-    let file = dir.join("main.beancount");
+    assert_clean_cache_env();
+    let dir = fixture_dir();
+    let file = dir.path().join("main.beancount");
     let mut f = fs::File::create(&file).expect("create");
     f.write_all(b"2018-01-01 open Assets:A\n").expect("write");
     drop(f);
@@ -168,5 +199,4 @@ fn a_stale_version_is_refused_rather_than_reinterpreted() {
         "a cache blob one version behind must be refused, not reinterpreted",
     );
     rustledger_loader::invalidate_cache(&file);
-    let _ = fs::remove_dir_all(&dir);
 }

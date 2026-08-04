@@ -1201,6 +1201,17 @@ fn account_names_accept_any_non_ascii_but_no_ascii_punctuation() {
             "{name} must be accepted (beancount accepts it)",
         );
     }
+    // Unicode whitespace and separators ARE accepted, by both tools. Pinned
+    // so the sharp edge is visible in the suite and not only in a doc
+    // comment: `Assets:A\u{a0}B` is ONE account, visually identical to
+    // `Assets:A B`. Verified against beancount individually — excluding them
+    // would reject files beancount loads, which is the bug #1930 fixes.
+    for name in ["Assets:A\u{a0}B", "Assets:A\u{2028}B", "Assets:A\u{200b}B"] {
+        assert!(
+            rustledger_parser::is_valid_account_name(name),
+            "{name:?} must be accepted (beancount accepts it)",
+        );
+    }
     for name in [
         "Assets:CORP_x", // ASCII punctuation
         "Assets:CORP.x",

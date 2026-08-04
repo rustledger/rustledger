@@ -106,9 +106,24 @@ pub enum Token<'src> {
     /// swallow a price annotation, tag or cost brace. beancount agrees on that
     /// boundary — it rejects `Assets:CORP@x`, `CORP#x`, `CORP_x` and `CORP.x`.
     ///
-    /// The COMPONENT START is deliberately untouched: beancount requires an
-    /// ASCII uppercase letter or digit there (`Assets:corp✨` and `Assets:✨x`
-    /// are both rejected by it), and so do we.
+    /// The COMPONENT START is deliberately untouched by #1930 — but note we do
+    /// NOT match beancount there. It requires ASCII uppercase or a digit; we
+    /// also allow `\p{Lo}`/`\p{Lt}`, so `Assets:日本` loads here and is
+    /// rejected by beancount. That divergence predates #1930 and is left alone
+    /// on purpose: tightening it would break CJK ledgers that work today. We
+    /// do agree on rejecting a lowercase or symbol start (`Assets:corp✨`,
+    /// `Assets:✨x`).
+    ///
+    /// KNOWN SHARP EDGE: the non-ASCII range includes Unicode whitespace,
+    /// control and line-separator characters — NBSP (U+00A0), LINE SEPARATOR
+    /// (U+2028), NEL (U+0085), ZWSP (U+200B) and friends — so `Assets:A<NBSP>B`
+    /// lexes as ONE account whose name is visually indistinguishable from
+    /// `Assets:A B`. That is worth knowing about, and it is deliberate:
+    /// beancount accepts every one of those inside an account name (verified
+    /// individually), so excluding them would trade a visual-ambiguity hazard
+    /// for the concrete bug #1930 exists to fix — rejecting files beancount
+    /// loads. If this is ever revisited it should be as a lint over account
+    /// names, not a lexer restriction, so the file still parses.
     ///
     /// Note: The beancount v3 spec restricts the first character to ASCII
     /// `[A-Z]`, but this is an artifact of the C flex lexer's poor Unicode
@@ -1362,7 +1377,7 @@ mod tests {
         // Valid since #1930: ANY non-ASCII inside a component. beancount
         // accepts all of these; requiring `\p{L}` here meant rejecting files
         // that exist.
-        assert!(ok("Assets:N\u{2116}1")); // № numero sign (No)
+        assert!(ok("Assets:N\u{2116}1")); // № numero sign (So)
         assert!(ok("Assets:Cash\u{1F600}")); // emoji (So)
         // Invalid: structural.
         assert!(!ok(""));

@@ -39,7 +39,7 @@ on:
       timeout:
         description: 'Timeout per mutant in seconds'
         required: false
-        # 300 -> 120. Measured on run 30785409699: the four parser shards run
+        # 300 -> 180. Measured on run 30785409699: the four parser shards run
         # DISJOINT slices of the mutant list (that is what `--shard k/n` does)
         # and the slices are equal in SIZE — 459 mutants each — yet they took
         # 36 / 53 / 63 / 93 minutes. Equal work by count, very unequal by
@@ -47,8 +47,10 @@ on:
         # of its 93 minutes, waiting on mutants that hang. See the
         # `shards_for` note below for why re-sharding is the wrong lever.
         #
-        # 180s is ~150x the measured baseline test (`Unmutated baseline in
-        # 113s build + 1s test`), so a legitimate test has enormous room.
+        # 180s is 180x the measured baseline TEST — `Unmutated baseline in
+        # 113s build + 1s test`, and `--timeout` bounds the test phase, not
+        # the build (`--build-timeout` is separate) — so a legitimate test has
+        # enormous room.
         #
         # The failure direction is safe: the score is
         # CAUGHT / (CAUGHT + MISSED + TIMEOUT), so a TIMEOUT sits in the

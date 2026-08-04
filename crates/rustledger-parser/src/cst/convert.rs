@@ -411,14 +411,14 @@ const VALID_BOOKING_METHODS: &[&str] = &[
 ///     Assets:N   1.00 USD
 ///     ...
 ///
-///   beancount   ParserSyntaxError + ValidationError: unknown account Assets:N
+///   beancount   `ParserSyntaxError` + `ValidationError`: unknown account
 ///   rledger     the tag error alone; the account is still opened
 ///
 /// Keeping the directive means the user gets one error naming the real
 /// problem instead of that error plus a cascade of unopened-account noise
-/// pointing at innocent lines. The compat oracle will not flag the difference
-/// - its error axis compares only WHETHER a file errs, not which errors - so
-/// it is written down here rather than left to be rediscovered.
+/// pointing at innocent lines. The compat oracle cannot flag the difference,
+/// because its error axis compares only WHETHER a file errs and not which
+/// errors, so it is written down here rather than left to be rediscovered.
 fn reject_tags_and_links(
     node: &crate::SyntaxNode,
     directive: &str,
@@ -443,7 +443,7 @@ fn reject_tags_and_links(
         );
         errors.push(crate::ParseError::new(
             crate::ParseErrorKind::SyntaxError(format!(
-                "a {directive} directive does not take a {what} ({}); \
+                "the {directive} directive does not take a {what} ({}); \
                  tags and links belong to transactions, and to note and \
                  document directives",
                 t.text()

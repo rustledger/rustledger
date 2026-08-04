@@ -313,8 +313,8 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     into `CostSpec.number: Option<CostNumber>` where `CostNumber` is
 ///     a 3-variant enum (`PerUnit`, `Total`, `PerUnitFromTotal`)
 ///     (#1164). The archived layout is structurally different
-///     (Option<Decimal> + Option<Decimal> → Option<discriminant +
-///     payload>); reading v7 bytes into the v8 layout would produce
+///     (`Option<Decimal>` + `Option<Decimal>` → `Option<discriminant +
+///     payload>`); reading v7 bytes into the v8 layout would produce
 ///     garbage cost numbers. Bumping forces regeneration.
 ///     Subsequent #1164 follow-up commits converted `CostNumber`'s
 ///     variants from tuple form (`PerUnit(Decimal)`) to struct form

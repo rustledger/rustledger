@@ -327,7 +327,17 @@ pub enum Token<'src> {
     /// Examples: filename:, lineno:, custom-key:, nameOnCard:
     /// The slice includes the trailing colon. Keys must start with a lowercase ASCII letter
     /// per the beancount v3 spec. Keys starting with uppercase are rejected.
-    #[regex(r"[a-z][a-zA-Z0-9_-]*:")]
+    ///
+    /// At least TWO characters before the colon (`+`, not `*`) — beancount's
+    /// key rule is a lowercase letter followed by one or more further
+    /// characters, so a bare `k:` does not lex as a key there at all and the
+    /// file fails to load. We accepted it (#1955).
+    ///
+    /// Only the LENGTH diverged. Every other part of this rule already matched:
+    /// `kk`, `k1`, `k-` and `k_` are accepted by both tools, and an uppercase
+    /// start like `A:` is rejected by both. So this is deliberately a minimal
+    /// `*` -> `+` rather than a rewrite of the character classes.
+    #[regex(r"[a-z][a-zA-Z0-9_-]+:")]
     MetaKey(&'src str),
 
     /// Indentation token (inserted by post-processing, not by Logos).

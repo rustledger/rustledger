@@ -5316,20 +5316,23 @@ mod tests {
     /// for metadata, so every latch guard could be flipped freely.
     #[test]
     fn metadata_latches_the_first_token_of_each_kind() {
+        // Two-character keys because beancount requires them, and so do we
+        // since #1955. These are fixture names only; the test is about
+        // first-of-kind LATCHING and nothing here depends on key length.
         let meta = meta_of(
-            "  s: \"one\" \"two\"\n  n: 1 2\n  c: USD EUR\n  d: 2024-06-01 2025-07-02\n  \
-             a: Assets:First Assets:Second\n  b: TRUE FALSE\n  t: #first #second\n",
+            "  ss: \"one\" \"two\"\n  nn: 1 2\n  cc: USD EUR\n  dd: 2024-06-01 2025-07-02\n  \
+             aa: Assets:First Assets:Second\n  bb: TRUE FALSE\n  tt: #first #second\n",
         );
         let got = |k: &str| meta.get(k).cloned().unwrap_or(MetaValue::None);
 
-        assert_eq!(got("s"), MetaValue::String("one".into()));
-        assert_eq!(got("n"), MetaValue::Int(1));
-        assert_eq!(got("d"), MetaValue::Date(naive_date(2024, 6, 1).unwrap()));
-        assert_eq!(got("a"), MetaValue::Account(Account::new("Assets:First")));
-        assert_eq!(got("b"), MetaValue::Bool(true), "TRUE came first");
-        assert_eq!(got("t"), MetaValue::Tag(Tag::new("first")));
+        assert_eq!(got("ss"), MetaValue::String("one".into()));
+        assert_eq!(got("nn"), MetaValue::Int(1));
+        assert_eq!(got("dd"), MetaValue::Date(naive_date(2024, 6, 1).unwrap()));
+        assert_eq!(got("aa"), MetaValue::Account(Account::new("Assets:First")));
+        assert_eq!(got("bb"), MetaValue::Bool(true), "TRUE came first");
+        assert_eq!(got("tt"), MetaValue::Tag(Tag::new("first")));
         // `c` pairs a number-less currency run: the FIRST currency wins.
-        assert_eq!(got("c"), MetaValue::Currency(Currency::new("USD")));
+        assert_eq!(got("cc"), MetaValue::Currency(Currency::new("USD")));
     }
 
     /// The sign machine: a MINUS after the key negates the number.
@@ -5415,11 +5418,12 @@ mod tests {
     /// reversing it is what pins the guard on the other one.
     #[test]
     fn metadata_latches_bool_and_taglink_in_either_order() {
-        let meta = meta_of("  b: FALSE TRUE\n  tl: #tag ^link\n  lt: ^link #tag\n");
+        // Two-character keys, per #1955; `tl` / `lt` already were.
+        let meta = meta_of("  bb: FALSE TRUE\n  tl: #tag ^link\n  lt: ^link #tag\n");
         let got = |k: &str| meta.get(k).cloned().unwrap_or(MetaValue::None);
 
         assert_eq!(
-            got("b"),
+            got("bb"),
             MetaValue::Bool(false),
             "FALSE came first, so the later TRUE must not overwrite it"
         );

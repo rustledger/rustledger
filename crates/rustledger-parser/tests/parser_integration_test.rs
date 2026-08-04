@@ -1285,3 +1285,32 @@ fn tags_and_links_are_rejected_only_where_beancount_rejects_them() {
         parsed.errors,
     );
 }
+
+/// #1955: a metadata key needs at least two characters, as in beancount.
+///
+/// The reject case is the fix; the accept cases are the point of the test.
+/// Only the LENGTH diverged — every other part of the key rule already matched
+/// beancount — so this pins the boundary rather than the one bug, and would
+/// catch a fix that over-tightened the character classes while it was at it.
+#[test]
+fn metadata_keys_need_at_least_two_characters() {
+    let parse =
+        |key: &str| rustledger_parser::parse(&format!("2018-01-01 open Assets:A\n  {key}: 42\n"));
+    assert!(
+        !parse("k").errors.is_empty(),
+        "a single-character key must be rejected (beancount: LexerError)",
+    );
+    for key in ["kk", "k1", "k-", "k_", "abc"] {
+        assert!(
+            parse(key).errors.is_empty(),
+            "{key}: must still be accepted (beancount accepts it), got {:?}",
+            parse(key).errors,
+        );
+    }
+    // Already agreed before this change, kept so a future edit to the rule
+    // cannot quietly relax it.
+    assert!(
+        !parse("A").errors.is_empty(),
+        "an uppercase start must stay rejected",
+    );
+}

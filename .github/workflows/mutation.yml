@@ -39,10 +39,12 @@ on:
       timeout:
         description: 'Timeout per mutant in seconds'
         required: false
-        # 300 -> 120. Measured on run 30785409699: all four parser shards test
-        # exactly 459 mutants, yet ran 36 / 53 / 63 / 93 minutes. Duration
-        # tracks TIMEOUTS, not mutant count — shard 3/4 spent 8 x 300s, about
-        # 40 of its 93 minutes, waiting on mutants that hang. See the
+        # 300 -> 120. Measured on run 30785409699: the four parser shards run
+        # DISJOINT slices of the mutant list (that is what `--shard k/n` does)
+        # and the slices are equal in SIZE — 459 mutants each — yet they took
+        # 36 / 53 / 63 / 93 minutes. Equal work by count, very unequal by
+        # clock. Duration tracks TIMEOUTS: shard 3/4 spent 8 x 300s, about 40
+        # of its 93 minutes, waiting on mutants that hang. See the
         # `shards_for` note below for why re-sharding is the wrong lever.
         #
         # 120s is still ~100x the measured baseline test (`Unmutated baseline
@@ -96,13 +98,14 @@ jobs:
           # Sharding splits the mutant list, so each job finishes well inside
           # the cap and a lost runner costs one shard instead of a crate.
           # NOT raised further on purpose. The obvious reading of a 93-minute
-          # shard is "split it more", and that is wrong here: every parser shard
-          # tests the SAME 459 mutants, so the spread is not workload
-          # imbalance. It is timeouts (0 / 1 / 7 / 8 across the four) plus how
-          # many mutants are unviable and therefore free (146 on the fastest,
-          # 34 on the slowest). More shards would divide the mutants but
+          # shard is "split it more", and that is wrong here. The shards already
+          # hold disjoint slices of EQUAL SIZE (459 mutants each), so the
+          # 36-to-93-minute spread is not workload imbalance to be divided
+          # away. It is timeouts (0 / 1 / 7 / 8 across the four) plus how many
+          # mutants are unviable and therefore free (146 on the fastest, 34 on
+          # the slowest). More shards would make each slice smaller but
           # multiply the fixed ~113s baseline build per runner, and the
-          # timeouts would simply redistribute.
+          # timeouts would simply redistribute across them.
           #
           # Headroom is also better than it looks: 93 minutes against a
           # 240-minute cap. Revisit if a shard passes ~180.

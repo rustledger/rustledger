@@ -24,7 +24,7 @@ mod tests {
   Assets:Bank  -5.00 USD
   Expenses:Food
 "#;
-        let result = parse(source);
+        let parsed = parse(source);
         let uri: lsp_types::Uri = "file:///test.beancount".parse().unwrap();
 
         let params = GotoDefinitionParams {
@@ -39,11 +39,36 @@ mod tests {
         let result = handle_goto_declaration(
             &params,
             source,
-            &result,
+            &parsed,
             None,
             &uri,
             PositionEncoding::Utf16,
         );
-        assert!(result.is_some());
+
+        // The claim in this test's NAME is that declaration answers exactly as
+        // definition. `is_some()` alone never checked that: swap the re-export
+        // above for a separate implementation and, as long as it returned
+        // Some, this test would still pass while the two silently diverged.
+        //
+        // So compare them. Today they are the same symbol, which makes the
+        // equality trivially true — that is the point. It is a drift guard: it
+        // starts doing work the moment someone gives declaration its own body.
+        let definition = crate::handlers::definition::handle_goto_definition(
+            &params,
+            source,
+            &parsed,
+            None,
+            &uri,
+            PositionEncoding::Utf16,
+        );
+        assert!(
+            result.is_some(),
+            "the fixture must resolve to a location, or the equality below \
+             compares two Nones and proves nothing",
+        );
+        assert_eq!(
+            result, definition,
+            "goto-declaration must answer exactly as goto-definition",
+        );
     }
 }

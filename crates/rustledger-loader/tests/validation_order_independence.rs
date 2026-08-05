@@ -1,4 +1,5 @@
-//! The loader produces a canonical directive order (#1902 Phase 1).
+//! Validation does not depend on the order directives were typed in
+//! (#1902 Phase 1).
 //!
 //! #1902 proposes "validation is deterministic and order-independent". The
 //! determinism half already has THREE tests in `rustledger-validate`
@@ -79,13 +80,22 @@ fn codes_for(order: &[usize], dir: &std::path::Path) -> Vec<String> {
         .iter()
         .chain(&late)
         .chain(&pad)
-        .map(|e| format!("{:?}", e.code))
+        // The STABLE rendered code ("E1001"), not the Debug variant name. The
+        // variant name is an internal identifier: renaming it is a refactor, but
+        // it would read here as a behavior change.
+        .map(|e| e.code.code().to_owned())
         .collect();
     codes.sort_unstable();
     codes
 }
 
-/// EXHAUSTIVE over a 6-block prefix rather than random sampling.
+/// EXHAUSTIVE over ALL blocks rather than random sampling.
+///
+/// Every block, not a prefix. An earlier version permuted only the first 6,
+/// which silently excluded the two blocks the fixture comments single out as
+/// the interesting ones: the `balance` that pairs with the pad, and the
+/// transaction touching an unopened account. The pad moved but never past its
+/// balance, and E1001 never appeared at all.
 ///
 /// 720 orderings is cheap, and exhaustive means a failure is reproducible
 /// without a seed — the thing that makes a randomized property annoying to act
@@ -97,16 +107,29 @@ fn diagnostics_are_invariant_under_input_permutation() {
         .tempdir()
         .expect("temp dir");
 
-    let n = 6usize;
-    let canonical: Vec<usize> = (0..n).collect();
+    let canonical: Vec<usize> = (0..blocks().len()).collect();
     let expected = codes_for(&canonical, dir.path());
 
     // Non-vacuity: if the fixture stopped producing diagnostics this test would
     // compare empty vectors forever and pass.
-    assert!(
-        !expected.is_empty(),
-        "the fixture must produce diagnostics, else the comparison is vacuous",
-    );
+    // Non-vacuity, per code. `!is_empty()` was too weak once the fixture grew:
+    // the unbalanced transaction alone would satisfy it while the pad/balance
+    // pair and the unopened account contributed nothing, which is exactly the
+    // gap that let a 6-block prefix look like full coverage.
+    // E1001 unopened account, E2003 pad-without-balance (the same-date balance
+    // sits at the START of its day, so a same-date pad has nothing after it to
+    // pad TO), E3001 unbalanced transaction.
+    //
+    // E2001 is deliberately absent: at 2024-01-09 the assertion of -15.00 is
+    // correct, and its staying correct under all 40320 orderings is the signal
+    // the balance block carries. If permuting moved which entries precede it,
+    // E2001 would appear and the equality below would fail.
+    for code in ["E1001", "E2003", "E3001"] {
+        assert!(
+            expected.contains(&code.to_owned()),
+            "fixture no longer produces {code}; got {expected:?}",
+        );
+    }
 
     let mut perm = canonical;
     let mut checked = 0usize;
@@ -119,7 +142,13 @@ fn diagnostics_are_invariant_under_input_permutation() {
         );
         checked += 1;
     });
-    assert_eq!(checked, 720, "expected every permutation of 6 blocks");
+    let expected_perms: usize = (1..=blocks().len()).product();
+    assert_eq!(
+        checked,
+        expected_perms,
+        "expected every permutation of all {} blocks",
+        blocks().len(),
+    );
 }
 
 fn permute(v: &mut Vec<usize>, k: usize, f: &mut impl FnMut(&[usize])) {

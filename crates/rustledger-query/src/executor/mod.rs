@@ -65,6 +65,37 @@ fn overflow_err(currency: &rustledger_core::Currency) -> QueryError {
     ))
 }
 
+/// `units x per-unit cost`, with the scale the multiplication invents stripped
+/// (#1963).
+///
+/// ONE implementation, because `WEIGHT()` reaches this arithmetic down two
+/// paths — a bare `Position` and every position inside an `Inventory` — and the
+/// first fix for #1963 patched only the first. The two then disagreed with each
+/// other as well as with the column: `WEIGHT(position)` gave `100` where
+/// `WEIGHT(SUM(position))` still gave `100.00000000000000000000000000`.
+///
+/// Why the arithmetic is re-derived here at all, why the strip is conditional,
+/// and what it still does not recover are documented at the `WEIGHT` arm.
+fn position_cost_total(units: &Amount, cost: &rustledger_core::Cost) -> Result<Amount, QueryError> {
+    /// Past any scale a cost is plausibly WRITTEN with. A heuristic, not an
+    /// invariant - see the `WEIGHT` arm.
+    const ARTIFACT_SCALE: u32 = 12;
+
+    // `checked_mul`, matching the `COST` arm. A saturating or wrapping product
+    // would certify a weight that never existed - the unsoundness #1863
+    // removed from the residual path.
+    let raw = units
+        .number
+        .checked_mul(cost.number)
+        .ok_or_else(|| overflow_err(&cost.currency))?;
+    let total = if raw.scale() > ARTIFACT_SCALE {
+        raw.normalize()
+    } else {
+        raw
+    };
+    Ok(Amount::new(total, cost.currency.clone()))
+}
+
 pub(super) fn compute_posting_weight(posting: &rustledger_core::Posting) -> Value {
     rustledger_booking::posting_weight(posting).map_or(Value::Null, Value::Amount)
 }
@@ -1561,22 +1592,7 @@ impl<'a> Executor<'a> {
                             // no `weight(position)` function — so there is no
                             // reference implementation to match here, only the
                             // column to stay consistent with.
-                            const ARTIFACT_SCALE: u32 = 12;
-                            // `checked_mul`, matching `COST` above. A saturating
-                            // or wrapping product would certify a weight that
-                            // never existed — the unsoundness #1863 removed from
-                            // the residual path.
-                            let raw = p
-                                .units
-                                .number
-                                .checked_mul(cost.number)
-                                .ok_or_else(|| overflow_err(&cost.currency))?;
-                            let total = if raw.scale() > ARTIFACT_SCALE {
-                                raw.normalize()
-                            } else {
-                                raw
-                            };
-                            Ok(Value::Amount(Amount::new(total, cost.currency.clone())))
+                            Ok(Value::Amount(position_cost_total(&p.units, cost)?))
                         } else {
                             Ok(Value::Amount(p.units.clone()))
                         }
@@ -1586,21 +1602,8 @@ impl<'a> Executor<'a> {
                         let mut result = Inventory::new();
                         for pos in inv.positions() {
                             if let Some(cost) = &pos.cost {
-                                // Checked: `units * cost` leaves range on
-                                // inputs well below the ceiling (#1863).
-                                let total =
-                                    pos.units.number.checked_mul(cost.number).ok_or_else(|| {
-                                        QueryError::Evaluation(format!(
-                                            "{} cost basis exceeds the representable range \
-                                             (±7.9e28)",
-                                            cost.currency
-                                        ))
-                                    })?;
                                 result
-                                    .add(Position::simple(Amount::new(
-                                        total,
-                                        cost.currency.clone(),
-                                    )))
+                                    .add(Position::simple(position_cost_total(&pos.units, cost)?))
                                     .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             } else {
                                 result

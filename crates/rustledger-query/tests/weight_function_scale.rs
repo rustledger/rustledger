@@ -67,7 +67,7 @@ fn a_total_cost_does_not_produce_invented_precision() {
     );
     // And they must still describe the same amount. Compared as `Decimal`,
     // whose equality is numeric — `100 == 100.00` — so this asserts the VALUE
-    // while the length check above covers the scale.
+    // while the scale assertion above covers the precision.
     assert_eq!(
         number_of(function),
         number_of(column),
@@ -94,5 +94,45 @@ fn an_ordinary_per_unit_cost_keeps_its_trailing_zeros() {
     assert_eq!(
         rows[0].1, rows[0].0,
         "on a plain per-unit cost the function and the column must match exactly",
+    );
+}
+
+/// The INVENTORY path must agree with the position path.
+///
+/// `WEIGHT()` reaches the same `units x cost` arithmetic two ways, and the
+/// first fix for #1963 patched only the `Position` arm. The `Inventory` arm 30
+/// lines below kept the defect verbatim: `WEIGHT(position)` reported `100`
+/// while `WEIGHT(SUM(position))` still reported
+/// `100.00000000000000000000000000` for the same lot. Both now route through
+/// one helper, and this pins that they cannot drift apart again.
+#[test]
+fn the_inventory_path_agrees_with_the_position_path() {
+    let src = "2024-01-01 open Assets:Broker\n2024-01-01 open Assets:Cash\n\
+               2024-02-01 * \"t\"\n  Assets:Broker  3 HOOL {{100.00 USD}}\n\
+               \x20 Assets:Cash  -100.00 USD\n";
+    let per_position = numbers(
+        src,
+        "SELECT weight, WEIGHT(position) WHERE currency = 'HOOL'",
+    );
+    let aggregated = numbers(
+        src,
+        "SELECT account, WEIGHT(SUM(position)) WHERE currency = 'HOOL' GROUP BY account",
+    );
+    assert_eq!(per_position.len(), 1, "one HOOL posting");
+    assert_eq!(aggregated.len(), 1, "one group");
+
+    let pos_scale = number_of(&per_position[0].1).scale();
+    let inv_scale = number_of(&aggregated[0].1).scale();
+    assert_eq!(
+        inv_scale, pos_scale,
+        "WEIGHT() over an inventory invented precision the position path does \
+         not: inventory scale {inv_scale}, position scale {pos_scale} \
+         (inventory={} position={})",
+        aggregated[0].1, per_position[0].1,
+    );
+    assert_eq!(
+        number_of(&aggregated[0].1),
+        number_of(&per_position[0].1),
+        "the two WEIGHT() paths must agree numerically",
     );
 }

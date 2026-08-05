@@ -433,16 +433,6 @@ A trailing quoted NOTE is not an error — Fava reads only the first three value
 
 ## Date Errors
 
-### DATE_OUT_OF_ORDER
-
-**Code:** `E10001`
-
-**Condition:** Directive date is before previous directive (informational only).
-
-**Message:** `Directive date {date} is before previous directive {prev_date}`
-
-**Severity:** Info (directives are auto-sorted)
-
 ### DATE_IN_FUTURE
 
 **Code:** `E10002`

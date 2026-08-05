@@ -32,7 +32,7 @@ diagnostic vector for the file — and renders one of:
   - Validation was skipped this turn (file > 500 KB or buffer has
     parse errors elsewhere — see `validation_would_run`).
   - A non-balance non-HINT diagnostic (e.g., `E1001 AccountNotOpen`
-    ERROR, `FutureDate` WARNING, `DateOutOfOrder` INFORMATION) anchors
+    ERROR, `FutureDate` WARNING) anchors
     on the balance directive's line — the diagnostic explains a
     different problem; claiming `⚠ Balance` would misattribute the
     failure and claiming `✓` would dismiss a real concern.

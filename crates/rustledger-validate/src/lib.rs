@@ -38,7 +38,6 @@
 //! | E7002 | Invalid option value |
 //! | E7003 | Duplicate option |
 //! | E8001 | Document file not found |
-//! | E10001 | Date out of order (info) |
 //! | E10002 | Entry dated in the future (warning) |
 
 #![forbid(unsafe_code)]
@@ -335,7 +334,6 @@ pub struct LedgerState {
     /// Validation options.
     options: ValidationOptions,
     /// Track previous directive date for out-of-order detection.
-    last_date: Option<NaiveDate>,
     /// `(account, close_date)` pairs whose late-phase Close check has
     /// already fired. Guards against duplicate same-day Close
     /// directives running the non-empty-balance check twice (the early
@@ -553,9 +551,9 @@ fn sum_account_subtree(
 /// account/commodity/pad bookkeeping accumulated by `Early` is visible
 /// to `Late`'s balance/inventory checks.
 ///
-/// Date-ordering and future-date checks run only in `Early` (date is
-/// independent of booking), so callers running both phases don't get
-/// duplicate `DateOutOfOrder` / `FutureDate` warnings.
+/// The future-date check runs only in `Early` (date is independent of
+/// booking), so callers running both phases don't get duplicate
+/// `FutureDate` warnings.
 fn validate_phase_inner<D: ValidatableDirective>(
     directives: &[D],
     state: &mut LedgerState,
@@ -569,13 +567,6 @@ fn validate_phase_inner<D: ValidatableDirective>(
     } else {
         FxHashMap::default()
     };
-
-    // Reset `last_date` at the start of each phase so the date-ordering
-    // check (which runs in Early) doesn't get confused by a previous
-    // Late pass having advanced past every directive.
-    if phase == Phase::Early {
-        state.last_date = None;
-    }
 
     let mut errors = Vec::new();
 
@@ -607,34 +598,26 @@ fn validate_phase_inner<D: ValidatableDirective>(
 
         // Snapshot before ANY errors are pushed for this directive so the
         // downstream patching loop can enrich every error tied to this
-        // directive — including the ordering / future-date checks below,
+        // directive — including the future-date check below,
         // not just the ones produced by the per-kind validators
         // (issue #896). No cost for the unspanned path; the skip-then-
         // patch loop is bypassed when `span_info()` returns `None`.
         let error_count_before = errors.len();
 
-        // Date-ordering and future-date checks only run in Early. Date
-        // is independent of booking, and we don't want duplicate errors
-        // when both phases iterate.
-        if phase == Phase::Early {
-            if let Some(last) = state.last_date
-                && date < last
-            {
-                errors.push(ValidationError::new(
-                    ErrorCode::DateOutOfOrder,
-                    format!("Directive date {date} is before previous directive {last}"),
-                    date,
-                ));
-            }
-            state.last_date = Some(date);
-
-            if state.options.warn_future_dates && date > today {
-                errors.push(ValidationError::new(
-                    ErrorCode::FutureDate,
-                    format!("Entry dated in the future: {date}"),
-                    date,
-                ));
-            }
+        // The future-date check only runs in Early. Date is independent
+        // of booking, and we don't want duplicate errors when both phases
+        // iterate.
+        //
+        // There was a date-ORDERING check here too, emitting E10001. It
+        // could never fire: this loop walks `keyed`, sorted by
+        // `booking_sort_key` (date first) immediately above, so `date <
+        // last` was unreachable. Removed with the code (#1970).
+        if phase == Phase::Early && state.options.warn_future_dates && date > today {
+            errors.push(ValidationError::new(
+                ErrorCode::FutureDate,
+                format!("Entry dated in the future: {date}"),
+                date,
+            ));
         }
 
         match (phase, directive) {
@@ -2577,7 +2560,6 @@ mod tests {
         );
 
         // Info
-        assert_eq!(ErrorCode::DateOutOfOrder.severity(), Severity::Info);
     }
 
     #[test]

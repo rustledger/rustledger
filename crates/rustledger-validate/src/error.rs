@@ -86,8 +86,6 @@ pub enum ErrorCode {
     DocumentNotFound,
 
     // === Date Errors (E10xxx) ===
-    /// E10001: Date out of order (info only).
-    DateOutOfOrder,
     /// E10002: Entry dated in the future (warning).
     FutureDate,
 }
@@ -145,7 +143,6 @@ impl ErrorCode {
         Self::InvalidOptionValue,
         Self::DuplicateOption,
         Self::DocumentNotFound,
-        Self::DateOutOfOrder,
         Self::FutureDate,
     ];
 
@@ -192,7 +189,6 @@ impl ErrorCode {
             // Document errors
             Self::DocumentNotFound => "E8001",
             // Date errors
-            Self::DateOutOfOrder => "E10001",
             Self::FutureDate => "E10002",
         }
     }
@@ -205,16 +201,9 @@ impl ErrorCode {
             Self::FutureDate
                 | Self::SinglePosting
                 | Self::AccountCloseNotEmpty
-                | Self::DateOutOfOrder
                 | Self::InvalidPrecisionMetadata
                 | Self::MalformedBudget
         )
-    }
-
-    /// Check if this is just informational.
-    #[must_use]
-    pub const fn is_info(&self) -> bool {
-        matches!(self, Self::DateOutOfOrder)
     }
 
     /// Whether this diagnostic is advisory-only and must NOT be surfaced by
@@ -268,7 +257,6 @@ impl ErrorCode {
             Self::InvalidOptionValue => "Invalid option value",
             Self::DuplicateOption => "Non-repeatable option given more than once",
             Self::DocumentNotFound => "Document file not found",
-            Self::DateOutOfOrder => "Directive date out of order",
             Self::FutureDate => "Directive dated in the future",
         }
     }
@@ -444,12 +432,6 @@ impl ErrorCode {
                  containing the directive (matching `include`).\n\nFix: correct the \
                  path, or remove the directive."
             }
-            Self::DateOutOfOrder => {
-                "A directive's date is earlier than the preceding directive's date \
-                 in the same file (informational only — directives are sorted before \
-                 processing, so this never changes results).\n\nFix: reorder the \
-                 file chronologically if you care about source order."
-            }
             Self::MalformedBudget => {
                 "A `custom \"budget\"` directive that is recognizably a budget \
                  carries content rledger cannot use (warning).\n\nBudgets follow \
@@ -474,9 +456,10 @@ impl ErrorCode {
     /// Get the severity level.
     #[must_use]
     pub const fn severity(&self) -> Severity {
-        if self.is_info() {
-            Severity::Info
-        } else if self.is_warning() {
+        // No code maps to `Severity::Info`. E10001 was the only one, and it was
+        // unreachable — see #1970. The level is kept on `Severity` because it
+        // is public and consumers match it exhaustively.
+        if self.is_warning() {
             Severity::Warning
         } else {
             Severity::Error
@@ -516,6 +499,10 @@ pub enum Severity {
     /// Suspicious but valid.
     Warning,
     /// Informational only.
+    ///
+    /// No [`ErrorCode`] currently maps here. E10001 did, and it could never be
+    /// emitted (#1970); the level is retained because `Severity` is public and
+    /// the LSP maps it to `DiagnosticSeverity::INFORMATION`.
     Info,
 }
 
@@ -625,8 +612,8 @@ mod tests {
         // spec. (The spec may also carry codes emitted by other crates — e.g.
         // loader include errors E9001/E9002 — so this is a subset check, not
         // strict equality.) Codes are backtick-wrapped in the spec (`**Code:**
-        // `E1001``), so the backtick delimiters keep `E1001` from matching
-        // inside `E10001`.
+        // `E1001``), so the backtick delimiters keep a shorter code from
+        // matching inside a longer one.
         // The spec lives at the workspace root (`spec/core/validation.md`),
         // OUTSIDE this crate, so it is not packaged to crates.io. Read it at
         // runtime relative to `CARGO_MANIFEST_DIR` and skip when it is absent —

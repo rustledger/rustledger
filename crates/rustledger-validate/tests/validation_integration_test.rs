@@ -916,96 +916,16 @@ fn test_spanned_validation_valid_ledger_no_errors() {
 
     let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
 
-    // Filter out any info-level "date out of order" messages
+    // FutureDate is advisory and unrelated to what this test pins. E10001
+    // used to be filtered here too; it no longer exists (#1970).
     let critical_errors: Vec<_> = errors
         .iter()
-        .filter(|e| !matches!(e.code, ErrorCode::DateOutOfOrder | ErrorCode::FutureDate))
+        .filter(|e| !matches!(e.code, ErrorCode::FutureDate))
         .collect();
 
     assert!(
         critical_errors.is_empty(),
         "expected no validation errors, got {critical_errors:?}"
-    );
-}
-
-/// Out-of-order input is CANONICALISED before the ordering check, so
-/// `DateOutOfOrder` cannot be produced at all.
-///
-/// This replaces a test that claimed to pin location info on a `DateOutOfOrder`
-/// error. Every assertion in it sat inside `if let Some(error) = date_error`,
-/// and `date_error` was always `None` — the validator returned NO errors for
-/// its fixture — so the test asserted nothing whatsoever and would have passed
-/// against any implementation.
-///
-/// What it concealed is bigger than the test: `run_phase_internal` sorts by
-/// `booking_sort_key` — `(date, priority, has_cost_reduction)`, date first —
-/// before the `date < last` comparison, so that comparison can never be true
-/// and E10001 is unreachable. Confirmed by deleting the sort, at which point
-/// this fixture does produce `["E10001"]`. See #1970.
-///
-/// So this is a TRIPWIRE, not an endorsement. If someone moves the ordering
-/// check ahead of the sort, this fails and points them at the decision.
-#[test]
-fn test_out_of_order_input_is_canonicalised_before_the_ordering_check() {
-    let directives = vec![
-        spanned_directive(
-            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
-            0,
-            50,
-            0,
-        ),
-        // Later date first ...
-        spanned_directive(
-            Directive::Open(Open::new(date(2024, 1, 10), "Expenses:Food")),
-            50,
-            100,
-            0,
-        ),
-        // ... earlier date second: out of order in the source.
-        spanned_directive(
-            Directive::Open(Open::new(date(2024, 1, 5), "Expenses:Transport")),
-            100,
-            150,
-            6,
-        ),
-        // Deliberately unopened, so the run produces SOMETHING. Without this
-        // the fixture yields zero errors and "no DateOutOfOrder" would be
-        // indistinguishable from "the validator never ran" — which is exactly
-        // how the previous version of this test passed while asserting nothing.
-        spanned_directive(
-            Directive::Transaction(
-                Transaction::new(date(2024, 1, 20), "unopened")
-                    .with_synthesized_posting(Posting::new(
-                        "Expenses:Never",
-                        Amount::new(dec!(1), "USD"),
-                    ))
-                    .with_synthesized_posting(Posting::new(
-                        "Assets:Bank",
-                        Amount::new(dec!(-1), "USD"),
-                    )),
-            ),
-            150,
-            250,
-            0,
-        ),
-    ];
-
-    let errors = validate_spanned_with_options(&directives, ValidationOptions::default());
-
-    // Non-vacuity first: the validator ran and had something to say.
-    assert!(
-        errors.iter().any(|e| e.code == ErrorCode::AccountNotOpen),
-        "fixture must produce E1001 or the absence below proves nothing; got {:?}",
-        errors.iter().map(|e| e.code.code()).collect::<Vec<_>>(),
-    );
-
-    assert!(
-        !errors.iter().any(|e| e.code == ErrorCode::DateOutOfOrder),
-        "E10001 became reachable — the ordering check now runs before the \
-         canonical sort. That is a behavior change, not a bug fix: decide \
-         whether the diagnostic should exist before making it live (#1970). \
-         Got {:?}",
-        errors.iter().map(|e| e.code.code()).collect::<Vec<_>>(),
     );
 }
 

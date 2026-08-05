@@ -308,12 +308,6 @@ Only directives rledger is confident are budgets get reported. Ownership is one 
 
 ## Date Warnings (E10xxx)
 
-### E10001: Date Out of Order (Info)
-
-**Cause**: Entries are not in chronological order.
-
-**Note**: This is informational only and does not prevent validation.
-
 ### E10002: Entry Dated in Future (Warning)
 
 **Cause**: Entry has a date in the future.

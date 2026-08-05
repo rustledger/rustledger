@@ -355,8 +355,8 @@ mod warning_severity_tests {
         let lookup = LineLookup::new("x");
         let date = rustledger_core::naive_date(2020, 1, 1).unwrap();
         let mk = |code| ValidationError::new(code, "m", date);
-        // DateOutOfOrder is a warning code; AccountNotOpen (E1001) is an error.
-        let warn = validation_error_to_wasm(&mk(ErrorCode::DateOutOfOrder), &lookup, None, Some(1));
+        // FutureDate is a warning code; AccountNotOpen (E1001) is an error.
+        let warn = validation_error_to_wasm(&mk(ErrorCode::FutureDate), &lookup, None, Some(1));
         assert_eq!(warn.severity, Severity::Warning);
         let err = validation_error_to_wasm(&mk(ErrorCode::AccountNotOpen), &lookup, None, Some(1));
         assert_eq!(err.severity, Severity::Error);

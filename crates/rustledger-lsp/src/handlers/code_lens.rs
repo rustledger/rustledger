@@ -270,8 +270,8 @@ const BALANCE_ERROR_CODES: &[&str] = &[
 ///   `⚠ Balance: X USD (see diagnostic)` — "see diagnostic" is a true
 ///   link by construction.
 /// - `Some(diags)` with some OTHER non-HINT diagnostic at `line`
-///   (e.g., `E1001` AccountNotOpen ERROR, `FutureDate` WARNING,
-///   `DateOutOfOrder` INFORMATION) but NO `BALANCE_ERROR_CODES`:
+///   (e.g., `E1001` AccountNotOpen ERROR, `FutureDate` WARNING) but
+///   NO `BALANCE_ERROR_CODES`:
 ///   the validator has something to say about this directive but
 ///   it isn't a balance-arithmetic failure. Render neutrally; don't
 ///   misattribute it as a balance failure AND don't claim ✓ on a
@@ -316,7 +316,7 @@ fn has_balance_error_at_line(diagnostics: &[Diagnostic], line: u32) -> bool {
 /// (ERROR, WARNING, or INFORMATION severity) anchored at `line.start`?
 ///
 /// Severity matters: a balance directive can carry a WARNING-severity
-/// diagnostic (`FutureDate` E10002, `DateOutOfOrder` E10001, etc.) that
+/// diagnostic (`FutureDate` E10002, etc.) that
 /// gets the balance directive's span patched onto it via
 /// `validate/lib.rs:548-562`. If we filtered on ERROR only, the lens
 /// would render `✓ Balance: X USD` for a directive the validator is
@@ -789,7 +789,7 @@ mod tests {
     }
 
     /// WARNING-severity diagnostics that anchor on the balance line —
-    /// `FutureDate`, `DateOutOfOrder`, `AccountCloseNotEmpty` —
+    /// `FutureDate`, `AccountCloseNotEmpty` —
     /// disqualify ✓. Without this, the lens claims the assertion holds
     /// while the validator is actively flagging the directive's date or
     /// account state, which is the same false-confidence pattern #1264
@@ -830,9 +830,14 @@ mod tests {
     }
 
     /// INFORMATION-severity diagnostics at the balance line also
-    /// disqualify ✓ — same rationale as WARNING, applied to
-    /// `DateOutOfOrder` and similar advisory-level findings the
-    /// validator anchors via the span-patch path.
+    /// disqualify ✓ — same rationale as WARNING, applied to advisory-level
+    /// findings the validator anchors via the span-patch path.
+    ///
+    /// No `ErrorCode` maps to INFORMATION today — E10001 was the only one and
+    /// it was removed as unreachable (#1970) — so the code below is a
+    /// synthetic diagnostic. The severity branch is still live: this handler
+    /// classifies by LSP severity, not by code, so anything that arrives at
+    /// INFORMATION must behave this way.
     #[test]
     fn balance_lens_neutral_on_information_severity_at_line() {
         let source = r#"2024-01-31 balance Assets:Bank 100 USD
@@ -841,7 +846,7 @@ mod tests {
         let params = code_lens_params();
 
         let diags = vec![diagnostic_with_code_severity_at_line(
-            "E10001",
+            "E-SYNTHETIC-INFO",
             DiagnosticSeverity::INFORMATION,
             0,
         )];

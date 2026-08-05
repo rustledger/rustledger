@@ -507,6 +507,34 @@ mod tests {
             .filter(|a| a.title.starts_with("Accept import:"))
             .collect();
         assert!(accept_actions.is_empty());
+
+        // Positive control, so the assertion above pins RANGE EXCLUSION rather
+        // than "import_code_actions never returns anything". Without it the
+        // test passes against a function that always returns an empty vec —
+        // `actions` really is empty here, so the filter above examines nothing.
+        let overlapping = Range {
+            start: Position {
+                line: 0,
+                character: 200,
+            },
+            end: Position {
+                line: 0,
+                character: 300,
+            },
+        };
+        let overlapping_actions =
+            import_code_actions(&directives, &source, overlapping, PositionEncoding::Utf16);
+        assert!(
+            overlapping_actions
+                .iter()
+                .any(|a| a.title.starts_with("Accept import:")),
+            "the same directive must yield an accept action when the range DOES \
+             overlap it, or the emptiness above proves nothing; got {:?}",
+            overlapping_actions
+                .iter()
+                .map(|a| &a.title)
+                .collect::<Vec<_>>(),
+        );
     }
 
     #[test]

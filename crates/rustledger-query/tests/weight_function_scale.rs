@@ -55,11 +55,15 @@ fn a_total_cost_does_not_produce_invented_precision() {
     assert_eq!(rows.len(), 1, "one HOOL posting");
     let (column, function) = (&rows[0].0, &rows[0].1);
 
-    // The scale the multiplication invents is the defect; 26 digits of it is
-    // what this test exists to prevent coming back.
+    // Assert on SCALE directly, not on rendered length. The first version
+    // compared `function.len() < column.len() + 4`, which is a proxy: a Debug
+    // formatting tweak could move it without any scale changing, and it never
+    // states the invariant it is standing in for.
+    let (col_scale, fn_scale) = (number_of(column).scale(), number_of(function).scale());
     assert!(
-        function.len() < column.len() + 4,
-        "WEIGHT() invented precision: column={column} function={function}",
+        fn_scale <= col_scale,
+        "WEIGHT() invented precision: column scale {col_scale}, function scale \
+         {fn_scale} (column={column} function={function})",
     );
     // And they must still describe the same amount. Compared as `Decimal`,
     // whose equality is numeric — `100 == 100.00` — so this asserts the VALUE

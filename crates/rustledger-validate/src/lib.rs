@@ -333,7 +333,6 @@ pub struct LedgerState {
     pending_pads: FxHashMap<rustledger_core::Account, Vec<PendingPad>>,
     /// Validation options.
     options: ValidationOptions,
-    /// Track previous directive date for out-of-order detection.
     /// `(account, close_date)` pairs whose late-phase Close check has
     /// already fired. Guards against duplicate same-day Close
     /// directives running the non-empty-balance check twice (the early

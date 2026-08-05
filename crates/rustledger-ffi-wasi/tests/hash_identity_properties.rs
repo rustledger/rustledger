@@ -280,3 +280,103 @@ fn units_presence_is_part_of_the_posting_boundary() {
         "units re-partitioned across a posting boundary must not collide",
     );
 }
+
+/// A posting's cost, price and flag are part of its identity.
+///
+/// They were not hashed at all — a different defect from the boundary
+/// ambiguity above: not two fields blurring together, but fields never
+/// consulted. Caught by Copilot on review, and all of these collided before
+/// the fix. The first is the one that matters: two purchases of the same stock
+/// at different prices were the same object to every consumer of `meta.hash`.
+#[test]
+fn cost_price_and_flag_are_part_of_posting_identity() {
+    use rustledger_core::{CostNumber, CostSpec, Decimal, IncompleteAmount, PriceKind};
+
+    fn cost(number: Option<CostNumber>) -> CostSpec {
+        CostSpec {
+            number,
+            currency: Some("USD".into()),
+            ..CostSpec::empty()
+        }
+    }
+    fn per_unit(v: i64) -> Option<CostNumber> {
+        Some(CostNumber::PerUnit {
+            value: Decimal::from(v),
+        })
+    }
+    let build = |mutate: &dyn Fn(&mut rustledger_core::directive::Posting)| {
+        let mut p = rustledger_core::directive::Posting::new(
+            "Assets:A",
+            rustledger_core::Amount::new(Decimal::ONE, "HOOL"),
+        );
+        mutate(&mut p);
+        let Directive::Transaction(mut t) = txn(None, "n", &[], &[]) else {
+            unreachable!()
+        };
+        t.postings = vec![rustledger_core::Spanned::new(
+            p,
+            rustledger_core::Span::new(0, 0),
+        )];
+        Directive::Transaction(t)
+    };
+
+    let plain = build(&|_| {});
+    let cost_100 = build(&|p| p.cost = Some(cost(per_unit(100))));
+    let cost_200 = build(&|p| p.cost = Some(cost(per_unit(200))));
+    let cost_total = build(&|p| {
+        p.cost = Some(cost(Some(CostNumber::Total {
+            value: Decimal::from(100),
+        })));
+    });
+    let cost_labelled = build(&|p| {
+        let mut c = cost(per_unit(100));
+        c.label = Some("lot-a".to_owned());
+        p.cost = Some(c);
+    });
+    let flagged = build(&|p| p.flag = Some('!'));
+    let priced = build(&|p| {
+        p.price = Some(rustledger_core::PriceAnnotation {
+            kind: PriceKind::Unit,
+            amount: Some(IncompleteAmount::complete(
+                Decimal::from(100),
+                "USD".to_owned(),
+            )),
+        });
+    });
+    let priced_total = build(&|p| {
+        p.price = Some(rustledger_core::PriceAnnotation {
+            kind: PriceKind::Total,
+            amount: Some(IncompleteAmount::complete(
+                Decimal::from(100),
+                "USD".to_owned(),
+            )),
+        });
+    });
+
+    let cases: [(&Directive, &Directive, &str); 7] = [
+        (&cost_100, &cost_200, "a different cost number"),
+        (&cost_100, &plain, "a cost vs no cost"),
+        (
+            &cost_100,
+            &cost_total,
+            "per-unit {100} vs total {{100}} — the accessors cannot tell these \
+             apart from the booked and compound shapes, which is why the match \
+             is written out",
+        ),
+        (&cost_100, &cost_labelled, "a lot label"),
+        (&flagged, &plain, "a posting flag"),
+        (&priced, &plain, "a price vs no price"),
+        (&priced, &priced_total, "@ vs @@ at the same amount"),
+    ];
+    let collisions: Vec<&str> = cases
+        .iter()
+        .filter(|(left, right, _)| hash(left) == hash(right))
+        .map(|(_, _, what)| *what)
+        .collect();
+    assert!(
+        collisions.is_empty(),
+        "{} of {} posting-identity cases collided: {collisions:#?}",
+        collisions.len(),
+        cases.len(),
+    );
+}

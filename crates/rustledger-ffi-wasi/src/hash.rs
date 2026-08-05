@@ -80,6 +80,95 @@ fn opt(hasher: &mut Sha256, bytes: Option<&[u8]>) {
     }
 }
 
+/// Feed a `Decimal` in, as its canonical rendering.
+fn decimal(hasher: &mut Sha256, d: rustledger_core::Decimal) {
+    field(hasher, d.to_string().as_bytes());
+}
+
+/// Feed an optional amount in, presence-tagged, number then currency.
+fn incomplete_amount(hasher: &mut Sha256, amount: Option<&rustledger_core::IncompleteAmount>) {
+    match amount {
+        Some(a) => {
+            hasher.update([1u8]);
+            let number = a.number().map(|n| n.to_string());
+            opt(hasher, number.as_deref().map(str::as_bytes));
+            opt(hasher, a.currency().map(str::as_bytes));
+        }
+        None => hasher.update([0u8]),
+    }
+}
+
+/// Feed a posting's whole identity in - not just its account and units.
+///
+/// `cost`, `price` and `flag` were absent from the digest entirely, which
+/// Copilot caught on review of #1961. That is a different defect from the
+/// boundary ambiguity above: not two fields blurring together, but fields
+/// never consulted at all. `2 HOOL {100.00 USD}` and `2 HOOL {200.00 USD}`
+/// hashed identically - two economically different transactions that rustfava
+/// and the desktop app could not tell apart.
+///
+/// The `CostNumber` match is written out variant by variant rather than
+/// through the `per_unit()`/`total()` accessors on purpose. Those two cannot
+/// distinguish `PerUnitFromTotal` from `Compound` (both set both), and an
+/// exhaustive match means adding a variant is a compile error here - which
+/// forces the identity question to be answered rather than silently defaulted.
+///
+/// Posting `meta` and comments are deliberately NOT hashed; see #1968.
+fn posting_identity(hasher: &mut Sha256, p: &rustledger_core::directive::Posting) {
+    use rustledger_core::CostNumber;
+
+    field(hasher, p.account.as_bytes());
+    incomplete_amount(hasher, p.units.as_ref());
+
+    let flag = p.flag.map(|c| c.to_string());
+    opt(hasher, flag.as_deref().map(str::as_bytes));
+
+    match &p.cost {
+        Some(c) => {
+            hasher.update([1u8]);
+            match &c.number {
+                None => hasher.update([0u8]),
+                Some(CostNumber::PerUnit { value }) => {
+                    hasher.update([1u8]);
+                    decimal(hasher, *value);
+                }
+                Some(CostNumber::Total { value }) => {
+                    hasher.update([2u8]);
+                    decimal(hasher, *value);
+                }
+                Some(CostNumber::PerUnitFromTotal(booked)) => {
+                    hasher.update([3u8]);
+                    decimal(hasher, booked.per_unit);
+                    decimal(hasher, booked.total);
+                }
+                Some(CostNumber::Compound { per_unit, total }) => {
+                    hasher.update([4u8]);
+                    decimal(hasher, *per_unit);
+                    decimal(hasher, *total);
+                }
+            }
+            opt(hasher, c.currency.as_deref().map(str::as_bytes));
+            let date = c.date.map(|d| d.to_string());
+            opt(hasher, date.as_deref().map(str::as_bytes));
+            opt(hasher, c.label.as_deref().map(str::as_bytes));
+            hasher.update([u8::from(c.merge)]);
+        }
+        None => hasher.update([0u8]),
+    }
+
+    match &p.price {
+        Some(price) => {
+            hasher.update([1u8]);
+            match price.kind {
+                rustledger_core::PriceKind::Unit => hasher.update([1u8]),
+                rustledger_core::PriceKind::Total => hasher.update([2u8]),
+            }
+            incomplete_amount(hasher, price.amount.as_ref());
+        }
+        None => hasher.update([0u8]),
+    }
+}
+
 /// Compute a SHA256 hash of a directive for unique identification.
 pub fn compute_directive_hash(directive: &Directive) -> String {
     let mut hasher = Sha256::new();
@@ -102,16 +191,7 @@ pub fn compute_directive_hash(directive: &Directive) -> String {
             }
             count(&mut hasher, t.postings.len());
             for posting in &t.postings {
-                field(&mut hasher, posting.account.as_bytes());
-                match &posting.units {
-                    Some(units) => {
-                        hasher.update([1u8]);
-                        let number = units.number().map(|n| n.to_string());
-                        opt(&mut hasher, number.as_deref().map(str::as_bytes));
-                        opt(&mut hasher, units.currency().map(str::as_bytes));
-                    }
-                    None => hasher.update([0u8]),
-                }
+                posting_identity(&mut hasher, posting);
             }
         }
         Directive::Open(o) => {

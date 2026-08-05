@@ -202,19 +202,46 @@ fn cost_data_msgpack_round_trip_preserves_all_variants() {
 
 #[test]
 fn accessors_exhaustively_cover_variants() {
-    // Regression guard: if a future variant is added without updating
-    // the accessors, this test stays green only by accident. The
-    // exhaustive match in the impl is what guarantees coverage; this
-    // test is a behavioral spot-check.
-    for cn in [
+    // The name promised exhaustiveness the test did not deliver: the sample
+    // list held PerUnit, Total and PerUnitFromTotal but NOT Compound, and the
+    // assertion was a blanket "at least one accessor returns Some".
+    //
+    // That blanket claim is FALSE for Compound, which is why it was quietly
+    // left out. Both accessors return None for it on purpose: the effective
+    // per-unit is (N*per_unit + total)/N and needs units, and the `total`
+    // field is only the lump component — exposing it as the total would
+    // recreate the #1700 misweighing in any consumer. So the test now pins
+    // the CONTRACT PER VARIANT instead, which states that decision rather
+    // than hiding it behind an omitted sample.
+    //
+    // The match is what keeps the name honest: adding a variant to
+    // `CostNumberData` makes this fail to COMPILE, forcing a decision about
+    // its accessors here.
+    let cases = [
         CostNumberData::PerUnit { value: "1".into() },
         CostNumberData::Total { value: "2".into() },
+        CostNumberData::Compound {
+            per_unit: "5".into(),
+            total: "10".into(),
+        },
         CostNumberData::PerUnitFromTotal {
             per_unit: "3".into(),
             total: "30".into(),
         },
-    ] {
-        // At least one accessor returns Some for every variant.
-        assert!(cn.per_unit().is_some() || cn.total().is_some());
+    ];
+
+    let mut seen = 0;
+    for cn in &cases {
+        let (want_per_unit, want_total): (Option<&str>, Option<&str>) = match cn {
+            CostNumberData::PerUnit { value } => (Some(value), None),
+            CostNumberData::Total { value } => (None, Some(value)),
+            // Deliberately neither — see above and #1700.
+            CostNumberData::Compound { .. } => (None, None),
+            CostNumberData::PerUnitFromTotal { per_unit, total } => (Some(per_unit), Some(total)),
+        };
+        seen += 1;
+        assert_eq!(cn.per_unit(), want_per_unit, "per_unit() for {cn:?}");
+        assert_eq!(cn.total(), want_total, "total() for {cn:?}");
     }
+    assert_eq!(seen, 4, "one case per CostNumberData variant");
 }

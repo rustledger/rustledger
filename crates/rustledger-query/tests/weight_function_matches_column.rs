@@ -18,29 +18,57 @@
 
 use rustledger_query::{Executor, parse};
 
-/// `(weight column, WEIGHT(position))` per row, as rendered values.
-fn column_and_function(source: &str) -> Vec<(String, String)> {
+/// Render a result value the way a reader of the query sees it.
+///
+/// `Amount`'s `Display` is `{number} {currency}` straight off `Decimal`, so it
+/// PRESERVES scale — `100.00` stays `100.00`. That matters: this file exists to
+/// compare scale, and rendering through `DisplayContext` (as the CSV writer
+/// does) would round both sides to the same thing and make every assertion
+/// below vacuous.
+///
+/// Not `Debug`. The first version compared `format!("{:?}")` strings, which
+/// tied the test to `Value`/`Amount`'s debug formatting — a derive change would
+/// have moved it with no behavior changing, and the failure output was a wall
+/// of struct syntax.
+fn render(value: &rustledger_query::Value) -> String {
+    match value {
+        rustledger_query::Value::Amount(a) => a.to_string(),
+        rustledger_query::Value::Null => "NULL".to_owned(),
+        other => panic!("weight columns should only ever be Amount or NULL, got {other:?}"),
+    }
+}
+
+/// `(account, weight column, WEIGHT(position))` per row.
+fn rows_of(source: &str) -> Vec<(String, String, String)> {
     let parsed = rustledger_parser::parse(source);
     let directives: Vec<rustledger_core::Directive> =
         parsed.directives.iter().map(|d| (**d).clone()).collect();
     let mut executor = Executor::new(&directives);
     let table = executor
-        .execute(&parse("SELECT weight, WEIGHT(position)").expect("query parses"))
+        .execute(&parse("SELECT account, weight, WEIGHT(position)").expect("query parses"))
         .expect("query runs");
     table
         .rows
         .iter()
-        .map(|r| (format!("{:?}", r[0]), format!("{:?}", r[1])))
+        .map(|r| {
+            let account = match &r[0] {
+                rustledger_query::Value::String(s) => s.clone(),
+                other => panic!("account should be a string, got {other:?}"),
+            };
+            (account, render(&r[1]), render(&r[2]))
+        })
         .collect()
 }
 
 fn assert_agrees(source: &str, what: &str) {
-    let rows = column_and_function(source);
+    let rows = rows_of(source);
     assert!(!rows.is_empty(), "{what}: fixture produced no rows");
     let disagreements: Vec<String> = rows
         .iter()
-        .filter(|(column, function)| column != function)
-        .map(|(column, function)| format!("column={column} function={function}"))
+        .filter(|(_, column, function)| column != function)
+        .map(|(account, column, function)| {
+            format!("  {account}: column={column} function={function}")
+        })
         .collect();
     assert!(
         disagreements.is_empty(),
@@ -125,15 +153,17 @@ fn a_cost_outranks_a_price_as_the_column_does() {
                   \x20 Assets:Cash  -10.50 USD\n";
     assert_agrees(source, "cost outranks price");
 
-    let rows = column_and_function(source);
-    let broker = &rows[0].1;
-    assert!(
-        broker.contains("10.50"),
+    // Select the row by ACCOUNT, not by index. Row order is an engine
+    // implementation detail unless the query constrains it, so `rows[0]` would
+    // be asserting on whichever posting happened to come first.
+    let rows = rows_of(source);
+    let (_, _, broker) = rows
+        .iter()
+        .find(|(account, _, _)| account == "Assets:Broker")
+        .expect("the broker posting");
+    assert_eq!(
+        broker, "10.50 USD",
         "a posting with both a cost and a price must weigh by its COST \
-         (10.50 USD), not its price (12.00 USD); got {broker}",
-    );
-    assert!(
-        !broker.contains("12.00"),
-        "the price weight leaked through: {broker}",
+         (10.50 USD), not its price (12.00 USD)",
     );
 }

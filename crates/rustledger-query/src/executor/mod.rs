@@ -1517,7 +1517,53 @@ impl<'a> Executor<'a> {
                 match &args[0] {
                     Value::Position(p) => {
                         if let Some(cost) = &p.cost {
-                            let total = p.units.number * cost.number;
+                            // `units x per-unit`, normalized (#1963).
+                            //
+                            // This CANNOT call `rustledger_booking::posting_weight`
+                            // like the `weight` COLUMN does: that takes a
+                            // `Posting`, whose `CostSpec` still carries the
+                            // preserved total for `Total`/`PerUnitFromTotal`,
+                            // while a `Position`'s cost is already resolved to a
+                            // per-unit `Decimal`. The total is gone by the time
+                            // this function sees it, and `evaluate_function_on_values`
+                            // receives only `Value`s — no posting to recover it from.
+                            //
+                            // Recomputing therefore reintroduces exactly the
+                            // division-then-multiplication the canonical exists to
+                            // avoid (#1106/#1113). `3 HOOL {{100.00 USD}}` resolves
+                            // to a per-unit of 33.333..., and multiplying back gave
+                            // `100.00000000000000000000000000` where the column
+                            // gives `100.00` — the same value with 26 digits of
+                            // scale invented by the multiplication.
+                            //
+                            // The mitigation is deliberately narrow. Normalizing
+                            // unconditionally was tried first and is WORSE: it also
+                            // strips MEANINGFUL trailing zeros, turning the ordinary
+                            // `2 HOOL {5.25 USD}` weight from `10.50` into `10.5`
+                            // and regressing the common case to paper over the rare
+                            // one. So the strip applies only when the scale is
+                            // already past anything a real cost carries — such a
+                            // scale can only have come from a division, never from
+                            // a written number, since `rust_decimal` tops out at 28.
+                            //
+                            // It does NOT recover the original scale: this yields
+                            // `100` where the column yields `100.00`. Closing that
+                            // gap needs `Position` to retain the cost spec (or this
+                            // function to receive the `Posting`), which is a wider
+                            // change than the symptom warrants and is recorded on
+                            // the issue.
+                            //
+                            // `WEIGHT()` is a rustledger extension — beanquery has
+                            // no `weight(position)` function — so there is no
+                            // reference implementation to match here, only the
+                            // column to stay consistent with.
+                            const ARTIFACT_SCALE: u32 = 12;
+                            let raw = p.units.number * cost.number;
+                            let total = if raw.scale() > ARTIFACT_SCALE {
+                                raw.normalize()
+                            } else {
+                                raw
+                            };
                             Ok(Value::Amount(Amount::new(total, cost.currency.clone())))
                         } else {
                             Ok(Value::Amount(p.units.clone()))

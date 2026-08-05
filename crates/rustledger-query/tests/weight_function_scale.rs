@@ -97,14 +97,24 @@ fn an_ordinary_per_unit_cost_keeps_its_trailing_zeros() {
     );
 }
 
-/// The INVENTORY path must agree with the position path.
+/// The INVENTORY path must not invent precision the position path does not.
 ///
 /// `WEIGHT()` reaches the same `units x cost` arithmetic two ways, and the
-/// first fix for #1963 patched only the `Position` arm. The `Inventory` arm 30
-/// lines below kept the defect verbatim: `WEIGHT(position)` reported `100`
-/// while `WEIGHT(SUM(position))` still reported
-/// `100.00000000000000000000000000` for the same lot. Both now route through
-/// one helper, and this pins that they cannot drift apart again.
+/// first fix for #1963 patched only the `Position` arm. The `Inventory` arm
+/// kept the defect verbatim: `WEIGHT(position)` reported `100` while
+/// `WEIGHT(SUM(position))` still reported `100.00000000000000000000000000` for
+/// the same lot. Both re-derivations now route through one helper.
+///
+/// The two are no longer EQUAL, and that is the fix for #1966 rather than a
+/// regression: `WEIGHT(position)` is now dispatched to the canonical
+/// `posting_weight` on the lazy path, where the `Posting` still exists, so it
+/// returns the column's exact `100.00` (scale 2). The inventory path has no
+/// posting to route with — `SUM(position)` has already collapsed them — so it
+/// still re-derives and normalizes to `100` (scale 0).
+///
+/// The invariant that survives is the one that matters: the inventory path must
+/// not carry MORE scale than the position path. That still catches the original
+/// defect, which was scale 26 against scale 2.
 #[test]
 fn the_inventory_path_agrees_with_the_position_path() {
     let src = "2024-01-01 open Assets:Broker\n2024-01-01 open Assets:Cash\n\
@@ -123,16 +133,18 @@ fn the_inventory_path_agrees_with_the_position_path() {
 
     let pos_scale = number_of(&per_position[0].1).scale();
     let inv_scale = number_of(&aggregated[0].1).scale();
-    assert_eq!(
-        inv_scale, pos_scale,
+    assert!(
+        inv_scale <= pos_scale,
         "WEIGHT() over an inventory invented precision the position path does \
          not: inventory scale {inv_scale}, position scale {pos_scale} \
          (inventory={} position={})",
-        aggregated[0].1, per_position[0].1,
+        aggregated[0].1,
+        per_position[0].1,
     );
     assert_eq!(
         number_of(&aggregated[0].1),
         number_of(&per_position[0].1),
-        "the two WEIGHT() paths must agree numerically",
+        "the two WEIGHT() paths must agree numerically (Decimal equality \
+         is numeric, so 100 == 100.00 — only the scale differs)",
     );
 }

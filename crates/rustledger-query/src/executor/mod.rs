@@ -686,6 +686,19 @@ impl<'a> Executor<'a> {
             account_balances,
         })
     }
+    /// Is this call `WEIGHT(position)` over the posting COLUMN?
+    ///
+    /// Deliberately narrow. `WEIGHT(<anything else>)` — a literal, an
+    /// expression, `SUM(position)` — keeps going to the shared value registry,
+    /// so this reintroduces exactly one lazy-path arm rather than un-collapsing
+    /// the dual dispatch the registry exists to prevent.
+    fn is_position_column(func: &FunctionCall) -> bool {
+        matches!(
+            func.args.as_slice(),
+            [Expr::Column(c)] if c.eq_ignore_ascii_case("position")
+        )
+    }
+
     fn evaluate_function(
         &self,
         func: &FunctionCall,
@@ -701,6 +714,26 @@ impl<'a> Executor<'a> {
             // COALESCE short-circuits on its raw argument expressions and must
             // NOT pre-evaluate every argument, so it stays on the lazy path.
             "COALESCE" => self.eval_coalesce(func, ctx),
+            // `WEIGHT(position)` needs the POSTING, not the evaluated argument,
+            // for the same reason the META family does: the value registry has
+            // already lost what the answer depends on.
+            //
+            // The canonical weight ladder in `rustledger_booking::posting_weight`
+            // is cost, then PRICE, then units. A `Value::Position` carries units
+            // and cost and no price at all, so the eager path could implement
+            // only two of the three rungs and silently returned the units for a
+            // priced posting — `10 EUR @ 1.10 USD` gave `10 EUR` where the
+            // `weight` column gives `11.00 USD`. A different number in a
+            // different currency, so summing WEIGHT() over a ledger with priced
+            // postings produced a currency-mixed total (#1966).
+            //
+            // Routing to the same helper the `weight` COLUMN uses makes the two
+            // spellings one computation rather than two implementations that
+            // agree by inspection. It also closes the residual scale gap from
+            // #1963 — the column's exact `100.00` instead of a re-derived `100`.
+            "WEIGHT" if Self::is_position_column(func) => Ok(compute_posting_weight(
+                &ctx.transaction.postings[ctx.posting_index],
+            )),
             // Aggregates evaluate to Null per row; real aggregation happens in
             // the aggregation pass.
             "SUM" | "COUNT" | "MIN" | "MAX" | "FIRST" | "LAST" | "AVG" => Ok(Value::Null),
@@ -1582,11 +1615,17 @@ impl<'a> Executor<'a> {
                             // is the regression described above.
                             //
                             // It does NOT recover the original scale: this yields
-                            // `100` where the column yields `100.00`. Closing that
-                            // gap needs `Position` to retain the cost spec (or this
-                            // function to receive the `Posting`), which is a wider
-                            // change than the symptom warrants and is recorded on
-                            // the issue.
+                            // `100` where the column yields `100.00`. For
+                            // `WEIGHT(position)` that no longer matters — #1966
+                            // routes the position COLUMN to the canonical on the
+                            // lazy path, where the `Posting` is still in hand, so
+                            // it gets the column's exact `100.00`. This arm is
+                            // now reached only by arguments the canonical cannot
+                            // serve: an `Inventory` from `SUM(position)`, or a
+                            // `Position` built by an expression. Neither carries
+                            // a price, so the price rung of the weight ladder is
+                            // genuinely unavailable here and cost-or-units is the
+                            // best answer possible.
                             //
                             // `WEIGHT()` is a rustledger extension — beanquery has
                             // no `weight(position)` function — so there is no

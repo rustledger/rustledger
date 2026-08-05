@@ -128,3 +128,155 @@ fn directive_kind_is_part_of_the_identity() {
     });
     assert_ne!(hash(&open), hash(&close), "open and close must not collide");
 }
+
+/// A posting with an account, and optionally units.
+fn txn_with_postings(
+    narration: &str,
+    links: &[&str],
+    postings: &[(&str, Option<(&str, Option<&str>)>)],
+) -> Directive {
+    let postings: Vec<rustledger_core::Spanned<rustledger_core::directive::Posting>> = postings
+        .iter()
+        .map(|(account, units)| {
+            let mut p = rustledger_core::directive::Posting::new(
+                *account,
+                rustledger_core::Amount::new(rustledger_core::Decimal::ZERO, "USD"),
+            );
+            p.units = units.map(|(number, currency)| {
+                let n = number.parse().expect("a decimal");
+                match currency {
+                    Some(c) => rustledger_core::IncompleteAmount::complete(n, (*c).to_owned()),
+                    None => rustledger_core::IncompleteAmount::number_only(n),
+                }
+            });
+            rustledger_core::Spanned::new(p, rustledger_core::Span::new(0, 0))
+        })
+        .collect();
+    let Directive::Transaction(mut t) = txn(None, narration, &[], links) else {
+        unreachable!()
+    };
+    t.postings = postings;
+    Directive::Transaction(t)
+}
+
+/// A field must not be able to MIGRATE across a collection boundary.
+///
+/// Length-prefixing each field is not sufficient on its own, which Copilot
+/// caught on review. A stream of length-prefixed fields decodes to a unique
+/// SEQUENCE of byte strings, but two different structures can produce the same
+/// sequence whenever a variable-length collection abuts anything else — so
+/// `tags ["a","b"], links []` and `tags ["a"], links ["b"]` both emit
+/// `["a", "b"]` and collide.
+///
+/// This is the same defect class the length prefix fixed, one level up: the
+/// element boundaries were unambiguous but the COLLECTION boundaries were not.
+///
+/// All three collide against the previous commit. They are not equally
+/// load-bearing on one mechanism, which is why the failure lists every case
+/// rather than stopping at the first: the tag/link case is caught only by the
+/// collection counts, while the other two are caught independently by both the
+/// counts and the presence tags.
+#[test]
+fn fields_cannot_migrate_across_collection_boundaries() {
+    let cases: [(Directive, Directive, &str); 3] = [
+        (
+            txn(None, "n", &["a", "b"], &[]),
+            txn(None, "n", &["a"], &["b"]),
+            "tag/link boundary: a tag must not be able to become a link",
+        ),
+        (
+            txn(None, "a", &["b"], &[]),
+            txn(Some("a"), "b", &[], &[]),
+            "payee/narration/tag boundary: an absent payee must not let the \
+             narration and a tag shift up into its place",
+        ),
+        (
+            txn_with_postings("n", &["a", "b"], &[]),
+            txn_with_postings("n", &["a"], &[("b", None)]),
+            "link/posting boundary: a link must not be able to become a posting \
+             account",
+        ),
+    ];
+    // Collect rather than stop at the first: an assert_ne in a loop hides
+    // whether the remaining cases are load-bearing or riding on this one.
+    let collisions: Vec<&str> = cases
+        .iter()
+        .filter(|(left, right, _)| hash(left) == hash(right))
+        .map(|(_, _, what)| *what)
+        .collect();
+    assert!(
+        collisions.is_empty(),
+        "{} of {} boundary cases collided: {collisions:#?}",
+        collisions.len(),
+        cases.len(),
+    );
+}
+
+/// Units contribute a VARIABLE number of fields, so the posting boundary needs
+/// its own marker.
+///
+/// The collection counts alone do not cover this. Within the postings list a
+/// posting emits its account and then zero, one, or two more fields depending
+/// on whether its units carry a number, a currency, both, or are absent — so
+/// two postings can be re-partitioned into two different postings emitting the
+/// identical field sequence:
+///
+/// ```text
+///   [Assets:A  1 USD] [Assets:B]        -> "Assets:A" "1" "USD" "Assets:B"
+///   [Assets:A  1    ] [USD  Assets:B]   -> "Assets:A" "1" "USD" "Assets:B"
+/// ```
+///
+/// Same count, same fields, different transactions. The presence tag on units
+/// (and on the number and currency inside them) is what separates these; it is
+/// the one case the counts cannot reach.
+#[test]
+fn units_presence_is_part_of_the_posting_boundary() {
+    fn posting(
+        account: &str,
+        units: Option<rustledger_core::IncompleteAmount>,
+    ) -> rustledger_core::Spanned<rustledger_core::directive::Posting> {
+        let mut p = rustledger_core::directive::Posting::new(
+            account,
+            rustledger_core::Amount::new(rustledger_core::Decimal::ZERO, "USD"),
+        );
+        p.units = units;
+        rustledger_core::Spanned::new(p, rustledger_core::Span::new(0, 0))
+    }
+    fn with(
+        postings: Vec<rustledger_core::Spanned<rustledger_core::directive::Posting>>,
+    ) -> Directive {
+        let Directive::Transaction(mut t) = txn(None, "n", &[], &[]) else {
+            unreachable!()
+        };
+        t.postings = postings;
+        Directive::Transaction(t)
+    }
+    let one = rustledger_core::Decimal::ONE;
+    let left = with(vec![
+        posting(
+            "Assets:A",
+            Some(rustledger_core::IncompleteAmount::complete(
+                one,
+                "USD".to_owned(),
+            )),
+        ),
+        posting("Assets:B", None),
+    ]);
+    let right = with(vec![
+        posting(
+            "Assets:A",
+            Some(rustledger_core::IncompleteAmount::number_only(one)),
+        ),
+        posting(
+            "USD",
+            Some(rustledger_core::IncompleteAmount::currency_only(
+                "Assets:B".to_owned(),
+            )),
+        ),
+    ]);
+    assert_ne!(
+        hash(&left),
+        hash(&right),
+        "units re-partitioned across a posting boundary must not collide",
+    );
+}

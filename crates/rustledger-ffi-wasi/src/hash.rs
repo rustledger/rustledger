@@ -30,6 +30,56 @@ fn field(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
+/// Feed a collection's LENGTH into the hash before its elements.
+///
+/// Length-prefixing each element is not enough on its own, which Copilot caught
+/// on review. A stream of length-prefixed fields decodes to a unique SEQUENCE
+/// of byte strings, but two different structures can produce the SAME sequence
+/// whenever a variable-length collection abuts anything else:
+///
+/// ```text
+///   tags ["a","b"], links []   ==  tags ["a"], links ["b"]
+/// ```
+///
+/// Both emit `["a", "b"]`. Counting the elements pins the partition, so a field
+/// can no longer migrate across a collection boundary undetected.
+///
+/// This is the same defect the length prefix fixed, one level up: the element
+/// boundaries were unambiguous, the COLLECTION boundaries were not.
+fn count(hasher: &mut Sha256, n: usize) {
+    hasher.update((n as u64).to_le_bytes());
+}
+
+/// Feed an OPTIONAL field into the hash, presence-tagged.
+///
+/// [`count`] does not subsume this. Within the postings list a posting emits
+/// its account and then zero, one, or two further fields depending on whether
+/// its units carry a number, a currency, both, or are absent - so even at a
+/// fixed posting COUNT the fields can be re-partitioned:
+///
+/// ```text
+///   [Assets:A  1 USD] [Assets:B]       ->  "Assets:A" "1" "USD" "Assets:B"
+///   [Assets:A  1    ] [USD  Assets:B]  ->  "Assets:A" "1" "USD" "Assets:B"
+/// ```
+///
+/// Same count, same fields, different transactions. That case is reachable only
+/// through the presence tag; the payee tag is the same mechanism applied
+/// uniformly, and is belt-and-braces rather than load-bearing (the fixed run of
+/// three collection counts after the narration already separates a present
+/// payee from an absent one).
+///
+/// The tag byte sits outside the field's own length prefix, so no field content
+/// can forge it.
+fn opt(hasher: &mut Sha256, bytes: Option<&[u8]>) {
+    match bytes {
+        Some(b) => {
+            hasher.update([1u8]);
+            field(hasher, b);
+        }
+        None => hasher.update([0u8]),
+    }
+}
+
 /// Compute a SHA256 hash of a directive for unique identification.
 pub fn compute_directive_hash(directive: &Directive) -> String {
     let mut hasher = Sha256::new();
@@ -40,25 +90,27 @@ pub fn compute_directive_hash(directive: &Directive) -> String {
             field(&mut hasher, b"Transaction");
             field(&mut hasher, t.date.to_string().as_bytes());
             field(&mut hasher, t.flag.to_string().as_bytes());
-            if let Some(ref payee) = t.payee {
-                field(&mut hasher, payee.as_bytes());
-            }
+            opt(&mut hasher, t.payee.as_deref().map(str::as_bytes));
             field(&mut hasher, t.narration.as_bytes());
+            count(&mut hasher, t.tags.len());
             for tag in &t.tags {
                 field(&mut hasher, tag.as_bytes());
             }
+            count(&mut hasher, t.links.len());
             for link in &t.links {
                 field(&mut hasher, link.as_bytes());
             }
+            count(&mut hasher, t.postings.len());
             for posting in &t.postings {
                 field(&mut hasher, posting.account.as_bytes());
-                if let Some(ref units) = posting.units {
-                    if let Some(num) = units.number() {
-                        field(&mut hasher, num.to_string().as_bytes());
+                match &posting.units {
+                    Some(units) => {
+                        hasher.update([1u8]);
+                        let number = units.number().map(|n| n.to_string());
+                        opt(&mut hasher, number.as_deref().map(str::as_bytes));
+                        opt(&mut hasher, units.currency().map(str::as_bytes));
                     }
-                    if let Some(cur) = units.currency() {
-                        field(&mut hasher, cur.as_bytes());
-                    }
+                    None => hasher.update([0u8]),
                 }
             }
         }
@@ -66,6 +118,7 @@ pub fn compute_directive_hash(directive: &Directive) -> String {
             field(&mut hasher, b"Open");
             field(&mut hasher, o.date.to_string().as_bytes());
             field(&mut hasher, o.account.as_bytes());
+            count(&mut hasher, o.currencies.len());
             for c in &o.currencies {
                 field(&mut hasher, c.as_bytes());
             }

@@ -4,11 +4,21 @@ option "booking_method" "NONE"
 2020-01-01 open Assets:Stock
 2020-01-01 open Assets:Cash    USD
 
-2020-02-01 * "Buy"
-  Assets:Stock    10 CORP
-  Assets:Cash    -10 USD @ CORP
+; Two lots at DIFFERENT costs. The augmentations are what make the
+; reduction below ambiguous under STRICT — the previous fixture had no
+; cost specs at all, so there were no lots, and every booking method
+; produced the same (empty) result. That is what made this test unable
+; to tell NONE from STRICT.
+2020-02-01 * "Buy lot 1"
+  Assets:Stock    10 CORP {1 USD}
+  Assets:Cash    -10 USD
 
-; Sell without cost tracking - NONE doesn't track lots
-2020-03-01 * "Sell"
-  Assets:Stock    -5 CORP
-  Assets:Cash      10 USD @ CORP
+2020-03-01 * "Buy lot 2"
+  Assets:Stock    10 CORP {3 USD}
+  Assets:Cash    -30 USD
+
+; Ambiguous under STRICT: `{}` matches two lots at different costs.
+; NONE performs no lot matching, so it must accept this.
+2020-04-01 * "Sell"
+  Assets:Stock    -5 CORP {}
+  Assets:Cash      10 USD

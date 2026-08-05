@@ -1508,9 +1508,22 @@ t = "check"
     // Note: apply_env tests require setting environment variables which is unsafe.
     // These behaviors are tested via integration tests instead.
 
+    /// An empty environment leaves the config untouched — and a populated one
+    /// does not, which is what makes the first half mean something.
+    ///
+    /// The previous version built this config, called `apply_env()`, discarded
+    /// the result and asserted NOTHING. Its comment said "just verify the
+    /// method doesn't panic" while its name promised no changes, so it passed
+    /// against any implementation of `apply_env` — including one that wiped
+    /// every field.
+    ///
+    /// It also read the real environment, and hedged about it: "this test
+    /// assumes `RLEDGER_FILE` and `RLEDGER_FORMAT` are not set ... may fail". That
+    /// is the #1729 shape. `apply_env` already splits into an injectable
+    /// `apply_env_config(&EnvironmentConfig)`, so the test takes that and reads
+    /// no environment at all.
     #[test]
-    fn test_apply_env_no_changes() {
-        // When no env vars are set, apply_env should not change anything
+    fn an_empty_environment_leaves_the_config_untouched() {
         let config = Config {
             default: DefaultConfig {
                 file: Some("/config/file.beancount".to_string()),
@@ -1524,10 +1537,32 @@ t = "check"
             ..Default::default()
         };
 
-        // Note: This test assumes RLEDGER_FILE and RLEDGER_FORMAT are not set
-        // If they happen to be set in the test environment, this test may fail
-        // Just verify the method doesn't panic
-        let _ = config.apply_env();
+        let untouched = config
+            .clone()
+            .apply_env_config(&EnvironmentConfig::default());
+        assert_eq!(
+            untouched.default.file.as_deref(),
+            Some("/config/file.beancount"),
+            "an empty environment must not replace the configured file",
+        );
+        assert_eq!(untouched.output.format.as_deref(), Some("text"));
+        assert_eq!(untouched.output.color, Some(true));
+
+        // Non-vacuity. Without this the assertions above would be equally
+        // satisfied by an `apply_env_config` that ignored its argument
+        // entirely — "unchanged" and "never applies anything" would be
+        // indistinguishable.
+        let overridden = config.apply_env_config(&EnvironmentConfig {
+            file: Some("/env/file.beancount".to_string()),
+            no_color: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            overridden.default.file.as_deref(),
+            Some("/env/file.beancount"),
+            "a populated environment must override the configured file",
+        );
+        assert_eq!(overridden.output.color, Some(false), "NO_COLOR must win");
     }
 
     #[test]

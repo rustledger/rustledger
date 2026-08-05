@@ -946,7 +946,7 @@ fn test_spanned_validation_valid_ledger_no_errors() {
 /// So this is a TRIPWIRE, not an endorsement. If someone moves the ordering
 /// check ahead of the sort, this fails and points them at the decision.
 #[test]
-fn out_of_order_input_is_canonicalised_before_the_ordering_check() {
+fn test_out_of_order_input_is_canonicalised_before_the_ordering_check() {
     let directives = vec![
         spanned_directive(
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),

@@ -35,7 +35,16 @@ fn hashing_is_deterministic() {
     for _ in 0..8 {
         assert_eq!(hash(&d), first, "the same directive must hash the same");
     }
+    // Length ALONE would also accept a 64-character non-hex encoding, which is
+    // the plausible way this changes: a switch to base64 or to an uppercase
+    // renderer would keep the count and break every consumer parsing the digest.
     assert_eq!(first.len(), 64, "a SHA256 hex digest is 64 characters");
+    assert!(
+        first
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "a SHA256 hex digest is lowercase hex; got {first}",
+    );
 }
 
 /// Moving a character across a field boundary must change the hash.

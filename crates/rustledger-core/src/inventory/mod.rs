@@ -399,6 +399,20 @@ pub struct Inventory {
     units_cache: FxHashMap<crate::Currency, Decimal>,
 }
 
+/// Where the positions a cache rebuild is reading came from.
+///
+/// Only affects whether the one-cost-less-lot-per-currency invariant is
+/// ASSERTED. It is a genuine invariant of positions this type built, and a
+/// `debug_assert` there earns its keep as an internal-bug tripwire — but a
+/// deserialized payload is input, and input must not be able to panic us.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheSource {
+    /// Positions this inventory produced; the invariant holds.
+    Internal,
+    /// Positions from outside — a deserialized payload.
+    Untrusted,
+}
+
 /// Deserialization shape for [`Inventory`]: the persisted field only.
 ///
 /// Exists so `From` can rebuild the derived caches — see the note on
@@ -406,7 +420,9 @@ pub struct Inventory {
 /// `positions` sequence), so this is not a compatibility break.
 #[derive(Deserialize)]
 struct InventoryWire {
-    #[serde(default)]
+    // NOT `#[serde(default)]`. The derive this replaces made `positions`
+    // required, so `{}` was `Err("missing field `positions`")`; defaulting it
+    // would quietly accept a malformed payload as an empty inventory.
     positions: Vector<Position>,
 }
 
@@ -417,7 +433,12 @@ impl From<InventoryWire> for Inventory {
             simple_index: FxHashMap::default(),
             units_cache: FxHashMap::default(),
         };
-        inv.rebuild_index();
+        // UNTRUSTED: the payload is input, not something this type produced, so
+        // it may carry two cost-less lots for one currency — a state the
+        // invariant forbids. `rebuild_index`'s `debug_assert` is there to catch
+        // an internal bug; reaching it from deserialization would turn a
+        // malformed document into a panic at the boundary.
+        inv.rebuild_index_from(CacheSource::Untrusted);
         inv
     }
 }
@@ -816,8 +837,14 @@ impl Inventory {
     }
 
     /// Rebuild all caches (`simple_index` and `units_cache`) from positions.
-    /// Called after operations that may invalidate caches (like retain or deserialization).
+    ///
+    /// Called after operations that may invalidate them (`compact`'s retain) and
+    /// on deserialization, which is what [`CacheSource`] distinguishes.
     fn rebuild_index(&mut self) {
+        self.rebuild_index_from(CacheSource::Internal);
+    }
+
+    fn rebuild_index_from(&mut self, source: CacheSource) {
         self.simple_index.clear();
         self.units_cache.clear();
 
@@ -831,10 +858,15 @@ impl Inventory {
             // Update simple_index only for positions without cost
             if pos.cost.is_none() {
                 debug_assert!(
-                    !self.simple_index.contains_key(&pos.units.currency),
+                    source == CacheSource::Untrusted
+                        || !self.simple_index.contains_key(&pos.units.currency),
                     "Invariant violated: multiple simple positions for currency {}",
                     pos.units.currency
                 );
+                // Last-wins on a duplicate, matching the pre-existing behavior
+                // of this insert. `units_cache` sums every position either way,
+                // so the total stays right; only which lot a later cost-less
+                // `add` merges into is affected.
                 self.simple_index.insert(pos.units.currency.clone(), idx);
             }
         }
@@ -1044,6 +1076,48 @@ mod tests {
         assert!(
             !round_tripped.add_headroom_for("USD", Decimal::ONE),
             "the inventory still holds Decimal::MAX"
+        );
+    }
+
+    /// A payload the type could not have produced must not panic us.
+    ///
+    /// Two cost-less lots for one currency violate the invariant
+    /// `rebuild_index` asserts. That assert is a worthwhile internal-bug
+    /// tripwire, but rebuilding on deserialization put it in reach of INPUT:
+    /// this exact document panicked a debug build with "Invariant violated:
+    /// multiple simple positions for currency USD". Caught reviewing the
+    /// rebuild change, not present before it.
+    ///
+    /// Behavior matches what the plain derive did — the total is the sum, the
+    /// lots are preserved — so nothing about malformed input changed except
+    /// that the caches are now correct for it.
+    #[test]
+    fn a_payload_violating_the_lot_invariant_does_not_panic() {
+        let json = r#"{"positions":[
+            {"units":{"number":"100","currency":"USD"},"cost":null},
+            {"units":{"number":"5","currency":"USD"},"cost":null}]}"#;
+        let inv: Inventory = serde_json::from_str(json).expect("malformed input still loads");
+        assert_eq!(inv.units("USD"), dec!(105), "the total sums every lot");
+        assert_eq!(
+            inv.positions().count(),
+            2,
+            "the lots are preserved as given"
+        );
+    }
+
+    /// `positions` stays REQUIRED.
+    ///
+    /// The derive this replaced made it so, and routing deserialization through
+    /// a wire struct is exactly the kind of change that silently relaxes it —
+    /// a stray `#[serde(default)]` turns a malformed document into an empty
+    /// inventory. It did, in the first draft of this change.
+    #[test]
+    fn a_payload_without_positions_is_rejected() {
+        let err = serde_json::from_str::<Inventory>("{}")
+            .expect_err("an inventory without positions is malformed");
+        assert!(
+            err.to_string().contains("missing field"),
+            "expected a missing-field error, got: {err}",
         );
     }
 

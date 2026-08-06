@@ -362,7 +362,7 @@ impl std::error::Error for AccountedBookingError {}
 // `rebuild_index`'s own doc already claimed it ran "after ... deserialization".
 // It did not — nothing called it on that path, and two comments elsewhere
 // referred to it by a name (`rebuild_caches`) that never existed. Now it does.
-#[serde(from = "InventoryWire")]
+#[serde(try_from = "InventoryWire")]
 pub struct Inventory {
     /// Persistent (structurally-shared) RRB-tree-backed vector. Cloning
     /// is O(1) (Arc bump on the tree root); `push_back` / indexed mutation
@@ -426,8 +426,20 @@ struct InventoryWire {
     positions: Vector<Position>,
 }
 
-impl From<InventoryWire> for Inventory {
-    fn from(wire: InventoryWire) -> Self {
+impl TryFrom<InventoryWire> for Inventory {
+    type Error = OverflowError;
+
+    /// `TryFrom`, not `From`: rebuilding the caches sums a currency's positions,
+    /// and that sum can overflow on a payload nobody sane wrote.
+    ///
+    /// `rebuild_index` accumulates with `+=`, which PANICS on `Decimal`
+    /// overflow — so two `Decimal::MAX` USD lots aborted inside `Deserialize`
+    /// with "Addition overflowed" rather than returning a serde error. Review
+    /// catch; a deserialization boundary must not panic on its input, the same
+    /// rule that applies to the parser. The rebuild now uses `checked_add` and
+    /// the failure arrives as `Err`, which serde reports as a normal
+    /// deserialization error.
+    fn try_from(wire: InventoryWire) -> Result<Self, Self::Error> {
         let mut inv = Self {
             positions: wire.positions,
             simple_index: FxHashMap::default(),
@@ -438,8 +450,8 @@ impl From<InventoryWire> for Inventory {
         // invariant forbids. `rebuild_index`'s `debug_assert` is there to catch
         // an internal bug; reaching it from deserialization would turn a
         // malformed document into a panic at the boundary.
-        inv.rebuild_index_from(CacheSource::Untrusted);
-        inv
+        inv.try_rebuild_index_from(CacheSource::Untrusted)?;
+        Ok(inv)
     }
 }
 
@@ -841,19 +853,37 @@ impl Inventory {
     /// Called after operations that may invalidate them (`compact`'s retain) and
     /// on deserialization, which is what [`CacheSource`] distinguishes.
     fn rebuild_index(&mut self) {
-        self.rebuild_index_from(CacheSource::Internal);
+        // Internal positions came through `add`, which already rejected any
+        // sum that would overflow, so this cannot fail. Asserted rather than
+        // ignored: a failure here would mean `add`'s check had a hole.
+        // Call FIRST, assert on the result. Putting the call inside
+        // `debug_assert!` compiles the rebuild itself out of release builds,
+        // so `compact` would have left the caches stale — caught by clippy's
+        // `debug_assert_with_mut_call`.
+        let rebuilt = self.try_rebuild_index_from(CacheSource::Internal);
+        debug_assert!(
+            rebuilt.is_ok(),
+            "internal positions summed past the Decimal range; `add` should \
+             have rejected them",
+        );
     }
 
-    fn rebuild_index_from(&mut self, source: CacheSource) {
+    fn try_rebuild_index_from(&mut self, source: CacheSource) -> Result<(), OverflowError> {
         self.simple_index.clear();
         self.units_cache.clear();
 
         for (idx, pos) in self.positions.iter().enumerate() {
-            // Update units cache for all positions
-            *self
+            // Update units cache for all positions. `checked_add`, not `+=`:
+            // `Decimal`'s `+` panics on overflow, and this runs over payloads.
+            let slot = self
                 .units_cache
                 .entry(pos.units.currency.clone())
-                .or_default() += pos.units.number;
+                .or_default();
+            *slot = slot
+                .checked_add(pos.units.number)
+                .ok_or_else(|| OverflowError {
+                    currency: pos.units.currency.clone(),
+                })?;
 
             // Update simple_index only for positions without cost
             if pos.cost.is_none() {
@@ -870,6 +900,7 @@ impl Inventory {
                 self.simple_index.insert(pos.units.currency.clone(), idx);
             }
         }
+        Ok(())
     }
 
     /// Merge this inventory with another.
@@ -1102,6 +1133,40 @@ mod tests {
             inv.positions().count(),
             2,
             "the lots are preserved as given"
+        );
+    }
+
+    /// A payload whose positions sum past the `Decimal` range is an ERROR,
+    /// not a panic.
+    ///
+    /// Rebuilding the caches sums each currency's positions, and the rebuild
+    /// used `+=`, which panics on `Decimal` overflow. Running it on
+    /// deserialization put that inside `Deserialize`: two `Decimal::MAX` USD
+    /// lots aborted with "Addition overflowed" instead of returning a serde
+    /// error — a denial of service on any embedder deserializing untrusted input. Review
+    /// catch on the rebuild change; the deep review that found the
+    /// `debug_assert` panic missed this second one.
+    ///
+    /// Two lots are needed, and the first must carry a cost: a second cost-less
+    /// lot for the same currency would be a different (also-tested) malformed
+    /// shape, and the sum is what is being exercised here.
+    #[test]
+    fn a_payload_that_overflows_the_total_is_an_error_not_a_panic() {
+        let max = Decimal::MAX.to_string();
+        let json = format!(
+            r#"{{"positions":[
+                {{"units":{{"number":"{max}","currency":"USD"}},
+                  "cost":{{"number":"1","currency":"EUR","date":null,"label":null}}}},
+                {{"units":{{"number":"{max}","currency":"USD"}},"cost":null}}]}}"#
+        );
+        let err = serde_json::from_str::<Inventory>(&json)
+            .expect_err("a total past the Decimal range cannot be represented");
+        // `OverflowError`'s own wording, which serde surfaces verbatim — so
+        // this also pins that the error reaching the caller is the domain one
+        // rather than a generic "invalid value".
+        assert!(
+            err.to_string().contains("exceeds the representable range"),
+            "expected the USD overflow error, got: {err}",
         );
     }
 

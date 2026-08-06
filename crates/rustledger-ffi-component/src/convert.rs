@@ -1857,6 +1857,35 @@ impl SessionState {
             .map_err(|e| e.to_string())
     }
 
+    /// The account-type root for `account`, honoring this ledger's
+    /// `name_assets` … `name_expenses` renames (WIT 3.11.0, #1964).
+    ///
+    /// The free `util.get-account-type` classifies with hardcoded English
+    /// roots, so on a ledger that renames Expenses it answers "unknown" while
+    /// `report balsheet` — which classifies through
+    /// [`rustledger_core::AccountTypes`], the canonical CLAUDE.md names —
+    /// gets it right. Same ledger, different answers depending on the surface
+    /// asked. That utility cannot fix it: its interface holds no ledger. A
+    /// session does, so this one goes through the canonical.
+    ///
+    /// Returns the canonical lowercase kind — `assets`, `liabilities`,
+    /// `equity`, `income`, `expenses`, or `unknown` — exactly the vocabulary
+    /// `util.get-account-type` already returns, so a caller can swap one for
+    /// the other without re-reading the strings. `AccountTypes::root_name` is
+    /// the inverse when the ledger's own display name is wanted.
+    pub fn account_type(&self, account: &str) -> String {
+        let types = rustledger_core::AccountTypes {
+            assets: self.options.name_assets.clone(),
+            liabilities: self.options.name_liabilities.clone(),
+            equity: self.options.name_equity.clone(),
+            income: self.options.name_income.clone(),
+            expenses: self.options.name_expenses.clone(),
+        };
+        types
+            .kind(account)
+            .map_or_else(|| "unknown".to_string(), |k| k.as_str().to_string())
+    }
+
     /// Investment returns over the held ledger (WIT 3.9.0, #1847): the
     /// `rledger report returns` engine over the boundary, so a host charts
     /// returns without re-deriving the cash-flow extraction or the XIRR/TWR
@@ -3266,5 +3295,68 @@ option \"render_commas\" \"TRUE\"
             out.contains("1234567.89") && !out.contains("1,234,567.89"),
             "an undeclared ledger must not group; got:\n{out}",
         );
+    }
+}
+
+#[cfg(test)]
+mod account_type_tests {
+    use super::SessionState;
+
+    /// A renamed root classifies through the ledger's own names (#1964).
+    ///
+    /// `util.get-account-type` hardcodes the English roots, so it answers
+    /// `unknown` for `Depenses:Food` while `report balsheet` — going through
+    /// `AccountTypes`, the canonical — classifies it as Expenses. Two answers
+    /// for one ledger depending on which surface is asked. This pins that the
+    /// session agrees with the reports.
+    const RENAMED: &str = "\
+option \"name_expenses\" \"Depenses\"
+
+2024-01-01 open Assets:Bank
+2024-01-01 open Depenses:Food
+
+2024-02-01 * \"lunch\"
+  Depenses:Food   10.00 USD
+  Assets:Bank    -10.00 USD
+";
+
+    #[test]
+    fn account_type_honors_a_renamed_root() {
+        let session = SessionState::from_source(RENAMED);
+        assert_eq!(
+            session.account_type("Depenses:Food"),
+            "expenses",
+            "the configured root must classify as Expenses",
+        );
+
+        // Non-vacuity, and the actual bug: the ledger-free utility cannot see
+        // the rename, so it disagrees. If this ever starts returning
+        // "Expenses" the utility gained ledger awareness and the two surfaces
+        // no longer need separating.
+        assert_eq!(
+            super::get_account_type("Depenses:Food"),
+            "unknown",
+            "util.get-account-type is ledger-free and cannot see the rename",
+        );
+    }
+
+    #[test]
+    fn account_type_still_answers_for_default_roots() {
+        let session = SessionState::from_source(RENAMED);
+        assert_eq!(session.account_type("Assets:Bank"), "assets");
+        // `Expenses:` is NOT a root on this ledger — it was renamed away, so
+        // the canonical rejects it. Pins that the method reads the config
+        // rather than accepting both spellings.
+        assert_eq!(
+            session.account_type("Expenses:Food"),
+            "unknown",
+            "the English root is not configured on this ledger",
+        );
+    }
+
+    #[test]
+    fn account_type_rejects_an_unknown_root() {
+        let session = SessionState::from_source(RENAMED);
+        assert_eq!(session.account_type("Nonsense:Thing"), "unknown");
     }
 }

@@ -45,7 +45,11 @@ use exports::rustledger::ledger::ledger::{
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. 3.10 adds
+/// The Component-Model api-version this build implements. 3.11 adds
+/// `session.account-type` (the account-type root honoring THIS ledger's
+/// `name_*` renames — the free `util.get-account-type` hardcodes the
+/// English roots and so disagrees with every report surface on a renamed
+/// ledger, #1964); 3.10 adds
 /// `session.budget` (budgeted vs actual over the held ledger — the
 /// `rledger report budget` engine, so a host can render a Fava-style
 /// budget view without re-deriving the accrual); 3.9 adds
@@ -63,7 +67,7 @@ use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 /// encrypted (`.gpg`/`.asc`) ledgers can be decrypted by the host (#1667);
 /// 3.1 added the `diff` field on `balance-dir` (#1663); 3.0 was the breaking
 /// `expand-pads` parameter on `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.10";
+const API_VERSION: &str = "3.11";
 
 struct Component;
 
@@ -138,6 +142,10 @@ impl GuestSession for LedgerSession {
 
     fn info(&self) -> LoadResult {
         self.state.info()
+    }
+
+    fn account_type(&self, account: String) -> String {
+        self.state.account_type(&account)
     }
 
     fn query(&self, query: String) -> QueryResult {

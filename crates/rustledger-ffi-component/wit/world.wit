@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.10.0;
+package rustledger:ledger@3.11.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -580,6 +580,18 @@ interface ledger {
     /// Everything the host needs at load time: entries, errors, options,
     /// plugins, and the resolved include graph.
     info: func() -> load-result;
+    /// The account-type root for `account`, honoring THIS ledger's
+    /// `name_assets` … `name_expenses` renames.
+    ///
+    /// `util.get-account-type` hardcodes the English roots, so it disagrees
+    /// with every other surface on a renamed ledger — `report balsheet` and
+    /// friends classify through the configured names while the FFI answered
+    /// "unknown" (#1964). A session holds the options, so this can agree.
+    ///
+    /// Returns the same vocabulary `util.get-account-type` does — `assets`,
+    /// `liabilities`, `equity`, `income`, `expenses`, or `unknown` — so the
+    /// two are drop-in interchangeable.
+    account-type: func(account: string) -> string;
     /// Run a BQL query against the held ledger.
     query: func(query: string) -> query-result;
     /// Keep only directives within `[begin, end)`.
@@ -724,7 +736,13 @@ interface util {
   types: func() -> types-info;
   /// Whether the file at `path` is an encrypted (GPG) ledger.
   is-encrypted: func(path: string) -> bool;
-  /// The account-type root (Assets/Liabilities/…) for an account name.
+  /// The account-type root (Assets/Liabilities/…) for an account name,
+  /// against the DEFAULT root names only.
+  ///
+  /// This interface is ledger-free by design, so it cannot see a ledger's
+  /// `name_assets` … `name_expenses` renames: on a ledger that renames
+  /// Expenses to Depenses this answers "unknown" for `Depenses:Food`. When
+  /// you hold a session, prefer [`session.account-type`], which honors them.
   get-account-type: func(account: string) -> string;
 }
 

@@ -634,12 +634,25 @@ impl WatchingPluginManager {
     }
 
     /// Force reload all plugins.
+    ///
+    /// Every fallible step for a plugin runs BEFORE either of its fields is
+    /// written, so the pair is updated atomically. The previous order assigned
+    /// `tracked.plugin` and only then called `metadata.modified()?`, which on
+    /// failure left the NEW plugin recorded against the OLD timestamp — an
+    /// inconsistent pair, and the only state `reload_if_changed` consults to
+    /// decide whether a reload is due. That sibling already gets this right;
+    /// this matches it (#1902 Phase 2).
+    ///
+    /// Atomicity is per PLUGIN, not across the loop: a failure on the third
+    /// plugin leaves the first two reloaded and returns `Err`. That is
+    /// deliberate — each is a valid instance either way, so the result is
+    /// incomplete rather than corrupt, and the error tells the caller.
     pub fn reload_all(&mut self) -> Result<()> {
         for tracked in &mut self.plugins {
             let new_plugin = Plugin::load(&tracked.path, &self.config)?;
-            let metadata = std::fs::metadata(&tracked.path)?;
+            let modified = std::fs::metadata(&tracked.path)?.modified()?;
             tracked.plugin = new_plugin;
-            tracked.modified = metadata.modified()?;
+            tracked.modified = modified;
         }
         Ok(())
     }

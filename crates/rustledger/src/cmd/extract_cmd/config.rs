@@ -79,12 +79,30 @@ pub(super) fn expand_tilde(path: &Path) -> PathBuf {
 }
 
 /// Find the importers.toml file, searching in standard locations.
-pub(super) fn find_importers_config(
+/// Where an `importers.toml` came from.
+///
+/// Matters because a config can do two very different things: DECLARE
+/// importers, and EXECUTE a `preprocess` command. Declaring is safe from
+/// anywhere. Executing is not — a config discovered in the current directory
+/// belongs to whoever put a file there, not necessarily to the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConfigSource {
+    /// Named by `--config`: the user pointed at this file.
+    Explicit,
+    /// `~/.config/rledger/importers.toml`: the user's own.
+    UserConfigDir,
+    /// `./importers.toml`, found by looking around. Convenient, but its
+    /// contents are a property of the directory, not of the user.
+    CurrentDirectory,
+}
+
+/// [`find_importers_config`] plus where the file came from.
+pub(super) fn find_importers_config_with_source(
     explicit_path: Option<&Path>,
-) -> Result<Option<std::path::PathBuf>> {
+) -> Result<Option<(std::path::PathBuf, ConfigSource)>> {
     if let Some(path) = explicit_path {
         if path.exists() {
-            return Ok(Some(path.to_path_buf()));
+            return Ok(Some((path.to_path_buf(), ConfigSource::Explicit)));
         }
         return Err(anyhow!("Importers config not found: {}", path.display()));
     }
@@ -92,17 +110,23 @@ pub(super) fn find_importers_config(
     if let Ok(cwd) = std::env::current_dir() {
         let local = cwd.join("importers.toml");
         if local.exists() {
-            return Ok(Some(local));
+            return Ok(Some((local, ConfigSource::CurrentDirectory)));
         }
     }
 
     if let Some(user_path) = crate::config::user_config_file("importers.toml")
         && user_path.exists()
     {
-        return Ok(Some(user_path));
+        return Ok(Some((user_path, ConfigSource::UserConfigDir)));
     }
 
     Ok(None)
+}
+
+pub(super) fn find_importers_config(
+    explicit_path: Option<&Path>,
+) -> Result<Option<std::path::PathBuf>> {
+    Ok(find_importers_config_with_source(explicit_path)?.map(|(path, _)| path))
 }
 
 /// Load and parse an importers.toml file.

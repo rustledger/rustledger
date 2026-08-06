@@ -279,10 +279,24 @@ The command runs with the CLI only — the WASI component cannot exec and
 rejects entries that set `preprocess` (a GUI host runs the preprocessor
 itself and passes the output as content).
 
-**Trust model**: `preprocess` executes a program from your config, exactly
-like a shell alias. Only write commands you trust, and treat an
-`importers.toml` you did not author like a shell script before running
-`rledger extract` near it. A community profile registry must never carry
+**Trust model**: `preprocess` executes a program named by the config, so it
+is honored only when the config is yours:
+
+| where the config came from | `preprocess` |
+|---|---|
+| `--config path/to/importers.toml` | runs |
+| `~/.config/rledger/importers.toml` | runs |
+| `./importers.toml`, found by looking around | **ignored, with a warning** |
+
+The last row is the point. Without it, `rledger extract statement.csv` would
+execute whatever an `importers.toml` in the current directory says — an
+unzipped statement bundle, a cloned repo, a shared downloads folder — because
+of where your terminal happened to be. The entry still works for declaring
+columns; only the command is withheld. Pass it with `--config` if it really is
+yours.
+
+Only write commands you trust, and treat an `importers.toml` you did not author
+like a shell script. A community profile registry must never carry
 `preprocess` entries.
 
 ## See Also

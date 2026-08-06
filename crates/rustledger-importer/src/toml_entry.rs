@@ -83,16 +83,31 @@ pub struct ImporterEntry {
     /// runs BEFORE format detection and extraction: any `{input}` argument
     /// is replaced by the statement's path, stdout becomes the content the
     /// rest of the pipeline (inference, column mapping) consumes. This is
-    /// how PDF and other unsupported formats import today — e.g.
-    /// `preprocess = ["pdftotext", "-layout", "{input}", "-"]` piped
-    /// through a table-to-CSV script — until a native parser exists.
+    /// how PDF and other unsupported formats import today, until a native
+    /// parser exists.
     ///
-    /// **Trust model**: this executes a program from your config, exactly
-    /// like a shell alias — only write commands you trust, and treat an
-    /// `importers.toml` from someone else like a shell script. Honored by
-    /// the CLI only; the WASI component cannot exec and rejects entries
-    /// that set it (the host runs the preprocessor and passes its output
-    /// as content instead).
+    /// This is an ARGV ARRAY, not a shell command line: there is no shell, so
+    /// `|`, `>` and `&&` are ordinary arguments rather than operators. A
+    /// single program:
+    ///
+    /// ```toml
+    /// preprocess = ["pdftotext", "-layout", "{input}", "-"]
+    /// ```
+    ///
+    /// A pipeline needs a shell, asked for explicitly:
+    ///
+    /// ```toml
+    /// preprocess = ["sh", "-c", "pdftotext -layout {input} - | to-csv"]
+    /// ```
+    ///
+    /// **Trust model**: this executes a program named by the config, so the
+    /// CLI honors it only when the config is yours — passed with `--config`,
+    /// or in your user config directory. A `./importers.toml` picked up from
+    /// the current directory is IGNORED for this field, with a warning,
+    /// because that file belongs to whoever put it there rather than to you.
+    /// Honored by the CLI only; the WASI component cannot exec and rejects
+    /// entries that set it (the host runs the preprocessor and passes its
+    /// output as content instead).
     #[serde(default)]
     pub preprocess: Option<Vec<String>>,
 }

@@ -63,8 +63,8 @@ use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use config::{
-    apply_column, build_config_from_entry, find_importers_config, find_matching_importers,
-    load_importers_config,
+    ConfigSource, ImportersFile, apply_column, build_config_from_entry, find_importers_config,
+    find_importers_config_with_source, find_matching_importers, load_importers_config,
 };
 // Used only by the WASM-importer-dir resolution path (gated below).
 #[cfg(feature = "python-plugin-wasm")]
@@ -301,6 +301,56 @@ pub fn list_importers_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<
     Ok(())
 }
 
+/// Resolve which config entry applies to `filename`, by the one rule.
+///
+/// `--importer <name>` wins; otherwise a `filename_pattern` glob, with the
+/// long-standing fallbacks: exactly one match uses it, no match with exactly
+/// one importer defined uses that, no match with several is an error, and
+/// several matches is an error.
+///
+/// Extracted because it existed twice — once inline in the `--config` branch,
+/// once re-implemented in [`maybe_preprocess`] — and the copies disagreed:
+/// the preprocess copy had no single-importer fallback and took the first of
+/// several matches instead of reporting the ambiguity. Two resolvers meant the
+/// entry that RAN a command could differ from the entry that then extracted.
+fn resolve_config_entry<'a>(
+    args: &Args,
+    importers_file: &'a ImportersFile,
+    filename: &str,
+) -> Result<Option<&'a rustledger_importer::toml_entry::ImporterEntry>> {
+    if let Some(ref name) = args.importer {
+        return Ok(importers_file.importers.iter().find(|e| e.name == *name));
+    }
+    if importers_file.importers.is_empty() {
+        return Ok(None);
+    }
+    let matches = find_matching_importers(importers_file, filename);
+    match matches.len() {
+        1 => Ok(Some(matches[0])),
+        0 if importers_file.importers.len() == 1 => Ok(Some(&importers_file.importers[0])),
+        0 => {
+            let available: Vec<&str> = importers_file
+                .importers
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect();
+            Err(anyhow!(
+                "No importer matches file '{}'. Use --importer to select one: {}",
+                filename,
+                available.join(", ")
+            ))
+        }
+        _ => {
+            let names: Vec<&str> = matches.iter().map(|e| e.name.as_str()).collect();
+            Err(anyhow!(
+                "Multiple importers match file '{}': {}. Use --importer to select one.",
+                filename,
+                names.join(", ")
+            ))
+        }
+    }
+}
+
 /// Run the resolved config entry's external `preprocess` command, if any.
 ///
 /// The entry is resolved the same way the CSV config branch resolves it —
@@ -311,16 +361,25 @@ pub fn list_importers_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<
 /// is replaced with the statement path; a missing placeholder is fine for
 /// commands that read their input elsewhere.
 ///
-/// Trust model: this executes a user-authored command from the user's own
-/// config, the same trust boundary as a shell alias or a beangulp Python
-/// importer. See the `preprocess` field docs in
-/// `rustledger_importer::toml_entry`.
+/// Trust model: this executes a command from the config, so it is honored
+/// ONLY when the config is the user's own — named with `--config`, or found
+/// in the user config directory. A `./importers.toml` discovered by looking
+/// around the current directory is IGNORED for this field, with a warning.
+///
+/// The difference matters more than the "same as a shell alias" framing
+/// suggested. A shell alias lives in your dotfiles; a cwd-discovered config
+/// belongs to whoever put a file in that directory — an unzipped statement
+/// bundle, a cloned repo, a shared downloads folder. Otherwise
+/// `rledger extract statement.csv` would execute an arbitrary command
+/// because of where the terminal happened to be. This is the boundary
+/// `direnv` requires an explicit `allow` for.
 fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTempFile>> {
     // Named const rather than an inline literal: `{input}` inside a call
     // trips clippy's literal_string_with_formatting_args.
     const INPUT_PLACEHOLDER: &str = "{input}";
 
-    let Some(config_path) = find_importers_config(args.config.as_deref())? else {
+    let Some((config_path, source)) = find_importers_config_with_source(args.config.as_deref())?
+    else {
         return Ok(None);
     };
     let importers_file = load_importers_config(&config_path)?;
@@ -328,16 +387,26 @@ fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTe
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_default();
-    let entry = if let Some(ref name) = args.importer {
-        importers_file.importers.iter().find(|e| e.name == *name)
-    } else {
-        find_matching_importers(&importers_file, &filename)
-            .into_iter()
-            .find(|e| e.preprocess.is_some())
-    };
+
+    // ONE resolver, shared with the `--config` branch below, so the entry that
+    // preprocesses is by construction the entry that then extracts. Resolving
+    // it separately here meant this path had no single-importer fallback and
+    // ran the command on the FIRST of several matches, before the other branch
+    // reported the ambiguity — a side effect ahead of an error.
+    let entry = resolve_config_entry(args, &importers_file, &filename)?;
     let Some(argv) = entry.and_then(|e| e.preprocess.as_ref()) else {
         return Ok(None);
     };
+
+    if source == ConfigSource::CurrentDirectory {
+        eprintln!(
+            "warning: ignoring `preprocess` in {} — a config found in the \
+             current directory is not run. Pass it with --config if it is \
+             yours.",
+            config_path.display()
+        );
+        return Ok(None);
+    }
     let [program, rest @ ..] = argv.as_slice() else {
         return Err(anyhow!("`preprocess` must name a command"));
     };
@@ -348,8 +417,24 @@ fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTe
         .map(|a| a.replace(INPUT_PLACEHOLDER, &input))
         .collect();
     eprintln!("Preprocessing with: {program} {}", cmd_args.join(" "));
+    let tmp = tempfile::Builder::new()
+        .prefix("rledger-preprocess-")
+        .suffix(".csv")
+        .tempfile()
+        .context("failed to create preprocess temp file")?;
+
+    // stdout goes STRAIGHT to the temp file. `Command::output()` buffered the
+    // whole of it in memory first and then copied it back out — two full
+    // copies of a statement that can be large once a PDF is flattened to text.
+    // stderr is still captured, because it is only read to build an error.
+    let stdout = tmp
+        .reopen()
+        .context("failed to open preprocess temp file for writing")?;
     let output = std::process::Command::new(program)
         .args(&cmd_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(std::process::Stdio::piped())
         .output()
         .with_context(|| format!("failed to run preprocess command `{program}`"))?;
     if !output.status.success() {
@@ -359,14 +444,6 @@ fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTe
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-
-    let mut tmp = tempfile::Builder::new()
-        .prefix("rledger-preprocess-")
-        .suffix(".csv")
-        .tempfile()
-        .context("failed to create preprocess temp file")?;
-    io::Write::write_all(&mut tmp, &output.stdout)
-        .context("failed to write preprocessed content")?;
     Ok(Some(tmp))
 }
 
@@ -566,6 +643,14 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     // dispatch, and column mapping all operate on the preprocessed
     // content unchanged. The binding keeps the temp file alive to EOF.
     let preprocessed = maybe_preprocess(args, file)?;
+    // `source_file` keeps the name the user typed; `file` becomes the
+    // preprocessed CONTENT. Rebinding both to the temp path meant
+    // auto-identification matched `filename_pattern` against
+    // `rledger-preprocess-XXXX.csv` — so `*.pdf` never matched, and a config
+    // with more than one importer failed with an error naming a temp file the
+    // user never saw, AFTER the command had already run. One importer hid it
+    // via the single-importer fallback.
+    let source_file: &Path = file;
     let file: &Path = preprocessed
         .as_ref()
         .map_or(file, tempfile::NamedTempFile::path);
@@ -658,46 +743,16 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 return Err(anyhow!("No importers defined in {}", config_path.display()));
             }
 
-            // Try auto-identification by filename pattern
-            let filename = file
+            // Auto-identify from the name the USER gave, not the temp file a
+            // preprocess step may have produced.
+            let filename = source_file
                 .file_name()
                 .map(|s| s.to_string_lossy())
                 .unwrap_or_default();
-            let matches = find_matching_importers(&importers_file, &filename);
-
-            let entry = match matches.len() {
-                1 => {
-                    eprintln!(
-                        "Auto-identified importer '{}' from filename pattern",
-                        matches[0].name
-                    );
-                    matches[0]
-                }
-                0 if importers_file.importers.len() == 1 => {
-                    // No pattern match but only one importer - use it
-                    &importers_file.importers[0]
-                }
-                0 => {
-                    let available: Vec<&str> = importers_file
-                        .importers
-                        .iter()
-                        .map(|e| e.name.as_str())
-                        .collect();
-                    return Err(anyhow!(
-                        "No importer matches file '{}'. Use --importer to select one: {}",
-                        filename,
-                        available.join(", ")
-                    ));
-                }
-                _ => {
-                    let names: Vec<&str> = matches.iter().map(|e| e.name.as_str()).collect();
-                    return Err(anyhow!(
-                        "Multiple importers match file '{}': {}. Use --importer to select one.",
-                        filename,
-                        names.join(", ")
-                    ));
-                }
-            };
+            let entry =
+                resolve_config_entry(args, &importers_file, &filename)?.ok_or_else(|| {
+                    anyhow!("No importer matches file '{filename}'. Use --importer to select one.")
+                })?;
 
             eprintln!(
                 "Using importer '{}' from {}",
@@ -1076,6 +1131,115 @@ narration_column = 1
         assert_eq!(
             parse_column_value(entry.amount_column.as_ref().unwrap()),
             Some("3".to_string())
+        );
+    }
+
+    /// Auto-identification must match the name the USER gave, not the temp
+    /// file preprocessing produced.
+    ///
+    /// The `--importer` path hid this: rebinding `file` to the temp
+    /// `rledger-preprocess-XXXX.csv` meant `filename_pattern = "*.pdf"` had
+    /// nothing to match, so a config with MORE THAN ONE importer failed with
+    /// "No importer matches file 'rledger-preprocess-…csv'" — naming a file
+    /// the user never saw, after the command had already run. A single-importer
+    /// config passed anyway via the no-match fallback, which is why the
+    /// original test did not catch it.
+    ///
+    /// Two importers here on purpose: one is the shape that passes regardless.
+    #[cfg(unix)]
+    #[test]
+    fn test_preprocess_auto_identifies_by_the_original_filename() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("statement.pdf");
+        std::fs::write(&pdf, "Date,Description,Amount\n2026-07-01,Coffee,-4.50\n").unwrap();
+        let config = dir.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            r#"
+[[importers]]
+name = "csv-bank"
+filename_pattern = "*.csv"
+account = "Assets:Other"
+date_column = "Date"
+narration_column = "Description"
+amount_column = "Amount"
+
+[[importers]]
+name = "pdf-bank"
+filename_pattern = "*.pdf"
+account = "Assets:Bank"
+date_column = "Date"
+narration_column = "Description"
+amount_column = "Amount"
+preprocess = ["cat", "{input}"]
+"#,
+        )
+        .unwrap();
+
+        // No --importer: identification must come from the *.pdf pattern.
+        let args = Args::parse_from([
+            "extract",
+            "--config",
+            config.to_str().unwrap(),
+            pdf.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        run_with_writer(&args, &pdf, &mut out).expect("auto-identifies the pdf profile");
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("Assets:Bank"),
+            "expected the pdf profile's account, got:\n{text}"
+        );
+    }
+
+    /// A config found by looking around the CURRENT DIRECTORY must not run
+    /// its `preprocess` command.
+    ///
+    /// Otherwise `rledger extract statement.csv` executes whatever an
+    /// `importers.toml` in that directory says — an unzipped bundle, a cloned
+    /// repo, a shared downloads folder. The entry is still usable for
+    /// declaring columns; only the exec is withheld.
+    ///
+    /// The command writes a marker file, so the assertion is that it did not
+    /// RUN, not merely that output looked unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn test_preprocess_is_ignored_from_a_cwd_discovered_config() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("EXECUTED");
+        let csv = dir.path().join("statement.csv");
+        std::fs::write(&csv, "Date,Description,Amount\n2026-07-01,Coffee,-4.50\n").unwrap();
+        std::fs::write(
+            dir.path().join("importers.toml"),
+            format!(
+                r#"
+[[importers]]
+name = "hostile"
+filename_pattern = "*"
+account = "Assets:Bank"
+date_column = "Date"
+narration_column = "Description"
+amount_column = "Amount"
+preprocess = ["touch", "{}"]
+"#,
+                marker.display()
+            ),
+        )
+        .unwrap();
+
+        // No --config: discovery has to find it in the current directory.
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let args = Args::parse_from(["extract", csv.to_str().unwrap()]);
+        let mut out = Vec::new();
+        let _ = run_with_writer(&args, &csv, &mut out);
+        std::env::set_current_dir(prev).unwrap();
+
+        assert!(
+            !marker.exists(),
+            "a cwd-discovered config executed its preprocess command",
         );
     }
 

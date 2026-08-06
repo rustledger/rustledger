@@ -46,6 +46,7 @@ fn make_input(directives: Vec<DirectiveWrapper>) -> PluginInput {
         options: PluginOptions {
             operating_currencies: vec!["USD".to_string()],
             title: None,
+            ..Default::default()
         },
         config: None,
     }
@@ -3690,6 +3691,7 @@ fn test_check_closing_units_none_uses_operating_currency_eur() {
         options: PluginOptions {
             operating_currencies: vec!["EUR".to_string()],
             title: None,
+            ..Default::default()
         },
         config: None,
     };
@@ -3747,6 +3749,7 @@ fn test_check_closing_units_none_falls_back_to_usd_when_no_operating_ccy() {
         options: PluginOptions {
             operating_currencies: vec![],
             title: None,
+            ..Default::default()
         },
         config: None,
     };
@@ -4307,6 +4310,7 @@ fn make_input_with_config(directives: Vec<DirectiveWrapper>, config: &str) -> Pl
         options: PluginOptions {
             operating_currencies: vec!["USD".to_string()],
             title: None,
+            ..Default::default()
         },
         config: Some(config.to_string()),
     }
@@ -8614,5 +8618,58 @@ fn test_capital_gains_gain_loss_zero_renames_to_losses() {
     assert_eq!(
         renamed_units.number, "0",
         "zero amount preserved through the rename"
+    );
+}
+
+/// `split_expenses` must split on a RENAMED expense root (#1964).
+///
+/// It previously classified with `account_type(..) == "expenses"`, which
+/// hardcodes the English roots — so on `option "name_expenses" "Depenses"`
+/// nothing was an expense, nothing split, and the plugin exited cleanly having
+/// done nothing. There was no error to notice.
+///
+/// The neighboring test above is the same scenario on an UNRENAMED ledger, so
+/// the pair separates "splitting works" from "splitting works on this ledger".
+#[test]
+fn test_split_expenses_splits_a_renamed_expense_root() {
+    let plugin = SplitExpensesPlugin;
+    let mut input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Depenses:Food"),
+            make_open("2024-01-01", "Assets:Cash"),
+            make_transaction(
+                "2024-01-15",
+                "Lunch",
+                vec![
+                    ("Depenses:Food", "100", "USD"),
+                    ("Assets:Cash", "-100", "USD"),
+                ],
+            ),
+        ],
+        "Alice Bob",
+    );
+    input.options.account_types = PluginAccountTypes {
+        expenses: "Depenses".to_string(),
+        ..PluginAccountTypes::default()
+    };
+
+    let output = process_and_materialize(&plugin, input);
+    assert!(output.errors.is_empty(), "{:?}", output.errors);
+
+    let expense_postings = output
+        .directives
+        .iter()
+        .filter_map(|d| match &d.data {
+            DirectiveData::Transaction(t) => Some(t),
+            _ => None,
+        })
+        .flat_map(|t| t.postings.iter())
+        .filter(|p| p.account.starts_with("Depenses:"))
+        .count();
+
+    assert_eq!(
+        expense_postings, 2,
+        "one sub-posting per member; 1 means the renamed root was not \
+         recognized and nothing split",
     );
 }

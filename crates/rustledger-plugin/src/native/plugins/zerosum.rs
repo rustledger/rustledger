@@ -512,6 +512,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: Some(config.to_string()),
         };
@@ -566,6 +567,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: Some(config.to_string()),
         };
@@ -636,6 +638,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: Some(config.to_string()),
         };

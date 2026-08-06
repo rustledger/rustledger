@@ -155,6 +155,7 @@ mod nounused_tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: None,
         };
@@ -213,6 +214,7 @@ mod nounused_tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: None,
         };
@@ -253,6 +255,7 @@ mod nounused_tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: None,
         };

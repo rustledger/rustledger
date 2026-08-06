@@ -97,11 +97,15 @@ impl NativePlugin for SplitExpensesPlugin {
                 let mut new_postings = Vec::new();
 
                 for posting in &txn.postings {
-                    // Check if this is an expense account (root-component
-                    // classification via core; identical to the old
-                    // `starts_with("Expenses:")` for any parsable account,
-                    // which always has >= 2 components).
-                    let is_expense = rustledger_core::account_type(&posting.account) == "expenses";
+                    // Classify through the ledger's CONFIGURED roots.
+                    //
+                    // This line previously read `account_type(..) == "expenses"`
+                    // with a comment noting it was "identical to the old
+                    // `starts_with(\"Expenses:\")`" — which was the problem
+                    // rather than the fix. The raw string had been replaced by
+                    // a helper hardcoding the same string, so the drift
+                    // survived being centralized (#1964).
+                    let is_expense = input.options.account_types.is_expense(&posting.account);
 
                     // Check if account already contains a member name
                     let has_member = members.iter().any(|m| posting.account.contains(m.as_str()));
@@ -257,6 +261,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: Some("Martin Caroline".to_string()),
         };
@@ -343,6 +348,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: Some("Martin Caroline".to_string()),
         };
@@ -388,6 +394,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: None,
         };

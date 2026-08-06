@@ -1019,6 +1019,15 @@ pub fn run_plugins(
     let plugin_options = PluginOptions {
         operating_currencies: file_options.operating_currency.clone(),
         title: file_options.title.clone(),
+        // Without these a plugin can only hardcode `Expenses:` etc., which
+        // silently matches nothing on a renamed ledger (#1964).
+        account_types: rustledger_plugin::PluginAccountTypes {
+            assets: file_options.name_assets.clone(),
+            liabilities: file_options.name_liabilities.clone(),
+            equity: file_options.name_equity.clone(),
+            income: file_options.name_income.clone(),
+            expenses: file_options.name_expenses.clone(),
+        },
     };
 
     // Dispatch each entry: resolve it to a concrete runtime, then run + apply

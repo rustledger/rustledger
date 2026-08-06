@@ -644,6 +644,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             options: PluginOptions {
                 operating_currencies: ledger.options.operating_currency.clone(),
                 title: ledger.options.title.clone(),
+                ..Default::default()
             },
             config: None,
         };

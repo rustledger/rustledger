@@ -297,6 +297,76 @@ pub fn validate_op_coverage(n: usize, ops: &[PluginOp]) -> Result<(), String> {
     Ok(())
 }
 
+/// The ledger's account-type root names, as configured.
+///
+/// A plugin that wants to know whether an account is an expense must ask
+/// through these rather than testing `starts_with("Expenses:")`: a ledger
+/// with `option "name_expenses" "Depenses"` has no `Expenses:` accounts at
+/// all, so a hardcoded test matches nothing and the plugin silently emits
+/// nothing — no error, no output, a clean exit (#1964).
+///
+/// Mirrors `rustledger_core::AccountTypes`, which cannot be used directly:
+/// this crate is the plugin WIRE contract and deliberately does not depend
+/// on core.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginAccountTypes {
+    /// Configured root name for Assets.
+    pub assets: String,
+    /// Configured root name for Liabilities.
+    pub liabilities: String,
+    /// Configured root name for Equity.
+    pub equity: String,
+    /// Configured root name for Income.
+    pub income: String,
+    /// Configured root name for Expenses.
+    pub expenses: String,
+}
+
+impl Default for PluginAccountTypes {
+    /// Beancount's defaults — what a ledger that renames nothing has.
+    fn default() -> Self {
+        Self {
+            assets: "Assets".to_string(),
+            liabilities: "Liabilities".to_string(),
+            equity: "Equity".to_string(),
+            income: "Income".to_string(),
+            expenses: "Expenses".to_string(),
+        }
+    }
+}
+
+impl PluginAccountTypes {
+    /// Whether `account`'s root is the configured Expenses name.
+    #[must_use]
+    pub fn is_expense(&self, account: &str) -> bool {
+        self.has_root(account, &self.expenses)
+    }
+
+    /// Whether `account`'s root is the configured Income name.
+    #[must_use]
+    pub fn is_income(&self, account: &str) -> bool {
+        self.has_root(account, &self.income)
+    }
+
+    /// Whether `account` is a balance-sheet root — Assets, Liabilities or
+    /// Equity — under this ledger's configured names.
+    #[must_use]
+    pub fn is_balance_sheet(&self, account: &str) -> bool {
+        self.has_root(account, &self.assets)
+            || self.has_root(account, &self.liabilities)
+            || self.has_root(account, &self.equity)
+    }
+
+    /// Root match on a COMPONENT boundary, not a prefix.
+    ///
+    /// `starts_with(root)` alone would match `Expenses2:Food` and
+    /// `ExpensesOld` for a root of `Expenses`; the root is the first
+    /// colon-separated component, so compare that.
+    fn has_root(&self, account: &str, root: &str) -> bool {
+        account.split(':').next().is_some_and(|first| first == root)
+    }
+}
+
 /// Ledger options passed to plugins.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginOptions {
@@ -304,6 +374,15 @@ pub struct PluginOptions {
     pub operating_currencies: Vec<String>,
     /// Ledger title (from `option "title" "My Ledger"`).
     pub title: Option<String>,
+    /// Configured account-type root names (`option "name_expenses"` etc.).
+    ///
+    /// `#[serde(default)]` so this stays wire-compatible both ways: a plugin
+    /// built against the older shape ignores the new field, and a plugin
+    /// built against this one reading an older host's payload gets the
+    /// beancount defaults rather than empty strings — which would classify
+    /// nothing and reproduce the bug this exists to fix.
+    #[serde(default)]
+    pub account_types: PluginAccountTypes,
 }
 
 // ============================================================================
@@ -646,7 +725,7 @@ impl CostNumberData {
             Self::Total { value } | Self::PerUnitFromTotal { total: value, .. } => Some(value),
             // Compound's `total` field is only the lump component, not
             // the whole cost — exposing it here would recreate the #1700
-            // mis-weighing in any consumer that treats it as the total.
+            // misweighing in any consumer that treats it as the total.
             Self::PerUnit { .. } | Self::Compound { .. } => None,
         }
     }
@@ -1275,6 +1354,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: Some("Test Ledger".to_string()),
+                ..Default::default()
             },
             config: Some("threshold=100".to_string()),
         };
@@ -1643,5 +1723,73 @@ mod tests {
         let decoded: MetadataOutput = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(decoded.name, original.name);
         assert_eq!(decoded.description, original.description);
+    }
+}
+
+#[cfg(test)]
+mod account_root_tests {
+    use super::PluginAccountTypes;
+
+    /// Classification follows the CONFIGURED names, not the English ones.
+    ///
+    /// This is the whole point of #1964: a plugin testing
+    /// `starts_with("Expenses:")` on a ledger with
+    /// `option "name_expenses" "Depenses"` matches nothing, so it emits
+    /// nothing — no error, no warning, a clean exit that looks like success.
+    #[test]
+    fn a_renamed_root_classifies_by_the_configured_name() {
+        let types = PluginAccountTypes {
+            expenses: "Depenses".to_string(),
+            income: "Revenu".to_string(),
+            ..PluginAccountTypes::default()
+        };
+        assert!(types.is_expense("Depenses:Food"));
+        assert!(types.is_income("Revenu:Salaire"));
+
+        // And the English names are NOT roots on this ledger — pinning that
+        // the check reads the config rather than accepting both spellings.
+        assert!(!types.is_expense("Expenses:Food"));
+        assert!(!types.is_income("Income:Salary"));
+    }
+
+    /// An unrenamed ledger keeps working.
+    #[test]
+    fn the_defaults_are_beancounts() {
+        let types = PluginAccountTypes::default();
+        assert!(types.is_expense("Expenses:Food"));
+        assert!(types.is_income("Income:Salary"));
+        assert!(types.is_balance_sheet("Assets:Bank"));
+        assert!(types.is_balance_sheet("Liabilities:CC"));
+        assert!(types.is_balance_sheet("Equity:Opening"));
+        assert!(!types.is_balance_sheet("Expenses:Food"));
+    }
+
+    /// The root is a COMPONENT, not a prefix.
+    ///
+    /// A bare `starts_with("Expenses")` would claim `Expenses2:Food` and
+    /// `ExpensesOld`. A bare account with no colon is still its own root.
+    #[test]
+    fn the_root_matches_on_a_component_boundary() {
+        let types = PluginAccountTypes::default();
+        assert!(!types.is_expense("Expenses2:Food"));
+        assert!(!types.is_expense("ExpensesOld"));
+        assert!(
+            types.is_balance_sheet("Assets"),
+            "a bare root is its own root"
+        );
+    }
+
+    /// An older host's payload, with no `account_types`, must deserialize to
+    /// the beancount defaults rather than empty strings.
+    ///
+    /// Empty strings would match no account at all and reproduce exactly the
+    /// silent-no-op this change fixes — the failure would look identical.
+    #[test]
+    fn an_older_payload_defaults_rather_than_emptying() {
+        let opts: super::PluginOptions =
+            serde_json::from_str(r#"{"operating_currencies":["USD"],"title":null}"#)
+                .expect("an older payload still loads");
+        assert_eq!(opts.account_types.expenses, "Expenses");
+        assert!(opts.account_types.is_expense("Expenses:Food"));
     }
 }

@@ -491,6 +491,7 @@ pub fn apply_plugins(
             options: PluginOptions {
                 operating_currencies: options.operating_currency.clone(),
                 title: options.title.clone(),
+                ..Default::default()
             },
             config: None,
         };

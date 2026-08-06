@@ -121,6 +121,7 @@ fn make_input(directives: &[Directive]) -> PluginInput {
         options: PluginOptions {
             operating_currencies: vec!["USD".to_string()],
             title: None,
+            ..Default::default()
         },
         config: None,
     }

@@ -60,9 +60,18 @@ impl NativePlugin for SellGainsPlugin {
                         let expected_gain = (sale_price - cost_per) * units_num.abs();
 
                         // Look for income/expense posting that should match
-                        let has_gain_posting = txn.postings.iter().any(|p| {
-                            p.account.starts_with("Income:") || p.account.starts_with("Expenses:")
-                        });
+                        // Classify through the ledger's CONFIGURED roots. The
+                        // hardcoded `starts_with("Income:")` matched nothing on
+                        // a ledger with `option "name_income" "Revenu"`, so
+                        // every sale looked like it had no gain posting and
+                        // this plugin warned on all of them — or, read the
+                        // other way, went silent exactly where it was needed
+                        // (#1964).
+                        let roots = &input.options.account_types;
+                        let has_gain_posting = txn
+                            .postings
+                            .iter()
+                            .any(|p| roots.is_income(&p.account) || roots.is_expense(&p.account));
 
                         if expected_gain != Decimal::ZERO && !has_gain_posting {
                             errors.push(PluginError::warning(format!(

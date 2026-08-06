@@ -276,6 +276,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: Some("{'Expenses:Taxes': 'Income:Taxes'}".to_string()),
         };
@@ -312,6 +313,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             // Rename all Food sub-accounts to Dining
             // In Rust regex, backreferences use $1 syntax
@@ -341,6 +343,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: None,
         };

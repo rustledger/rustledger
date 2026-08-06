@@ -70,6 +70,6 @@ pub use runtime::{
     validate_plugin_module,
 };
 pub use types::{
-    DirectiveWrapper, PluginError, PluginErrorSeverity, PluginInput, PluginOp, PluginOptions,
-    PluginOutput, validate_op_coverage,
+    DirectiveWrapper, PluginAccountTypes, PluginError, PluginErrorSeverity, PluginInput, PluginOp,
+    PluginOptions, PluginOutput, validate_op_coverage,
 };

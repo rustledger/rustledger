@@ -199,6 +199,7 @@ mod commodity_attr_tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: Some("{'name': null}".to_string()),
         };
@@ -230,6 +231,7 @@ mod commodity_attr_tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: Some("{'name': null}".to_string()),
         };
@@ -259,6 +261,7 @@ mod commodity_attr_tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: Some("{'sector': ['Tech', 'Finance']}".to_string()),
         };
@@ -290,6 +293,7 @@ mod commodity_attr_tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: Some("{'sector': ['Tech', 'Finance']}".to_string()),
         };

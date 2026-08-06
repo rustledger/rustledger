@@ -397,6 +397,7 @@ mod currency_accounts_tests {
         PluginOptions {
             operating_currencies: vec!["USD".to_string()],
             title: None,
+            ..Default::default()
         }
     }
 

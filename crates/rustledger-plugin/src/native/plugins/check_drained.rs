@@ -68,14 +68,12 @@ impl NativePlugin for CheckDrainedPlugin {
 
             if let DirectiveData::Close(data) = &wrapper.data {
                 // Only generate for balance sheet accounts (Assets,
-                // Liabilities, Equity). `account_type` classifies by the
-                // root component, so both `Assets:...` and a bare `Assets`
-                // land in the same arm (the old hand-written check needed
-                // six clauses for that).
-                let is_balance_sheet = matches!(
-                    rustledger_core::account_type(&data.account),
-                    "assets" | "liabilities" | "equity"
-                );
+                // Liabilities, Equity), under THIS ledger's configured root
+                // names — `account_type` hardcodes the English ones, so a
+                // renamed ledger classified every close as off-balance-sheet
+                // and silently skipped it (#1964). Root-component match, so
+                // both `Assets:...` and a bare `Assets` qualify.
+                let is_balance_sheet = input.options.account_types.is_balance_sheet(&data.account);
 
                 if !is_balance_sheet {
                     continue;
@@ -186,6 +184,7 @@ mod check_drained_tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: None,
         };
@@ -246,6 +245,7 @@ mod check_drained_tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: None,
         };
@@ -346,6 +346,7 @@ mod check_drained_tests {
             options: PluginOptions {
                 operating_currencies: vec!["USD".to_string()],
                 title: None,
+                ..Default::default()
             },
             config: None,
         };

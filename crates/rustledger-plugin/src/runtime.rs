@@ -1200,6 +1200,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec![],
                 title: None,
+                ..Default::default()
             },
             config: None,
         };
@@ -1242,6 +1243,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec![],
                 title: None,
+                ..Default::default()
             },
             config: None,
         }
@@ -1313,6 +1315,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec![],
                 title: None,
+                ..Default::default()
             },
             config: None,
         };
@@ -1352,6 +1355,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec![],
                 title: None,
+                ..Default::default()
             },
             config: None,
         };
@@ -1387,6 +1391,7 @@ mod tests {
             options: PluginOptions {
                 operating_currencies: vec![],
                 title: None,
+                ..Default::default()
             },
             config: None,
         }

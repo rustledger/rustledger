@@ -347,6 +347,22 @@ impl std::error::Error for AccountedBookingError {}
 /// assert_eq!(inv.units("AAPL"), dec!(10));
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// Deserialization goes through `InventoryWire` so the derived caches are
+// REBUILT rather than left empty.
+//
+// `simple_index` and `units_cache` are `#[serde(skip)]`, so a plain derive
+// produced an inventory holding positions with both caches empty. `units()`
+// recomputes on a miss and `add_headroom_for` refuses to answer, but `add()`
+// trusted them: `units_cache.get(..).unwrap_or_default()` read 0 for an
+// inventory already holding 100 USD, then wrote that back as the new total,
+// while the empty `simple_index` meant a cost-less lot was appended instead of
+// merged. A round-tripped 100 USD inventory answered `units("USD") == 5` after
+// adding 5, with two lots where there should be one.
+//
+// `rebuild_index`'s own doc already claimed it ran "after ... deserialization".
+// It did not — nothing called it on that path, and two comments elsewhere
+// referred to it by a name (`rebuild_caches`) that never existed. Now it does.
+#[serde(from = "InventoryWire")]
 pub struct Inventory {
     /// Persistent (structurally-shared) RRB-tree-backed vector. Cloning
     /// is O(1) (Arc bump on the tree root); `push_back` / indexed mutation
@@ -381,6 +397,29 @@ pub struct Inventory {
     /// Not serialized - rebuilt on demand.
     #[serde(skip)]
     units_cache: FxHashMap<crate::Currency, Decimal>,
+}
+
+/// Deserialization shape for [`Inventory`]: the persisted field only.
+///
+/// Exists so `From` can rebuild the derived caches — see the note on
+/// `Inventory`. Kept private; the wire format is unchanged (a struct with a
+/// `positions` sequence), so this is not a compatibility break.
+#[derive(Deserialize)]
+struct InventoryWire {
+    #[serde(default)]
+    positions: Vector<Position>,
+}
+
+impl From<InventoryWire> for Inventory {
+    fn from(wire: InventoryWire) -> Self {
+        let mut inv = Self {
+            positions: wire.positions,
+            simple_index: FxHashMap::default(),
+            units_cache: FxHashMap::default(),
+        };
+        inv.rebuild_index();
+        inv
+    }
 }
 
 impl PartialEq for Inventory {
@@ -973,14 +1012,15 @@ impl Inventory {
 #[cfg(test)]
 mod tests {
 
-    /// A deserialized inventory, whose caches are empty until rebuilt, must
-    /// not be reported as having headroom it does not have.
+    /// A deserialized inventory must not be reported as having headroom it
+    /// does not have.
     ///
-    /// `units_cache` and `simple_index` are `#[serde(skip)]`, so a round-trip
-    /// leaves `positions` populated and both caches empty. Reading them in that
-    /// state answers "plenty of room" for an inventory parked at the ceiling.
-    /// An unsound `true` makes `apply` skip the snapshot it needed, so this is
-    /// silent corruption rather than a wrong number (review catch on #1898).
+    /// The caches are `#[serde(skip)]`, so a round-trip once left `positions`
+    /// populated and both caches empty. Deserialization now rebuilds them, so
+    /// this passes because the cache is CORRECT rather than because
+    /// `add_headroom_for` refuses to read an empty one. Both are checked: the
+    /// defensive refusal stays as the second line of defense for any other way
+    /// an inventory might reach that state (review catch on #1898).
     #[test]
     fn a_deserialized_inventory_refuses_to_claim_headroom() {
         let mut inv = Inventory::new();
@@ -992,21 +1032,62 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&inv).expect("serialize"))
                 .expect("deserialize");
 
-        // Precondition: this really is the caches-empty state, so the test
-        // cannot pass vacuously on an inventory that rebuilt them itself.
         assert!(
             !round_tripped.positions.is_empty(),
             "the positions survive the round-trip"
         );
         assert!(
-            round_tripped.units_cache.is_empty(),
-            "...and the caches do not — that is what makes this dangerous"
+            !round_tripped.units_cache.is_empty(),
+            "and so do the caches now — deserialization rebuilds them"
         );
 
         assert!(
             !round_tripped.add_headroom_for("USD", Decimal::ONE),
-            "the inventory still holds Decimal::MAX; an empty cache is \
-             'cannot prove', never 'plenty of room'"
+            "the inventory still holds Decimal::MAX"
+        );
+    }
+
+    /// Mutating a deserialized inventory must not corrupt it.
+    ///
+    /// This is the case the rebuild exists for. `add` trusts both caches: it
+    /// reads `units_cache.get(..).unwrap_or_default()` as the running total and
+    /// `simple_index` as the lot to merge into. With both empty it read 0 for an
+    /// inventory already holding 100 USD, wrote that back as the new total, and
+    /// appended a second cost-less USD lot instead of merging — so a round-tripped
+    /// 100 USD inventory answered `units("USD") == 5` after adding 5, holding two
+    /// lots where the type's own invariant allows one.
+    ///
+    /// `units()` and `add_headroom_for` both survived that state on their own —
+    /// one recomputes, the other refuses — which is exactly why it went
+    /// unnoticed: the read paths were guarded and the WRITE path was not.
+    #[test]
+    fn adding_to_a_deserialized_inventory_keeps_the_running_total() {
+        let mut inv = Inventory::new();
+        inv.add(Position::simple(Amount::new(dec!(100), "USD")))
+            .expect("fits");
+
+        let mut round_tripped: Inventory =
+            serde_json::from_str(&serde_json::to_string(&inv).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(
+            round_tripped.units("USD"),
+            dec!(100),
+            "the round-trip preserves the total"
+        );
+
+        round_tripped
+            .add(Position::simple(Amount::new(dec!(5), "USD")))
+            .expect("fits");
+
+        assert_eq!(
+            round_tripped.units("USD"),
+            dec!(105),
+            "add must extend the existing total, not replace it"
+        );
+        assert_eq!(
+            round_tripped.positions().count(),
+            1,
+            "a cost-less add merges into the existing lot rather than appending"
         );
     }
 

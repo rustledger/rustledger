@@ -639,8 +639,8 @@ impl WatchingPluginManager {
     /// written, so the pair is updated atomically. The previous order assigned
     /// `tracked.plugin` and only then called `metadata.modified()?`, which on
     /// failure left the NEW plugin recorded against the OLD timestamp — an
-    /// inconsistent pair, and the only state `reload_if_changed` consults to
-    /// decide whether a reload is due. That sibling already gets this right;
+    /// inconsistent pair, and the only state `check_and_reload` consults to
+    /// decide whether a reload is due. `check_and_reload` already gets this right;
     /// this matches it (#1902 Phase 2).
     ///
     /// Atomicity is per PLUGIN, not across the loop: a failure on the third

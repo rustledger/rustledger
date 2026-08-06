@@ -728,15 +728,14 @@ impl Loader {
 /// overrides, then per-commodity `precision:` metadata. Only
 /// `render_commas` — presentation policy, not precision — is applied here.
 fn build_display_context(directives: &[Spanned<Directive>], options: &Options) -> DisplayContext {
-    let mut ctx = DisplayContext::from_directives(
+    DisplayContext::from_directives(
         directives.iter().map(|s| &s.value),
         options
             .display_precision
             .iter()
             .map(|(c, p)| (c.as_str(), *p)),
-    );
-    ctx.set_render_commas(options.render_commas);
-    ctx
+        options.render_commas,
+    )
 }
 
 #[cfg(test)]

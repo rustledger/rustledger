@@ -488,6 +488,7 @@ impl DisplayContext {
     pub fn from_directives<'a, I>(
         directives: I,
         fixed_precisions: impl IntoIterator<Item = (&'a str, u32)>,
+        render_commas: bool,
     ) -> Self
     where
         I: IntoIterator<Item = &'a Directive>,
@@ -584,6 +585,17 @@ impl DisplayContext {
         for (currency, precision) in fixed_precisions {
             ctx.set_fixed_precision(currency, precision);
         }
+
+        // Stage 2b: the ledger-wide grouping flag.
+        //
+        // A PARAMETER rather than a post-construction setter on purpose. Both
+        // production callers — the loader's `build_display_context` and the FFI
+        // component's `session.format` — used to call `set_render_commas`
+        // immediately after this, as two independent copies of the same
+        // six-line recipe with nothing asserting they agreed. Deleting the call
+        // from the FFI copy passed the entire workspace test suite. Threading it
+        // through the signature makes forgetting it a compile error instead.
+        ctx.set_render_commas(render_commas);
 
         // Stage 3: per-commodity `precision: N` metadata (see doc above).
         for directive in directives {
@@ -1813,7 +1825,7 @@ mod tests {
         ];
 
         // No overrides: pure inference.
-        let ctx = DisplayContext::from_directives(dirs.iter().take(4), std::iter::empty());
+        let ctx = DisplayContext::from_directives(dirs.iter().take(4), std::iter::empty(), false);
         assert_eq!(ctx.get_precision("USD"), Some(2), "mode of {{2,2,0}}dp");
         assert_eq!(ctx.get_precision("EUR"), Some(1));
         assert_eq!(
@@ -1829,7 +1841,7 @@ mod tests {
         );
 
         // Option override beats inference; commodity metadata beats both.
-        let ctx = DisplayContext::from_directives(dirs.iter(), [("EUR", 3), ("USD", 5)]);
+        let ctx = DisplayContext::from_directives(dirs.iter(), [("EUR", 3), ("USD", 5)], false);
         assert_eq!(
             ctx.get_precision("USD"),
             Some(4),
@@ -1871,7 +1883,7 @@ mod custom_directive_precision_tests {
     #[test]
     fn custom_amounts_do_not_inform_precision() {
         let directives = [custom_with_amount(1, Amount::new(dec!(0.5), "BTC"))];
-        let ctx = DisplayContext::from_directives(directives.iter(), std::iter::empty());
+        let ctx = DisplayContext::from_directives(directives.iter(), std::iter::empty(), false);
         assert_eq!(ctx.get_precision("BTC"), None);
         assert!(
             !ctx.currencies().any(|c| c == "BTC"),
@@ -1895,7 +1907,7 @@ mod custom_directive_precision_tests {
                 ),
             ),
         ];
-        let ctx = DisplayContext::from_directives(directives.iter(), std::iter::empty());
+        let ctx = DisplayContext::from_directives(directives.iter(), std::iter::empty(), false);
         assert_eq!(ctx.get_precision("USD"), Some(2));
     }
 

@@ -1833,13 +1833,6 @@ impl SessionState {
     /// into scope; bare `rledger format <file>` has none and emits ungrouped
     /// text.
     pub fn format(&self) -> Result<String, String> {
-        let mut ctx = rustledger_core::DisplayContext::from_directives(
-            self.directives.iter(),
-            self.options
-                .display_precision
-                .iter()
-                .map(|(c, p)| (c.as_str(), *p)),
-        );
         // The session holds the ledger's options, so this path can honor
         // `render_commas` on disk — the boundary a machine consumer crosses is
         // the PARSER, and the grammar admits grouped numerals. (Contrast the
@@ -1848,7 +1841,14 @@ impl SessionState {
         // `false` because it is a per-file text transform with no options in
         // scope; giving it a context is a separate decision about whether
         // `format` becomes a ledger operation.
-        ctx.set_render_commas(self.options.render_commas);
+        let ctx = rustledger_core::DisplayContext::from_directives(
+            self.directives.iter(),
+            self.options
+                .display_precision
+                .iter()
+                .map(|(c, p)| (c.as_str(), *p)),
+            self.options.render_commas,
+        );
         let config = rustledger_core::format::FormatConfig {
             number_display: Some(ctx),
             ..Default::default()
@@ -3192,5 +3192,79 @@ option \"operating_currency\" \"USD\"
             .returns(&inv, &inc, "USD", "2020-12-31")
             .expect("net-units returns tolerate an un-booked from_entries over-sell");
         assert_eq!(r.current_value, "-600", "net −5 ACME × 120");
+    }
+}
+
+#[cfg(test)]
+mod format_policy_tests {
+    use super::SessionState;
+
+    /// Both grouping tiers, over the FFI `session.format` surface.
+    ///
+    /// This surface honors `render_commas` and per-commodity `render_commas:`
+    /// declarations — deliberately, per the doc on `SessionState::format`: the
+    /// session holds the ledger's options, and the boundary a machine consumer
+    /// crosses here is the PARSER, whose grammar admits grouped numerals.
+    ///
+    /// Nothing verified it. Deleting the flag from this path used to pass the
+    /// entire workspace suite, because the construction was a second private
+    /// copy of the loader's `build_display_context` and no test rendered
+    /// through it. `DisplayContext::from_directives` now takes the flag as a
+    /// parameter, so dropping it is a compile error rather than a silent
+    /// downgrade — and this pins the behavior itself.
+    const LEDGER: &str = "\
+option \"render_commas\" \"TRUE\"
+
+2024-01-01 commodity USD
+2024-01-01 commodity JPY
+  render_commas: FALSE
+
+2024-01-01 open Assets:Bank
+2024-01-01 open Assets:Yen
+2024-01-01 open Equity:Open
+
+2024-02-01 * \"big usd\"
+  Assets:Bank    1234567.89 USD
+  Equity:Open   -1234567.89 USD
+
+2024-02-02 * \"big jpy\"
+  Assets:Yen     9876543 JPY
+  Equity:Open   -9876543 JPY
+";
+
+    #[test]
+    fn format_honors_both_grouping_tiers() {
+        let out = SessionState::from_source(LEDGER)
+            .format()
+            .expect("format succeeds");
+
+        assert!(
+            out.contains("1,234,567.89"),
+            "the ledger-wide render_commas must group USD; got:\n{out}",
+        );
+        // The per-commodity opt-OUT is the half a global-only implementation
+        // passes anyway, so it is the one that matters here.
+        assert!(
+            out.contains("9876543 JPY"),
+            "JPY declares render_commas: FALSE and must stay ungrouped; got:\n{out}",
+        );
+        assert!(
+            !out.contains("9,876,543"),
+            "JPY was grouped despite its own declaration; got:\n{out}",
+        );
+    }
+
+    /// Without `render_commas`, nothing groups — so the assertions above pin
+    /// the OPTION rather than "this surface always groups".
+    #[test]
+    fn format_leaves_an_undeclared_ledger_ungrouped() {
+        let plain = LEDGER.replace("option \"render_commas\" \"TRUE\"\n", "");
+        let out = SessionState::from_source(&plain)
+            .format()
+            .expect("format succeeds");
+        assert!(
+            out.contains("1234567.89") && !out.contains("1,234,567.89"),
+            "an undeclared ledger must not group; got:\n{out}",
+        );
     }
 }

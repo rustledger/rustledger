@@ -277,9 +277,9 @@ proptest! {
         let sum_of_groups: Decimal = g
             .rows
             .iter()
-            .map(|r| number_of(&format!("{:?}", r[1])))
+            .map(|r| number_of(&r[1]))
             .sum();
-        let ungrouped = number_of(&format!("{:?}", t.rows[0][0]));
+        let ungrouped = number_of(&t.rows[0][0]);
 
         prop_assert_eq!(
             sum_of_groups, ungrouped,
@@ -289,16 +289,37 @@ proptest! {
         // Each group key must sum exactly the ungrouped rows carrying that key.
         for group in &g.rows {
             let key = format!("{:?}", group[0]);
-            let reported = number_of(&format!("{:?}", group[1]));
+            let reported = number_of(&group[1]);
             let expected: Decimal = r
                 .rows
                 .iter()
                 .filter(|row| format!("{:?}", row[0]) == key)
-                .map(|row| number_of(&format!("{:?}", row[1])))
+                .map(|row| number_of(&row[1]))
                 .sum();
             prop_assert_eq!(
                 reported, expected,
                 "group {} sums rows that are not its own", key
+            );
+        }
+
+        // And the SIDECAR itself, which is the thing #1177 actually broke.
+        //
+        // The two assertions above read the projected `account` COLUMN. The
+        // group key travels separately, in `row_group_keys`, reachable only
+        // through `group_key(i)` — so a row whose column is right and whose
+        // sidecar is wrong satisfies everything above and is exactly the
+        // divergence that shipped. `results_match` next door compares sidecars
+        // too, but only between two runs: it pins them as DETERMINISTIC, not
+        // as correct, and a consistently-wrong sidecar passes it every time.
+        for (i, group) in g.rows.iter().enumerate() {
+            let sidecar = g.group_key(i);
+            prop_assert!(
+                sidecar.is_some(),
+                "row {} of a GROUP BY result carries no group key", i
+            );
+            prop_assert_eq!(
+                sidecar.expect("checked"), &group[..1],
+                "row {}'s group key disagrees with its GROUP BY column", i
             );
         }
     }
@@ -331,17 +352,19 @@ proptest! {
 }
 
 /// The `number:` field of a rendered `Value`, as a `Decimal`.
-fn number_of(rendered: &str) -> Decimal {
-    let after = rendered
-        .rsplit("number: ")
-        .next()
-        .filter(|_| rendered.contains("number: "))
-        .unwrap_or(rendered);
-    let text: String = after
-        .trim_start_matches(|c: char| !c.is_ascii_digit() && c != '-')
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
-        .collect();
-    text.parse()
-        .unwrap_or_else(|e| panic!("parsing {rendered:?}: {e}"))
+/// The `Decimal` out of a numeric cell.
+///
+/// Matching the public `Value` variants rather than scraping `{:?}`. The
+/// scraping version parsed a decimal back out of the Debug rendering, which
+/// couples the test to a formatting impl that is free to change and had
+/// already grown a branch for two different shapes. `Amount` is accepted
+/// because `SUM(number)` over a single-currency ledger can come back as one.
+fn number_of(v: &rustledger_query::Value) -> Decimal {
+    use rustledger_query::Value as V;
+    match v {
+        V::Number(d) => *d,
+        V::Integer(i) => Decimal::from(*i),
+        V::Amount(a) => a.number,
+        other => panic!("expected a numeric cell, got {other:?}"),
+    }
 }

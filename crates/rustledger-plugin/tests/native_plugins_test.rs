@@ -6236,6 +6236,48 @@ fn test_generate_base_ccy_prices_uses_an_inverse_rate() {
     );
 }
 
+/// A ZERO reverse rate yields no derived price, and does not panic.
+///
+/// Zero prices are legitimate — a gifted option books at zero cost — so the
+/// inverse fallback meets them, and `1/0` has no answer. Review asked for
+/// coverage of the zero branch; the branch turned out to be redundant, because
+/// `Decimal::checked_div` already returns `None` for a zero divisor, so an
+/// explicit `is_zero()` test ahead of it could never change the outcome. It was
+/// removed rather than tested.
+///
+/// This pins the BEHAVIOR instead, which is not redundant: switching to bare
+/// `Decimal::ONE / rate` would panic on this input rather than skip the entry.
+#[test]
+fn test_generate_base_ccy_prices_skips_a_zero_inverse_rate() {
+    let plugin = GenerateBaseCcyPricesPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_price("2020-01-01", "USD", "10", "TUG"),
+            make_price("2020-01-01", "EUR", "0", "TUG"),
+        ],
+        "EUR",
+    );
+    let output = process_and_materialize(&plugin, input);
+    assert!(output.errors.is_empty(), "{:?}", output.errors);
+
+    let prices: Vec<_> = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "price")
+        .collect();
+    assert_eq!(
+        prices.len(),
+        2,
+        "a zero reverse rate has no reciprocal, so no USD->EUR price can be \
+         derived; the two inputs must pass through unchanged",
+    );
+    assert!(
+        !prices.iter().any(|d| matches!(&d.data,
+            DirectiveData::Price(p) if p.currency == "USD" && p.amount.currency == "EUR")),
+        "no derived USD->EUR price may be emitted from a zero rate",
+    );
+}
+
 /// A DECLARED direction must win over the inverse of the other.
 ///
 /// With both `A -> B` and `B -> A` on the books, the rate the ledger wrote is

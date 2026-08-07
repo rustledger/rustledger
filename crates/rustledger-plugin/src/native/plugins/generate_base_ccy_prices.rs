@@ -167,12 +167,12 @@ fn get_price(
     }
     let inverse = (pair.1.clone(), pair.0.clone());
     let rate = lookup(price_map, &inverse, date)?;
-    // Guard the reciprocal: a zero rate is a real thing in ledgers (a gifted
-    // option books at zero cost), and beancount filters those out of the
-    // inversion for the same reason rather than dividing by zero.
-    if rate.is_zero() {
-        return None;
-    }
+    // `checked_div`, not `/`: a zero rate is a real thing in ledgers (a gifted
+    // option books at zero cost), and beancount filters those out of its own
+    // inversion rather than dividing by them. `checked_div` already returns
+    // `None` for a zero divisor, so an explicit `is_zero()` branch ahead of it
+    // would be dead — verified, and removed for that reason. Bare `/` would
+    // PANIC here, which is what the zero-rate test pins.
     Decimal::ONE.checked_div(rate)
 }
 

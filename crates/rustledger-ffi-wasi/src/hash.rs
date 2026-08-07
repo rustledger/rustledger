@@ -200,7 +200,10 @@ fn incomplete_amount(hasher: &mut Sha256, amount: Option<&rustledger_core::Incom
 /// exhaustive match means adding a variant is a compile error here - which
 /// forces the identity question to be answered rather than silently defaulted.
 ///
-/// Posting `meta` and comments are deliberately NOT hashed; see #1968.
+/// Posting `meta` IS hashed and posting comments are not — the #1968 split.
+/// Metadata is structured user data with a write API premised on it being
+/// meaningful; comments are presentation, and do not reliably survive a
+/// parse/format round trip. See [`metadata`].
 fn posting_identity(hasher: &mut Sha256, p: &rustledger_core::directive::Posting) {
     use rustledger_core::CostNumber;
 

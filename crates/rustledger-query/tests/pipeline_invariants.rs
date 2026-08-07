@@ -66,8 +66,12 @@ fn results_match(a: &QueryResult, b: &QueryResult) -> bool {
 /// Magnitudes spanning three scales, not one uniform range.
 ///
 /// The original `-1_000_000..1_000_000` made a value near the boundary
-/// vanishingly rare: landing in `(0, 1]` needs `|n| <= 10^scale`, so at most
-/// 1000 of two million draws — roughly 0.3 expected hits across a whole run.
+/// vanishingly rare. A drawn value is `n / 10^scale`, and `scale` is
+/// `0u32..3` — EXCLUSIVE, so 0, 1 or 2 — which puts the ceiling at `10^2`.
+/// Landing in `(0, 1]` therefore needs `0 < n <= 100`: at most 100 of two
+/// million values, so across a whole run (128 cases x ~6 transactions) about
+/// **0.04** expected hits. Not one in twenty-five runs.
+///
 /// A predicate bug at the boundary would have gone unseen, which sabotaging
 /// the partition property is how I found out: swapping `number > 0` for
 /// `number > 1` changed nothing, because there was nothing between them.
@@ -200,19 +204,31 @@ fn large_ledger_query_is_deterministic() {
 // parsing.
 // ---------------------------------------------------------------------------
 
-/// Every posting's number, straight from the executor, with no predicate.
-fn all_numbers(ledger: &[Directive]) -> Vec<String> {
-    let q = parse("SELECT number").expect("query parses");
+/// Rows identified by `date`, `account` AND `number`, not by number alone.
+///
+/// Copilot's catch on review. A multiset of bare numbers cannot see a WHERE
+/// path that DROPS one row and DUPLICATES another carrying the same number —
+/// and this generator makes equal numbers common, because every transaction
+/// posts `amt` to a random account and `-amt` to `Assets:Bank`. The union
+/// would still reconstruct, and the property would be weaker than its own
+/// docstring claims. Three columns make a coincidence need all three to agree.
+fn row_keys(ledger: &[Directive], predicate: Option<&str>) -> Vec<String> {
+    let sql = match predicate {
+        Some(p) => format!("SELECT date, account, number WHERE {p}"),
+        None => "SELECT date, account, number".to_owned(),
+    };
+    let q = parse(&sql).expect("query parses");
     let r = Executor::new(ledger).execute(&q).expect("runs");
-    let mut v: Vec<String> = r.rows.iter().map(|row| format!("{:?}", row[0])).collect();
-    v.sort();
-    v
-}
-
-fn numbers_where(ledger: &[Directive], predicate: &str) -> Vec<String> {
-    let q = parse(&format!("SELECT number WHERE {predicate}")).expect("query parses");
-    let r = Executor::new(ledger).execute(&q).expect("runs");
-    let mut v: Vec<String> = r.rows.iter().map(|row| format!("{:?}", row[0])).collect();
+    let mut v: Vec<String> = r
+        .rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|c| format!("{c:?}"))
+                .collect::<Vec<_>>()
+                .join("|")
+        })
+        .collect();
     v.sort();
     v
 }
@@ -232,9 +248,9 @@ proptest! {
     /// into comparing something against nothing.
     #[test]
     fn a_predicate_and_its_negation_partition_the_rows(ledger in ledger_strategy()) {
-        let all = all_numbers(&ledger);
-        let yes = numbers_where(&ledger, "number > 0");
-        let no = numbers_where(&ledger, "NOT (number > 0)");
+        let all = row_keys(&ledger, None);
+        let yes = row_keys(&ledger, Some("number > 0"));
+        let no = row_keys(&ledger, Some("NOT (number > 0)"));
 
         prop_assert!(!all.is_empty(), "the fixture must produce rows");
         prop_assert!(!yes.is_empty() && !no.is_empty(),

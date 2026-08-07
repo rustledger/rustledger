@@ -63,8 +63,6 @@ fn results_match(a: &QueryResult, b: &QueryResult) -> bool {
     a.rows == b.rows && (0..a.rows.len()).all(|i| a.group_key(i) == b.group_key(i))
 }
 
-/// A balanced two-posting transaction with a random leg account, amount,
-/// and day.
 /// Magnitudes spanning three scales, not one uniform range.
 ///
 /// The original `-1_000_000..1_000_000` made a value near the boundary
@@ -81,6 +79,8 @@ fn amount_strategy() -> impl Strategy<Value = i64> {
     ]
 }
 
+/// A balanced two-posting transaction with a random leg account, amount,
+/// and day.
 fn txn_strategy() -> impl Strategy<Value = Transaction> {
     (1u32..28, 0usize..ACCOUNTS.len(), amount_strategy(), 0u32..3)
         .prop_filter("non-zero amount", |(_, _, n, _)| *n != 0)
@@ -249,19 +249,27 @@ proptest! {
         );
     }
 
-    /// Grouping must not change the total.
+    /// Grouping must not change the total, and each group must own its rows.
     ///
-    /// `SUM(number) GROUP BY account`, summed back over the groups, must equal
-    /// the ungrouped `SUM(number)`. That is the invariant #1177 broke: rows
-    /// were right while their group-key sidecar was not, so any check reading
-    /// only the values agreed while the grouping underneath had drifted.
+    /// Two assertions, because the weaker one alone would have missed #1177.
+    ///
+    /// The total is the obvious half: `SUM(number) GROUP BY account`, summed
+    /// back over the groups, must equal the ungrouped `SUM(number)`.
+    ///
+    /// But a total is blind to the failure that actually happened — rows right
+    /// while their group-key sidecar was not. Permute the sums across the
+    /// account labels and the total still reconciles perfectly; every group is
+    /// simply attributed to the wrong account. So the second assertion pins
+    /// each group's sum against the rows that belong to that key.
     #[test]
     fn grouping_preserves_the_total(ledger in ledger_strategy()) {
         let grouped = parse("SELECT account, SUM(number) GROUP BY account").expect("parses");
         let total = parse("SELECT SUM(number)").expect("parses");
+        let rows = parse("SELECT account, number").expect("parses");
 
         let g = Executor::new(&ledger).execute(&grouped).expect("runs");
         let t = Executor::new(&ledger).execute(&total).expect("runs");
+        let r = Executor::new(&ledger).execute(&rows).expect("runs");
 
         prop_assert!(!g.rows.is_empty(), "grouping must produce at least one group");
         prop_assert_eq!(t.rows.len(), 1, "an ungrouped SUM is a single row");
@@ -277,6 +285,22 @@ proptest! {
             sum_of_groups, ungrouped,
             "the group sums must add up to the ungrouped total"
         );
+
+        // Each group key must sum exactly the ungrouped rows carrying that key.
+        for group in &g.rows {
+            let key = format!("{:?}", group[0]);
+            let reported = number_of(&format!("{:?}", group[1]));
+            let expected: Decimal = r
+                .rows
+                .iter()
+                .filter(|row| format!("{:?}", row[0]) == key)
+                .map(|row| number_of(&format!("{:?}", row[1])))
+                .sum();
+            prop_assert_eq!(
+                reported, expected,
+                "group {} sums rows that are not its own", key
+            );
+        }
     }
 
     /// `ORDER BY` must permute, never add, drop or alter.

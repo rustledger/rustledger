@@ -256,9 +256,23 @@ def compare(a: dict, b: dict):
 # Every entry carries why. An entry without a reason is indistinguishable from
 # one added to make a run look clean.
 # Pinned price-directive divergences, keyed (file, field) like the posting
-# table. Empty: the corpus run below found none, and an empty pin table is the
-# honest state to ship — a pin added "just in case" hides the first real one.
-KNOWN_PRICE_DIVERGENCES: dict[tuple[str, str], str] = {}
+# table. One entry, and deliberately only one — a pin added "just in case"
+# hides the first real finding, which is exactly what the OTHER divergence
+# from the same corpus run turned out to be (#1980, left unpinned so it keeps
+# showing until it is fixed).
+KNOWN_PRICE_DIVERGENCES: dict[tuple[str, str], str] = {
+    ("ledger_prices.beancount", "price_number"):
+        "rust_decimal's ~28-significant-digit ceiling, not a defect. This "
+        "ledger carries rates that came from binary floats, so beancount "
+        "holds e.g. 0.999079999999999968096631164371501654386520385742187"
+        "5 (the exact float64 expansion, ~52 digits) where rledger holds "
+        "0.9990799999999999680966311644. They agree to every digit rledger "
+        "can represent; the difference is the documented limitation in "
+        "CLAUDE.md's Decimal Precision section, not a disagreement about "
+        "the money. Note `_num_agrees` cannot absorb this on its own: it "
+        "quantizes rledger's value to beancount's exponent, and an exponent "
+        "that fine overflows the Decimal context and raises.",
+}
 
 
 KNOWN_POSTING_DIVERGENCES: dict[tuple[str, str], str] = {

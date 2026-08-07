@@ -380,3 +380,267 @@ fn cost_price_and_flag_are_part_of_posting_identity() {
         cases.len(),
     );
 }
+
+/// Build a metadata map from key/value pairs.
+fn meta(pairs: &[(&str, rustledger_core::MetaValue)]) -> Metadata {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .collect()
+}
+
+fn txn_with_meta(m: Metadata) -> Directive {
+    let Directive::Transaction(mut t) = txn(None, "n", &[], &[]) else {
+        unreachable!()
+    };
+    t.meta = m;
+    Directive::Transaction(t)
+}
+
+/// User metadata is part of a directive's identity — the #1968 decision.
+///
+/// Two directives differing only by a metadata key were the same object to
+/// every consumer of `meta.hash`, including rustfava's `insert_metadata`, which
+/// resolves an entry BY hash and then writes to that entry's line without any
+/// second factor. The endpoint whose whole job is creating metadata-only
+/// differences was the one unguarded against them.
+#[test]
+fn metadata_is_part_of_the_identity() {
+    use rustledger_core::MetaValue as V;
+
+    let none = txn_with_meta(meta(&[]));
+    let a = txn_with_meta(meta(&[("k", V::String("a".into()))]));
+    let b = txn_with_meta(meta(&[("k", V::String("b".into()))]));
+    let other_key = txn_with_meta(meta(&[("j", V::String("a".into()))]));
+    let two = txn_with_meta(meta(&[
+        ("k", V::String("a".into())),
+        ("j", V::String("b".into())),
+    ]));
+
+    let cases: [(&Directive, &Directive, &str); 4] = [
+        (&none, &a, "metadata present vs absent"),
+        (&a, &b, "a different value under the same key"),
+        (&a, &other_key, "the same value under a different key"),
+        (&a, &two, "an additional key"),
+    ];
+    let collisions: Vec<&str> = cases
+        .iter()
+        .filter(|(left, right, _)| hash(left) == hash(right))
+        .map(|(_, _, what)| *what)
+        .collect();
+    assert!(
+        collisions.is_empty(),
+        "{} of {} metadata cases collided: {collisions:#?}",
+        collisions.len(),
+        cases.len(),
+    );
+}
+
+/// A metadata VALUE's type is part of its identity, not just its rendering.
+///
+/// `MetaValue`'s `Display` is lossy across variants: `Number(42)` and `Int(42)`
+/// both render `42`. The parser goes to deliberate trouble (#1766) to keep
+/// those distinct, so hashing the rendering would throw the distinction away
+/// again one layer down. Hence the variant tag.
+#[test]
+fn metadata_value_types_do_not_collide() {
+    use rustledger_core::MetaValue as V;
+
+    let int = txn_with_meta(meta(&[("k", V::Int(42))]));
+    let number = txn_with_meta(meta(&[("k", V::Number(42.into()))]));
+    let string = txn_with_meta(meta(&[("k", V::String("42".into()))]));
+    let null = txn_with_meta(meta(&[("k", V::None)]));
+    let bool_true = txn_with_meta(meta(&[("k", V::Bool(true))]));
+    let bool_false = txn_with_meta(meta(&[("k", V::Bool(false))]));
+
+    let cases: [(&Directive, &Directive, &str); 4] = [
+        (&int, &number, "Int(42) vs Number(42) — both render `42`"),
+        (&int, &string, "Int(42) vs String(\"42\")"),
+        (&null, &bool_false, "None vs Bool(false)"),
+        (&bool_true, &bool_false, "Bool(true) vs Bool(false)"),
+    ];
+    let collisions: Vec<&str> = cases
+        .iter()
+        .filter(|(left, right, _)| hash(left) == hash(right))
+        .map(|(_, _, what)| *what)
+        .collect();
+    assert!(
+        collisions.is_empty(),
+        "{} of {} meta-value cases collided: {collisions:#?}",
+        collisions.len(),
+        cases.len(),
+    );
+}
+
+/// The same metadata hashes the same however the map was built.
+///
+/// `Metadata` is an `FxHashMap`, so iteration order is an implementation
+/// detail. Hashing it as it iterates would make the digest depend on insertion
+/// history — nondeterminism in the one field every consumer treats as stable.
+/// Inserting the same pairs in the opposite order is the cheapest way to reach
+/// a differently-ordered map.
+#[test]
+fn metadata_hashing_does_not_depend_on_map_order() {
+    use rustledger_core::MetaValue as V;
+
+    let pairs = [
+        ("alpha", V::String("1".into())),
+        ("beta", V::Int(2)),
+        ("gamma", V::Bool(true)),
+        ("delta", V::None),
+    ];
+    let mut forward = Metadata::default();
+    for (k, v) in &pairs {
+        forward.insert((*k).to_owned(), v.clone());
+    }
+    let mut backward = Metadata::default();
+    for (k, v) in pairs.iter().rev() {
+        backward.insert((*k).to_owned(), v.clone());
+    }
+
+    // Self-check FIRST. This test only exercises the sort if the two maps
+    // actually iterate differently — and whether they do is a property of
+    // these particular keys and `FxHashMap`'s bucket layout, not something
+    // the test controls. If a hasher change or a different key set ever makes
+    // both iterate identically, the assertion below would pass with the sort
+    // deleted. Failing loudly here is the difference between a guard and a
+    // decoration.
+    let f: Vec<&String> = forward.keys().collect();
+    let b: Vec<&String> = backward.keys().collect();
+    assert_ne!(
+        f, b,
+        "these two maps iterate identically, so this test can no longer \
+         distinguish a sorted digest from an unsorted one — pick keys that \
+         do produce different orders"
+    );
+
+    assert_eq!(
+        hash(&txn_with_meta(forward)),
+        hash(&txn_with_meta(backward)),
+        "insertion order must not reach the digest"
+    );
+}
+
+/// Comments are deliberately NOT part of the identity — the other half of
+/// #1968.
+///
+/// This asserts a deliberate collision, which is the only way to pin a decision
+/// to EXCLUDE something: if a future change starts hashing comments, this test
+/// fails and the decision gets re-made on purpose rather than by accident.
+#[test]
+fn comments_are_deliberately_not_part_of_the_identity() {
+    let plain = txn(None, "n", &[], &[]);
+
+    let Directive::Transaction(mut t) = txn(None, "n", &[], &[]) else {
+        unreachable!()
+    };
+    t.trailing_comments = vec!["; a note to self".to_owned()];
+    let commented = Directive::Transaction(t);
+
+    assert_eq!(
+        hash(&plain),
+        hash(&commented),
+        "a comment must not change a directive's identity (#1968)"
+    );
+}
+
+/// Fields that reached NO digest at all, found by auditing every directive
+/// struct's fields against the arms of `compute_directive_hash`.
+///
+/// Same defect class as the `cost`/`price`/`flag` omission #1961 fixed — not
+/// two fields blurring together, but fields never consulted. These are not the
+/// #1968 judgment call; each is unambiguously identity-bearing:
+///
+/// - `Open::booking` decides how every reduction against the account is booked.
+/// - `Balance::tolerance` — `100 USD` and `100 USD ~ 0.05` are different
+///   assertions, and one can pass where the other fails.
+/// - `Document::tags`/`links` — a Document carries both, exactly as a
+///   Transaction does.
+/// - `Custom::values` — the values ARE the directive. Every `custom "budget"`
+///   on a given date hashed identically.
+#[test]
+fn every_directive_field_reaches_the_digest() {
+    use rustledger_core::MetaValue as V;
+    use rustledger_core::directive::{Balance, Custom, Document, Open};
+
+    let d = naive_date(2024, 1, 1).unwrap();
+    let amount = rustledger_core::Amount::new(rustledger_core::Decimal::ONE, "USD");
+
+    let mut open_fifo = Open::new(d, "Assets:A");
+    open_fifo.booking = Some("FIFO".to_owned());
+    let mut open_lifo = Open::new(d, "Assets:A");
+    open_lifo.booking = Some("LIFO".to_owned());
+    let open_none = Open::new(d, "Assets:A");
+
+    let bal_plain = Balance::new(d, "Assets:A", amount.clone());
+    let mut bal_tol = Balance::new(d, "Assets:A", amount.clone());
+    bal_tol.tolerance = Some("0.05".parse().unwrap());
+    let mut bal_tol2 = Balance::new(d, "Assets:A", amount);
+    bal_tol2.tolerance = Some("0.50".parse().unwrap());
+
+    let doc_plain = Document::new(d, "Assets:A", "/x.pdf");
+    let mut doc_tagged = Document::new(d, "Assets:A", "/x.pdf");
+    doc_tagged.tags = vec![Tag::new("t")];
+    let mut doc_linked = Document::new(d, "Assets:A", "/x.pdf");
+    doc_linked.links = vec![Link::new("t")];
+
+    let mut custom_a = Custom::new(d, "budget");
+    custom_a.values = vec![V::String("a".into())];
+    let mut custom_b = Custom::new(d, "budget");
+    custom_b.values = vec![V::String("b".into())];
+    let custom_empty = Custom::new(d, "budget");
+
+    let pairs: Vec<(Directive, Directive, &str)> = vec![
+        (
+            Directive::Open(open_fifo.clone()),
+            Directive::Open(open_lifo),
+            "Open: FIFO vs LIFO",
+        ),
+        (
+            Directive::Open(open_fifo),
+            Directive::Open(open_none),
+            "Open: a booking method vs none",
+        ),
+        (
+            Directive::Balance(bal_plain),
+            Directive::Balance(bal_tol.clone()),
+            "Balance: a tolerance vs none",
+        ),
+        (
+            Directive::Balance(bal_tol),
+            Directive::Balance(bal_tol2),
+            "Balance: a different tolerance",
+        ),
+        (
+            Directive::Document(doc_plain),
+            Directive::Document(doc_tagged.clone()),
+            "Document: a tag vs none",
+        ),
+        (
+            Directive::Document(doc_tagged),
+            Directive::Document(doc_linked),
+            "Document: the same name as a tag vs as a link",
+        ),
+        (
+            Directive::Custom(custom_a.clone()),
+            Directive::Custom(custom_b),
+            "Custom: a different value",
+        ),
+        (
+            Directive::Custom(custom_a),
+            Directive::Custom(custom_empty),
+            "Custom: a value vs none",
+        ),
+    ];
+    let collisions: Vec<&str> = pairs
+        .iter()
+        .filter(|(left, right, _)| hash(left) == hash(right))
+        .map(|(_, _, what)| *what)
+        .collect();
+    assert!(
+        collisions.is_empty(),
+        "{} of {} never-hashed-field cases collided: {collisions:#?}",
+        collisions.len(),
+        pairs.len(),
+    );
+}

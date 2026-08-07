@@ -491,7 +491,17 @@ pub fn apply_plugins(
             options: PluginOptions {
                 operating_currencies: options.operating_currency.clone(),
                 title: options.title.clone(),
-                ..Default::default()
+                // The held options carry the ledger's root renames, so pass
+                // them: `..Default::default()` would hand plugins the English
+                // roots and reproduce on this surface exactly the silent
+                // misclassification this change fixes (#1964).
+                account_types: rustledger_plugin::PluginAccountTypes {
+                    assets: options.name_assets.clone(),
+                    liabilities: options.name_liabilities.clone(),
+                    equity: options.name_equity.clone(),
+                    income: options.name_income.clone(),
+                    expenses: options.name_expenses.clone(),
+                },
             },
             config: None,
         };
@@ -575,5 +585,65 @@ option \"operating_currency\" \"USD\"
             .filter(|d| matches!(d, Directive::Transaction(t) if rustledger_booking::is_synthesized_pad(t)))
             .count();
         assert_eq!(synth, 1, "expected exactly one synthesized Padding txn");
+    }
+}
+
+#[cfg(test)]
+mod plugin_options_tests {
+    use super::*;
+
+    /// `apply_plugins` must hand plugins the ledger's OWN root names.
+    ///
+    /// This surface built `PluginOptions` with `..Default::default()`, which
+    /// supplies the English roots — so a plugin classifying through
+    /// `account_types` still misclassified here after the native pipeline was
+    /// fixed. Caught in review of #1978: the bulk edit that silenced the new
+    /// field's compile errors treated this production site like a test one.
+    ///
+    /// Uses `check_drained`, which emits a balance assertion when a
+    /// BALANCE-SHEET account is closed. `apply_plugins` hardcodes
+    /// `config: None`, so a config-driven plugin like `split_expenses` is a
+    /// passthrough here and cannot discriminate — the first draft of this test
+    /// used it and passed with the bug reinstated.
+    #[test]
+    fn apply_plugins_passes_the_ledgers_account_roots() {
+        let options = crate::types::output::LedgerOptions {
+            name_assets: "Actifs".to_string(),
+            ..crate::types::output::LedgerOptions::default()
+        };
+
+        let source = "\
+2024-01-01 open Actifs:Bank
+2024-01-01 open Expenses:Food
+
+2024-02-01 * \"lunch\"
+  Expenses:Food   10.00 USD
+  Actifs:Bank    -10.00 USD
+
+2024-03-01 close Actifs:Bank
+";
+        let parsed = rustledger_parser::parse(source);
+        let directives: Vec<rustledger_core::Directive> =
+            parsed.directives.iter().map(|d| (**d).clone()).collect();
+        let n = directives.len();
+        let before = directives.len();
+        let mut errors = Vec::new();
+
+        let (out, _, _) = apply_plugins(
+            &["check_drained"],
+            directives,
+            vec![0; n],
+            vec!["<test>".to_string(); n],
+            &mut errors,
+            &options,
+        );
+
+        assert!(
+            out.len() > before,
+            "check_drained must add a balance assertion for the closed \
+             `Actifs:` account; unchanged output means the renamed root was \
+             not recognized as balance-sheet, so the ledger's names never \
+             reached the plugin",
+        );
     }
 }

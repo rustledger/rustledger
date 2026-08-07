@@ -644,7 +644,16 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             options: PluginOptions {
                 operating_currencies: ledger.options.operating_currency.clone(),
                 title: ledger.options.title.clone(),
-                ..Default::default()
+                // Same as the loader pipeline: CLI-specified WASM plugins must
+                // see the ledger's own root names, or they misclassify on a
+                // renamed ledger just as the native ones did (#1964).
+                account_types: rustledger_plugin::PluginAccountTypes {
+                    assets: ledger.options.name_assets.clone(),
+                    liabilities: ledger.options.name_liabilities.clone(),
+                    equity: ledger.options.name_equity.clone(),
+                    income: ledger.options.name_income.clone(),
+                    expenses: ledger.options.name_expenses.clone(),
+                },
             },
             config: None,
         };

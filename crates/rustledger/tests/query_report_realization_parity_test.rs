@@ -184,11 +184,31 @@ fn two_lot_fixture(method: &str) -> String {
   Assets:Cash  -2000.00 USD
 
 2024-06-10 * "sell 5"
-  Assets:Broker   -5 AAPL {{}} @ 180.00 USD
+{reduction}
   Assets:Cash    900.00 USD
   Income:PnL
-"#
+"#,
+        reduction = reduction_for(method),
     )
+}
+
+/// The reduction line, which cannot be the same for every method.
+///
+/// NONE turns cost tracking off, so an empty `{{}}` spec has nothing to
+/// resolve and interpolation fails with "2 unknowns" — the transaction never
+/// books at all. Before #1987 that did not show up here, because both surfaces
+/// then realized the UNBOOKED transaction and agreed: the guard was comparing
+/// two wrong answers and calling it parity. Making booking failures fatal is
+/// what exposed it.
+///
+/// NONE therefore reduces by price rather than by lot, which is the only shape
+/// that means anything when there are no lots.
+fn reduction_for(method: &str) -> &'static str {
+    if method == "NONE" {
+        "  Assets:Broker   -5 AAPL @ 180.00 USD"
+    } else {
+        "  Assets:Broker   -5 AAPL {} @ 180.00 USD"
+    }
 }
 
 /// Every `(units, cost)` pair a surface reports for AAPL, sorted.
@@ -297,21 +317,27 @@ fn every_agreeing_booking_method_realizes_identically() {
     );
 }
 
-/// STRICT ambiguity: both surfaces report it, and they diverge on what
-/// happens next — #1987.
+/// STRICT ambiguity: both surfaces must REFUSE, alike.
 ///
-/// This test used to assert only that both mentioned the message, which
-/// Copilot flagged as not matching its own stated intent ("must FAIL on both
-/// surfaces"). Checking the exit codes turned up a bug the message-only
-/// assertion was hiding: `report balances` PANICS (exit 101, an assertion in
-/// `apply()` about unbooked reductions), while `query BALANCES` exits 0 and
-/// prints a `-5 AAPL` row for an account holding 15 units.
+/// This test was a characterization test for #1987 and has been rewritten
+/// because the fix tripped it, which is exactly what it was for. What it used
+/// to pin:
 ///
-/// Pinned rather than skipped, for the same reason as AVERAGE below: a fix
-/// changes these exit codes and trips this test, forcing it to be rewritten as
-/// the agreement assertion it was always supposed to be.
+/// | surface | exit | behavior |
+/// |---|---|---|
+/// | `query BALANCES` | 0 | printed `-5 AAPL` for an account holding 15 |
+/// | `report balances` | 101 | **panicked** in `apply()` |
+///
+/// One crashed, the other answered wrongly, and neither said so in its exit
+/// code. Now both refuse with the same message and the same status: a
+/// transaction that did not book leaves the stream in pre-booking shape, and
+/// no figure derived from it can be trusted.
+///
+/// Asserting the STATUS and not only the message, which is the gap that hid
+/// the panic: the old version checked that both *printed* the ambiguity, and
+/// both did — one of them on its way to crashing.
 #[test]
-fn strict_ambiguity_is_reported_by_both_surfaces() {
+fn strict_ambiguity_makes_both_surfaces_refuse() {
     let bin = require_rledger!();
     let f = write_fixture(&two_lot_fixture("STRICT"));
     let path = f.path().to_str().unwrap();
@@ -333,33 +359,29 @@ fn strict_ambiguity_is_reported_by_both_surfaces() {
         )
     };
     let (q, r) = (combined(&query), combined(&report));
-    assert!(
-        q.contains("Ambiguous lot match"),
-        "BQL must report the ambiguity: {q}"
-    );
-    assert!(
-        r.contains("Ambiguous lot match"),
-        "report must report the ambiguity: {r}"
-    );
 
-    // The outcomes, which is where they part company (#1987).
     assert!(
-        query.status.success(),
-        "BQL exits 0 today despite the ambiguity — if this now fails, #1987 \
-         has been fixed on the query side; rewrite this test to assert both \
-         surfaces agree"
+        !query.status.success(),
+        "BQL must refuse to answer over an unbooked ledger: {q}"
     );
     assert!(
         !report.status.success(),
-        "report exits non-zero today (it panics in apply()) — if this now \
-         succeeds, #1987 has been fixed on the report side; rewrite this test \
-         to assert both surfaces agree"
+        "report must refuse to answer over an unbooked ledger: {r}"
     );
-    assert!(
-        r.contains("panicked"),
-        "the #1987 shape is a PANIC, not a clean error. If report now fails \
-         cleanly that is the fix landing — rewrite this test.\nreport: {r}"
-    );
+    for (surface, out) in [("query", &q), ("report", &r)] {
+        assert!(
+            out.contains("could not be booked"),
+            "{surface} must say WHY it refused: {out}"
+        );
+        assert!(
+            out.contains("Ambiguous lot match"),
+            "{surface} must name the underlying booking failure: {out}"
+        );
+        assert!(
+            !out.contains("panicked"),
+            "{surface} must fail cleanly, not panic (#1987): {out}"
+        );
+    }
 }
 
 /// AVERAGE diverges today — #1985. Pinned, not skipped.

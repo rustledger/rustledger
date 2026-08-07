@@ -171,3 +171,52 @@ pub fn bail_on_parse_errors(raw: &rustledger_loader::LoadResult, file: &Path) ->
     }
     Ok(())
 }
+
+/// Refuse to derive figures from a ledger whose transactions did not book.
+///
+/// The same principle as [`bail_on_parse_errors`], one phase later. A booking
+/// failure — an ambiguous STRICT lot match, a reduction with no matching lot —
+/// leaves that transaction in the directive stream in PRE-BOOKING shape:
+/// `run_booking` partitions failures out, and `finalize` re-merges them so the
+/// user still sees their own input. That re-merge is documented as being "for
+/// output", but nothing stopped the same directives flowing into computation.
+///
+/// The consequences were #1987, and they were worse than a wrong number:
+///
+/// * `report balances` realizes through `BookingEngine::apply`, whose
+///   precondition is booked input. In debug it PANICKED (exit 101); in release
+///   it dropped the reduction and reported 20 AAPL for an account holding 15.
+/// * `query BALANCES` re-aggregates by lot key and printed a dangling `-5
+///   AAPL` row, exiting 0.
+///
+/// So one surface crashed, the other answered wrongly, and neither said so in
+/// its exit code. `apply` now reports the failure rather than asserting in one
+/// build profile and ignoring it in the other; this stops the CLI reaching that
+/// point at all, and says what to do about it.
+///
+/// # Errors
+///
+/// When any directive failed to book.
+pub fn bail_on_booking_errors(ledger: &rustledger_loader::Ledger, file: &Path) -> Result<()> {
+    // Counting the BOOK-coded errors specifically. `ledger.errors` also carries
+    // validation diagnostics, which do NOT leave the stream unbooked and must
+    // not gate a report — `rledger check` is where those are read.
+    let failures: Vec<&str> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.code == "BOOK")
+        .map(|e| e.message.as_str())
+        .collect();
+    if failures.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{}: {} transaction(s) could not be booked; refusing to derive figures \
+         from a ledger whose lots did not resolve — the affected accounts would \
+         be over-stated. Run `rledger check {}` to see them.\n  {}",
+        file.display(),
+        failures.len(),
+        file.display(),
+        failures.join("\n  "),
+    );
+}

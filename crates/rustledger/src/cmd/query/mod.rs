@@ -176,6 +176,11 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     // Report errors to stderr (matching bean-query behavior)
     // Continue with successfully parsed directives rather than bailing
     if !ledger.errors.is_empty() && !args.no_errors {
+        // A booking failure leaves directives unbooked in this same stream; every
+        // figure below would be derived from them. Checked before the diagnostics
+        // loop so the message the user acts on is the last thing printed.
+        crate::cmd::loadcache::bail_on_booking_errors(&ledger, file)?;
+
         for err in &ledger.errors {
             eprintln!("{}: {}", err.code, err.message);
         }

@@ -508,6 +508,11 @@ fn load(
     // ledger says. Left on `eprintln!`, they reached the terminal and nothing
     // else — a confident, complete-looking report over a file that did not
     // parse, which is the failure the sink was introduced to end.
+    // A booking failure leaves directives unbooked in this same stream; every
+    // figure below would be derived from them. Checked before the diagnostics
+    // loop so the message the user acts on is the last thing printed.
+    crate::cmd::loadcache::bail_on_booking_errors(&ledger, file)?;
+
     for err in &ledger.errors {
         warnings.emit(Diagnostic {
             code: Some(err.code.clone()),

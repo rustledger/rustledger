@@ -683,6 +683,49 @@ impl BookingEngine {
     /// what any one account can consume, which is the safe direction, and it
     /// avoids grouping postings by account and currency — an allocation, which
     /// is the thing being removed.
+    /// Whether `apply` must snapshot before mutating.
+    ///
+    /// Two reasons a posting can fail partway through, and both now abort the
+    /// transaction, so both need the earlier postings rolled back:
+    ///
+    /// * an `add` that overflows (#1863) — [`Self::overflow_is_possible`];
+    /// * a `reduce` with no matching lot, which since #1987 is an error rather
+    ///   than something to ignore.
+    ///
+    /// The reduction half is checked separately because `overflow_is_possible`
+    /// is about magnitudes and answers `true` for an unfilled posting only by
+    /// coincidence. Relying on that coincidence would leave a filled-but-
+    /// unbookable transaction (an ambiguous STRICT match with explicit
+    /// amounts) mutating half its accounts and then returning `Err`.
+    ///
+    /// Kept as two predicates rather than folded into one so the #1897
+    /// perf reasoning stays legible: snapshotting EVERY transaction cost 2.4x
+    /// heap churn and 6% CPU, which is why neither half is unconditional.
+    /// Reductions are a minority of transactions in a real ledger, so this
+    /// widens the gate without reopening that regression.
+    fn rollback_needed(&self, txn: &Transaction) -> bool {
+        self.overflow_is_possible(txn) || self.has_reduction(txn)
+    }
+
+    /// Whether any posting reduces an existing cost-bearing lot.
+    ///
+    /// Uses the canonical [`Inventory::is_booking_reduction`] rather than
+    /// re-deriving "is this a reduction" from the sign, which is the drift the
+    /// duplication review kept finding.
+    fn has_reduction(&self, txn: &Transaction) -> bool {
+        txn.postings.iter().any(|posting| {
+            let Some(units) = posting.amount() else {
+                // Unfilled: booking did not complete, so this transaction is
+                // exactly the unbookable kind that needs the rollback.
+                return true;
+            };
+            let method = self.method_for(&posting.account);
+            self.inventories
+                .get(&posting.account)
+                .is_some_and(|inv| inv.is_booking_reduction(units, posting.cost.as_ref(), method))
+        })
+    }
+
     fn overflow_is_possible(&self, txn: &Transaction) -> bool {
         let mut sum_abs = rustledger_core::Decimal::ZERO;
         for posting in &txn.postings {
@@ -718,24 +761,23 @@ impl BookingEngine {
     ///
     /// The transaction MUST already be booked — postings filled with complete
     /// units and resolved costs, as produced by [`Self::book_and_interpolate`]
-    /// or the free [`book`](crate::book) function. Applying an *unbooked*
-    /// transaction can silently over-sell an inventory: a reduction with no
-    /// matching lot yet is dropped (its `reduce` error is ignored, historical
-    /// release behavior). The loader pipeline guarantees this ordering; the
-    /// in-loop `debug_assert` below catches a violating caller in debug builds.
-    /// A caller that CANNOT guarantee booked input must not derive a figure from
-    /// this lot-matching realization — e.g. the returns engine values **net units
-    /// at market** (`rustledger-returns`), never `apply`, so a re-merged
-    /// booking-failed transaction cannot over-sell it.
+    /// or the free [`book`](crate::book) function. The loader pipeline
+    /// guarantees this ordering. A caller that CANNOT guarantee booked input
+    /// must not derive a figure from this lot-matching realization — e.g. the
+    /// returns engine values **net units at market** (`rustledger-returns`),
+    /// never `apply`, so a re-merged booking-failed transaction cannot
+    /// over-sell it.
+    ///
     /// # Errors
     ///
-    /// [`BookingError`] only for arithmetic overflow (#1863) — a property of
-    /// the ledger's numbers, not of the caller, so it is reported rather than
-    /// asserted. A failed *reduction* keeps the historical
-    /// debug-assert-then-ignore contract below: that means the caller applied
-    /// an unbooked transaction, which is a bug in the caller. Keeping it
-    /// non-fatal preserves every existing caller's release-build behavior;
-    /// only the overflow path is new.
+    /// [`BookingError`] for arithmetic overflow (#1863) or for a reduction
+    /// that finds no matching lot (#1987). Either way the transaction is rolled
+    /// back whole: no posting of a failing transaction stays applied.
+    ///
+    /// The reduction case used to be `debug_assert!`-then-ignore, which made
+    /// the two build profiles disagree about a user's ledger — debug panicked,
+    /// release silently over-stated the holding. Reporting it is what lets a
+    /// caller decide, which is the whole point of the precondition.
     pub fn apply(&mut self, txn: &Transaction) -> Result<(), BookingError> {
         // Snapshot every account this transaction touches, so an overflow
         // partway through cannot leave the earlier postings applied.
@@ -757,7 +799,7 @@ impl BookingEngine {
         // every transaction cost 2.4x heap churn and 6% CPU on the nightly
         // profile to guard a case needing values near 7.9e28 (#1897).
         let snapshot: Option<FxHashMap<rustledger_core::Account, Option<Inventory>>> =
-            if self.overflow_is_possible(txn) {
+            if self.rollback_needed(txn) {
                 let mut snap =
                     FxHashMap::with_capacity_and_hasher(txn.postings.len(), Default::default());
                 for posting in &txn.postings {
@@ -784,42 +826,39 @@ impl BookingEngine {
             };
 
         for posting in &txn.postings {
-            let reduced = self.try_apply_posting(posting, txn.date);
-            if matches!(
-                reduced,
-                Err(BookingError::Inventory(
-                    rustledger_core::AccountedBookingError {
-                        error: rustledger_core::BookingError::Overflow(_),
-                        ..
-                    }
-                ))
-            ) {
-                // `snapshot` is `Some` whenever this arm is reachable: the
-                // guard only returns false when no add can overflow, and
-                // overflow is the sole error that reaches here. Restoring
-                // nothing would be silent corruption, so a violated guard must
-                // be loud rather than quiet.
+            // EVERY posting failure aborts the transaction and rolls back —
+            // overflow and failed reduction alike (#1987).
+            //
+            // A failed reduction used to be `debug_assert!` then ignored. That
+            // meant the two build profiles disagreed about what happens to a
+            // user's ledger: debug PANICKED (`report balances` exited 101 on an
+            // ambiguous STRICT match), while release dropped the reduction and
+            // carried on — reporting 20 AAPL for an account holding 15. A
+            // silently over-stated holding is the worse of the two, and it was
+            // the one real users got.
+            //
+            // The precondition is unchanged and still documented: `apply` wants
+            // booked input. What changed is that violating it is now reported
+            // instead of being asserted in one profile and ignored in the
+            // other. Callers already handle this — `book()` records the error
+            // and marks the transaction failed, the wasm entry point checks
+            // `is_ok()`, and the CLI refuses to derive a figure at all.
+            if let Err(e) = self.try_apply_posting(posting, txn.date) {
+                // `snapshot` is `Some` whenever this arm is reachable:
+                // `rollback_needed` covers both failure modes. Restoring
+                // nothing would be silent corruption — precisely the bug being
+                // fixed — so a violated guard must be loud rather than quiet.
                 assert!(
                     snapshot.is_some(),
-                    "overflow_is_possible() returned false but an overflow \
-                     occurred: the guard is unsound and the earlier postings \
-                     of this transaction cannot be rolled back"
+                    "rollback_needed() returned false but posting application \
+                     failed ({e}): the guard is unsound and the earlier \
+                     postings of this transaction cannot be rolled back"
                 );
                 if let Some(snapshot) = snapshot {
                     rollback(self, snapshot);
                 }
-                return reduced;
+                return Err(e);
             }
-            debug_assert!(
-                reduced.is_ok(),
-                "apply() reduction failed — the transaction must be booked \
-                 before apply() (postings filled, costs resolved); applying an \
-                 unbooked reduction silently over-sells inventory. A caller that \
-                 cannot guarantee booked input must not derive a figure from this \
-                 realization (e.g. returns values net units at market instead)."
-            );
-            // Release builds keep the historical ignore-and-continue behavior.
-            let _ = reduced;
         }
         Ok(())
     }

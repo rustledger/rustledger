@@ -534,17 +534,44 @@ fn negative_long_term_days_is_rejected() {
     );
 }
 
+/// An ambiguous STRICT reduction makes the report REFUSE, not return empty.
+///
+/// This test previously asserted the opposite — that the report succeeded with
+/// a header-only CSV, on the reasoning that no disposal was fabricated. Not
+/// fabricating a row was right; exiting 0 was not. A header-only capital-gains
+/// CSV is indistinguishable from "you had no disposals this year", so the
+/// failure mode was a confident, complete-looking answer over a ledger that
+/// did not book — the exact hazard `bail_on_parse_errors` already exists to
+/// prevent one phase earlier.
+///
+/// Changed by #1987, where the same unbooked directives made `report balances`
+/// panic and `query BALANCES` print a negative holding. Booking failures are
+/// now refused across the board rather than each report improvising.
 #[test]
-fn ambiguous_strict_reduction_yields_no_rows() {
+fn ambiguous_strict_reduction_is_refused() {
     let bin = require_rledger!();
     let f = write_fixture(LEDGER_AMBIGUOUS);
     let path = f.path().to_str().unwrap();
-    // The report books with the ledger's STRICT method: the ambiguous bare-`{}`
-    // sale does not book, so no disposal is fabricated.
-    let out = run(&bin, &["report", path, "capgains", "--format", "csv"]);
-    assert_eq!(
-        out.lines().count(),
-        1,
-        "header only, no fabricated rows: {out}"
+
+    let out = Command::new(&bin)
+        .args(["report", path, "capgains", "--format", "csv"])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        !out.status.success(),
+        "an unbooked ledger must not yield an exit-0 report: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        stderr.contains("could not be booked"),
+        "the refusal must say why: {stderr}"
+    );
+    // And still no fabricated disposal, which was the original point.
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("AAPL"),
+        "no disposal may be fabricated from an unbooked sale: {}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }

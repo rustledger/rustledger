@@ -980,6 +980,40 @@ def main() -> int:
         else:
             beancount_only.append((path, detail))
 
+        # --- axis 4: the price database ------------------------------
+        # Neither axis above reaches it. A posting carries its own `@`
+        # annotation, but the ledger's PRICE DIRECTIVES are what market
+        # valuation reads — VALUE(), report holdings / networth, and the
+        # returns engine, which values net units at market (#1847). A
+        # dropped or misdated price directive is invisible to every
+        # other axis here and wrong in all of those.
+        bcpr = beancount_prices(path)
+        if bcpr is None:
+            price_skipped += 1
+        else:
+            rlpr = rledger_prices(args.rledger, path)
+            if rlpr is None:
+                price_skipped += 1
+            else:
+                price_compared += 1
+                # Most ledgers declare no prices at all, so an
+                # empty-vs-empty comparison is a pass that exercised
+                # nothing. Count the files that actually carry price
+                # directives — that is this axis's real coverage, and
+                # without it "compared 188 files" reads as far more
+                # assurance than it is.
+                if bcpr or rlpr:
+                    price_exercised += 1
+                kept_pr, pinned_pr = [], 0
+                for where, field, x, y in compare_prices(bcpr, rlpr):
+                    if (path.name, field) in KNOWN_PRICE_DIVERGENCES:
+                        pinned_pr += 1
+                    else:
+                        kept_pr.append((where, x, y))
+                price_pinned += pinned_pr
+                if kept_pr:
+                    price_divergent.append((path, kept_pr))
+
         # --- axis 1: booked values (unchanged) -----------------------------
         try:
             bc = beancount_totals(path)
@@ -1021,40 +1055,6 @@ def main() -> int:
                 posting_pinned += pinned_here
                 if kept:
                     posting_divergent.append((path, kept))
-
-            # --- axis 4: the price database ------------------------------
-            # Neither axis above reaches it. A posting carries its own `@`
-            # annotation, but the ledger's PRICE DIRECTIVES are what market
-            # valuation reads — VALUE(), report holdings / networth, and the
-            # returns engine, which values net units at market (#1847). A
-            # dropped or misdated price directive is invisible to every
-            # other axis here and wrong in all of those.
-            bcpr = beancount_prices(path)
-            if bcpr is None:
-                price_skipped += 1
-            else:
-                rlpr = rledger_prices(args.rledger, path)
-                if rlpr is None:
-                    price_skipped += 1
-                else:
-                    price_compared += 1
-                    # Most ledgers declare no prices at all, so an
-                    # empty-vs-empty comparison is a pass that exercised
-                    # nothing. Count the files that actually carry price
-                    # directives — that is this axis's real coverage, and
-                    # without it "compared 188 files" reads as far more
-                    # assurance than it is.
-                    if bcpr or rlpr:
-                        price_exercised += 1
-                    kept_pr, pinned_pr = [], 0
-                    for where, field, x, y in compare_prices(bcpr, rlpr):
-                        if (path.name, field) in KNOWN_PRICE_DIVERGENCES:
-                            pinned_pr += 1
-                        else:
-                            kept_pr.append((where, x, y))
-                    price_pinned += pinned_pr
-                    if kept_pr:
-                        price_divergent.append((path, kept_pr))
 
     # Errors first: a file rledger wrongly rejects is a louder problem than a
     # value that differs in the last place, and the CI step only lifts the

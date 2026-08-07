@@ -65,13 +65,24 @@ fn results_match(a: &QueryResult, b: &QueryResult) -> bool {
 
 /// A balanced two-posting transaction with a random leg account, amount,
 /// and day.
+/// Magnitudes spanning three scales, not one uniform range.
+///
+/// The original `-1_000_000..1_000_000` made a value near the boundary
+/// vanishingly rare: landing in `(0, 1]` needs `|n| <= 10^scale`, so at most
+/// 1000 of two million draws — roughly 0.3 expected hits across a whole run.
+/// A predicate bug at the boundary would have gone unseen, which sabotaging
+/// the partition property is how I found out: swapping `number > 0` for
+/// `number > 1` changed nothing, because there was nothing between them.
+fn amount_strategy() -> impl Strategy<Value = i64> {
+    prop_oneof![
+        3 => -1_000_000i64..1_000_000,  // ordinary magnitudes
+        2 => -1_000i64..1_000,          // small — puts values around 1
+        1 => -5i64..5,                  // tiny — puts values either side of 0
+    ]
+}
+
 fn txn_strategy() -> impl Strategy<Value = Transaction> {
-    (
-        1u32..28,
-        0usize..ACCOUNTS.len(),
-        -1_000_000i64..1_000_000,
-        0u32..3,
-    )
+    (1u32..28, 0usize..ACCOUNTS.len(), amount_strategy(), 0u32..3)
         .prop_filter("non-zero amount", |(_, _, n, _)| *n != 0)
         .prop_map(|(day, acct, n, scale)| {
             let amt = Decimal::new(n, scale);
@@ -172,4 +183,141 @@ fn large_ledger_query_is_deterministic() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Algebraic properties (#1902 Phase 1).
+//
+// The determinism properties above ask "does the same input give the same
+// answer twice". These ask whether the answer is RIGHT, using relationships
+// that must hold whatever the ledger contains — so they need no expected
+// value, which is what makes them checkable over generated input.
+//
+// Miri excludes this crate for rowan reasons that are not going away, so this
+// is the compensating coverage. It is also aimed where the crate has actually
+// broken: #1177 was a grouping/parallel-path divergence, and the two bugs
+// found by hand this cycle (#1963, #1966) were both in evaluation rather than
+// parsing.
+// ---------------------------------------------------------------------------
+
+/// Every posting's number, straight from the executor, with no predicate.
+fn all_numbers(ledger: &[Directive]) -> Vec<String> {
+    let q = parse("SELECT number").expect("query parses");
+    let r = Executor::new(ledger).execute(&q).expect("runs");
+    let mut v: Vec<String> = r.rows.iter().map(|row| format!("{:?}", row[0])).collect();
+    v.sort();
+    v
+}
+
+fn numbers_where(ledger: &[Directive], predicate: &str) -> Vec<String> {
+    let q = parse(&format!("SELECT number WHERE {predicate}")).expect("query parses");
+    let r = Executor::new(ledger).execute(&q).expect("runs");
+    let mut v: Vec<String> = r.rows.iter().map(|row| format!("{:?}", row[0])).collect();
+    v.sort();
+    v
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(96))]
+
+    /// `WHERE p` and `WHERE NOT p` must PARTITION the unfiltered rows.
+    ///
+    /// Neither half may invent a row, lose one, or claim the same row twice.
+    /// A predicate that misevaluates in one direction only — the shape a
+    /// three-valued-logic slip takes — shows up here as a sum that no longer
+    /// reconstructs the whole.
+    ///
+    /// `number > 0` on purpose: the ledger strategy balances every transaction,
+    /// so both sides are always populated and the property never degenerates
+    /// into comparing something against nothing.
+    #[test]
+    fn a_predicate_and_its_negation_partition_the_rows(ledger in ledger_strategy()) {
+        let all = all_numbers(&ledger);
+        let yes = numbers_where(&ledger, "number > 0");
+        let no = numbers_where(&ledger, "NOT (number > 0)");
+
+        prop_assert!(!all.is_empty(), "the fixture must produce rows");
+        prop_assert!(!yes.is_empty() && !no.is_empty(),
+            "both halves must be populated or the partition is vacuous: \
+             {} positive, {} non-positive", yes.len(), no.len());
+
+        let mut union: Vec<String> = yes.iter().chain(no.iter()).cloned().collect();
+        union.sort();
+        prop_assert_eq!(
+            union, all,
+            "WHERE p and WHERE NOT p must reconstruct exactly the unfiltered rows"
+        );
+    }
+
+    /// Grouping must not change the total.
+    ///
+    /// `SUM(number) GROUP BY account`, summed back over the groups, must equal
+    /// the ungrouped `SUM(number)`. That is the invariant #1177 broke: rows
+    /// were right while their group-key sidecar was not, so any check reading
+    /// only the values agreed while the grouping underneath had drifted.
+    #[test]
+    fn grouping_preserves_the_total(ledger in ledger_strategy()) {
+        let grouped = parse("SELECT account, SUM(number) GROUP BY account").expect("parses");
+        let total = parse("SELECT SUM(number)").expect("parses");
+
+        let g = Executor::new(&ledger).execute(&grouped).expect("runs");
+        let t = Executor::new(&ledger).execute(&total).expect("runs");
+
+        prop_assert!(!g.rows.is_empty(), "grouping must produce at least one group");
+        prop_assert_eq!(t.rows.len(), 1, "an ungrouped SUM is a single row");
+
+        let sum_of_groups: Decimal = g
+            .rows
+            .iter()
+            .map(|r| number_of(&format!("{:?}", r[1])))
+            .sum();
+        let ungrouped = number_of(&format!("{:?}", t.rows[0][0]));
+
+        prop_assert_eq!(
+            sum_of_groups, ungrouped,
+            "the group sums must add up to the ungrouped total"
+        );
+    }
+
+    /// `ORDER BY` must permute, never add, drop or alter.
+    ///
+    /// Sorting is where a comparator that is not a total order silently loses
+    /// or duplicates rows — and the null-ordering tests next door pin WHICH
+    /// order, not that the multiset survived it.
+    #[test]
+    fn ordering_is_a_permutation(ledger in ledger_strategy()) {
+        let unordered = parse("SELECT date, account, number").expect("parses");
+        let ordered =
+            parse("SELECT date, account, number ORDER BY number DESC").expect("parses");
+
+        let u = Executor::new(&ledger).execute(&unordered).expect("runs");
+        let o = Executor::new(&ledger).execute(&ordered).expect("runs");
+
+        let key = |r: &Vec<rustledger_query::Value>| {
+            r.iter().map(|v| format!("{v:?}")).collect::<Vec<_>>().join("|")
+        };
+        let mut a: Vec<String> = u.rows.iter().map(key).collect();
+        let mut b: Vec<String> = o.rows.iter().map(key).collect();
+        a.sort();
+        b.sort();
+
+        prop_assert!(!a.is_empty(), "the fixture must produce rows");
+        prop_assert_eq!(a, b, "ORDER BY changed the multiset of rows, not just their order");
+    }
+}
+
+/// The `number:` field of a rendered `Value`, as a `Decimal`.
+fn number_of(rendered: &str) -> Decimal {
+    let after = rendered
+        .rsplit("number: ")
+        .next()
+        .filter(|_| rendered.contains("number: "))
+        .unwrap_or(rendered);
+    let text: String = after
+        .trim_start_matches(|c: char| !c.is_ascii_digit() && c != '-')
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+        .collect();
+    text.parse()
+        .unwrap_or_else(|e| panic!("parsing {rendered:?}: {e}"))
 }

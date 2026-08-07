@@ -216,21 +216,40 @@ fn aapl_lots(stdout: &str) -> Option<Vec<(String, String)>> {
             if units.is_empty() || units.parse::<f64>().is_err() {
                 continue;
             }
-            let cost = after
-                .split_once('{')
-                .and_then(|(_, rest)| rest.split_once('}').map(|(inner, _)| inner))
-                .map(|inner| {
-                    inner
+            // A lot with NO `{...}` is a genuine shape — NONE booking, and the
+            // unbooked reduction in #1987, both produce bare units. That is
+            // recorded as `None`, which is not the same as a cost that failed
+            // to parse.
+            //
+            // Everything else fails loudly. Copilot's catch: this used to
+            // `unwrap_or_default()` into an empty string, so a change to how
+            // costs render would give BOTH surfaces `""` and they would
+            // compare equal — a guard whose entire job is comparing costs,
+            // passing precisely when it had stopped seeing them.
+            let cost = match after.split_once('{') {
+                None => None,
+                Some((_, rest)) => {
+                    let inner = rest
+                        .split_once('}')
+                        .unwrap_or_else(|| panic!("lot cost is not closed in {line:?}"));
+                    let number = inner
+                        .0
                         .split(',')
                         .next()
-                        .unwrap_or_default()
+                        .expect("split always yields one field")
                         .split_whitespace()
                         .next()
-                        .unwrap_or_default()
-                        .to_owned()
-                })
-                .unwrap_or_default();
-            lots.push((units, cost));
+                        .unwrap_or_else(|| panic!("lot cost carries no number in {line:?}"));
+                    assert!(
+                        number.parse::<f64>().is_ok(),
+                        "lot cost {number:?} is not a number in {line:?} — the \
+                         cost rendering changed and this comparison has stopped \
+                         seeing costs"
+                    );
+                    Some(number.to_owned())
+                }
+            };
+            lots.push((units, cost.unwrap_or_else(|| "<no cost>".to_owned())));
         }
     }
     if lots.is_empty() {
@@ -278,11 +297,19 @@ fn every_agreeing_booking_method_realizes_identically() {
     );
 }
 
-/// STRICT must FAIL on both surfaces, not on one.
+/// STRICT ambiguity: both surfaces report it, and they diverge on what
+/// happens next — #1987.
 ///
-/// An ambiguous lot match is a realization outcome like any other, and a guard
-/// that only compared successful output would miss a surface that quietly
-/// picked a lot where the other refused.
+/// This test used to assert only that both mentioned the message, which
+/// Copilot flagged as not matching its own stated intent ("must FAIL on both
+/// surfaces"). Checking the exit codes turned up a bug the message-only
+/// assertion was hiding: `report balances` PANICS (exit 101, an assertion in
+/// `apply()` about unbooked reductions), while `query BALANCES` exits 0 and
+/// prints a `-5 AAPL` row for an account holding 15 units.
+///
+/// Pinned rather than skipped, for the same reason as AVERAGE below: a fix
+/// changes these exit codes and trips this test, forcing it to be rewritten as
+/// the agreement assertion it was always supposed to be.
 #[test]
 fn strict_ambiguity_is_reported_by_both_surfaces() {
     let bin = require_rledger!();
@@ -313,6 +340,25 @@ fn strict_ambiguity_is_reported_by_both_surfaces() {
     assert!(
         r.contains("Ambiguous lot match"),
         "report must report the ambiguity: {r}"
+    );
+
+    // The outcomes, which is where they part company (#1987).
+    assert!(
+        query.status.success(),
+        "BQL exits 0 today despite the ambiguity — if this now fails, #1987 \
+         has been fixed on the query side; rewrite this test to assert both \
+         surfaces agree"
+    );
+    assert!(
+        !report.status.success(),
+        "report exits non-zero today (it panics in apply()) — if this now \
+         succeeds, #1987 has been fixed on the report side; rewrite this test \
+         to assert both surfaces agree"
+    );
+    assert!(
+        r.contains("panicked"),
+        "the #1987 shape is a PANIC, not a clean error. If report now fails \
+         cleanly that is the fix landing — rewrite this test.\nreport: {r}"
     );
 }
 

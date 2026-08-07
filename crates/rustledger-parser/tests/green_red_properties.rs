@@ -237,12 +237,19 @@ fn ledger_source() -> impl Strategy<Value = String> {
     .prop_map(|parts| parts.concat())
 }
 
-/// Every observable on `ParseResult`, rendered for comparison.
+/// The `ParseResult` fields `fuzz_green_eq_red` compares — deliberately that
+/// list and not "everything".
 ///
-/// The same list the fuzz target asserts, kept together so a new field added
-/// to `ParseResult` is one edit rather than a silent coverage hole. Compared
-/// via `Debug` for the same reason the fuzz target does: it avoids requiring
-/// `PartialEq` on every field type.
+/// `syntax_root` is excluded, which Copilot was right to want said out loud:
+/// both paths build the SAME lossless CST and only differ in how they walk it,
+/// so comparing the tree would pass by construction while saying nothing about
+/// the conversion under test. Mirroring the fuzz target's list also keeps the
+/// two guards' notions of "the parity contract" from drifting apart, which is
+/// the failure mode this whole file exists to catch.
+///
+/// Kept in one place so a new field on `ParseResult` is one edit rather than a
+/// silent coverage hole. Compared via `Debug` for the same reason the fuzz
+/// target does: it avoids requiring `PartialEq` on every field type.
 fn observables(r: &rustledger_parser::ParseResult) -> Vec<(&'static str, String)> {
     vec![
         ("directives", format!("{:?}", r.directives)),

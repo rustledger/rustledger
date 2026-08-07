@@ -94,11 +94,18 @@ pub struct ImporterEntry {
     /// preprocess = ["pdftotext", "-layout", "{input}", "-"]
     /// ```
     ///
-    /// A pipeline needs a shell, asked for explicitly:
+    /// A pipeline needs a shell, asked for explicitly — and the path goes in
+    /// as a POSITIONAL argument, never spliced into the command string:
     ///
     /// ```toml
-    /// preprocess = ["sh", "-c", "pdftotext -layout {input} - | to-csv"]
+    /// preprocess = ["sh", "-c", "pdftotext -layout \"$1\" - | to-csv", "_", "{input}"]
     /// ```
+    ///
+    /// `sh -c` parses its argument as source, so a `{input}` written inside it
+    /// would let a filename become code: `a;rm -rf ~;b.pdf` is three commands.
+    /// The filename is not the config author's — importing files you
+    /// downloaded is the point — so the CLI REJECTS that shape. `{input}` as
+    /// its own argv element is always safe; a shell never re-parses `$1`.
     ///
     /// **Trust model**: this executes a program named by the config, so the
     /// CLI honors it only when the config is yours — passed with `--config`,

@@ -373,16 +373,103 @@ fn resolve_config_entry<'a>(
 /// `rledger extract statement.csv` would execute an arbitrary command
 /// because of where the terminal happened to be. This is the boundary
 /// `direnv` requires an explicit `allow` for.
-fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTempFile>> {
-    // Named const rather than an inline literal: `{input}` inside a call
-    // trips clippy's literal_string_with_formatting_args.
-    const INPUT_PLACEHOLDER: &str = "{input}";
+/// Replaced with the statement's path in each `preprocess` argument.
+///
+/// Named rather than inlined: `{input}` inside a call trips clippy's
+/// `literal_string_with_formatting_args`.
+const INPUT_PLACEHOLDER: &str = "{input}";
 
+/// Shells whose `-c` argument is a COMMAND STRING, not a filename.
+///
+/// Splicing a path into one of those is command injection, because the shell
+/// re-parses it: `a;touch PWNED;b.pdf` is three commands. The filename is not
+/// under the config author's control — importing files you downloaded is the
+/// whole point of this feature — so the config being trusted says nothing
+/// about the path being safe.
+const SHELLS: &[&str] = &[
+    "sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh",
+];
+
+/// Reject `{input}` spliced INTO a shell command string.
+///
+/// `["pdftotext", "-layout", "{input}", "-"]` is safe: there is no shell, and
+/// the placeholder is a whole argv element, so the path arrives as one
+/// argument whatever it contains.
+///
+/// `["sh", "-c", "pdftotext {input} - | to-csv"]` is not: `sh -c` parses its
+/// argument as source. Verified — a file named `a;touch PWNED;b.pdf` creates
+/// `PWNED`, with a config that is entirely the user's own, so every provenance
+/// gate in this module passes and the command still runs.
+///
+/// Refusing rather than warning: this is stderr in the middle of a batch
+/// import, the failure is silent when it works and catastrophic when it does
+/// not, and the remedy is one line. The feature has never shipped, so nothing
+/// is being broken.
+///
+/// `{input}` as its own argv element is still allowed after a shell, which is
+/// what makes the positional form work: `sh -c '… "$1" …' _ {input}` puts the
+/// path in `$1`, where the shell never re-parses it.
+fn reject_shell_splice(program: &str, argv: &[String]) -> Result<()> {
+    let base = Path::new(program)
+        .file_name()
+        .map_or(program, |f| f.to_str().unwrap_or(program));
+    if !SHELLS.contains(&base) {
+        return Ok(());
+    }
+    // A whole-element `{input}` is the safe form; only EMBEDDED placeholders
+    // end up inside something the shell re-parses.
+    let Some(bad) = argv
+        .iter()
+        .find(|a| a.contains(INPUT_PLACEHOLDER) && a.trim() != INPUT_PLACEHOLDER)
+    else {
+        return Ok(());
+    };
+    Err(anyhow!(
+        "`preprocess` splices {INPUT_PLACEHOLDER} into a `{base}` command string, \
+         which is command injection: the shell re-parses the statement's \
+         filename, and a file named `a;rm -rf ~;b.pdf` would run `rm`.\n\
+         \n\
+         Found: {bad:?}\n\
+         \n\
+         Pass the path as a positional argument instead, so the shell never \
+         re-parses it:\n\
+         \n    preprocess = [\"{base}\", \"-c\", \"… \\\"$1\\\" …\", \"_\", \"{INPUT_PLACEHOLDER}\"]\n\
+         \n\
+         Or drop the shell entirely — {INPUT_PLACEHOLDER} as its own argv \
+         element is always safe:\n\
+         \n    preprocess = [\"pdftotext\", \"-layout\", \"{INPUT_PLACEHOLDER}\", \"-\"]"
+    ))
+}
+
+/// Which `preprocess` argv applies to `file`, if any.
+///
+/// Split out of [`maybe_preprocess`] so that config discovery — the fallible
+/// part — can be made TOLERANT for a config the user never pointed at, while
+/// failures from actually running the command always propagate.
+fn resolve_preprocess_argv(args: &Args, file: &Path) -> Result<Option<Vec<String>>> {
     let Some((config_path, source)) = find_importers_config_with_source(args.config.as_deref())?
     else {
         return Ok(None);
     };
     let importers_file = load_importers_config(&config_path)?;
+
+    // An EARLY-OUT, not a guard — say so, because the difference matters to
+    // whoever reads this next. Almost no importers.toml declares `preprocess`,
+    // and this skips resolving an entry on every extract run that cannot
+    // possibly need one.
+    //
+    // It is deliberately NOT what keeps `--auto` working: sabotaging it away
+    // fails no test, because the silencing in `maybe_preprocess` already
+    // covers every case this does. Anyone tempted to lean on it for
+    // correctness should lean on that instead.
+    if !importers_file
+        .importers
+        .iter()
+        .any(|e| e.preprocess.is_some())
+    {
+        return Ok(None);
+    }
+
     let filename = file
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
@@ -407,9 +494,61 @@ fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTe
         );
         return Ok(None);
     }
+    Ok(Some(argv.clone()))
+}
+
+/// Run the resolved config entry's external `preprocess` command, if any.
+///
+/// The entry is resolved the same way the CSV config branch resolves it —
+/// by `--importer` name, else by `filename_pattern` glob — from the same
+/// config file. Returns a temp file (with a `.csv` suffix so extension
+/// dispatch lands on the CSV importer) holding the command's stdout, or
+/// `None` when no entry with `preprocess` applies. Any `{input}` argument
+/// is replaced with the statement path; a missing placeholder is fine for
+/// commands that read their input elsewhere.
+///
+/// Trust model: this executes a command from the config, so it is honored
+/// ONLY when the config is the user's own — named with `--config`, or found
+/// in the user config directory. A `./importers.toml` discovered by looking
+/// around the current directory is IGNORED for this field, with a warning.
+///
+/// The difference matters more than the "same as a shell alias" framing
+/// suggested. A shell alias lives in your dotfiles; a cwd-discovered config
+/// belongs to whoever put a file in that directory — an unzipped statement
+/// bundle, a cloned repo, a shared downloads folder. Otherwise
+/// `rledger extract statement.csv` would execute an arbitrary command
+/// because of where the terminal happened to be. This is the boundary
+/// `direnv` requires an explicit `allow` for.
+///
+/// Discovery never reports its own errors. `--auto` and the raw-argument path
+/// build their config without reading importers.toml at all, so a broken or
+/// ambiguous file lying around must not fail them — before this split, the mere
+/// presence of one did. Paths that DO use a config re-load it below and report
+/// the same error from there.
+fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTempFile>> {
+    // A config problem discovered HERE is never reported here.
+    //
+    // Not swallowing it: every path that actually uses a config loads and
+    // resolves it again in the branch below, and reports the identical error
+    // from there. Reporting it from preprocessing only adds the case where a
+    // path that does NOT use a config — `--auto`, raw arguments — is failed by
+    // a file it would never have read.
+    //
+    // This started life as `if !(args.config.is_some() || args.importer.is_some())`,
+    // on the theory that a user who named a config should hear about it.
+    // Sabotaging the condition showed it changed nothing observable: with the
+    // guard made unconditional, `--config broken.toml` still errors, from the
+    // branch below. A condition whose removal no test can detect is complexity
+    // pretending to be caution.
+    let argv = match resolve_preprocess_argv(args, file) {
+        Ok(Some(argv)) => argv,
+        Ok(None) | Err(_) => return Ok(None),
+    };
+
     let [program, rest @ ..] = argv.as_slice() else {
         return Err(anyhow!("`preprocess` must name a command"));
     };
+    reject_shell_splice(program, rest)?;
 
     let input = file.to_string_lossy();
     let cmd_args: Vec<String> = rest
@@ -1033,6 +1172,35 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
 
 #[cfg(test)]
 mod tests {
+    /// Serializes the tests that must run from a particular directory.
+    ///
+    /// `std::env::set_current_dir` is PROCESS-global and cargo runs tests on
+    /// threads, so two of these interleaving means one test's `rledger` looks
+    /// for `importers.toml` in the other's temp dir. That was already latent
+    /// with a single cwd test present; adding a second made it fail about half
+    /// the time. Poisoning is irrelevant here — a panicking test has already
+    /// failed — so the guard is taken through `unwrap_or_else(PoisonError::into_inner)`
+    /// rather than cascading one failure into unrelated ones.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `f` with the process working directory set to `dir`, restoring it
+    /// afterwards even if `f` panics.
+    fn with_cwd<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = CWD_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::env::current_dir().expect("a working directory");
+        std::env::set_current_dir(dir).expect("can enter the temp dir");
+        // `AssertUnwindSafe`: the only captured state is the temp dir, and the
+        // cwd is restored before the panic is resumed.
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        std::env::set_current_dir(prev).expect("can return");
+        match out {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
     use super::*;
     use rustledger_importer::config::ImporterType;
     use rustledger_importer::toml_entry::{ImporterEntry, parse_column_value};
@@ -1230,12 +1398,9 @@ preprocess = ["touch", "{}"]
         .unwrap();
 
         // No --config: discovery has to find it in the current directory.
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
         let args = Args::parse_from(["extract", csv.to_str().unwrap()]);
         let mut out = Vec::new();
-        let _ = run_with_writer(&args, &csv, &mut out);
-        std::env::set_current_dir(prev).unwrap();
+        let _ = with_cwd(dir.path(), || run_with_writer(&args, &csv, &mut out));
 
         assert!(
             !marker.exists(),
@@ -1284,6 +1449,200 @@ preprocess = ["cat", "{input}"]
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("Coffee"), "row not imported: {text}");
         assert!(text.contains("Assets:Bank"), "account missing: {text}");
+    }
+
+    /// `{input}` spliced into a shell command string is REFUSED.
+    ///
+    /// This was the shape the docs recommended. `sh -c` parses its argument as
+    /// source, so the statement's filename is re-parsed — and the filename is
+    /// not the config author's, which is what makes the provenance gates above
+    /// insufficient on their own.
+    ///
+    /// The assertion is that the marker file was NOT created, not merely that
+    /// the command errored: a command can fail after the injected part ran.
+    /// Verified against the unfixed version, where `PWNED` appears.
+    #[cfg(unix)]
+    #[test]
+    fn test_preprocess_refuses_a_filename_spliced_into_a_shell() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        // A filename carrying shell metacharacters — an attacker-chosen name in
+        // a downloads folder or an unzipped statement bundle. Relative, run
+        // from inside the temp dir, so the injected `touch` has no path to
+        // resolve and the marker lands where we can see it.
+        let name = "a;touch PWNED;b.pdf";
+        let hostile = dir.path().join(name);
+        let marker = dir.path().join("PWNED");
+        std::fs::write(
+            &hostile,
+            "Date,Description,Amount\n2026-07-01,Coffee,-4.50\n",
+        )
+        .unwrap();
+        let config = dir.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            "[[importers]]\nname = \"pdf\"\nfilename_pattern = \"*.pdf\"\n\
+             account = \"Assets:Bank\"\ndate_column = \"Date\"\n\
+             narration_column = \"Description\"\namount_column = \"Amount\"\n\
+             preprocess = [\"sh\", \"-c\", \"cat {input}\"]\n",
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            "--config",
+            config.to_str().unwrap(),
+            hostile.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        let result = with_cwd(dir.path(), || run_with_writer(&args, &hostile, &mut out));
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("command injection"),
+            "expected the splice to be refused, got: {err}"
+        );
+        assert!(!marker.exists(), "the injected command ran");
+    }
+
+    /// The POSITIONAL form is allowed, and works on the same hostile name.
+    ///
+    /// Pinning the escape hatch as well as the refusal: a check that rejected
+    /// every shell would push users back to unquoted splicing somewhere else.
+    #[cfg(unix)]
+    #[test]
+    fn test_preprocess_allows_a_shell_when_the_path_is_positional() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let name = "a;touch PWNED;b.pdf";
+        let hostile = dir.path().join(name);
+        let marker = dir.path().join("PWNED");
+        std::fs::write(
+            &hostile,
+            "Date,Description,Amount\n2026-07-01,Coffee,-4.50\n",
+        )
+        .unwrap();
+        let config = dir.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            "[[importers]]\nname = \"pdf\"\nfilename_pattern = \"*.pdf\"\n\
+             account = \"Assets:Bank\"\ndate_column = \"Date\"\n\
+             narration_column = \"Description\"\namount_column = \"Amount\"\n\
+             preprocess = [\"sh\", \"-c\", \"cat \\\"$1\\\"\", \"_\", \"{input}\"]\n",
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            "--config",
+            config.to_str().unwrap(),
+            hostile.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        let result = with_cwd(dir.path(), || run_with_writer(&args, &hostile, &mut out));
+
+        result.expect("the positional form is allowed");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Coffee"), "row not imported: {text}");
+        assert!(!marker.exists(), "the positional form still injected");
+    }
+
+    /// `--auto` must not be failed by a config it never consults.
+    ///
+    /// `--auto` and the raw-argument path build their config without reading
+    /// importers.toml at all. Preprocessing resolved an entry up front, and
+    /// resolution reports an ambiguous config as an ERROR — so merely having
+    /// two matching importers in the current directory aborted a command that
+    /// would never have looked at them.
+    ///
+    /// Neither entry declares `preprocess`, which is the point: nothing here
+    /// is even a candidate for preprocessing.
+    ///
+    /// Two mechanisms independently keep this green — the
+    /// declares-`preprocess` gate skips resolution entirely, and discovery
+    /// errors are tolerated for a config the user never pointed at — so
+    /// removing either ALONE still passes. That is deliberate depth, not a
+    /// vacuous test: it fails with both removed. The sibling below isolates
+    /// the tolerance, which is the load-bearing one.
+    #[cfg(unix)]
+    #[test]
+    fn test_auto_is_not_failed_by_an_ambiguous_config_it_never_reads() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("statement.csv");
+        std::fs::write(&csv, "Date,Description,Amount\n2026-07-01,Coffee,-4.50\n").unwrap();
+        std::fs::write(
+            dir.path().join("importers.toml"),
+            "[[importers]]\nname = \"a\"\nfilename_pattern = \"*.csv\"\n\
+             account = \"Assets:A\"\ndate_column = \"Date\"\n\
+             narration_column = \"Description\"\namount_column = \"Amount\"\n\
+             [[importers]]\nname = \"b\"\nfilename_pattern = \"statement*\"\n\
+             account = \"Assets:B\"\ndate_column = \"Date\"\n\
+             narration_column = \"Description\"\namount_column = \"Amount\"\n",
+        )
+        .unwrap();
+
+        let args = Args::parse_from(["extract", "--auto", csv.to_str().unwrap()]);
+        let mut out = Vec::new();
+        let result = with_cwd(dir.path(), || run_with_writer(&args, &csv, &mut out));
+
+        result.expect("--auto must not read the ambiguous config at all");
+        assert!(String::from_utf8(out).unwrap().contains("Coffee"));
+    }
+
+    /// A config that cannot even be PARSED must not fail `--auto` either.
+    ///
+    /// This isolates the tolerance. The declares-`preprocess` gate cannot help
+    /// here — the file fails to load before anything can be inspected — so the
+    /// only thing keeping `--auto` working is that a config the user never
+    /// pointed at is not allowed to fail a command that would not have read
+    /// it. Remove that and this test fails on its own.
+    #[cfg(unix)]
+    #[test]
+    fn test_auto_is_not_failed_by_an_unparsable_config_it_never_reads() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("statement.csv");
+        std::fs::write(&csv, "Date,Description,Amount\n2026-07-01,Tea,-3.00\n").unwrap();
+        std::fs::write(dir.path().join("importers.toml"), "not = [valid\n").unwrap();
+
+        let args = Args::parse_from(["extract", "--auto", csv.to_str().unwrap()]);
+        let mut out = Vec::new();
+        let result = with_cwd(dir.path(), || run_with_writer(&args, &csv, &mut out));
+
+        result.expect("--auto must not be failed by an unparsable config");
+        assert!(String::from_utf8(out).unwrap().contains("Tea"));
+    }
+
+    /// A config the user POINTED AT still reports its own errors.
+    ///
+    /// Pins the end-to-end guarantee, and deliberately not a guard for the
+    /// silencing in `maybe_preprocess`: the `--config` branch loads the file
+    /// again and errors from there, so this stays green however that silencing
+    /// is written. That is exactly what made the original
+    /// `user_asked_for_config` condition removable — no test could tell the
+    /// difference, because the error never depended on it.
+    #[test]
+    fn test_an_explicitly_named_config_still_reports_its_errors() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("statement.csv");
+        std::fs::write(&csv, "Date,Description,Amount\n2026-07-01,Tea,-3.00\n").unwrap();
+        let config = dir.path().join("broken.toml");
+        std::fs::write(&config, "not = [valid\n").unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            "--config",
+            config.to_str().unwrap(),
+            csv.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        let err = run_with_writer(&args, &csv, &mut out).unwrap_err();
+        assert!(
+            err.to_string().contains("parse importers config"),
+            "a named config must report its own parse error, got: {err}"
+        );
     }
 
     /// A failing preprocess command surfaces its stderr, not a CSV error.

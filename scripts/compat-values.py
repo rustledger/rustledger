@@ -64,6 +64,25 @@ POSTING_QUERY = (
 )
 
 
+# Axis 4 reads the PRICE DIRECTIVES a ledger resolves to.
+#
+# Deliberately the directives, not beancount's price MAP: `build_price_map`
+# synthesizes the inverse of every pair (a `price HOOL 100 USD` also yields
+# `USD -> 0.01 HOOL`), which rledger's `#prices` does not, so comparing maps
+# is all false divergence. Comparing what each side booked as `Price` entries
+# is apples-to-apples.
+#
+# Worth its own axis because nothing else reaches it. The posting axis covers a
+# posting's `@` annotation; this covers the ledger's price DATABASE, which is
+# what market valuation reads — `VALUE()`, `report holdings` / `networth`, and
+# the returns engine, which values net units at market (#1847). A dropped or
+# misdated price directive is invisible to every other axis here and wrong in
+# every one of those.
+PRICE_QUERY = (
+    "SELECT date, currency, amount FROM #prices ORDER BY date, currency"
+)
+
+
 # Error classes that do NOT stop beancount booking the transactions it parsed.
 # A file missing an `open` directive still books its postings correctly, and its
 # amounts are just as comparable as a clean file's. Anything lexer/parser/load
@@ -236,6 +255,12 @@ def compare(a: dict, b: dict):
 #
 # Every entry carries why. An entry without a reason is indistinguishable from
 # one added to make a run look clean.
+# Pinned price-directive divergences, keyed (file, field) like the posting
+# table. Empty: the corpus run below found none, and an empty pin table is the
+# honest state to ship — a pin added "just in case" hides the first real one.
+KNOWN_PRICE_DIVERGENCES: dict[tuple[str, str], str] = {}
+
+
 KNOWN_POSTING_DIVERGENCES: dict[tuple[str, str], str] = {
     # rust_decimal's ~28-29 significant-digit ceiling. The price here needs 30
     # to round-trip, so we store a value truncated at the coefficient limit.
@@ -421,6 +446,89 @@ def rledger_postings(binary: str, path: Path):
             price_n, price_c,
         ))
     return sorted(rows, key=_row_sort_key)
+
+
+def beancount_prices(path: Path):
+    """`Price` directives from beancount, or None if not comparable.
+
+    Row shape matches PRICE_QUERY: (date, currency, number, quote_currency).
+    """
+    from beancount import loader
+    from beancount.core import data
+
+    try:
+        entries, errors, _ = loader.load_file(str(path))
+    except Exception:
+        return None
+    if errors and not {type(e).__name__ for e in errors} <= NON_FATAL_ERRORS:
+        return None
+
+    rows = []
+    for e in entries:
+        if not isinstance(e, data.Price):
+            continue
+        if e.amount is None or e.amount.number is None:
+            return None  # unresolved; nothing meaningful to compare
+        rows.append((str(e.date), e.currency, e.amount.number, e.amount.currency))
+    return sorted(rows, key=_price_sort_key)
+
+
+def rledger_prices(binary: str, path: Path):
+    """The same rows from rledger's `#prices`, or None if not comparable."""
+    # JSON, not CSV, for the reason spelled out on `rledger_postings`: CSV
+    # renders through `DisplayContext` and would compare beancount's STORED
+    # number against rledger's ROUNDED one.
+    try:
+        proc = subprocess.run(
+            [binary, "query", "--format", "json", str(path), PRICE_QUERY],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0 or "parse errors" in proc.stderr:
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    rows = []
+    for r in payload.get("rows", []):
+        amount = r.get("amount")
+        if not isinstance(amount, dict):
+            return None
+        number = _dec(amount.get("number"))
+        if number is None:
+            return None
+        rows.append((r.get("date"), r.get("currency"), number, amount.get("currency")))
+    return sorted(rows, key=_price_sort_key)
+
+
+def _price_sort_key(row):
+    """Total order over price rows, on the same lossless token as postings."""
+    date, currency, number, quote = row
+    return (date or "", currency or "", _decimal_sort_token(number), quote or "")
+
+
+def compare_prices(bc_rows, rl_rows):
+    """Field-level differences between two price-directive row sets.
+
+    Same `(where, field, x, y)` shape `compare_postings` returns, so the pin
+    and reporting machinery is shared rather than re-implemented. Dates and
+    currencies compare exactly; only the rate takes the precision tolerance.
+    """
+    diffs = []
+    if len(bc_rows) != len(rl_rows):
+        diffs.append(("<row count>", "<row count>", len(bc_rows), len(rl_rows)))
+        return diffs
+
+    fields = ("date", "currency", "price_number", "price_currency")
+    for bc, rl in zip(bc_rows, rl_rows):
+        for name, x, y in zip(fields, bc, rl):
+            ok = _num_agrees(x, y) if name == "price_number" else (x or None) == (y or None)
+            if not ok:
+                diffs.append((f"{bc[1]} {bc[0]} {name}", name, x, y))
+    return diffs
 
 
 def _decimal_sort_token(v: Decimal) -> str:
@@ -741,6 +849,65 @@ def self_test(binary: str) -> int:
                 f"a zero price must survive extraction as 0 XFER, got {[(r[7], r[8]) for r in rows]}",
             )
 
+    # --- axis 4: the price comparator, and the extractor under it ---------
+    def prow(date="2024-01-01", cur="HOOL", n="100.00", quote="USD"):
+        return (date, cur, Decimal(n), quote)
+
+    check(compare_prices([prow()], [prow()]) == [],
+          "identical price rows must compare equal")
+    check(compare_prices([prow()], [prow(n="110.00")]) != [],
+          "a wrong RATE must be reported")
+    check(compare_prices([prow()], [prow(date="2024-02-01")]) != [],
+          "a wrong DATE must be reported — a price on the wrong day values "
+          "every holding between the two dates differently")
+    check(compare_prices([prow()], [prow(quote="EUR")]) != [],
+          "a wrong QUOTE CURRENCY must be reported")
+    check(compare_prices([prow()], [prow(cur="AAPL")]) != [],
+          "a wrong BASE CURRENCY must be reported")
+    check(compare_prices([prow()], [prow(), prow(date="2024-02-01")]) != [],
+          "a differing row COUNT must be reported — a dropped price directive "
+          "is the shape this axis exists to catch")
+
+    # Same tolerance split as the posting axis: representation, not value.
+    check(compare_prices([prow(n="100.00")], [prow(n="100.000")]) == [],
+          "trailing zeros on a rate are representation, not disagreement")
+    check(compare_prices([prow(n="100.00")], [prow(n="100.01")]) != [],
+          "a one-cent rate difference IS disagreement")
+
+    # Pins are field-scoped, as on the other two axes.
+    KNOWN_PRICE_DIVERGENCES[("self_test.beancount", "price_number")] = "self-test"
+    try:
+        rate = [d for d in compare_prices([prow()], [prow(n="110.00")])
+                if ("self_test.beancount", d[1]) not in KNOWN_PRICE_DIVERGENCES]
+        check(not rate, "a pinned field must be suppressed")
+        other = [d for d in compare_prices([prow()], [prow(date="2024-02-01")])
+                 if ("self_test.beancount", d[1]) not in KNOWN_PRICE_DIVERGENCES]
+        check(other, "a pin on one field must NOT suppress another")
+    finally:
+        KNOWN_PRICE_DIVERGENCES.pop(("self_test.beancount", "price_number"), None)
+
+    # ...and END TO END through the extractor, for the same reason the posting
+    # axis does it: the comparator checks above would all pass while
+    # `beancount_prices` returned nothing at all.
+    with tempfile.TemporaryDirectory() as td:
+        pf = Path(td) / "prices.beancount"
+        pf.write_text(
+            "2024-01-01 commodity HOOL\n"
+            "2024-01-01 price HOOL  100.00 USD\n"
+            "2024-02-01 price HOOL  110.00 USD\n"
+        )
+        rows = beancount_prices(pf)
+        check(rows is not None and len(rows) == 2,
+              f"the price fixture must extract two rows, got {rows}")
+        if rows:
+            check(rows[0] == ("2024-01-01", "HOOL", Decimal("100.00"), "USD"),
+                  f"price rows must carry date/base/rate/quote, got {rows[0]}")
+            # The inverse pair beancount's price MAP would synthesize must NOT
+            # be here — comparing maps rather than directives is what makes
+            # this axis all false divergence.
+            check(all(r[1] != "USD" for r in rows),
+                  f"synthesized inverse pairs must not appear, got {rows}")
+
     for f in failures:
         print(f"SELF-TEST FAILED: {f}")
     if failures:
@@ -749,7 +916,9 @@ def self_test(binary: str) -> int:
           "and pins are direction-scoped; posting axis reports wrong cost, "
           "lot date, price and row count, tolerates representation-only "
           "differences without tolerating real ones, and its pins are "
-          "field-scoped")
+          "field-scoped; price axis reports wrong rate, date, base, quote and "
+          "row count, extracts directives rather than the inverse-synthesizing "
+          "price map, and its pins are field-scoped")
     return 0
 
 
@@ -776,6 +945,8 @@ def main() -> int:
     err_agree = err_undecidable = 0
     posting_compared = posting_skipped = posting_pinned = 0
     posting_divergent = []
+    price_compared = price_skipped = price_pinned = price_exercised = 0
+    price_divergent = []
     rledger_only, beancount_only, pinned = [], [], []
 
     for path in files:
@@ -837,6 +1008,40 @@ def main() -> int:
                 if kept:
                     posting_divergent.append((path, kept))
 
+            # --- axis 4: the price database ------------------------------
+            # Neither axis above reaches it. A posting carries its own `@`
+            # annotation, but the ledger's PRICE DIRECTIVES are what market
+            # valuation reads — VALUE(), report holdings / networth, and the
+            # returns engine, which values net units at market (#1847). A
+            # dropped or misdated price directive is invisible to every
+            # other axis here and wrong in all of those.
+            bcpr = beancount_prices(path)
+            if bcpr is None:
+                price_skipped += 1
+            else:
+                rlpr = rledger_prices(args.rledger, path)
+                if rlpr is None:
+                    price_skipped += 1
+                else:
+                    price_compared += 1
+                    # Most ledgers declare no prices at all, so an
+                    # empty-vs-empty comparison is a pass that exercised
+                    # nothing. Count the files that actually carry price
+                    # directives — that is this axis's real coverage, and
+                    # without it "compared 188 files" reads as far more
+                    # assurance than it is.
+                    if bcpr or rlpr:
+                        price_exercised += 1
+                    kept_pr, pinned_pr = [], 0
+                    for where, field, x, y in compare_prices(bcpr, rlpr):
+                        if (path.name, field) in KNOWN_PRICE_DIVERGENCES:
+                            pinned_pr += 1
+                        else:
+                            kept_pr.append((where, x, y))
+                    price_pinned += pinned_pr
+                    if kept_pr:
+                        price_divergent.append((path, kept_pr))
+
     # Errors first: a file rledger wrongly rejects is a louder problem than a
     # value that differs in the last place, and the CI step only lifts the
     # first 40 lines of this output into the job summary.
@@ -870,6 +1075,19 @@ def main() -> int:
           f"(see KNOWN_POSTING_DIVERGENCES)")
     print(f"files with a POSTING divergence: {len(posting_divergent)}\n")
     for path, diffs in posting_divergent[:25]:
+        print(f"  {path}")
+        for where, x, y in diffs[:6]:
+            print(f"      {where}:  beancount={x}  rledger={y}")
+    print()
+
+    print("=== PRICE DIRECTIVES (the price database) ===")
+    print(f"compared {price_compared} files, skipped {price_skipped}")
+    print(f"of which actually declare prices: {price_exercised}  "
+          f"<-- the axis's real coverage; the rest compare empty to empty")
+    print(f"known deviations:     {price_pinned} field(s) pinned "
+          f"(see KNOWN_PRICE_DIVERGENCES)")
+    print(f"files with a PRICE divergence: {len(price_divergent)}\n")
+    for path, diffs in price_divergent[:25]:
         print(f"  {path}")
         for where, x, y in diffs[:6]:
             print(f"      {where}:  beancount={x}  rledger={y}")

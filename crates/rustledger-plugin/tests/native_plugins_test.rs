@@ -6170,6 +6170,108 @@ fn test_generate_base_ccy_prices_emits_derived_chain() {
     );
 }
 
+/// Only the INVERSE pair is declared — upstream's `issue122` fixture.
+///
+/// ```beancount
+/// plugin "tariochbctools.plugins.generate_base_ccy_prices" "EUR"
+/// 2020-01-01 price USD  10 TUG
+/// 2020-01-01 price EUR 100 TUG
+/// ```
+///
+/// To express `USD 10 TUG` in EUR the plugin needs TUG→EUR, and the ledger
+/// declares only EUR→TUG. beancount finds it because `build_price_map`
+/// inserts `(quote, base) = ONE / price` for every forward pair; rledger
+/// looked up one direction and silently emitted nothing (#1980) — no error,
+/// just a price missing from what every market valuation then reads.
+///
+/// Upstream's expected output is `price USD 0.10 EUR`, and the arithmetic is
+/// beancount's: invert (1/100 = 0.01), then multiply (10 * 0.01).
+#[test]
+fn test_generate_base_ccy_prices_uses_an_inverse_rate() {
+    let plugin = GenerateBaseCcyPricesPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_price("2020-01-01", "USD", "10", "TUG"),
+            make_price("2020-01-01", "EUR", "100", "TUG"),
+        ],
+        "EUR",
+    );
+    let output = process_and_materialize(&plugin, input);
+    assert!(output.errors.is_empty(), "{:?}", output.errors);
+
+    let prices: Vec<_> = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "price")
+        .collect();
+    assert_eq!(
+        prices.len(),
+        3,
+        "two inputs plus the derived USD->EUR; 2 means the inverse rate was \
+         not found and the entry was silently skipped",
+    );
+
+    let derived = prices
+        .iter()
+        .find_map(|d| match &d.data {
+            DirectiveData::Price(p) if p.currency == "USD" && p.amount.currency == "EUR" => Some(p),
+            _ => None,
+        })
+        .expect("derived USD->EUR price must be emitted");
+    // Upstream renders `0.10`; this plugin's `format_decimal` trims trailing
+    // zeros, so the string is `0.1`. Assert the VALUE, which is what the
+    // fixture is about — and what the compat oracle compares, since
+    // `_num_agrees` quantizes before comparing. Pinning the string here would
+    // be pinning a formatting choice that has nothing to do with #1980.
+    assert_eq!(
+        derived
+            .amount
+            .number
+            .parse::<rust_decimal::Decimal>()
+            .unwrap(),
+        "0.10".parse::<rust_decimal::Decimal>().unwrap(),
+        "10 TUG * (1/100 EUR/TUG) = 0.10 EUR, matching upstream's fixture; \
+         got {}",
+        derived.amount.number,
+    );
+}
+
+/// A DECLARED direction must win over the inverse of the other.
+///
+/// With both `A -> B` and `B -> A` on the books, the rate the ledger wrote is
+/// the rate to use; falling through to a reciprocal would silently prefer
+/// derived data over stated data. Rates chosen so the two disagree — a
+/// reciprocal of 0.5 is 2, not 3 — otherwise the test cannot tell them apart.
+#[test]
+fn test_generate_base_ccy_prices_prefers_a_declared_rate_over_an_inverse() {
+    let plugin = GenerateBaseCcyPricesPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_price("2020-01-01", "TUG", "3", "EUR"),
+            make_price("2020-01-01", "EUR", "0.5", "TUG"),
+            make_price("2020-01-01", "USD", "10", "TUG"),
+        ],
+        "EUR",
+    );
+    let output = process_and_materialize(&plugin, input);
+    assert!(output.errors.is_empty(), "{:?}", output.errors);
+
+    let derived = output
+        .directives
+        .iter()
+        .filter(|d| d.directive_type == "price")
+        .find_map(|d| match &d.data {
+            DirectiveData::Price(p) if p.currency == "USD" && p.amount.currency == "EUR" => Some(p),
+            _ => None,
+        })
+        .expect("derived USD->EUR price must be emitted");
+    assert_eq!(
+        derived.amount.number, "30",
+        "10 TUG * 3 EUR/TUG (DECLARED) = 30; the inverse of EUR 0.5 TUG would \
+         give 20 and would mean derived data beat stated data",
+    );
+}
+
 /// Target price already exists (ETH→USD already given) → plugin
 /// must NOT emit a duplicate. Pins the `already_existing_price`
 /// short-circuit.

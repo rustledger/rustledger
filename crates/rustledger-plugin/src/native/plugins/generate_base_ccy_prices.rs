@@ -143,7 +143,41 @@ fn build_price_map(
 }
 
 /// Get price for a currency pair on a specific date.
+/// The rate for `pair` as of `date`, falling back to the INVERSE of the
+/// declared pair.
+///
+/// A ledger declaring `price EUR 100 TUG` states the TUG/EUR rate just as
+/// surely as the other spelling would, and beancount treats it that way:
+/// `prices.build_price_map` inserts `(quote, base) = ONE / price` for every
+/// forward pair. rledger looked up one direction only, so on upstream's own
+/// `issue122` fixture — base EUR, with `USD 10 TUG` and `EUR 100 TUG` — it
+/// could not find TUG->EUR and silently emitted no `USD 0.10 EUR` at all
+/// (#1980). No error; just a price missing from the ledger every market
+/// valuation then reads.
+///
+/// The DECLARED direction is tried first, so a ledger stating both `A -> B`
+/// and `B -> A` keeps the rate it wrote rather than a reciprocal of the other.
 fn get_price(
+    price_map: &HashMap<(String, String), Vec<(String, Decimal)>>,
+    pair: &(String, String),
+    date: &str,
+) -> Option<Decimal> {
+    if let Some(rate) = lookup(price_map, pair, date) {
+        return Some(rate);
+    }
+    let inverse = (pair.1.clone(), pair.0.clone());
+    let rate = lookup(price_map, &inverse, date)?;
+    // Guard the reciprocal: a zero rate is a real thing in ledgers (a gifted
+    // option books at zero cost), and beancount filters those out of the
+    // inversion for the same reason rather than dividing by zero.
+    if rate.is_zero() {
+        return None;
+    }
+    Decimal::ONE.checked_div(rate)
+}
+
+/// Lookup with no inversion: the declared direction only.
+fn lookup(
     price_map: &HashMap<(String, String), Vec<(String, Decimal)>>,
     pair: &(String, String),
     date: &str,

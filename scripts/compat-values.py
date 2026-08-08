@@ -44,7 +44,7 @@ rledger raised E3001 on a file beancount accepts.
 """
 from __future__ import annotations
 
-import argparse, csv, io, json, re, subprocess, sys
+import argparse, csv, io, json, re, subprocess, sys, tempfile
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -111,6 +111,16 @@ NON_FATAL_ERRORS = {"ValidationError", "BalanceError", "DocumentError", "PadErro
 KNOWN_ERROR_DIVERGENCES: dict[tuple[str, str], str] = {}
 
 
+# Deliberate deviations in WHICH KIND of error the two tools raise, for files
+# both already reject. Keyed by (basename, beancount families, rledger
+# families) so a pin covers one file and one direction of disagreement — the
+# same surgical-pin rule the registry above follows, for the same reason.
+#
+# EMPTY ON PURPOSE at introduction. Entries get added only with a written reason
+# after a corpus run shows them.
+KNOWN_KIND_DIVERGENCES: dict[tuple[str, tuple[str, ...], tuple[str, ...]], str] = {}
+
+
 def beancount_errors(path: Path):
     """(errored, kinds) per Python beancount, or (None, set()) if it crashed.
 
@@ -128,7 +138,12 @@ def beancount_errors(path: Path):
         _, errors, _ = loader.load_file(str(path))
     except Exception:
         return None, set()
-    return bool(errors), {type(e).__name__ for e in errors}
+    # QUALIFIED by module, because the bare class name is ambiguous:
+    # `BalanceError` exists in BOTH `beancount.core.interpolate` and
+    # `beancount.ops.balance`, and they mean different things. Comparing kinds
+    # (below) with the bare name would silently conflate a failed balance
+    # ASSERTION with a transaction that does not balance.
+    return bool(errors), {f"{type(e).__module__}.{type(e).__name__}" for e in errors}
 
 
 def rledger_errors(binary: str, path: Path):
@@ -145,10 +160,21 @@ def rledger_errors(binary: str, path: Path):
         )
     except (subprocess.TimeoutExpired, OSError):
         return None, set()
-    # Any letter prefix, not just E: the parser emits P0012 and friends. The
-    # first corpus run reported the one genuine finding as "(no code)" because
-    # this said `E` — the diagnostic was useless exactly when it mattered.
-    codes = set(re.findall(r"\b[A-Z]\d{4}\b", proc.stdout + proc.stderr))
+    # Two renderings, because rledger has two kinds of code and this saw only
+    # one of them:
+    #
+    #   E1001 / P0012  — the numbered validator and parser codes
+    #   error[BOOK]    — the booking phase, which is NOT numbered
+    #
+    # Matching only `[A-Z]\d{4}` missed every booking failure. That was
+    # invisible while the axis compared booleans; adding the KIND comparison
+    # surfaced it immediately, as 8 corpus files "both reject, kinds
+    # undecidable" with zero unmappable kinds — a set that was empty, not
+    # unrecognized. It also degraded the older rledger-only diagnostics, which
+    # printed "(no code)" for exactly these files.
+    text = proc.stdout + proc.stderr
+    codes = set(re.findall(r"\b[A-Z]\d{4}\b", text))
+    codes |= set(re.findall(r"(?:error|warning)\[([A-Z][A-Z_]+)\]", text))
     return proc.returncode != 0, codes
 
 
@@ -642,6 +668,122 @@ def compare_postings(bc_rows, rl_rows):
     return diffs
 
 
+# A common vocabulary for "what KIND of thing is wrong", so the two tools'
+# incompatible error names can be compared at all.
+#
+# Every row below was MEASURED, not guessed: `--self-test` writes a minimal
+# fixture per family and asserts each side still classifies it here. A mapping
+# table that drifts from the tools it maps is worse than none, because it turns
+# real divergence into "agree".
+#
+# The measurement that shaped the design: beancount's `ValidationError` is a
+# CATCH-ALL. One class covers an unopened account (rledger E1001), a closed one
+# (E1003), a transaction that does not balance (E3001) and a currency the
+# account does not permit (E5002) — four rledger families. So a kind maps to a
+# SET, and agreement is a NON-EMPTY INTERSECTION rather than equality. Demanding
+# equality would report every ValidationError file as divergent.
+BEANCOUNT_KIND_FAMILIES: dict[str, set[str]] = {
+    "beancount.parser.lexer.LexerError": {"parse"},
+    "beancount.parser.grammar.ParserError": {"parse"},
+    "beancount.parser.grammar.ParserSyntaxError": {"parse"},
+    "beancount.parser.grammar.DeprecatedError": {"parse"},
+    "beancount.core.interpolate.BalanceError": {"balance_assertion"},
+    "beancount.ops.balance.BalanceError": {"balance_assertion"},
+    "beancount.ops.validation.ValidationError": {
+        "account",
+        "transaction_balance",
+        "currency",
+        "pad",
+    },
+    "beancount.ops.pad.PadError": {"pad"},
+    "beancount.ops.documents.DocumentError": {"document"},
+    "beancount.parser.booking.BookingError": {"booking"},
+    "beancount.parser.booking_method.AmbiguousMatchError": {"booking"},
+    "beancount.parser.booking_full.ReductionError": {"booking"},
+    "beancount.parser.booking_full.SelfReduxError": {"booking"},
+    "beancount.parser.booking_full.CategorizationError": {"booking"},
+    # Interpolation straddles both phases and the two tools file it
+    # differently by ARCHITECTURE, not by disagreement: beancount raises it
+    # from `booking_full`, rledger from its booking pass (`error[BOOK]`).
+    # Mapped to both, after the first corpus run reported three files as
+    # divergent -- e09, e14, e17 -- whose messages turn out to say the same
+    # thing ("Too many missing numbers for currency group 'EUR'" against
+    # "multiple postings missing amounts ... (2 unknowns)"). Those were the
+    # TABLE's error, not the tools'; a family map is a copy of someone
+    # else's vocabulary and gets calibrated against reality, not asserted.
+    "beancount.parser.booking_full.InterpolationError": {
+        "transaction_balance",
+        "booking",
+    },
+}
+
+# rledger's codes, by prefix. The table lives in `rustledger-validate/src/lib.rs`.
+RLEDGER_CODE_FAMILIES: list[tuple[str, str]] = [
+    (r"^P\d{4}$", "parse"),
+    (r"^E1\d{3}$", "account"),
+    (r"^E200[12]$", "balance_assertion"),
+    (r"^E200[34]$", "pad"),
+    (r"^E3\d{3}$", "transaction_balance"),
+    (r"^E4\d{3}$", "booking"),
+    # The booking phase's own code, which is a WORD not a number
+    # (`LedgerError::error("BOOK", ...)`). Every booking failure in the corpus
+    # carries this and no numeric code at all.
+    (r"^BOOK$", "booking"),
+    (r"^E5\d{3}$", "currency"),
+    (r"^E7\d{3}$", "option"),
+    (r"^E8\d{3}$", "document"),
+]
+
+
+def _families(kinds, table) -> tuple[set[str], int]:
+    """(families, unmapped_count) for one side's error kinds.
+
+    `unmapped` is returned rather than swallowed. A kind this table does not
+    know is a BLIND SPOT, and an axis that silently treats its blind spots as
+    agreement is the vacuous-guard shape: it would report zeros forever while
+    the vocabulary it depends on drifted underneath it.
+    """
+    fams: set[str] = set()
+    unmapped = 0
+    for kind in kinds:
+        if isinstance(table, dict):
+            hit = table.get(kind)
+        else:
+            hit = next(
+                (
+                    {fam}
+                    for pattern, fam in table
+                    if re.match(pattern, kind)
+                ),
+                None,
+            )
+        if hit is None:
+            unmapped += 1
+        else:
+            fams |= hit
+    return fams, unmapped
+
+
+def compare_error_kinds(bc_kinds, rl_codes):
+    """Do the two tools reject a file for the SAME KIND of reason?
+
+    Only asked when both already agree the file errs. Until this existed the
+    axis compared `bc_err == rl_err` — two BOOLEANS — so two tools rejecting a
+    file for entirely unrelated reasons counted as agreement. That is the gap
+    #1902 names: "not ... error kinds".
+
+    Returns (verdict, detail) where verdict is "agree", "undecidable" (one side
+    had nothing this table can place) or "differ".
+    """
+    bc_fams, bc_unmapped = _families(bc_kinds, BEANCOUNT_KIND_FAMILIES)
+    rl_fams, rl_unmapped = _families(rl_codes, RLEDGER_CODE_FAMILIES)
+    if not bc_fams or not rl_fams:
+        return "undecidable", (bc_unmapped, rl_unmapped)
+    if bc_fams & rl_fams:
+        return "agree", ()
+    return "differ", (sorted(bc_fams), sorted(rl_fams))
+
+
 def classify_error_agreement(binary: str, path: Path):
     """Which bucket does this file fall in, and what to print for it.
 
@@ -658,10 +800,23 @@ def classify_error_agreement(binary: str, path: Path):
     # incomplete, so "beancount rejects and we do not" says nothing about
     # rledger. 19 of the first corpus run's 20 disagreements were exactly this.
     # Counting them as findings would bury the one that was real.
-    if bc_err and "LoadError" in bc_kinds:
+    if bc_err and any(k.endswith(".LoadError") for k in bc_kinds):
         return "undecidable", ()
     if bc_err == rl_err:
-        return "agree", ()
+        if not bc_err:
+            return "agree", ()
+        # BOTH reject. Until this check existed that was the end of it, and two
+        # tools rejecting a file for unrelated reasons — beancount for a bad
+        # lot match, rledger for an unopened account — counted as agreement.
+        verdict, detail = compare_error_kinds(bc_kinds, rl_codes)
+        if verdict == "differ":
+            reason = KNOWN_KIND_DIVERGENCES.get((path.name, tuple(detail[0]), tuple(detail[1])))
+            if reason is not None:
+                return "kind_pinned", (detail[0], detail[1], reason)
+            return "kind_differs", detail
+        if verdict == "undecidable":
+            return "kind_undecidable", detail
+        return "agree", ("kinds",)
     direction = "rledger_only" if rl_err else "beancount_only"
     reason = KNOWN_ERROR_DIVERGENCES.get((path.name, direction))
     if reason is not None:
@@ -922,6 +1077,102 @@ def self_test(binary: str) -> int:
             check(all(r[1] != "USD" for r in rows),
                   f"synthesized inverse pairs must not appear, got {rows}")
 
+    # --- axis 5: the error-KIND comparator, and the table under it --------
+    #
+    # The table is the risk here, not the comparator. A mapping from beancount
+    # class names to families is a copy of someone else's vocabulary, and a
+    # stale copy turns real divergence into "agree" — the exact drift the
+    # duplication review keeps finding. So each family is MEASURED against a
+    # live fixture rather than asserted from the table.
+    kind_cases = [
+        ("account", "account",
+         '2024-01-01 open Assets:Bank USD\n\n'
+         '2024-01-05 * "x"\n  Assets:Bank    -10.00 USD\n  Expenses:Ghost  10.00 USD\n'),
+        ("balance_assertion", "balance_assertion",
+         '2024-01-01 open Assets:Bank USD\n\n'
+         '2024-01-05 * "x"\n  Assets:Bank    -10.00 USD\n  Assets:Bank     10.00 USD\n\n'
+         '2024-02-01 balance Assets:Bank   999.00 USD\n'),
+        ("transaction_balance", "transaction_balance",
+         '2024-01-01 open Assets:Bank USD\n2024-01-01 open Expenses:X USD\n\n'
+         '2024-01-05 * "x"\n  Assets:Bank    -10.00 USD\n  Expenses:X       7.00 USD\n'),
+        ("parse", "parse",
+         '2024-01-01 open Assets:Bank USD\nthis is not a directive @@@@\n'),
+        # Interpolation: beancount files it under booking_full, rledger
+        # under BOOK. The three false positives that corrected the table.
+        ("booking", "booking",
+         'option "booking_method" "NONE"\n\n'
+         '2024-01-01 open Assets:Broker\n2024-01-01 open Assets:Cash\n'
+         '2024-01-01 open Income:PnL\n\n'
+         '2024-01-02 * "buy"\n  Assets:Broker  2 EUR {1.00 USD}\n'
+         '  Assets:Cash   -2.00 USD\n\n'
+         '2024-01-05 * "sell"\n  Assets:Broker  -1 EUR {}\n'
+         '  Assets:Cash    1.50 USD\n  Income:PnL\n'),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, expected_family, source in kind_cases:
+            f = Path(tmp) / f"kind_{name}.beancount"
+            f.write_text(source)
+            bc_err, bc_kinds = beancount_errors(f)
+            rl_err, rl_codes = rledger_errors(binary, f)
+            if not bc_err or not rl_err:
+                failures.append(
+                    f"kind fixture {name}: expected BOTH tools to reject "
+                    f"(beancount={bc_err}, rledger={rl_err}); the fixture no "
+                    f"longer exercises this family"
+                )
+                continue
+            bc_fams, _ = _families(bc_kinds, BEANCOUNT_KIND_FAMILIES)
+            rl_fams, _ = _families(rl_codes, RLEDGER_CODE_FAMILIES)
+            if expected_family not in bc_fams:
+                failures.append(
+                    f"kind table stale: beancount {sorted(bc_kinds)} no longer "
+                    f"maps to {expected_family!r} (got {sorted(bc_fams)})"
+                )
+            if expected_family not in rl_fams:
+                failures.append(
+                    f"kind table stale: rledger {sorted(rl_codes)} no longer "
+                    f"maps to {expected_family!r} (got {sorted(rl_fams)})"
+                )
+            verdict, _ = compare_error_kinds(bc_kinds, rl_codes)
+            if verdict != "agree":
+                failures.append(
+                    f"kind comparator says {verdict!r} for {name}, which both "
+                    f"tools reject for the same reason"
+                )
+
+    # THE important one: the comparator must be able to say "differ". Feeding
+    # it two kinds that genuinely mean different things is the only way to know
+    # it is not a function that returns "agree".
+    verdict, detail = compare_error_kinds(
+        {"beancount.parser.lexer.LexerError"}, {"E2001"}
+    )
+    if verdict != "differ":
+        failures.append(
+            "kind comparator cannot report a divergence: a beancount PARSE "
+            f"error against an rledger BALANCE-ASSERTION code returned {verdict!r}"
+        )
+
+    # And it must not invent one out of its own ignorance. An unknown kind is a
+    # blind spot, reported as undecidable — treating it as divergence would
+    # bury the real findings under the table's gaps.
+    verdict, _ = compare_error_kinds({"some.new.ErrorClass"}, {"E2001"})
+    if verdict != "undecidable":
+        failures.append(
+            f"an unmappable beancount kind must be undecidable, got {verdict!r}"
+        )
+
+    # A pin must be scoped to its exact disagreement, like every other registry
+    # here: same file, opposite direction, must still be reported.
+    key = ("pinned.beancount", ("parse",), ("balance_assertion",))
+    KNOWN_KIND_DIVERGENCES[key] = "self-test"
+    try:
+        if KNOWN_KIND_DIVERGENCES.get(
+            ("pinned.beancount", ("balance_assertion",), ("parse",))
+        ) is not None:
+            failures.append("a kind pin leaked across directions")
+    finally:
+        del KNOWN_KIND_DIVERGENCES[key]
+
     for f in failures:
         print(f"SELF-TEST FAILED: {f}")
     if failures:
@@ -930,7 +1181,9 @@ def self_test(binary: str) -> int:
           "and pins are direction-scoped; posting axis reports wrong cost, "
           "lot date, price and row count, tolerates representation-only "
           "differences without tolerating real ones, and its pins are "
-          "field-scoped; price axis reports wrong rate, date, base, quote and "
+          "field-scoped; kind axis maps four measured families, reports a "
+          "differing pair, stays undecidable on an unknown kind and scopes its "
+          "pins; price axis reports wrong rate, date, base, quote and "
           "row count, extracts directives rather than the inverse-synthesizing "
           "price map, and its pins are field-scoped")
     return 0
@@ -962,6 +1215,8 @@ def main() -> int:
     price_compared = price_skipped = price_pinned = price_exercised = 0
     price_divergent = []
     rledger_only, beancount_only, pinned = [], [], []
+    kind_differs, kind_pinned = [], []
+    kind_undecidable = unmapped_bc = unmapped_rl = err_agree_kind = 0
 
     for path in files:
         # --- axis 2: do the tools agree the file is acceptable? ------------
@@ -973,8 +1228,22 @@ def main() -> int:
             err_undecidable += 1
         elif bucket == "agree":
             err_agree += 1
+            # Both-reject-and-kinds-agree is a strictly stronger statement than
+            # both-accept, and worth its own number: it is the only one of the
+            # two that the kind table actually exercised.
+            if detail == ("kinds",):
+                err_agree_kind += 1
         elif bucket == "pinned":
             pinned.append((path, detail))
+        elif bucket == "kind_differs":
+            kind_differs.append((path, detail))
+        elif bucket == "kind_pinned":
+            kind_pinned.append((path, detail))
+        elif bucket == "kind_undecidable":
+            kind_undecidable += 1
+            bc_unmapped, rl_unmapped = detail
+            unmapped_bc += bc_unmapped
+            unmapped_rl += rl_unmapped
         elif bucket == "rledger_only":
             rledger_only.append((path, detail))
         else:
@@ -1071,6 +1340,21 @@ def main() -> int:
         print(f"    rledger-only: {path}  {' '.join(codes) or '(no code)'}")
     for path, kinds in beancount_only[:15]:
         print(f"    beancount-only: {path}  {' '.join(kinds) or '(no kind)'}")
+    print()
+
+    # The kind comparison, which only applies to files BOTH tools reject.
+    # Until it existed those were counted as agreement on the strength of two
+    # booleans, so "we both say no, for unrelated reasons" was invisible.
+    print("=== ERROR KIND (do they reject it for the SAME REASON?) ===")
+    print(f"files both reject and kinds agree: {err_agree_kind}")
+    print(f"known deviations:     {len(kind_pinned)}  (pinned, see KNOWN_KIND_DIVERGENCES)")
+    print(f"undecidable:          {kind_undecidable}  "
+          f"({unmapped_bc} beancount kind(s) and {unmapped_rl} rledger code(s) "
+          f"this table cannot place — the axis's own blind spot, printed rather "
+          f"than counted as agreement)")
+    print(f"files rejected for DIFFERENT reasons: {len(kind_differs)}  <-- findings")
+    for path, (bc_fams, rl_fams) in kind_differs[:15]:
+        print(f"    {path}:  beancount={'+'.join(bc_fams)}  rledger={'+'.join(rl_fams)}")
     print()
 
     print("=== BOOKED VALUES ===")

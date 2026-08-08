@@ -544,7 +544,6 @@ impl<'a> Executor<'a> {
         // through, which is the point: two realizations of one ledger is the
         // duplication registry's realization family, and this was the drift.
         let mut engine = rustledger_booking::BookingEngine::new();
-        engine.register_account_methods(self.resolved_directives());
         // Single cumulative running balance across WHERE-filtered postings in
         // iteration order. This is the bean-query `balance` semantic: a snapshot
         // of "everything selected so far" rather than a per-account view.
@@ -554,6 +553,11 @@ impl<'a> Executor<'a> {
         // Handle both spanned and unspanned directives
         let directive_iter: Vec<(usize, &Directive)> =
             self.resolved_directives().enumerate().collect();
+        // Register from the vec just built rather than walking the directive
+        // stream a second time — Copilot's catch. `register_account_methods`
+        // only reads `Open` directives, so the order is irrelevant and this is
+        // the same registration, one pass earlier.
+        engine.register_account_methods(directive_iter.iter().map(|(_, d)| *d));
 
         // Resolve a posting to a Position that preserves cost basis when present.
         // The single cost-resolve lives in `Position::from_posting`, shared with
@@ -610,7 +614,15 @@ impl<'a> Executor<'a> {
                     // account_balance (saves the `.clone()` + map probe per
                     // posting; `Inventory::add` allocates internally so the
                     // saving compounds across a long run).
-                    let resolved = resolve_position(posting, txn.date);
+                    // Only `needs_balance` reads this now. Before #1985 the
+                    // per-account accumulation used it too, so it was
+                    // unconditional; `apply_posting` resolves the position
+                    // itself, so computing it here for a query that reads
+                    // neither column was a `Position::from_posting` per
+                    // posting for nothing. Copilot's catch.
+                    let resolved = needs_balance
+                        .then(|| resolve_position(posting, txn.date))
+                        .flatten();
                     if needs_account_balance {
                         engine
                             .apply_posting(posting, txn.date)

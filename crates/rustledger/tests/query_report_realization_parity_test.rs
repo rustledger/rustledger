@@ -1,16 +1,24 @@
 //! Drift guard: BQL `BALANCES` and `report balances` must agree on netted
 //! reductions.
 //!
-//! The two surfaces realize balances differently by construction: the query
-//! executor re-aggregates already-booked postings with naive `Inventory::add`
-//! (lot-key netting), while reports realize through the booking engine's
-//! lot-matching `apply`. They agree today ONLY because both consume
-//! post-booking directives — the loader's book phase has already matched
-//! every reduction against its lot, so naive re-aggregation lands on the
-//! same keys. That invariant holds by pipeline design, not by any type-level
-//! guarantee: feeding the executor unbooked directives (a new embedding
-//! path, a harness shortcut) would silently reactivate the #1726 class in
-//! BQL while reports stayed correct.
+//! The two surfaces now realize balances the SAME way — both through
+//! `BookingEngine`, which resolves the account's booking method and reduces
+//! against a lot or adds a new one.
+//!
+//! They did not always. Until #1985 the query executor re-aggregated
+//! already-booked postings with a naive `Inventory::add` — unconditionally,
+//! with no reduction branch at all — and this file used to explain that the
+//! two agreed "ONLY because both consume post-booking directives ... so naive
+//! re-aggregation lands on the same keys". That was true for FIFO/LIFO/HIFO
+//! and false for AVERAGE, where a reduction is booked at the merged average
+//! cost, a key belonging to no augmentation. It survived as a dangling
+//! negative position, and BQL reported a negative holding for an account that
+//! held 15 units.
+//!
+//! Recorded rather than deleted because the shape recurs: an invariant that
+//! holds "by pipeline design, not by any type-level guarantee" is one nobody
+//! is checking, and the exception had been shipping for as long as AVERAGE
+//! had. These tests are that check.
 //!
 //! These tests pin the agreement on the two reduction shapes that killed
 //! the reports in #1726: an explicit-cost reduction with a price
@@ -150,16 +158,11 @@ fn fifo_empty_spec_reduction_nets_identically() {
 //
 // The two fixtures above pin FIFO-via-empty-`{}` and an explicit-cost
 // reduction. That left five of seven booking methods unpinned, and the gap was
-// load-bearing: AVERAGE diverges today (#1985). The docstring at the top of
-// this file states the invariant that fails —
-//
-//   "they agree ... ONLY because both consume post-booking directives — the
-//    loader's book phase has already matched every reduction against its lot,
-//    so naive re-aggregation lands on the same keys"
-//
-// — and AVERAGE is the one method where a reduction is booked at a cost that
-// belongs to NO augmentation (the merged average), so it has no key to net
-// against and survives as a negative row.
+// load-bearing: extending the matrix is what found #1985 (AVERAGE realizing
+// differently on the two surfaces) and #1987 (STRICT ambiguity panicking one
+// surface while the other answered wrongly). Both are fixed; the matrix stays
+// so the next method added is pinned from the start rather than five releases
+// later.
 //
 // `broker_holding` above cannot express this: it asserts exactly ONE AAPL
 // line, which is right for a fully netted holding and wrong for every method
@@ -291,11 +294,14 @@ fn surfaces(method: &str) -> (Vec<(String, String)>, Vec<(String, String)>) {
     )
 }
 
-/// FIFO, LIFO, HIFO and NONE must realize identically on both surfaces.
+/// Every booking method must realize identically on both surfaces.
 ///
-/// Four methods, one test, because the failure mode is per-method and naming
-/// them all in one assertion means a regression in exactly one still reports
-/// which one.
+/// FIFO, LIFO, HIFO, NONE and — since #1985 — AVERAGE. One test rather than
+/// five, because the failure mode is per-method and collecting the
+/// disagreements means a regression in exactly one still names which one.
+///
+/// AVERAGE is asserted again on its own below, for the netted SHAPE that set
+/// comparison cannot express.
 #[test]
 fn every_agreeing_booking_method_realizes_identically() {
     let _ = require_rledger!();

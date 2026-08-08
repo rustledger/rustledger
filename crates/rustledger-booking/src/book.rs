@@ -619,16 +619,6 @@ impl BookingEngine {
         })
     }
 
-    /// Apply ONE posting to the running inventories, returning an error if it
-    /// reduces a lot that is not held.
-    ///
-    /// The per-posting core of [`Self::apply`], which ignores a reduction failure
-    /// per its booked-input contract; the fallible signature keeps the over-sell
-    /// detectable by the `debug_assert` there.
-    ///
-    /// # Errors
-    /// Returns the reduce error when the posting reduces a lot that is not held
-    /// (an over-sell / unbooked-input contract violation).
     /// Apply ONE booked posting to the running inventories.
     ///
     /// The canonical "what does this posting do to an inventory" decision:
@@ -651,14 +641,6 @@ impl BookingEngine {
     ///
     /// Same as [`Self::apply`]: the posting must already be booked.
     pub fn apply_posting(
-        &mut self,
-        posting: &Posting,
-        date: rustledger_core::NaiveDate,
-    ) -> Result<(), BookingError> {
-        self.try_apply_posting(posting, date)
-    }
-
-    fn try_apply_posting(
         &mut self,
         posting: &Posting,
         date: rustledger_core::NaiveDate,
@@ -872,7 +854,7 @@ impl BookingEngine {
             // other. Callers already handle this — `book()` records the error
             // and marks the transaction failed, the wasm entry point checks
             // `is_ok()`, and the CLI refuses to derive a figure at all.
-            if let Err(e) = self.try_apply_posting(posting, txn.date) {
+            if let Err(e) = self.apply_posting(posting, txn.date) {
                 // `snapshot` is `Some` whenever this arm is reachable:
                 // `rollback_needed` covers both failure modes. Restoring
                 // nothing would be silent corruption — precisely the bug being

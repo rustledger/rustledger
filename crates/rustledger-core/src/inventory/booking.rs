@@ -506,6 +506,25 @@ impl Inventory {
     }
 
     /// AVERAGE booking: merge all lots of the currency.
+    ///
+    /// Stricter than Python: beancount does NOT implement this method.
+    /// `beancount.parser.booking_method.booking_method_AVERAGE` raises
+    /// `AmbiguousMatchError("AVERAGE method is not supported")`, with the real
+    /// implementation left commented out ("DISABLED - This is the code for
+    /// AVERAGE, which is currently disabled"). `Booking.AVERAGE` exists in the
+    /// enum and is accepted in an `open` directive, so a ledger declaring it
+    /// parses and then books nothing.
+    ///
+    /// Two consequences worth knowing before changing anything here:
+    ///
+    /// * The compat oracle cannot referee this. There is no reference answer
+    ///   to diff against, so correctness rests on the definition — the merged
+    ///   lot's cost is the cost-weighted average of the lots it replaces — and
+    ///   on the two rledger surfaces agreeing.
+    /// * That is exactly why #1985 survived: BQL netted by lot key and produced
+    ///   a dangling negative position where reports produced the merged lot,
+    ///   and no differential test could see it. The internal parity guard
+    ///   (`query_report_realization_parity_test`) is what caught it.
     pub(super) fn reduce_average(&mut self, units: &Amount) -> Result<BookingResult, BookingError> {
         let matching: Vec<&Position> = self
             .positions

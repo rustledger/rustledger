@@ -629,6 +629,35 @@ impl BookingEngine {
     /// # Errors
     /// Returns the reduce error when the posting reduces a lot that is not held
     /// (an over-sell / unbooked-input contract violation).
+    /// Apply ONE booked posting to the running inventories.
+    ///
+    /// The canonical "what does this posting do to an inventory" decision:
+    /// resolve the account's booking method, then REDUCE against a lot or ADD a
+    /// new one. Public because the query engine needs exactly this and was
+    /// re-deriving a broken half of it — `Inventory::add` unconditionally, with
+    /// no reduction branch at all (#1985). That looked right for FIFO/LIFO,
+    /// where booking has already resolved the reduction's cost so its lot key
+    /// matches an existing lot and `add` nets it by coincidence, and produced a
+    /// dangling negative position under AVERAGE, where the reduction is booked
+    /// at the merged average cost — a key belonging to no augmentation.
+    ///
+    /// # Errors
+    ///
+    /// [`BookingError`] when the reduction finds no matching lot, or an `add`
+    /// overflows. Unlike [`Self::apply`] this is a SINGLE posting, so there is
+    /// nothing to roll back — the caller owns transaction atomicity.
+    ///
+    /// # Precondition
+    ///
+    /// Same as [`Self::apply`]: the posting must already be booked.
+    pub fn apply_posting(
+        &mut self,
+        posting: &Posting,
+        date: rustledger_core::NaiveDate,
+    ) -> Result<(), BookingError> {
+        self.try_apply_posting(posting, date)
+    }
+
     fn try_apply_posting(
         &mut self,
         posting: &Posting,

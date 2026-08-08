@@ -528,8 +528,23 @@ impl<'a> Executor<'a> {
         // keeps (plus the pre-`open_on` carry-in below), independent of the WHERE
         // filter, so `account_balance` always reflects the account's true ledger
         // balance at the point of the posting.
-        let mut account_balances: FxHashMap<rustledger_core::Account, Inventory> =
-            FxHashMap::default();
+        // Realize through the BOOKING ENGINE, not a bare inventory map.
+        //
+        // This used to be `FxHashMap<Account, Inventory>` accumulated with
+        // `Inventory::add` — unconditionally, with no reduction branch at all.
+        // For FIFO/LIFO that looks right by coincidence: booking has already
+        // resolved a reduction's cost, so its lot key matches an existing lot
+        // and `add` nets it. Under AVERAGE it does not, because the reduction
+        // is booked at the MERGED average cost — a key belonging to no
+        // augmentation — so it survived as a dangling negative position and
+        // BALANCES reported `10 {200}  10 {150}  -5 {175}` for an account
+        // holding 15 (#1985).
+        //
+        // `apply_posting` is the same decision `report balances` realizes
+        // through, which is the point: two realizations of one ledger is the
+        // duplication registry's realization family, and this was the drift.
+        let mut engine = rustledger_booking::BookingEngine::new();
+        engine.register_account_methods(self.resolved_directives());
         // Single cumulative running balance across WHERE-filtered postings in
         // iteration order. This is the bean-query `balance` semantic: a snapshot
         // of "everything selected so far" rather than a per-account view.
@@ -563,13 +578,9 @@ impl<'a> Executor<'a> {
                         // didn't make it past the FROM filter.
                         if needs_account_balance {
                             for posting in &txn.postings {
-                                if let Some(pos) = resolve_position(posting, txn.date) {
-                                    let bal = account_balances
-                                        .entry(posting.account.clone())
-                                        .or_default();
-                                    bal.add(pos)
-                                        .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-                                }
+                                engine
+                                    .apply_posting(posting, txn.date)
+                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             }
                         }
                         continue;
@@ -600,9 +611,9 @@ impl<'a> Executor<'a> {
                     // posting; `Inventory::add` allocates internally so the
                     // saving compounds across a long run).
                     let resolved = resolve_position(posting, txn.date);
-                    if needs_account_balance && let Some(pos) = resolved.clone() {
-                        let bal = account_balances.entry(posting.account.clone()).or_default();
-                        bal.add(pos)
+                    if needs_account_balance {
+                        engine
+                            .apply_posting(posting, txn.date)
                             .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                     }
 
@@ -650,7 +661,7 @@ impl<'a> Executor<'a> {
                             None
                         },
                         account_balance: if needs_account_balance {
-                            account_balances.get(&posting.account).cloned()
+                            engine.inventory(&posting.account).cloned()
                         } else {
                             None
                         },
@@ -683,7 +694,7 @@ impl<'a> Executor<'a> {
 
         Ok(PostingScan {
             postings,
-            account_balances,
+            account_balances: engine.into_inventories(),
         })
     }
     /// Is this call `WEIGHT(position)` over the posting COLUMN?

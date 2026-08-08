@@ -301,7 +301,7 @@ fn every_agreeing_booking_method_realizes_identically() {
     let _ = require_rledger!();
     let mut disagreed: Vec<String> = Vec::new();
 
-    for method in ["FIFO", "LIFO", "HIFO", "NONE"] {
+    for method in ["FIFO", "LIFO", "HIFO", "NONE", "AVERAGE"] {
         let (query, report) = surfaces(method);
         if query != report {
             disagreed.push(format!("{method}: query={query:?} report={report:?}"));
@@ -418,35 +418,65 @@ fn no_errors_does_not_permit_answering_from_an_unbooked_ledger() {
     );
 }
 
-/// AVERAGE diverges today — #1985. Pinned, not skipped.
+/// AVERAGE too — the divergence #1985 named, now fixed.
 ///
-/// A characterization test: it asserts the WRONG current behavior on purpose,
-/// so that whichever way #1985 is fixed, this fails and forces the guard above
-/// to be updated to include AVERAGE. Marking it `#[ignore]` instead would mean
-/// the fix lands with nothing noticing, which is how a known divergence
-/// quietly becomes a permanent one.
+/// This replaces `average_booking_diverges_today`, a characterization test
+/// that asserted the WRONG behavior on purpose so a fix would trip it. It did,
+/// which is what it was for. What it used to pin:
 ///
-/// The report is correct (one netted `15 AAPL {175.00}`); BQL re-aggregates by
-/// lot key and produces the two original lots plus a dangling `-5` at the
-/// merged average cost, which belongs to no augmentation.
+/// | surface | AAPL for an account holding 15 |
+/// |---|---|
+/// | `report balances` | `15 AAPL {175.00}` |
+/// | `query BALANCES` | `10 {200}` + `10 {150}` + **`-5 {175}`** |
+///
+/// The cause was two realizations of one ledger. BQL accumulated with
+/// `Inventory::add` unconditionally, with no reduction branch at all — right
+/// for FIFO/LIFO by coincidence, because booking has already resolved a
+/// reduction's cost so its lot key matches an existing lot and `add` nets it.
+/// Under AVERAGE the reduction is booked at the MERGED average cost, a key
+/// belonging to no augmentation, so it survived as a dangling negative.
+///
+/// BQL now realizes through `BookingEngine::apply_posting`, the same decision
+/// reports use, so this is one realization rather than two that agree by
+/// luck.
+///
+/// Kept SEPARATE from the loop above rather than folded into it, because the
+/// netting is what makes AVERAGE different: it is the only method whose
+/// holding collapses to a single lot, and asserting that shape is worth more
+/// than one more iteration of a set comparison.
+///
+/// DELIBERATE DEVIATION, and the reason this bug needed an internal guard.
+/// Python beancount does NOT implement AVERAGE: `booking_method_AVERAGE`
+/// raises `AmbiguousMatchError("AVERAGE method is not supported")` and the real
+/// implementation sits commented out ("DISABLED - This is the code for
+/// AVERAGE"). Run this fixture through beancount and it books no reduction at
+/// all, leaving 20 units.
+///
+/// So there is no oracle for this. The compat suite cannot referee it, and the
+/// value asserted here rests on the definition instead: 10 @ 150 plus 10 @ 200
+/// is 3500 over 20 units, so 175.00 per unit; selling 5 leaves 15 at 175.00.
+/// That is textbook average-cost, and it is what both surfaces now produce.
+///
+/// Worth stating because it is the general case, not a footnote: a divergence
+/// in a feature the reference implementation does not have is invisible to
+/// differential testing by construction. The parity guard between our OWN two
+/// surfaces is the only thing that could have found it.
 #[test]
-fn average_booking_diverges_today() {
+fn average_booking_nets_to_a_single_merged_lot() {
     let _ = require_rledger!();
     let (query, report) = surfaces("AVERAGE");
 
     assert_eq!(
         report,
         vec![("15".to_owned(), "175.00".to_owned())],
-        "report should net AVERAGE to a single merged lot"
+        "report must net AVERAGE to one merged lot"
     );
-    assert_ne!(
+    assert_eq!(
         query, report,
-        "AVERAGE now AGREES between query and report — #1985 is fixed. \
-         Delete this test and add \"AVERAGE\" to \
-         `every_agreeing_booking_method_realizes_identically`."
+        "BQL must realize AVERAGE the same way the report does (#1985)"
     );
     assert!(
-        query.iter().any(|(units, _)| units.starts_with('-')),
-        "the #1985 shape is a surviving NEGATIVE lot; got {query:?}"
+        !query.iter().any(|(units, _)| units.starts_with('-')),
+        "a negative holding is the #1985 shape and must not return: {query:?}"
     );
 }

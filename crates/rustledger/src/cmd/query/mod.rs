@@ -173,14 +173,20 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     let ledger = rustledger_loader::process(raw, &options)
         .with_context(|| format!("failed to load {}", file.display()))?;
 
+    // A booking failure leaves directives unbooked in this same stream; every
+    // figure below would be derived from them.
+    //
+    // OUTSIDE the `--no-errors` guard, which Copilot caught this sitting
+    // inside. `--no-errors` suppresses the printing of diagnostics; it is not
+    // permission to compute figures from a ledger that did not book. Nested,
+    // `rledger query --no-errors x.beancount BALANCES` returned the dangling
+    // `-5 AAPL` row and exited 0 — the exact bug this change exists to fix,
+    // reachable through a flag about verbosity.
+    crate::cmd::loadcache::bail_on_booking_errors(&ledger, file)?;
+
     // Report errors to stderr (matching bean-query behavior)
     // Continue with successfully parsed directives rather than bailing
     if !ledger.errors.is_empty() && !args.no_errors {
-        // A booking failure leaves directives unbooked in this same stream; every
-        // figure below would be derived from them. Checked before the diagnostics
-        // loop so the message the user acts on is the last thing printed.
-        crate::cmd::loadcache::bail_on_booking_errors(&ledger, file)?;
-
         for err in &ledger.errors {
             eprintln!("{}: {}", err.code, err.message);
         }

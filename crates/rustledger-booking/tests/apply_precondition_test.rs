@@ -43,12 +43,18 @@ const fn empty_spec() -> CostSpec {
 /// Seed two lots at different costs, applied normally.
 fn engine_with_two_lots() -> BookingEngine {
     let mut engine = BookingEngine::with_method(BookingMethod::Strict);
+    // The cash leg is derived from the lot rather than hard-coded: Copilot
+    // caught both buys paying -1500.00 while the second is 10 @ 200.00. `apply`
+    // does not check balance today, so nothing failed — which is exactly why an
+    // internally inconsistent fixture is worth fixing before it becomes load-
+    // bearing for a test that does.
     for (day, units, cost) in [(5u32, "10", "150.00"), (6, "10", "200.00")] {
         let mut buy = Posting::new("Assets:Broker", amount(units, "AAPL"));
         buy.cost = Some(spec(cost, "USD", day));
+        let paid = -(units.parse::<Decimal>().unwrap() * cost.parse::<Decimal>().unwrap());
         let txn = Transaction::new(date(day), "buy")
             .with_synthesized_posting(buy)
-            .with_synthesized_posting(Posting::new("Assets:Cash", amount("-1500.00", "USD")));
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(paid, "USD")));
         engine.apply(&txn).expect("an augmentation applies");
     }
     engine

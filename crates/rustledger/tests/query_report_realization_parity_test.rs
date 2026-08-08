@@ -384,6 +384,40 @@ fn strict_ambiguity_makes_both_surfaces_refuse() {
     }
 }
 
+/// `--no-errors` suppresses PRINTING, not the refusal.
+///
+/// Copilot's catch on the #1987 fix: the guard was nested inside the
+/// `!args.no_errors` block, so `rledger query --no-errors x BALANCES` walked
+/// straight past a booking failure and printed the dangling `-5 AAPL` row with
+/// exit 0 — the exact bug the fix exists to prevent, reachable through a flag
+/// about verbosity.
+///
+/// Note the argument ORDER. `rledger query FILE QUERY --no-errors` puts the
+/// flag after the positionals, where it is swallowed into the BQL text and
+/// never registers — which is how the first attempt to reproduce this
+/// "passed". The flag has to come before the positionals to mean anything.
+#[test]
+fn no_errors_does_not_permit_answering_from_an_unbooked_ledger() {
+    let bin = require_rledger!();
+    let f = write_fixture(&two_lot_fixture("STRICT"));
+    let path = f.path().to_str().unwrap();
+
+    let out = Command::new(&bin)
+        .args(["query", "--no-errors", path, "BALANCES"])
+        .output()
+        .expect("run query");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        !out.status.success(),
+        "--no-errors must not license answering over an unbooked ledger: {stdout}"
+    );
+    assert!(
+        !stdout.contains("AAPL"),
+        "no holding may be reported from an unbooked ledger: {stdout}"
+    );
+}
+
 /// AVERAGE diverges today — #1985. Pinned, not skipped.
 ///
 /// A characterization test: it asserts the WRONG current behavior on purpose,

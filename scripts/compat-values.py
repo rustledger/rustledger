@@ -44,7 +44,7 @@ rledger raised E3001 on a file beancount accepts.
 """
 from __future__ import annotations
 
-import argparse, csv, io, json, re, subprocess, sys, tempfile
+import argparse, csv, importlib, io, json, re, subprocess, sys
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -138,11 +138,22 @@ def beancount_errors(path: Path):
         _, errors, _ = loader.load_file(str(path))
     except Exception:
         return None, set()
-    # QUALIFIED by module, because the bare class name is ambiguous:
-    # `BalanceError` exists in BOTH `beancount.core.interpolate` and
-    # `beancount.ops.balance`, and they mean different things. Comparing kinds
-    # (below) with the bare name would silently conflate a failed balance
-    # ASSERTION with a transaction that does not balance.
+    # QUALIFIED by module rather than bare class name.
+    #
+    # An earlier version of this comment claimed the qualification separated two
+    # different `BalanceError` classes, in `core.interpolate` and `ops.balance`.
+    # That was wrong, and Copilot catching the comment contradicting the table
+    # is what turned it up: `ops.balance` IMPORTS the class from
+    # `core.interpolate`, so they are the same object and `__module__` always
+    # reads `beancount.core.interpolate`. A package scan lists it under both
+    # module names, which is what I misread as two classes.
+    #
+    # The qualification is still worth having, for the reason that survives
+    # measurement: beancount reuses short error names across modules
+    # (`CommodityError`, `ConfigError`, `BookingError` all appear more than
+    # once), so a bare name is ambiguous in general even where it happens not
+    # to be for this one. It also makes the printed kind say where it came
+    # from.
     return bool(errors), {f"{type(e).__module__}.{type(e).__name__}" for e in errors}
 
 
@@ -687,8 +698,12 @@ BEANCOUNT_KIND_FAMILIES: dict[str, set[str]] = {
     "beancount.parser.grammar.ParserError": {"parse"},
     "beancount.parser.grammar.ParserSyntaxError": {"parse"},
     "beancount.parser.grammar.DeprecatedError": {"parse"},
+    # `ops.balance` raises this one; the class is DEFINED in `core.interpolate`
+    # and imported, so its `__module__` is the latter. Keying it under
+    # `beancount.ops.balance.BalanceError` as well looked thorough and was
+    # dead code: no error can ever carry that name. The self-test now rejects
+    # a key that no class's own qualified name matches.
     "beancount.core.interpolate.BalanceError": {"balance_assertion"},
-    "beancount.ops.balance.BalanceError": {"balance_assertion"},
     "beancount.ops.validation.ValidationError": {
         "account",
         "transaction_balance",
@@ -1139,6 +1154,35 @@ def self_test(binary: str) -> int:
                     f"kind comparator says {verdict!r} for {name}, which both "
                     f"tools reject for the same reason"
                 )
+
+    # Every table key must name a class that EXISTS and whose own qualified
+    # name is that key.
+    #
+    # This exists because one key did not. `beancount.ops.balance.BalanceError`
+    # looked right — that module raises it — but the class is defined in
+    # `core.interpolate` and merely imported, so `__module__` never reads
+    # `ops.balance` and the entry could not match anything. A dead key is worse
+    # than a missing one: it reads as coverage. Nothing else here would have
+    # caught it, because a key that never matches simply never fires.
+    for key, fams in BEANCOUNT_KIND_FAMILIES.items():
+        module_name, class_name = key.rsplit(".", 1)
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:
+            failures.append(f"kind table key {key!r}: module will not import ({exc})")
+            continue
+        obj = getattr(module, class_name, None)
+        if obj is None:
+            failures.append(f"kind table key {key!r}: no such class")
+            continue
+        actual = f"{obj.__module__}.{obj.__name__}"
+        if actual != key:
+            failures.append(
+                f"kind table key {key!r} is a RE-EXPORT of {actual!r}; errors "
+                f"carry the defining module, so this key can never match"
+            )
+        if not fams:
+            failures.append(f"kind table key {key!r} maps to no family")
 
     # THE important one: the comparator must be able to say "differ". Feeding
     # it two kinds that genuinely mean different things is the only way to know

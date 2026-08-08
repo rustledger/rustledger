@@ -44,3 +44,4 @@
 {"date":"2026-08-05T04:14:37Z","commit":"0dca83aa6fbdb49aa914cf14f9210f469295f416","txns":10000,"instructions":836503319,"heap_total_bytes":86707623,"heap_peak_bytes":27452151,"heap_blocks":484251}
 {"date":"2026-08-06T05:56:55Z","commit":"7931e8d0dd0619d5fb9031a594308311cf3783d0","txns":10000,"instructions":836306991,"heap_total_bytes":86707623,"heap_peak_bytes":27452151,"heap_blocks":484251}
 {"date":"2026-08-07T05:08:09Z","commit":"badb8985ceba4965bfa596da0582d52fc529a572","txns":10000,"instructions":836306246,"heap_total_bytes":86708647,"heap_peak_bytes":27452151,"heap_blocks":484252}
+{"date":"2026-08-08T04:21:41Z","commit":"2a6f049e89164cded89b5d2db51b3011092e6151","txns":10000,"instructions":838775509,"heap_total_bytes":86707623,"heap_peak_bytes":27452151,"heap_blocks":484251}

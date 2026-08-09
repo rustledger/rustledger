@@ -83,7 +83,7 @@ pub use format::{
 };
 pub use identifiers::{
     ACCOUNT_TYPES, Account, AccountTypeKind, AccountTypes, Currency, Link, Tag, account_type,
-    is_subaccount_or_equal,
+    is_account_type, is_subaccount_or_equal,
 };
 pub use implicit_prices::extract_per_unit_price;
 pub use intern::{InternedStr, StringInterner};

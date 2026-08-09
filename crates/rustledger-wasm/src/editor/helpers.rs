@@ -50,10 +50,7 @@ pub fn is_word_char(c: char) -> bool {
 
 /// Check if a string looks like an account type.
 pub fn is_account_type(s: &str) -> bool {
-    matches!(
-        s,
-        "Assets" | "Liabilities" | "Equity" | "Income" | "Expenses"
-    )
+    rustledger_core::is_account_type(s)
 }
 
 /// Check if a string looks like a currency (all uppercase, 2-5 chars).

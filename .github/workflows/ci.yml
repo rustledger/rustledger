@@ -26,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      vscode: ${{ steps.filter.outputs.vscode }}
       should_build: ${{ steps.decide.outputs.should_build }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,6 +49,12 @@ jobs:
               # check.
               - 'scripts/regen-bindings.sh'
               - 'crates/rustledger-wasm/bindings/**'
+            # The VS Code extension is a separate filter, NOT part of `code`:
+            # it shares nothing with the workspace crates (it is a thin LSP
+            # client), so a Rust change cannot break it and it should not make
+            # every Rust PR pay for a Node install.
+            vscode:
+              - 'packages/vscode/**'
       - name: Decide if build needed
         id: decide
         env:
@@ -263,6 +270,34 @@ jobs:
   # would miss the case that actually bites — the server calls into
   # `@rustledger/wasm`, so a Rust change can break it without touching a single
   # file here.
+  vscode-extension:
+    name: VS Code Extension
+    needs: [changes]
+    if: needs.changes.outputs.vscode == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: packages/vscode/package-lock.json
+      - name: Install
+        working-directory: packages/vscode
+        run: npm ci
+      # `npm run build` is esbuild, which STRIPS types without checking them —
+      # so a type error bundled cleanly and shipped, and nothing in CI ran
+      # `tsc` at all. #1993 carried a real one (the LSP protocol's
+      # `RelativePattern` takes `baseUri: string`, not VS Code's `Uri`) that
+      # only a local `tsc --noEmit` caught. `build` now runs `typecheck`
+      # first; this runs it explicitly so the failure names itself.
+      - name: Typecheck
+        working-directory: packages/vscode
+        run: npm run typecheck
+      - name: Build
+        working-directory: packages/vscode
+        run: npm run build
+
   mcp-server:
     name: MCP Server
     runs-on: ubuntu-latest
@@ -585,7 +620,7 @@ jobs:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, uri-boundary, lsp-platform, mcp-server, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate]
+    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, uri-boundary, lsp-platform, mcp-server, vscode-extension, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate]
     steps:
       - name: Check results
         run: |
@@ -626,6 +661,20 @@ jobs:
           echo "mcp-server result: $mcp"
           if [[ "$mcp" != "success" ]]; then
             echo "mcp-server must pass"
+            exit 1
+          fi
+
+          # vscode-extension is path-gated on `packages/vscode/**`, so it is
+          # `skipped` on most PRs and that is fine — but it is checked HERE,
+          # ahead of the `should_build` early-exit below. `should_build`
+          # tracks RUST changes, so a vscode-only PR has it false, and a check
+          # placed after the exit would never run on the one kind of PR it
+          # exists for. That is how the extension had no CI at all: not a
+          # missing job, a job that could not have gated anything.
+          vscode="${{ needs.vscode-extension.result }}"
+          echo "vscode-extension result: $vscode"
+          if [[ "$vscode" != "success" && "$vscode" != "skipped" ]]; then
+            echo "vscode-extension must pass when packages/vscode changed"
             exit 1
           fi
 

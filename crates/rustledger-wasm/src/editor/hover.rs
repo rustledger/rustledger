@@ -6,8 +6,7 @@ use rustledger_parser::ParseResult;
 use crate::types::EditorHoverInfo;
 
 use super::helpers::{
-    count_account_usages, count_currency_usages, get_word_at_position, is_account_type,
-    is_currency_like,
+    count_account_usages, count_currency_usages, get_word_at_position, is_currency_like,
 };
 use super::line_index::EditorCache;
 
@@ -33,7 +32,7 @@ pub fn get_hover_info(
     let word = get_word_at_position(source, line, character)?;
 
     // Check if it's an account name
-    if (word.contains(':') || is_account_type(&word))
+    if (word.contains(':') || rustledger_core::is_default_account_root(&word))
         && let Some(info) = get_account_hover_info(&word, parse_result)
     {
         return Some(EditorHoverInfo {

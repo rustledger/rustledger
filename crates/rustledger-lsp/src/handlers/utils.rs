@@ -473,12 +473,6 @@ pub fn is_account_like(s: &str) -> bool {
             .any(|t| s.starts_with(t))
 }
 
-/// Check if a string is a standard root account type.
-#[must_use]
-pub fn is_account_type(s: &str) -> bool {
-    rustledger_core::is_account_type(s)
-}
-
 /// Check if a string looks like a currency (simple format check).
 ///
 /// Currencies are typically 2-5 uppercase letters/digits (e.g., USD, EUR, BTC).
@@ -904,15 +898,6 @@ mod tests {
         assert!(!is_account_like("Random:Thing"));
     }
 
-    #[test]
-    fn test_is_account_type() {
-        assert!(is_account_type("Assets"));
-        assert!(is_account_type("Liabilities"));
-        assert!(is_account_type("Income"));
-        assert!(!is_account_type("Bank"));
-        assert!(!is_account_type("assets"));
-    }
-
     /// The two account-root lists must not drift apart.
     ///
     /// `rustledger-completion` keeps its own copy because it has no
@@ -939,19 +924,19 @@ mod tests {
     /// And the predicate must answer for exactly that list.
     ///
     /// Guards the direction the equality above cannot: a future
-    /// `is_account_type` that hardcoded its own words would still pass a test
+    /// `is_default_account_root` that hardcoded its own words would still pass a test
     /// comparing two constants. This asks the function about every root, and
     /// about a word that is not one.
     #[test]
-    fn is_account_type_answers_for_every_root() {
+    fn is_default_account_root_answers_for_every_root() {
         for root in rustledger_core::ACCOUNT_TYPES {
             assert!(
-                is_account_type(root),
-                "{root} is an account root but is_account_type says otherwise"
+                rustledger_core::is_default_account_root(root),
+                "{root} is an account root but is_default_account_root says otherwise"
             );
         }
         assert!(
-            !is_account_type("Depenses"),
+            !rustledger_core::is_default_account_root("Depenses"),
             "a renamed root is not a default"
         );
     }

@@ -335,6 +335,14 @@ pub const ACCOUNT_TYPES: [&str; 5] = ["Assets", "Liabilities", "Equity", "Income
 
 /// Whether a bare word is one of the DEFAULT account-type roots.
 ///
+/// Named for what it does, not for what it might be mistaken for. It was
+/// `is_account_type`, which promises CLASSIFICATION — and on a ledger with
+/// `option "name_expenses" "Depenses"` it answers `false` for `Depenses` and
+/// `true` for `Expenses`, both wrong as classification. It is inert today
+/// because a bare root is not a valid account name, so nothing downstream can
+/// act on it (#1964); the name was the part that could mislead the next
+/// caller, who might use it where it is not inert.
+///
 /// The single implementation of a question the editor surfaces both asked
 /// separately: `rustledger-lsp` matched against [`ACCOUNT_TYPES`] while
 /// `rustledger-wasm` inlined its own `matches!` over the same five strings.
@@ -356,7 +364,7 @@ pub const ACCOUNT_TYPES: [&str; 5] = ["Assets", "Liabilities", "Equity", "Income
 /// reference contains a `:` and should be classified with [`AccountTypes`],
 /// which honors the `name_*` renames.
 #[must_use]
-pub fn is_account_type(word: &str) -> bool {
+pub fn is_default_account_root(word: &str) -> bool {
     ACCOUNT_TYPES.contains(&word)
 }
 

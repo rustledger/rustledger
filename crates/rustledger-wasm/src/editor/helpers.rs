@@ -48,11 +48,6 @@ pub fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == ':' || c == '_' || c == '-'
 }
 
-/// Check if a string looks like an account type.
-pub fn is_account_type(s: &str) -> bool {
-    rustledger_core::is_account_type(s)
-}
-
 /// Check if a string looks like a currency (all uppercase, 2-5 chars).
 pub fn is_currency_like(s: &str) -> bool {
     s.len() >= 2
@@ -236,17 +231,6 @@ mod tests {
         assert!(!is_currency_like("U")); // Too short
         assert!(!is_currency_like("VERYLONGCURRENCY")); // Too long
         assert!(!is_currency_like("usd")); // Lowercase
-    }
-
-    #[test]
-    fn test_is_account_type() {
-        assert!(is_account_type("Assets"));
-        assert!(is_account_type("Liabilities"));
-        assert!(is_account_type("Equity"));
-        assert!(is_account_type("Income"));
-        assert!(is_account_type("Expenses"));
-        assert!(!is_account_type("Other"));
-        assert!(!is_account_type("assets")); // Case-sensitive
     }
 
     #[test]

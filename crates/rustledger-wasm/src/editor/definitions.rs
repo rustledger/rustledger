@@ -5,7 +5,7 @@ use rustledger_parser::ParseResult;
 
 use crate::types::EditorLocation;
 
-use super::helpers::{get_word_at_position, is_account_type, is_currency_like};
+use super::helpers::{get_word_at_position, is_currency_like};
 use super::line_index::{EditorCache, LineIndex};
 
 /// Get the definition location for the symbol at the given position (using cached data).
@@ -19,7 +19,7 @@ pub fn get_definition_cached(
     let word = get_word_at_position(source, line, character)?;
 
     // Check if it's an account name
-    if (word.contains(':') || is_account_type(&word))
+    if (word.contains(':') || rustledger_core::is_default_account_root(&word))
         && let Some(location) =
             find_account_definition_cached(&word, parse_result, &cache.line_index)
     {

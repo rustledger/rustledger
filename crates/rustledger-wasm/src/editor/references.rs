@@ -7,7 +7,7 @@ use crate::types::{EditorRange, EditorReference, EditorReferencesResult, Referen
 
 use super::helpers::{
     find_nth_word_in_line, find_quoted_string_in_line, find_word_in_line, get_line,
-    get_word_at_position, is_account_type, is_currency_like,
+    get_word_at_position, is_currency_like,
 };
 use super::line_index::{EditorCache, LineIndex};
 
@@ -22,7 +22,7 @@ pub fn get_references_cached(
     let word = get_word_at_position(source, line, character)?;
 
     // Check if it's an account name
-    if word.contains(':') || is_account_type(&word) {
+    if word.contains(':') || rustledger_core::is_default_account_root(&word) {
         return Some(find_account_references(
             &word,
             source,

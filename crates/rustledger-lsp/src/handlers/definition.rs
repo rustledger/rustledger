@@ -10,9 +10,7 @@ use rustledger_parser::ParseResult;
 
 use crate::ledger_state::LedgerState;
 
-use super::utils::{
-    LineIndex, PositionEncoding, get_word_at_source_position, is_account_type, is_currency_like,
-};
+use super::utils::{LineIndex, PositionEncoding, get_word_at_source_position, is_currency_like};
 
 /// Handle a go-to-definition request.
 pub fn handle_goto_definition(
@@ -36,7 +34,7 @@ pub fn handle_goto_definition(
     // after a one-shot O(n) build.
     let line_index = LineIndex::new(source, encoding);
 
-    let is_account = word.contains(':') || is_account_type(&word);
+    let is_account = word.contains(':') || rustledger_core::is_default_account_root(&word);
 
     // Check if it's an account name (current file first).
     if is_account

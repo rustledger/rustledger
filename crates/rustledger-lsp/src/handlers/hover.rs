@@ -13,7 +13,7 @@ use crate::ledger_state::LedgerState;
 
 use super::utils::{
     PositionEncoding, commodity_declaration_spans, count_noun, get_word_at_source_position,
-    is_account_type, is_currency_like_simple,
+    is_currency_like_simple,
 };
 
 /// Handle a hover request.
@@ -36,7 +36,7 @@ pub fn handle_hover(
     let ledger_directives = ledger_state.and_then(LedgerState::directives);
 
     // Check if it's an account name
-    if (word.contains(':') || is_account_type(&word))
+    if (word.contains(':') || rustledger_core::is_default_account_root(&word))
         && let Some(info) = get_account_info(&word, parse_result, ledger_directives)
     {
         return Some(Hover {

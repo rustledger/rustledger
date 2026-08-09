@@ -70,7 +70,13 @@ pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
 /// Shared option→validation mapping and document-dir resolution — single source
 /// of truth so the LSP/MCP diagnostics cannot drift from `check` (issue #1648).
 #[cfg(feature = "validation")]
-pub use process::{document_source_dirs, resolve_document_dirs, validation_options_from_options};
+pub use process::{document_source_dirs, validation_options_from_options};
+
+/// Resolve `documents` roots against the ledger's directory.
+///
+/// Ungated: the loader itself calls these to raise E7006, and it needs to do so
+/// whether or not `validation` is on.
+pub use process::{document_root_warnings, resolve_document_dirs};
 
 /// Whether an `include`/glob path contains glob metacharacters (`*`, `?`, `[`).
 ///
@@ -428,6 +434,21 @@ impl Loader {
 
         // Build display context from directives and options
         let display_context = build_display_context(&directives, &options);
+
+        // E7006: `option "documents"` roots that do not exist.
+        //
+        // This runs here rather than in option parsing because a relative
+        // `documents` path is relative to the LEDGER FILE — the same rule
+        // beancount and `include` use — and only the source map knows where
+        // that file is. Doing it during parsing meant `Path::new(value)`,
+        // which asked about the process CWD: `rledger check sub/ledger.bean`
+        // reported a missing document root that was present, and the same
+        // ledger checked clean from inside `sub/` (#1999).
+        let base_dir = source_map.files().first().and_then(|f| f.path.parent());
+        options.warnings.extend(process::document_root_warnings(
+            &options.documents,
+            base_dir,
+        ));
 
         Ok(LoadResult {
             directives,

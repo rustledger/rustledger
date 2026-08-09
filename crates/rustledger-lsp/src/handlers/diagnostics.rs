@@ -893,6 +893,16 @@ pub fn all_diagnostics(
             for (key, value, _span) in &result.options {
                 opts.set(key, value);
             }
+            // `Options::set` no longer checks that `documents` roots exist —
+            // it has no base dir, so it could only ask about the LSP process's
+            // CWD, which is wherever the editor happened to launch us (#1999).
+            // Resolve against the open buffer's directory instead, the same
+            // base dir the validation options above already use.
+            opts.warnings
+                .extend(rustledger_loader::document_root_warnings(
+                    &opts.documents,
+                    current_file_path.and_then(|p| p.parent()),
+                ));
             single_file_options = opts;
             single_file_options.warnings.as_slice()
         };

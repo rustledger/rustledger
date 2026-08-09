@@ -575,15 +575,17 @@ impl Options {
                 }
             }
             "documents" => {
-                // Validate that document root exists
-                if !std::path::Path::new(value).exists() {
-                    self.warnings.push(OptionWarning {
-                        code: "E7006",
-                        message: format!("Document root '{value}' does not exist"),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
+                // NO existence check here. A relative `documents` path is
+                // relative to the LEDGER FILE, as it is in beancount and as
+                // `include` is — and option parsing does not know where that
+                // file is. `Path::new(value).exists()` therefore asked about
+                // the process CWD, so `rledger check path/to/ledger` reported
+                // E7006 for a document root that was present (#1999), while
+                // `query` — which resolves through `resolve_document_dirs` —
+                // found it.
+                //
+                // The check now happens where the source map exists, in
+                // `Loader::load`, through that same canonical resolver.
                 self.documents.push(value.to_string());
             }
             "plugin_processing_mode" => {

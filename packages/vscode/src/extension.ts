@@ -187,18 +187,26 @@ function rootFor(uri: vscode.Uri): {
   return { root: vscode.Uri.file(dirname(uri.fsPath)), folder: undefined };
 }
 
-// Whether the binary is present. Asked once per activation, not per client:
-// N missing-binary popups for N folders would be worse than one.
-let binaryChecked = false;
-let binaryPresent = false;
+// Whether each configured binary is present, keyed BY COMMAND.
+//
+// Asked once per command rather than once per client, so N folders sharing a
+// server path produce one missing-binary popup instead of N. Keyed rather than
+// a single flag because `server.path` is readable per-resource: two folders can
+// name different binaries, and caching the first answer for the second would
+// report a missing binary as present, or warn about the wrong one.
+const binaryChecks = new Map<string, boolean>();
 
 async function ensureBinary(command: string): Promise<boolean> {
-  if (binaryChecked) {
-    return binaryPresent;
+  const cached = binaryChecks.get(command);
+  if (cached !== undefined) {
+    return cached;
   }
-  binaryChecked = true;
-  binaryPresent = findBinary(command);
-  if (!binaryPresent) {
+  // Recorded BEFORE awaiting the popup: `findBinary` is synchronous, so a
+  // concurrent caller that arrives while the dialog is open reads the cached
+  // answer and does not raise a second one.
+  const present = findBinary(command);
+  binaryChecks.set(command, present);
+  if (!present) {
     const install = "Install";
     const result = await vscode.window.showWarningMessage(
       `Could not find "${command}". Install rustledger to enable language features.`,
@@ -208,10 +216,14 @@ async function ensureBinary(command: string): Promise<boolean> {
       vscode.env.openExternal(vscode.Uri.parse(INSTALL_URL));
     }
   }
-  return binaryPresent;
+  return present;
 }
 
 // Start a client for one ledger root, unless one is already running for it.
+// Starts in flight, so a second caller for the same root joins the first
+// rather than racing it.
+const starting = new Map<string, Promise<void>>();
+
 async function startClientForRoot(
   root: vscode.Uri,
   folder: vscode.WorkspaceFolder | undefined,
@@ -220,7 +232,33 @@ async function startClientForRoot(
   if (clients.has(key)) {
     return;
   }
+  // The `clients` check alone is not enough, which Copilot caught: this
+  // function awaits before it records anything, so two documents from the SAME
+  // folder — exactly what `startClientsForOpenDocuments` produces via
+  // `Promise.all` — both passed the guard and started a server each.
+  // Reproduced at 2 servers for one folder.
+  //
+  // Reserving the in-flight promise closes it because the reservation happens
+  // in the same synchronous turn as the lookup: no other task can interleave
+  // between the `get` and the `set`.
+  const inFlight = starting.get(key);
+  if (inFlight) {
+    return inFlight;
+  }
+  const attempt = startClientForRootUncontended(root, folder, key);
+  starting.set(key, attempt);
+  try {
+    await attempt;
+  } finally {
+    starting.delete(key);
+  }
+}
 
+async function startClientForRootUncontended(
+  root: vscode.Uri,
+  folder: vscode.WorkspaceFolder | undefined,
+  key: string,
+): Promise<void> {
   // Read config against the ROOT, which is what makes a folder-level
   // `.vscode/settings.json` take effect. Without the resource argument this
   // returns the window value and every folder gets the same journal.
@@ -300,7 +338,19 @@ async function startClientForRoot(
   );
   clients.set(key, client);
 
-  await client.start();
+  try {
+    await client.start();
+  } catch (error) {
+    // Registered before starting so a concurrent caller sees it, which means a
+    // FAILED start would otherwise leave a dead client in the map — and
+    // `clients.has(key)` then makes every later attempt a no-op, disabling that
+    // folder until the window is reloaded. A spawn failure is usually
+    // transient (binary mid-upgrade, a bad `server.path` since corrected), so
+    // it must not be permanent.
+    clients.delete(key);
+    outputChannel?.appendLine(`Failed to start rledger-lsp for ${key}: ${error}`);
+    return;
+  }
   outputChannel?.appendLine(
     `Started rledger-lsp for ${key}` +
       (journalFile ? ` (journalFile: ${journalFile})` : " (auto-discovery)"),
@@ -319,6 +369,12 @@ async function ensureClientForDocument(
 }
 
 async function stopClient(key: string): Promise<void> {
+  // Wait for an in-flight start first. Removing a workspace folder while its
+  // server is still coming up would otherwise find nothing in `clients`,
+  // return, and let the start finish afterwards — leaving a server running for
+  // a folder that is gone.
+  await starting.get(key)?.catch(() => undefined);
+
   const client = clients.get(key);
   if (!client) {
     return;
@@ -358,9 +414,9 @@ export async function activate(
     async () => {
       outputChannel?.appendLine("Restarting rledger-lsp...");
       await stopAllClients();
-      // Re-ask for the binary: a restart is how a user retries after
-      // installing it, and a cached "missing" would make that do nothing.
-      binaryChecked = false;
+      // Re-ask for the binaries: a restart is how a user retries after
+      // installing one, and a cached "missing" would make that do nothing.
+      binaryChecks.clear();
       await startClientsForOpenDocuments();
     },
   );
@@ -411,7 +467,8 @@ export async function activate(
         `Configuration changed; restarting ${affected.length} server(s)`,
       );
       await Promise.all(affected.map(stopClient));
-      binaryChecked = false;
+      // `server.path` may be what changed.
+      binaryChecks.clear();
       await startClientsForOpenDocuments();
     }),
   );

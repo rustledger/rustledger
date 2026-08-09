@@ -285,16 +285,17 @@ jobs:
       - name: Install
         working-directory: packages/vscode
         run: npm ci
-      # `npm run build` is esbuild, which STRIPS types without checking them —
-      # so a type error bundled cleanly and shipped, and nothing in CI ran
-      # `tsc` at all. #1993 carried a real one (the LSP protocol's
-      # `RelativePattern` takes `baseUri: string`, not VS Code's `Uri`) that
-      # only a local `tsc --noEmit` caught. `build` now runs `typecheck`
-      # first; this runs it explicitly so the failure names itself.
-      - name: Typecheck
-        working-directory: packages/vscode
-        run: npm run typecheck
-      - name: Build
+      # esbuild STRIPS types without checking them, so a type error bundled
+      # cleanly and shipped, and nothing in CI ran `tsc` at all. #1993 carried
+      # a real one (the LSP protocol's `RelativePattern` takes
+      # `baseUri: string`, not VS Code's `Uri`) that only a local
+      # `tsc --noEmit` caught.
+      #
+      # `npm run build` is now `typecheck && esbuild`, so ONE step covers both
+      # — named the way `mcp-server` above names the same arrangement. An
+      # earlier revision ran `typecheck` as its own step for a clearer failure
+      # label, which Copilot pointed out just runs `tsc` twice.
+      - name: Typecheck and build
         working-directory: packages/vscode
         run: npm run build
 

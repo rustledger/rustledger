@@ -1,7 +1,7 @@
 {
   "name": "rustledger-vscode",
   "displayName": "rustledger",
-  "description": "Beancount language support powered by rustledger — completions, diagnostics, formatting, and more",
+  "description": "Beancount language support powered by rustledger \u2014 completions, diagnostics, formatting, and more",
   "version": "0.1.0",
   "license": "GPL-3.0-only",
   "repository": {
@@ -76,7 +76,8 @@
         "rustledger.journalFile": {
           "type": "string",
           "default": "",
-          "description": "Path to the root journal file (e.g., main.beancount). If empty, the LSP discovers it automatically."
+          "description": "Path to the root journal file. Relative paths resolve against the workspace folder, so each folder in a multi-root workspace can point at its own ledger from its .vscode/settings.json. Leave empty to auto-discover.",
+          "scope": "resource"
         },
         "rustledger.checkForUpdates": {
           "type": "boolean",

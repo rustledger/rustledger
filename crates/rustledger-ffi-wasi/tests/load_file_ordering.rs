@@ -51,6 +51,10 @@ use std::path::{Path, PathBuf};
 use rustledger_core::Directive;
 use rustledger_ffi_wasi::helpers::{expand_pads, load_file};
 
+/// `load_file`'s second positional argument. Named because a bare `true` next
+/// to a file about `expand_pads=true` reads as the wrong flag entirely.
+const CONFINE_INCLUDES: bool = true;
+
 fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     let mut file = std::fs::File::create(&path).expect("create fixture");
@@ -111,7 +115,7 @@ fn load_file_emits_a_globally_date_sorted_stream() {
     let dir = tempfile::tempdir().expect("tempdir");
     let main = write_reported_shape(dir.path());
 
-    let loaded = load_file(&main, true).expect("fixture loads");
+    let loaded = load_file(&main, CONFINE_INCLUDES).expect("fixture loads");
 
     assert!(
         loaded.directives.len() > 150,
@@ -136,7 +140,7 @@ fn the_top_level_files_own_entry_is_not_stranded_at_the_end() {
     let dir = tempfile::tempdir().expect("tempdir");
     let main = write_reported_shape(dir.path());
 
-    let loaded = load_file(&main, true).expect("fixture loads");
+    let loaded = load_file(&main, CONFINE_INCLUDES).expect("fixture loads");
 
     let last_transaction_date = loaded
         .directives
@@ -186,9 +190,34 @@ fn the_pad_expanded_stream_is_also_globally_sorted() {
     extra.insert_str(0, &std::fs::read_to_string(&main).expect("read main"));
     std::fs::write(&main, extra).expect("rewrite main");
 
-    let loaded = load_file(&main, true).expect("fixture loads");
-    let tags: Vec<u32> = loaded.directive_lines.clone();
-    let (expanded, _) = expand_pads(loaded.directives, tags, &0u32);
+    let loaded = load_file(&main, CONFINE_INCLUDES).expect("fixture loads");
+    // `(line, file)` tags, matching `convert.rs`'s real call rather than a
+    // simpler stand-in. `expand_pads` is generic over the tag, so a line-only
+    // `u32` compiles and passes — and would not be exercising what this test
+    // claims to: the MULTI-FILE surface, where the tag carries the originating
+    // file too. Copilot's catch.
+    let tags: Vec<(u32, String)> = loaded
+        .directive_lines
+        .iter()
+        .copied()
+        .zip(loaded.directive_files.iter().cloned())
+        .collect();
+    let synth_tag = (0u32, "<synthesized>".to_string());
+    let (expanded, expanded_tags) = expand_pads(loaded.directives, tags, &synth_tag);
+
+    assert_eq!(
+        expanded.len(),
+        expanded_tags.len(),
+        "every directive must keep a tag through expansion",
+    );
+    assert!(
+        expanded_tags
+            .iter()
+            .any(|(_, file)| file.ends_with("m00.beancount")),
+        "the tags must carry originating FILES, or this is not exercising the \
+         multi-file surface: {:?}",
+        expanded_tags.first(),
+    );
 
     assert!(
         expanded

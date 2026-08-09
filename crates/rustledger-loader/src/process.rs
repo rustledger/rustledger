@@ -1381,16 +1381,24 @@ pub fn resolve_document_dirs(
 /// A `None` `base_dir` (an unsaved buffer with no path) checks only absolute
 /// roots. Relative ones are skipped rather than guessed at, because the only
 /// thing left to resolve them against is the CWD, and that is the bug.
+///
+/// Probing goes through `fs` rather than [`std::path::Path::exists`] so the
+/// check honors the loader's injected filesystem instead of reaching past it
+/// to the host. That matters for in-memory loads: a [`VirtualFileSystem`] has
+/// no directory entries, and a raw host probe would warn on every one.
+///
+/// [`VirtualFileSystem`]: crate::VirtualFileSystem
 #[must_use]
 pub fn document_root_warnings(
     documents: &[String],
     base_dir: Option<&std::path::Path>,
+    fs: &dyn crate::vfs::FileSystem,
 ) -> Vec<crate::options::OptionWarning> {
     documents
         .iter()
         .zip(resolve_document_dirs(documents, base_dir))
         .filter(|(value, _)| base_dir.is_some() || std::path::Path::new(value).is_absolute())
-        .filter(|(_, resolved)| !resolved.exists())
+        .filter(|(_, resolved)| !fs.dir_exists(resolved))
         .map(|(value, resolved)| crate::options::OptionWarning {
             code: "E7006",
             message: format!(

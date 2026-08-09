@@ -817,6 +817,10 @@ impl rustledger_loader::FileSystem for HostDecryptFs {
         self.0.exists(path)
     }
 
+    fn dir_exists(&self, path: &std::path::Path) -> bool {
+        self.0.dir_exists(path)
+    }
+
     fn is_encrypted(&self, path: &std::path::Path) -> bool {
         self.0.is_encrypted(path)
     }

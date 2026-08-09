@@ -26,6 +26,15 @@ pub trait FileSystem: Send + Sync + std::fmt::Debug {
     /// Check if a file exists at the given path.
     fn exists(&self, path: &Path) -> bool;
 
+    /// Check if a *directory* exists at the given path.
+    ///
+    /// Separate from [`FileSystem::exists`] because the two answers genuinely
+    /// differ per backend: a virtual filesystem is a flat file map with no
+    /// directories in it at all, so `exists` on a directory is always false
+    /// there — using it to validate `option "documents"` roots would warn on
+    /// every in-memory load. See the per-impl notes.
+    fn dir_exists(&self, path: &Path) -> bool;
+
     /// Check if a path is a GPG-encrypted file.
     ///
     /// For virtual filesystems, this always returns false since
@@ -82,6 +91,12 @@ pub trait FileSystem: Send + Sync + std::fmt::Debug {
 pub struct DiskFileSystem;
 
 impl FileSystem for DiskFileSystem {
+    fn dir_exists(&self, path: &Path) -> bool {
+        // `is_dir`, not `exists`: a regular file named `docs` is not a
+        // document root, and reporting it as one would be a false pass.
+        path.is_dir()
+    }
+
     fn read(&self, path: &Path) -> Result<Arc<str>, LoadError> {
         let bytes = fs::read(path).map_err(|e| LoadError::Io {
             path: path.to_path_buf(),
@@ -262,6 +277,15 @@ impl FileSystem for VirtualFileSystem {
     fn exists(&self, path: &Path) -> bool {
         let normalized = normalize_vfs_path(path);
         self.files.contains_key(&normalized)
+    }
+
+    fn dir_exists(&self, _path: &Path) -> bool {
+        // A virtual filesystem is a flat map of file paths to contents; it has
+        // no directory entries, so it can neither confirm nor disprove that a
+        // document root exists. Answer "yes" so callers do not manufacture an
+        // E7006 for every in-memory load. Routing this through `exists` would
+        // always be false and would do exactly that.
+        true
     }
 
     fn is_encrypted(&self, _path: &Path) -> bool {

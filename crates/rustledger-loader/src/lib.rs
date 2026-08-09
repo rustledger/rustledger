@@ -445,10 +445,9 @@ impl Loader {
         // reported a missing document root that was present, and the same
         // ledger checked clean from inside `sub/` (#1999).
         let base_dir = source_map.files().first().and_then(|f| f.path.parent());
-        options.warnings.extend(process::document_root_warnings(
-            &options.documents,
-            base_dir,
-        ));
+        let doc_warnings =
+            process::document_root_warnings(&options.documents, base_dir, self.fs.as_ref());
+        options.warnings.extend(doc_warnings);
 
         Ok(LoadResult {
             directives,

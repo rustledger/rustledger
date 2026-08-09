@@ -14,18 +14,22 @@
 //! guaranteed not to contain the relative root under test. That is precisely
 //! the configuration the old code got wrong.
 //!
-//! Sabotage-checked — both failure directions were induced and observed:
+//! Sabotage-checked — every failure direction was induced and observed:
 //!
-//! | sabotage | `relative_root_next_to_ledger` | `missing_root` | `present_only_in_cwd` | `absolute_root` |
-//! |---|---|---|---|---|
-//! | reinstate CWD check in `Options::set` | **FAIL** | **FAIL** | pass | **FAIL** |
-//! | gut `document_root_warnings` | pass | **FAIL** | **FAIL** | **FAIL** |
+//! | sabotage | `relative_root` | `missing_root` | `only_in_cwd` | `absolute_root` | `file_where_root` | `virtual_fs` |
+//! |---|---|---|---|---|---|---|
+//! | reinstate CWD check in `Options::set` | **FAIL** | **FAIL** | pass | **FAIL** | pass | pass |
+//! | gut `document_root_warnings` | pass | **FAIL** | **FAIL** | **FAIL** | **FAIL** | pass |
+//! | `VirtualFileSystem::dir_exists` → `exists` | pass | pass | pass | pass | pass | **FAIL** |
+//! | `DiskFileSystem::dir_exists` → `exists` | pass | pass | pass | pass | **FAIL** | pass |
 //!
-//! The first row is the #1999 regression itself, caught by
+//! Row 1 is the #1999 regression itself, caught by
 //! `relative_root_next_to_ledger_is_found`; it also trips the count assertions
-//! because the reinstated check double-warns alongside the canonical one. The
-//! second row is the "did you just delete the feature" direction. Neither
-//! column is held by a test that cannot fail.
+//! because the reinstated check double-warns alongside the canonical one. Row 2
+//! is the "did you just delete the feature" direction. Rows 3 and 4 pin the two
+//! filesystem-backend answers independently — each is held by exactly one test,
+//! so neither can rot behind the other. No column is held only by a test that
+//! cannot fail.
 
 use rustledger_loader::Loader;
 
@@ -116,4 +120,50 @@ fn absolute_root_is_checked_as_given() {
 
     let dir = fixture(&present.path().join("gone").display().to_string(), &[]);
     assert_eq!(e7006_warnings(&dir).len(), 1);
+}
+
+/// A regular file is not a document root. The check uses `is_dir`, not
+/// `exists`, so a file sitting where the root should be is a warning rather
+/// than a false pass.
+#[test]
+fn file_where_the_root_should_be_warns() {
+    let dir = fixture("docs", &[]);
+    std::fs::write(dir.path().join("docs"), "not a directory").unwrap();
+    assert_eq!(
+        e7006_warnings(&dir).len(),
+        1,
+        "a plain file named `docs` must not satisfy a documents root"
+    );
+}
+
+/// In-memory loads must not manufacture E7006.
+///
+/// A [`VirtualFileSystem`] is a flat map of file paths to contents with no
+/// directory entries in it, so any host-filesystem probe — or any probe
+/// through `FileSystem::exists`, which consults that same file map — reports
+/// every document root as missing. The check therefore goes through
+/// `dir_exists`, which the virtual backend answers "yes" to because it cannot
+/// disprove the root. Without this, every WASM/in-memory load of a ledger
+/// carrying `option "documents"` would emit a spurious error.
+#[test]
+fn virtual_filesystem_load_does_not_warn() {
+    let mut vfs = rustledger_loader::VirtualFileSystem::new();
+    vfs.add_file(
+        "/mem/ledger.bean",
+        "option \"documents\" \"docs\"\n\n2020-01-01 open Assets:Cash USD\n",
+    );
+    let result = Loader::new()
+        .with_filesystem(Box::new(vfs))
+        .load(std::path::Path::new("/mem/ledger.bean"))
+        .expect("in-memory ledger loads");
+    let warnings: Vec<_> = result
+        .options
+        .warnings
+        .iter()
+        .filter(|w| w.code == "E7006")
+        .collect();
+    assert!(
+        warnings.is_empty(),
+        "in-memory load must not warn about document roots it cannot see: {warnings:?}"
+    );
 }

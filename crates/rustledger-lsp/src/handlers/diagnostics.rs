@@ -902,6 +902,7 @@ pub fn all_diagnostics(
                 .extend(rustledger_loader::document_root_warnings(
                     &opts.documents,
                     current_file_path.and_then(|p| p.parent()),
+                    &rustledger_loader::DiskFileSystem,
                 ));
             single_file_options = opts;
             single_file_options.warnings.as_slice()

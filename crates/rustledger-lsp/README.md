@@ -57,6 +57,36 @@ code --install-extension rustledger-vscode.vsix
 
 The extension provides syntax highlighting and automatically connects to `rledger-lsp` for completions, diagnostics, hover, and more. If `rledger-lsp` is not installed, it will prompt you to install it.
 
+#### Nix / home-manager
+
+The extension is a flake output, so it can be pinned with the same input as
+everything else (issue #1998):
+
+```nix
+{
+  inputs.rustledger.url = "github:rustledger/rustledger";
+
+  # ...
+  programs.vscode.profiles.default.extensions = [
+    rustledger.packages.${pkgs.system}.vscode-extension
+  ];
+
+  # The extension looks for `rledger-lsp` on PATH. This flake's `rustledger`
+  # package ships it alongside `rledger`, so installing it here gives an
+  # extension and a server that are guaranteed to be the same version.
+  home.packages = [ rustledger.packages.${pkgs.system}.default ];
+}
+```
+
+If you would rather not put the server on PATH, set `rustledger.server.path`
+to an absolute path instead.
+
+The extension's built-in update check is **disabled by default in the Nix
+build**. Elsewhere it offers to download a newer `.vsix` from GitHub and
+install it, which would place a second copy outside Nix and quietly detach the
+extension from your configuration. Re-enable `rustledger.checkForUpdates` if
+you want that behavior anyway.
+
 ### Neovim (nvim-lspconfig)
 
 ```lua

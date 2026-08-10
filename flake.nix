@@ -134,6 +134,81 @@
             ];
           };
 
+          # ---- VS Code extension (issue #1998) ------------------------
+          # The extension version IS the release tag, and the release tag is the
+          # workspace version, so read it from Cargo.toml rather than writing a
+          # literal here. `packages/vscode/package.json` carries a `0.1.0`
+          # placeholder that CI overwrites from the tag at release time
+          # (`npm pkg set version`), so it is not a usable source — and a second
+          # literal in this file would just be one more thing to drift.
+          vscodeVersion =
+            (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+
+          vscodeVsix = pkgs.buildNpmPackage {
+            pname = "rustledger-vscode-vsix";
+            version = vscodeVersion;
+            src = ./packages/vscode;
+            npmDepsHash = "sha256-+uUy4mzGgOyEv3e5O9oSkVZ/qZB1P6qaT+v4iBqfGuk=";
+
+            # esbuild's npm postinstall downloads a prebuilt binary for the host
+            # platform, and the build sandbox has no network. Skip install scripts
+            # and point esbuild at the nixpkgs build instead.
+            npmFlags = [ "--ignore-scripts" ];
+            ESBUILD_BINARY_PATH = "${pkgs.esbuild}/bin/esbuild";
+
+            nativeBuildInputs = [ pkgs.jq ];
+
+            # `package` is `build` (typecheck + esbuild) plus `vsce package`.
+            npmBuildScript = "package";
+
+            # Both edits run AFTER `npm ci`, not in postPatch: `npm ci` refuses to
+            # run when package.json and package-lock.json disagree, and the lock
+            # records the root package's own version.
+            preBuild = ''
+              npm pkg set version="${vscodeVersion}"
+
+              # Default the self-updater OFF for this channel. It does not update
+              # the LSP binary — it fetches the .vsix from the GitHub release and
+              # calls `workbench.extensions.installExtension`, which would install
+              # a SECOND copy outside Nix and silently un-manage a declarative
+              # install. That is precisely the outcome someone installing this
+              # from a flake is trying to avoid. The setting can still be turned
+              # back on by anyone who wants it.
+              jq '.contributes.configuration.properties["rustledger.checkForUpdates"].default = false' \
+                package.json > package.json.new
+              mv package.json.new package.json
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              install -Dm644 rustledger-vscode.vsix "$out/rustledger-vscode.vsix"
+              runHook postInstall
+            '';
+          };
+
+          # `rustledger.server.path` is deliberately NOT patched to a store path.
+          # The extension defaults it to `rledger-lsp` on PATH, and this flake's own
+          # `rustledger` package already ships that binary next to `rledger`
+          # (`rustledger-lsp` is in `default-members`), so installing both from this
+          # flake gives a version-matched pair for free. Hardcoding it would couple
+          # this derivation to the Rust build — every `.rs` change would rebuild the
+          # extension — and put a /nix/store path in the settings UI as the default.
+          vscodeExtension = pkgs.vscode-utils.buildVscodeExtension {
+            pname = "rustledger-vscode";
+            version = vscodeVersion;
+            src = "${vscodeVsix}/rustledger-vscode.vsix";
+            vscodeExtPublisher = "rustledger";
+            vscodeExtName = "rustledger-vscode";
+            vscodeExtUniqueId = "rustledger.rustledger-vscode";
+
+            meta = {
+              description = "rustledger VS Code extension (LSP client for beancount files)";
+              homepage = "https://github.com/rustledger/rustledger";
+              license = lib.licenses.mit;
+              platforms = lib.platforms.all;
+            };
+          };
+
           # Build dependencies only (for caching)
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
@@ -284,6 +359,10 @@
           packages = {
             default = rustledger;
             rustledger = rustledger;
+            
+            # VS Code extension, installable via home-manager's
+            # `programs.vscode.extensions` or `vscode-with-extensions` (#1998).
+            vscode-extension = vscodeExtension;
 
             # Documentation
             doc = craneLib.cargoDoc (

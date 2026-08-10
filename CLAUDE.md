@@ -72,8 +72,14 @@ resolve unless you've fetched it locally).
 | `spike/ffi-wit-component` | WIT / Component-Model FFI design spike for #1384. Reference if the `rustledger:ledger` component contract (the typed WIT API) changes. |
 | `spike/ledger-resource` | Stateful `resource session` "A+B boundary" redesign spike for #173. Reference for a future stateful embedding API. |
 | `benchmarks`, `compatibility`, `profiling` | CI-managed data branches (nightly benchmark / compatibility results; `profiling` holds the deterministic instruction-count + heap trend history written by `profile.yml`). Written by automation — never hand-delete. |
+| `fuzz-corpus` | CI-managed data branch holding the durable fuzz corpus (tens of thousands of inputs; the nightly commit message records the current count), written by the nightly `fuzz.yml` run and re-fetched by every later PR so each replays a corpus strictly stronger than the day before. Deleting it does not merely lose history: it silently resets every PR's fuzzing to cold, and nothing goes red to say so. Written by automation — never hand-delete. (Crash inputs are deliberately *not* kept here — they belong in-tree under `crates/<crate>/fuzz/regressions/<target>/`, committed alongside their fix, so losing this branch cannot resurrect a fixed bug.) |
 
 When pruning merged/closed PR branches, skip the rows above.
+
+None of these have an open PR, so any check of the form "no PR ⇒ stale" deletes
+all of them. `git branch --merged` is no help either: this repo squash-merges,
+so genuinely merged branches never appear in it. Classify by **PR state**
+(`gh pr list --head <branch> --state all`), then subtract this table.
 
 ______________________________________________________________________
 

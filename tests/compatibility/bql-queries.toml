@@ -40,7 +40,7 @@ preserve_order = true
 
 [[query]]
 name = "count-by-currency"
-query = "SELECT currency, COUNT(*) AS count GROUP BY currency ORDER BY count DESC LIMIT 5"
+query = "SELECT currency, COUNT(*) AS count GROUP BY currency ORDER BY count DESC, currency LIMIT 5"
 preserve_order = true
 
 # ----------------------------------------------------------------------
@@ -59,7 +59,7 @@ preserve_order = true
 
 [[query]]
 name = "balance-running-assets"
-query = "SELECT date, account, balance WHERE account ~ '^Assets' ORDER BY date LIMIT 10"
+query = "SELECT date, account, balance WHERE account ~ '^Assets' ORDER BY date, account LIMIT 10"
 notes = "Cumulative running balance over WHERE-filtered postings (#929)"
 preserve_order = true
 
@@ -106,18 +106,18 @@ preserve_order = true
 
 [[query]]
 name = "position-by-date"
-query = "SELECT date, account, position WHERE account ~ '^Assets' ORDER BY date LIMIT 10"
+query = "SELECT date, account, position WHERE account ~ '^Assets' ORDER BY date, account LIMIT 10"
 preserve_order = true
 
 [[query]]
 name = "weight-by-date"
-query = "SELECT date, account, weight WHERE account ~ '^Assets' ORDER BY date LIMIT 10"
+query = "SELECT date, account, weight WHERE account ~ '^Assets' ORDER BY date, account LIMIT 10"
 notes = "Weight = cost-basis-converted balancing amount; differs from position only on cost-bearing postings"
 preserve_order = true
 
 [[query]]
 name = "cost-basis-fields"
-query = "SELECT account, cost_number, cost_currency WHERE cost_number IS NOT NULL ORDER BY account LIMIT 10"
+query = "SELECT account, cost_number, cost_currency WHERE cost_number IS NOT NULL ORDER BY account, cost_number, cost_currency LIMIT 10"
 notes = "Exposes the cost-bearing branch of position handling"
 preserve_order = true
 

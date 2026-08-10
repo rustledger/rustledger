@@ -443,6 +443,10 @@ criteria = "safe-to-deploy"
 version = "0.9.11"
 criteria = "safe-to-deploy"
 
+[[exemptions.memoffset]]
+version = "0.9.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.miette]]
 version = "7.6.0"
 criteria = "safe-to-deploy"
@@ -652,7 +656,7 @@ version = "1.6.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.rowan]]
-version = "0.16.1"
+version = "0.17.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rust_decimal]]

@@ -62,11 +62,29 @@ The extension provides syntax highlighting and automatically connects to `rledge
 The extension is a flake output, so it can be pinned with the same input as
 everything else (issue #1998):
 
+In your flake, add the input and hand it to home-manager:
+
 ```nix
+# flake.nix
 {
   inputs.rustledger.url = "github:rustledger/rustledger";
 
-  # ...
+  outputs = { nixpkgs, home-manager, rustledger, ... }: {
+    homeConfigurations."you" = home-manager.lib.homeManagerConfiguration {
+      pkgs = nixpkgs.legacyPackages.x86_64-linux;
+      extraSpecialArgs = { inherit rustledger; };
+      modules = [ ./home.nix ];
+    };
+  };
+}
+```
+
+Then, in the home-manager module:
+
+```nix
+# home.nix
+{ pkgs, rustledger, ... }:
+{
   programs.vscode.profiles.default.extensions = [
     rustledger.packages.${pkgs.system}.vscode-extension
   ];

@@ -204,7 +204,9 @@
             meta = {
               description = "rustledger VS Code extension (LSP client for beancount files)";
               homepage = "https://github.com/rustledger/rustledger";
-              license = lib.licenses.mit;
+              # GPL-3.0-only, matching packages/vscode/package.json, its
+              # LICENSE file, and the workspace. Not MIT.
+              license = lib.licenses.gpl3Only;
               platforms = lib.platforms.all;
             };
           };

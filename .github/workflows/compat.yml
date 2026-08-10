@@ -880,6 +880,7 @@ jobs:
           bql_pct = int(os.environ.get('BQL_PCT', 0))
           bql_raw_pct = int(os.environ.get('BQL_RAW_PCT', 0))
           regression_count = int(os.environ.get('REGRESSION_COUNT', 0))
+          bql_total = int(os.environ.get('BQL_TOTAL', 0))
 
           now = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
           date_short = datetime.utcnow().strftime('%Y-%m-%d')
@@ -896,6 +897,10 @@ jobs:
               'error_pct': error_pct,
               'full_pct': full_pct,
               'bql_pct': bql_pct,
+              # The population this point was computed over. Without it a reader
+              # cannot tell real movement from a change in what was measured —
+              # which is how the denominator swing above went unnoticed for days.
+              'bql_runs': bql_total,
               'regression_count': regression_count,
           })
           history = history[-90:]  # Keep 90 days
@@ -1076,6 +1081,7 @@ jobs:
           BQL_PCT: ${{ steps.bql_compat.outputs.bql_pct }}
           BQL_RAW_PCT: ${{ steps.bql_compat.outputs.bql_raw_pct }}
           REGRESSION_COUNT: ${{ steps.compat_test.outputs.regression_count }}
+          BQL_TOTAL: ${{ steps.bql_compat.outputs.bql_total }}
       - name: Update summary
         run: |
           cat >> $GITHUB_STEP_SUMMARY << EOF
@@ -1232,8 +1238,25 @@ jobs:
                 body: body
               });
             }
+      # Only the SCHEDULED run publishes. It is the only one that sweeps the
+      # whole corpus — a push-to-main run queries `--max-files=150` of ~673,
+      # and publishing both put two incomparable populations into one series.
+      # The trend then tracked merge traffic rather than compatibility: two
+      # consecutive runs measured 11390 and 2499 file×query pairs, the smaller
+      # a strict subset of the larger, with ZERO cases changing answer — a pure
+      # denominator swing that read as a 1-2 point regression and recovery.
+      #
+      # It also truncated the baseline. `previous-bql-results.jsonl` is fetched
+      # from this branch, so every merge replaced a 673-file baseline with a
+      # 150-file one, leaving the other ~523 files nothing to regress against
+      # until the next nightly rebuilt it.
+      #
+      # Push runs still execute the full gate — they just no longer overwrite
+      # the record. That also stops a push advancing the baseline past an
+      # ungated regression (see the gate-ordering note below), and makes
+      # `history[-90:]` mean 90 days again instead of ~2 weeks of merges.
       - name: Commit results to compatibility branch
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'schedule'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

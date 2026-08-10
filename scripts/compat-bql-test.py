@@ -295,7 +295,7 @@ def _stale_registry_entries(
 def bare_name_registry_entries(
     registries: list[tuple[str, set[tuple[str, str]]]] | None = None,
 ) -> list[tuple[str, str]]:
-    """Registry keys written as a bare filename instead of a repo-relative path.
+    r"""Registry keys written as a bare filename instead of a repo-relative path.
 
     Since #2016 a fixture's identity is its path. A bare name is not merely
     unidiomatic here — it silently NEVER MATCHES any run, so the mask it was
@@ -307,6 +307,12 @@ def bare_name_registry_entries(
     on disk, so it cannot silently skip on a machine where the fixtures were
     never downloaded — which is exactly how the stale/dangling check degrades.
     Typo'd *paths* are a different failure and are caught by the dangling check.
+
+    `/` is the only separator accepted, deliberately. Run keys are POSIX
+    (`str(file_path)` on a Linux runner), so a key written with `\` separators
+    could never match one either, and flagging it here is the correct outcome —
+    treating `\` as a separator would make this guard go SILENT on exactly the
+    kind of unmatchable key it exists to catch.
     """
     if registries is None:
         registries = [
@@ -434,9 +440,26 @@ def _run_self_test() -> int:
     check(dirty == [("T", "bare.beancount")], f"bare-name key must be flagged, got {dirty}")
     clean = bare_name_registry_entries([("T", {("tests/x/ok.beancount", "q2")})])
     check(clean == [], f"path-keyed registry must be clean, got {clean}")
+    # A `\`-separated key can't match a POSIX run key either, so it must be
+    # flagged, not excused. Pins the reasoning in the docstring against a
+    # future "portability" edit that would silently disarm the guard.
+    backslash = bare_name_registry_entries(
+        [("T", {(r"tests\x\a.beancount", "q1")})]
+    )
+    check(
+        backslash == [("T", r"tests\x\a.beancount")],
+        f"backslash-separated key must be flagged, got {backslash}",
+    )
     # And the real registries this script ships with must be path-keyed.
     live = bare_name_registry_entries()
     check(live == [], f"shipped registries must be path-keyed, got {live}")
+
+    # --- find_file must not escape the corpus root (#2019 review) ---
+    for escape in ("/etc/passwd", "../outside.beancount", "tests/../../outside.beancount"):
+        check(
+            find_file(escape, DEFAULT_TEST_DIRS) is None,
+            f"find_file must reject {escape!r} rather than resolve outside REPO_ROOT",
+        )
 
     if failures:
         for m in failures:
@@ -763,6 +786,16 @@ def find_file(name_or_path: str, test_dirs: list[Path]) -> Path | None:
     `sorted()` (not `matches[0]` on an arbitrary walk order) so that even the
     legacy path is reproducible across machines and runs.
     """
+    # Reject absolute paths and `..` before touching the filesystem.
+    # `REPO_ROOT / "/etc/passwd"` is `/etc/passwd` — pathlib lets an absolute
+    # operand replace the base entirely — and `..` walks out the same way. The
+    # entries we generate are always relative and clean, but `--files-from` also
+    # accepts a downloaded baseline artifact, and silently querying a file
+    # outside the corpus is the same "this is not the file it claims to be"
+    # failure this function exists to remove.
+    if os.path.isabs(name_or_path) or ".." in name_or_path.split("/"):
+        return None
+
     direct = REPO_ROOT / name_or_path
     if direct.is_file():
         return direct
@@ -846,8 +879,9 @@ def main() -> int:
             "name never matches a run, so the mask silently does nothing."
         )
         for name, file in bare:
-            print(f"  BARE NAME [{name}]: {file!r} — use its path, e.g. "
-                  f"'tests/compatibility/files/<project>/{file}'")
+            print(f"  NOT A PATH [{name}]: {file!r} — use a repo-relative path "
+                  f"with '/' separators, e.g. "
+                  f"'tests/compatibility/files/<project>/{Path(file).name}'")
         return 1
 
     queries = load_corpus(args.corpus)

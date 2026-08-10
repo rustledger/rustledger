@@ -897,9 +897,12 @@ jobs:
               'error_pct': error_pct,
               'full_pct': full_pct,
               'bql_pct': bql_pct,
-              # The population this point was computed over. Without it a reader
-              # cannot tell real movement from a change in what was measured —
-              # which is how the denominator swing above went unnoticed for days.
+              # The population this point was computed over: file × query
+              # pairs executed, which is what the script calls a run (its
+              # `QueryRun`, its `Runs tested: N (file × query)` line). Without
+              # it a reader cannot tell real movement from a change in what was
+              # measured — which is how the denominator swing above went
+              # unnoticed for days.
               'bql_runs': bql_total,
               'regression_count': regression_count,
           })

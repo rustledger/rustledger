@@ -304,6 +304,18 @@ jobs:
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    env:
+      # The workflow-level `RUSTC_WRAPPER: sccache` only works in jobs that
+      # install sccache; this one does not, and cargo then dies with
+      # "could not execute process `sccache ... rustc -vV` (never executed)".
+      # Clearing it is what the SemVer job does for the same reason. These are
+      # five tiny crates — a shared compiler cache would buy less than the
+      # setup step costs.
+      #
+      # RUSTFLAGS is deliberately NOT cleared: the workflow's `-Dwarnings`
+      # should apply here. All five examples are warning-clean under it, and
+      # examples that accumulate warnings are examples nobody should copy.
+      RUSTC_WRAPPER: ''
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable

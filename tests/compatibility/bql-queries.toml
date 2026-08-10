@@ -71,7 +71,33 @@ preserve_order = true
 
 [[query]]
 name = "first-balance-by-month"
-query = "SELECT year, month, FIRST(balance) WHERE account ~ '^Assets' ORDER BY year, month LIMIT 12"
+# `LAST(balance)` is not idle curiosity — it is load-bearing, and removing it
+# reintroduces ~570 mismatches.
+#
+# `balance` mutates a shared accumulator when it is evaluated, and beanquery's
+# `FIRST.update` evaluates its operand only on a group's FIRST row. So with
+# `FIRST(balance)` alone, postings after each group's first row never reach the
+# accumulator and beanquery reports the balance of a ledger that skipped them.
+# Worked example (`tests_code.beancount`, 3 Assets postings in March and 4 in
+# May, all +10.00 EUR, so the true running balance is 10/20/30 then 40/50/60/70):
+#
+#     bare FIRST(balance)   ->  2018-03  10.00 EUR   2018-05  20.00 EUR
+#     with LAST(balance)    ->  2018-03  10.00 EUR   2018-05  40.00 EUR
+#
+# 20.00 is March's first posting plus May's first posting — the four rows
+# beanquery never evaluated. rledger returns 40.00 either way, which is correct.
+# Selecting LAST too forces evaluation on every row and the two tools then agree
+# exactly, so this is upstream beanquery#279 rather than anything on our side.
+#
+# The fix is in the query rather than the mask registry because the divergence is
+# overwhelmingly hit by the nightly `synthetic_*` fixtures, which are regenerated
+# every run — a `(filename, query)` pin cannot cover a file that will not exist
+# tomorrow, and 499 of 513 unpinned occurrences were synthetic.
+#
+# rledger's bare-`FIRST(balance)` behavior is pinned independently by
+# `crates/rustledger-query/tests/first_balance_accumulates.rs`, so widening the
+# SELECT here does not stop us noticing if OUR semantics change.
+query = "SELECT year, month, FIRST(balance), LAST(balance) WHERE account ~ '^Assets' ORDER BY year, month LIMIT 12"
 preserve_order = true
 
 # ----------------------------------------------------------------------

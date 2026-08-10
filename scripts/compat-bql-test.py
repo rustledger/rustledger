@@ -93,94 +93,18 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
     ("testdata_source_generic_importer_test_invalid_journal.beancount", "*"),
     # DisplayContext common vs max precision (#724)
     ("testdata_source_ofx_test_fidelity_journal.beancount", "*"),
-    # beancount/beanquery#279: FIRST aggregator short-circuits operand
-    # evaluation after the first row, leaving the stateful `balance`
-    # accumulator stale for subsequent groups. The exact same query
-    # against the exact same fixture gives different FIRST(balance)
-    # values depending on whether other aggregators (e.g. LAST) appear
-    # in the SELECT list — because LAST's presence forces the operand
-    # to be evaluated on every row. See tests/compatibility/exclusions.toml
-    # for the full root-cause writeup. rledger pre-computes ctx.balance
-    # per row so FIRST/LAST always agree; we don't want to mirror the
-    # upstream bug. Surgical pin (not "*") so any other genuine
-    # divergence on these fixtures stays surfaced.
-    ("cost_only.beancount", "first-balance-by-month"),
-    ("testdata_source_healthequity_test_invalid_journal.beancount", "first-balance-by-month"),
-    ("testdata_source_healthequity_test_matching_journal.beancount", "first-balance-by-month"),
-    ("testdata_source_ofx_test_fidelity_ira_journal.beancount", "first-balance-by-month"),
-    ("testdata_source_paypal_test_matching_journal.beancount", "first-balance-by-month"),
+    # beancount/beanquery#279 used to be pinned here, 56 fixtures of it. It is
+    # not masked any more because it is no longer a divergence: the corpus query
+    # now selects `LAST(balance)` alongside `FIRST(balance)`, which forces
+    # beanquery to evaluate the stateful `balance` accumulator on every row, and
+    # the two tools then agree exactly. See the rationale on
+    # `first-balance-by-month` in tests/compatibility/bql-queries.toml.
     #
-    # The 51 below hit the SAME upstream bug and were pinned later, once the
-    # corpus grew past the original five. Each was VERIFIED, not assumed:
-    # `scripts/verify-first-balance-divergence.py` checks that rledger's
-    # `FIRST(balance)` equals what beanquery itself produces when `balance` is
-    # forced to evaluate on every row (by adding `LAST(balance)` to the SELECT
-    # list). Where those agree, the only difference is the accumulation
-    # beanquery skipped, so the fixture is upstream's bug and not ours.
-    #
-    # Eight further fixtures mismatch on this query and are deliberately NOT
-    # pinned. Seven load third-party plugins (beancount_reds_plugins,
-    # beancount_lazy_plugins) that the verifier could not import; beancount
-    # reports that as a load error and then EXITS 0 with a partially-loaded
-    # ledger, so the comparison silently degrades to rledger-full against
-    # beancount-partial and proves nothing — including for three of them whose
-    # rows happened to match anyway. The eighth genuinely disagrees.
-    #
-    # All eight stay surfaced. Pinning on the strength of "same query name"
-    # would be exactly the too-broad mask this registry's surgical-pin rule
-    # exists to prevent, and would bury a real regression among known-bad
-    # pairs. Install those plugins and re-run the verifier to settle them.
-    ("bc_scripts_my_accounts.beancount", "first-balance-by-month"),
-    ("contrib_examples_budgets-example.beancount", "first-balance-by-month"),
-    ("contrib_examples_example.beancount", "first-balance-by-month"),
-    ("contrib_examples_huge-example.beancount", "first-balance-by-month"),
-    ("data_sample-west.beancount", "first-balance-by-month"),
-    ("data_sample.beancount", "first-balance-by-month"),
-    ("example_alipay_example-alipay-output.beancount", "first-balance-by-month"),
-    ("example_bocom_debit_example-bocom_debit-output.beancount", "first-balance-by-month"),
-    ("example_example.beancount", "first-balance-by-month"),
-    ("example_ledger.beancount", "first-balance-by-month"),
-    ("example_multiple-files-example_example.beancount", "first-balance-by-month"),
-    ("example_portfolio.beancount", "first-balance-by-month"),
-    ("example_wechat_example-wechat-output.beancount", "first-balance-by-month"),
-    ("examples_example.beancount", "first-balance-by-month"),
-    ("examples_ledger_ledger.beancount", "first-balance-by-month"),
-    ("examples_simple_basic.beancount", "first-balance-by-month"),
-    ("examples_simple_starter.beancount", "first-balance-by-month"),
-    ("examples_vesting_vesting.beancount", "first-balance-by-month"),
-    ("fava_investor_examples_example.beancount", "first-balance-by-month"),
-    ("fava_investor_examples_huge-example.beancount", "first-balance-by-month"),
-    ("fava_investor_modules_minimizegains_example.beancount", "first-balance-by-month"),
-    ("fava_investor_modules_tlh_example.beancount", "first-balance-by-month"),
-    ("frontend_tests_dashboards__testdata.beancount", "first-balance-by-month"),
-    ("nomina_examples_example.beancount", "first-balance-by-month"),
-    ("src_fava_portfolio_returns_test_ledger_example_stock.beancount", "first-balance-by-month"),
-    ("src_fava_portfolio_returns_test_ledger_linear_growth_stock.beancount", "first-balance-by-month"),
-    ("src_fava_portfolio_returns_test_ledger_savings_plan.beancount", "first-balance-by-month"),
-    ("testdata_source_venmo_test_invalid_references_journal.beancount", "first-balance-by-month"),
-    ("testdata_source_venmo_test_matching_journal.beancount", "first-balance-by-month"),
-    ("tests_amounts-decimal-comma.beancount", "first-balance-by-month"),
-    ("tests_amounts.beancount", "first-balance-by-month"),
-    ("tests_aux-date.beancount", "first-balance-by-month"),
-    ("tests_balance-assertion.beancount", "first-balance-by-month"),
-    ("tests_code.beancount", "first-balance-by-month"),
-    ("tests_comments.beancount", "first-balance-by-month"),
-    ("tests_commodities.beancount", "first-balance-by-month"),
-    ("tests_data_extension-report-example.beancount", "first-balance-by-month"),
-    ("tests_data_long-example.beancount", "first-balance-by-month"),
-    ("tests_data_query-example.beancount", "first-balance-by-month"),
-    ("tests_dates.beancount", "first-balance-by-month"),
-    ("tests_fixated.beancount", "first-balance-by-month"),
-    ("tests_hledger.beancount", "first-balance-by-month"),
-    ("tests_lots.beancount", "first-balance-by-month"),
-    ("tests_metadata.beancount", "first-balance-by-month"),
-    ("tests_narration.beancount", "first-balance-by-month"),
-    ("tests_payee.beancount", "first-balance-by-month"),
-    ("tests_prices.beancount", "first-balance-by-month"),
-    ("tests_samples_official.beancount", "first-balance-by-month"),
-    ("tests_tags.beancount", "first-balance-by-month"),
-    ("tests_test.beancount", "first-balance-by-month"),
-    ("tests_virtual-postings.beancount", "first-balance-by-month"),
+    # Pinning could never have finished the job. 499 of the 513 unpinned
+    # occurrences were `synthetic_*` fixtures, which the nightly generator
+    # recreates every run — a `(filename, query)` entry cannot mask a file that
+    # will not exist tomorrow, so the registry lost ground every night no matter
+    # how many entries were added.
 }
 
 

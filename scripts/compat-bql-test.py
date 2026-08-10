@@ -83,21 +83,26 @@ EMPTY_RESULT_WARNING_FRACTION = 0.5
 # These don't count against compat percentage. See referenced beanquery
 # issues for context.
 #
-# Keyed by `(filename, query_name)`. A bare filename used to be enough,
-# but with a 13-query corpus a single broken file would silently mask up
-# to 12 unrelated regressions on that same file. The query_name pin
+# Keyed by `(repo_relative_path, query_name)`. A bare filename used to be
+# enough, but with a 13-query corpus a single broken file would silently mask
+# up to 12 unrelated regressions on that same file. The query_name pin
 # makes the allowlist surgical: only the specific query that's known to
 # diverge is excused.
 #
-# Use `("filename", "*")` to allowlist ALL queries on a file (e.g., when
+# The key is a PATH, not a basename: four basenames collide in the corpus, so a
+# name-keyed mask would excuse every twin sharing that name (#2016). Entries are
+# stale/dangling-checked at runtime, so a mistyped path surfaces as a dangling
+# warning rather than a silent no-op mask.
+#
+# Use `("path", "*")` to allowlist ALL queries on a file (e.g., when
 # the divergence is in a column projection that every query touches).
 KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
     # beancount/beanquery#275: position display truncates precision in
     # the ledger's display context. Affects any query that projects
     # `position` or sums it.
-    ("testdata_source_generic_importer_test_invalid_journal.beancount", "*"),
+    ("tests/compatibility/files/beancount-import/testdata_source_generic_importer_test_invalid_journal.beancount", "*"),
     # DisplayContext common vs max precision (#724)
-    ("testdata_source_ofx_test_fidelity_journal.beancount", "*"),
+    ("tests/compatibility/files/beancount-import/testdata_source_ofx_test_fidelity_journal.beancount", "*"),
     # beancount/beanquery#279 used to be pinned here, 56 fixtures of it. It is
     # not masked any more because it is no longer a divergence: the corpus query
     # now selects `LAST(balance)` alongside `FIRST(balance)`, which forces
@@ -124,8 +129,8 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
 # whose pair now MATCHES bean-query fails the run, so a mask can't outlive the
 # divergence it documents and then absorb a real regression on the same pair.
 #
-# Keyed by `(filename, query_name)` with the same surgical-pin semantics
-# as `KNOWN_PYTHON_DIVERGENCES`. Counted as "known" for the effective
+# Keyed by `(repo_relative_path, query_name)` with the same surgical-pin
+# semantics as `KNOWN_PYTHON_DIVERGENCES`. Counted as "known" for the effective
 # match percentage (the values are correct — only display scale differs),
 # but tracked as a distinct category so future bookkeeping stays honest.
 KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
@@ -150,9 +155,9 @@ KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
     # work. Tracked under #1112 (kept open as the tracker — do not
     # auto-close from this PR). Surgical pin (not "*") so any
     # non-scale divergence on these fixtures stays surfaced.
-    ("testdata_source_healthequity_test_invalid_journal.beancount", "sum-number-by-currency"),
-    ("testdata_source_healthequity_test_matching_journal.beancount", "sum-number-by-currency"),
-    ("testdata_source_ofx_test_non_default_capital_gains_journal.beancount", "sum-number-by-currency"),
+    ("tests/compatibility/files/beancount-import/testdata_source_healthequity_test_invalid_journal.beancount", "sum-number-by-currency"),
+    ("tests/compatibility/files/beancount-import/testdata_source_healthequity_test_matching_journal.beancount", "sum-number-by-currency"),
+    ("tests/compatibility/files/beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount", "sum-number-by-currency"),
 }
 
 
@@ -287,6 +292,35 @@ def _stale_registry_entries(
     return stale, dangling
 
 
+def bare_name_registry_entries(
+    registries: list[tuple[str, set[tuple[str, str]]]] | None = None,
+) -> list[tuple[str, str]]:
+    """Registry keys written as a bare filename instead of a repo-relative path.
+
+    Since #2016 a fixture's identity is its path. A bare name is not merely
+    unidiomatic here — it silently NEVER MATCHES any run, so the mask it was
+    meant to apply quietly does nothing and the divergence it documents shows
+    up as a mismatch (or, worse, a mask intended for one file gets written in a
+    form that could only ever have excused a twin).
+
+    The check is purely syntactic (`"/" in key`) on purpose: it needs no corpus
+    on disk, so it cannot silently skip on a machine where the fixtures were
+    never downloaded — which is exactly how the stale/dangling check degrades.
+    Typo'd *paths* are a different failure and are caught by the dangling check.
+    """
+    if registries is None:
+        registries = [
+            ("KNOWN_PYTHON_DIVERGENCES", KNOWN_PYTHON_DIVERGENCES),
+            ("KNOWN_RUST_DIVERGENCES", KNOWN_RUST_DIVERGENCES),
+        ]
+    bare: list[tuple[str, str]] = []
+    for name, registry in registries:
+        for file, _query in registry:
+            if "/" not in file:
+                bare.append((name, file))
+    return sorted(bare)
+
+
 def stale_divergence_entries(
     results: "list[QueryRun]",
 ) -> "tuple[list[tuple[str, tuple[str, str]]], list[tuple[str, tuple[str, str]]]]":
@@ -390,6 +424,19 @@ def _run_self_test() -> int:
         ("T", ("c.beancount", "*")) not in stale_w,
         "a file with one diverging query keeps its wildcard live",
     )
+
+    # --- bare-name registry guard (#2016) ---
+    # Both directions, because a guard only ever shown reporting "clean" is
+    # indistinguishable from one that is wired up wrong and always says clean.
+    dirty = bare_name_registry_entries(
+        [("T", {("bare.beancount", "q1"), ("tests/x/ok.beancount", "q2")})]
+    )
+    check(dirty == [("T", "bare.beancount")], f"bare-name key must be flagged, got {dirty}")
+    clean = bare_name_registry_entries([("T", {("tests/x/ok.beancount", "q2")})])
+    check(clean == [], f"path-keyed registry must be clean, got {clean}")
+    # And the real registries this script ships with must be path-keyed.
+    live = bare_name_registry_entries()
+    check(live == [], f"shipped registries must be path-keyed, got {live}")
 
     if failures:
         for m in failures:
@@ -679,6 +726,10 @@ def load_valid_files(check_results: Path) -> list[str]:
 
     BQL diffs against an empty postings table aren't meaningful — both
     tools return zero rows trivially. Only test files with real data.
+
+    Returns repo-relative paths (the check step records `file` as a path since
+    #2016). Order is preserved, and paths are unique by construction, so the
+    caller's `--max-files` budget now counts files rather than names.
     """
     files: list[str] = []
     if not check_results.exists():
@@ -698,10 +749,31 @@ def load_valid_files(check_results: Path) -> list[str]:
     return files
 
 
-def find_file(filename: str, test_dirs: list[Path]) -> Path | None:
+def find_file(name_or_path: str, test_dirs: list[Path]) -> Path | None:
+    """Resolve a check-results `file` entry to a path on disk.
+
+    `file` is a repo-relative PATH (see the `FileResult` rationale in
+    `.github/workflows/compat.yml`), so the common case is a direct hit and
+    involves no globbing at all. That directness is the point: the previous
+    `rglob(name) -> matches[0]` made identity filesystem-order dependent, and
+    four basenames collide in the corpus (#2016).
+
+    The glob is kept only as a fallback for a BARE name, which is what a
+    baseline artifact published before #2016 contains. It is deliberately
+    `sorted()` (not `matches[0]` on an arbitrary walk order) so that even the
+    legacy path is reproducible across machines and runs.
+    """
+    direct = REPO_ROOT / name_or_path
+    if direct.is_file():
+        return direct
+    if "/" in name_or_path:
+        # A path that does not exist is a genuine miss; do not fall back to
+        # globbing its basename, which would resolve to a DIFFERENT file that
+        # merely shares the name — exactly the bug this function stopped having.
+        return None
     for d in test_dirs:
         if d.exists():
-            matches = list(d.rglob(filename))
+            matches = sorted(d.rglob(name_or_path))
             if matches:
                 return matches[0]
     return None
@@ -762,6 +834,22 @@ def main() -> int:
     if args.self_test:
         return _run_self_test()
 
+    # Static gate, before any work: a bare-name registry key can never match a
+    # run, so it is a mask that does nothing. Fail fast rather than let the run
+    # report the divergence it was supposed to excuse.
+    bare = bare_name_registry_entries()
+    if bare:
+        print(
+            f"::error::{len(bare)} deliberate-divergence registry "
+            f"entr{'y' if len(bare) == 1 else 'ies'} keyed by bare filename. "
+            "Fixtures are identified by repo-relative path since #2016; a bare "
+            "name never matches a run, so the mask silently does nothing."
+        )
+        for name, file in bare:
+            print(f"  BARE NAME [{name}]: {file!r} — use its path, e.g. "
+                  f"'tests/compatibility/files/<project>/{file}'")
+        return 1
+
     queries = load_corpus(args.corpus)
     print(f"Corpus: {len(queries)} queries from {args.corpus.name}")
 
@@ -774,13 +862,11 @@ def main() -> int:
 
     test_dirs = DEFAULT_TEST_DIRS
 
-    # Resolve basenames → real paths BEFORE prioritization. The
-    # `--files-from` JSONL stores `file_path.name` (basename only —
-    # see `.github/workflows/compat.yml` `FileResult(file=...)`), so
-    # we can't tell from the basename alone whether a fixture lives
-    # under `plugins/` or anywhere else. Resolving first lets us
-    # prioritize on the resolved path and also surfaces collisions
-    # via `find_file`'s logic.
+    # Resolve to real paths BEFORE prioritization: `is_plugin_fixture` below
+    # needs the path's directory segments, which the entry alone doesn't
+    # guarantee is on disk. Since #2016 the `--files-from` JSONL stores a
+    # repo-relative path (see `FileResult` in `.github/workflows/compat.yml`),
+    # so this is a direct existence check rather than a basename glob.
     resolved: list[tuple[str, Path]] = []
     unresolved: list[str] = []
     for filename in valid:
@@ -1069,6 +1155,12 @@ def main() -> int:
     # out of the run (its file no longer qualifies) is NOT counted, only a real
     # true→false flip is. This is the gate that would have caught the JOURNAL
     # regression (90→12 matches) that previously merged unblocked.
+    #
+    # The pair key's file component became a repo-relative path in #2016. The
+    # first run after that change compares against a name-keyed baseline, so no
+    # pair matches and nothing is gated — by the same "dropped pairs don't
+    # count" rule above. One cycle of reduced sensitivity, then the published
+    # baseline is path-keyed too.
     if args.baseline and args.baseline.exists():
         baseline_passing = set()
         with open(args.baseline) as f:

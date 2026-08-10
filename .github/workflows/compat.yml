@@ -301,6 +301,13 @@ jobs:
 
           @dataclass
           class FileResult:
+              # Repo-relative PATH, not a bare filename. Four basenames collide
+              # in the corpus (3x example.beancount, 3x example_example.beancount,
+              # 2x data_sample.beancount, 2x accounts.beancount), so a bare name
+              # is not an identity: it made `previous_results` below silently drop
+              # all but one file per collision, let `exclusions.toml` leak (an
+              # excluded path re-entered the BQL suite under a surviving twin's
+              # name), and left 6 files never queried at all. See #2016.
               file: str
               category: str
               # Check comparison
@@ -339,7 +346,9 @@ jobs:
           def test_file(file_path: Path) -> FileResult:
               """Test a single file - designed to run in parallel."""
               category = get_category(file_path)
-              result = FileResult(file=file_path.name, category=category)
+              # TEST_DIRS are repo-relative and the job runs from the repo root,
+              # so str(file_path) is already the repo-relative path.
+              result = FileResult(file=str(file_path), category=category)
 
               # === Python parsing ===
               python_accounts = set()
@@ -564,6 +573,15 @@ jobs:
           json_parse_failures = [r for r in results if r.rust_json_parse_failed]
 
           # === Regression detection ===
+          # Keyed by `file`, a repo-relative path since #2016. It used to be a
+          # bare name and `previous_results` is a dict, so each of the four
+          # colliding basenames kept only ONE entry — the other fixtures were
+          # compared against an unrelated file's history, or dropped entirely.
+          #
+          # The first run after #2016 sees a name-keyed baseline, so no key
+          # matches and nothing is flagged (a missing key means "new", not
+          # "regressed"). One cycle of reduced sensitivity, then the published
+          # baseline is path-keyed and the comparison is exact.
           previous_file = Path(".github/badges/previous-check-results.jsonl")
           regressions = []
           if previous_file.exists() and previous_file.stat().st_size > 0:

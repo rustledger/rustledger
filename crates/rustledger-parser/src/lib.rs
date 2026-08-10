@@ -572,7 +572,7 @@ mod cached_syntax_root_matches_fresh_parse {
     fn assert_round_trip(label: &str, source: &str) {
         let parsed = parse(source);
         let (stripped, _bom) = crate::bom::strip_leading(source);
-        let fresh = parse_structured(stripped).green().into_owned();
+        let fresh = parse_structured(stripped).green().to_owned();
         assert_eq!(
             parsed.syntax_root, fresh,
             "cached syntax_root diverged from fresh parse_structured for {label}: \n\

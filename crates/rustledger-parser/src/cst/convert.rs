@@ -227,7 +227,7 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
                 let base =
                     u32::from(node.syntax().text_range().start()) as usize + bom_offset as usize;
                 let green_dir = if use_green {
-                    super::green::convert_transaction(&green, base)
+                    super::green::convert_transaction(green, base)
                 } else {
                     None
                 };
@@ -354,13 +354,15 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         crate::cst::format::GroupingStyle::default(),
     );
 
-    // Capture the green root before we drop `source_file`. The
-    // `.green()` call returns a Cow so we promote to owned with
-    // `into_owned()`; the resulting `GreenNode` is reference-
-    // counted internally, cheap to clone, and `Send + Sync` -
-    // safe to stash in `Arc<ParseResult>` that the LSP shares
-    // across threads.
-    let syntax_root = source_file.syntax().green().into_owned();
+    // Capture the green root before we drop `source_file`. `.green()`
+    // borrows (`&GreenNodeData`), so promote to an owned `GreenNode`; it is
+    // reference-counted internally, cheap to clone, and `Send + Sync` — safe
+    // to stash in the `Arc<ParseResult>` the LSP shares across threads.
+    //
+    // `to_owned()`, not `into_owned()`: rowan 0.17 changed `green()` from
+    // returning `Cow<GreenNodeData>` to returning `&GreenNodeData`, so the
+    // promotion now goes through `ToOwned` instead of `Cow::into_owned`.
+    let syntax_root = source_file.syntax().green().to_owned();
 
     ParseResult {
         directives,

@@ -537,7 +537,7 @@ pub(super) fn walk_descendants(
             account_occurrences: Vec::new(),
         },
     };
-    w.walk(&root.green(), false);
+    w.walk(root.green(), false);
     w.result
 }
 

@@ -893,9 +893,15 @@ def main() -> int:
     # Per-query empty-result rate. A query that returns 0 rows on >50%
     # of files isn't actually being tested by the corpus and should
     # either be reformulated or paired with data that exercises it.
+    #
+    # Over `conclusive`, not `results`: a failed run has empty stdout, so it
+    # scores as `py_rows == 0 and rs_rows == 0` and would be indistinguishable
+    # from a query the corpus genuinely fails to exercise. A missing plugin or
+    # a timeout would then be reported as poor corpus coverage — the same
+    # mistake as folding those runs into the match rate, one metric over.
     empties_by_query: dict[str, int] = {}
     runs_by_query: dict[str, int] = {}
-    for r in results:
+    for r in conclusive:
         runs_by_query[r.query_name] = runs_by_query.get(r.query_name, 0) + 1
         if r.py_rows == 0 and r.rs_rows == 0:
             empties_by_query[r.query_name] = empties_by_query.get(r.query_name, 0) + 1

@@ -576,7 +576,13 @@ fn process_fifo_sell(
                 span: None,
             });
 
-            state.total_units -= lot.units;
+            // Same reasoning as the partial branch: the posting reported
+            // `rounded_units`, so that is what leaves the running total. With
+            // the partial branch fixed, `lot.units` is already at
+            // `MAPPED_CURRENCY_PRECISION` and this is a no-op — but it keeps
+            // the two branches saying the same thing, and it is still correct
+            // for a lot carrying more precision than the posting can express.
+            state.total_units -= rounded_units;
             remaining -= lot_value_at_current_price;
             state.lots.remove(0);
         } else {
@@ -620,8 +626,19 @@ fn process_fifo_sell(
                 span: None,
             });
 
-            lot.units -= units_to_sell;
-            state.total_units -= units_to_sell;
+            // Decrement by what was POSTED, not by the unrounded quotient.
+            //
+            // The posting above reports `rounded_units`; decrementing the lot
+            // by the full-precision `units_to_sell` lets the plugin's idea of
+            // the lot drift below the balance the ledger actually shows. The
+            // drift is at most 1e-7 per partial sell and is invisible until a
+            // later full sell posts `lot.units` — by then already short — and
+            // leaves a residual position that should not exist (#2018).
+            //
+            // The buy path has always done it this way: it rounds once and
+            // uses that single value for both the lot and the posting.
+            lot.units -= rounded_units;
+            state.total_units -= rounded_units;
             remaining = Decimal::ZERO;
         }
     }
@@ -810,6 +827,84 @@ mod tests {
         assert_eq!(config.account, "Assets:Fund");
         assert_eq!(config.currency, "FUND_USD");
         assert_eq!(config.pnl_account, "Income:Fund:PnL");
+    }
+
+    /// A partial sell must move the lot by exactly what it posted, so a later
+    /// full sell closes the lot to zero instead of leaving a phantom residual.
+    ///
+    /// Regression for #2018. `units_to_sell` is `remaining / price`, which can
+    /// carry more precision than `MAPPED_CURRENCY_PRECISION`; the posting is
+    /// rounded but the lot used to be decremented by the unrounded quotient.
+    /// The gap is at most 1e-7 per partial sell and is invisible until the
+    /// close-out posts a lot balance that is already short.
+    ///
+    /// The numbers mirror `tests_data_some_fund_example.beancount`: 500 units
+    /// bought at 1, then sold at a price that does not divide evenly, then the
+    /// remainder sold. Before the fix the two postings summed to -500.0000000
+    /// against a 500 lot only because the lot had silently shrunk; beancount's
+    /// plugin posts -374.9999999 and -125.0000001.
+    #[test]
+    fn partial_sell_leaves_no_phantom_residual() {
+        let mut state = AccountState::new(AccountConfig {
+            account: "Assets:Fund:Total".to_string(),
+            currency: "FUND_USD".to_string(),
+            pnl_account: "Income:Fund:PnL".to_string(),
+        });
+        state.lots.push(CostLot {
+            units: Decimal::from(500),
+            cost_per_unit: Decimal::ONE,
+            date: "2024-01-10".to_string(),
+        });
+        state.total_units = Decimal::from(500);
+        // 1200/1125 — the price that produces a non-terminating quotient.
+        state.last_price = Decimal::from(1200) / Decimal::from(1125);
+
+        let posted = |ps: &[PostingData]| -> Decimal {
+            ps.iter()
+                .filter(|p| p.account == "Assets:Fund:Total")
+                .filter_map(|p| p.units.as_ref())
+                .map(|a| a.number.parse::<Decimal>().expect("posted units parse"))
+                .sum()
+        };
+
+        let (first, _) = process_fifo_sell(
+            &mut state,
+            Decimal::from(400),
+            "Assets:Fund:Total",
+            "USD",
+            &None,
+            &[],
+        );
+        let sold_first = posted(&first);
+
+        // Sell everything that remains, at whatever price.
+        let remaining_value = state.total_units * state.last_price;
+        let (second, _) = process_fifo_sell(
+            &mut state,
+            remaining_value,
+            "Assets:Fund:Total",
+            "USD",
+            &None,
+            &[],
+        );
+        let sold_second = posted(&second);
+
+        assert_eq!(
+            sold_first + sold_second,
+            Decimal::from(-500),
+            "the two sells must dispose of exactly the 500 units bought; a \
+             shortfall here is the #2018 residual"
+        );
+        assert!(
+            state.lots.is_empty(),
+            "the lot should be gone, found {:?}",
+            state.lots
+        );
+        assert_eq!(
+            state.total_units,
+            Decimal::ZERO,
+            "running total must close to zero, not to a 1e-7 remainder"
+        );
     }
 
     #[test]

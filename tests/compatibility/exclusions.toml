@@ -191,3 +191,32 @@ affected sub-segment so it starts with ASCII (e.g.,
 type (`Assets`, `Liabilities`, etc.), and the root segments in
 this file are already ASCII.
 """
+
+[[exclusions]]
+pattern = "fava-budget-freedom/example.beancount"
+reason = "Loads a Python plugin by module name, which rledger cannot execute"
+details = """
+The file loads `plugin "beancount_periodic.amortize"`, and rledger refuses it:
+
+    error[E8004]: Python plugin "beancount_periodic.amortize" is not supported
+    by module name; reference the file directly, e.g. plugin "/path/to/plugin.py".
+    The plugin sandbox cannot see the host venv, so the plugin must be
+    self-contained.
+
+That is a deliberate sandbox boundary, not a gap to close, so the two tools can
+never agree here: with `beancount_periodic` installed beancount amortizes and
+reports 34 entries while rledger reports 12.
+
+Until now the fixture was silently "passing" for the wrong reason. The plugin
+was not in the compat install list either, so beancount ALSO failed to load it
+— reporting the failed import on stderr and then exiting 0 with a partial
+ledger — and the two partial results agreed vacuously on several queries. #2013
+made that visible by flagging load errors as inconclusive.
+
+Installing the plugin would not fix it, it would invert it: beancount would run
+the amortization and rledger structurally cannot, turning four vacuous matches
+into four permanent mismatches. Excluding the fixture is the honest option,
+since neither tool can be compared against the other on it.
+
+This is the only fixture in the corpus that uses `beancount_periodic`.
+"""

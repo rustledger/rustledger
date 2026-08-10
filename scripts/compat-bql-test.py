@@ -69,6 +69,11 @@ MIN_CORPUS_SIZE = 15
 # fuzz workflow uses.
 MAX_FILES = 150
 
+# beancount emits these on stderr and still exits 0, leaving the ledger short
+# of directives the fixture expects. Same expression as the one in
+# `verify-first-balance-divergence.py`, which documents the failure mode.
+_LOAD_ERROR = re.compile(r"Error importing|error importing|<load>:")
+
 # A query that returns 0 rows on more than this fraction of files isn't
 # really being tested by the corpus — flag it loudly so we know to add
 # data that exercises it.
@@ -569,6 +574,27 @@ def run_query(
         return ToolOutput(
             stdout=proc.stdout, failed=True, reason=f"rc={proc.returncode}: {head[:120]}"
         )
+    # Exit status alone is NOT enough for bean-query. beancount reports a
+    # failed plugin import as a load error on stderr and then exits 0 with a
+    # PARTIALLY LOADED ledger, so the comparison silently degrades to
+    # rledger-full against beancount-partial. That is not evidence of
+    # anything: every divergence it produces is an artifact of the missing
+    # plugin, and a fixture where both sides happen to come back empty is
+    # recorded as a match on no basis at all.
+    #
+    # This is not hypothetical. The corpus installs two third-party plugin
+    # sets (`beancount_reds_plugins`, `beancount-lazy-plugins`, see
+    # compat.yml), and running without them turns the four
+    # `beancount-lazy-plugins` valuation fixtures into ~58 confident
+    # mismatches that vanish once the plugins are present.
+    #
+    # `scripts/verify-first-balance-divergence.py` has guarded this since it
+    # was written; the harness that produces the published number did not.
+    for line in (proc.stderr or "").splitlines():
+        if _LOAD_ERROR.search(line):
+            return ToolOutput(
+                stdout=proc.stdout, failed=True, reason=f"load error: {line.strip()[:120]}"
+            )
     return ToolOutput(stdout=proc.stdout)
 
 
@@ -825,14 +851,29 @@ def main() -> int:
 
     # Tally. `total` counts file×query *runs*, not distinct corpus
     # queries; we expose both to make the CI summary unambiguous.
-    total = len(results)
-    matching = sum(1 for r in results if r.match)
+    # A run where either tool failed proves nothing, so it must not be
+    # averaged into the match rate. Counting it as a mismatch (which is what
+    # `match=False` does) quietly converts an environment problem — a missing
+    # third-party plugin, a timeout — into a lower compatibility number, and
+    # the number is the thing people read.
+    #
+    # Excluding them silently would trade one blind spot for another, so
+    # they are also surfaced as a CI annotation. Deliberately a warning and
+    # not a hard failure: in CI the corpus plugins ARE installed (compat.yml),
+    # so a load error there means the install broke and is worth shouting
+    # about — but a timeout lands in this same bucket, and failing the suite
+    # on a slow runner would make it flaky for a reason unrelated to
+    # compatibility.
+    inconclusive = [r for r in results if r.py_failed or r.rs_failed]
+    conclusive = [r for r in results if not (r.py_failed or r.rs_failed)]
+    total = len(conclusive)
+    matching = sum(1 for r in conclusive if r.match)
     known_py = sum(
-        1 for r in results
+        1 for r in conclusive
         if not r.match and _is_known_python_divergence(r)
     )
     known_rs = sum(
-        1 for r in results
+        1 for r in conclusive
         if not r.match and _is_known_rust_divergence(r)
     )
     known_div = known_py + known_rs
@@ -877,6 +918,25 @@ def main() -> int:
     )
     print(f"Runs tested:         {total}  (file × query)")
     print(f"Runs matching:       {matching}")
+    if inconclusive:
+        print(
+            f"Inconclusive:        {len(inconclusive)} run(s) where a tool failed "
+            f"— EXCLUDED from the rates below"
+        )
+        for r in inconclusive[:5]:
+            reason = r.py_failure or r.rs_failure or "?"
+            print(f"    {r.file} | {r.query_name}: {reason[:96]}")
+        load_errs = [r for r in inconclusive
+                     if "load error" in (r.py_failure or r.rs_failure or "")]
+        if load_errs:
+            files = sorted({r.file for r in load_errs})
+            print(
+                f"::warning::{len(load_errs)} run(s) across {len(files)} fixture(s) "
+                f"could not be compared because a tool reported a load error and "
+                f"still exited 0 — usually a missing third-party corpus plugin. "
+                f"Those runs are excluded from the match rates. Files: "
+                f"{', '.join(files[:5])}"
+            )
     print(f"Raw match:           {matching}/{total} ({raw_pct}%)  [nothing masked]")
     print(f"Known Python diffs:  {known_py}")
     print(f"Known Rust diffs:    {known_rs}")

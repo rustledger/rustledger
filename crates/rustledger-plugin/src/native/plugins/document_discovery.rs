@@ -170,6 +170,12 @@ impl NativePlugin for DocumentDiscoveryPlugin {
                 continue;
             }
 
+            // Seed the ancestor chain with this root so a link pointing at
+            // the root itself is caught. Fresh per root: a cycle is a property
+            // of one walk, not of the whole scan.
+            let mut ancestors =
+                vec![std::fs::canonicalize(dir_path).unwrap_or_else(|_| dir_path.to_path_buf())];
+
             if let Err(e) = scan_documents(
                 dir_path,
                 dir,
@@ -178,6 +184,7 @@ impl NativePlugin for DocumentDiscoveryPlugin {
                 &mut new_directives,
                 &mut unknown,
                 &mut errors,
+                &mut ancestors,
                 0, // Initial depth
             ) {
                 errors.push(PluginError::error(format!(
@@ -262,10 +269,38 @@ fn unknown_account_warning(
 
 /// Recursively scan a directory for document files.
 ///
+/// Symlinked subdirectories ARE followed, because beancount follows them:
+/// `beancount/ops/documents.py` walks with `account.walk(directory)`, whose
+/// `followlinks` parameter defaults to `True`. Skipping them made an entire
+/// document tree silently invisible — no error, no warning, indistinguishable
+/// from an empty folder (#1997). A documents tree assembled from links is the
+/// normal shape whenever the ledger repo and the document library cannot share
+/// a root, e.g. invoices in a synced folder linked into the `documents` tree.
+///
+/// This is not Windows-specific. It was reported for Windows directory
+/// junctions, because Rust's `FileType::is_symlink` is true for name-surrogate
+/// reparse points while Python's `os.path.islink` is false for them — so a
+/// junction was the case where the two implementations visibly disagreed even
+/// under `followlinks=False`. But `followlinks` is `True`, so the divergence
+/// covers ordinary POSIX symlinks too, and it reproduces on Linux.
+///
 /// # Security
-/// - Uses `symlink_metadata` to detect and skip symlinks, preventing infinite loops
+/// - Breaks symlink cycles by tracking the canonicalized *ancestor chain* of
+///   the current walk. Following links without a guard would hang;
+///   beancount's `os.walk(followlinks=True)` has none, so this is deliberately
+///   stricter than the thing it matches.
+///
+///   Deliberately an ancestor chain and NOT a global visited-set. A visited-set
+///   also terminates, but it silently drops legitimate re-reachability: two
+///   account directories may link to the same physical folder, and beancount
+///   walks both, emitting one document per account. A global set would walk
+///   whichever came first and drop the other — trading this bug for a new
+///   divergence. A directory is only a cycle when it is its own ancestor.
 /// - Enforces maximum recursion depth to prevent denial-of-service from deeply nested directories
-#[allow(clippy::only_used_in_recursion)]
+// One argument more than the lint allows. The alternative is a context struct
+// that exists only to satisfy the count; `load_recursive` in the loader
+// carries the same allow for the same reason.
+#[allow(clippy::too_many_arguments)]
 fn scan_documents(
     path: &std::path::Path,
     base_dir: &str,
@@ -274,6 +309,7 @@ fn scan_documents(
     directives: &mut Vec<DirectiveWrapper>,
     unknown: &mut std::collections::BTreeMap<String, Vec<String>>,
     errors: &mut Vec<PluginError>,
+    ancestors: &mut Vec<std::path::PathBuf>,
     depth: usize,
 ) -> std::io::Result<()> {
     use std::fs;
@@ -291,20 +327,33 @@ fn scan_documents(
         let entry = entry?;
         let entry_path = entry.path();
 
-        // Use symlink_metadata to check file type WITHOUT following symlinks.
-        // This prevents infinite recursion from symlink cycles.
-        let metadata = match fs::symlink_metadata(&entry_path) {
+        // `metadata`, not `symlink_metadata`: this FOLLOWS the link, so a
+        // linked subtree is classified by what it points at rather than being
+        // seen as an opaque "symlink" and dropped. A broken link fails to stat
+        // and is skipped here, which is also what a walk that cannot enter it
+        // would do.
+        let metadata = match fs::metadata(&entry_path) {
             Ok(m) => m,
-            Err(_) => continue, // Skip entries we can't stat
+            Err(_) => continue, // Skip entries we can't stat (incl. dangling links)
         };
 
-        // Skip symlinks entirely to prevent security issues
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-
         if metadata.is_dir() {
-            scan_documents(
+            // Cycle guard: canonicalize so a link collapses to its target,
+            // then refuse to descend into a directory that is already on the
+            // path we took to get here. `a/b -> a` is caught; `x -> t` and
+            // `y -> t` are both still walked.
+            let key = fs::canonicalize(&entry_path).unwrap_or_else(|_| entry_path.clone());
+            if ancestors.contains(&key) {
+                errors.push(PluginError::warning(format!(
+                    "Skipped {} while scanning documents: it links back into a \
+                     directory already being scanned ({})",
+                    entry_path.display(),
+                    key.display()
+                )));
+                continue;
+            }
+            ancestors.push(key);
+            let result = scan_documents(
                 &entry_path,
                 base_dir,
                 existing,
@@ -312,8 +361,11 @@ fn scan_documents(
                 directives,
                 unknown,
                 errors,
+                ancestors,
                 depth + 1,
-            )?;
+            );
+            ancestors.pop();
+            result?;
         } else if metadata.is_file() {
             // Try to parse filename as YYYY-MM-DD.description.ext
             if let Some(file_name) = entry_path.file_name().and_then(|n| n.to_str())

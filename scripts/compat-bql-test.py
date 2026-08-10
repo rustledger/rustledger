@@ -1081,10 +1081,19 @@ def main() -> int:
                 if b.get("match"):
                     baseline_passing.add((b.get("file"), b.get("query_name")))
 
+        # A run where a tool failed is NOT a regression — it is an absence of
+        # evidence, the same reasoning `stale_divergence_entries` already
+        # applies. Without this, making load errors visible would itself fire
+        # the gate: a pair that "matched" only because beancount loaded a
+        # partial ledger and both sides came back empty is a FALSE match, and
+        # honestly reclassifying it as inconclusive would be reported as a
+        # regression it never was.
         regressed = [
             r
             for r in results
-            if not r.match and (r.file, r.query_name) in baseline_passing
+            if not r.match
+            and not (r.py_failed or r.rs_failed)
+            and (r.file, r.query_name) in baseline_passing
         ]
         if regressed:
             print()

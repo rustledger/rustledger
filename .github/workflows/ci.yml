@@ -299,6 +299,50 @@ jobs:
         working-directory: packages/vscode
         run: npm run build
 
+  example-plugins:
+    name: Example Plugins
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        with:
+          toolchain: 1.97.0 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
+      # `examples/*` each declare their own `[workspace]`, deliberately: they
+      # model what a third-party plugin crate looks like. That also means
+      # `cargo test --workspace` never builds them, so nothing in CI compiled
+      # them at all — and #1978 added a pub field to `PluginOptions` while
+      # every one of these examples constructed it with an exhaustive literal.
+      # All three broke, on main, silently. They are the copy-paste templates
+      # for writing a plugin, so a break here is a break in the documented
+      # onboarding path for the audience `rustledger-plugin-types` exists to
+      # serve ("use in your plugin crate").
+      #
+      # `cargo test`, NOT `cargo build`. Every one of those broken literals
+      # lived in a `#[cfg(test)]` module, so the plugins still built fine and a
+      # build-only gate would have stayed green through the exact regression
+      # this job exists to catch.
+      - name: Build and test each example plugin
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          found=0
+          for manifest in examples/*/Cargo.toml; do
+            dir=$(dirname "$manifest")
+            echo "::group::$dir"
+            cargo test --manifest-path "$manifest"
+            echo "::endgroup::"
+            found=$((found + 1))
+          done
+          # A loop over a glob that matches nothing exits 0 and reports
+          # success, which would silently restore the gap this job closes.
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no example plugins found under examples/ — the glob matched nothing"
+            exit 1
+          fi
+          echo "checked $found example plugin(s)"
+
   mcp-server:
     name: MCP Server
     runs-on: ubuntu-latest

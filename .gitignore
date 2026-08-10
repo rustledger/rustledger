@@ -1,5 +1,8 @@
 # Rust build artifacts
 /target/
+# `examples/*` are standalone workspaces (they model third-party plugin
+# crates), so the root-anchored rule above does not cover their build dirs.
+examples/*/target/
 **/*.rs.bk
 
 # ts-rs intermediate per-type .d.ts output (ADR-0004 Phase 1, #1218).

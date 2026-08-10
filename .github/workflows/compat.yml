@@ -28,9 +28,24 @@ on:
         required: false
         default: ''
         type: string
-# Prevent concurrent runs from racing on the compatibility branch
+# Prevent concurrent runs from racing on the compatibility branch.
+#
+# Keyed on the EVENT, not a shared 'nightly' literal. `pull_request.number` is
+# empty for both `push` and `schedule`, so both used to resolve to
+# `compatibility-nightly` and, with cancel-in-progress, any merge to main killed
+# an in-flight nightly. The full sweep takes ~11 minutes and merges are frequent,
+# so that happened often — and it stopped being harmless once the scheduled run
+# became the only one that publishes (see "Commit results to compatibility
+# branch"). A cancelled nightly is now a missing data point rather than one
+# replaced by a push run's narrower sample: the 2026-08-10T04:38 nightly was
+# cancelled by a 04:47 merge and the trend simply did not advance that day.
+#
+# Push runs no longer write to the branch at all, so the writer-vs-writer race
+# this guard exists for is only schedule-vs-schedule, which distinct groups still
+# cover. Pushes keep cancelling each other, which is the resource behavior they
+# already had.
 concurrency:
-  group: compatibility-${{ github.event.pull_request.number || 'nightly' }}
+  group: compatibility-${{ github.event.pull_request.number || github.event_name }}
   cancel-in-progress: true
 permissions:
   contents: write

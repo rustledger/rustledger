@@ -347,26 +347,38 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
 /// `DisplayContext::format`, whose unknown-currency fallback calls
 /// `normalize()` and *strips* trailing zeros (`0.000` → `0`), making
 /// output worse than the pre-fix state.
-/// Whether a `Position`'s units, when rounded to the currency's tracked
-/// display precision, equal zero.
+/// Whether a `Position` should be omitted from `Value::Inventory` rendering.
 ///
-/// Used to suppress sub-cent residuals (rounding artifacts of cost-spec
-/// interpolation) from `Value::Inventory` rendering. Pure mathematical
-/// zero is already filtered via `Position::is_empty`; this also catches
-/// `-0.0003183 USD` (the kind of capital-gains rounding residual that
-/// matches bean-query's blank-cell display for SUM(position) / BALANCES
-/// outputs when the underlying value is below currency display
-/// precision). Matches Python beancount's behavior of suppressing
-/// zero-valued positions in aggregate output (#1104).
-fn position_renders_as_zero(pos: &rustledger_core::Position, ctx: &DisplayContext) -> bool {
-    if pos.units.number.is_zero() {
-        return true;
-    }
-    if let Some(dp) = ctx.get_precision(pos.units.currency.as_str()) {
-        pos.units.number.round_dp(dp).is_zero()
-    } else {
-        false
-    }
+/// **Exactly zero only.** This stands in for a difference in the INVENTORY,
+/// not a display rule: beancount removes a lot when it reduces to exactly
+/// zero, so `0 ORNG {1 USD}` is simply absent from its inventory and the cell
+/// renders blank. Ours retains the closed lot, so it is filtered here instead.
+/// Delete this the day `Inventory` drops zero lots itself.
+///
+/// # It used to also blank sub-precision residuals, and that was wrong
+///
+/// #1104 added a second test — round to the currency's display precision and
+/// drop the position if that is zero — on the belief that bean-query
+/// blank-cells a residual like `-0.0003183 USD`. It does not. Checked against
+/// bean-query 3.2.3:
+///
+/// ```text
+/// ; Assets:B holds 0.0003183 USD
+/// bean-query "SELECT account, SUM(position) ..."
+///   Assets:A            <- blank: inventory is EMPTY
+///   Assets:B  0.00 USD  <- shown: the position exists, rounded for display
+/// ```
+///
+/// beancount blanks an empty inventory, not a small number. Rounding to
+/// `0.00` is display precision doing its job, and suppressing the row instead
+/// hid real positions — the zero-sum fixtures reported nothing where
+/// bean-query reported `0.00 USD` (#2015 tail).
+const fn position_renders_as_zero(pos: &rustledger_core::Position) -> bool {
+    // An exactly-zero position is one beancount's Inventory would have
+    // REMOVED on reduction (a cost lot closed out, `0 ORNG {1 USD}`); ours
+    // retains it, so this filter stands in for that difference and must stay
+    // until the inventory itself drops them.
+    pos.units.number.is_zero()
 }
 
 fn looks_like_currency(s: &str) -> bool {
@@ -566,7 +578,7 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
 
             let positions: Vec<String> = sorted_positions
                 .iter()
-                .filter(|p| !position_renders_as_zero(p, ctx))
+                .filter(|p| !position_renders_as_zero(p))
                 .map(|p| {
                     if numberify {
                         ctx.format_amount_number(p.units.number, p.units.currency.as_str())
@@ -789,7 +801,7 @@ mod tests {
     /// tracked 2dp precision, that rounds to `-0.00`, which is semantically
     /// "no position" — both Python and now rust suppress it.
     #[test]
-    fn test_value_inventory_suppresses_sub_precision_positions() {
+    fn test_value_inventory_renders_sub_precision_positions() {
         let mut ctx = DisplayContext::new();
         // Seed USD precision at 2dp.
         ctx.update(dec!(1.00), "USD");
@@ -802,8 +814,9 @@ mod tests {
 
         let rendered = format_value(&Value::Inventory(Box::new(inv)), false, &ctx);
         assert_eq!(
-            rendered, "",
-            "sub-cent USD residual must render as blank to match bean-query; \
+            rendered, "0.00 USD",
+            "a sub-cent USD residual is a position the inventory HOLDS, so \
+             bean-query renders it at USD precision rather than blanking it; \
              got {rendered:?}"
         );
     }
@@ -890,7 +903,7 @@ mod tests {
     /// `format_value`, but they target different value types and
     /// different concerns.
     #[test]
-    fn test_csv_inventory_suppresses_sub_precision_positions() {
+    fn test_csv_inventory_renders_sub_precision_positions() {
         use rustledger_query::QueryResult;
 
         let mut ctx = DisplayContext::new();
@@ -916,23 +929,22 @@ mod tests {
             .find(|l| l.contains("Capital-Gains"))
             .unwrap_or_else(|| panic!("expected data row; raw output:\n{csv}"));
 
-        // The position cell after the comma should be empty (or only
-        // whitespace) — matching bean-query's CSV behavior of blanking
-        // sub-precision positions. Anchor on absence of "USD" in the
-        // value cell.
+        // The position cell holds the residual, rendered at USD precision.
+        // bean-query does NOT blank it: the inventory holds the position, so
+        // it is shown as `0.00 USD`.
         let value_cell = data_row
             .split_once(',')
             .map(|(_, rest)| rest)
             .unwrap_or_default();
         assert!(
-            !value_cell.contains("USD"),
-            "sub-precision USD position must not render in CSV value cell; \
-             got cell {value_cell:?} in row {data_row:?}"
+            value_cell.contains("0.00 USD"),
+            "a sub-precision USD position must render at USD precision in the \
+             CSV value cell; got cell {value_cell:?} in row {data_row:?}"
         );
     }
 
     #[test]
-    fn test_beancount_inventory_suppresses_sub_precision_positions() {
+    fn test_beancount_inventory_renders_sub_precision_positions() {
         use rustledger_query::QueryResult;
 
         let mut ctx = DisplayContext::new();
@@ -951,8 +963,9 @@ mod tests {
         let out = String::from_utf8(buf).expect("utf8");
 
         assert!(
-            !out.contains("USD"),
-            "sub-precision USD position must not render in beancount output; got {out:?}"
+            out.contains("0.00 USD"),
+            "a sub-precision USD position must render at USD precision in \
+             beancount output; got {out:?}"
         );
     }
 

@@ -14,8 +14,10 @@
 //!
 //! Our CST parser is deliberately permissive — it is lossless and recovers
 //! rather than rejecting — so nothing downstream re-imposed that shape, and
-//! three constructs beancount refuses loaded here without a word (#2008 cases
-//! 3, 4, 6, 7). Being *more* permissive than the reference is the wrong
+//! three constructs beancount refuses loaded here without a word: a string
+//! after a tag, junk after the narration, and more than two strings (#2008
+//! cases 3, 4, and 6/7 — two fixtures of the same construct). Being *more*
+//! permissive than the reference is the wrong
 //! direction for a compatibility reimplementation: the file looks fine here
 //! and breaks for anyone who takes it back to beancount.
 //!
@@ -104,9 +106,12 @@ fn is_flag_position_token(kind: SyntaxKind, range: &Range<usize>) -> bool {
 
 /// The first defect in a transaction header's token sequence, if any.
 ///
-/// `tokens` must be the header region only — from the first non-trivia token
-/// through (not past) the terminating `NEWLINE`. Ranges are in whatever frame
-/// the caller is working in; they are echoed back untouched.
+/// `tokens` must be the header region only: from the first non-trivia token
+/// up to but **not including** the terminating `NEWLINE`, which is what both
+/// callers pass (red `header_tokens()` uses `take_while(!= NEWLINE)`, green
+/// breaks on it). `NEWLINE` is still in the trivia set below so that feeding
+/// one in cannot change the verdict, but no caller should. Ranges are in
+/// whatever frame the caller is working in; they are echoed back untouched.
 pub(super) fn first_header_defect<I>(tokens: I) -> Option<(HeaderDefect, Range<usize>)>
 where
     I: IntoIterator<Item = (SyntaxKind, Range<usize>)>,

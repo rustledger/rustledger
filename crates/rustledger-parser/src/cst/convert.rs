@@ -2781,10 +2781,20 @@ pub(super) fn header_defect_error(
     bom_offset: u32,
 ) -> crate::ParseError {
     // `get` rather than indexing: a range that is not a char boundary would
-    // panic, and a parser must not panic on malformed input.
-    let text = stripped.get(range.clone()).unwrap_or_default();
+    // panic, and a parser must not panic on malformed input. Token ranges are
+    // always char boundaries, so this is unreachable today — but an empty
+    // slice would render as `unexpected "" in transaction header`, which names
+    // nothing. Fall back to the byte range instead, so even the unreachable
+    // branch produces something a reader can act on.
+    let message = match stripped.get(range.clone()) {
+        Some(text) => super::txn_header::defect_message(defect, text),
+        None => format!(
+            "malformed transaction header at bytes {}..{} ({defect:?})",
+            range.start, range.end
+        ),
+    };
     crate::ParseError::new(
-        crate::ParseErrorKind::SyntaxError(super::txn_header::defect_message(defect, text)),
+        crate::ParseErrorKind::SyntaxError(message),
         Span::new(
             range.start + bom_offset as usize,
             range.end + bom_offset as usize,

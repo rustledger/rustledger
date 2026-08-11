@@ -263,11 +263,19 @@ const LIMA_2008_CASES: &[(&str, bool)] = &[
 
 #[test]
 fn test_lima_2008_cases_have_expected_strictness() {
+    // Hard assert, not a skip. These 441 fixtures are committed to the repo,
+    // so a missing directory is a broken checkout, not an unavailable
+    // dependency - and a test that skips itself is the exact failure mode
+    // CLAUDE.md warns about under "Availability-gated tests must fail loudly
+    // somewhere". Skipping here would also hide the very thing this table
+    // exists to pin.
     let dir = spec_fixtures_dir().join("lima-tests");
-    if !dir.exists() {
-        eprintln!("Skipping: lima-tests fixtures not found");
-        return;
-    }
+    assert!(
+        dir.is_dir(),
+        "lima-tests fixtures missing at {} - they are committed to the repo, \
+         so this is a broken checkout rather than a reason to skip",
+        dir.display()
+    );
     let mut wrong = Vec::new();
     for (stem, should_reject) in LIMA_2008_CASES {
         let path = dir.join(format!("{stem}.beancount"));

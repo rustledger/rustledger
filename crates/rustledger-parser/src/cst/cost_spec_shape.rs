@@ -27,11 +27,11 @@
 //! as "reject SLASH" would have passed the two #2008 fixtures and broken every
 //! ledger that divides in a cost spec.
 //!
-//! Unlike [`super::txn_header`], this needs no green mirror. Its caller,
-//! `convert::extract_cost_spec_shape_errors`, rides the existing whole-tree
-//! `COST_SPEC` scan that already runs for BOTH paths (it sits outside the
-//! `use_green` branch, next to `extract_unclosed_cost_brace_errors`), so there
-//! is one walker and nothing to drift. The rule is still expressed over
+//! Unlike [`super::txn_header`], this needs no green mirror. It is called from
+//! inside `convert::extract_unclosed_cost_brace_errors`' existing `COST_SPEC`
+//! walk — one pass, not a second one alongside it — and that walk runs for
+//! BOTH paths because it sits outside the `use_green` branch. So there is one
+//! walker and nothing to drift. The rule is still expressed over
 //! `(SyntaxKind, Range<usize>)` so it stays testable without a tree.
 
 use crate::SyntaxKind;
@@ -150,9 +150,12 @@ pub(super) fn cost_defect_message(defect: CostSpecDefect, text: &str) -> String 
              each comma-separated component needs a number, currency, date, \
              string or `*`"
         ),
+        // "the closing brace", not a literal `}`: a `{{total}}` spec closes
+        // with `}}`, and naming the wrong one in a message about malformed
+        // syntax is exactly the kind of misdirection #2008 is about.
         CostSpecDefect::TrailingJunk => format!(
             "unexpected {text:?} in cost spec: the component is already \
-             complete, so only `,` or `}}` may follow"
+             complete, so only `,` or the closing brace may follow"
         ),
     }
 }

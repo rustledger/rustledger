@@ -1262,12 +1262,25 @@ def main() -> int:
         # partial ledger and both sides came back empty is a FALSE match, and
         # honestly reclassifying it as inconclusive would be reported as a
         # regression it never was.
+        # A pair registered as a DELIBERATE divergence is likewise not a
+        # regression. Registering one is the act of saying "these two are
+        # expected to differ, and here is which side is wrong"; if the gate
+        # ignored that, the registries could never absorb a newly-created
+        # divergence and the only way to land a fix that makes us diverge
+        # ON PURPOSE would be to bypass the gate entirely.
+        #
+        # This does not blunt the gate, because the exemption is paired: an
+        # entry whose pair starts MATCHING again fails the run via
+        # `stale_divergence_entries` above, so a registration cannot outlive
+        # the divergence it documents and quietly cover a later regression on
+        # the same pair.
         regressed = [
             r
             for r in results
             if not r.match
             and not (r.py_failed or r.rs_failed)
             and (r.file, r.query_name) in baseline_passing
+            and not _is_known_divergence(r)
         ]
         if regressed:
             print()

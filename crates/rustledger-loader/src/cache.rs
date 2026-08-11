@@ -408,13 +408,20 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 /// v24: tags and links are no longer accepted as `custom` / `pushmeta`
 ///     values (#1958), so a file using them moves from clean to erroring and
 ///     a stale cache would serve the old clean parse.
+/// v25: transaction headers beancount's grammar rejects are now parse errors
+///     (#2008) - a third header string, a string after a tag/link, or junk
+///     after the narration. Same reasoning as v24: those files move from
+///     clean to erroring, and this was observed for real - the first
+///     `rledger check` run against the fixtures after the change reported
+///     only the old downstream `E1001`s, because the cache still held the
+///     permissive parse.
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 24;
+pub const CACHE_VERSION: u32 = 25;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1130,7 +1137,10 @@ mod tests {
         // layout: the `CostNumber` discriminants and payload encodings the byte
         // arrays below pin are untouched, and those assertions prove it rather
         // than take this comment's word for it.
-        const FIXTURE_VERSION: u32 = 24;
+        // v25 (#2008) is another v15: transaction headers beancount rejects now
+        // produce a parse error. That changes WHICH errors are emitted, not how
+        // a `CostNumber` is archived, so the byte arrays are still valid.
+        const FIXTURE_VERSION: u32 = 25;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1227,7 +1237,7 @@ mod tests {
         // still match — and the assertion, not this comment, is what proves it.
         // v20 (#1930) is an account-name lexer change; `MetaValue` is
         // untouched and the hash below must still match.
-        const FIXTURE_VERSION: u32 = 24;
+        const FIXTURE_VERSION: u32 = 25;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

@@ -820,7 +820,7 @@ impl Transaction {
     /// header line. Body content (`POSTING` / `META_ENTRY` nodes;
     /// flat tokens emitted by `emit_transaction_body`'s catch-all
     /// for malformed indented lines) is excluded.
-    fn header_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+    pub(super) fn header_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
         self.syntax()
             .children_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)

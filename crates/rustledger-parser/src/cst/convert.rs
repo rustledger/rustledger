@@ -2422,6 +2422,7 @@ fn walk_top_level_once(
                 custom_value_check(&child, bom_offset, &mut errors);
             }
             crate::SyntaxKind::TRANSACTION => {
+                transaction_header_check(&child, stripped, bom_offset, &mut errors);
                 transaction_body_check(&child, bom_offset, &mut errors);
             }
             crate::SyntaxKind::ERROR_NODE => {
@@ -2742,6 +2743,51 @@ fn unexpected_body_input(line_start: u32, end: u32, bom_offset: u32) -> crate::P
         Span::new(
             (line_start + bom_offset) as usize,
             (end + bom_offset) as usize,
+        ),
+    )
+}
+
+/// Reject transaction headers beancount's grammar refuses (#2008 cases 3, 4,
+/// 6, 7). The rule itself lives in [`super::txn_header`] so this and its green
+/// mirror (`green::tl_transaction_header_check`) cannot drift; here we only
+/// enumerate the header tokens.
+///
+/// Token enumeration goes through `Transaction::header_tokens`, the same
+/// accessor `flag()` / `strings()` / `tags()` use, so "what counts as the
+/// header" has one definition.
+fn transaction_header_check(
+    child: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+    out: &mut Vec<crate::ParseError>,
+) {
+    let Some(txn) = ast::Transaction::cast(child.clone()) else {
+        return;
+    };
+    let tokens = txn.header_tokens().map(|t| {
+        let r = t.text_range();
+        (t.kind(), usize::from(r.start())..usize::from(r.end()))
+    });
+    if let Some((defect, range)) = super::txn_header::first_header_defect(tokens) {
+        out.push(header_defect_error(defect, &range, stripped, bom_offset));
+    }
+}
+
+/// Shared by both walkers so one defect cannot be reported two ways.
+pub(super) fn header_defect_error(
+    defect: super::txn_header::HeaderDefect,
+    range: &std::ops::Range<usize>,
+    stripped: &str,
+    bom_offset: u32,
+) -> crate::ParseError {
+    // `get` rather than indexing: a range that is not a char boundary would
+    // panic, and a parser must not panic on malformed input.
+    let text = stripped.get(range.clone()).unwrap_or_default();
+    crate::ParseError::new(
+        crate::ParseErrorKind::SyntaxError(super::txn_header::defect_message(defect, text)),
+        Span::new(
+            range.start + bom_offset as usize,
+            range.end + bom_offset as usize,
         ),
     )
 }

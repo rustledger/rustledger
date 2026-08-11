@@ -674,7 +674,10 @@ pub(super) fn walk_top_level(
             }
             match kind {
                 K::CUSTOM_DIRECTIVE => tl_custom_check(n, offset, bom_offset, &mut errors),
-                K::TRANSACTION => tl_transaction_body_check(n, offset, bom_offset, &mut errors),
+                K::TRANSACTION => {
+                    tl_transaction_header_check(n, offset, bom_offset, stripped, &mut errors);
+                    tl_transaction_body_check(n, offset, bom_offset, &mut errors);
+                }
                 K::ERROR_NODE => {
                     tl_error_node_check(n, offset, bom_offset, stripped, &mut errors);
                     tl_section_marker_check(n, offset, bom_offset, &mut section_marker_comments);
@@ -793,6 +796,64 @@ fn unexpected_body_input(line_start: usize, end: usize, bom_offset: u32) -> crat
 
 /// `transaction_body_check` on green: a body line with catch-all tokens (outside
 /// `POSTING` / `META_ENTRY` nodes) is "unexpected input".
+/// `transaction_header_check` on green (#2008 cases 3, 4, 6, 7).
+///
+/// The rule lives in [`super::txn_header`]; this only enumerates the header
+/// token run, mirroring `Transaction::header_tokens`: skip leading trivia,
+/// then take tokens up to (not past) the terminating `NEWLINE`. A direct
+/// child NODE ends the header too — `POSTING` / `META_ENTRY` are body, and a
+/// header that reaches one without a `NEWLINE` has no more header left.
+fn tl_transaction_header_check(
+    node: &rowan::GreenNodeData,
+    base: usize,
+    bom_offset: u32,
+    stripped: &str,
+    out: &mut Vec<crate::ParseError>,
+) {
+    use crate::SyntaxKind as K;
+    let mut tokens: Vec<(crate::SyntaxKind, std::ops::Range<usize>)> = Vec::new();
+    let mut started = false;
+    let mut offset = base;
+    for child in node.children() {
+        let len = child_len(child);
+        match &child {
+            NodeOrToken::Token(t) => {
+                let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
+                if !started {
+                    // Leading trivia per the Directive-Terminator Rule. BOM
+                    // stays OUT of the skip set, exactly as in
+                    // `Transaction::header_tokens`: a mid-file BOM is a
+                    // corruption to surface, not trivia.
+                    if matches!(
+                        kind,
+                        K::WHITESPACE
+                            | K::NEWLINE
+                            | K::COMMENT
+                            | K::PERCENT_COMMENT
+                            | K::SHEBANG
+                            | K::EMACS_DIRECTIVE
+                    ) {
+                        offset += len;
+                        continue;
+                    }
+                    started = true;
+                }
+                if kind == K::NEWLINE {
+                    break;
+                }
+                tokens.push((kind, offset..offset + len));
+            }
+            NodeOrToken::Node(_) => break,
+        }
+        offset += len;
+    }
+    if let Some((defect, range)) = super::txn_header::first_header_defect(tokens) {
+        out.push(super::convert::header_defect_error(
+            defect, &range, stripped, bom_offset,
+        ));
+    }
+}
+
 fn tl_transaction_body_check(
     node: &rowan::GreenNodeData,
     base: usize,
@@ -1219,6 +1280,20 @@ mod tests {
             "2020-01-01 * \"p\" #tag1\n  A 1 USD\n  #bodytag\n  B\n", // body tag/link is valid (no error)
             "@@@ totally invalid line @@@\n2020-01-01 open A\n", // error-node classified recovery error
             "* Section\n**  Indented Sub\n; c0 comment\n2020-01-01 open A\n", // section markers + comment
+            // transaction-header check (#2008). Both walkers must agree on
+            // the defect AND its span, so a multi-byte case is included: the
+            // green walker sums green child lengths while the red walker
+            // reads rowan text ranges, and a char-vs-byte slip would show up
+            // here as a differing span (or a panic in the message slice).
+            "2020-01-01 * #tag \"after tag\" ^lnk\n  A 1 USD\n  B\n", // string after tag
+            "2020-01-01 * \"a\" \"b\" \"c\"\n  A 1 USD\n  B\n",       // too many strings
+            "2020-01-01 * \"a\" \"b\" \"c\" \"d\"\n  A 1 USD\n  B\n", // four strings
+            "2020-01-01 * \"Dinner\" A:*:B\n  A 1 USD\n  B\n",        // junk in header
+            "2020-01-01 * \"é\" \"münts\" \"ü\"\n  A 1 EUR\n  B\n",   // multi-byte + too many
+            "2020-01-01 * \"é payee\" X:*:Y\n  A 1 EUR\n  B\n",       // multi-byte + junk
+            // Valid shapes that must stay clean on BOTH paths.
+            "2012-12-17 P \"Payee\" \"Narration\"\n  A 1 USD\n  B\n", // 1-char CURRENCY flag
+            "2020-01-01 * \"p\" \"n\" ; trailing comment\n  A 1 USD\n  B\n",
         ];
         for src in corpus {
             let g = crate::parse(src);

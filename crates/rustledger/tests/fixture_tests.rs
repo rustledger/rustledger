@@ -225,7 +225,77 @@ fn lima_test_expects_parse_error(name: &str) -> bool {
         || name.contains("CostEmptyComponents")   // empty cost spec components
         || name.contains("CostWithSlashes")       // cost with slashes notation
         || name.contains("CommentInPostingsInvalid") // invalid comment in postings
-        || name.contains("TagThenLink") // tag ordering edge case
+        || name.contains("TagThenLink") // tag ordering edge case (#2008 case 3)
+        || name.contains("TooManyStrings") // >2 header strings (#2008 case 7)
+        || name.contains("TransactionThreeStrings") // >2 header strings (#2008 case 6)
+}
+
+/// The seven constructs from #2008 that beancount rejects, and whether rledger
+/// rejects them yet.
+///
+/// This exists because the allowlist above is **one-sided**: its branch in
+/// `test_lima_tests_parse` is a bare `continue`, so listing a fixture there
+/// only permits an error — it never checks one occurs. `TagThenLink`,
+/// `CostEmptyComponents` and `CostWithSlashes` sat in it for the parser's
+/// whole life while producing no error at all, which is how #2008 stayed
+/// invisible. (28 allowlisted fixtures are in that position today; the other
+/// 22 are `GrammarExceptions*`, whose intended semantics are unverified, so
+/// they are deliberately left alone rather than guessed at.)
+///
+/// Two-sided on purpose: the `false` rows assert we are STILL permissive, so
+/// landing the rest of #2008 turns this test red and forces the row to flip.
+/// A row that can only be right is not a test.
+const LIMA_2008_CASES: &[(&str, bool)] = &[
+    // case 1: `10 AAPL {, 100.0 USD, , }`
+    ("ParseLots.CostEmptyComponents", false),
+    // case 2: `1.1 AAPL {45.23 USD / 2015-07-16 / "blabla"}`
+    ("ParseLots.CostWithSlashes", false),
+    // case 3: a STRING after a TAG
+    ("Transactions.TagThenLink", true),
+    // case 4: `A:*:B` after the narration
+    ("SyntaxErrors.ErrorInTransactionLine", true),
+    // case 5: `20 AAPL {USD}` / `20 AAPL { # USD}`
+    ("ParseLots.CostTotalJustCurrency", false),
+    // case 6 / 7: three header strings
+    ("ParserEntryTypes.TransactionThreeStrings", true),
+    ("Transactions.TooManyStrings", true),
+];
+
+#[test]
+fn test_lima_2008_cases_have_expected_strictness() {
+    let dir = spec_fixtures_dir().join("lima-tests");
+    if !dir.exists() {
+        eprintln!("Skipping: lima-tests fixtures not found");
+        return;
+    }
+    let mut wrong = Vec::new();
+    for (stem, should_reject) in LIMA_2008_CASES {
+        let path = dir.join(format!("{stem}.beancount"));
+        assert!(
+            path.exists(),
+            "#2008 fixture {stem} is missing - it is the evidence for this test, \
+             so a rename must update the table rather than silently skip the row"
+        );
+        let (parses_clean, errors) = parse_file(&path);
+        let rejected = !parses_clean;
+        if rejected != *should_reject {
+            wrong.push(format!(
+                "  {stem}: expected {}, got {} ({errors} parse errors)",
+                if *should_reject {
+                    "REJECTED"
+                } else {
+                    "accepted"
+                },
+                if rejected { "REJECTED" } else { "accepted" },
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "#2008 strictness table is out of date:\n{}\n\nIf you just made one of \
+         the `false` rows reject, flip it to `true`.",
+        wrong.join("\n")
+    );
 }
 
 #[test]

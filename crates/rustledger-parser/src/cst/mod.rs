@@ -56,6 +56,7 @@ mod lossless_tokens;
 mod parser;
 mod syntax_kind;
 mod trivia;
+mod txn_header;
 
 pub use convert::{parse_red_only, parse_via_cst, parse_via_cst_opts};
 // Formatter exports do NOT re-export through `cst` — the sole

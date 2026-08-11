@@ -20,12 +20,20 @@ yanked = "warn"
 # parent crate isn't actionable today. Re-audit when the upstream crate
 # either resumes maintenance or gets a replacement we can adopt.
 ignore = [
-  # `paste` (proc-macro), pulled in transitively by `ferrolearn-bayes`
-  # via `faer` / `gemm`. Project is unmaintained but the code is stable
-  # and small. No drop-in replacement exists with the same macro
-  # surface. Re-evaluate when faer drops the dep or when a fork
-  # supersedes paste.
-  "RUSTSEC-2024-0436",
+  # `bitmaps`, reached only as `bitmaps <- imbl <- rustledger-core`.
+  # Archived by its owner on 2026-05-03; the advisory is `unmaintained`,
+  # not a vulnerability, and there is no known defect to be exposed to.
+  #
+  # Not actionable from here. `imbl` (the maintained fork of `im`) is
+  # itself current at 7.0.1 with no release that drops the dep, and
+  # `bitmaps` is its internal chunk bitmap - not a type we hold or pass
+  # around, so we cannot swap it for `fixedbitset` / `bitvec` without
+  # replacing `imbl` itself. `imbl` backs `Inventory`'s persistent maps,
+  # so that is a data-structure change, not a dependency bump.
+  #
+  # Re-audit when `imbl` releases a version without `bitmaps`, or if this
+  # advisory is ever upgraded from `unmaintained` to a vulnerability.
+  "RUSTSEC-2026-0247",
 ]
 
 # rand 0.8.x (via cap-rand/wasmtime-wasi) uses thread_rng which is

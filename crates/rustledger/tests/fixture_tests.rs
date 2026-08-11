@@ -247,9 +247,9 @@ fn lima_test_expects_parse_error(name: &str) -> bool {
 /// A row that can only be right is not a test.
 const LIMA_2008_CASES: &[(&str, bool)] = &[
     // case 1: `10 AAPL {, 100.0 USD, , }`
-    ("ParseLots.CostEmptyComponents", false),
+    ("ParseLots.CostEmptyComponents", true),
     // case 2: `1.1 AAPL {45.23 USD / 2015-07-16 / "blabla"}`
-    ("ParseLots.CostWithSlashes", false),
+    ("ParseLots.CostWithSlashes", true),
     // case 3: a STRING after a TAG
     ("Transactions.TagThenLink", true),
     // case 4: `A:*:B` after the narration

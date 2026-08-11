@@ -175,3 +175,74 @@ fn one_defect_per_header() {
     let src = "2013-05-02 * \"Dinner\" A:*:B\n\x20 Expenses:R  100 USD\n\x20 Assets:C -100 USD\n";
     assert_eq!(header_errors(src).len(), 1);
 }
+
+// ---- cost-spec component shape (#2008 cases 1 and 2) ----------------------
+
+fn cost_errors(src: &str) -> Vec<String> {
+    parse(src)
+        .errors
+        .iter()
+        .map(std::string::ToString::to_string)
+        .filter(|m| m.contains("cost spec") || m.contains("cost-spec component"))
+        .collect()
+}
+
+/// #2008 case 1 — `test-cases_ParseLots.CostEmptyComponents.beancount`.
+/// beancount: `syntax error, unexpected COMMA, expecting HASH or CAPITAL or
+/// CURRENCY`.
+#[test]
+fn empty_cost_component_is_rejected() {
+    let src = "2014-01-01 *\n\
+               \x20 Assets:Invest:AAPL      10 AAPL {, 100.0 USD, , }\n\
+               \x20 Assets:Invest:Cash  -19.90 USD\n";
+    let errs = cost_errors(src);
+    assert_eq!(errs.len(), 1, "expected one cost-spec error, got {errs:?}");
+    assert!(errs[0].contains("empty cost-spec component"), "{}", errs[0]);
+}
+
+/// #2008 case 2 — `test-cases_ParseLots.CostWithSlashes.beancount`.
+/// beancount: `syntax error, unexpected SLASH, expecting RCURL or COMMA`.
+#[test]
+fn junk_after_a_complete_cost_component_is_rejected() {
+    let src = "2014-01-01 *\n\
+               \x20 Assets:Invest:AAPL      1.1 AAPL {45.23 USD / 2015-07-16 / \"blabla\"}\n\
+               \x20 Assets:Invest:Cash   -45.23 USD\n";
+    let errs = cost_errors(src);
+    assert_eq!(errs.len(), 1, "expected one cost-spec error, got {errs:?}");
+    assert!(errs[0].contains("already complete"), "{}", errs[0]);
+}
+
+/// Cost specs that must stay clean. `{{...}}` is the one that matters: an
+/// earlier draft omitted `}}` from the closer set and lit up 42 real
+/// total-cost specs across the corpus.
+#[test]
+fn valid_cost_specs_are_untouched() {
+    for spec in [
+        "{}",
+        "{100.00 USD}",
+        "{100.00 USD, 2015-01-01}",
+        "{100.00 USD, \"lot-label\"}",
+        "{100.00 USD, 2015-01-01, \"lot\"}",
+        "{{500.00 USD}}",
+        "{{500.00 USD, 2015-01-01}}",
+        "{# 500.00 USD}",
+        // arithmetic: `/` and `*` are number_expr operators, not junk
+        "{10.00 * 3 USD}",
+        "{30.00 / 3 USD}",
+        "{10.00 + 2 USD}",
+        "{*}",
+        // #2008 case 5 stays accepted here on purpose - it is a booker-level
+        // currency-group judgment, not a shape defect.
+        "{USD}",
+        "{ # USD}",
+    ] {
+        let src = format!(
+            "2014-01-01 *\n  Assets:I:AAPL  10 AAPL {spec}\n  Assets:I:Cash  -100.00 USD\n"
+        );
+        assert!(
+            cost_errors(&src).is_empty(),
+            "valid cost spec wrongly rejected: {spec} -> {:?}",
+            cost_errors(&src)
+        );
+    }
+}

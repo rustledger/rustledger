@@ -415,13 +415,18 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     `rledger check` run against the fixtures after the change reported
 ///     only the old downstream `E1001`s, because the cache still held the
 ///     permissive parse.
+/// v26: malformed cost-spec component lists are now parse errors (#2008 cases
+///     1 and 2) - an empty comma-delimited component, or a token after a
+///     component is already complete. Same clean-to-erroring move as v25, and
+///     a separate version because a cache written between the two lands is
+///     stale for this change even though it carries v25.
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 25;
+pub const CACHE_VERSION: u32 = 26;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1140,7 +1145,7 @@ mod tests {
         // v25 (#2008) is another v15: transaction headers beancount rejects now
         // produce a parse error. That changes WHICH errors are emitted, not how
         // a `CostNumber` is archived, so the byte arrays are still valid.
-        const FIXTURE_VERSION: u32 = 25;
+        const FIXTURE_VERSION: u32 = 26;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1237,7 +1242,7 @@ mod tests {
         // still match — and the assertion, not this comment, is what proves it.
         // v20 (#1930) is an account-name lexer change; `MetaValue` is
         // untouched and the hash below must still match.
-        const FIXTURE_VERSION: u32 = 25;
+        const FIXTURE_VERSION: u32 = 26;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

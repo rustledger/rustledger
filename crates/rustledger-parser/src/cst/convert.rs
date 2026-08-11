@@ -147,6 +147,11 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // costs the (already-correct) full scan — never a false skip.
     if stripped.contains('{') {
         errors.extend(extract_unclosed_cost_brace_errors(&source_file, bom_offset));
+        errors.extend(extract_cost_spec_shape_errors(
+            &source_file,
+            stripped,
+            bom_offset,
+        ));
     }
     // Same guard trick as above: no '^' in the source means no LINK token can
     // exist, so the whole-tree scan is skipped on the common case.
@@ -2500,6 +2505,52 @@ fn extract_link_metadata_value_errors(
 /// `10 AAPL {150 USD\n` posting or an EOF-truncated cost block
 /// surfaces a diagnostic instead of silently producing a half-
 /// built cost spec.
+/// Reject cost specs whose component list beancount's grammar refuses
+/// (#2008 cases 1 and 2): an empty comma-delimited component, or a token after
+/// a component is already complete.
+///
+/// Rides the same whole-tree `COST_SPEC` scan as
+/// `extract_unclosed_cost_brace_errors` and under the same `contains('{')`
+/// guard, and like it runs for both the green and red paths - so unlike the
+/// transaction-header check there is no second walker to keep in step.
+///
+/// The rule itself is in [`super::cost_spec_shape`]; this only enumerates
+/// tokens and turns a defect into a `ParseError`.
+fn extract_cost_spec_shape_errors(
+    source_file: &SourceFile,
+    stripped: &str,
+    bom_offset: u32,
+) -> Vec<crate::ParseError> {
+    let mut out = Vec::new();
+    for node in source_file.syntax().descendants() {
+        if node.kind() != crate::SyntaxKind::COST_SPEC {
+            continue;
+        }
+        let tokens = node
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .map(|t| {
+                let r = t.text_range();
+                (t.kind(), usize::from(r.start())..usize::from(r.end()))
+            });
+        if let Some((defect, range)) = super::cost_spec_shape::first_cost_spec_defect(tokens) {
+            // `get` rather than indexing: a non-char-boundary range must not
+            // panic the parser.
+            let text = stripped.get(range.clone()).unwrap_or_default();
+            out.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError(super::cost_spec_shape::cost_defect_message(
+                    defect, text,
+                )),
+                Span::new(
+                    range.start + bom_offset as usize,
+                    range.end + bom_offset as usize,
+                ),
+            ));
+        }
+    }
+    out
+}
+
 /// Tags and links are not valid `custom` or `pushmeta` VALUES (#1958).
 ///
 /// Two different rules, and conflating them is the trap here:

@@ -79,6 +79,23 @@ fn write_text<W: Write>(
     // a commodity's own `render_commas:` declaration unreadable here (#1896).
     for col in &mut col_contexts {
         col.adopt_grouping_from(ctx);
+        // A COLUMN renderer takes the widest precision in the column, not the
+        // most common one. That is what bean-query's `DecimalRenderer` does,
+        // and it is the difference between aligning a column and rewriting the
+        // values in it.
+        //
+        // `MostCommon` is right for a LEDGER context — "how does this currency
+        // usually get written" — and wrong here. On `SOME_FUND_USD` the
+        // observed decimals are `0 0 7 2 0 0 2`; the mode is 0, so a column
+        // holding `-374.9999999` rendered it as `-375` (#2015). Not a rounded
+        // total, not a blanked cell: a number the ledger does not contain,
+        // printed with nothing to signal it. Under `Maximum` the column is 7 dp
+        // and every value in it prints as itself.
+        //
+        // Scoped to these per-column contexts. The ledger context `ctx` keeps
+        // `MostCommon`, so `print`/`format` and every other surface are
+        // untouched — this is a query-rendering policy only.
+        col.set_precision(rustledger_core::Precision::Maximum);
     }
     let mut col_inherited: Vec<bool> = vec![false; result.columns.len()];
     for row in &result.rows {
@@ -286,28 +303,90 @@ fn write_beancount<W: Write>(
     Ok(())
 }
 
+/// Observe one amount into a column context at the precision that renders it
+/// FAITHFULLY.
+///
+/// Rounding to the ledger's precision is fine — right, even — as long as it
+/// does not change the number. When it does, the ledger precision is too
+/// coarse to render this value at all, and the column has to widen or we print
+/// something the ledger does not contain.
+///
+/// The comparison is numeric, so it ignores scale: `15152.070000000000000000`
+/// and `15152.07` are equal and the column stays at 2 dp. That matters because
+/// our arithmetic carries scale that beancount's does not — of 131 runs that
+/// moved when this observed raw values unconditionally, 114 were numerically
+/// identical and differed only in trailing zeros. Widening for those is pure
+/// noise.
+///
+/// The remaining case is the one #2015 is about: `-374.9999999` on a commodity
+/// tracked at 0 dp quantizes to `-375`, which is a different number, so the
+/// column widens to 7 dp and prints the value the ledger actually holds.
+fn observe(
+    col_ctx: &mut DisplayContext,
+    ledger_ctx: &DisplayContext,
+    number: rustledger_core::Decimal,
+    currency: &str,
+) {
+    let quantized = ledger_ctx.quantize(number, currency);
+    // `==` on `Decimal` compares VALUE, not scale — that is the whole point.
+    let faithful = if quantized == number {
+        quantized
+    } else {
+        number
+    };
+    col_ctx.update(faithful, currency);
+}
+
 /// Update a per-column display context with the amounts in a value.
+///
+/// Observes the values **as they are**, not as the ledger context would round
+/// them. That is the whole point of a per-column context: bean-query renders a
+/// query result through a per-column `DecimalRenderer` that takes the widest
+/// number of decimals actually present in the column, independent of the
+/// ledger's per-currency `DisplayContext`.
+///
+/// These arms used to pre-quantize through `ledger_ctx`, which made the column
+/// context incapable of learning a precision FINER than the ledger already
+/// had — it could only ever confirm what it was told. On a commodity the
+/// ledger tracks at 0 dp that turned `-374.9999999` into a rendered `-375`
+/// (#2015): not a rounded total or a blanked cell, but a number the ledger
+/// does not contain, printed with nothing to signal it. It also fed
+/// `position_renders_as_zero` a 0-dp precision, which then suppressed a
+/// `0.0000001` residual entirely.
+///
+/// The `Value::Number` arm below already observed raw values, so the
+/// pre-quantizing arms were also internally inconsistent with it: the same
+/// residual printed correctly via `SUM(number)` and wrongly via
+/// `SUM(position)`. This makes all four arms agree.
+///
+/// `ledger_ctx` is still used — but at the call site, once per column, for the
+/// zero-pad fallback (see the `col_inherited` guard in `write_text`).
 fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx: &DisplayContext) {
     match value {
         Value::Amount(a) => {
-            let quantized = ledger_ctx.quantize(a.number, a.currency.as_str());
-            col_ctx.update(quantized, a.currency.as_str());
+            observe(col_ctx, ledger_ctx, a.number, a.currency.as_str());
         }
         Value::Position(p) => {
-            let quantized = ledger_ctx.quantize(p.units.number, p.units.currency.as_str());
-            col_ctx.update(quantized, p.units.currency.as_str());
+            observe(
+                col_ctx,
+                ledger_ctx,
+                p.units.number,
+                p.units.currency.as_str(),
+            );
             if let Some(ref cost) = p.cost {
-                let quantized = ledger_ctx.quantize(cost.number, cost.currency.as_str());
-                col_ctx.update(quantized, cost.currency.as_str());
+                observe(col_ctx, ledger_ctx, cost.number, cost.currency.as_str());
             }
         }
         Value::Inventory(inv) => {
             for pos in inv.positions() {
-                let quantized = ledger_ctx.quantize(pos.units.number, pos.units.currency.as_str());
-                col_ctx.update(quantized, pos.units.currency.as_str());
+                observe(
+                    col_ctx,
+                    ledger_ctx,
+                    pos.units.number,
+                    pos.units.currency.as_str(),
+                );
                 if let Some(ref cost) = pos.cost {
-                    let quantized = ledger_ctx.quantize(cost.number, cost.currency.as_str());
-                    col_ctx.update(quantized, cost.currency.as_str());
+                    observe(col_ctx, ledger_ctx, cost.number, cost.currency.as_str());
                 }
             }
         }

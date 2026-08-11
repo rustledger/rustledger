@@ -350,10 +350,15 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
 /// Whether a `Position` should be omitted from `Value::Inventory` rendering.
 ///
 /// **Exactly zero only.** This stands in for a difference in the INVENTORY,
-/// not a display rule: beancount removes a lot when it reduces to exactly
-/// zero, so `0 ORNG {1 USD}` is simply absent from its inventory and the cell
-/// renders blank. Ours retains the closed lot, so it is filtered here instead.
-/// Delete this the day `Inventory` drops zero lots itself.
+/// not a display rule. `Inventory::add` coalesces same-key lots, so a lot that
+/// is bought and then fully sold nets to a `0 ORNG {1 USD}` entry that stays in
+/// the map; beancount drops the key at that point, so the position is simply
+/// absent there and the cell renders blank.
+///
+/// Note `Inventory::positions()` is an unfiltered iterator over that map (the
+/// `!p.is_empty()` filter lives on the `Display` impl, a different path), so
+/// the coalesced zero does reach this filter and has to be dropped here.
+/// Delete this the day `Inventory` drops zero-net keys itself.
 ///
 /// # It used to also blank sub-precision residuals, and that was wrong
 ///
@@ -791,15 +796,18 @@ mod tests {
         );
     }
 
-    /// Issue #1104: a position whose units round to zero at the currency's
-    /// tracked display precision is suppressed from `Value::Inventory`
-    /// rendering. Matches bean-query, which renders such cells as blank
-    /// in SUM(position) / BALANCES output rather than showing `0.00 USD`.
+    /// A position whose units round to zero at the currency's display
+    /// precision is still a position the inventory HOLDS, so it renders —
+    /// at that precision, as `0.00 USD`.
+    ///
+    /// This inverts #1104, which suppressed such cells believing bean-query
+    /// blanked them. It does not: bean-query blanks an EMPTY inventory.
+    /// Checked against bean-query 3.2.3 — an account holding `0.0003183 USD`
+    /// renders `0.00 USD`, while one that netted to nothing renders blank.
     ///
     /// Concrete trigger: capital-gains residuals from cost-spec interpolation
-    /// often land near the noise floor (e.g., `-0.0003183 USD`). At USD's
-    /// tracked 2dp precision, that rounds to `-0.00`, which is semantically
-    /// "no position" — both Python and now rust suppress it.
+    /// land near the noise floor (`-0.0003183 USD`). Suppressing them hid a
+    /// real arithmetic divergence — see #2034.
     #[test]
     fn test_value_inventory_renders_sub_precision_positions() {
         let mut ctx = DisplayContext::new();
@@ -890,11 +898,9 @@ mod tests {
         assert_eq!(format_value(&inv_val, true, &ctx), "-1202.01");
     }
 
-    /// Issue #1104 cross-format coverage: the zero-position suppression
-    /// must also apply to CSV and beancount outputs, not just the
-    /// human-facing text table. This matches bean-query, whose CSV
-    /// output renders sub-precision positions as blank (verified
-    /// empirically against the #1104 fixture).
+    /// Cross-format coverage: a sub-precision position must render in CSV and
+    /// beancount output too, not just the human-facing text table — the same
+    /// correction as the text case above (#1104 had all three suppressing).
     ///
     /// This is distinct from the #988 AC#4 "lossless" contract for
     /// `Value::Number` (which preserves Decimal scale across non-text

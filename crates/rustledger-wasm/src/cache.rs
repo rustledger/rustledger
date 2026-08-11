@@ -58,7 +58,10 @@ use crate::types::{Error, LedgerOptions};
 /// v11 (#2008): transaction headers beancount rejects are now parse errors.
 /// Same reasoning as the loader's v25.
 /// v12 (#2008): malformed cost-spec component lists likewise. Loader v26.
-pub const CACHE_VERSION: u32 = 12;
+/// v13 (#2008): numberless cost specs archive `None`, not an invented zero.
+/// Loader v27 — and unlike v11/v12 this one changes archived VALUES, so a
+/// stale blob would serve the invented number rather than merely miss an error.
+pub const CACHE_VERSION: u32 = 13;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -84,7 +87,7 @@ pub const CACHE_VERSION: u32 = 12;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 26;
+const LOADER_CACHE_VERSION_PIN: u32 = 27;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

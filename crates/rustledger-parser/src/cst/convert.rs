@@ -1945,11 +1945,53 @@ pub(super) fn cost_spec_from_tokens(tokens: impl Iterator<Item = impl TokenView>
         }
     }
 
-    let number = if past_hash {
-        Some(CostNumber::Compound {
-            per_unit: pre_hash.unwrap_or_default(),
-            total: post_hash_total.unwrap_or_default(),
-        })
+    // A malformed component list means we do not know the cost, so do not
+    // report one (#2008). `{, 100.0 USD, , }` and `{45.23 USD / 2015-07-16 /
+    // "blabla"}` both have a number our recovery can scrape out, and scraping
+    // it is how `rledger check` came to print `E3001 does not balance:
+    // residual 980.10 USD` — an arithmetic complaint about a typo, whose
+    // number was produced by this function rather than by anything the author
+    // wrote. Dropping to "unknown" hands the posting to interpolation, which
+    // already knows how to solve for a single unknown per currency group and
+    // to reject more than one.
+    //
+    // The currency is kept: `{, 100.0 USD, , }` names USD unambiguously, so
+    // "an unknown cost in USD" is the honest reading. Same rule as `{ # USD}`
+    // above — never invent a number the author did not write.
+    let shape_ok =
+        super::cost_spec_shape::first_cost_spec_defect(toks.iter().map(|t| (t.kind(), ())))
+            .is_none();
+
+    let number = if !shape_ok {
+        None
+    } else if past_hash {
+        match (pre_hash, post_hash_total) {
+            // `{ # USD}` — no number on EITHER side of the `#`. There is no
+            // cost number here at all, so say so; `unwrap_or_default()` used to
+            // invent `Compound { per_unit: 0, total: 0 }`, a perfectly
+            // determinable zero cost. That is why #2008 case 5 loaded clean:
+            // interpolation counts a cost spec with no determinable number as
+            // one unknown for its currency and enforces "at most one per
+            // currency group", but an invented zero is not an unknown, so the
+            // rule never saw it.
+            //
+            // Reported as `None`, exactly like `{USD}`, because that is what
+            // the two shapes have in common: a currency and no number.
+            //
+            // Scoped to BOTH sides missing. `{100 # USD}` and `{# 500 USD}`
+            // still default the absent side to zero — beancount treats it as
+            // MISSING and would solve for it, which is a different and larger
+            // change. The corpus says that is not urgent: `{ # CCY}` appears in
+            // exactly one file (the #2008 fixture), and the one-sided forms
+            // appear only in other parser-lima conformance fixtures. Widening
+            // this without an oracle to check against is how a compat fix
+            // starts breaking real ledgers.
+            (None, None) => None,
+            (per_unit, total) => Some(CostNumber::Compound {
+                per_unit: per_unit.unwrap_or_default(),
+                total: total.unwrap_or_default(),
+            }),
+        }
     } else {
         match (first_number, is_total) {
             (Some(v), true) => Some(CostNumber::Total { value: v }),

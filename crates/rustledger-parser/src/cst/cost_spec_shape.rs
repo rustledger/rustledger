@@ -35,7 +35,6 @@
 //! `(SyntaxKind, Range<usize>)` so it stays testable without a tree.
 
 use crate::SyntaxKind;
-use std::ops::Range;
 
 /// What is wrong with a cost spec's component list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,9 +65,15 @@ const fn is_cost_trivia(kind: SyntaxKind) -> bool {
 /// Reports at most one defect, like [`super::txn_header::first_header_defect`]
 /// and for the same reason: beancount stops at the first, and a malformed spec
 /// otherwise cascades.
-pub(super) fn first_cost_spec_defect<I>(tokens: I) -> Option<(CostSpecDefect, Range<usize>)>
+/// Generic over the payload carried alongside each kind so the rule has ONE
+/// implementation with two uses: the diagnostic path passes byte ranges and
+/// gets the offending one back, while `convert::cost_spec_from_tokens` passes
+/// `()` and only asks whether the spec is malformed at all (#2008). A separate
+/// kind-only predicate would be the same rule written twice, which is the
+/// drift this module was created to avoid.
+pub(super) fn first_cost_spec_defect<P, I>(tokens: I) -> Option<(CostSpecDefect, P)>
 where
-    I: IntoIterator<Item = (SyntaxKind, Range<usize>)>,
+    I: IntoIterator<Item = (SyntaxKind, P)>,
 {
     // `{}` is a valid, meaningful empty cost spec ("infer the lot"), so
     // emptiness is only a defect once a COMMA has claimed there are multiple
@@ -77,8 +82,10 @@ where
     // leading `{,` and the trailing `,}` are both empty components too.
     let mut saw_comma = false;
     let mut component_has_content = false;
-    let mut component_complete_at: Option<Range<usize>> = None;
-    let mut pending_empty: Option<Range<usize>> = None;
+    // Flags, not payloads: nothing reads these back, and keeping them
+    // payload-free is what lets the rule stay generic over `P`.
+    let mut component_complete = false;
+    let mut pending_empty = false;
 
     for (kind, range) in tokens {
         // Every opener form: `{`, `{{` (total cost) and `{#`.
@@ -101,7 +108,7 @@ where
                 if !closing {
                     saw_comma = true;
                 }
-                if !component_has_content && (saw_comma || pending_empty.is_some()) {
+                if !component_has_content && (saw_comma || pending_empty) {
                     // Report at the delimiter, as beancount does ("unexpected
                     // COMMA"). For `{}` this is unreachable: no comma is seen,
                     // and `pending_empty` is still None.
@@ -110,9 +117,9 @@ where
                 if closing {
                     return None;
                 }
-                pending_empty = Some(range);
+                pending_empty = true;
                 component_has_content = false;
-                component_complete_at = None;
+                component_complete = false;
             }
             // CURRENCY completes a `compound_amount`; DATE and STRING are
             // whole components on their own.
@@ -124,14 +131,14 @@ where
             // costs only `{* 100 USD}` (missing comma), which is outside
             // #2008's evidence and not worth guessing at.
             SyntaxKind::CURRENCY | SyntaxKind::DATE | SyntaxKind::STRING => {
-                if let Some(_done) = &component_complete_at {
+                if component_complete {
                     return Some((CostSpecDefect::TrailingJunk, range));
                 }
                 component_has_content = true;
-                component_complete_at = Some(range);
+                component_complete = true;
             }
             _ => {
-                if component_complete_at.is_some() {
+                if component_complete {
                     return Some((CostSpecDefect::TrailingJunk, range));
                 }
                 component_has_content = true;
@@ -164,6 +171,7 @@ pub(super) fn cost_defect_message(defect: CostSpecDefect, text: &str) -> String 
 mod tests {
     use super::*;
     use SyntaxKind as K;
+    use std::ops::Range;
 
     fn toks(items: &[(K, &str)]) -> Vec<(K, Range<usize>)> {
         let mut at = 0usize;

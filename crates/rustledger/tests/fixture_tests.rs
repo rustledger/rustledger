@@ -254,12 +254,62 @@ const LIMA_2008_CASES: &[(&str, bool)] = &[
     ("Transactions.TagThenLink", true),
     // case 4: `A:*:B` after the narration
     ("SyntaxErrors.ErrorInTransactionLine", true),
-    // case 5: `20 AAPL {USD}` / `20 AAPL { # USD}`
+    // case 5: `20 AAPL {USD}` / `20 AAPL { # USD}`. Still PARSE-clean, and
+    // correctly so - beancount rejects it from the booker, not the grammar.
+    // `LIMA_2008_LOAD_REJECTED` below covers the half this table cannot see.
     ("ParseLots.CostTotalJustCurrency", false),
     // case 6 / 7: three header strings
     ("ParserEntryTypes.TransactionThreeStrings", true),
     ("Transactions.TooManyStrings", true),
 ];
+
+/// #2008 fixtures that must be rejected at LOAD time rather than parse time.
+///
+/// `LIMA_2008_CASES` measures parse errors, which is the wrong instrument for
+/// case 5: beancount rejects `{USD}` / `{ # USD}` from the booker ("Too many
+/// missing numbers for currency group"), and rledger now reaches the same
+/// verdict through interpolation's "at most one unknown per currency group"
+/// rule. A parse-level table would have to record it as `false` forever and
+/// would silently stop meaning anything.
+/// Paired with the SUBSTRING its rejection must contain. Asserting merely that
+/// `rledger check` fails is worthless here and was caught being so: this
+/// fixture's accounts are never opened, so check exits non-zero on E1001 no
+/// matter what the booker does. Reverting the fix left the test green.
+const LIMA_2008_LOAD_REJECTED: &[(&str, &str)] = &[(
+    "ParseLots.CostTotalJustCurrency",
+    "multiple postings missing amounts",
+)];
+
+#[test]
+fn test_lima_2008_load_rejections() {
+    let dir = spec_fixtures_dir().join("lima-tests");
+    assert!(
+        dir.is_dir(),
+        "lima-tests fixtures missing at {} - they are committed to the repo, \
+         so this is a broken checkout rather than a reason to skip",
+        dir.display()
+    );
+    for (stem, expected) in LIMA_2008_LOAD_REJECTED {
+        let path = dir.join(format!("{stem}.beancount"));
+        assert!(path.exists(), "#2008 fixture {stem} is missing");
+        let Some((ok, output)) = rledger_check(&path) else {
+            // `rledger_check` returns None only when the binary is absent.
+            // Everything else in this file behaves the same way, so match it
+            // rather than invent a stricter rule here.
+            eprintln!("Skipping {stem}: rledger binary not built");
+            continue;
+        };
+        assert!(
+            !ok,
+            "{stem} must be rejected at load time; rledger check passed it.\n{output}"
+        );
+        assert!(
+            output.contains(expected),
+            "{stem} must be rejected FOR THE RIGHT REASON - expected \
+             {expected:?} in the output.\n{output}"
+        );
+    }
+}
 
 #[test]
 fn test_lima_2008_cases_have_expected_strictness() {

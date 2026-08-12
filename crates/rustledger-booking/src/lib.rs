@@ -32,6 +32,7 @@ pub use book::{
 };
 pub use interpolate::{
     InterpolationError, InterpolationResult, UnknownGroup, elided_unknown_groups, interpolate,
+    interpolate_with_tolerance_map, interpolate_with_tolerances,
 };
 pub use pad::{
     PadError, PadResult, SYNTH_PAD_NARRATION_PREFIX, is_synthesized_pad, merge_with_padding,
@@ -61,6 +62,50 @@ pub struct ToleranceOptions<'a> {
     /// though a named per-currency default still reaches it) — behavior
     /// inherited verbatim from the validator.
     pub defaults: &'a FxHashMap<String, Decimal>,
+}
+
+/// Owned counterpart of [`ToleranceOptions`].
+///
+/// For holders that outlive any one borrow — the booking engine carries one
+/// across a whole ledger so every transaction it interpolates rounds against
+/// the ledger's own knobs.
+#[derive(Debug, Clone)]
+pub struct TolerancePolicy {
+    /// See [`ToleranceOptions::multiplier`].
+    pub multiplier: Decimal,
+    /// See [`ToleranceOptions::infer_from_cost`].
+    pub infer_from_cost: bool,
+    /// See [`ToleranceOptions::defaults`].
+    pub defaults: FxHashMap<String, Decimal>,
+}
+
+impl Default for TolerancePolicy {
+    /// Beancount's defaults: `inferred_tolerance_multiplier` 0.5,
+    /// `infer_tolerance_from_cost` false, no `inferred_tolerance_default`.
+    ///
+    /// Written by hand rather than derived on purpose. A derived `Default`
+    /// would give `multiplier: 0`, which reads downstream as "this currency
+    /// has no tolerance" and would silently switch off both the balance
+    /// check's slack and interpolation's quantization.
+    fn default() -> Self {
+        Self {
+            multiplier: Decimal::new(5, 1),
+            infer_from_cost: false,
+            defaults: FxHashMap::default(),
+        }
+    }
+}
+
+impl TolerancePolicy {
+    /// Borrowed view, for passing to [`transaction_tolerances`].
+    #[must_use]
+    pub const fn options(&self) -> ToleranceOptions<'_> {
+        ToleranceOptions {
+            multiplier: self.multiplier,
+            infer_from_cost: self.infer_from_cost,
+            defaults: &self.defaults,
+        }
+    }
 }
 
 /// Calculate the quantum (smallest unit) of a decimal number based on its precision.

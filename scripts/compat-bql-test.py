@@ -197,28 +197,14 @@ KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
     # work. Tracked under #1112 (kept open as the tracker — do not
     # auto-close from this PR). Surgical pin (not "*") so any
     # non-scale divergence on these fixtures stays surfaced.
+    #
+    # All three `non_default_capital_gains_journal` entries that used to sit
+    # here and below are gone: #2034's tolerance-quantization fix made that
+    # fixture match bean-query on every query. The two below still diverge —
+    # their residual is born inside a `{{total}}` lot match, which the
+    # tolerance rule does not reach.
     ("tests/compatibility/files/beancount-import/testdata_source_healthequity_test_invalid_journal.beancount", "sum-number-by-currency"),
     ("tests/compatibility/files/beancount-import/testdata_source_healthequity_test_matching_journal.beancount", "sum-number-by-currency"),
-    ("tests/compatibility/files/beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount", "sum-number-by-currency"),
-    # Our capital-gains computation leaves a `-0.0003183 USD` residual in the
-    # gains account where beancount lands on exactly `0.00` (#2034). OURS is
-    # the side that is wrong.
-    #
-    # Invisible until the renderer stopped blanking positions that round to
-    # zero: `position_renders_as_zero` suppressed the row, so a real arithmetic
-    # residual looked like agreement. Registering it keeps the divergence
-    # counted and named instead of hidden behind a display rule.
-    #
-    # Remove when #2034 is fixed - the stale-mask gate fails the run the moment
-    # these pairs start matching again.
-    (
-        "tests/compatibility/files/beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount",
-        "balances-by-account",
-    ),
-    (
-        "tests/compatibility/files/beancount-import/testdata_source_ofx_test_non_default_capital_gains_journal.beancount",
-        "sum-position-by-account",
-    ),
 }
 
 

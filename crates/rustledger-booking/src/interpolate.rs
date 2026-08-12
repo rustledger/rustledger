@@ -191,21 +191,108 @@ fn accumulate_residual(
     }
 }
 
-/// Round an interpolated amount to match existing scale, but never round
-/// a non-zero residual to zero (that would leave the transaction unbalanced).
-fn round_interpolated(residual: Decimal, existing_scale: Option<u32>) -> Decimal {
-    let interpolated = -residual;
-    if let Some(scale) = existing_scale {
-        let rounded = interpolated.round_dp(scale);
-        // If rounding would make non-zero residual into zero, preserve precision
-        if rounded.is_zero() && !residual.is_zero() {
-            interpolated
-        } else {
-            rounded
-        }
-    } else {
-        interpolated
+/// Beancount's `MAX_TOLERANCE_DIGITS`. A quantum carrying this many or more
+/// significant digits reads as machine-derived rather than user-specified,
+/// and beancount declines to quantize against it.
+const MAX_TOLERANCE_DIGITS: u32 = 5;
+
+/// Python `Decimal.normalize()` semantics, which `rust_decimal` only half
+/// implements: the significant digits with trailing zeros stripped, plus the
+/// power-of-ten exponent they were stripped into.
+///
+/// `rust_decimal` has no positive exponent, so `10000` normalizes to itself
+/// (mantissa `10000`, scale 0) where Python yields `1E+4` — one digit at
+/// exponent 4. Beancount's rule reads BOTH of those Python values: the digit
+/// count feeds `is_tolerance_user_specified` and the exponent is the rounding
+/// position, so each has to be recovered explicitly rather than taken from
+/// `mantissa()` / `scale()`.
+fn normalized_parts(quantum: Decimal) -> (u32, i32) {
+    let normalized = quantum.normalize();
+    let mut mantissa = normalized.mantissa().unsigned_abs();
+    if mantissa == 0 {
+        // Python: `Decimal(0).normalize()` is `0` — one digit, exponent 0.
+        return (1, 0);
     }
+    // `scale()` is 0..=28, so the conversion cannot fail.
+    let mut exponent = -i32::try_from(normalized.scale()).unwrap_or(0);
+    while mantissa.is_multiple_of(10) {
+        mantissa /= 10;
+        exponent += 1;
+    }
+    (mantissa.ilog10() + 1, exponent)
+}
+
+/// Round `value` to the decimal position `10^exponent` — the operation
+/// Python's `Decimal.quantize` performs. Half-even, matching Python's default
+/// context (and `round_dp`'s default strategy).
+///
+/// Returns `None` only if the power of ten needed for a positive exponent
+/// leaves `rust_decimal`'s range, in which case the caller leaves the value
+/// unrounded rather than guessing.
+fn quantize_to_exponent(value: Decimal, exponent: i32) -> Option<Decimal> {
+    if exponent <= 0 {
+        let dp = u32::try_from(-exponent).ok()?;
+        return Some(value.round_dp(dp));
+    }
+    // Rounding to tens or coarser. Only reachable via a tolerance >= 0.5,
+    // which needs `infer_tolerance_from_cost` on a high-priced commodity or
+    // an explicit `inferred_tolerance_default`.
+    let mut power = Decimal::ONE;
+    for _ in 0..exponent {
+        power = power.checked_mul(Decimal::TEN)?;
+    }
+    value.checked_div(power)?.round_dp(0).checked_mul(power)
+}
+
+/// Solve an elided posting's number from a residual, quantizing it the way
+/// beancount's `interpolate.quantize_with_tolerance` does.
+///
+/// The rounding grid is the transaction's own balance tolerance for the
+/// currency, not the scale of the amounts written in it. That is what keeps
+/// the result self-consistent: `quantize` rounds to the EXPONENT of
+/// `tolerance * 2` (not to a multiple of it), and for any normalized decimal
+/// `d = D x 10^e` with integer `D >= 1` we have `10^e <= d`, so the worst-case
+/// rounding error is
+///
+/// ```text
+/// 1/2 x 10^exponent(2t)  <=  1/2 x 2t  =  t
+/// ```
+///
+/// — never more than the tolerance the balance validator already accepts.
+/// The bound holds for every `tolerance_multiplier`, which is why the literal
+/// `2` is copied from beancount rather than replaced with
+/// `1 / tolerance_multiplier`: the latter reconstructs the raw quantum `q`,
+/// whose half-ulp is `q/2` against a tolerance of only `q x multiplier`, and
+/// so breaks the bound for every multiplier below 0.5. Beancount's own
+/// `TODO(blais)` about the `2` is about where the multiplier is applied, not
+/// a defect in this direction.
+///
+/// Rounding by tolerance also replaces an older scale-based rule that tracked
+/// the maximum observed scale per currency. That rule diverged from beancount
+/// three ways, all fixed here: it took the FINEST scale where beancount takes
+/// the COARSEST quantum, it let a total-price annotation establish a currency's
+/// precision when beancount only looks at posting units, and it carried a
+/// carve-out (#274) that kept full precision whenever rounding would land on
+/// zero — which is exactly when beancount rounds, and exactly the residual in
+/// #2034.
+fn round_interpolated(residual: Decimal, tolerance: Option<Decimal>) -> Decimal {
+    let interpolated = -residual;
+    // Beancount guards with a truthiness test (`if tolerance:`), so an absent
+    // tolerance AND a tolerance of exactly zero both skip quantization. The
+    // zero case is not theoretical — `option "inferred_tolerance_multiplier"
+    // "0"` produces one, and reading it as a rounding position would mean
+    // `round_dp(0)`, reviving the "0.049 becomes 0" failure of #274.
+    let Some(tolerance) = tolerance.filter(|t| !t.is_zero()) else {
+        return interpolated;
+    };
+    let Some(quantum) = tolerance.checked_mul(Decimal::TWO) else {
+        return interpolated;
+    };
+    let (digits, exponent) = normalized_parts(quantum);
+    if digits >= MAX_TOLERANCE_DIGITS {
+        return interpolated;
+    }
+    quantize_to_exponent(interpolated, exponent).unwrap_or(interpolated)
 }
 
 /// How a units-missing posting's balance weight depends on the number we are
@@ -567,9 +654,68 @@ pub fn elided_unknown_groups(txn: &Transaction) -> Vec<(usize, UnknownGroup)> {
 /// // Assets:Cash now has -50.00 USD
 /// ```
 pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, InterpolationError> {
+    let policy = crate::TolerancePolicy::default();
+    interpolate_with_tolerances(transaction, &policy.options())
+}
+
+/// [`interpolate`], with the ledger's own tolerance knobs.
+///
+/// The solved number is quantized against the transaction's balance tolerance
+/// (see `round_interpolated`), so a ledger that sets
+/// `tolerance_multiplier`, `infer_tolerance_from_cost` or
+/// `inferred_tolerance_default` must pass them here or interpolation and the
+/// balance validator will be reasoning about different tolerances.
+///
+/// Derives the tolerances from `transaction` itself. If the transaction has
+/// already been BOOKED, use [`interpolate_with_tolerance_map`] instead and
+/// derive them from the pre-booking form — see that function for why.
+///
+/// # Errors
+/// Same as [`interpolate`].
+pub fn interpolate_with_tolerances(
+    transaction: &Transaction,
+    tolerance_options: &crate::ToleranceOptions<'_>,
+) -> Result<InterpolationResult, InterpolationError> {
+    let tolerances = crate::transaction_tolerances(transaction, tolerance_options);
+    interpolate_with_tolerance_map(transaction, &tolerances)
+}
+
+/// [`interpolate`], quantizing against a tolerance map the caller supplies.
+///
+/// Exists because the tolerances must come from the transaction as the USER
+/// WROTE IT, which is not always the transaction being interpolated. Beancount
+/// computes them in `booking_full.book` from `entry.postings` — the parsed,
+/// pre-booking postings, where a `{}` cost spec is still empty — and only then
+/// books and interpolates.
+///
+/// Deriving them from the booked form instead is not a subtle difference. An
+/// empty `{}` resolves to the matched lot's per-unit cost, which is routinely a
+/// 26+ digit quotient (`total / units`). With `infer_tolerance_from_cost` on,
+/// that number multiplies into the tolerance, whose quantum then carries far
+/// more than 5 significant digits — so `is_tolerance_user_specified` rejects it
+/// and quantization is skipped entirely, leaking the full 26-digit residual
+/// into the ledger. On
+/// `testdata_source_healthequity_test_matching_journal.beancount` that is the
+/// difference between beancount's `-36.730 USD` (pre-booking tolerance 0.0955,
+/// quantum 0.191, 3dp) and `-36.73000000000000000000000000`.
+///
+/// The map is also never rebuilt from the partially-filled result, so a solved
+/// number can never feed the tolerance that rounds it.
+///
+/// # Errors
+/// Same as [`interpolate`].
+pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
+    transaction: &Transaction,
+    tolerances: &std::collections::HashMap<Currency, Decimal, S>,
+) -> Result<InterpolationResult, InterpolationError> {
     // Clone the transaction for modification
     let mut result = transaction.clone();
     let mut filled_indices = Vec::new();
+    // Fills whose RESIDUAL was already exactly zero, as opposed to fills that
+    // merely quantized to zero. Beancount treats the two differently and so
+    // does the prune at the end of this function — see it for why.
+    let mut zero_residual_fills: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
 
     // Lazily compute inferred currency only when needed (most transactions don't need it)
     let mut inferred_cost_currency: Option<Option<Currency>> = None;
@@ -588,35 +734,27 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     let mut missing_by_currency: HashMap<Currency, Vec<usize>> = HashMap::with_capacity(2);
     let mut unassigned_missing: Vec<usize> = Vec::with_capacity(2);
 
-    // Track maximum scale (decimal places) per currency for rounding interpolated amounts.
+    // `tolerances` (computed above from the INPUT transaction) is the rounding
+    // grid for every solved number — see `round_interpolated`. It comes from
+    // the canonical `transaction_tolerances`, the same function the balance
+    // validator uses, so interpolation cannot round to a precision the
+    // validator would then reject.
     //
-    // Matches Python beancount's `infer_tolerances` rule: only NON-INTEGER posting
-    // units contribute to the per-currency tolerance/precision. Integer amounts
-    // ("1 CAD" commission, "1 CSU" share count) do NOT contribute — they don't
-    // tell us anything about that currency's display precision.
-    //
-    // Cost spec scales are deliberately NOT included. With Python's default
-    // `infer_tolerance_from_cost = False`, cost annotations don't influence the
-    // residual quantization either. The natural Decimal arithmetic that flows
-    // through `cost_amount = units × per_unit` preserves whatever scale the
-    // operands carry, so a transaction with no non-integer posting units in a
-    // given currency simply doesn't get a quantization step (the residual is
-    // rendered at its natural scale).
+    // Only NON-INTEGER posting units establish a tolerance, so a currency with
+    // no fractional units in the transaction gets none and its residual passes
+    // through at whatever scale the arithmetic produced:
     //
     // - #333 (`1 CSU {2800.01 CAD}` + `1 CAD` commission + missing CAD):
-    //   no non-integer CAD posting units in this transaction; residual
-    //   passes through unrounded at its natural scale, which is 2dp from
-    //   the explicit cost literal `{2800.01}` flowing through
-    //   `cost_amount = units × per_unit`.
-    // - #251 (`70.538 ABC {100 USD}` + missing posting): no non-integer
-    //   USD posting units; residual = `70.538 × 100 = 7053.800` (scale 3
-    //   from the rust_decimal multiplication), preserved naturally.
-    // - #1107 (`-1.763 STOCK {}` lot-matched against high-precision per_unit):
-    //   the cash side `336.73 USD` gives USD scale=2; the residual gets
-    //   quantized to 2dp instead of inheriting the lot's derived 26-digit
-    //   per_unit precision.
-    let mut max_scale_by_currency: HashMap<Currency, u32> = HashMap::with_capacity(4);
-
+    //   no fractional CAD units, so no quantization; the residual keeps the
+    //   2dp that `{2800.01}` carried through `cost_amount = units × per_unit`.
+    // - #251 (`70.538 ABC {100 USD}` + missing posting): no fractional USD
+    //   units; residual = `70.538 × 100 = 7053.800`, preserved naturally.
+    // - #1107 (`-1.763 STOCK {}` against a high-precision per_unit): the cash
+    //   side `336.73 USD` sets a USD tolerance of 0.005, so the residual
+    //   quantizes to 2dp instead of inheriting the lot's derived 26-digit
+    //   per_unit precision. Cost-spec scale never reaches the tolerance —
+    //   `infer_tolerance_from_cost` is off by default and, when on, feeds
+    //   the units quantum rather than the cost's own scale.
     // Per-currency count of postings whose WEIGHT contribution is unknown even
     // though their units are written out. Two shapes qualify:
     //
@@ -669,18 +807,6 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     for (i, posting) in transaction.postings.iter().enumerate() {
         match &posting.units {
             Some(IncompleteAmount::Complete(amount)) => {
-                // Track scale (decimal places) for rounding interpolated amounts.
-                // Skip integer (scale==0) amounts — matches Python's
-                // `infer_tolerances`, which ignores integer posting.units
-                // since they don't reflect intentional currency precision.
-                let scale = amount.number.scale();
-                if scale > 0 {
-                    max_scale_by_currency
-                        .entry(amount.currency.clone())
-                        .and_modify(|s| *s = (*s).max(scale))
-                        .or_insert(scale);
-                }
-
                 // Determine the "weight" of this posting for balance purposes.
                 // The cost weight goes through the shared `cost_weight` engine —
                 // the SAME `CostNumber` ladder `calculate_residual` uses — so
@@ -708,10 +834,10 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
 
                 if let Some((currency, cost_amount)) = cost_contribution {
                     // Cost-based posting: weight is in the cost currency.
-                    // Cost spec scales are intentionally NOT tracked in
-                    // `max_scale_by_currency` — see its declaration for the
-                    // rationale (Python beancount with default
-                    // `infer_tolerance_from_cost = False`).
+                    // A cost spec's own scale never reaches the rounding grid
+                    // — see the `tolerances` comment above for why (Python
+                    // beancount with default `infer_tolerance_from_cost =
+                    // false`).
                     accumulate_residual(
                         &mut residuals,
                         &mut unrepresentable,
@@ -836,13 +962,13 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                                 },
                             ),
                             rustledger_core::PriceKind::Total => {
-                                let scale = price_amt.number.scale();
-                                if scale > 0 {
-                                    max_scale_by_currency
-                                        .entry(price_amt.currency.clone())
-                                        .and_modify(|s| *s = (*s).max(scale))
-                                        .or_insert(scale);
-                                }
+                                // A total-price annotation deliberately does
+                                // NOT establish this currency's rounding grid.
+                                // Beancount infers tolerance from posting
+                                // UNITS only, so `3 STK @@ 10.00 USD` leaves
+                                // USD without a tolerance and the residual
+                                // unquantized. The old scale-based rule read
+                                // the `10.00` here and rounded to 2dp.
                                 (
                                     price_amt.currency.clone(),
                                     // Exact for the same reason as the
@@ -1263,10 +1389,11 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
         // posting's weight, so the common path below is the original one: the
         // residual is the number, in the currency it was keyed under.
         let Some((units_currency, multiplier)) = scaled_missing.remove(&idx) else {
-            let interpolated = round_interpolated(
-                residual,
-                max_scale_by_currency.get(&weight_currency).copied(),
-            );
+            let interpolated =
+                round_interpolated(residual, tolerances.get(&weight_currency).copied());
+            if residual.is_zero() {
+                zero_residual_fills.insert(idx);
+            }
             result.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
                 interpolated,
                 &weight_currency,
@@ -1288,10 +1415,10 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                 currency: weight_currency,
             });
         };
-        let interpolated = round_interpolated(
-            quotient,
-            max_scale_by_currency.get(&units_currency).copied(),
-        );
+        let interpolated = round_interpolated(quotient, tolerances.get(&units_currency).copied());
+        if quotient.is_zero() {
+            zero_residual_fills.insert(idx);
+        }
 
         result.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
             interpolated,
@@ -1327,10 +1454,11 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
 
             // Fill the first currency into the original posting
             let (first_currency, first_residual) = &non_zero_residuals[0];
-            let interpolated = round_interpolated(
-                *first_residual,
-                max_scale_by_currency.get(first_currency).copied(),
-            );
+            let interpolated =
+                round_interpolated(*first_residual, tolerances.get(first_currency).copied());
+            if first_residual.is_zero() {
+                zero_residual_fills.insert(idx);
+            }
             result.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
                 interpolated,
                 first_currency,
@@ -1341,8 +1469,10 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
             // Add new postings for remaining currencies
             for (currency, residual) in non_zero_residuals.iter().skip(1) {
                 let mut new_posting = original_posting.clone();
-                let interpolated =
-                    round_interpolated(*residual, max_scale_by_currency.get(currency).copied());
+                let interpolated = round_interpolated(*residual, tolerances.get(currency).copied());
+                if residual.is_zero() {
+                    zero_residual_fills.insert(result.postings.len());
+                }
                 new_posting.units = Some(IncompleteAmount::Complete(Amount::new(
                     interpolated,
                     currency,
@@ -1369,7 +1499,10 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                 if i < non_zero_residuals.len() {
                     let (currency, residual) = &non_zero_residuals[i];
                     let interpolated =
-                        round_interpolated(*residual, max_scale_by_currency.get(currency).copied());
+                        round_interpolated(*residual, tolerances.get(currency).copied());
+                    if residual.is_zero() {
+                        zero_residual_fills.insert(*idx);
+                    }
                     result.postings[*idx].units = Some(IncompleteAmount::Complete(Amount::new(
                         interpolated,
                         currency,
@@ -1382,6 +1515,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                     result.postings[*idx].units =
                         Some(IncompleteAmount::Complete(Amount::zero(currency)));
                     filled_indices.push(*idx);
+                    zero_residual_fills.insert(*idx);
                 } else if let Some(currency) = get_inferred_currency(&mut inferred_cost_currency) {
                     // No residuals but we can infer currency from cost basis
                     // This handles balanced cost-basis transactions like:
@@ -1391,6 +1525,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
                     result.postings[*idx].units =
                         Some(IncompleteAmount::Complete(Amount::zero(&currency)));
                     filled_indices.push(*idx);
+                    zero_residual_fills.insert(*idx);
                 } else {
                     // No residuals and cannot infer currency
                     return Err(InterpolationError::CannotInferCurrency {
@@ -1401,10 +1536,23 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
         }
     }
 
-    // Prune postings that were filled with zero amounts. Python
-    // beancount drops these from its rendered output too — they
-    // contribute nothing to the transaction balance and would just
+    // Prune postings filled from an ALREADY-ZERO residual. Beancount drops
+    // exactly these — they contribute nothing to the balance and would just
     // clutter BQL / JSON / format output.
+    //
+    // A fill that merely QUANTIZED to zero is deliberately kept, because
+    // beancount keeps it. The two are easy to conflate and behave differently:
+    //
+    //   Assets:A  5.00 USD / Assets:B -5.00 USD / Assets:C
+    //     -> residual 0, beancount emits NO `Assets:C` posting
+    //
+    //   Assets:A  1.6696817 USD / Assets:B -1.67 USD / Assets:C
+    //     -> residual 0.0003183, beancount emits `Assets:C  0.00 USD`
+    //
+    // Pruning the second shape is what made #2034's fix regress
+    // `distinct-account` / `count-by-currency` / `count-by-year-month` on the
+    // capital-gains fixture: the numbers agreed with bean-query but the row
+    // count did not, because we had dropped a posting beancount keeps.
     //
     // The historical concern (#877) was that pre-validation pruning
     // hid `E1001 Account X was never opened` errors on elided
@@ -1420,6 +1568,7 @@ pub fn interpolate(transaction: &Transaction) -> Result<InterpolationResult, Int
     // Iterate in reverse so indices stay valid as we remove.
     let mut indices_to_remove: Vec<usize> = filled_indices
         .iter()
+        .filter(|&&idx| zero_residual_fills.contains(&idx))
         .filter(|&&idx| {
             result.postings.get(idx).is_some_and(|p| {
                 p.units
@@ -2083,11 +2232,158 @@ mod tests {
         );
     }
 
-    /// Test that interpolation uses the maximum scale when multiple amounts have different scales.
+    /// #2034: the residual beancount absorbs and we used to keep.
+    ///
+    /// A `-0.04241 UNIT {39.37 USD}` disposal weighs `-1.6696817 USD` against
+    /// a `1.67 USD` fee, leaving `0.0003183`. The old carve-out fired exactly
+    /// here — `round_dp(2)` gives zero, so it kept full precision and wrote
+    /// `-0.0003183` into the capital-gains account. Beancount quantizes to
+    /// `-0.00` and lets the 0.0003183 sit inside USD's 0.005 tolerance.
     #[test]
-    fn test_interpolate_uses_max_scale() {
-        // When we have amounts with different scales, use the maximum.
-        // 0.1 USD (scale 1) and 0.001 USD (scale 3) -> interpolate to scale 3
+    fn interpolate_absorbs_capital_gains_rounding_residual() {
+        let txn = Transaction::new(date(2013, 9, 5), "TRANSFER - MATCH - Investment Expense")
+            .with_synthesized_posting(Posting::new(
+                "Assets:Vanguard",
+                Amount::new(dec!(-1.6696817), "USD"),
+            ))
+            .with_synthesized_posting(Posting::new(
+                "Expenses:Fees:Vanguard",
+                Amount::new(dec!(1.67), "USD"),
+            ))
+            .with_synthesized_posting(Posting::auto("Income:Vanguard:CapitalGains"));
+
+        let r = interpolate(&txn).expect("interpolation should succeed");
+
+        // Quantized to 0.00 and KEPT — beancount writes `-0.00 USD` here, and
+        // only an already-zero residual gets pruned. Pre-fix this was
+        // `-0.0003183`.
+        let gains = r
+            .transaction
+            .postings
+            .iter()
+            .find(|p| p.account.as_str().contains("CapitalGains"))
+            .and_then(|p| get_amount(p))
+            .expect("the gains posting survives; only zero RESIDUALS are pruned");
+        assert_eq!(gains.number, dec!(0));
+        assert_eq!(gains.currency, Currency::from("USD"));
+
+        let residual = r.residuals.get("USD").copied().unwrap_or(Decimal::ZERO);
+        assert_eq!(residual, dec!(0.0003183));
+        assert!(
+            residual.abs() <= dec!(0.005),
+            "must stay inside USD's tolerance or the validator would raise E3001"
+        );
+    }
+
+    /// A zero tolerance must disable quantization, not mean "round to 0 dp".
+    ///
+    /// Beancount guards with a truthiness test (`if tolerance:`), so a
+    /// tolerance of exactly zero skips `quantize` entirely. Porting that as
+    /// `if let Some(t)` instead would compute `(0 * 2).normalize() == 0`,
+    /// read its exponent as 0, and `round_dp(0)` the fill — reviving #274's
+    /// "0.049 becomes 0" on any ledger that sets the multiplier to zero.
+    #[test]
+    fn zero_tolerance_skips_quantization() {
+        assert_eq!(
+            round_interpolated(dec!(-0.049), Some(Decimal::ZERO)),
+            dec!(0.049),
+            "a zero tolerance must pass the value through untouched"
+        );
+        assert_eq!(
+            round_interpolated(dec!(-0.049), None),
+            dec!(0.049),
+            "an absent tolerance behaves the same way"
+        );
+        // Sanity: a real tolerance at this scale does quantize.
+        assert_eq!(
+            round_interpolated(dec!(-0.049), Some(dec!(0.005))),
+            dec!(0.05)
+        );
+    }
+
+    /// The invariant the whole rule exists to guarantee: quantizing a solved
+    /// number never pushes the leftover residual past the tolerance the
+    /// balance validator will measure it against.
+    ///
+    /// `quantize` rounds to the EXPONENT of `2t`, and for a normalized
+    /// `d = D x 10^e` with integer `D >= 1` we have `10^e <= d`, so the
+    /// half-ulp is `1/2 x 10^e <= 1/2 x 2t = t`. That bound is what makes
+    /// beancount's literal `2` safe at every `tolerance_multiplier` — and it
+    /// is the reason the alternative reading of blais's TODO (use
+    /// `1 / tolerance_multiplier`, reconstructing the raw quantum `q` whose
+    /// half-ulp is `q/2` against a tolerance of only `q x multiplier`) is
+    /// NOT adopted: it breaks this for every multiplier below 0.5.
+    ///
+    /// The sweep has to straddle the grid. An earlier version probed only
+    /// residuals far below it, where everything rounds to zero and the
+    /// leftover is trivially small — it survived a mutation that rounded a
+    /// full decimal position too coarse. The step below is finer than the
+    /// tightest grid in play (0.0001) and the range spans several multiples
+    /// of the widest (0.01), so exact midpoints are sampled.
+    #[test]
+    fn rounding_error_never_exceeds_tolerance() {
+        let quantum = dec!(0.01);
+        for multiplier in [dec!(0.5), dec!(0.3), dec!(0.1), dec!(0.05), dec!(0.01)] {
+            let tolerance = quantum * multiplier;
+            for step in 0..=500_i64 {
+                let residual = Decimal::new(step, 4);
+                let filled = round_interpolated(residual, Some(tolerance));
+                let leftover = residual + filled;
+                assert!(
+                    leftover.abs() <= tolerance,
+                    "multiplier {multiplier}: residual {residual} -> fill {filled} \
+                     leaves {leftover}, past tolerance {tolerance}"
+                );
+            }
+        }
+    }
+
+    /// A quantum with 5+ significant digits is not "user specified", so
+    /// beancount declines to quantize against it. Mirrors
+    /// `is_tolerance_user_specified`.
+    #[test]
+    fn machine_derived_quantum_skips_quantization() {
+        // 2 * 0.000061725 = 0.00012345 -> five digits -> no quantization.
+        let tolerance = dec!(0.000061725);
+        assert_eq!(
+            round_interpolated(dec!(-0.123456789), Some(tolerance)),
+            dec!(0.123456789)
+        );
+    }
+
+    /// `normalized_parts` reproduces Python's `Decimal.normalize()`, including
+    /// the positive exponent `rust_decimal` cannot represent.
+    #[test]
+    fn normalized_parts_matches_python_normalize() {
+        // Python: Decimal('0.01').normalize() -> 0.01, digits (1,), exp -2
+        assert_eq!(normalized_parts(dec!(0.01)), (1, -2));
+        // Decimal('0.006').normalize() -> 0.006, digits (6,), exp -3
+        assert_eq!(normalized_parts(dec!(0.006)), (1, -3));
+        // Decimal('0.0002469').normalize() -> digits (2,4,6,9), exp -7
+        assert_eq!(normalized_parts(dec!(0.0002469)), (4, -7));
+        // Decimal('1').normalize() -> 1, digits (1,), exp 0
+        assert_eq!(normalized_parts(dec!(1)), (1, 0));
+        // Decimal('10000').normalize() -> 1E+4, digits (1,), exp 4.
+        // rust_decimal keeps this as mantissa 10000 / scale 0, so the
+        // trailing-zero stripping is what recovers Python's answer.
+        assert_eq!(normalized_parts(dec!(10000)), (1, 4));
+        assert_eq!(normalized_parts(Decimal::ZERO), (1, 0));
+    }
+
+    /// Mixed scales in one currency round to the COARSEST, not the finest.
+    ///
+    /// This test used to assert the reverse — that `0.1 USD` (scale 1) and
+    /// `0.001 USD` (scale 3) interpolate at scale 3, giving `-0.101`. That
+    /// was a divergence. Beancount's tolerance is the MAX over each posting's
+    /// `quantum x multiplier`, so the coarse `0.1` leg sets USD's tolerance
+    /// to 0.05 and the rounding grid to 0.1; beancount 3.2.3 fills
+    /// `Assets:Cash` with `-0.1 USD` on this exact ledger, 0 errors.
+    ///
+    /// Taking the finest scale is the strictly worse choice: it preserves
+    /// digits the transaction never claimed and, in #2034's shape, preserved
+    /// a residual beancount had already absorbed.
+    #[test]
+    fn test_interpolate_rounds_to_coarsest_tolerance() {
         let txn = Transaction::new(date(2024, 1, 15), "Test")
             .with_synthesized_posting(Posting::new("Expenses:A", Amount::new(dec!(0.1), "USD")))
             .with_synthesized_posting(Posting::new("Expenses:B", Amount::new(dec!(0.001), "USD")))
@@ -2098,10 +2394,18 @@ mod tests {
         let filled = &result.transaction.postings[2];
         let amount = get_amount(filled).expect("should have amount");
 
-        // The amount is exactly -0.101, which fits in 3 decimal places
-        assert_eq!(amount.number, dec!(-0.101));
-        // Scale should be 3 (the maximum of 1 and 3)
-        assert_eq!(amount.number.scale(), 3);
+        assert_eq!(amount.number, dec!(-0.1), "coarsest grid (0.1), not 0.001");
+        assert_eq!(amount.number.scale(), 1);
+
+        // The 0.001 left behind is inside the 0.05 tolerance, so the balance
+        // validator accepts it — which is what makes the coarse rounding safe.
+        let residual = result
+            .residuals
+            .get("USD")
+            .copied()
+            .unwrap_or(Decimal::ZERO);
+        assert_eq!(residual, dec!(0.001));
+        assert!(residual.abs() <= dec!(0.05));
     }
 
     /// Test that cost spec scale is used when other postings have lower scale.
@@ -2744,13 +3048,22 @@ mod tests {
     }
 
     #[test]
-    fn interpolate_preserves_subcent_residual() {
+    fn interpolate_quantizes_subcent_residual_to_tolerance() {
         // Explicit USD legs net to zero; a 0.001 USD per-unit price
-        // contribution leaves a sub-cent residual. The currency's tracked
-        // scale is 2 (from the 1.00 USD legs), so naively rounding the
-        // -0.001 fill to 0.00 would silently leave the txn unbalanced.
-        // `round_interpolated` must keep full precision — kills the
-        // `!residual.is_zero()` guard.
+        // contribution leaves a sub-cent residual.
+        //
+        // This test used to assert the opposite — that the -0.001 fill kept
+        // full precision — on the reasoning that rounding it to 0.00 "would
+        // silently leave the txn unbalanced". That premise was wrong under
+        // beancount's tolerance model, and asserting it pinned a divergence:
+        // the two `1.00 USD` legs give USD a tolerance of 0.005, and a 0.001
+        // leftover is comfortably inside it. Beancount 3.2.3 on the same
+        // ledger fills `Assets:Cash` with `-0.00 USD` and reports 0 errors.
+        //
+        // We agree on the arithmetic and then prune the zero-valued fill (see
+        // the prune step in `interpolate`), so the observable here is that no
+        // USD fill survives and the leftover residual is within tolerance —
+        // NOT that a -0.001 posting was written.
         let txn = Transaction::new(date(2024, 1, 1), "subcent")
             .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(1.00), "USD")))
             .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-1.00), "USD")))
@@ -2761,16 +3074,34 @@ mod tests {
             )
             .with_synthesized_posting(Posting::auto("Assets:Cash"));
         let r = interpolate(&txn).expect("interpolation should succeed");
-        let cash = r
+
+        let usd_fill = r
             .filled_indices
             .iter()
-            .map(|&i| get_amount(&r.transaction.postings[i]).expect("filled"))
+            .filter_map(|&i| get_amount(&r.transaction.postings[i]))
             .find(|a| a.currency == "USD")
-            .expect("a USD fill");
+            .expect("a USD fill, quantized to zero but kept");
         assert_eq!(
-            cash.number,
-            dec!(-0.001),
-            "sub-cent residual must be preserved, not rounded to zero"
+            usd_fill.number,
+            dec!(0),
+            "quantized to zero rather than keeping -0.001"
+        );
+
+        let residual = r.residuals.get("USD").copied().unwrap_or(Decimal::ZERO);
+        assert_eq!(residual, dec!(0.001), "the un-absorbed sub-cent remainder");
+
+        // The point of the whole rule: whatever is left over is inside the
+        // tolerance the balance validator will measure it against.
+        let policy = crate::TolerancePolicy::default();
+        let tolerance = crate::transaction_tolerances(&txn, &policy.options())
+            .get(&Currency::from("USD"))
+            .copied()
+            .expect("USD has a tolerance");
+        assert_eq!(tolerance, dec!(0.005));
+        assert!(
+            residual.abs() <= tolerance,
+            "rounding must never push the residual past the tolerance: \
+             {residual} vs {tolerance}"
         );
     }
 

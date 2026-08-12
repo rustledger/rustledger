@@ -429,8 +429,19 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // only when the caller asked for them (the capgains report) — no consumer pays
     // to retain them otherwise.
     let mut capital_gains: Vec<rustledger_booking::CapitalGain> = Vec::new();
+    // Interpolation quantizes solved amounts against the transaction's balance
+    // tolerance, so the booking pass needs the ledger's own tolerance knobs —
+    // the same three the balance validator reads. Left on defaults, a ledger
+    // that customizes them would interpolate to one grid and be validated
+    // against another.
+    let tolerance_policy = rustledger_booking::TolerancePolicy {
+        multiplier: raw.options.inferred_tolerance_multiplier,
+        infer_from_cost: raw.options.infer_tolerance_from_cost,
+        defaults: raw.options.inferred_tolerance_default.clone(),
+    };
     let (booked, failed) = directives.book(
         effective_booking_method,
+        tolerance_policy,
         &mut errors,
         options.collect_capital_gains.then_some(&mut capital_gains),
     );
@@ -636,6 +647,7 @@ impl crate::Directives<crate::EarlyValidated> {
     pub(crate) fn book(
         mut self,
         effective_method: rustledger_core::BookingMethod,
+        tolerance_policy: rustledger_booking::TolerancePolicy,
         errors: &mut Vec<LedgerError>,
         gains: Option<&mut Vec<rustledger_booking::CapitalGain>>,
     ) -> (
@@ -645,6 +657,7 @@ impl crate::Directives<crate::EarlyValidated> {
         let (booked, failed) = run_booking(
             std::mem::take(self.as_vec_mut()),
             effective_method,
+            tolerance_policy,
             errors,
             gains,
         );
@@ -799,12 +812,14 @@ impl crate::Directives<crate::LateValidated> {
 fn run_booking(
     mut directives: Vec<Spanned<Directive>>,
     booking_method: BookingMethod,
+    tolerance_policy: rustledger_booking::TolerancePolicy,
     errors: &mut Vec<LedgerError>,
     mut gains: Option<&mut Vec<rustledger_booking::CapitalGain>>,
 ) -> (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) {
     use rustledger_booking::BookingEngine;
 
-    let mut engine = BookingEngine::with_method(booking_method);
+    let mut engine =
+        BookingEngine::with_method(booking_method).with_tolerance_policy(tolerance_policy);
     engine.register_account_methods(directives.iter().map(|s| &s.value));
 
     // Build an index ordered for booking: stable sort by

@@ -14,7 +14,10 @@ use rustledger_core::{
 };
 use thiserror::Error;
 
-use crate::{InterpolationError, InterpolationResult, interpolate};
+use crate::{
+    InterpolationError, InterpolationResult, interpolate_with_tolerance_map,
+    interpolate_with_tolerances,
+};
 
 // Note: We no longer quantize calculated values during booking.
 // Python beancount preserves full precision during booking and only
@@ -104,6 +107,10 @@ pub struct BookingEngine {
     /// Per-account booking method overrides (from `open` directives).
     /// Looked up first, falling back to `booking_method` if absent.
     account_methods: FxHashMap<rustledger_core::Account, BookingMethod>,
+    /// Tolerance knobs used to quantize interpolated amounts. Defaults to
+    /// beancount's defaults; the loader overrides it from the ledger's
+    /// `option` directives via [`Self::with_tolerance_policy`].
+    tolerance: crate::TolerancePolicy,
 }
 
 impl BookingEngine {
@@ -114,6 +121,7 @@ impl BookingEngine {
             inventories: FxHashMap::default(),
             booking_method: BookingMethod::Fifo,
             account_methods: FxHashMap::default(),
+            tolerance: crate::TolerancePolicy::default(),
         }
     }
 
@@ -124,7 +132,22 @@ impl BookingEngine {
             inventories: FxHashMap::default(),
             booking_method: method,
             account_methods: FxHashMap::default(),
+            tolerance: crate::TolerancePolicy::default(),
         }
+    }
+
+    /// Set the tolerance knobs used to quantize interpolated amounts.
+    ///
+    /// Interpolation rounds a solved number to the transaction's own balance
+    /// tolerance, so a ledger that sets `tolerance_multiplier`,
+    /// `infer_tolerance_from_cost` or `inferred_tolerance_default` must pass
+    /// them here. Skipping this leaves the engine on beancount's defaults,
+    /// which would round against a tolerance the balance validator is not
+    /// using.
+    #[must_use]
+    pub fn with_tolerance_policy(mut self, policy: crate::TolerancePolicy) -> Self {
+        self.tolerance = policy;
+        self
     }
 
     /// Register the booking method for a specific account.
@@ -910,11 +933,21 @@ impl BookingEngine {
         // directly, skip the clone, and return no gains (an empty `Vec` does not
         // allocate).
         if !txn.postings.iter().any(|p| p.cost.is_some()) {
-            return Ok((interpolate(txn)?, Vec::new()));
+            return Ok((
+                interpolate_with_tolerances(txn, &self.tolerance.options())?,
+                Vec::new(),
+            ));
         }
+        // Tolerances come from the PRE-booking transaction, matching
+        // beancount's `booking_full.book`, which infers them from
+        // `entry.postings` before resolving any `{}`. Deriving them after
+        // booking would feed the lot's 26-digit per-unit cost into the
+        // tolerance and silently disable quantization — see
+        // `interpolate_with_tolerance_map`.
+        let tolerances = crate::transaction_tolerances(txn, &self.tolerance.options());
         // First book (fill in costs + compute gains), then interpolate amounts.
         let booked = self.book(txn)?;
-        let result = interpolate(&booked.transaction)?;
+        let result = interpolate_with_tolerance_map(&booked.transaction, &tolerances)?;
         Ok((result, booked.gains))
     }
 }

@@ -562,7 +562,18 @@ fn rendered_inventory_positions(
                 if ca.number != cb.number {
                     return cb.number.cmp(&ca.number);
                 }
-                ca.date.cmp(&cb.date)
+                if ca.date != cb.date {
+                    return ca.date.cmp(&cb.date);
+                }
+                // Label is the last discriminator. It is part of `Cost`'s
+                // `Eq`/`Hash`, so two lots differing only by label survive
+                // aggregation as separate entries — and without this arm they
+                // compared Equal and their order fell out of `HashMap`
+                // iteration, which is seeded per process. The same query on
+                // the same file could print its rows in either order run to
+                // run. With it the comparator is total: anything that still
+                // ties shares a key and was already netted.
+                ca.label.cmp(&cb.label)
             }
             (Some(_), None) => std::cmp::Ordering::Greater,
             (None, Some(_)) => std::cmp::Ordering::Less,
@@ -811,6 +822,44 @@ mod tests {
         assert_eq!(rendered[0].units.number, dec!(545.4545455));
         let out = format_value(&Value::Inventory(Box::new(inv)), false, &col_ctx);
         assert!(out.starts_with("545.4545455 COOL_FUND_USD"), "got: {out}");
+    }
+
+    /// Ordering is deterministic for lots that differ only by cost label.
+    ///
+    /// `Cost`'s `Eq`/`Hash` include `label`, so `{1 USD, "lot-a"}` and
+    /// `{1 USD, "lot-b"}` stay separate entries. Before the label tie-break
+    /// they compared Equal and their relative order came from `HashMap`
+    /// iteration — seeded per process, so a run could print either order.
+    /// Rebuilding the inventory many times here is the point: a single
+    /// construction cannot observe the instability.
+    #[test]
+    fn test_label_only_lots_have_deterministic_order() {
+        let lot = |label: &str| Position {
+            units: Amount::new(dec!(2), "AAA"),
+            cost: Some(Cost {
+                number: dec!(1),
+                currency: "USD".into(),
+                date: Some(rustledger_core::NaiveDate::constant(2024, 1, 1)),
+                label: Some(label.to_string()),
+            }),
+        };
+
+        let mut orderings = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let mut inv = Inventory::new();
+            inv.add(lot("lot-b")).expect("add");
+            inv.add(lot("lot-a")).expect("add");
+            let labels: Vec<String> = rendered_inventory_positions(&inv)
+                .into_iter()
+                .filter_map(|p| p.cost?.label)
+                .collect();
+            orderings.insert(labels.join(","));
+        }
+        assert_eq!(
+            orderings,
+            std::collections::HashSet::from(["lot-a,lot-b".to_string()]),
+            "order must be stable and label-ascending"
+        );
     }
 
     /// Lots whose costs are numerically equal but written at different

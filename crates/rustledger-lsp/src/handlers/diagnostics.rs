@@ -280,7 +280,21 @@ pub(crate) fn run_ledger_validation(
     // Run booking/interpolation on transactions before validation.
     // This fills in missing amounts (auto-balancing) so validation sees the complete picture.
     // Use Strict booking method to match rledger check's default behavior.
-    let mut booking_engine = BookingEngine::with_method(BookingMethod::Strict);
+    //
+    // The tolerance knobs come along too. Since #2034 interpolation quantizes
+    // a solved amount against the transaction's balance tolerance, so an
+    // engine left on beancount's defaults would round a ledger that sets
+    // `tolerance_multiplier` / `infer_tolerance_from_cost` /
+    // `inferred_tolerance_default` differently from `rledger check` — the
+    // same class of drift `build_validation_options_from_*` exists to stop.
+    // These are the very options the validator below is handed, so booking
+    // and validation cannot disagree about the tolerance either.
+    let mut booking_engine = BookingEngine::with_method(BookingMethod::Strict)
+        .with_tolerance_policy(rustledger_booking::TolerancePolicy {
+            multiplier: validation_options.tolerance_multiplier,
+            infer_from_cost: validation_options.infer_tolerance_from_cost,
+            defaults: validation_options.inferred_tolerance_default.clone(),
+        });
     booking_engine.register_account_methods(booked_directives.iter().map(|s| &s.value));
     // Booking failures, surfaced as diagnostics below.
     //

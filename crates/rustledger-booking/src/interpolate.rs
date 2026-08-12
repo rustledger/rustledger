@@ -206,15 +206,17 @@ const MAX_TOLERANCE_DIGITS: u32 = 5;
 /// count feeds `is_tolerance_user_specified` and the exponent is the rounding
 /// position, so each has to be recovered explicitly rather than taken from
 /// `mantissa()` / `scale()`.
-fn normalized_parts(quantum: Decimal) -> (u32, i32) {
+fn normalized_parts(quantum: Decimal) -> (u32, i64) {
     let normalized = quantum.normalize();
     let mut mantissa = normalized.mantissa().unsigned_abs();
     if mantissa == 0 {
         // Python: `Decimal(0).normalize()` is `0` — one digit, exponent 0.
         return (1, 0);
     }
-    // `scale()` is 0..=28, so the conversion cannot fail.
-    let mut exponent = -i32::try_from(normalized.scale()).unwrap_or(0);
+    // `i64::from(u32)` is infallible, so there is no fallback branch that
+    // could silently substitute a different exponent — and hence a different
+    // rounding position — if the conversion ever went wrong.
+    let mut exponent = -i64::from(normalized.scale());
     while mantissa.is_multiple_of(10) {
         mantissa /= 10;
         exponent += 1;
@@ -229,7 +231,7 @@ fn normalized_parts(quantum: Decimal) -> (u32, i32) {
 /// Returns `None` only if the power of ten needed for a positive exponent
 /// leaves `rust_decimal`'s range, in which case the caller leaves the value
 /// unrounded rather than guessing.
-fn quantize_to_exponent(value: Decimal, exponent: i32) -> Option<Decimal> {
+fn quantize_to_exponent(value: Decimal, exponent: i64) -> Option<Decimal> {
     if exponent <= 0 {
         let dp = u32::try_from(-exponent).ok()?;
         return Some(value.round_dp(dp));
@@ -3060,10 +3062,10 @@ mod tests {
         // leftover is comfortably inside it. Beancount 3.2.3 on the same
         // ledger fills `Assets:Cash` with `-0.00 USD` and reports 0 errors.
         //
-        // We agree on the arithmetic and then prune the zero-valued fill (see
-        // the prune step in `interpolate`), so the observable here is that no
-        // USD fill survives and the leftover residual is within tolerance —
-        // NOT that a -0.001 posting was written.
+        // We agree with beancount on both halves: the fill is 0.00 rather
+        // than -0.001, and the posting SURVIVES. Only a fill whose residual
+        // was already zero is pruned; this one merely quantized to zero, so
+        // it is kept, exactly as beancount keeps its `-0.00 USD`.
         let txn = Transaction::new(date(2024, 1, 1), "subcent")
             .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(1.00), "USD")))
             .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-1.00), "USD")))

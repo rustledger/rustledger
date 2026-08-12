@@ -102,19 +102,28 @@ fn get_account_info(
                 .is_some_and(|rest| rest.starts_with(':'))
     };
 
-    // The current file's directives go LAST so that on an equal-length tie
-    // (the same account opened in both places) `max_by_key` — which returns
-    // the last maximum — prefers the one the user is looking at.
+    // Rank the two sources explicitly and sort on `(specificity, source)`
+    // rather than leaning on `max_by_key`'s last-maximum-wins tie behavior.
+    // The tie is reachable and the choice matters: `LedgerState::directives`
+    // is the whole loaded ledger, which includes THIS file as loaded from
+    // disk, so when the same account is opened in both the buffer copy is the
+    // live one and the ledger copy may be stale by an unsaved edit.
+    const FROM_LEDGER: u8 = 0;
+    const FROM_BUFFER: u8 = 1;
     let open = ledger_directives
         .into_iter()
-        .chain(std::iter::once(parse_result.directives.as_slice()))
-        .flatten()
-        .filter_map(|sd| match &sd.value {
-            Directive::Open(open) if describes_account(open) => Some(open),
+        .map(|dirs| (FROM_LEDGER, dirs))
+        .chain(std::iter::once((
+            FROM_BUFFER,
+            parse_result.directives.as_slice(),
+        )))
+        .flat_map(|(source, dirs)| dirs.iter().map(move |sd| (source, sd)))
+        .filter_map(|(source, sd)| match &sd.value {
+            Directive::Open(open) if describes_account(open) => Some((source, open)),
             _ => None,
         })
-        .max_by_key(|open| open.account.as_ref().len())
-        .cloned();
+        .max_by_key(|(source, open)| (open.account.as_ref().len(), *source))
+        .map(|(_, open)| open.clone());
     let usage_count = count_account_usages(account, parse_result);
 
     if let Some(open) = open {
@@ -330,6 +339,12 @@ mod tests {
             "2014-01-01 open Assets:Bank\n",
         ));
 
+        for (name, pr) in [
+            ("parent_first", &parent_first),
+            ("child_first", &child_first),
+        ] {
+            assert!(pr.errors.is_empty(), "{name} must parse: {:?}", pr.errors);
+        }
         let a = get_account_info("Assets:Bank:Checking", &parent_first, None).expect("info");
         let b = get_account_info("Assets:Bank:Checking", &child_first, None).expect("info");
 
@@ -355,6 +370,7 @@ mod tests {
             "2020-01-01 open Expenses:Food USD\n",
             "2020-01-01 open Expenses:Food:Restaurant USD\n",
         ));
+        assert!(pr.errors.is_empty(), "fixture must parse: {:?}", pr.errors);
         let info = get_account_info("Expenses:Food:Restaurant", &pr, None).expect("info");
         assert!(
             info.contains("## Account: `Expenses:Food:Restaurant`"),
@@ -382,6 +398,7 @@ mod tests {
             "2020-01-01 open Assets:Bank\n",
             "2020-01-01 open Assets:Bank:Checking EUR\n",
         ));
+        assert!(pr.errors.is_empty(), "fixture must parse: {:?}", pr.errors);
         let info = get_account_info("Assets:Bank:Checking:Sub", &pr, None).expect("info");
 
         assert!(
@@ -417,6 +434,30 @@ mod tests {
         assert!(info.contains("**Currencies:** USD"), "got: {info}");
     }
 
+    /// On an EQUALLY specific match the buffer wins, not the loaded ledger.
+    /// `LedgerState::directives` includes this file as loaded from disk, so the
+    /// ledger's copy of the same `open` can be stale by an unsaved edit.
+    #[test]
+    fn test_account_info_prefers_buffer_over_stale_ledger_copy() {
+        // The buffer holds the edit the user just made — a later date and a USD
+        // constraint; the on-disk ledger still has the original line.
+        let buffer = parse("2024-02-01 open Assets:Bank:Checking USD\n");
+        let stale = parse("2014-01-01 open Assets:Bank:Checking\n");
+        assert!(buffer.errors.is_empty(), "{:?}", buffer.errors);
+        assert!(stale.errors.is_empty(), "{:?}", stale.errors);
+
+        let info = get_account_info("Assets:Bank:Checking", &buffer, Some(&stale.directives))
+            .expect("info");
+        assert!(
+            info.contains("**Opened:** 2024-02-01"),
+            "the live buffer's open must win: {info}"
+        );
+        assert!(
+            info.contains("**Currencies:** USD"),
+            "the live buffer's constraint must win: {info}"
+        );
+    }
+
     /// A sibling sharing a name prefix is not an ancestor. `Assets:Bank` is a
     /// string prefix of `Assets:Banking` but not its parent, so hovering
     /// `Assets:Banking` must not pick it up.
@@ -429,13 +470,15 @@ mod tests {
     #[test]
     fn test_account_info_ignores_prefix_sibling() {
         let pr = parse("2020-01-01 open Assets:Bank USD\n");
+        // Pin the fixture. An `is_none()` assertion is satisfied just as well
+        // by an `open` that failed to parse, so without this the test would go
+        // vacuous the moment account-name validation changed — exactly what
+        // made an earlier draft of the ancestor test above meaningless.
+        assert!(pr.errors.is_empty(), "fixture must parse: {:?}", pr.errors);
         // Nothing describes `Assets:Banking` and it is used nowhere, so there
         // is nothing to report at all.
-        assert!(
-            get_account_info("Assets:Banking", &pr, None).is_none(),
-            "got: {:?}",
-            get_account_info("Assets:Banking", &pr, None)
-        );
+        let info = get_account_info("Assets:Banking", &pr, None);
+        assert!(info.is_none(), "got: {info:?}");
     }
 
     #[test]

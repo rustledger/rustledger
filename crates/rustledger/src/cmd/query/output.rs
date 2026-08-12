@@ -517,21 +517,18 @@ pub(super) fn format_value_with_hint(
 fn rendered_inventory_positions(
     inv: &rustledger_core::Inventory,
 ) -> Vec<rustledger_core::Position> {
-    use rustledger_core::Position;
+    use rustledger_core::{Cost, Currency, Position};
     use std::collections::HashMap;
 
-    let mut aggregated: HashMap<(String, Option<String>), Position> = HashMap::new();
+    // Key on the typed values rather than a formatted string. `Currency` and
+    // `Cost` are both `Eq + Hash`, and `rust_decimal`'s `Hash` agrees with its
+    // `Eq` — `1.00` and `1` compare equal AND hash equal — so lots written at
+    // `{1.00 USD}` and `{1 USD}` still net together, which is what the old
+    // key's `number.normalize()` was there to ensure. Avoids two allocations
+    // per lot on a path walked once per row.
+    let mut aggregated: HashMap<(Currency, Option<Cost>), Position> = HashMap::new();
     for pos in inv.positions().filter(|p| !p.is_empty()) {
-        let cost_key = pos.cost.as_ref().map(|c| {
-            format!(
-                "{}|{}|{:?}|{:?}",
-                c.number.normalize(),
-                c.currency,
-                c.date,
-                c.label
-            )
-        });
-        let key = (pos.units.currency.to_string(), cost_key);
+        let key = (pos.units.currency.clone(), pos.cost.clone());
 
         aggregated
             .entry(key)
@@ -814,6 +811,47 @@ mod tests {
         assert_eq!(rendered[0].units.number, dec!(545.4545455));
         let out = format_value(&Value::Inventory(Box::new(inv)), false, &col_ctx);
         assert!(out.starts_with("545.4545455 COOL_FUND_USD"), "got: {out}");
+    }
+
+    /// Lots whose costs are numerically equal but written at different
+    /// scales — `{1.00 USD}` and `{1 USD}` — must still net into one
+    /// position.
+    ///
+    /// This is load-bearing for the typed `(Currency, Option<Cost>)`
+    /// aggregation key. The key it replaced stringified `number.normalize()`
+    /// precisely to collapse those two; the typed key relies instead on
+    /// `rust_decimal`'s `Hash` agreeing with its `Eq`. If that ever stopped
+    /// holding, the lots would silently stop netting and the column would
+    /// print two rows where beancount prints one.
+    #[test]
+    fn test_costs_equal_at_different_scales_net_together() {
+        let cost = |n| {
+            Some(Cost {
+                number: n,
+                currency: "USD".into(),
+                date: Some(rustledger_core::NaiveDate::constant(2024, 1, 1)),
+                label: None,
+            })
+        };
+        let mut inv = Inventory::new();
+        inv.add(Position {
+            units: Amount::new(dec!(2), "AAA"),
+            cost: cost(dec!(1.00)),
+        })
+        .expect("add");
+        inv.add(Position {
+            units: Amount::new(dec!(3), "AAA"),
+            cost: cost(dec!(1)),
+        })
+        .expect("add");
+
+        let rendered = rendered_inventory_positions(&inv);
+        assert_eq!(
+            rendered.len(),
+            1,
+            "`{{1.00 USD}}` and `{{1 USD}}` are the same lot: {rendered:?}"
+        );
+        assert_eq!(rendered[0].units.number, dec!(5));
     }
 
     /// Display order of the netted positions: currency, then quantity

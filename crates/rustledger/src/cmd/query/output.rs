@@ -541,7 +541,14 @@ fn rendered_inventory_positions(
             .or_insert_with(|| pos.clone());
     }
 
-    let mut sorted_positions: Vec<Position> = aggregated.into_values().collect();
+    // Drop positions that net to exactly zero. The formatter already skips
+    // them (`position_renders_as_zero`), so leaving them in would reintroduce
+    // in miniature the very mismatch this function exists to remove: a sample
+    // in the histogram with no corresponding number in the output.
+    let mut sorted_positions: Vec<Position> = aggregated
+        .into_values()
+        .filter(|p| !position_renders_as_zero(p))
+        .collect();
     sorted_positions.sort_by(|a, b| {
         if a.units.currency != b.units.currency {
             return a.units.currency.cmp(&b.units.currency);
@@ -609,9 +616,10 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
         Value::Inventory(inv) => {
             let sorted_positions = rendered_inventory_positions(inv);
 
+            // No zero-filter here: `rendered_inventory_positions` already
+            // applied it, so this list IS the printed set.
             let positions: Vec<String> = sorted_positions
                 .iter()
-                .filter(|p| !position_renders_as_zero(p))
                 .map(|p| {
                     if numberify {
                         ctx.format_amount_number(p.units.number, p.units.currency.as_str())
@@ -806,6 +814,75 @@ mod tests {
         assert_eq!(rendered[0].units.number, dec!(545.4545455));
         let out = format_value(&Value::Inventory(Box::new(inv)), false, &col_ctx);
         assert!(out.starts_with("545.4545455 COOL_FUND_USD"), "got: {out}");
+    }
+
+    /// Display order of the netted positions: currency, then quantity
+    /// descending, then cost-less ahead of held-at-cost, then cost currency
+    /// ascending, cost number descending, and acquisition date ascending.
+    ///
+    /// Covers the comparator arms the netting test above never reaches — it
+    /// uses a single currency at a single cost, so every tie-break below was
+    /// dead to it. Each lot here is given a DISTINCT cost key on purpose;
+    /// sharing one would net the lots together (as the first draft of this
+    /// test discovered) and the tie-break would never be compared.
+    #[test]
+    fn test_rendered_inventory_positions_display_order() {
+        let day = |d| Some(rustledger_core::NaiveDate::constant(2024, 1, d));
+        let at = |n, ccy: &str, d| {
+            Some(Cost {
+                number: n,
+                currency: ccy.into(),
+                date: day(d),
+                label: None,
+            })
+        };
+        let pos = |n, ccy: &str, cost| Position {
+            units: Amount::new(n, ccy),
+            cost,
+        };
+
+        let mut inv = Inventory::new();
+        // Deliberately inserted out of display order.
+        inv.add(pos(dec!(5), "ZZZ", None)).expect("add");
+        inv.add(pos(dec!(1), "AAA", at(dec!(2), "USD", 2)))
+            .expect("add");
+        inv.add(pos(dec!(1), "AAA", at(dec!(2), "USD", 1)))
+            .expect("add");
+        inv.add(pos(dec!(1), "AAA", at(dec!(3), "USD", 1)))
+            .expect("add");
+        inv.add(pos(dec!(1), "AAA", at(dec!(2), "EUR", 1)))
+            .expect("add");
+        inv.add(pos(dec!(1), "AAA", None)).expect("add");
+        inv.add(pos(dec!(7), "AAA", None)).expect("add");
+
+        let got: Vec<_> = rendered_inventory_positions(&inv)
+            .into_iter()
+            .map(|p| {
+                (
+                    p.units.currency.to_string(),
+                    p.units.number,
+                    p.cost.map(|c| (c.number, c.currency.to_string(), c.date)),
+                )
+            })
+            .collect();
+
+        let aaa = |n, cost| ("AAA".to_string(), n, cost);
+        assert_eq!(
+            got,
+            vec![
+                // Quantity descending within a currency. The two cost-less
+                // AAA lots share a key, so they net to 8.
+                aaa(dec!(8), None),
+                // Equal quantities: cost currency ascending...
+                aaa(dec!(1), Some((dec!(2), "EUR".to_string(), day(1)))),
+                // ...then cost number DESCENDING...
+                aaa(dec!(1), Some((dec!(3), "USD".to_string(), day(1)))),
+                // ...then acquisition date ascending.
+                aaa(dec!(1), Some((dec!(2), "USD".to_string(), day(1)))),
+                aaa(dec!(1), Some((dec!(2), "USD".to_string(), day(2)))),
+                ("ZZZ".to_string(), dec!(5), None),
+            ]
+        );
     }
 
     /// Cost-spec braces in BQL output match Beancount's

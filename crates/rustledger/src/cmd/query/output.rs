@@ -301,8 +301,12 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
                 col_ctx.update(quantized, cost.currency.as_str());
             }
         }
+        // Observe the NETTED positions, i.e. exactly what `format_value`
+        // will print — see `rendered_inventory_positions`. Walking the raw
+        // lots here made the histogram describe numbers that never appear
+        // in the output.
         Value::Inventory(inv) => {
-            for pos in inv.positions() {
+            for pos in rendered_inventory_positions(inv) {
                 let quantized = ledger_ctx.quantize(pos.units.number, pos.units.currency.as_str());
                 col_ctx.update(quantized, pos.units.currency.as_str());
                 if let Some(ref cost) = pos.cost {
@@ -493,6 +497,77 @@ pub(super) fn format_value_with_hint(
     format_value(value, numberify, ctx)
 }
 
+/// Collapse an inventory's raw lots into the positions that are actually
+/// RENDERED: one per `(units currency, cost key)`, summed, in display order.
+///
+/// Shared deliberately by the formatter and by the display-precision
+/// histogram in [`update_column_context`]. They used to derive this
+/// separately — the formatter aggregated, the histogram walked
+/// `inv.positions()` raw — so the column's inferred precision described a
+/// different set of numbers than the ones printed.
+///
+/// That is not academic. A running `balance` column re-observes every
+/// surviving lot on every row, so an early integer-valued lot is counted once
+/// per row it persists in and can outvote the fractional lots that net against
+/// it. On the `beancount-lazy-plugins` `COOL_FUND` ledger the raw walk yielded
+/// 5 samples at 0dp against 4 at 7dp — mode 0 — and
+/// `545.4545455 COOL_FUND_USD` printed as `545`, while bean-query (which
+/// histograms the netted value it prints) chose 7dp. Aggregating first gives
+/// 2 samples at 0dp against 4 at 7dp, and the two agree.
+fn rendered_inventory_positions(
+    inv: &rustledger_core::Inventory,
+) -> Vec<rustledger_core::Position> {
+    use rustledger_core::Position;
+    use std::collections::HashMap;
+
+    let mut aggregated: HashMap<(String, Option<String>), Position> = HashMap::new();
+    for pos in inv.positions().filter(|p| !p.is_empty()) {
+        let cost_key = pos.cost.as_ref().map(|c| {
+            format!(
+                "{}|{}|{:?}|{:?}",
+                c.number.normalize(),
+                c.currency,
+                c.date,
+                c.label
+            )
+        });
+        let key = (pos.units.currency.to_string(), cost_key);
+
+        aggregated
+            .entry(key)
+            .and_modify(|existing| {
+                existing.units.number += pos.units.number;
+            })
+            .or_insert_with(|| pos.clone());
+    }
+
+    let mut sorted_positions: Vec<Position> = aggregated.into_values().collect();
+    sorted_positions.sort_by(|a, b| {
+        if a.units.currency != b.units.currency {
+            return a.units.currency.cmp(&b.units.currency);
+        }
+        let qty_cmp = b.units.number.cmp(&a.units.number);
+        if qty_cmp != std::cmp::Ordering::Equal {
+            return qty_cmp;
+        }
+        match (&a.cost, &b.cost) {
+            (Some(ca), Some(cb)) => {
+                if ca.currency != cb.currency {
+                    return ca.currency.cmp(&cb.currency);
+                }
+                if ca.number != cb.number {
+                    return cb.number.cmp(&ca.number);
+                }
+                ca.date.cmp(&cb.date)
+            }
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+    sorted_positions
+}
+
 pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -532,54 +607,7 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
             }
         }
         Value::Inventory(inv) => {
-            use rustledger_core::Position;
-            use std::collections::HashMap;
-
-            let mut aggregated: HashMap<(String, Option<String>), Position> = HashMap::new();
-            for pos in inv.positions().filter(|p| !p.is_empty()) {
-                let cost_key = pos.cost.as_ref().map(|c| {
-                    format!(
-                        "{}|{}|{:?}|{:?}",
-                        c.number.normalize(),
-                        c.currency,
-                        c.date,
-                        c.label
-                    )
-                });
-                let key = (pos.units.currency.to_string(), cost_key);
-
-                aggregated
-                    .entry(key)
-                    .and_modify(|existing| {
-                        existing.units.number += pos.units.number;
-                    })
-                    .or_insert_with(|| pos.clone());
-            }
-
-            let mut sorted_positions: Vec<_> = aggregated.values().collect();
-            sorted_positions.sort_by(|a, b| {
-                if a.units.currency != b.units.currency {
-                    return a.units.currency.cmp(&b.units.currency);
-                }
-                let qty_cmp = b.units.number.cmp(&a.units.number);
-                if qty_cmp != std::cmp::Ordering::Equal {
-                    return qty_cmp;
-                }
-                match (&a.cost, &b.cost) {
-                    (Some(ca), Some(cb)) => {
-                        if ca.currency != cb.currency {
-                            return ca.currency.cmp(&cb.currency);
-                        }
-                        if ca.number != cb.number {
-                            return cb.number.cmp(&ca.number);
-                        }
-                        ca.date.cmp(&cb.date)
-                    }
-                    (Some(_), None) => std::cmp::Ordering::Greater,
-                    (None, Some(_)) => std::cmp::Ordering::Less,
-                    (None, None) => std::cmp::Ordering::Equal,
-                }
-            });
+            let sorted_positions = rendered_inventory_positions(inv);
 
             let positions: Vec<String> = sorted_positions
                 .iter()
@@ -711,6 +739,74 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use rustledger_core::{Amount, Cost, Inventory, Position};
+
+    /// The precision histogram must describe the numbers that are PRINTED.
+    ///
+    /// A running `balance` column carries the same lots forward row after row,
+    /// so observing raw lots counts a long-lived one once per row it survives
+    /// in. On the `COOL_FUND` ledger that gave 5 samples at 0dp against 4 at
+    /// 7dp — mode 0 — and `545.4545455 COOL_FUND_USD` printed as `545`, while
+    /// bean-query printed `545.4545455`. Netting first is what makes the two
+    /// agree, so this asserts the histogram and the formatter see one list.
+    #[test]
+    fn test_column_context_observes_netted_positions_not_raw_lots() {
+        let cost = Cost {
+            number: dec!(1.00),
+            currency: "USD".into(),
+            date: Some(rustledger_core::NaiveDate::constant(2024, 1, 10)),
+            label: None,
+        };
+        let lot = |n| Position {
+            units: Amount::new(n, "COOL_FUND_USD"),
+            cost: Some(cost.clone()),
+        };
+        let inv_of = |lots: &[rust_decimal::Decimal]| {
+            let mut inv = Inventory::new();
+            for n in lots {
+                inv.add(lot(*n)).expect("add");
+            }
+            inv
+        };
+
+        // The cumulative balance as it appears on each row of the COOL_FUND
+        // ledger. A single row would NOT expose the bug: its raw lots are one
+        // 0dp and one 7dp sample, and `mode()` breaks that tie toward 7
+        // anyway. It takes the running column, where the integer lot is
+        // re-observed on every row it survives, for 0dp to win the vote.
+        let rows = [
+            vec![dec!(1000)],
+            vec![dec!(1000)],
+            vec![dec!(1000), dec!(-454.5454545)],
+            vec![dec!(1000), dec!(-454.5454545)],
+            vec![dec!(1000), dec!(-454.5454545), dec!(-545.4545455)],
+            vec![dec!(1000), dec!(-454.5454545)],
+        ];
+
+        let ledger_ctx = DisplayContext::new();
+        let mut col_ctx = DisplayContext::new();
+        for lots in &rows {
+            let value = Value::Inventory(Box::new(inv_of(lots)));
+            update_column_context(&mut col_ctx, &value, &ledger_ctx);
+        }
+
+        // Netted, the column sees mostly 7dp values. Walking raw lots instead
+        // counts `1000` once per row and drives the mode to 0, which printed
+        // `545.4545455 COOL_FUND_USD` as `545` where bean-query printed it in
+        // full.
+        assert_eq!(
+            col_ctx.get_precision("COOL_FUND_USD"),
+            Some(7),
+            "precision must be inferred from the netted values that are printed"
+        );
+
+        // The netting itself, and the end-to-end cell.
+        let inv = inv_of(&rows[2]);
+        let rendered = rendered_inventory_positions(&inv);
+        assert_eq!(rendered.len(), 1, "lots at one cost net together");
+        assert_eq!(rendered[0].units.number, dec!(545.4545455));
+        let out = format_value(&Value::Inventory(Box::new(inv)), false, &col_ctx);
+        assert!(out.starts_with("545.4545455 COOL_FUND_USD"), "got: {out}");
+    }
 
     /// Cost-spec braces in BQL output match Beancount's
     /// `Position.__str__`: `{ 128.99 USD}` — single space after `{`,

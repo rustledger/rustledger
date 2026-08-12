@@ -77,39 +77,73 @@ pub fn handle_hover(
 
 /// Get information about an account.
 ///
-/// The `open` directive is looked up in the current file first, then in the
-/// cross-file `ledger_directives` (the loaded ledger) so an account opened in
-/// an `include`d file still shows its open date/currencies instead of a
-/// spurious "No `open` directive found".
+/// The `open` directive is looked up across the current file and the cross-file
+/// `ledger_directives` (the loaded ledger), so an account opened in an
+/// `include`d file still shows its open date/currencies instead of a spurious
+/// "No `open` directive found".
+///
+/// Several `open`s can describe the hovered account at once — a ledger may open
+/// a catch-all `Expenses:Food` as well as `Expenses:Food:Restaurant` — so the
+/// MOST SPECIFIC one is chosen rather than the first encountered. An exact
+/// `open` is the longest possible match and therefore always wins, whatever
+/// order the directives happen to appear in. Selecting positionally meant a
+/// parent declared before its child hijacked the child's popup, which is the
+/// norm in any alphabetically sorted account list (#2021).
 fn get_account_info(
     account: &str,
     parse_result: &ParseResult,
     ledger_directives: Option<&[Spanned<Directive>]>,
 ) -> Option<String> {
-    let matches_open = |open: &rustledger_core::Open| {
+    let describes_account = |open: &rustledger_core::Open| {
         let oa = open.account.as_ref();
         account == oa
             || account
                 .strip_prefix(oa)
                 .is_some_and(|rest| rest.starts_with(':'))
     };
-    let find_open = |dirs: &[Spanned<Directive>]| {
-        dirs.iter().find_map(|sd| match &sd.value {
-            Directive::Open(open) if matches_open(open) => Some(open.clone()),
+
+    // The current file's directives go LAST so that on an equal-length tie
+    // (the same account opened in both places) `max_by_key` — which returns
+    // the last maximum — prefers the one the user is looking at.
+    let open = ledger_directives
+        .into_iter()
+        .chain(std::iter::once(parse_result.directives.as_slice()))
+        .flatten()
+        .filter_map(|sd| match &sd.value {
+            Directive::Open(open) if describes_account(open) => Some(open),
             _ => None,
         })
-    };
-
-    let open =
-        find_open(&parse_result.directives).or_else(|| ledger_directives.and_then(find_open));
+        .max_by_key(|open| open.account.as_ref().len())
+        .cloned();
     let usage_count = count_account_usages(account, parse_result);
 
     if let Some(open) = open {
-        let mut info = format!("## Account: `{}`\n\n", open.account);
-        info.push_str(&format!("**Opened:** {}\n\n", open.date));
-        if !open.currencies.is_empty() {
-            let currencies: Vec<String> = open.currencies.iter().map(|c| c.to_string()).collect();
-            info.push_str(&format!("**Currencies:** {}\n\n", currencies.join(", ")));
+        // Always title with the account under the cursor. Titling with
+        // `open.account` was the visible half of #2021: an ancestor's name was
+        // presented as though it were the hovered account.
+        let mut info = format!("## Account: `{account}`\n\n");
+        let currencies: Vec<String> = open.currencies.iter().map(|c| c.to_string()).collect();
+        if open.account.as_ref() == account {
+            info.push_str(&format!("**Opened:** {}\n\n", open.date));
+            if !currencies.is_empty() {
+                info.push_str(&format!("**Currencies:** {}\n\n", currencies.join(", ")));
+            }
+        } else {
+            // Only an ancestor is declared. Attribute its date and currency
+            // constraint to it by name instead of letting them read as this
+            // account's own — and say so explicitly, so a missing
+            // `**Currencies:**` line is explained rather than just absent.
+            info.push_str(&format!(
+                "**Note:** no `open` for this account; nearest declared ancestor is `{}` (opened {})\n\n",
+                open.account, open.date
+            ));
+            if !currencies.is_empty() {
+                info.push_str(&format!(
+                    "**Currencies (from `{}`):** {}\n\n",
+                    open.account,
+                    currencies.join(", ")
+                ));
+            }
         }
         info.push_str(&format!(
             "**Used in:** {}",
@@ -279,6 +313,128 @@ mod tests {
         assert!(
             !cross.contains("No `open`"),
             "should not claim missing open: {cross}"
+        );
+    }
+
+    /// #2021: an exact `open` must win over an ancestor's, whichever is
+    /// declared first. The issue's own repro, run in both directive orders —
+    /// identical content, so both must produce identical hover text.
+    #[test]
+    fn test_account_info_prefers_exact_open_over_ancestor() {
+        let parent_first = parse(concat!(
+            "2014-01-01 open Assets:Bank\n",
+            "2014-01-01 open Assets:Bank:Checking USD\n",
+        ));
+        let child_first = parse(concat!(
+            "2014-01-01 open Assets:Bank:Checking USD\n",
+            "2014-01-01 open Assets:Bank\n",
+        ));
+
+        let a = get_account_info("Assets:Bank:Checking", &parent_first, None).expect("info");
+        let b = get_account_info("Assets:Bank:Checking", &child_first, None).expect("info");
+
+        assert_eq!(
+            a, b,
+            "declaration order must not change the hover text\n{a}\n---\n{b}"
+        );
+        // Pre-fix, `parent_first` produced "## Account: `Assets:Bank`" with no
+        // currencies — the ancestor's `open`, wearing the child's name.
+        assert!(a.contains("## Account: `Assets:Bank:Checking`"), "got: {a}");
+        assert!(a.contains("**Currencies:** USD"), "got: {a}");
+        assert!(
+            !a.contains("nearest declared ancestor"),
+            "an exact open is not an ancestor fallback: {a}"
+        );
+    }
+
+    /// The catch-all-parent shape from the issue, which is the norm in an
+    /// alphabetically sorted account list.
+    #[test]
+    fn test_account_info_exact_open_wins_for_sorted_catch_all_parent() {
+        let pr = parse(concat!(
+            "2020-01-01 open Expenses:Food USD\n",
+            "2020-01-01 open Expenses:Food:Restaurant USD\n",
+        ));
+        let info = get_account_info("Expenses:Food:Restaurant", &pr, None).expect("info");
+        assert!(
+            info.contains("## Account: `Expenses:Food:Restaurant`"),
+            "got: {info}"
+        );
+        // The title alone is not enough — it is now always the hovered
+        // account, so it stays right even if the WRONG open were selected.
+        // These pin the selection itself.
+        assert!(
+            !info.contains("nearest declared ancestor"),
+            "the exact open must be selected, not the catch-all parent: {info}"
+        );
+        assert!(info.contains("**Currencies:** USD"), "got: {info}");
+    }
+
+    /// With no exact `open`, the LONGEST ancestor is used — not the first —
+    /// the popup is still titled with the hovered account, and the ancestor's
+    /// facts are attributed to it rather than presented as this account's own.
+    #[test]
+    fn test_account_info_falls_back_to_longest_ancestor() {
+        // Two real ancestors, shallowest first, so a positional search picks
+        // `Assets:Bank`. (A single-segment `open Assets` does not parse, so it
+        // cannot be used as the decoy candidate here.)
+        let pr = parse(concat!(
+            "2020-01-01 open Assets:Bank\n",
+            "2020-01-01 open Assets:Bank:Checking EUR\n",
+        ));
+        let info = get_account_info("Assets:Bank:Checking:Sub", &pr, None).expect("info");
+
+        assert!(
+            info.contains("## Account: `Assets:Bank:Checking:Sub`"),
+            "titled with the hovered account: {info}"
+        );
+        assert!(
+            info.contains("nearest declared ancestor is `Assets:Bank:Checking`"),
+            "longest ancestor, and named as such: {info}"
+        );
+        assert!(
+            info.contains("**Currencies (from `Assets:Bank:Checking`):** EUR"),
+            "the constraint is attributed, not claimed: {info}"
+        );
+        assert!(
+            !info.contains("**Opened:**"),
+            "an ancestor's date is not this account's open date: {info}"
+        );
+    }
+
+    /// An exact `open` in an included file still beats an ancestor declared in
+    /// the file being edited — the selection is over both sources at once.
+    #[test]
+    fn test_account_info_exact_open_from_include_beats_local_ancestor() {
+        let pr = parse("2014-01-01 open Assets:Bank\n");
+        let inc = parse("2014-01-01 open Assets:Bank:Checking USD\n");
+        let info = get_account_info("Assets:Bank:Checking", &pr, Some(&inc.directives))
+            .expect("account info");
+        assert!(
+            info.contains("## Account: `Assets:Bank:Checking`"),
+            "got: {info}"
+        );
+        assert!(info.contains("**Currencies:** USD"), "got: {info}");
+    }
+
+    /// A sibling sharing a name prefix is not an ancestor. `Assets:Bank` is a
+    /// string prefix of `Assets:Banking` but not its parent, so hovering
+    /// `Assets:Banking` must not pick it up.
+    ///
+    /// The direction matters: the check asks whether the OPEN prefixes the
+    /// HOVERED account, so the decoy has to be the shorter of the two. An
+    /// earlier version of this test had them the other way round, where
+    /// `strip_prefix` returns `None` outright and the `:` boundary is never
+    /// reached — it could not fail.
+    #[test]
+    fn test_account_info_ignores_prefix_sibling() {
+        let pr = parse("2020-01-01 open Assets:Bank USD\n");
+        // Nothing describes `Assets:Banking` and it is used nowhere, so there
+        // is nothing to report at all.
+        assert!(
+            get_account_info("Assets:Banking", &pr, None).is_none(),
+            "got: {:?}",
+            get_account_info("Assets:Banking", &pr, None)
         );
     }
 

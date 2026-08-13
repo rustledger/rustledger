@@ -1270,7 +1270,16 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
         // `total = -residual * signum(units)` and `per_unit = total / |units|`.
         let signum = units_number.signum();
         let total = -residual * signum;
-        let per_unit = total / units_number.abs();
+        // `normalize()` strips trailing zeros the DIVISION invented.
+        // `rust_decimal` picks a non-minimal scale for an exact quotient —
+        // `900 / 1000` yields `0.90` (scale 2), not `0.9` — where Python's
+        // decimal follows the spec's "ideal exponent" rule and reduces an
+        // exact result. Those zeros are an artifact of the algorithm, and a
+        // cost of `0.90` claims a significant digit the quotient does not
+        // have; the solved cost is then rendered with it (`cost_number`).
+        // The VALUE is untouched, so `BookedCost`'s
+        // `per_unit x |units| == total` invariant still holds.
+        let per_unit = (total / units_number.abs()).normalize();
         if per_unit < Decimal::ZERO {
             // Beancount: "Cost is negative" — a lot cannot be acquired at a
             // negative cost (#1705 edge e14).
@@ -3172,6 +3181,46 @@ mod tests {
 
     /// The `IncompleteInputs.UnitsMissingNumberWithCost` vector: the number is
     /// `residual / cost_per_unit`, written in the UNITS currency.
+    /// A cost solved from an empty `{}` carries the quotient's MINIMAL
+    /// scale — no trailing zeros the division invented.
+    ///
+    /// `rust_decimal` picks a non-minimal scale for an exact quotient:
+    /// `900 / 1000` is `0.90` (scale 2), not `0.9`. Python's decimal follows
+    /// the spec's "ideal exponent" rule and reduces an exact result, so
+    /// bean-query reports `cost_number` as `0.9`. Beyond the divergence, the
+    /// extra zero claims a significant digit the quotient does not have.
+    #[test]
+    fn inferred_cost_uses_the_quotients_minimal_scale() {
+        // 1000 USD {} against -900 EUR -> 900/1000 = 0.9 EUR per unit.
+        let txn = Transaction::new(date(2024, 1, 2), "buy")
+            .with_synthesized_posting(
+                Posting::new("Assets:Broker", Amount::new(dec!(1000), "USD"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-900), "EUR")));
+
+        let r = interpolate(&txn).expect("interpolation should succeed");
+        let cost = r.transaction.postings[0]
+            .cost
+            .as_ref()
+            .expect("cost was solved");
+        let per_unit = cost
+            .number
+            .as_ref()
+            .and_then(rustledger_core::CostNumber::per_unit)
+            .expect("a per-unit cost");
+
+        assert_eq!(per_unit, dec!(0.9), "value");
+        assert_eq!(
+            per_unit.scale(),
+            1,
+            "scale must be minimal — got {per_unit} (scale {})",
+            per_unit.scale()
+        );
+        // `to_string` is what reaches `cost_number` in BQL output.
+        assert_eq!(per_unit.to_string(), "0.9");
+    }
+
     #[test]
     fn interpolates_units_number_from_per_unit_cost() {
         let txn = Transaction::new(date(2010, 5, 28), "Buy")

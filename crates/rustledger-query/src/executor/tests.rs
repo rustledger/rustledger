@@ -1819,3 +1819,46 @@ fn test_expr_references_column_walks_window_over_clause() {
         "OVER (ORDER BY balance + amount) must be detected"
     );
 }
+
+/// `SUM` must carry Python `decimal`'s scale, including across a running
+/// total that passes through zero.
+///
+/// The postings below sum to exactly zero, and one pair is scale-2 while the
+/// rest are scale-0. Python renders `0.00`; pre-fix rledger rendered `0`,
+/// because `rust_decimal`'s addition returns the other operand unchanged when
+/// one side is zero and so discarded the accumulated scale as soon as the
+/// scale-0 terms that FOLLOW the fractional pair were added.
+///
+/// Order is the whole point — the scale-0 pair must come last. With the
+/// fractional pair last the naive accumulation happens to end at scale 2 and
+/// the test passes against the bug. Verified by reordering: move the `-2/2`
+/// pair before the `111.11` pair and this test no longer distinguishes the
+/// fix from `+=`.
+#[test]
+fn sum_keeps_python_scale_when_the_running_total_passes_through_zero() {
+    let directives = vec![Directive::Transaction(
+        Transaction::new(date(2024, 1, 1), "mixed scales")
+            .with_flag('*')
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(-111.11), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(111.11), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(-2), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(2), "USD"))),
+    )];
+
+    let mut executor = Executor::new(&directives);
+    let query = parse("SELECT currency, SUM(number) GROUP BY currency").unwrap();
+    let result = executor.execute(&query).unwrap();
+
+    assert_eq!(result.len(), 1);
+    let Value::Number(sum) = &result.rows[0][1] else {
+        panic!("expected a Number, got {:?}", result.rows[0][1]);
+    };
+
+    // Assert the RENDERING: `Decimal`'s `==` ignores scale, so comparing
+    // against `dec!(0.00)` would pass against the bug it is pinning.
+    assert_eq!(
+        sum.to_string(),
+        "0.00",
+        "SUM must keep the widest addend's scale (bean-query renders 0.00)",
+    );
+}

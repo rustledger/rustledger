@@ -331,11 +331,21 @@ impl<'a> Executor<'a> {
                                     has_positions = true;
                                 }
                                 Value::Number(n) => {
-                                    total_number += n;
+                                    // Python scale semantics, not `+=` — see
+                                    // `rustledger_core::add_python_scale`. A
+                                    // running total that passes through zero
+                                    // otherwise drops its scale and the column
+                                    // renders `0` where bean-query renders
+                                    // `0.00`.
+                                    total_number =
+                                        rustledger_core::add_python_scale(total_number, n);
                                     has_numbers = true;
                                 }
                                 Value::Integer(i) => {
-                                    total_number += Decimal::from(i);
+                                    total_number = rustledger_core::add_python_scale(
+                                        total_number,
+                                        Decimal::from(i),
+                                    );
                                     has_numbers = true;
                                 }
                                 Value::Null => {}
@@ -820,11 +830,21 @@ impl<'a> Executor<'a> {
                                     has_positions = true;
                                 }
                                 Value::Number(n) => {
-                                    total_number += n;
+                                    // Python scale semantics, not `+=` — see
+                                    // `rustledger_core::add_python_scale`. A
+                                    // running total that passes through zero
+                                    // otherwise drops its scale and the column
+                                    // renders `0` where bean-query renders
+                                    // `0.00`.
+                                    total_number =
+                                        rustledger_core::add_python_scale(total_number, n);
                                     has_numbers = true;
                                 }
                                 Value::Integer(i) => {
-                                    total_number += Decimal::from(i);
+                                    total_number = rustledger_core::add_python_scale(
+                                        total_number,
+                                        Decimal::from(i),
+                                    );
                                     has_numbers = true;
                                 }
                                 Value::Null => {}

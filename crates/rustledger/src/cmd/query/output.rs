@@ -1600,9 +1600,22 @@ mod tests {
             .split_whitespace()
             .last()
             .unwrap_or_else(|| panic!("expected non-empty data row; got: {data_row:?}"));
+        // `0.000`, not `0.00`. The fixture's addends are `5.00, -5.00,
+        // 0.000, 0.0`, so Python's sum carries the widest scale — 3 — and
+        // bean-query's `DecimalRenderer` prints a decimal at its intrinsic
+        // scale without ever quantizing. Measured against bean-query 3.2.3
+        // on this exact ledger:
+        //
+        //     py: USD  0.000
+        //
+        // This assertion previously read `0.00`, describing the pre-fix
+        // accumulation: `rust_decimal`'s addition discards a zero operand's
+        // scale, so the running total collapsed to 2dp and the #988 hint
+        // padded it back to USD's 2dp. That agreed with neither bean-query
+        // nor the arithmetic. See `rustledger_core::add_python_scale`.
         assert_eq!(
-            sum_cell, "0.00",
-            "SUM cell should be quantized to USD's 2dp; row was {data_row:?}, raw output:\n{text}"
+            sum_cell, "0.000",
+            "SUM cell should carry the widest addend's scale; row was {data_row:?}, raw output:\n{text}"
         );
     }
 
@@ -1675,9 +1688,11 @@ mod tests {
             .find(|l| l.contains("USD"))
             .unwrap_or_else(|| panic!("expected USD data row; raw output:\n{text}"));
         let sum_cell = data_row.split_whitespace().last().expect("non-empty row");
+        // Same fixture, same reasoning as the explicit-GROUP BY test above:
+        // bean-query renders `0.000` here.
         assert_eq!(
-            sum_cell, "0.00",
-            "implicit GROUP BY should quantize same as explicit; got {sum_cell:?} \
+            sum_cell, "0.000",
+            "implicit GROUP BY should render the same as explicit; got {sum_cell:?} \
              in row {data_row:?}\n full output:\n{text}"
         );
     }

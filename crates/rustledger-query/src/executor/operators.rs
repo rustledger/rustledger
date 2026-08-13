@@ -349,10 +349,14 @@ impl Executor<'_> {
                             .map(Value::Date)
                             .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
                     }
-                    // `checked_add` so a value-range overflow yields NULL (like
+                    // Checked so a value-range overflow yields NULL (like
                     // div-by-zero — see `arithmetic_op`) instead of panicking;
                     // `rust_decimal` panics on raw `+`/`-`/`*` overflow.
-                    _ => self.arithmetic_op(left, right, Decimal::checked_add),
+                    //
+                    // Python scale semantics, so `0.00 + 1` is `1.00` as
+                    // bean-query renders it, not `1` — the same rule SUM
+                    // accumulates by. See `rustledger_core::add_python_scale`.
+                    _ => self.arithmetic_op(left, right, rustledger_core::checked_add_python_scale),
                 }
             }
             BinaryOperator::Sub => {
@@ -368,7 +372,7 @@ impl Executor<'_> {
                             .map(Value::Date)
                             .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
                     }
-                    _ => self.arithmetic_op(left, right, Decimal::checked_sub),
+                    _ => self.arithmetic_op(left, right, rustledger_core::checked_sub_python_scale),
                 }
             }
             BinaryOperator::Mul => self.arithmetic_op(left, right, Decimal::checked_mul),

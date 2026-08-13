@@ -44,6 +44,7 @@
 pub mod amount;
 pub mod calendar;
 pub mod cost;
+pub mod decimal;
 pub mod directive;
 pub mod display_context;
 pub mod extract;
@@ -66,6 +67,9 @@ mod kani_proofs;
 pub use amount::{Amount, AmountParseError, AmountParseErrorReason, IncompleteAmount};
 pub use calendar::{CalendarPeriod, quarter_index0};
 pub use cost::{BookedCost, BookedCostInvariantError, Cost, CostNumber, CostSpec};
+pub use decimal::{
+    add_python_scale, checked_add_python_scale, checked_sub_python_scale, sub_python_scale,
+};
 pub use directive::{
     Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document, Event, MetaValue,
     Metadata, Note, Open, Pad, Posting, Price, PriceAnnotation, PriceKind, Query, Transaction,

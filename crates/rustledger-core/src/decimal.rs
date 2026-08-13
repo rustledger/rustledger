@@ -91,24 +91,29 @@ mod tests {
 
     /// The exact shape `rust_decimal` gets wrong: a zero operand's scale is
     /// dropped. Both orders, since its zero shortcut applies to either side.
+    ///
+    /// Asserts on `to_string()`, NOT on `Decimal` equality. `==` compares
+    /// value and ignores scale — `dec!(1) == dec!(1.00)` — so an
+    /// `assert_eq!(add_python_scale(..), dec!(1.00))` here would pass against
+    /// a plain `a + b` and pin nothing. That is exactly what this test looked
+    /// like when Copilot caught it on #2046; the rendered form is the whole
+    /// subject of the divergence, so it is what gets asserted.
     #[test]
     fn a_zero_operand_keeps_its_scale() {
-        assert_eq!(add_python_scale(dec!(0.00), dec!(1)), dec!(1.00));
-        assert_eq!(add_python_scale(dec!(1), dec!(0.00)), dec!(1.00));
-        assert_eq!(sub_python_scale(dec!(0.00), dec!(1)), dec!(-1.00));
-        assert_eq!(sub_python_scale(dec!(1), dec!(0.00)), dec!(1.00));
+        assert_eq!(add_python_scale(dec!(0.00), dec!(1)).to_string(), "1.00");
+        assert_eq!(add_python_scale(dec!(1), dec!(0.00)).to_string(), "1.00");
+        assert_eq!(sub_python_scale(dec!(0.00), dec!(1)).to_string(), "-1.00");
+        assert_eq!(sub_python_scale(dec!(1), dec!(0.00)).to_string(), "1.00");
     }
 
-    /// `assert_eq!` on `Decimal` compares VALUE, not scale — `dec!(1)` and
-    /// `dec!(1.00)` are equal to it. Every assertion above would therefore
-    /// pass against plain `+`, which is the bug. Assert on the rendered
-    /// string, which is what the divergence is actually about.
+    /// The trap the test above avoids, pinned so it cannot silently return:
+    /// `Decimal`'s `==` cannot see a scale difference, and the raw operator
+    /// really does drop it.
     #[test]
-    fn scale_is_asserted_on_the_rendering_not_the_value() {
-        assert_eq!(dec!(1), dec!(1.00), "precondition: == ignores scale");
-
-        assert_eq!(add_python_scale(dec!(0.00), dec!(1)).to_string(), "1.00");
+    fn decimal_equality_cannot_see_the_bug_but_rendering_can() {
+        assert_eq!(dec!(1), dec!(1.00), "== ignores scale");
         assert_eq!((dec!(0.00) + dec!(1)).to_string(), "1", "the bug itself");
+        assert_eq!(add_python_scale(dec!(0.00), dec!(1)).to_string(), "1.00");
     }
 
     /// Ordinary operands already behaved; the fix must not disturb them.
@@ -159,5 +164,51 @@ mod tests {
 
         assert_eq!(python_like.to_string(), "0.00");
         assert_eq!(naive.to_string(), "0", "pins the pre-fix behavior");
+    }
+
+    /// The checked variants exist so BQL can map a value-range overflow to
+    /// NULL instead of panicking (`rust_decimal` panics on raw `+`). That
+    /// path had no test — the one behavior the checked form is FOR.
+    #[test]
+    fn checked_variants_return_none_on_overflow() {
+        assert_eq!(checked_add_python_scale(Decimal::MAX, Decimal::MAX), None);
+        assert_eq!(checked_sub_python_scale(Decimal::MIN, Decimal::MAX), None);
+
+        // And still compute the ordinary case, with the scale rule applied.
+        assert_eq!(
+            checked_add_python_scale(dec!(0.00), dec!(1))
+                .expect("no overflow")
+                .to_string(),
+            "1.00"
+        );
+        assert_eq!(
+            checked_sub_python_scale(dec!(1), dec!(0.00))
+                .expect("no overflow")
+                .to_string(),
+            "1.00"
+        );
+    }
+
+    /// The rescale step must never corrupt a value it cannot widen.
+    ///
+    /// A sum near `Decimal::MAX` has no room for extra fractional digits, so
+    /// the requested scale is unreachable. `Decimal::rescale` is documented
+    /// to leave the value alone in that case rather than truncating, and this
+    /// pins that we depend on it: if it ever became saturating or truncating,
+    /// the failure mode is a silently WRONG money value rather than a panic
+    /// or an error, which nothing else here would catch.
+    ///
+    /// Verified against the real type rather than assumed — `MAX.rescale(2)`
+    /// is a no-op returning `79228162514264337593543950335`.
+    #[test]
+    fn rescale_beyond_capacity_preserves_the_value() {
+        let near_max = Decimal::MAX - Decimal::ONE;
+        let sum = add_python_scale(near_max, dec!(0.00));
+
+        assert_eq!(
+            sum, near_max,
+            "a value too large to carry the target scale must keep its VALUE",
+        );
+        assert_eq!(sum.to_string(), near_max.to_string());
     }
 }

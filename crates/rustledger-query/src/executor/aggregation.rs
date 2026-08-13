@@ -522,6 +522,15 @@ impl<'a> Executor<'a> {
                             let val = self.evaluate_expr(&func.args[0], ctx)?;
                             match val {
                                 Value::Number(n) => {
+                                    // NOTE: deliberately plain `+=`, unlike
+                                    // SUM above. Fixing AVG needs a DIVISION
+                                    // scale rule too — `rust_decimal` drops
+                                    // the dividend's scale on `0.00 / 4` (it
+                                    // yields `0`, Python yields `0.00`), so
+                                    // the accumulator alone changes nothing
+                                    // observable here. Tracked separately;
+                                    // bean-query has no `avg(decimal)` at all,
+                                    // so there is no compat pin either way.
                                     sum += n;
                                     count += 1;
                                 }
@@ -966,6 +975,15 @@ impl<'a> Executor<'a> {
                                 self.evaluate_subquery_expr(&func.args[0], row, column_map)?;
                             match val {
                                 Value::Number(n) => {
+                                    // NOTE: deliberately plain `+=`, unlike
+                                    // SUM above. Fixing AVG needs a DIVISION
+                                    // scale rule too — `rust_decimal` drops
+                                    // the dividend's scale on `0.00 / 4` (it
+                                    // yields `0`, Python yields `0.00`), so
+                                    // the accumulator alone changes nothing
+                                    // observable here. Tracked separately;
+                                    // bean-query has no `avg(decimal)` at all,
+                                    // so there is no compat pin either way.
                                     sum += n;
                                     count += 1;
                                 }

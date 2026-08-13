@@ -97,6 +97,163 @@ EMPTY_RESULT_WARNING_FRACTION = 0.5
 # Use `("path", "*")` to allowlist ALL queries on a file (e.g., when
 # the divergence is in a column projection that every query touches).
 KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
+    # `option "render_commas" "TRUE"` is honored by beancount and ignored by
+    # bean-query. These three fixtures set it; we emit `1,234,567.89 USD` and
+    # bean-query emits `1234567.89 USD`. Values are byte-identical once the
+    # separators are removed — this is purely thousands grouping.
+    #
+    # Verified rather than assumed, because registering the wrong side here
+    # would mask an rledger bug:
+    #   * `render_commas` is a real beancount option (`parser/options.py`),
+    #     defaulting to False.
+    #   * beancount CONSUMES it: `parser/grammar.py` does
+    #     `self.dcontext.set_commas(self.options["render_commas"])`.
+    #   * beancount's own printer honors it — `printer.format_entry` with that
+    #     dcontext renders `1,234,567.89 USD`.
+    #   * `render_commas` appears NOWHERE in beanquery's source; its renderer
+    #     never consults the ledger's dcontext for grouping.
+    #
+    # So beancount intends the option to produce separators and bean-query
+    # simply is not wired to it. We honor a documented option the user
+    # explicitly set; masking these keeps the metric from penalizing that.
+    # Pinned by `render_commas_applies_to_every_column_kind` and
+    # `beancount_output_honors_render_commas_like_format` in
+    # `crates/rustledger/src/cmd/query/output.rs`.
+    #
+    # Revisit if beanquery starts reading the option, at which point these
+    # pairs match again and the stale-mask gate fails the run.
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount",
+        "balance-running-assets",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount",
+        "sum-position-by-account",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount",
+        "first-balance-by-month",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount",
+        "last-balance-by-month",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount",
+        "balances-by-account",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount",
+        "journal-assets",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount",
+        "journal-assets",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
+        "last-balance-by-month",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
+        "first-balance-by-month",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
+        "journal-assets",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount",
+        "journal-assets-at-cost",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount",
+        "journal-assets-at-units",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount",
+        "position-by-date",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount",
+        "sum-number-by-currency",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount",
+        "weight-by-date",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount",
+        "balance-running-assets",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount",
+        "balances-by-account",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount",
+        "first-balance-by-month",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount",
+        "journal-assets-at-cost",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount",
+        "journal-assets-at-units",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount",
+        "last-balance-by-month",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount",
+        "position-by-date",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount",
+        "sum-number-by-currency",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount",
+        "sum-position-by-account",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount",
+        "weight-by-date",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
+        "balance-running-assets",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
+        "balances-by-account",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
+        "journal-assets-at-cost",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
+        "journal-assets-at-units",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
+        "position-by-date",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
+        "sum-number-by-currency",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
+        "sum-position-by-account",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
+        "weight-by-date",
+    ),
     # beancount/beanquery#275: position display truncates precision in
     # the ledger's display context. Affects any query that projects
     # `position` or sums it.

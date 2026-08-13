@@ -897,17 +897,18 @@ impl<'a> Executor<'a> {
                             // gets the same rule rather than a second
                             // convention.
                             //
-                            // Honest scope note: I could not construct a
-                            // ledger where THIS loop's zero-crossing is
-                            // observable — booking rejects the reductions that
-                            // would produce one. The `0` vs `0.00` difference
-                            // visible from `NUMBER(SUM(position))` on a
-                            // single-currency ledger comes from further
-                            // upstream, where `Inventory::add` coalesces
-                            // same-key lots with a plain `checked_add` and
-                            // drops the scale there. That is a
-                            // `rustledger-core` change touching every balance
-                            // surface, so it is deliberately NOT in this PR.
+                            // Scope note, so this is not mistaken for a fix of
+                            // the visible symptom: no ledger is known that
+                            // makes THIS loop's own zero-crossing observable —
+                            // booking rejects the reductions that would build
+                            // one. The `0` vs `0.00` that `NUMBER(SUM(position))`
+                            // does show on a single-currency ledger comes from
+                            // further upstream, where `Inventory::add`
+                            // coalesces same-key lots with a plain
+                            // `checked_add` and drops the scale there. Fixing
+                            // that is a `rustledger-core` change read by every
+                            // balance surface (reports, FFI, BQL) and wants its
+                            // own compat sweep.
                             total = rustledger_core::add_python_scale(total, pos.units.number);
                         }
                         Ok(Value::Number(total))

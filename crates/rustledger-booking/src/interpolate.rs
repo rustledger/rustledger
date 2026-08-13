@@ -2715,7 +2715,17 @@ mod tests {
     /// Issue #1705: an augmenting `{}` posting with one balancing leg has
     /// its per-unit cost inferred from the residual (like beancount), not
     /// left with an empty cost basis. `1000 USD {}` + `-900 EUR` → the lot
-    /// is booked at 0.90 EUR/unit.
+    /// is booked at 0.9 EUR/unit.
+    ///
+    /// Also pins the quotient's SCALE. `rust_decimal` picks a non-minimal
+    /// scale for an exact quotient — `900 / 1000` is `0.90`, not `0.9` —
+    /// where Python's decimal reduces an exact result, so bean-query reports
+    /// `cost_number` as `0.9`. The extra zero claims a significant digit the
+    /// quotient does not have, and it is written into the posting.
+    ///
+    /// The scale assertion is load-bearing: `Decimal`'s `PartialEq` ignores
+    /// scale, so this test read `dec!(0.90)` and passed either way. A value
+    /// comparison alone cannot see this regression.
     #[test]
     fn test_interpolate_augmenting_empty_cost_inferred_from_residual() {
         use rustledger_core::{CostNumber, CostSpec};
@@ -2735,7 +2745,16 @@ mod tests {
         assert_eq!(cost.currency.as_deref(), Some("EUR"));
         match cost.number {
             Some(CostNumber::PerUnitFromTotal(b)) => {
-                assert_eq!(b.per_unit, dec!(0.90), "per-unit cost");
+                assert_eq!(b.per_unit, dec!(0.9), "per-unit cost");
+                assert_eq!(
+                    b.per_unit.scale(),
+                    1,
+                    "minimal scale — got {} (scale {})",
+                    b.per_unit,
+                    b.per_unit.scale()
+                );
+                // What reaches `cost_number` in BQL output.
+                assert_eq!(b.per_unit.to_string(), "0.9");
                 assert_eq!(b.total, dec!(900), "preserved total");
             }
             other => panic!("expected PerUnitFromTotal, got {other:?}"),
@@ -3181,46 +3200,6 @@ mod tests {
 
     /// The `IncompleteInputs.UnitsMissingNumberWithCost` vector: the number is
     /// `residual / cost_per_unit`, written in the UNITS currency.
-    /// A cost solved from an empty `{}` carries the quotient's MINIMAL
-    /// scale — no trailing zeros the division invented.
-    ///
-    /// `rust_decimal` picks a non-minimal scale for an exact quotient:
-    /// `900 / 1000` is `0.90` (scale 2), not `0.9`. Python's decimal follows
-    /// the spec's "ideal exponent" rule and reduces an exact result, so
-    /// bean-query reports `cost_number` as `0.9`. Beyond the divergence, the
-    /// extra zero claims a significant digit the quotient does not have.
-    #[test]
-    fn inferred_cost_uses_the_quotients_minimal_scale() {
-        // 1000 USD {} against -900 EUR -> 900/1000 = 0.9 EUR per unit.
-        let txn = Transaction::new(date(2024, 1, 2), "buy")
-            .with_synthesized_posting(
-                Posting::new("Assets:Broker", Amount::new(dec!(1000), "USD"))
-                    .with_cost(CostSpec::empty()),
-            )
-            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-900), "EUR")));
-
-        let r = interpolate(&txn).expect("interpolation should succeed");
-        let cost = r.transaction.postings[0]
-            .cost
-            .as_ref()
-            .expect("cost was solved");
-        let per_unit = cost
-            .number
-            .as_ref()
-            .and_then(rustledger_core::CostNumber::per_unit)
-            .expect("a per-unit cost");
-
-        assert_eq!(per_unit, dec!(0.9), "value");
-        assert_eq!(
-            per_unit.scale(),
-            1,
-            "scale must be minimal — got {per_unit} (scale {})",
-            per_unit.scale()
-        );
-        // `to_string` is what reaches `cost_number` in BQL output.
-        assert_eq!(per_unit.to_string(), "0.9");
-    }
-
     #[test]
     fn interpolates_units_number_from_per_unit_cost() {
         let txn = Transaction::new(date(2010, 5, 28), "Buy")

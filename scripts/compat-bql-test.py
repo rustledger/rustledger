@@ -97,6 +97,28 @@ EMPTY_RESULT_WARNING_FRACTION = 0.5
 # Use `("path", "*")` to allowlist ALL queries on a file (e.g., when
 # the divergence is in a column projection that every query touches).
 KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
+    # bean-query pads the amount INSIDE a cost brace, producing ragged output
+    # that its own `Position.__str__` never emits:
+    #
+    #     py:  2.00 ETH { 6500.00      EUR   }   21030.00 EUR { 0.90 GBP}
+    #     rs:  2.00 ETH { 6500.00 EUR}          21030.00 EUR { 0.90 GBP}
+    #
+    # Note it pads only the ETH lot; `{ 0.90 GBP}` in the same cell is
+    # compact. The width appears to come from a per-currency amount renderer
+    # sized by the widest EUR amount in the column (`21030.00 EUR` units)
+    # leaking into the EUR *cost*, so the padding tracks something the cost
+    # has nothing to do with. beancount's own renderer emits
+    # `-5 AAPL {50.00 USD, 2012-04-10}` — no interior padding at all.
+    #
+    # Our compact form is the one bean-query itself produces for every other
+    # lot, and matches the `{ 128.99 USD}` shape pinned since #987 / #1047.
+    # Values are identical; this is interior whitespace only.
+    ("tests/compatibility/files/ledger2beancount/tests_lots.beancount", "sum-position-by-account"),
+    ("tests/compatibility/files/ledger2beancount/tests_lots.beancount", "last-balance-by-month"),
+    ("tests/compatibility/files/ledger2beancount/tests_lots.beancount", "first-balance-by-month"),
+    ("tests/compatibility/files/ledger2beancount/tests_lots.beancount", "balances-by-account"),
+    ("tests/compatibility/files/ledger2beancount/tests_lots.beancount", "journal-assets-at-cost"),
+    ("tests/compatibility/files/ledger2beancount/tests_lots.beancount", "journal-assets"),
     # `option "render_commas" "TRUE"` is honored by beancount and ignored by
     # bean-query. These three fixtures set it; we emit `1,234,567.89 USD` and
     # bean-query emits `1234567.89 USD`. Values are byte-identical once the
@@ -333,6 +355,30 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
 # match percentage (the values are correct — only display scale differs),
 # but tracked as a distinct category so future bookkeeping stays honest.
 KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
+    # Posting ORDER after an elided posting is split across two currencies.
+    # On `examples_simple_basic.beancount`:
+    #
+    #     Assets:Cash                 440.00 CAD
+    #     Assets:AccountsReceivable  -431.92 USD
+    #     Assets:Cash                             <- fills as -440.00 CAD AND +431.92 USD
+    #
+    # Both tools produce the SAME four postings with the same values —
+    # `SELECT ... ORDER BY lineno` is byte-identical. Only `JOURNAL` differs,
+    # because `beanquery/compiler.py::transform_journal` builds a SELECT with
+    # NO ORDER BY, so the command exposes raw storage order. beancount's
+    # booking rebuilds postings grouped by currency, putting the CAD fill next
+    # to the CAD posting; we keep the authored order and append fills. The
+    # running `balance` column then differs as a CONSEQUENCE of row order, not
+    # of any arithmetic.
+    #
+    # Same shape as the zerosum entry below, and filed the same way: we are
+    # the side that differs from bean-query's output, so it goes in the RUST
+    # list even though preserving the user's authored order is defensible.
+    # Putting it in the Python bucket would let a future genuine regression on
+    # these pairs hide behind a flattering label.
+    ("tests/compatibility/files/beancount-v3/examples_simple_basic.beancount", "journal-assets"),
+    ("tests/compatibility/files/beancount-v3/examples_simple_basic.beancount", "journal-assets-at-units"),
+    ("tests/compatibility/files/beancount-v3/examples_simple_basic.beancount", "journal-assets-at-cost"),
     # `sum-number-by-currency` display-scale mismatch on cost-spec
     # interpolation fixtures: Python beanquery preserves arithmetic
     # scale through SUM (`-1966.700` at scale 3); rledger's booking

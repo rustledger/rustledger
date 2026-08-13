@@ -42,6 +42,13 @@ impl AtMode {
     }
 }
 
+/// Widths `JOURNAL` applies to its payee and narration columns, matching
+/// beancount's `transform_journal` (`MAXWIDTH(payee, 48)` /
+/// `MAXWIDTH(narration, 80)`).
+const JOURNAL_PAYEE_MAXWIDTH: i64 = 48;
+/// See [`JOURNAL_PAYEE_MAXWIDTH`].
+const JOURNAL_NARRATION_MAXWIDTH: i64 = 80;
+
 impl Executor<'_> {
     /// Execute a SELECT query.
     pub(super) fn execute_select(&self, query: &SelectQuery) -> Result<QueryResult, QueryError> {
@@ -1010,15 +1017,28 @@ impl Executor<'_> {
                             AtMode::None | AtMode::Other => cumulative_balance.clone(),
                         };
 
+                        // `JOURNAL` is defined by beancount as a SELECT whose
+                        // payee and narration go through `MAXWIDTH`
+                        // (`beanquery/compiler.py::transform_journal`:
+                        // `MAXWIDTH(payee, 48)`, `MAXWIDTH(narration, 80)`).
+                        // Skipping it let a single long narration widen the
+                        // column without bound — the command exists to give a
+                        // readable ledger view, and an 800-character memo
+                        // defeats that.
+                        let shorten = |text: String, width: i64| -> Value {
+                            Self::maxwidth_on_values(&[Value::String(text), Value::Integer(width)])
+                                .unwrap_or_else(|_| Value::String(String::new()))
+                        };
                         let row = vec![
                             Value::Date(txn.date),
                             Value::String(txn.flag.to_string()),
-                            Value::String(
+                            shorten(
                                 txn.payee
                                     .as_ref()
                                     .map_or_else(String::new, ToString::to_string),
+                                JOURNAL_PAYEE_MAXWIDTH,
                             ),
-                            Value::String(txn.narration.to_string()),
+                            shorten(txn.narration.to_string(), JOURNAL_NARRATION_MAXWIDTH),
                             Value::String(posting.account.to_string()),
                             position_value,
                             Value::Inventory(Box::new(balance_for_row)),

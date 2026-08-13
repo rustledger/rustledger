@@ -282,7 +282,32 @@ impl NativePlugin for ZerosumPlugin {
                 }
             }
 
-            // Now update the matched postings to use the target account
+            // Update the matched postings to use the target account, IN PLACE.
+            //
+            // Deliberate divergence from `beancount_reds_plugins`, whose
+            // `account_replace` does:
+            //
+            //     new_posting = posting._replace(account=new_account)
+            //     txn.postings.remove(posting)
+            //     txn.postings.append(new_posting)
+            //
+            // — moving every rewritten posting to the END of the transaction.
+            // That reordering is incidental to mutating a Python list while
+            // iterating it (the caller has to `break` and reprocess because,
+            // in its own words, "this entry's postings changes under us"), not
+            // a property anyone chose. It silently destroys the order the user
+            // wrote, which is the only thing posting order carries.
+            //
+            // Rewriting the account in place keeps that order. The values,
+            // accounts and signs are identical either way, so nothing
+            // downstream depends on the difference — only rendered posting
+            // order differs, which is why the four affected pairs on
+            // `tests/regressions/issue-278.beancount` are registered in
+            // `KNOWN_RUST_DIVERGENCES` (see `scripts/compat-bql-test.py`)
+            // rather than chased.
+            //
+            // Revisit if upstream ever makes the ordering intentional, or if a
+            // consumer starts deriving meaning from posting position.
             for (txn_i, post_i) in &matched {
                 if let DirectiveData::Transaction(ref mut txn) = directives[*txn_i].data
                     && *post_i < txn.postings.len()
@@ -534,6 +559,91 @@ mod tests {
             }
         }
         assert!(found_matched, "Should have matched postings");
+    }
+
+    /// A matched posting is rewritten IN PLACE — its position in the
+    /// transaction does not change.
+    ///
+    /// `beancount_reds_plugins` removes and re-appends the posting, so every
+    /// rewritten posting ends up last. That is incidental to mutating a list
+    /// while iterating it, not a chosen property, and it discards the order
+    /// the user wrote. We keep the order; accounts and amounts are identical
+    /// either way.
+    ///
+    /// The two transactions put the zerosum leg at DIFFERENT positions —
+    /// first in one, last in the other — so the test distinguishes "kept in
+    /// place" from "moved to the end", which a single transaction with the
+    /// leg already last could not.
+    ///
+    /// Pinned because it is the observable behind four registered entries in
+    /// `KNOWN_RUST_DIVERGENCES` for `tests/regressions/issue-278.beancount`.
+    /// If this flips, those entries go stale and the compat run fails — the
+    /// intended coupling.
+    #[test]
+    fn test_matched_posting_keeps_its_position() {
+        let plugin = ZerosumPlugin;
+        let config = r"{
+            'zerosum_accounts': {
+                'Assets:ZeroSum:Transfers': ('Assets:ZeroSum-Matched:Transfers', 30)
+            }
+        }";
+
+        // `create_transfer_txn` writes `from` first with the NEGATED amount
+        // and `to` second, so this puts the zerosum leg first in one txn
+        // (at -100) and second in the other (at +100) — they cancel.
+        let input = PluginInput {
+            directives: vec![
+                create_transfer_txn(
+                    "2024-01-01",
+                    "Assets:ZeroSum:Transfers",
+                    "Assets:Bank",
+                    "100.00",
+                    "USD",
+                ),
+                create_transfer_txn(
+                    "2024-01-03",
+                    "Assets:Investment",
+                    "Assets:ZeroSum:Transfers",
+                    "100.00",
+                    "USD",
+                ),
+            ],
+            options: PluginOptions {
+                operating_currencies: vec!["USD".to_string()],
+                title: None,
+                ..Default::default()
+            },
+            config: Some(config.to_string()),
+        };
+
+        let input_dirs = input.directives.clone();
+        let output = plugin.process(input);
+        assert_eq!(output.errors.len(), 0);
+        let directives = materialize_ops(&input_dirs, &output);
+
+        let accounts: Vec<Vec<String>> = directives
+            .iter()
+            .filter_map(|d| match &d.data {
+                DirectiveData::Transaction(t) => {
+                    Some(t.postings.iter().map(|p| p.account.clone()).collect())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(accounts.len(), 2, "both transactions survive");
+
+        // Rewritten, but each still where it was written. Upstream's
+        // remove/append would make BOTH of these last.
+        assert_eq!(
+            accounts[0],
+            vec!["Assets:ZeroSum-Matched:Transfers", "Assets:Bank"],
+            "leg written FIRST must stay first"
+        );
+        assert_eq!(
+            accounts[1],
+            vec!["Assets:Investment", "Assets:ZeroSum-Matched:Transfers"],
+            "leg written SECOND must stay second"
+        );
     }
 
     #[test]

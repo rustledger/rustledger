@@ -203,6 +203,34 @@ KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
     # fixture match bean-query on every query. The two below still diverge —
     # their residual is born inside a `{{total}}` lot match, which the
     # tolerance rule does not reach.
+    # `beancount_reds_plugins`' zerosum rewrites a matched posting by
+    # REMOVING and RE-APPENDING it, so every rewritten posting lands last in
+    # its transaction. We rewrite the account in place and keep the posting
+    # where the user wrote it.
+    #
+    # This is a DELIBERATE deviation, and the only one on these pairs: the
+    # accounts, amounts and signs are byte-identical — bean-query and rledger
+    # emit the same two rows in the opposite order, nothing more. Upstream's
+    # ordering is incidental to mutating a list mid-iteration (its loop has to
+    # `break` and reprocess because "this entry's postings changes under us"),
+    # not a property anyone chose, and it discards the only information
+    # posting order carries: what the user wrote.
+    #
+    # Filed under the RUST list rather than the Python one on purpose. We are
+    # the side that differs from bean-query's output, and putting a deviation
+    # we think is an improvement into the Python bucket would let a future
+    # genuine rledger regression on these pairs hide behind a flattering
+    # label.
+    #
+    # Pinned in `test_matched_posting_keeps_its_position`
+    # (`rustledger-plugin/src/native/plugins/zerosum.rs`); if that flips,
+    # these go stale and the run fails. Revisit if upstream makes the
+    # ordering intentional, or if a consumer starts deriving meaning from
+    # posting position.
+    ("tests/regressions/issue-278.beancount", "balance-running-assets"),
+    ("tests/regressions/issue-278.beancount", "journal-assets"),
+    ("tests/regressions/issue-278.beancount", "journal-assets-at-cost"),
+    ("tests/regressions/issue-278.beancount", "journal-assets-at-units"),
     ("tests/compatibility/files/beancount-import/testdata_source_healthequity_test_invalid_journal.beancount", "sum-number-by-currency"),
     ("tests/compatibility/files/beancount-import/testdata_source_healthequity_test_matching_journal.beancount", "sum-number-by-currency"),
 }

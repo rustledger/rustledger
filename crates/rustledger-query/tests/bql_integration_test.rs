@@ -660,6 +660,65 @@ fn test_execute_journal_query() {
     assert!(!result.is_empty());
 }
 
+/// `JOURNAL` shortens payee and narration to the widths beancount defines.
+///
+/// `beanquery/compiler.py::transform_journal` builds the command as a SELECT
+/// over `MAXWIDTH(payee, 48)` and `MAXWIDTH(narration, 80)`. We selected the
+/// raw columns, so a single long memo widened the column without bound and
+/// pushed every later column off screen.
+///
+/// Asserts the widths and the `[...]` marker, not merely "shorter than the
+/// input" — the point is the specific 48/80 contract, and a test that only
+/// checked "was truncated somewhere" would pass with the wrong widths.
+#[test]
+fn test_journal_shortens_payee_and_narration_to_beancount_widths() {
+    let long_payee = "PAYEE ".repeat(20); // 120 chars
+    let long_narration = "NARRATION ".repeat(20); // 200 chars
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 1), long_narration.trim())
+                .with_payee(long_payee.trim())
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(1000), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-1000), "USD"),
+                )),
+        ),
+    ];
+    let query = parse(r#"JOURNAL "Assets""#).expect("should parse");
+    let mut executor = Executor::new(&directives);
+    let result = executor.execute(&query).expect("should execute");
+    assert_eq!(result.rows.len(), 1);
+
+    let cell = |i: usize| match &result.rows[0][i] {
+        Value::String(s) => s.clone(),
+        other => panic!("column {i} should be a string, got {other:?}"),
+    };
+    // Columns: date, flag, payee, narration, account, position, balance.
+    let (payee, narration) = (cell(2), cell(3));
+
+    assert!(
+        payee.len() <= 48,
+        "payee must fit MAXWIDTH(payee, 48), got {} chars: {payee}",
+        payee.len()
+    );
+    assert!(
+        narration.len() <= 80,
+        "narration must fit MAXWIDTH(narration, 80), got {} chars: {narration}",
+        narration.len()
+    );
+    assert!(payee.ends_with("[...]"), "payee marker: {payee}");
+    assert!(
+        narration.ends_with("[...]"),
+        "narration marker: {narration}"
+    );
+}
+
 /// Regression test for issue #955 (Bug 2): the JOURNAL `balance` column was
 /// per-account, but Python `bean-query` translates JOURNAL to a SELECT where
 /// `balance` is the cumulative inventory across every WHERE-filtered posting

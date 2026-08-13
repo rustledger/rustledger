@@ -376,6 +376,13 @@ pub fn merge_with_padding(directives: &[Directive]) -> Vec<Directive> {
     // Place each synth immediately BEFORE the first Balance sharing its date,
     // and otherwise at the END of its date group.
     //
+    // Cost: one insert per synth into an already-sorted vector, so O(n x k)
+    // for k pads rather than the previous single O(n log n) pass. `pad` is
+    // used sparingly by construction — one per account per period — and the
+    // whole function early-returns on a ledger with none; the heaviest file
+    // in the compat corpus carries 12. If a ledger ever arrives with pads in
+    // the thousands, merge the (date-sorted) synths in one pass instead.
+    //
     // The "before a same-date Balance" half is load-bearing: a `pad` and the
     // `balance` it satisfies can share a date, and any consumer checking
     // assertions mid-stream against this view must see the padding first.

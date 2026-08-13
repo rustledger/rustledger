@@ -216,27 +216,19 @@ impl Ledger {
     /// matters.
     #[must_use]
     pub fn balance_view(&self) -> Vec<Directive> {
-        let mut booked: Vec<Directive> = self.directives.iter().map(|s| s.value.clone()).collect();
+        let booked: Vec<Directive> = self.directives.iter().map(|s| s.value.clone()).collect();
 
-        // Inlined from `rustledger_booking::merge_with_padding` so
-        // `booked` is moved (not re-cloned via `to_vec()`).
-        // Algorithmically identical: prepend synth transactions, then
-        // stable-sort by date. Same-date pad+balance pairs land as
-        // `[synth, pad, balance]` because synths sit at the front of
-        // their date-group pre-sort.
+        // Call the canonical placement rule rather than re-deriving it.
+        // This used to inline the merge so `booked` could be moved instead of
+        // cloned a second time; `merge_with_padding_owned` gives the same
+        // saving without the copy. The copy had already drifted — it still
+        // prepended synths after the shared rule learned to place them
+        // relative to a same-date `Balance`.
         debug_assert!(
             !booked.iter().any(|d| matches!(d, Directive::Transaction(t) if rustledger_booking::is_synthesized_pad(t))),
             "balance_view called on a Ledger whose directives already contain synth pad transactions",
         );
-        let pad_result = rustledger_booking::process_pads(&booked);
-        let mut merged: Vec<Directive> =
-            Vec::with_capacity(booked.len() + pad_result.padding_transactions.len());
-        for txn in pad_result.padding_transactions {
-            merged.push(Directive::Transaction(txn));
-        }
-        merged.append(&mut booked);
-        merged.sort_by_key(rustledger_core::Directive::date);
-        merged
+        rustledger_booking::merge_with_padding_owned(booked)
     }
 }
 

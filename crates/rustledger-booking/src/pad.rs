@@ -360,6 +360,17 @@ fn create_padding_transaction(
 /// re-applies them against an inventory that already includes the prior
 /// synth. A `debug_assert!` guards against this in dev builds.
 pub fn merge_with_padding(directives: &[Directive]) -> Vec<Directive> {
+    merge_with_padding_owned(directives.to_vec())
+}
+
+/// [`merge_with_padding`] for a caller that already owns its directives.
+///
+/// Exists so consumers holding an owned `Vec` need not clone it a second time
+/// just to reach the canonical placement rule. `Ledger::balance_view` used to
+/// inline the merge for exactly that reason, and the copy drifted the moment
+/// the rule changed — this is the same saving without the duplicate.
+#[must_use]
+pub fn merge_with_padding_owned(directives: Vec<Directive>) -> Vec<Directive> {
     // Idempotence: input that already contains synth pad transactions has
     // been merged before (e.g. an embedder queries entries it loaded via
     // load-full, which merges pads — rustledger#1712). Re-running would
@@ -368,10 +379,10 @@ pub fn merge_with_padding(directives: &[Directive]) -> Vec<Directive> {
         .iter()
         .any(|d| matches!(d, Directive::Transaction(t) if is_synthesized_pad(t)))
     {
-        return directives.to_vec();
+        return directives;
     }
 
-    let result = process_pads(directives);
+    let result = process_pads(&directives);
 
     // Place each synth immediately BEFORE the first Balance sharing its date,
     // and otherwise at the END of its date group.
@@ -394,7 +405,7 @@ pub fn merge_with_padding(directives: &[Directive]) -> Vec<Directive> {
     // 2019-01-29 transaction for `Assets:Test5`, and every running balance
     // from that row on was 500.00 USD out relative to bean-query, which
     // orders the padding at the `pad` directive's own position.
-    let mut merged: Vec<Directive> = directives.to_vec();
+    let mut merged: Vec<Directive> = directives;
     merged.sort_by_key(rustledger_core::Directive::date);
 
     for txn in result.padding_transactions {

@@ -384,46 +384,65 @@ pub fn merge_with_padding_owned(directives: Vec<Directive>) -> Vec<Directive> {
 
     let result = process_pads(&directives);
 
-    // Place each synth immediately BEFORE the first Balance sharing its date,
-    // and otherwise at the END of its date group.
-    //
-    // Cost: one insert per synth into an already-sorted vector, so O(n x k)
-    // for k pads rather than the previous single O(n log n) pass. `pad` is
-    // used sparingly by construction — one per account per period — and the
-    // whole function early-returns on a ledger with none; the heaviest file
-    // in the compat corpus carries 12. If a ledger ever arrives with pads in
-    // the thousands, merge the (date-sorted) synths in one pass instead.
-    //
-    // The "before a same-date Balance" half is load-bearing: a `pad` and the
-    // `balance` it satisfies can share a date, and any consumer checking
-    // assertions mid-stream against this view must see the padding first.
-    //
-    // The "otherwise at the end" half is what stops the synth displacing
-    // UNRELATED same-date directives. Prepending it to the whole date group
-    // did that: on `ledger2beancount/tests_balance-assertion.beancount` a
-    // 2019-01-29 pad for `Assets:Test6` jumped ahead of an unrelated
-    // 2019-01-29 transaction for `Assets:Test5`, and every running balance
-    // from that row on was 500.00 USD out relative to bean-query, which
-    // orders the padding at the `pad` directive's own position.
     let mut merged: Vec<Directive> = directives;
     merged.sort_by_key(rustledger_core::Directive::date);
 
     for txn in result.padding_transactions {
-        let date = txn.date;
-        let insert_at = merged
-            .iter()
-            .position(|d| d.date() == date && matches!(d, Directive::Balance(_)))
-            .unwrap_or_else(|| {
-                // End of this date's group (or of the run, if it is last).
-                merged
-                    .iter()
-                    .rposition(|d| d.date() <= date)
-                    .map_or(0, |i| i + 1)
-            });
+        let insert_at = pad_insertion_index(merged.iter(), txn.date);
         merged.insert(insert_at, Directive::Transaction(txn));
     }
 
     merged
+}
+
+/// Where a synthesized padding transaction dated `date` belongs in an
+/// already date-sorted directive stream.
+///
+/// The rule: immediately BEFORE the first `Balance` sharing its date, and
+/// otherwise at the END of its date group.
+///
+/// The "before a same-date Balance" half is load-bearing: a `pad` and the
+/// `balance` it satisfies can share a date, and any consumer checking
+/// assertions mid-stream must see the padding first.
+///
+/// The "otherwise at the end" half is what stops the synth displacing
+/// UNRELATED same-date directives. Prepending it to the whole date group did
+/// that: on `ledger2beancount/tests_balance-assertion.beancount` a 2019-01-29
+/// pad for `Assets:Test6` jumped ahead of an unrelated 2019-01-29 transaction
+/// for `Assets:Test5`, and every running balance from that row on was
+/// 500.00 USD out relative to bean-query, which orders the padding at the
+/// `pad` directive's own position.
+///
+/// This is the single source of truth for pad placement. It is `pub` because
+/// the rule has three consumers with three different element types —
+/// [`merge_with_padding_owned`] over `Directive`,
+/// [`merge_with_padding_spanned`] over [`Spanned<Directive>`], and
+/// `rustledger-ffi-wasi`'s `expand_pads` over `(Directive, tag)` pairs, which
+/// carries parallel provenance tags and so cannot call either merge. All three
+/// once open-coded the rule; two of the copies were still prepending when this
+/// one changed. Compute the index here rather than re-deriving it.
+///
+/// Cost: one insert per synth into an already-sorted vector, so O(n x k) for
+/// k pads rather than a single O(n log n) pass. `pad` is used sparingly by
+/// construction — one per account per period — and callers early-return on a
+/// ledger with none; the heaviest file in the compat corpus carries 12. If a
+/// ledger ever arrives with pads in the thousands, merge the (date-sorted)
+/// synths in one pass instead.
+#[must_use]
+pub fn pad_insertion_index<'a, I>(sorted: I, date: NaiveDate) -> usize
+where
+    I: IntoIterator<Item = &'a Directive>,
+{
+    let mut end_of_group = 0;
+    for (index, directive) in sorted.into_iter().enumerate() {
+        if directive.date() == date && matches!(directive, Directive::Balance(_)) {
+            return index;
+        }
+        if directive.date() <= date {
+            end_of_group = index + 1;
+        }
+    }
+    end_of_group
 }
 
 /// Span-preserving variant of [`merge_with_padding`].
@@ -453,23 +472,13 @@ pub fn merge_with_padding_spanned(directives: &[Spanned<Directive>]) -> Vec<Span
 
     let result = process_pads(&plain);
 
-    // Same placement rule as the plain variant — see it for why the synth
-    // goes before a same-date Balance but after everything else on its date.
-    // Marked synthesized so they resolve to no source location.
+    // Placement via the shared [`pad_insertion_index`]. Marked synthesized so
+    // they resolve to no source location.
     let mut merged: Vec<Spanned<Directive>> = directives.to_vec();
     merged.sort_by_key(|s| s.value.date());
 
     for txn in result.padding_transactions {
-        let date = txn.date;
-        let insert_at = merged
-            .iter()
-            .position(|s| s.value.date() == date && matches!(s.value, Directive::Balance(_)))
-            .unwrap_or_else(|| {
-                merged
-                    .iter()
-                    .rposition(|s| s.value.date() <= date)
-                    .map_or(0, |i| i + 1)
-            });
+        let insert_at = pad_insertion_index(merged.iter().map(|s| &s.value), txn.date);
         merged.insert(insert_at, Spanned::synthesized(Directive::Transaction(txn)));
     }
 

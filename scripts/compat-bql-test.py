@@ -223,8 +223,8 @@ KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
     # label.
     #
     # Pinned in `test_matched_posting_keeps_its_position`
-    # (`rustledger-plugin/src/native/plugins/zerosum.rs`); if that flips,
-    # these go stale and the run fails. Revisit if upstream makes the
+    # (`crates/rustledger-plugin/src/native/plugins/zerosum.rs`); if that
+    # flips, these go stale and the run fails. Revisit if upstream makes the
     # ordering intentional, or if a consumer starts deriving meaning from
     # posting position.
     ("tests/regressions/issue-278.beancount", "balance-running-assets"),

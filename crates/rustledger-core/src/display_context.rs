@@ -916,7 +916,13 @@ impl DisplayContext {
         const PYTHON_DECIMAL_PRECISION: u32 = 28;
         let capped = Self::cap_significant_digits(number, PYTHON_DECIMAL_PRECISION);
         let formatted = Self::to_scientific_string(capped);
-        if self.render_commas {
+        // No thousands separators on the exponential form. `add_commas`
+        // groups from the right of the integer part, and an exponent has no
+        // decimal point to shield it — `0E-14` came back `0E,-14` and `1E-7`
+        // came back `1,E-7`. A scientific mantissa is one digit before the
+        // point by construction, so there is never a group to insert anyway.
+        // Copilot's catch on #2053.
+        if self.render_commas && !formatted.contains('E') {
             Self::add_commas(&formatted)
         } else {
             formatted
@@ -2143,6 +2149,37 @@ mod custom_directive_precision_tests {
         let mut plain = DisplayContext::new();
         plain.set_fixed_precision("USD", 2);
         assert!(!plain.for_surface(OutputSurface::Human).render_commas());
+    }
+
+    /// `render_commas` must not corrupt the exponential form.
+    ///
+    /// `add_commas` groups from the right of the integer part, and an
+    /// exponent has no decimal point to shield it: `0E-14` became `0E,-14`
+    /// and `1E-7` became `1,E-7`. Only `1.234E-7` survived, because the `.`
+    /// split happened to protect it — which is why this pins the bare-mantissa
+    /// forms specifically.
+    #[test]
+    fn render_commas_leaves_scientific_notation_alone() {
+        use std::str::FromStr;
+
+        let mut ctx = DisplayContext::new();
+        ctx.set_render_commas(true);
+
+        for (input, want) in [
+            ("0E-14", "0E-14"),
+            ("1E-7", "1E-7"),
+            ("-1E-7", "-1E-7"),
+            ("1234E-10", "1.234E-7"),
+        ] {
+            let value = Decimal::from_str(input).expect("parses");
+            assert_eq!(ctx.format_default(value), want, "input {input}");
+        }
+
+        // And commas still apply to the plain form.
+        assert_eq!(
+            ctx.format_default(Decimal::from_str("1234567.89").unwrap()),
+            "1,234,567.89",
+        );
     }
 
     /// `format_default` follows Python's `to-scientific-string`.

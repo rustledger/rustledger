@@ -379,33 +379,6 @@ KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
     ("tests/compatibility/files/beancount-v3/examples_simple_basic.beancount", "journal-assets"),
     ("tests/compatibility/files/beancount-v3/examples_simple_basic.beancount", "journal-assets-at-units"),
     ("tests/compatibility/files/beancount-v3/examples_simple_basic.beancount", "journal-assets-at-cost"),
-    # `sum-number-by-currency` display-scale mismatch on cost-spec
-    # interpolation fixtures: Python beanquery preserves arithmetic
-    # scale through SUM (`-1966.700` at scale 3); rledger's booking
-    # layer normalizes residuals to the input minimum scale and lands
-    # at scale 2 (`-1966.70`). The values are numerically equal — the
-    # difference is *display scale only*, surfaced as a textual diff
-    # because both tools intentionally preserve scale on `Value::Number`
-    # output (#1103 / #1106 / #1113).
-    #
-    # Root cause: cost-spec interpolation against `{}` lot-match against
-    # a `{{total}}` lot produces a residual whose scale depends on which
-    # intermediate value drives it. Python's intermediate stays at the
-    # buy-side scale 3; rledger's #1108 fix dropped intermediate scale
-    # to the input minimum (2) to stop 26-digit contamination — that
-    # fix was correct for the over-precision case but over-applies on
-    # these fixtures.
-    #
-    # Deep fix is continuation of #1108's pipeline scale-propagation
-    # work. Tracked under #1112 (kept open as the tracker — do not
-    # auto-close from this PR). Surgical pin (not "*") so any
-    # non-scale divergence on these fixtures stays surfaced.
-    #
-    # All three `non_default_capital_gains_journal` entries that used to sit
-    # here and below are gone: #2034's tolerance-quantization fix made that
-    # fixture match bean-query on every query. The two below still diverge —
-    # their residual is born inside a `{{total}}` lot match, which the
-    # tolerance rule does not reach.
     # `beancount_reds_plugins`' zerosum rewrites a matched posting by
     # REMOVING and RE-APPENDING it, so every rewritten posting lands last in
     # its transaction. We rewrite the account in place and keep the posting
@@ -434,8 +407,6 @@ KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
     ("tests/regressions/issue-278.beancount", "journal-assets"),
     ("tests/regressions/issue-278.beancount", "journal-assets-at-cost"),
     ("tests/regressions/issue-278.beancount", "journal-assets-at-units"),
-    ("tests/compatibility/files/beancount-import/testdata_source_healthequity_test_invalid_journal.beancount", "sum-number-by-currency"),
-    ("tests/compatibility/files/beancount-import/testdata_source_healthequity_test_matching_journal.beancount", "sum-number-by-currency"),
 }
 
 

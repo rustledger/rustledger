@@ -231,7 +231,18 @@ fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
     if complex {
         return None;
     }
-    let number = number.map(|n| if sign_minus { -n } else { n });
+    // `negate_python`, not a bare `-n`: negating a zero must yield a POSITIVE
+    // zero, so a literal `-0.00` loads as `0.00` exactly as beancount parses
+    // it (`Decimal('0.00')`, unsigned). The red path applies the same rule in
+    // `convert_amount_to_incomplete`; the two MUST agree, and this is the one
+    // postings actually take.
+    let number = number.map(|n| {
+        if sign_minus {
+            rustledger_core::negate_python(n)
+        } else {
+            n
+        }
+    });
     match (number, currency) {
         (Some(n), Some(c)) => Some(IncompleteAmount::Complete(Amount::new(n, c))),
         (Some(n), None) => Some(IncompleteAmount::NumberOnly(n)),
@@ -1325,5 +1336,76 @@ mod tests {
                 "green-wired parse diverged from red for: {src:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod negative_zero_tests {
+    use crate::parse;
+    use rustledger_core::Directive;
+
+    /// A literal `-0.00` must load as an UNSIGNED zero, as beancount parses it.
+    ///
+    /// beancount gives `Decimal('0.00')` (checked against 3.2.3 via
+    /// `load_string`) and bean-query prints `0.00`. The green path applied the
+    /// sign with a bare `-n`, which flips `rust_decimal`'s sign bit even on
+    /// zero, so the posting archived a signed zero and rendered `-0.00`
+    /// everywhere downstream — including `SUM`, where it turned an exactly
+    /// balanced CNY column into `-0.00`.
+    ///
+    /// This is the GREEN path specifically. The red path's equivalent
+    /// (`convert_amount_to_incomplete`) was fixed in the same change, but
+    /// postings take this one, and fixing only the red one left the output
+    /// unchanged — which is how the dual-path rule earns its keep.
+    ///
+    /// Asserts on `to_string()`: `==` cannot see a sign on zero, so
+    /// `assert_eq!(number, dec!(0.00))` would pass against the bug.
+    #[test]
+    fn a_literal_negative_zero_loads_unsigned() {
+        let parsed = parse(
+            "2024-01-01 open Assets:A\n\
+             2024-01-01 open Expenses:T\n\
+             2024-01-02 * \"t\"\n\
+             \x20 Assets:A    0.00 CNY\n\
+             \x20 Expenses:T -0.00 CNY\n",
+        );
+
+        let mut rendered = Vec::new();
+        for spanned in &parsed.directives {
+            if let Directive::Transaction(txn) = &spanned.value {
+                for posting in &txn.postings {
+                    if let Some(amount) = posting.amount() {
+                        rendered.push(amount.number.to_string());
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            rendered,
+            vec!["0.00".to_string(), "0.00".to_string()],
+            "a `-0.00` literal must not archive a signed zero",
+        );
+    }
+
+    /// The sign is still applied to non-zero amounts — the guard above must
+    /// not have turned negation off.
+    #[test]
+    fn a_literal_negative_amount_keeps_its_sign() {
+        let parsed = parse(
+            "2024-01-01 open Assets:A\n\
+             2024-01-02 * \"t\"\n\
+             \x20 Assets:A -12.34 CNY\n",
+        );
+
+        let number = parsed
+            .directives
+            .iter()
+            .find_map(|s| match &s.value {
+                Directive::Transaction(t) => t.postings.first()?.amount().map(|a| a.number),
+                _ => None,
+            })
+            .expect("one posting");
+        assert_eq!(number.to_string(), "-12.34");
     }
 }

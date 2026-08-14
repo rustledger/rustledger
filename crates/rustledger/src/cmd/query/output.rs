@@ -1065,6 +1065,20 @@ mod tests {
     /// Checked against bean-query 3.2.3 — an account holding `0.0003183 USD`
     /// renders `0.00 USD`, while one that netted to nothing renders blank.
     ///
+    /// The SIGN survives the rounding: a `-0.0003183 USD` position renders
+    /// `-0.00 USD`, not `0.00 USD`. This assertion read `0.00 USD` until the
+    /// negative-zero work, because the doc note above was verified on the
+    /// POSITIVE value while the fixture below uses the negative one — the
+    /// sign was never re-checked against bean-query. It has been now, on a
+    /// ledger whose USD precision is 2dp:
+    ///
+    /// ```text
+    /// Assets:Neg  -0.00 USD
+    /// ```
+    ///
+    /// That sign is the only thing distinguishing a small negative balance
+    /// from an exactly flat one in the rendered cell.
+    ///
     /// Concrete trigger: capital-gains residuals from cost-spec interpolation
     /// land near the noise floor (`-0.0003183 USD`). Suppressing them hid a
     /// real arithmetic divergence — see #2034.
@@ -1082,10 +1096,10 @@ mod tests {
 
         let rendered = format_value(&Value::Inventory(Box::new(inv)), false, &ctx);
         assert_eq!(
-            rendered, "0.00 USD",
+            rendered, "-0.00 USD",
             "a sub-cent USD residual is a position the inventory HOLDS, so \
-             bean-query renders it at USD precision rather than blanking it; \
-             got {rendered:?}"
+             bean-query renders it at USD precision rather than blanking it, \
+             and keeps its sign; got {rendered:?}"
         );
     }
 

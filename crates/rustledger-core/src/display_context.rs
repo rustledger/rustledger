@@ -726,11 +726,13 @@ impl DisplayContext {
     #[must_use]
     pub fn quantize(&self, number: Decimal, currency: &str) -> Decimal {
         if let Some(dp) = self.get_precision(currency) {
-            let mut rounded = number.round_dp(dp);
-            // round_dp can leave a smaller scale than `dp` (it only rounds
-            // *down* the dp count). rescale pads up to exactly `dp`.
-            rounded.rescale(dp);
-            rounded
+            // `round_dp_python` pads to exactly `dp` (round_dp only ever
+            // reduces the scale) AND keeps the sign when a small negative
+            // rounds away — `-0.00495` at 2dp is `-0.00`, as bean-query
+            // renders it, not the unsigned `0.00` that `round_dp` returns.
+            // That sign is the only thing left telling the reader the balance
+            // is negative rather than flat.
+            crate::decimal::round_dp_python(number, dp)
         } else {
             number
         }
@@ -851,14 +853,12 @@ impl DisplayContext {
     /// when the currency is untracked.
     fn format_quantized(&self, number: Decimal, currency: &str) -> String {
         let raw = match self.get_precision(currency) {
-            Some(dp) => {
-                let mut rounded = number.round_dp(dp);
-                // `round_dp` leaves a smaller scale than `dp` when the
-                // input had fewer dp; `rescale` pads with trailing zeros
-                // to exactly `dp`.
-                rounded.rescale(dp);
-                rounded.to_string()
-            }
+            // Same rounding as [`Self::quantize`], via the shared
+            // `round_dp_python` — this used to be an inline copy of the
+            // round_dp+rescale pair, and the copy is what made the sign fix
+            // for `-0.00495 -> -0.00` land on `quantize` while every rendered
+            // Amount kept going through this one unchanged.
+            Some(dp) => crate::decimal::round_dp_python(number, dp).to_string(),
             None => number.normalize().to_string(),
         };
         if self.render_commas_for(currency) {

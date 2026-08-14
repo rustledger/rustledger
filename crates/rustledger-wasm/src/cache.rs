@@ -61,7 +61,10 @@ use crate::types::{Error, LedgerOptions};
 /// v13 (#2008): numberless cost specs archive `None`, not an invented zero.
 /// Loader v27 — and unlike v11/v12 this one changes archived VALUES, so a
 /// stale blob would serve the invented number rather than merely miss an error.
-pub const CACHE_VERSION: u32 = 13;
+/// v14: a literal `-0.00` parses to an UNSIGNED zero. Loader v28 — archived
+/// VALUES again, so a stale blob would serve `-0.00` where the build no longer
+/// produces one.
+pub const CACHE_VERSION: u32 = 14;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -87,7 +90,7 @@ pub const CACHE_VERSION: u32 = 13;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 27;
+const LOADER_CACHE_VERSION_PIN: u32 = 28;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

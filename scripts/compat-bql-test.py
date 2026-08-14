@@ -117,7 +117,13 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
     ("tests/compatibility/files/ledger2beancount/tests_lots.beancount", "last-balance-by-month"),
     ("tests/compatibility/files/ledger2beancount/tests_lots.beancount", "first-balance-by-month"),
     ("tests/compatibility/files/ledger2beancount/tests_lots.beancount", "balances-by-account"),
-    ("tests/compatibility/files/ledger2beancount/tests_lots.beancount", "journal-assets-at-cost"),
+    # `journal-assets-at-cost` used to sit here too. It no longer diverges:
+    # the row it differed on carries a `-0.0000000 MADEUP` position, which
+    # bean-query renders with the sign and rledger used to flatten to
+    # `0.0000000`. Once rounding stopped dropping the sign of a small
+    # negative, the interior-padding difference above turned out not to reach
+    # this query at all, and the pair matches byte-for-byte. The five entries
+    # that remain are the genuine padding cases.
     ("tests/compatibility/files/ledger2beancount/tests_lots.beancount", "journal-assets"),
     # `option "render_commas" "TRUE"` is honored by beancount and ignored by
     # bean-query. These three fixtures set it; we emit `1,234,567.89 USD` and

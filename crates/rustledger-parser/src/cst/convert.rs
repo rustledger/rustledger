@@ -729,7 +729,10 @@ fn convert_price(
         }
         let mut n = parse_decimal_token(node.number()?.text())?;
         if node_has_minus_before_number(node.syntax()) {
-            n = -n;
+            // Python's rule: negating a zero yields a POSITIVE zero, so a
+            // literal `-0.00` loads as `0.00` exactly as beancount parses it.
+            // A bare `-n` would keep the sign bit and render `-0.00`.
+            n = rustledger_core::negate_python(n);
         }
         Some(n)
     })?;
@@ -779,7 +782,10 @@ fn convert_balance(
         }
         let mut n = parse_decimal_token(node.number()?.text())?;
         if node_has_minus_before_number(node.syntax()) {
-            n = -n;
+            // Python's rule: negating a zero yields a POSITIVE zero, so a
+            // literal `-0.00` loads as `0.00` exactly as beancount parses it.
+            // A bare `-n` would keep the sign bit and render `-0.00`.
+            n = rustledger_core::negate_python(n);
         }
         Some(n)
     })?;
@@ -1421,7 +1427,9 @@ fn convert_amount_to_incomplete(
             if let Some(sign) = amt.sign()
                 && sign.is_minus()
             {
-                value = -value;
+                // See the sign note above — `negate_python` keeps a zero
+                // unsigned, matching beancount's parse of `-0.00`.
+                value = rustledger_core::negate_python(value);
             }
             Some(value)
         })

@@ -136,6 +136,63 @@ pub fn checked_div_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {
     Some(result)
 }
 
+/// Negate with Python `decimal`'s sign rule for zero.
+///
+/// Python defines unary minus as `0 - x`, so negating ANY zero yields a
+/// POSITIVE zero:
+///
+/// ```text
+///   -Decimal("0.00")   ==  0.00
+///   -Decimal("-0.00")  ==  0.00
+/// ```
+///
+/// `rust_decimal`'s `Neg` flips the sign bit unconditionally, so `-dec!(0.00)`
+/// is a signed zero that renders `-0.00`. beancount normalizes it away — a
+/// ledger posting written `-0.00 CNY` loads as `Decimal('0.00')` there, and
+/// bean-query prints `0.00` — while rledger's parser applies the sign with a
+/// bare `-n` and kept the `-0.00` all the way to the output.
+///
+/// A zero has no sign in bookkeeping; this is the canonical negation for any
+/// site that flips a parsed or computed amount.
+#[must_use]
+pub fn negate_python(number: Decimal) -> Decimal {
+    if number.is_zero() {
+        // `abs` clears the sign bit and keeps the scale — `normalize` would
+        // strip the scale too, and `+ ZERO` collapses it to `0`.
+        number.abs()
+    } else {
+        -number
+    }
+}
+
+/// Round to `dp` decimal places with Python `decimal`'s sign rule for zero.
+///
+/// Python's `quantize` keeps the sign when a small negative rounds away:
+///
+/// ```text
+///   Decimal("-0.00495").quantize(Decimal("0.01"))  ==  -0.00
+///   Decimal("-0.0000001").quantize(Decimal("0.01")) == -0.00
+/// ```
+///
+/// `rust_decimal`'s `round_dp` returns an UNSIGNED zero there, which loses
+/// the only information the cell still carries — that the underlying balance
+/// is negative rather than exactly zero. bean-query renders `-0.00 USD` for a
+/// `-0.00495 USD` position; rledger rendered `0.00 USD` and read as flat.
+///
+/// The result is padded to exactly `dp` (see the caller's note on `round_dp`
+/// only ever reducing the scale).
+#[must_use]
+pub fn round_dp_python(number: Decimal, dp: u32) -> Decimal {
+    let mut rounded = number.round_dp(dp);
+    rounded.rescale(dp);
+    if rounded.is_zero() && number.is_sign_negative() {
+        // Re-apply the sign the rounding dropped. Negating a positive zero is
+        // exactly how a signed zero is constructed in `rust_decimal`.
+        return -rounded;
+    }
+    rounded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,18 +323,27 @@ mod tests {
         }
     }
 
-    /// One deliberate difference from the table's source: Python has a signed
-    /// zero (`Decimal("-0.00") / 3` is `-0.00`), `rust_decimal` does not — it
-    /// has a single zero, so the sign cannot be carried and `0.00` is the
-    /// closest representable answer. Pinned so the gap is a recorded fact
-    /// rather than a surprise; it is a pre-existing property of the type, not
-    /// something this rule introduces.
+    /// `from_str` drops a literal minus on zero, but the TYPE can hold a
+    /// signed zero — the two are different things, and #2049 conflated them.
+    ///
+    /// That commit asserted "the type has no signed zero" from this same
+    /// `from_str` evidence. It does: `-dec!(0.00)` renders `-0.00`, which is
+    /// exactly the value the parser used to archive for a `-0.00` literal.
+    /// The narrower true statement is pinned here instead, since the division
+    /// table above depends on it: a `-0.00` DIVIDEND reaching
+    /// `checked_div_python_scale` via `from_str` is already unsigned, so the
+    /// `-0.00` Python would print is unreachable by that route.
     #[test]
-    fn negative_zero_is_unrepresentable_and_renders_unsigned() {
-        let neg_zero = Decimal::from_str("-0.00").expect("parses");
-        assert_eq!(neg_zero.to_string(), "0.00", "the type has no signed zero");
+    fn from_str_drops_the_sign_on_zero_though_the_type_can_carry_one() {
+        let parsed = Decimal::from_str("-0.00").expect("parses");
+        assert_eq!(parsed.to_string(), "0.00", "from_str drops it");
+        assert!(!parsed.is_sign_negative());
+
+        // ...but the type carries one when constructed by negation.
+        assert_eq!((-Decimal::from_str("0.00").unwrap()).to_string(), "-0.00");
+
         assert_eq!(
-            checked_div_python_scale(neg_zero, Decimal::from(3))
+            checked_div_python_scale(parsed, Decimal::from(3))
                 .expect("no overflow")
                 .to_string(),
             "0.00",
@@ -292,6 +358,57 @@ mod tests {
             None,
             "div-by-zero must not panic",
         );
+    }
+
+    /// Negating a zero must yield a POSITIVE zero, as Python does.
+    ///
+    /// `rust_decimal`'s `Neg` flips the sign bit unconditionally, so a bare
+    /// `-dec!(0.00)` renders `-0.00`. beancount loads a ledger posting written
+    /// `-0.00 CNY` as `Decimal('0.00')` and bean-query prints `0.00`, so the
+    /// signed zero was ours alone.
+    ///
+    /// Asserts on `to_string()` — `==` cannot see a sign on zero any more than
+    /// it can see scale (`dec!(0.00) == -dec!(0.00)`), so a value-level
+    /// assertion would pass against the bug.
+    #[test]
+    fn negating_a_zero_gives_an_unsigned_zero() {
+        assert_eq!((-dec!(0.00)).to_string(), "-0.00", "the bug itself");
+        assert_eq!(negate_python(dec!(0.00)).to_string(), "0.00");
+        assert_eq!(negate_python(-dec!(0.00)).to_string(), "0.00");
+        // Scale survives — `normalize()` would have flattened it to `0`.
+        assert_eq!(negate_python(dec!(0.0000)).to_string(), "0.0000");
+        // Non-zero negation is untouched.
+        assert_eq!(negate_python(dec!(1.25)).to_string(), "-1.25");
+        assert_eq!(negate_python(dec!(-1.25)).to_string(), "1.25");
+    }
+
+    /// Rounding a small negative to zero must KEEP the sign, as Python's
+    /// `quantize` does — the opposite direction from the negation rule above,
+    /// which is why one fix could not serve both.
+    ///
+    /// Expectations taken from `CPython`: `Decimal("-0.00495").quantize(
+    /// Decimal("0.01"))` is `-0.00`. bean-query renders `-0.00 USD` for such a
+    /// position; rledger rendered `0.00 USD`, which reads as an exactly flat
+    /// balance when it is not.
+    #[test]
+    fn rounding_a_small_negative_to_zero_keeps_the_sign() {
+        assert_eq!(dec!(-0.00495).round_dp(2).to_string(), "0.00", "the bug");
+
+        for (value, dp, want) in [
+            (dec!(-0.00495), 2, "-0.00"),
+            (dec!(-0.004), 2, "-0.00"),
+            (dec!(-0.0000001), 2, "-0.00"),
+            (dec!(0.00495), 2, "0.00"),
+            (dec!(-1.004), 2, "-1.00"),
+            (dec!(-0.00495), 5, "-0.00495"),
+            (dec!(1), 2, "1.00"),
+        ] {
+            assert_eq!(
+                round_dp_python(value, dp).to_string(),
+                want,
+                "{value} at {dp}dp",
+            );
+        }
     }
 
     /// The checked variants exist so BQL can map a value-range overflow to

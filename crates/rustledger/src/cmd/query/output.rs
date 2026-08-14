@@ -365,7 +365,7 @@ const fn position_renders_as_zero(pos: &rustledger_core::Position) -> bool {
 /// `545.4545455 COOL_FUND_USD` printed as `545`, while bean-query (which
 /// histograms the netted value it prints) chose 7dp. Aggregating first gives
 /// 2 samples at 0dp against 4 at 7dp, and the two agree.
-pub(super) fn rendered_inventory_positions(
+fn rendered_inventory_positions(
     inv: &rustledger_core::Inventory,
 ) -> Vec<rustledger_core::Position> {
     use rustledger_core::{Cost, Currency, Position};
@@ -1483,26 +1483,48 @@ mod tests {
             Value::String("Expenses:A".into()),
             Value::Number(dec!(5.000)),
         ]);
-        let mut buf: Vec<u8> = Vec::new();
-        write_text(&mixed, &mut buf, false, &ctx).expect("write_text ok");
-        let text = String::from_utf8(buf).expect("utf8");
-        assert!(
-            text.contains("-5.00") && text.contains("5.000"),
-            "each cell keeps its own scale; got:\n{text}"
+        // Exact cell tokens, not `contains`: `-5.000` CONTAINS `-5.00`, so a
+        // substring check would pass even if both cells had rendered at the
+        // wrong scale. Copilot's catch on #2051.
+        assert_eq!(
+            data_cells(&mixed, &ctx),
+            vec!["-5.00".to_string(), "5.000".to_string()],
+            "each cell keeps its own scale",
         );
     }
 
-    /// Render `result` and return the last whitespace-separated token of its
-    /// first data row — the right-aligned value cell.
-    fn last_cell(result: &rustledger_query::QueryResult, ctx: &DisplayContext) -> String {
+    /// Render `result` and return the last whitespace-separated token of every
+    /// data row — the right-aligned value cell of each.
+    ///
+    /// Finds the rows by skipping past the `-----` separator rather than
+    /// indexing a fixed line, so a change to the header layout cannot silently
+    /// point this at the wrong line (or at a header) — Copilot's catch on
+    /// #2051. An empty result yields an empty vec, which a caller comparing
+    /// against expected cells will fail on loudly.
+    fn data_cells(result: &rustledger_query::QueryResult, ctx: &DisplayContext) -> Vec<String> {
         let mut buf: Vec<u8> = Vec::new();
         write_text(result, &mut buf, false, ctx).expect("write_text ok");
         let text = String::from_utf8(buf).expect("utf8");
         text.lines()
-            .nth(2)
-            .and_then(|l| l.split_whitespace().last())
-            .unwrap_or_else(|| panic!("expected a data row; got:\n{text}"))
-            .to_string()
+            // Past the `-----` separator...
+            .skip_while(|l| !l.trim_start().starts_with('-'))
+            .skip(1)
+            // ...and stop at the blank line before the `N row(s)` footer,
+            // which is otherwise picked up as a data row yielding `row(s)`.
+            .take_while(|l| !l.trim().is_empty())
+            .filter_map(|l| l.split_whitespace().last().map(str::to_string))
+            .collect()
+    }
+
+    /// The single data cell of a one-row result.
+    fn last_cell(result: &rustledger_query::QueryResult, ctx: &DisplayContext) -> String {
+        let cells = data_cells(result, ctx);
+        assert_eq!(
+            cells.len(),
+            1,
+            "expected exactly one data row, got {cells:?}"
+        );
+        cells.into_iter().next().expect("checked non-empty")
     }
 
     // ─── Issue #1023: PIVOT BY currency precision ────────────────────────

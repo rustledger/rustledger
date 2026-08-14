@@ -395,6 +395,59 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
 # match percentage (the values are correct — only display scale differs),
 # but tracked as a distinct category so future bookkeeping stays honest.
 KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
+    # `beancount_lazy_plugins`' valuation plugin leaves a phantom lot behind;
+    # we deliberately do not, per #2018.
+    #
+    # Upstream posts a ROUNDED quantity but accumulates the UNROUNDED one:
+    #
+    #     modified_posting = ... round_down(total_in_mapped_currency, 7) ...
+    #     balances[posting.account] += total_in_mapped_currency   # unrounded
+    #
+    # The two drift by up to 1e-7 per partial sell. On `cool_fund_example`
+    # that makes the final close-out post `-545.4545454` against our
+    # `-545.4545455`, and beancount finishes holding `0.0000001
+    # COOL_FUND_USD` in an account the user emptied.
+    #
+    # Replaying the plugin's own arithmetic in CPython reproduces beancount
+    # exactly, unrounded balance and all — so this is upstream's behavior, not
+    # an accident of anyone's decimal type. It is NOT the `rust_decimal`
+    # ceiling either: these are ten-digit values, and the residue is born from
+    # the rounding policy rather than from precision running out. (The genuine
+    # ceiling case is `tests_data_output_some_fund_output`, a different file.)
+    #
+    # rledger decrements the lot by what it POSTED. That is #2018, closed:
+    # decrementing by the unrounded quotient let our idea of the lot drift
+    # below the balance the ledger shows, and a later full close-out then
+    # posted a short lot and left exactly the kind of residual position seen
+    # here. Matching upstream would reintroduce it.
+    #
+    # Filed under the RUST list because we are the side whose output differs
+    # from bean-query. Pinned per (file, query) rather than with `"*"`: only
+    # 22 of the 51 runs across these three files diverge, and a blanket mask
+    # would swallow a future regression on the other 29. Revisit if upstream
+    # starts accumulating the rounded quantity.
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_cool_fund_example.beancount", "balance-running-assets"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_cool_fund_example.beancount", "first-balance-by-month"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_cool_fund_example.beancount", "journal-assets"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_cool_fund_example.beancount", "sum-number-by-currency"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_output.beancount", "balance-running-assets"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_output.beancount", "balances-by-account"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_output.beancount", "first-balance-by-month"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_output.beancount", "journal-assets"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_output.beancount", "journal-assets-at-cost"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_output.beancount", "journal-assets-at-units"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_output.beancount", "last-balance-by-month"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_output.beancount", "position-by-date"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_output.beancount", "prices-from-plugin-by-date"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_output.beancount", "sum-position-by-account"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_output_cool_fund_output.beancount", "weight-by-date"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount", "first-balance-by-month"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount", "journal-assets"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount", "journal-assets-at-units"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount", "last-balance-by-month"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount", "sum-number-by-currency"),
+    ("tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount", "sum-position-by-account"),
+
     # `capital_gains_classifier` RECOMPUTES the gain upstream; we reclassify
     # the posting that was already interpolated.
     #

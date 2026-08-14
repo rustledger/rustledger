@@ -770,15 +770,36 @@ fn parse_valuation_amount(value: &MetaValueData) -> Option<(Decimal, String)> {
 }
 
 /// Round up with given precision.
+/// Python `decimal`'s `ROUND_UP`: away from zero, NOT toward +infinity.
+///
+/// The upstream plugin rounds a cash INFLOW with `ROUND_UP` and an OUTFLOW
+/// with `ROUND_DOWN` (`valuation/__init__.py`), so the fund never credits
+/// more units than the cash bought. `ceil`/`floor` agree with Python for
+/// positive values and are exactly INVERTED for negative ones, which is the
+/// outflow path — so an outflow of `-6000/11` rounded to `-545.4545455`
+/// here against beancount's `-545.4545454`.
+///
+/// That one digit is the whole of the "1E-7 residue" this fixture is known
+/// for: beancount's three legs sum to `0.0000001` because of its own
+/// truncation, and rledger's summed to zero. It is not a `rust_decimal`
+/// precision limit — these are ten-digit values.
 fn round_up(value: Decimal, decimals: u32) -> Decimal {
     let scale = Decimal::new(1, decimals);
-    (value / scale).ceil() * scale
+    let scaled = value / scale;
+    // Away from zero.
+    let rounded = if value.is_sign_negative() {
+        scaled.floor()
+    } else {
+        scaled.ceil()
+    };
+    rounded * scale
 }
 
 /// Round down with given precision.
+/// Python `decimal`'s `ROUND_DOWN`: toward zero — see [`round_up`].
 fn round_down(value: Decimal, decimals: u32) -> Decimal {
     let scale = Decimal::new(1, decimals);
-    (value / scale).floor() * scale
+    (value / scale).trunc() * scale
 }
 
 /// Format a decimal number, stripping trailing zeros.
@@ -792,11 +813,16 @@ fn format_decimal(d: Decimal) -> String {
 }
 
 /// Format a decimal with fixed precision (for synthetic amounts).
+/// Render at EXACTLY `decimals` places, matching Python's
+/// `round(Decimal, decimals)`.
+///
+/// This used to `trim_end_matches('0')`, which does the opposite of what its
+/// own comment claimed ("keep at least 7 decimal places") — it stripped every
+/// trailing zero, so an inflow of `1000` emitted `1000` where beancount emits
+/// `1000.0000000`. The values were equal; the scale was not, and the scale is
+/// what the position and its cost render at.
 fn format_decimal_fixed(d: Decimal, decimals: u32) -> String {
-    let scaled = d.round_dp(decimals);
-    let s = format!("{:.1$}", scaled, decimals as usize);
-    // Trim trailing zeros but keep at least 7 decimal places for consistency
-    s.trim_end_matches('0').to_string()
+    format!("{:.1$}", d.round_dp(decimals), decimals as usize)
 }
 
 #[cfg(test)]
@@ -909,20 +935,41 @@ mod tests {
 
     #[test]
     fn test_round_up() {
+        // `ROUND_UP` is AWAY FROM ZERO, not toward +infinity. The two agree on
+        // positives, which is all this test covered while the helper used
+        // `ceil` — so the direction could be wrong for negatives with the
+        // suite green. Reference values from CPython's `decimal`.
         let value = Decimal::new(12_345_678, 8); // 0.12345678
-        let rounded = round_up(value, 7);
-        assert!(rounded >= value);
-        // 0.12345678 rounded up to 7 decimals = 0.1234568
-        assert_eq!(rounded, Decimal::new(1_234_568, 7));
+        assert_eq!(round_up(value, 7), Decimal::new(1_234_568, 7));
+        assert!(round_up(value, 7) >= value, "positives grow");
+
+        let negative = Decimal::new(-12_345_678, 8); // -0.12345678
+        assert_eq!(
+            round_up(negative, 7),
+            Decimal::new(-1_234_568, 7),
+            "away from zero, so a negative gets MORE negative",
+        );
+        // Deliberately not `>= negative`: that assertion encodes the
+        // toward-+infinity reading this helper is not.
+        assert!(round_up(negative, 7).abs() >= negative.abs());
     }
 
     #[test]
     fn test_round_down() {
+        // `ROUND_DOWN` is TOWARD ZERO — see `test_round_up`. This is the
+        // direction the sell path takes, and the one that made the
+        // `cool_fund` close-out differ from beancount in the last digit.
         let value = Decimal::new(12_345_678, 8); // 0.12345678
-        let rounded = round_down(value, 7);
-        assert!(rounded <= value);
-        // 0.12345678 rounded down to 7 decimals = 0.1234567
-        assert_eq!(rounded, Decimal::new(1_234_567, 7));
+        assert_eq!(round_down(value, 7), Decimal::new(1_234_567, 7));
+        assert!(round_down(value, 7) <= value, "positives shrink");
+
+        let negative = Decimal::new(-12_345_678, 8); // -0.12345678
+        assert_eq!(
+            round_down(negative, 7),
+            Decimal::new(-1_234_567, 7),
+            "toward zero, so a negative gets LESS negative",
+        );
+        assert!(round_down(negative, 7).abs() <= negative.abs());
     }
 
     #[test]

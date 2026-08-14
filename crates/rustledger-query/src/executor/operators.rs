@@ -376,7 +376,14 @@ impl Executor<'_> {
                 }
             }
             BinaryOperator::Mul => self.arithmetic_op(left, right, Decimal::checked_mul),
-            BinaryOperator::Div => self.arithmetic_op(left, right, Decimal::checked_div),
+            // Python's ideal-exponent rule, same as AVG — see
+            // `rustledger_core::checked_div_python_scale`. Unlike `avg`, this
+            // operator DOES exist in bean-query, so the divergence was
+            // user-visible on both sides: `0.00 / 4` rendered `0` against its
+            // `0.00`, and `7 / 2` rendered `3.50` against its `3.5`.
+            BinaryOperator::Div => {
+                self.arithmetic_op(left, right, rustledger_core::checked_div_python_scale)
+            }
             BinaryOperator::Mod => self.modulo_op(left, right),
         }
     }

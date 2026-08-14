@@ -1917,3 +1917,39 @@ fn avg_follows_python_decimal_scale_in_both_directions() {
         "-56.555",
     );
 }
+
+/// BQL's `/` operator follows the same rule as AVG.
+///
+/// Unlike `avg(decimal)`, division DOES exist in bean-query, so this one is a
+/// compat surface and the divergence was user-visible in both directions:
+/// `0.00 / 4` rendered `0` against bean-query's `0.00`, and `7 / 2` rendered
+/// `3.50` against its `3.5`. Verified against bean-query 3.2.3 on each case
+/// below.
+///
+/// Leaving the operator on raw `checked_div` while AVG used the rule would
+/// have put two different answers for the same arithmetic in one engine.
+#[test]
+fn the_division_operator_matches_bean_query_scale() {
+    let directives = vec![Directive::Transaction(
+        Transaction::new(date(2024, 1, 2), "t")
+            .with_flag('*')
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(-1), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(1), "USD"))),
+    )];
+
+    for (expr, want) in [
+        ("0.00 / 4", "0.00"),
+        ("0.000 / 3", "0.000"),
+        ("7 / 2", "3.5"),
+        ("1.00 / 2", "0.50"),
+        ("1 / 3", "0.3333333333333333333333333333"),
+    ] {
+        let mut executor = Executor::new(&directives);
+        let query = parse(&format!("SELECT {expr}")).unwrap();
+        let result = executor.execute(&query).unwrap();
+        let Value::Number(n) = &result.rows[0][0] else {
+            panic!("expected a Number for {expr}, got {:?}", result.rows[0][0]);
+        };
+        assert_eq!(n.to_string(), want, "{expr}");
+    }
+}

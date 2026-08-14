@@ -304,6 +304,16 @@ impl QueryResult {
     /// Returns `&[Value]` rather than `&Vec<Value>` so callers aren't
     /// tied to the specific container type.
     #[must_use]
+    /// No production consumer as of the #988/#1023 hint removal.
+    ///
+    /// The sidecar existed so the text renderer could quantize a `SUM` cell
+    /// by its GROUP BY currency. bean-query does not quantize a Decimal
+    /// column at all, so that renderer path is gone and only tests read this
+    /// now. It is kept rather than removed because dropping it is a public
+    /// API change to `QueryResult` and would rewrite the sidecar-survival
+    /// assertions in `pipeline_invariants.rs` — worth doing, worth doing on
+    /// its own. Flagged here so the next reader knows it is unused rather
+    /// than load-bearing.
     pub fn group_key(&self, row_idx: usize) -> Option<&[Value]> {
         self.row_group_keys.get(row_idx).and_then(|k| k.as_deref())
     }

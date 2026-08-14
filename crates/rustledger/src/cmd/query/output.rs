@@ -97,52 +97,23 @@ fn write_text<W: Write>(
         }
     }
 
-    // Resolve per-row currency hints once. The hint feeds both the
-    // width-calculation pass and the print pass; computing per-pass
-    // would duplicate the lookup.
+    // No per-cell currency hint. bean-query's `DecimalRenderer` renders a
+    // naked Decimal at its INTRINSIC scale and never quantizes — it pads only
+    // for decimal-point alignment — so any per-currency rounding here is a
+    // divergence, in either direction.
     //
-    // Lifetime: the `&str` entries borrow from `result.row_group_keys`.
-    // Safe because `result` is `&`-borrowed for the rest of this
-    // function — any future refactor that mutates `result` mid-stream
-    // would break this and the borrow checker would point at the cache.
+    // #988 and #1023 both added one, to compensate for SUM losing scale
+    // during accumulation. #2046 fixed that at the source (`add_python_scale`
+    // — `rust_decimal` dropped a zero operand's scale), which left the hints
+    // padding output that was already correct. Measured against bean-query
+    // 3.2.3:
     //
-    // Short-circuit: when no row has a GROUP BY key (the common case for
-    // non-aggregate queries), every hint would be `None` — skip the
-    // allocation entirely. Access via `currency_hints.get(i).copied().flatten()`
-    // tolerates the empty Vec.
-    let currency_hints: Vec<Option<&str>> = if result.has_aggregate_rows() {
-        (0..result.rows.len())
-            .map(|i| currency_hint_for_row(result, i, ctx))
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Resolve per-column currency hints from column names (issue #1023).
+    //     SELECT currency, SUM(number) ...   py `-900`   rs `-900.00`
+    //     PIVOT BY ... (a scale-0 cell)      py `3`      rs `3.00`
     //
-    // PIVOT BY currency reshapes rows: the GROUP BY currency moves into
-    // column position, and each pivoted column's *name* is a currency
-    // code (e.g. "USD", "JPY"). The pivot path uses `add_row` (not
-    // `add_aggregate_row`), so the per-row sidecar is `None` for those
-    // rows — we'd lose the precision context if we relied on
-    // `currency_hints` alone.
-    //
-    // Same false-positive guard as `currency_hint_for_row`: the column
-    // name must both look like a currency AND have tracked precision.
-    // The precision check is what stops a literal column named "USD"
-    // (when no USD has been observed) from routing through
-    // `DisplayContext::format`'s normalize path and stripping zeros.
-    let column_currency_hints: Vec<Option<&str>> = result
-        .columns
-        .iter()
-        .map(|col| {
-            if looks_like_currency(col) && ctx.get_precision(col).is_some() {
-                Some(col.as_str())
-            } else {
-                None
-            }
-        })
-        .collect();
+    // The second is the #1023 shape specifically: bean-query renders `-5.00`
+    // and `5.000` in the SAME pivoted column, per cell, which is the clearest
+    // statement that the column has no shared precision to impose.
 
     // Calculate column widths using per-column contexts. Each column is
     // clamped to `MAX_COLUMN_WIDTH` to keep the dynamic width passed to
@@ -153,11 +124,10 @@ fn write_text<W: Write>(
         .map(|c| c.len().min(MAX_COLUMN_WIDTH))
         .collect();
 
-    for (row_idx, row) in result.rows.iter().enumerate() {
+    for row in &result.rows {
         for (i, value) in row.iter().enumerate() {
             let col_ctx = col_contexts.get(i).unwrap_or(ctx);
-            let cell_hint = resolve_cell_hint(&currency_hints, &column_currency_hints, row_idx, i);
-            let len = format_value_with_hint(value, numberify, col_ctx, cell_hint).len();
+            let len = format_value(value, numberify, col_ctx).len();
             if i < widths.len() && len > widths[i] {
                 widths[i] = len.min(MAX_COLUMN_WIDTH);
             }
@@ -197,14 +167,13 @@ fn write_text<W: Write>(
     writeln!(writer)?;
 
     // Print rows using per-column display contexts
-    for (row_idx, row) in result.rows.iter().enumerate() {
+    for row in &result.rows {
         for (i, value) in row.iter().enumerate() {
             if i > 0 {
                 write!(writer, "  ")?;
             }
             let col_ctx = col_contexts.get(i).unwrap_or(ctx);
-            let cell_hint = resolve_cell_hint(&currency_hints, &column_currency_hints, row_idx, i);
-            let formatted = format_value_with_hint(value, numberify, col_ctx, cell_hint);
+            let formatted = format_value(value, numberify, col_ctx);
             if i < widths.len() {
                 // Right-align numeric columns to match Python beancount
                 if i < is_numeric_col.len() && is_numeric_col[i] {
@@ -315,23 +284,13 @@ fn update_column_context(col_ctx: &mut DisplayContext, value: &Value, ledger_ctx
                 }
             }
         }
-        // For naked Decimal columns (e.g. SUM(number), cost_number),
-        // observe the column's actual values into the `__default__`
-        // bucket. Matches Python `bean-query`'s `DecimalRenderer`, which
-        // tracks per-column dp independently of the per-currency dctx.
-        // Pre-fix this only inherited from the ledger ctx, which made
-        // the column inherit precision from unrelated currencies (e.g.
-        // a column of USD `cost_number` values rendered at VBMPX's 3dp
-        // precision).
-        //
-        // The ledger-ctx inheritance happens ONCE per column at the
-        // call site (write_text) — see the `col_inherited` guard. Doing
-        // it here per-cell would inflate the ledger's histogram by N
-        // (number of rows) under the new add-merge semantics of
-        // `update_from`.
-        Value::Number(n) => {
-            col_ctx.update(*n, rustledger_core::DEFAULT_CURRENCY);
-        }
+        // A naked Decimal contributes NOTHING to the per-column histogram.
+        // It used to feed the `__default__` bucket so the column could carry
+        // its own dp, but nothing reads that: `format_value` renders a
+        // `Value::Number` through `DisplayContext::format_default`, which
+        // consults only the commas flag and never a precision. The bucket was
+        // written on every cell and read by no one once the #988/#1023 hints
+        // were removed.
         _ => {}
     }
 }
@@ -389,114 +348,6 @@ const fn position_renders_as_zero(pos: &rustledger_core::Position) -> bool {
     // until the inventory itself drops them.
     pos.units.number.is_zero()
 }
-
-fn looks_like_currency(s: &str) -> bool {
-    if s.len() < 2 || s.len() > 24 {
-        return false;
-    }
-    let mut chars = s.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_uppercase() {
-        return false;
-    }
-    chars.all(|c| {
-        c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '\'' | '.' | '_' | '-')
-    })
-}
-
-/// Find the per-row currency hint for issue #988 quantization.
-///
-/// Scans the row's GROUP BY key (from `QueryResult::group_key`) for the
-/// first string that both *looks* like a currency AND has tracked precision
-/// in the active `DisplayContext`. The precision check is essential — see
-/// `looks_like_currency`'s docstring for why a heuristic-only filter would
-/// regress output.
-///
-/// Multi-currency-column GROUP BY (rare but possible) takes the *first*
-/// match in iteration order — see `QueryResult::add_aggregate_row`'s
-/// docstring for the contract.
-fn currency_hint_for_row<'a>(
-    result: &'a rustledger_query::QueryResult,
-    row_idx: usize,
-    ctx: &DisplayContext,
-) -> Option<&'a str> {
-    result.group_key(row_idx).and_then(|key_values| {
-        key_values.iter().find_map(|v| match v {
-            Value::String(s)
-                if looks_like_currency(s) && ctx.get_precision(s.as_str()).is_some() =>
-            {
-                Some(s.as_str())
-            }
-            _ => None,
-        })
-    })
-}
-
-/// Combine row sidecar and column-name hints into a single per-cell hint.
-///
-/// Precedence: **row hint wins** over column-name fallback. The row sidecar
-/// came from the actual GROUP BY key (`add_aggregate_row`), so it's a more
-/// authoritative signal than the column name (a heuristic from
-/// `looks_like_currency`).
-///
-/// Pinning the precedence in one helper guarantees the width-calculation
-/// pass and the print pass agree — they MUST, otherwise rendered widths
-/// don't match the rendered values they were sized for.
-fn resolve_cell_hint<'a>(
-    row_hints: &[Option<&'a str>],
-    col_hints: &[Option<&'a str>],
-    row_idx: usize,
-    col_idx: usize,
-) -> Option<&'a str> {
-    row_hints
-        .get(row_idx)
-        .copied()
-        .flatten()
-        .or_else(|| col_hints.get(col_idx).copied().flatten())
-}
-
-/// Format a value with optional GROUP BY currency hint (issue #988).
-///
-/// When `currency_hint` is set and the value is a `Value::Number` (typically
-/// produced by an aggregate like `SUM(number)` over a `GROUP BY currency`),
-/// route through `DisplayContext::format` for per-currency quantization so
-/// the rendered scale matches bean-query (e.g. `0.00` not `0.000`). Without
-/// the hint, behavior is identical to `format_value`.
-///
-/// The hint is *only* consulted by the text renderer — JSON / CSV /
-/// beancount output paths still use `format_value`, keeping their values
-/// lossless (issue #988 acceptance criterion #4).
-///
-/// The caller is responsible for ensuring the hint resolves to a currency
-/// with tracked precision (`ctx.get_precision(currency).is_some()`) — pass
-/// `None` otherwise. See `currency_hint_for_row` for the canonical
-/// extraction path.
-pub(super) fn format_value_with_hint(
-    value: &Value,
-    numberify: bool,
-    ctx: &DisplayContext,
-    currency_hint: Option<&str>,
-) -> String {
-    if let (Value::Number(n), Some(currency)) = (value, currency_hint) {
-        // Debug-only tripwire for the contract documented above: fire if a
-        // future caller passes a hint without filtering through the
-        // precision gate first. Only meaningful inside this branch — for
-        // non-Number values the hint is ignored, so a "bad" hint there is
-        // harmless. Release builds skip the check; the worst observable
-        // effect is the strip-trailing-zeros regression that the gate
-        // was designed to prevent.
-        debug_assert!(
-            ctx.get_precision(currency).is_some(),
-            "format_value_with_hint called with currency {currency:?} lacking \
-             tracked precision in the DisplayContext — would silently strip \
-             trailing zeros via the normalize() fallback. Filter via \
-             currency_hint_for_row first."
-        );
-        return ctx.format(*n, currency);
-    }
-    format_value(value, numberify, ctx)
-}
-
 /// Collapse an inventory's raw lots into the positions that are actually
 /// RENDERED: one per `(units currency, cost key)`, summed, in display order.
 ///
@@ -514,7 +365,7 @@ pub(super) fn format_value_with_hint(
 /// `545.4545455 COOL_FUND_USD` printed as `545`, while bean-query (which
 /// histograms the netted value it prints) chose 7dp. Aggregating first gives
 /// 2 samples at 0dp against 4 at 7dp, and the two agree.
-fn rendered_inventory_positions(
+pub(super) fn rendered_inventory_positions(
     inv: &rustledger_core::Inventory,
 ) -> Vec<rustledger_core::Position> {
     use rustledger_core::{Cost, Currency, Position};
@@ -1264,109 +1115,6 @@ mod tests {
     // hint), preserving the unquantized value (AC #4: lossless non-text
     // output).
 
-    /// Heuristic detection of currency-shaped strings (used by the text
-    /// renderer to find the GROUP BY currency in a row's sidecar).
-    #[test]
-    fn test_looks_like_currency_accepts_typical_currencies() {
-        assert!(looks_like_currency("USD"));
-        assert!(looks_like_currency("EUR"));
-        assert!(looks_like_currency("BTC"));
-        assert!(looks_like_currency("V0AAA"));
-        assert!(looks_like_currency("X.Y"));
-        assert!(looks_like_currency("ABC-123"));
-    }
-
-    #[test]
-    fn test_looks_like_currency_rejects_non_currencies() {
-        assert!(!looks_like_currency(""));
-        assert!(!looks_like_currency("U")); // single char (real currencies are 2+)
-        assert!(!looks_like_currency("usd")); // lowercase first
-        assert!(!looks_like_currency("123")); // starts with digit
-        assert!(!looks_like_currency("hello world")); // space
-        assert!(!looks_like_currency(&"A".repeat(25))); // too long
-    }
-
-    /// Pinning the format dispatch: a `Value::Number` cell rendered with
-    /// a currency hint goes through `DisplayContext::format(n, currency)`,
-    /// not `format_default(n)`. Without the hint, behavior is unchanged
-    /// from `format_value`.
-    ///
-    /// With the hint, the rendered scale is `max(value_scale, currency_dp)`
-    /// — so a scale-0 value (`dec!(0)`) is padded up to USD's tracked 2dp,
-    /// while a scale-3 value (`dec!(0.000)`) is preserved at 3dp because
-    /// the currency hint only pads up; it never quantizes down (closes #1103).
-    #[test]
-    fn test_format_value_with_hint_routes_number_through_per_currency_ctx() {
-        let mut ctx = DisplayContext::new();
-        // Seed USD precision at 2dp by observing typical USD amounts.
-        ctx.update(dec!(1.00), "USD");
-        ctx.update(dec!(2.00), "USD");
-        ctx.update(dec!(3.00), "USD");
-
-        // Scale-0 input: the hint pads up to USD's 2dp.
-        let pad_value = Value::Number(dec!(0));
-        let padded = format_value_with_hint(&pad_value, false, &ctx, Some("USD"));
-        assert_eq!(
-            padded, "0.00",
-            "scale-0 value should pad up to USD's 2dp, got {padded:?}"
-        );
-
-        // Scale-3 input: the hint preserves the higher scale (post-#1103).
-        let high_scale_value = Value::Number(dec!(0.000));
-        let preserved = format_value_with_hint(&high_scale_value, false, &ctx, Some("USD"));
-        assert_eq!(
-            preserved, "0.000",
-            "scale-3 value should preserve scale (max(3, 2) = 3), got {preserved:?}"
-        );
-
-        // Without the hint, fall through to format_value's default (preserves
-        // the natural 3dp scale from rust_decimal).
-        let without_hint = format_value_with_hint(&high_scale_value, false, &ctx, None);
-        assert_eq!(
-            without_hint, "0.000",
-            "expected default-format to keep rust_decimal natural scale, got {without_hint:?}"
-        );
-    }
-
-    /// Critical regression: `DisplayContext::format(n, currency)` falls
-    /// back to `n.normalize()` when the currency has no tracked precision,
-    /// which STRIPS trailing zeros. So a false-positive hint isn't a no-op
-    /// — it would render `0.000` as `0`, making output WORSE than the
-    /// pre-fix state. The gate lives in `currency_hint_for_row` (only
-    /// returns hints for currencies that pass `ctx.get_precision().is_some()`);
-    /// this test pins that contract end-to-end.
-    #[test]
-    fn test_currency_hint_for_row_filters_untracked_currencies() {
-        use rustledger_query::QueryResult;
-
-        let mut ctx = DisplayContext::new();
-        ctx.update(dec!(1.00), "USD");
-        ctx.update(dec!(2.00), "USD");
-
-        let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
-        // Row 0: GROUP BY key contains tracked USD → hint returned.
-        result.add_aggregate_row(
-            vec![Value::String("USD".into()), Value::Number(dec!(0.000))],
-            vec![Value::String("USD".into())],
-        );
-        // Row 1: GROUP BY key contains MADEUP — passes shape check but
-        // has no tracked precision → hint MUST be filtered out.
-        result.add_aggregate_row(
-            vec![Value::String("MADEUP".into()), Value::Number(dec!(0.000))],
-            vec![Value::String("MADEUP".into())],
-        );
-
-        let usd_hint = currency_hint_for_row(&result, 0, &ctx);
-        let madeup_hint = currency_hint_for_row(&result, 1, &ctx);
-
-        assert_eq!(usd_hint, Some("USD"));
-        assert_eq!(
-            madeup_hint, None,
-            "untracked currency must NOT be returned as a hint — would cause \
-             DisplayContext::format to strip trailing zeros via normalize()"
-        );
-    }
-
     // ─── AC #4: lossless CSV / JSON / beancount output ───────────────────
     //
     // The fix MUST NOT bleed into non-text renderers. Aggregate values
@@ -1474,51 +1222,6 @@ mod tests {
         );
     }
 
-    /// Text-renderer aggregate cells use the currency hint to PAD short
-    /// values up to the currency's tracked precision. A scale-0 input
-    /// rendered under a USD (2dp) hint becomes `0.00`, not the natural
-    /// `0`. The hint does NOT quantize down — scale-3 inputs preserve
-    /// their scale, matching bean-query (closes #1103). The "pad up"
-    /// behavior is what makes `SUM(0.00) → 0.00` instead of `0`
-    /// (the #954 fix that this code path was added for).
-    #[test]
-    fn test_text_aggregate_output_pads_via_currency_hint() {
-        use rustledger_query::QueryResult;
-
-        let mut ctx = DisplayContext::new();
-        ctx.update(dec!(1.00), "USD");
-        ctx.update(dec!(2.00), "USD");
-        ctx.update(dec!(3.00), "USD");
-
-        // Scale-0 input under USD's 2dp hint pads up.
-        let mut result = QueryResult::new(vec!["currency".into(), "sum".into()]);
-        result.add_aggregate_row(
-            vec![Value::String("USD".into()), Value::Number(dec!(0))],
-            vec![Value::String("USD".into())],
-        );
-
-        let mut buf: Vec<u8> = Vec::new();
-        write_text(&result, &mut buf, false, &ctx).expect("text ok");
-        let text = String::from_utf8(buf).expect("utf8");
-
-        // Anchor on the data-row's SUM cell exactly. `text.contains("0.00")`
-        // would pass for a (now-incorrect) "0.000" rendering because "0.00"
-        // is a substring of "0.000"; pinning the right-aligned cell token
-        // catches both directions.
-        let data_row = text
-            .lines()
-            .find(|l| l.contains("USD"))
-            .unwrap_or_else(|| panic!("expected USD data row; raw output:\n{text}"));
-        let sum_cell = data_row
-            .split_whitespace()
-            .last()
-            .expect("non-empty data row");
-        assert_eq!(
-            sum_cell, "0.00",
-            "scale-0 input should pad up to USD's 2dp via hint; got {sum_cell:?} in {data_row:?}"
-        );
-    }
-
     /// End-to-end integration test (the canary the issue's compat
     /// harness would fire). Drives a real BQL query
     /// `SELECT currency, SUM(number) GROUP BY currency` through the
@@ -1526,13 +1229,12 @@ mod tests {
     /// output is quantized to USD's tracked precision (2dp) instead of
     /// `rust_decimal`'s natural 3dp.
     ///
-    /// This is the only test in the file that exercises the FULL
-    /// pipeline — Executor populates `row_group_keys`, `write_text`
-    /// reads via `currency_hint_for_row`, format dispatches through
-    /// `DisplayContext::format`. A regression that breaks the wiring
-    /// (e.g. someone reverting `add_aggregate_row` to `add_row` in
-    /// the executor) would fire here even if the helper-level tests
-    /// stay green.
+    /// This is the only test in the file that exercises the FULL pipeline:
+    /// Executor aggregates, `write_text` renders. It used to also pin the
+    /// hint wiring (`row_group_keys` -> `currency_hint_for_row` ->
+    /// `DisplayContext::format`); that path is gone, and what remains pinned
+    /// is the thing that actually matters — the scale SUM produces survives
+    /// to the output verbatim.
     #[test]
     fn test_e2e_sum_group_by_currency_text_output_matches_per_currency_precision() {
         use rustledger_core::{Amount, Directive, Posting, Transaction};
@@ -1540,17 +1242,10 @@ mod tests {
 
         let date = |y, m, d| rustledger_core::naive_date(y, m, d).unwrap();
 
-        // Build a tiny ledger where SUM(number) GROUP BY currency on USD
-        // ends up with a value at a scale ≤ USD's tracked 2dp. The
-        // `0.000` and `0.0` inputs collapse to a zero whose scale ≤ 2 in
-        // rust_decimal Add semantics, and a USD-tracked DisplayContext
-        // at 2dp pads up to `0.00` via `max(value_scale, currency_dp)`.
-        // After PR #1106, the hint pads up but never quantizes down, so
-        // a SUM result with scale > 2 would render at its higher scale
-        // — that case is covered by the per-currency unit tests in
-        // `display_context.rs`; this e2e test verifies the executor
-        // populates `row_group_keys` so the renderer's hint resolution
-        // can route the value through the per-currency context.
+        // The addends are `5.00, -5.00, 0.000, 0.0`, so the sum carries the
+        // widest scale — 3 — and renders `0.000`. USD is tracked at 2dp here
+        // deliberately: the renderer must NOT reach for that, in either
+        // direction. bean-query 3.2.3 gives `0.000` on this ledger.
         let directives = vec![
             Directive::Transaction(
                 Transaction::new(date(2024, 1, 15), "Coffee")
@@ -1711,96 +1406,103 @@ mod tests {
         );
     }
 
-    /// Multi-column GROUP BY: when the key has both a non-currency
-    /// column (account) and a currency column, the renderer should
-    /// pick the currency-shaped string regardless of position. Pins
-    /// the contract documented on `add_aggregate_row`.
+    /// A naked Decimal renders at its INTRINSIC scale, whatever the column is
+    /// called and whatever precision the currency has.
+    ///
+    /// This replaces four tests that pinned the opposite — the #988 row hint
+    /// and the #1023 column-name fallback, both of which quantized a
+    /// `Value::Number` to the currency's tracked dp. Both were compensating
+    /// for SUM losing scale during accumulation, which #2046 fixed at the
+    /// source; once the arithmetic was right they only padded output that
+    /// already matched.
+    ///
+    /// bean-query 3.2.3 does not quantize a Decimal column at all — its
+    /// `DecimalRenderer` pads for decimal-point ALIGNMENT and nothing else.
+    /// Measured on ledgers whose USD precision is 2dp:
+    ///
+    /// ```text
+    /// SELECT currency, SUM(number) GROUP BY currency   ->  EUR  -900
+    /// PIVOT BY account, currency (a scale-0 cell)      ->  Expenses:B  3
+    /// ```
+    ///
+    /// and, most directly, a single pivoted USD column holding two different
+    /// scales at once:
+    ///
+    /// ```text
+    ///                USD
+    /// Assets:Bank  -5.00
+    /// Expenses:A    5.000
+    /// ```
+    ///
+    /// A column carrying `-5.00` and `5.000` together cannot have a shared
+    /// precision to impose, which is the clearest statement of the rule.
     #[test]
-    fn test_currency_hint_for_row_finds_currency_in_multi_column_group_by_key() {
+    fn a_decimal_column_is_not_quantized_by_currency() {
         use rustledger_query::QueryResult;
 
         let mut ctx = DisplayContext::new();
+        // USD tracked at 2dp, JPY at 0dp — neither may reach a Number cell.
         ctx.update(dec!(1.00), "USD");
         ctx.update(dec!(2.00), "USD");
+        ctx.update(dec!(100), "JPY");
 
-        let mut result = QueryResult::new(vec!["account".into(), "currency".into(), "sum".into()]);
-        // Key order: [account="Assets:Bank", currency="USD"]. account
-        // doesn't pass `looks_like_currency` (lowercase chars + colon),
-        // so the iterator skips to the second key element and picks USD.
-        result.add_aggregate_row(
-            vec![
-                Value::String("Assets:Bank".into()),
-                Value::String("USD".into()),
-                Value::Number(dec!(0.000)),
-            ],
-            vec![
-                Value::String("Assets:Bank".into()),
-                Value::String("USD".into()),
-            ],
+        // Shape 1: the #988 row sidecar — GROUP BY currency puts "USD" in the
+        // row key, which used to pad the SUM cell to 2dp.
+        let mut grouped = QueryResult::new(vec!["currency".into(), "sum".into()]);
+        grouped.add_aggregate_row(
+            vec![Value::String("USD".into()), Value::Number(dec!(0))],
+            vec![Value::String("USD".into())],
+        );
+        assert_eq!(
+            last_cell(&grouped, &ctx),
+            "0",
+            "a scale-0 SUM must not inherit USD's 2dp from the GROUP BY key",
         );
 
-        let hint = currency_hint_for_row(&result, 0, &ctx);
+        // Shape 2: the #1023 column-name fallback — a PIVOT names the column
+        // after the currency, which used to pad every cell in it.
+        let mut pivoted = QueryResult::new(vec!["account".into(), "USD".into()]);
+        pivoted.add_row(vec![
+            Value::String("Assets:A".into()),
+            Value::Number(dec!(0)),
+        ]);
         assert_eq!(
-            hint,
-            Some("USD"),
-            "expected USD hint extracted from second key element"
+            last_cell(&pivoted, &ctx),
+            "0",
+            "a column NAMED after a currency must not quantize its cells",
+        );
+
+        // Shape 3: mixed scales in one pivoted column each keep their own —
+        // the property that makes a per-column precision impossible.
+        let mut mixed = QueryResult::new(vec!["account".into(), "USD".into()]);
+        mixed.add_row(vec![
+            Value::String("Assets:Bank".into()),
+            Value::Number(dec!(-5.00)),
+        ]);
+        mixed.add_row(vec![
+            Value::String("Expenses:A".into()),
+            Value::Number(dec!(5.000)),
+        ]);
+        let mut buf: Vec<u8> = Vec::new();
+        write_text(&mixed, &mut buf, false, &ctx).expect("write_text ok");
+        let text = String::from_utf8(buf).expect("utf8");
+        assert!(
+            text.contains("-5.00") && text.contains("5.000"),
+            "each cell keeps its own scale; got:\n{text}"
         );
     }
 
-    /// Pins the documented "first match wins" contract on
-    /// `add_aggregate_row`: when TWO currency-shaped strings appear in
-    /// the GROUP BY key (rare but possible — e.g.
-    /// `GROUP BY currency, quote_currency`), iteration picks the first
-    /// one. A future change to `find_map` → `last`, scoring, or
-    /// alphabetical-min would break this test (which is the point —
-    /// the contract is load-bearing for downstream behavior).
-    #[test]
-    fn test_currency_hint_for_row_first_currency_wins_when_multiple() {
-        use rustledger_query::QueryResult;
-
-        let mut ctx = DisplayContext::new();
-        // Both EUR and USD have tracked precision so the gate doesn't
-        // disambiguate — only the iteration order does.
-        ctx.update(dec!(1.00), "EUR");
-        ctx.update(dec!(2.00), "EUR");
-        ctx.update(dec!(1.00), "USD");
-        ctx.update(dec!(2.00), "USD");
-
-        let mut result = QueryResult::new(vec![
-            "currency".into(),
-            "quote_currency".into(),
-            "sum".into(),
-        ]);
-        // Row 0 key: [EUR, USD]. First-wins → EUR.
-        result.add_aggregate_row(
-            vec![
-                Value::String("EUR".into()),
-                Value::String("USD".into()),
-                Value::Number(dec!(0.000)),
-            ],
-            vec![Value::String("EUR".into()), Value::String("USD".into())],
-        );
-        // Row 1 key: [USD, EUR] — reversed. Confirms the result tracks
-        // key order, not some side property of EUR/USD specifically.
-        result.add_aggregate_row(
-            vec![
-                Value::String("USD".into()),
-                Value::String("EUR".into()),
-                Value::Number(dec!(0.000)),
-            ],
-            vec![Value::String("USD".into()), Value::String("EUR".into())],
-        );
-
-        assert_eq!(
-            currency_hint_for_row(&result, 0, &ctx),
-            Some("EUR"),
-            "first-wins: [EUR, USD] should pick EUR"
-        );
-        assert_eq!(
-            currency_hint_for_row(&result, 1, &ctx),
-            Some("USD"),
-            "first-wins: [USD, EUR] should pick USD"
-        );
+    /// Render `result` and return the last whitespace-separated token of its
+    /// first data row — the right-aligned value cell.
+    fn last_cell(result: &rustledger_query::QueryResult, ctx: &DisplayContext) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        write_text(result, &mut buf, false, ctx).expect("write_text ok");
+        let text = String::from_utf8(buf).expect("utf8");
+        text.lines()
+            .nth(2)
+            .and_then(|l| l.split_whitespace().last())
+            .unwrap_or_else(|| panic!("expected a data row; got:\n{text}"))
+            .to_string()
     }
 
     // ─── Issue #1023: PIVOT BY currency precision ────────────────────────
@@ -1810,48 +1512,6 @@ mod tests {
     // uses `add_row` (not `add_aggregate_row`), so the per-row sidecar is
     // `None` for those rows. The renderer needs a column-name fallback
     // to recover the precision context.
-
-    /// Pivoted rows have `None` `group_key` but the column name is a
-    /// currency code. The width-calc and print passes both consult the
-    /// column-name fallback, so a scale-0 `Value::Number(0)` in a
-    /// USD-named column should render as `0.00` (padded to USD's
-    /// tracked 2dp). After #1103, the hint pads up but never quantizes
-    /// down — so a scale-3 input would render as `0.000`. This test
-    /// uses scale-0 to exercise the padding path the fallback enables.
-    #[test]
-    fn test_text_pivoted_column_uses_column_name_as_currency_hint() {
-        use rustledger_query::QueryResult;
-
-        let mut ctx = DisplayContext::new();
-        ctx.update(dec!(1.00), "USD");
-        ctx.update(dec!(2.00), "USD");
-
-        // Simulate post-PIVOT shape: the value cell is a Number whose
-        // precision context lives in the column name "USD". No row
-        // sidecar (mirrors what `apply_pivot` produces).
-        let mut result = QueryResult::new(vec!["account".into(), "USD".into()]);
-        result.add_row(vec![
-            Value::String("Assets:Cash".into()),
-            Value::Number(dec!(0)),
-        ]);
-
-        let mut buf: Vec<u8> = Vec::new();
-        write_text(&result, &mut buf, false, &ctx).expect("text ok");
-        let text = String::from_utf8(buf).expect("utf8");
-
-        let data_row = text
-            .lines()
-            .find(|l| l.contains("Assets:Cash"))
-            .unwrap_or_else(|| panic!("expected an Assets:Cash row; raw output:\n{text}"));
-        let last_cell = data_row
-            .split_whitespace()
-            .last()
-            .unwrap_or_else(|| panic!("expected non-empty data row; got: {data_row:?}"));
-        assert_eq!(
-            last_cell, "0.00",
-            "pivoted column named USD should pad scale-0 input up to 2dp; row was {data_row:?}, raw output:\n{text}"
-        );
-    }
 
     /// False-positive guard: a column literally named "USD" but with no
     /// tracked precision in the active context must NOT route through
@@ -1889,49 +1549,6 @@ mod tests {
                         .is_some_and(|c| c == "0" || c == "0.00")
             }),
             "must not emit `0` (normalize-stripped) or `0.00` (false-positive quantize); got {text:?}"
-        );
-    }
-
-    /// Precedence: row sidecar wins over column-name fallback. When both
-    /// supply a hint (rare but possible: `GROUP BY currency PIVOT BY
-    /// some_other_col`), the row's sidecar is the more authoritative
-    /// signal — it came from the actual GROUP BY key, not a heuristic
-    /// over the column header.
-    ///
-    /// Test the precedence with a scale-0 input: the JPY (0dp) column-name
-    /// would pad to `0`, but the USD (2dp) row sidecar wins and pads to
-    /// `0.00`. (Post-#1103, the hint pads up but never quantizes down,
-    /// so we use scale-0 to exercise the padding path that distinguishes
-    /// 0dp from 2dp hints.)
-    #[test]
-    fn test_row_sidecar_wins_over_column_name_fallback() {
-        use rustledger_query::QueryResult;
-
-        let mut ctx = DisplayContext::new();
-        // Both currencies tracked, but at different scales: USD=2dp, JPY=0dp.
-        ctx.update(dec!(1.00), "USD");
-        ctx.update(dec!(100), "JPY");
-
-        // Column name says JPY (0dp); row sidecar says USD (2dp).
-        // The row sidecar must win → padded to 2dp.
-        let mut result = QueryResult::new(vec!["account".into(), "JPY".into()]);
-        result.add_aggregate_row(
-            vec![Value::String("Assets:Cash".into()), Value::Number(dec!(0))],
-            vec![Value::String("USD".into())],
-        );
-
-        let mut buf: Vec<u8> = Vec::new();
-        write_text(&result, &mut buf, false, &ctx).expect("text ok");
-        let text = String::from_utf8(buf).expect("utf8");
-
-        let data_row = text
-            .lines()
-            .find(|l| l.contains("Assets:Cash"))
-            .unwrap_or_else(|| panic!("expected Assets:Cash row; raw output:\n{text}"));
-        let last_cell = data_row.split_whitespace().last().expect("non-empty row");
-        assert_eq!(
-            last_cell, "0.00",
-            "row sidecar (USD, 2dp) must beat column name (JPY, 0dp); row was {data_row:?}"
         );
     }
 
@@ -2062,107 +1679,6 @@ mod tests {
         // fixture brittle). The text-renderer behavior IS the contract
         // this PR changes; the JSON path goes through `write_json`
         // unchanged.
-    }
-
-    /// Multi-currency PIVOT: USD column at 2dp, JPY column at 0dp on the
-    /// same row. Each pivoted column must use its OWN precision via the
-    /// per-column hint — the column-name fallback isn't a single global
-    /// setting, it's resolved per cell.
-    ///
-    /// Test with scale-0 inputs so the per-column hint drives different
-    /// padding: USD pads to 2dp, JPY stays at 0dp (max(0, 0) = 0).
-    /// Post-#1103 the hint pads up but never quantizes down, so scale-0
-    /// is the right shape to exercise per-column padding differences.
-    #[test]
-    fn test_text_pivoted_multi_currency_uses_per_column_precision() {
-        use rustledger_query::QueryResult;
-
-        let mut ctx = DisplayContext::new();
-        // USD seeded at 2dp, JPY at 0dp.
-        ctx.update(dec!(1.00), "USD");
-        ctx.update(dec!(2.00), "USD");
-        ctx.update(dec!(100), "JPY");
-        ctx.update(dec!(200), "JPY");
-
-        // Simulate post-PIVOT shape: same row has scale-0 values in both
-        // columns. After the per-column fallback, USD pads to 2dp and JPY
-        // stays at 0dp.
-        let mut result = QueryResult::new(vec!["account".into(), "USD".into(), "JPY".into()]);
-        result.add_row(vec![
-            Value::String("Assets:Cash".into()),
-            Value::Number(dec!(0)),
-            Value::Number(dec!(50)),
-        ]);
-
-        let mut buf: Vec<u8> = Vec::new();
-        write_text(&result, &mut buf, false, &ctx).expect("text ok");
-        let text = String::from_utf8(buf).expect("utf8");
-
-        let data_row = text
-            .lines()
-            .find(|l| l.contains("Assets:Cash"))
-            .unwrap_or_else(|| panic!("expected Assets:Cash row; raw output:\n{text}"));
-
-        // Pull both numeric cells. Whitespace-split is safe here — both
-        // numeric cells have no internal whitespace and the account name
-        // has no spaces.
-        let tokens: Vec<&str> = data_row.split_whitespace().collect();
-        let [_account, usd_cell, jpy_cell] = tokens.as_slice() else {
-            panic!("expected 3 whitespace-separated tokens, got: {tokens:?}");
-        };
-        assert_eq!(
-            *usd_cell, "0.00",
-            "USD column should render at 2dp; row was {data_row:?}"
-        );
-        assert_eq!(
-            *jpy_cell, "50",
-            "JPY column should render at 0dp (integer); row was {data_row:?}"
-        );
-    }
-
-    /// Defensive regression test: a non-pivoted query with a column
-    /// aliased as a currency code (e.g. `SELECT … AS USD`) inherits the
-    /// column-name fallback's padding behavior — values get padded up to
-    /// the tracked currency precision.
-    ///
-    /// Today's contract: WITH tracked USD precision (2dp), a scale-0
-    /// value in a USD-aliased column renders padded to `0.00`. After
-    /// #1103, the fallback only pads UP (`max(scale, dp)`); it never
-    /// quantizes higher-scale values DOWN. This is the same behavior
-    /// PIVOT relies on; we're just acknowledging that non-pivoted
-    /// queries inherit it too. If it turns out to be a real problem in
-    /// practice, the fix is to gate the fallback on something
-    /// PIVOT-specific (e.g. a boolean on `QueryResult` set by
-    /// `apply_pivot`).
-    #[test]
-    fn test_non_pivoted_currency_named_column_inherits_fallback_quantization() {
-        use rustledger_query::QueryResult;
-
-        let mut ctx = DisplayContext::new();
-        ctx.update(dec!(1.00), "USD");
-        ctx.update(dec!(2.00), "USD");
-
-        // Non-pivoted result: column literally named USD, scale-0 value.
-        // No row sidecar (so `currency_hints` is empty for this row).
-        let mut result = QueryResult::new(vec!["label".into(), "USD".into()]);
-        result.add_row(vec![Value::String("test".into()), Value::Number(dec!(0))]);
-
-        let mut buf: Vec<u8> = Vec::new();
-        write_text(&result, &mut buf, false, &ctx).expect("text ok");
-        let text = String::from_utf8(buf).expect("utf8");
-
-        // With USD tracked at 2dp, the column-name fallback applies even
-        // outside the PIVOT path. Pin this behavior so a future tightening
-        // (e.g. PIVOT-only fallback) is a deliberate change.
-        let data_row = text
-            .lines()
-            .find(|l| l.contains("test"))
-            .unwrap_or_else(|| panic!("expected `test` row; raw output:\n{text}"));
-        let last_cell = data_row.split_whitespace().last().expect("non-empty row");
-        assert_eq!(
-            last_cell, "0.00",
-            "currency-named column drives padding regardless of PIVOT path; row was {data_row:?}"
-        );
     }
 
     /// `render_commas` is a property of the TABLE, not of a column's contents:

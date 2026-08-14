@@ -84,10 +84,63 @@ pub fn checked_sub_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {
     Some(diff)
 }
 
+/// Divide with Python `decimal`'s scale rule.
+///
+/// Python defines an *ideal exponent* for division: `exp(a) - exp(b)`, i.e.
+/// an ideal SCALE of `scale(a) - scale(b)`. An exact quotient is reduced
+/// toward that scale but never below the scale exactness requires:
+///
+/// ```text
+///   0.00 / 4     ->  0.00     ideal 2, exact needs 0  -> 2
+///   7    / 2     ->  3.5      ideal 0, exact needs 1  -> 1
+///   1.00 / 2     ->  0.50     ideal 2, exact needs 1  -> 2
+///   1.000 / 8    ->  0.125    ideal 3, exact needs 3  -> 3
+/// ```
+///
+/// `rust_decimal` misses this in BOTH directions, so a pad-only fix would be
+/// half a fix:
+///
+/// * **Under**, on a zero dividend — the same zero shortcut behind
+///   [`add_python_scale`]. `0.00 / 4` gives `0`, dropping the scale.
+/// * **Over**, on an exact quotient — `7 / 2` gives `3.50`, one trailing
+///   zero more than the ideal exponent allows.
+///
+/// So the quotient is stripped to its minimal form and then padded up to the
+/// ideal scale; the two steps together land on Python's answer from either
+/// side. An inexact quotient (`1 / 3`) has no trailing zeros to strip and a
+/// scale far past the ideal, so both steps are no-ops and it is returned as
+/// `rust_decimal` computed it.
+///
+/// Returns `None` on divide-by-zero or overflow, matching
+/// `Decimal::checked_div` — BQL maps that to NULL rather than panicking.
+#[must_use]
+pub fn checked_div_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {
+    let quotient = a.checked_div(b)?;
+
+    // `scale()` is u32; the ideal can be negative (a coarser dividend than
+    // divisor), which simply means "no padding required".
+    let ideal_scale = i64::from(a.scale()) - i64::from(b.scale());
+
+    // Minimal form first: this is what removes the EXTRA trailing zero in
+    // `7 / 2 -> 3.50`. `normalize` never loses value.
+    let mut result = quotient.normalize();
+    let target = ideal_scale.max(i64::from(result.scale()));
+
+    // `rescale` takes u32 and is a no-op past the mantissa's capacity; the
+    // clamp keeps a pathological ideal from wrapping on the cast.
+    if let Ok(target) = u32::try_from(target)
+        && result.scale() < target
+    {
+        result.rescale(target);
+    }
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
+    use std::str::FromStr;
 
     /// The exact shape `rust_decimal` gets wrong: a zero operand's scale is
     /// dropped. Both orders, since its zero shortcut applies to either side.
@@ -164,6 +217,81 @@ mod tests {
 
         assert_eq!(python_like.to_string(), "0.00");
         assert_eq!(naive.to_string(), "0", "pins the pre-fix behavior");
+    }
+
+    /// Division scale, against Python `decimal`'s answers verbatim.
+    ///
+    /// Every expectation below was produced by running the case through
+    /// `CPython`'s `decimal` (3.13) rather than reasoned out — the ideal-exponent
+    /// rule is easy to state and easy to get subtly wrong, and a table of
+    /// hand-derived expectations would just encode the same misreading twice.
+    ///
+    /// Asserts on `to_string()`: `Decimal`'s `==` ignores scale, which is the
+    /// entire subject here.
+    #[test]
+    fn division_matches_python_decimal_scale() {
+        // (dividend, divisor, python's rendering)
+        let cases = [
+            // Zero dividend — `rust_decimal` drops the scale (gives `0`).
+            ("0.00", "4", "0.00"),
+            ("0.000", "3", "0.000"),
+            ("0.0", "7", "0.0"),
+            ("0.00", "2.0", "0.0"),
+            ("0.00", "1", "0.00"),
+            ("-0.00", "3", "0.00"), // see the sign note below
+            // Zero with no scale to keep.
+            ("0", "4", "0"),
+            // Exact quotients — `rust_decimal` OVER-pads `7 / 2` to `3.50`.
+            ("7", "2", "3.5"),
+            ("5", "4", "1.25"),
+            ("1.0", "2.00", "0.5"),
+            // Exact quotients both already agree on.
+            ("1.00", "2", "0.50"),
+            ("3.00", "3", "1.00"),
+            ("1.000", "8", "0.125"),
+            ("10.00", "4", "2.50"),
+            ("2.50", "5", "0.50"),
+            ("100.00", "8", "12.50"),
+            ("12.345", "5", "2.469"),
+            // Inexact: no trailing zeros to strip, scale far past the ideal,
+            // so the rule leaves `rust_decimal`'s result alone.
+            ("1", "3", "0.3333333333333333333333333333"),
+        ];
+
+        for (a, b, want) in cases {
+            let a = Decimal::from_str(a).expect("dividend parses");
+            let b = Decimal::from_str(b).expect("divisor parses");
+            let got = checked_div_python_scale(a, b).expect("no overflow");
+            assert_eq!(got.to_string(), want, "{a} / {b}");
+        }
+    }
+
+    /// One deliberate difference from the table's source: Python has a signed
+    /// zero (`Decimal("-0.00") / 3` is `-0.00`), `rust_decimal` does not — it
+    /// has a single zero, so the sign cannot be carried and `0.00` is the
+    /// closest representable answer. Pinned so the gap is a recorded fact
+    /// rather than a surprise; it is a pre-existing property of the type, not
+    /// something this rule introduces.
+    #[test]
+    fn negative_zero_is_unrepresentable_and_renders_unsigned() {
+        let neg_zero = Decimal::from_str("-0.00").expect("parses");
+        assert_eq!(neg_zero.to_string(), "0.00", "the type has no signed zero");
+        assert_eq!(
+            checked_div_python_scale(neg_zero, Decimal::from(3))
+                .expect("no overflow")
+                .to_string(),
+            "0.00",
+        );
+    }
+
+    /// Divide-by-zero is `None`, not a panic — BQL renders it NULL.
+    #[test]
+    fn division_by_zero_is_none() {
+        assert_eq!(
+            checked_div_python_scale(dec!(1.00), Decimal::ZERO),
+            None,
+            "div-by-zero must not panic",
+        );
     }
 
     /// The checked variants exist so BQL can map a value-range overflow to

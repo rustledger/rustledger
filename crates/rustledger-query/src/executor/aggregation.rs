@@ -522,20 +522,17 @@ impl<'a> Executor<'a> {
                             let val = self.evaluate_expr(&func.args[0], ctx)?;
                             match val {
                                 Value::Number(n) => {
-                                    // NOTE: deliberately plain `+=`, unlike
-                                    // SUM above. Fixing AVG needs a DIVISION
-                                    // scale rule too — `rust_decimal` drops
-                                    // the dividend's scale on `0.00 / 4` (it
-                                    // yields `0`, Python yields `0.00`), so
-                                    // the accumulator alone changes nothing
-                                    // observable here. Tracked separately;
-                                    // bean-query has no `avg(decimal)` at all,
-                                    // so there is no compat pin either way.
-                                    sum += n;
+                                    // Python scale semantics, same as SUM. The
+                                    // accumulator and the division below are
+                                    // one fix: #2046 landed this half alone,
+                                    // found it changed nothing observable
+                                    // because the division re-normalized, and
+                                    // reverted it rather than ship a half-fix.
+                                    sum = rustledger_core::add_python_scale(sum, n);
                                     count += 1;
                                 }
                                 Value::Integer(i) => {
-                                    sum += Decimal::from(i);
+                                    sum = rustledger_core::add_python_scale(sum, Decimal::from(i));
                                     count += 1;
                                 }
                                 Value::Null => {}
@@ -549,7 +546,21 @@ impl<'a> Executor<'a> {
                         if count == 0 {
                             Ok(Value::Null)
                         } else {
-                            Ok(Value::Number(sum / Decimal::from(count)))
+                            // Python's ideal-exponent rule — see
+                            // `rustledger_core::checked_div_python_scale`.
+                            // `rust_decimal` misses it in both directions:
+                            // `0.00 / 4` loses the scale, `7 / 2` gains a
+                            // trailing zero. `count` is non-zero here (the
+                            // branch above returns NULL otherwise), so the
+                            // `None` arm is unreachable in practice; map it to
+                            // NULL rather than panicking on a future change.
+                            Ok(
+                                rustledger_core::checked_div_python_scale(
+                                    sum,
+                                    Decimal::from(count),
+                                )
+                                .map_or(Value::Null, Value::Number),
+                            )
                         }
                     }
                     _ => {
@@ -975,20 +986,17 @@ impl<'a> Executor<'a> {
                                 self.evaluate_subquery_expr(&func.args[0], row, column_map)?;
                             match val {
                                 Value::Number(n) => {
-                                    // NOTE: deliberately plain `+=`, unlike
-                                    // SUM above. Fixing AVG needs a DIVISION
-                                    // scale rule too — `rust_decimal` drops
-                                    // the dividend's scale on `0.00 / 4` (it
-                                    // yields `0`, Python yields `0.00`), so
-                                    // the accumulator alone changes nothing
-                                    // observable here. Tracked separately;
-                                    // bean-query has no `avg(decimal)` at all,
-                                    // so there is no compat pin either way.
-                                    sum += n;
+                                    // Python scale semantics, same as SUM. The
+                                    // accumulator and the division below are
+                                    // one fix: #2046 landed this half alone,
+                                    // found it changed nothing observable
+                                    // because the division re-normalized, and
+                                    // reverted it rather than ship a half-fix.
+                                    sum = rustledger_core::add_python_scale(sum, n);
                                     count += 1;
                                 }
                                 Value::Integer(i) => {
-                                    sum += Decimal::from(i);
+                                    sum = rustledger_core::add_python_scale(sum, Decimal::from(i));
                                     count += 1;
                                 }
                                 Value::Null => {}
@@ -1002,7 +1010,21 @@ impl<'a> Executor<'a> {
                         if count == 0 {
                             Ok(Value::Null)
                         } else {
-                            Ok(Value::Number(sum / Decimal::from(count)))
+                            // Python's ideal-exponent rule — see
+                            // `rustledger_core::checked_div_python_scale`.
+                            // `rust_decimal` misses it in both directions:
+                            // `0.00 / 4` loses the scale, `7 / 2` gains a
+                            // trailing zero. `count` is non-zero here (the
+                            // branch above returns NULL otherwise), so the
+                            // `None` arm is unreachable in practice; map it to
+                            // NULL rather than panicking on a future change.
+                            Ok(
+                                rustledger_core::checked_div_python_scale(
+                                    sum,
+                                    Decimal::from(count),
+                                )
+                                .map_or(Value::Null, Value::Number),
+                            )
                         }
                     }
                     _ => {

@@ -68,7 +68,8 @@ pub use amount::{Amount, AmountParseError, AmountParseErrorReason, IncompleteAmo
 pub use calendar::{CalendarPeriod, quarter_index0};
 pub use cost::{BookedCost, BookedCostInvariantError, Cost, CostNumber, CostSpec};
 pub use decimal::{
-    add_python_scale, checked_add_python_scale, checked_sub_python_scale, sub_python_scale,
+    add_python_scale, checked_add_python_scale, checked_div_python_scale, checked_sub_python_scale,
+    sub_python_scale,
 };
 pub use directive::{
     Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document, Event, MetaValue,

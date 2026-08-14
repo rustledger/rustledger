@@ -933,6 +933,37 @@ mod tests {
         );
     }
 
+    /// `format_decimal_fixed` renders EXACTLY `decimals` places.
+    ///
+    /// It used to `trim_end_matches('0')` — the opposite of its own comment —
+    /// so an inflow of `1000` emitted `1000` where beancount emits
+    /// `1000.0000000`. Asserts the full string, not a prefix or a length:
+    /// the failure mode was a SHORTER rendering of an equal value, which a
+    /// `starts_with` or a parse-and-compare would both accept.
+    #[test]
+    fn format_decimal_fixed_pads_to_exactly_the_requested_places() {
+        assert_eq!(
+            format_decimal_fixed(Decimal::new(1000, 0), 7),
+            "1000.0000000"
+        );
+        assert_eq!(format_decimal_fixed(Decimal::new(0, 0), 7), "0.0000000");
+        // Already at 7dp: unchanged.
+        assert_eq!(
+            format_decimal_fixed(Decimal::new(5_454_545_454, 7), 7),
+            "545.4545454"
+        );
+        // More precision than asked for: rounded to exactly 7.
+        assert_eq!(
+            format_decimal_fixed(Decimal::new(54_545_454_549, 8), 7),
+            "545.4545455"
+        );
+        // Negative keeps its sign and its padding.
+        assert_eq!(
+            format_decimal_fixed(Decimal::new(-1000, 0), 7),
+            "-1000.0000000"
+        );
+    }
+
     #[test]
     fn test_round_up() {
         // `ROUND_UP` is AWAY FROM ZERO, not toward +infinity. The two agree on

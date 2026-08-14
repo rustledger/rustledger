@@ -423,9 +423,14 @@ KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
     #
     # Filed under the RUST list because we are the side whose output differs
     # from bean-query. Pinned per (file, query) rather than with `"*"`: only
-    # 22 of the 51 runs across these three files diverge, and a blanket mask
-    # would swallow a future regression on the other 29. Revisit if upstream
-    # starts accumulating the rounded quantity.
+    # 21 of the 51 runs across these three files diverge (11 + 6 + 4), and a
+    # blanket mask would swallow a future regression on the other 30. Revisit
+    # if upstream starts accumulating the rounded quantity.
+    #
+    # It was 22 until `output_cool_fund_output`'s `sum-number-by-currency`
+    # started matching: that file is the plugin's captured OUTPUT, so it
+    # carries the residue as literal data and only ever differed in notation,
+    # which #2053 fixed. The stale-mask gate caught the leftover entry.
     ("tests/compatibility/files/beancount-lazy-plugins/tests_data_cool_fund_example.beancount", "balance-running-assets"),
     ("tests/compatibility/files/beancount-lazy-plugins/tests_data_cool_fund_example.beancount", "first-balance-by-month"),
     ("tests/compatibility/files/beancount-lazy-plugins/tests_data_cool_fund_example.beancount", "journal-assets"),

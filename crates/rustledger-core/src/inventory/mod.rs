@@ -732,8 +732,14 @@ impl Inventory {
             .get(&position.units.currency)
             .copied()
             .unwrap_or_default();
-        let new_cached = cached
-            .checked_add(position.units.number)
+        // Python `decimal` scale semantics, not raw `checked_add` — see
+        // `crate::decimal::add_python_scale`. `rust_decimal` returns the other
+        // operand untouched when one side is zero, so a running total that
+        // passes through zero drops its scale and everything added after it
+        // renders one scale narrower. That made a coalesced balance
+        // ORDER-DEPENDENT: the same postings in a different order produced
+        // `1` or `1.00` for the same money.
+        let new_cached = crate::decimal::checked_add_python_scale(cached, position.units.number)
             .ok_or_else(overflow)?;
 
         let merge_idx = position
@@ -743,11 +749,14 @@ impl Inventory {
             .flatten();
         let merged_units = merge_idx
             .map(|idx| {
-                self.positions[idx]
-                    .units
-                    .number
-                    .checked_add(position.units.number)
-                    .ok_or_else(overflow)
+                // Same rule as the units cache above — these two must agree,
+                // or `units()` and the position itself report different scales
+                // for the same currency.
+                crate::decimal::checked_add_python_scale(
+                    self.positions[idx].units.number,
+                    position.units.number,
+                )
+                .ok_or_else(overflow)
             })
             .transpose()?;
 
@@ -1599,6 +1608,62 @@ mod tests {
             .expect("fixture fits in Decimal");
         assert_eq!(inv.len(), 2); // Both lots kept
         assert_eq!(inv.units("AAPL"), dec!(0)); // Net units still zero
+    }
+
+    /// Coalescing must not make a balance depend on the order it was built in.
+    ///
+    /// `rust_decimal` returns the other operand untouched when one side is
+    /// zero, so a running total that passes through zero loses its scale and
+    /// every later addend renders one scale narrower. The two inventories
+    /// below hold the SAME multiset of amounts in a different order.
+    ///
+    /// Asserts on `to_string()`, not on `Decimal` equality: `==` compares
+    /// value and ignores scale (`dec!(1) == dec!(1.00)`), so a value-level
+    /// assertion here would pass against the bug it is pinning.
+    #[test]
+    fn coalescing_is_independent_of_the_order_amounts_arrive_in() {
+        // Passes through 0.00 (scale 2), then takes a scale-0 addend.
+        let zero_crossing_first = [dec!(-2.00), dec!(2.00), dec!(-1)];
+        // Same amounts, no zero crossing before the scale-0 addend.
+        let zero_crossing_last = [dec!(-1), dec!(-2.00), dec!(2.00)];
+
+        let build = |amounts: &[Decimal]| {
+            let mut inv = Inventory::new();
+            for n in amounts {
+                inv.add(Position::simple(Amount::new(*n, "USD")))
+                    .expect("fixture fits in Decimal");
+            }
+            inv
+        };
+
+        let a = build(&zero_crossing_first);
+        let b = build(&zero_crossing_last);
+
+        // The merged POSITION.
+        assert_eq!(
+            a.positions()
+                .next()
+                .expect("one position")
+                .units
+                .number
+                .to_string(),
+            "-1.00",
+            "a total that passed through zero must keep the widest scale",
+        );
+        assert_eq!(
+            b.positions()
+                .next()
+                .expect("one position")
+                .units
+                .number
+                .to_string(),
+            "-1.00",
+        );
+
+        // And the units CACHE, which is maintained separately and would
+        // otherwise disagree with the position it summarizes.
+        assert_eq!(a.units("USD").to_string(), "-1.00");
+        assert_eq!(b.units("USD").to_string(), "-1.00");
     }
 
     #[test]

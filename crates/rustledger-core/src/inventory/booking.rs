@@ -852,7 +852,12 @@ impl Inventory {
 
         // Update the position
         let currency = pos.units.currency.clone();
-        let new_units = pos.units.number + units.number;
+        // Python scale rule, same as `Inventory::add` — see
+        // `crate::decimal::add_python_scale`. A reduction that brings a lot
+        // through zero would otherwise drop the scale here while `add` kept
+        // it, so the same lot would render differently depending on whether
+        // it was last touched by an add or a reduce.
+        let new_units = crate::decimal::add_python_scale(pos.units.number, units.number);
         let new_pos = Position {
             units: Amount::new(new_units, currency.clone()),
             cost: pos.cost.clone(),
@@ -861,7 +866,7 @@ impl Inventory {
 
         // Update units cache incrementally (units.number is negative for reductions)
         if let Some(cached) = self.units_cache.get_mut(&currency) {
-            *cached += units.number;
+            *cached = crate::decimal::add_python_scale(*cached, units.number);
         }
 
         // Remove if empty and rebuild simple_index

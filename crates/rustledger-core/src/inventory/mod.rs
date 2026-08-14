@@ -882,17 +882,26 @@ impl Inventory {
         self.units_cache.clear();
 
         for (idx, pos) in self.positions.iter().enumerate() {
-            // Update units cache for all positions. `checked_add`, not `+=`:
+            // Update units cache for all positions. Checked, not `+=`:
             // `Decimal`'s `+` panics on overflow, and this runs over payloads.
+            //
+            // Must apply the SAME Python-scale rule as `add`, not a raw
+            // `checked_add`. `units_cache` is `#[serde(skip)]`, so this is the
+            // path that reconstructs it after a round-trip; if the two
+            // disagreed, an inventory built incrementally and the same
+            // inventory deserialized would report different scales for the
+            // same money — measured at `1.00` built vs `1` rebuilt, across
+            // three cost lots summing through zero. Pinned by
+            // `a_round_trip_reports_the_same_scale_as_incremental_adds`.
             let slot = self
                 .units_cache
                 .entry(pos.units.currency.clone())
                 .or_default();
-            *slot = slot
-                .checked_add(pos.units.number)
-                .ok_or_else(|| OverflowError {
+            *slot = crate::decimal::checked_add_python_scale(*slot, pos.units.number).ok_or_else(
+                || OverflowError {
                     currency: pos.units.currency.clone(),
-                })?;
+                },
+            )?;
 
             // Update simple_index only for positions without cost
             if pos.cost.is_none() {
@@ -1608,6 +1617,53 @@ mod tests {
             .expect("fixture fits in Decimal");
         assert_eq!(inv.len(), 2); // Both lots kept
         assert_eq!(inv.units("AAPL"), dec!(0)); // Net units still zero
+    }
+
+    /// A deserialized inventory must report the same scale as one built by
+    /// incremental `add`s.
+    ///
+    /// `units_cache` is `#[serde(skip)]`, so `try_rebuild_index_from` is what
+    /// reconstructs it after a round-trip. That rebuild re-sums the positions;
+    /// if it used a raw `checked_add` while `add` used the Python scale rule,
+    /// the two would part company the moment the running sum crossed zero —
+    /// the same money reporting `1.00` from one path and `1` from the other,
+    /// silently, depending only on whether it had been serialized.
+    ///
+    /// Needs COST-BEARING lots. Cost-less positions coalesce into a single
+    /// position, and one position cannot cross zero during the rebuild, so a
+    /// simpler fixture passes either way and pins nothing.
+    #[test]
+    fn a_round_trip_reports_the_same_scale_as_incremental_adds() {
+        let mut inv = Inventory::new();
+        let lots = [
+            (
+                dec!(2.00),
+                Cost::new(dec!(10.00), "USD").with_date(date(2024, 1, 1)),
+            ),
+            (
+                dec!(-2.00),
+                Cost::new(dec!(11.00), "USD").with_date(date(2024, 1, 2)),
+            ),
+            (
+                dec!(1),
+                Cost::new(dec!(12.00), "USD").with_date(date(2024, 1, 3)),
+            ),
+        ];
+        for (units, cost) in lots {
+            inv.add(Position::with_cost(Amount::new(units, "SH"), cost))
+                .expect("fixture fits in Decimal");
+        }
+
+        let built = inv.units("SH").to_string();
+        assert_eq!(built, "1.00", "the incrementally-built total");
+
+        let json = serde_json::to_string(&inv).expect("serializes");
+        let round_tripped: Inventory = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(
+            round_tripped.units("SH").to_string(),
+            built,
+            "a serde round-trip must not change the reported scale",
+        );
     }
 
     /// Coalescing must not make a balance depend on the order it was built in.

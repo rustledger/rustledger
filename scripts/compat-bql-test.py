@@ -395,6 +395,38 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
 # match percentage (the values are correct — only display scale differs),
 # but tracked as a distinct category so future bookkeeping stays honest.
 KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
+    # `capital_gains_classifier` RECOMPUTES the gain upstream; we reclassify
+    # the posting that was already interpolated.
+    #
+    #   Assets:Brokerage  -100 ORNG {1 USD} @ 1.50 USD
+    #   Assets:Bank        150 USD
+    #   Income:Capital-Gains            <- interpolated to -50
+    #
+    #     py:  USD 0.00        rs:  USD 0
+    #
+    # The values are equal; only the scale differs, and it comes from the
+    # upstream plugin's own arithmetic. `long_short.py` computes
+    # `gain = (cost.number - price.number) * abs(units.number)` — here
+    # `(1 - 1.50) * 100`, where `0.50` carries scale 2 — then REMOVES the
+    # original gains postings and appends new ones holding that product. It
+    # reconciles the product against the interpolated residual only if the
+    # difference exceeds the transaction tolerance, redistributing the excess
+    # proportionally.
+    #
+    # rledger keeps the interpolated number, which is the residual that
+    # actually balances the transaction, and changes only the account. That
+    # is the classifier's stated job, and it cannot drift from the balance
+    # the way a recomputation can — upstream needs the tolerance check
+    # precisely because its product may not equal the residual.
+    #
+    # Filed under the RUST list even though the behavior is deliberate: we
+    # are the side whose output differs from bean-query, and a flattering
+    # label would let a future genuine regression on this pair hide. Revisit
+    # if the plugin stops substituting its own product.
+    (
+        "tests/compatibility/files/reds-plugins/beancount_reds_plugins_capital_gains_classifier_example.long_short.beancount",
+        "sum-number-by-currency",
+    ),
     # Posting ORDER after an elided posting is split across two currencies.
     # On `examples_simple_basic.beancount`:
     #

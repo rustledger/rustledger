@@ -915,12 +915,69 @@ impl DisplayContext {
         // fractional digits = 28 total).
         const PYTHON_DECIMAL_PRECISION: u32 = 28;
         let capped = Self::cap_significant_digits(number, PYTHON_DECIMAL_PRECISION);
-        let formatted = capped.to_string();
+        let formatted = Self::to_scientific_string(capped);
         if self.render_commas {
             Self::add_commas(&formatted)
         } else {
             formatted
         }
+    }
+
+    /// Render a `Decimal` the way Python's `Decimal.__str__` does.
+    ///
+    /// The spec's `to-scientific-string` switches to exponential notation
+    /// when the ADJUSTED exponent is below -6, and uses plain notation
+    /// otherwise:
+    ///
+    /// ```text
+    ///   0.000001   adj  -6  ->  0.000001
+    ///   0.0000001  adj  -7  ->  1E-7
+    ///   0E-14      adj -14  ->  0E-14
+    /// ```
+    ///
+    /// `rust_decimal`'s `Display` is always plain, so a naked Decimal column
+    /// diverged from bean-query on anything that far below zero: a zero at
+    /// scale 14 rendered `0.00000000000000` against bean-query's `0E-14`.
+    ///
+    /// The adjusted exponent is `-scale + digits - 1`, and Python counts a
+    /// zero coefficient as one digit — which is why a plain `0` (scale 0)
+    /// stays `0` while `0E-14` goes exponential.
+    ///
+    /// Only the naked-Decimal path uses this. Amount cells keep their
+    /// per-currency rendering, which bean-query also prints plainly.
+    fn to_scientific_string(number: Decimal) -> String {
+        let scale = i64::from(number.scale());
+        let mantissa = number.mantissa().unsigned_abs();
+        let digits = if mantissa == 0 {
+            1
+        } else {
+            i64::from(mantissa.ilog10()) + 1
+        };
+        // Spec: `adjusted = exponent + digits - 1`, with `exponent = -scale`.
+        let adjusted = digits - scale - 1;
+        if adjusted > -7 {
+            return number.to_string();
+        }
+
+        let sign = if number.is_sign_negative() { "-" } else { "" };
+        if mantissa == 0 {
+            // Python prints a zero's exponent as its own exponent.
+            return format!("{sign}0E-{scale}");
+        }
+
+        // Strip trailing zeros into the exponent, then place the decimal
+        // point after the first significant digit.
+        let all = mantissa.to_string();
+        let significant = all.trim_end_matches('0');
+        let trailing = (all.len() - significant.len()) as i64;
+        let exponent = -scale + trailing + (significant.len() as i64 - 1);
+        let coefficient = if significant.len() == 1 {
+            significant.to_string()
+        } else {
+            format!("{}.{}", &significant[..1], &significant[1..])
+        };
+        let exp_sign = if exponent < 0 { "-" } else { "+" };
+        format!("{sign}{coefficient}E{exp_sign}{}", exponent.abs())
     }
 
     /// Round `number` to at most `max_sig` significant digits, matching
@@ -2086,5 +2143,58 @@ mod custom_directive_precision_tests {
         let mut plain = DisplayContext::new();
         plain.set_fixed_precision("USD", 2);
         assert!(!plain.for_surface(OutputSurface::Human).render_commas());
+    }
+
+    /// `format_default` follows Python's `to-scientific-string`.
+    ///
+    /// Expectations produced by running each case through `CPython`'s
+    /// `decimal` (3.13) rather than derived — the switch point is easy to
+    /// state and easy to get off by one. `1E+2` is excluded from the round
+    /// trip because `rust_decimal` cannot hold a positive exponent; every
+    /// other case is a value it can represent.
+    #[test]
+    fn format_default_matches_python_decimal_str() {
+        use std::str::FromStr;
+
+        let ctx = DisplayContext::new();
+        for (input, want) in [
+            ("0E-14", "0E-14"),
+            ("0E-7", "0E-7"),
+            ("0E-6", "0.000000"),
+            ("0", "0"),
+            ("0.00", "0.00"),
+            ("1E-7", "1E-7"),
+            ("0.0000001", "1E-7"),
+            ("0.000001", "0.000001"),
+            ("0.00001", "0.00001"),
+            ("1.5E-9", "1.5E-9"),
+            ("-1E-7", "-1E-7"),
+            ("1234E-10", "1.234E-7"),
+            ("1E-28", "1E-28"),
+            ("0.1", "0.1"),
+            ("123.456", "123.456"),
+        ] {
+            let value = Decimal::from_str(input).expect("parses");
+            assert_eq!(ctx.format_default(value), want, "input {input}");
+        }
+    }
+
+    /// The switch is on the ADJUSTED exponent, not the scale, so a value with
+    /// enough significant digits stays plain even at a deep scale.
+    #[test]
+    fn the_notation_switch_follows_the_adjusted_exponent() {
+        use std::str::FromStr;
+
+        let ctx = DisplayContext::new();
+        // scale 7 but adjusted -1: plain.
+        assert_eq!(
+            ctx.format_default(Decimal::from_str("0.1234567").unwrap()),
+            "0.1234567"
+        );
+        // scale 7, adjusted -7: exponential.
+        assert_eq!(
+            ctx.format_default(Decimal::from_str("0.0000001").unwrap()),
+            "1E-7"
+        );
     }
 }

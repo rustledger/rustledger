@@ -97,6 +97,40 @@ EMPTY_RESULT_WARNING_FRACTION = 0.5
 # Use `("path", "*")` to allowlist ALL queries on a file (e.g., when
 # the divergence is in a column projection that every query touches).
 KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
+    # A TOTAL annotation round-trips through a per-unit quotient in beancount
+    # and comes back with 28 digits of division noise; rledger uses the total
+    # the user wrote.
+    #
+    #   Assets:US:ETrade:CashEUR  110.00 EUR @@ 120.00 USD
+    #   Assets:US:BofA:Checking                 <- interpolated
+    #
+    #     py:  -120.0000000000000000000000000
+    #     rs:  -120.00
+    #
+    # beancount divides 120.00 / 110.00 to get a per-unit price
+    # (1.0909...  at context precision), then multiplies back by 110.00. The
+    # product cannot return to 120.00 exactly, so the residue is carried as
+    # trailing digits. rledger balances against the annotated total directly
+    # and lands on the authored value.
+    #
+    # Verified as one mechanism across all three pairs rather than assumed:
+    # `beangrow` and `fava-portfolio-returns` each hold exactly one `@@`, and
+    # `missing_prices` the `{{25.61 GBP, 2017-12-14}}` form of the same thing.
+    # In every case the two tools agree on the VALUE and on `cost_number`
+    # itself — only beancount's re-multiplied total carries the tail.
+    #
+    # Filed under the PYTHON list: the numbers are equal, the user wrote the
+    # total, and reproducing the noise would mean adopting a round-trip we do
+    # not perform. Revisit if beancount stops re-deriving the total.
+    ("tests/compatibility/files/beangrow/example_ledger.beancount", "sum-number-by-currency"),
+    (
+        "tests/compatibility/files/fava-portfolio-returns/example_example.beancount",
+        "sum-number-by-currency",
+    ),
+    (
+        "tests/compatibility/files/beancount-portfolio-alloc/tests_test_inputs_missing_prices.beancount",
+        "sum-number-by-currency",
+    ),
     # bean-query pads the amount INSIDE a cost brace, producing ragged output
     # that its own `Position.__str__` never emits:
     #

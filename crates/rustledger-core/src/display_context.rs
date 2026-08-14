@@ -971,16 +971,17 @@ impl DisplayContext {
             return format!("{sign}0E-{scale}");
         }
 
-        // Strip trailing zeros into the exponent, then place the decimal
-        // point after the first significant digit.
-        let all = mantissa.to_string();
-        let significant = all.trim_end_matches('0');
-        let trailing = (all.len() - significant.len()) as i64;
-        let exponent = -scale + trailing + (significant.len() as i64 - 1);
-        let coefficient = if significant.len() == 1 {
-            significant.to_string()
+        // The coefficient is used AS STORED — Python does not normalize it,
+        // and `rust_decimal` keeps the distinction (`10E-8` is mantissa 10 at
+        // scale 8, not mantissa 1 at scale 7). Stripping trailing zeros here
+        // rendered `1E-7` where Python gives `1.0E-7`, discarding a digit the
+        // value actually carries.
+        let digits = mantissa.to_string();
+        let exponent = -scale + (digits.len() as i64 - 1);
+        let coefficient = if digits.len() == 1 {
+            digits
         } else {
-            format!("{}.{}", &significant[..1], &significant[1..])
+            format!("{}.{}", &digits[..1], &digits[1..])
         };
         let exp_sign = if exponent < 0 { "-" } else { "+" };
         format!("{sign}{coefficient}E{exp_sign}{}", exponent.abs())
@@ -2182,6 +2183,27 @@ mod custom_directive_precision_tests {
         );
     }
 
+    #[test]
+    fn tmp_probe_edges() {
+        use std::str::FromStr;
+        let ctx = DisplayContext::new();
+        for s in [
+            "0E-28",
+            "1E-28",
+            "-0E-14",
+            "0.0000000000000000000000000001",
+            "9999999999999999999999999999E-28",
+            "1.000000E-7",
+            "10E-8",
+            "100E-9",
+        ] {
+            match Decimal::from_str(s) {
+                Ok(v) => println!("PROBE {s:34} -> rs {:24}", ctx.format_default(v)),
+                Err(e) => println!("PROBE {s:34} -> unrepresentable ({e})"),
+            }
+        }
+    }
+
     /// `format_default` follows Python's `to-scientific-string`.
     ///
     /// Expectations produced by running each case through `CPython`'s
@@ -2208,6 +2230,13 @@ mod custom_directive_precision_tests {
             ("-1E-7", "-1E-7"),
             ("1234E-10", "1.234E-7"),
             ("1E-28", "1E-28"),
+            // Coefficients that END in zeros keep them — Python does not
+            // normalize the significand, and these round-trip through
+            // `rust_decimal` intact (`10E-8` is mantissa 10 at scale 8).
+            ("10E-8", "1.0E-7"),
+            ("100E-9", "1.00E-7"),
+            ("1.000000E-7", "1.000000E-7"),
+            ("0.00000010", "1.0E-7"),
             ("0.1", "0.1"),
             ("123.456", "123.456"),
         ] {

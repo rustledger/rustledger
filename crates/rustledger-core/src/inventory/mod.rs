@@ -668,12 +668,16 @@ impl Inventory {
 
     /// Get mutable access to the underlying positions, contiguously.
     ///
-    /// Forces the [`PositionStore::Owned`] backing first, so the caller gets
-    /// a real `&mut Vec<Position>` with O(1) indexing and amortized O(1)
-    /// push. If the inventory was [`PositionStore::Shared`] — the BQL
-    /// snapshot representation — that conversion costs O(M) once and any
-    /// structural sharing with earlier snapshots is dropped for THIS
-    /// inventory; the snapshots themselves are unaffected.
+    /// Forces the contiguous backing first, so the caller gets a real
+    /// `&mut Vec<Position>` with O(1) indexing and amortized O(1) push. If
+    /// the inventory was using the structurally-shared backing — the BQL
+    /// snapshot representation, see [`Inventory::new_shared`] — that
+    /// conversion costs O(M) once and any sharing with earlier snapshots is
+    /// dropped for THIS inventory; the snapshots themselves are unaffected.
+    ///
+    /// (The backing enum is private, so this deliberately describes it in
+    /// prose rather than linking: a public doc cannot intra-doc-link a
+    /// private item, and `cargo doc -D warnings` rejects it.)
     pub fn positions_mut(&mut self) -> &mut Vec<Position> {
         self.positions.make_owned();
         match &mut self.positions {

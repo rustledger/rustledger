@@ -1021,10 +1021,21 @@ impl Inventory {
         let spec = cost_spec.cloned().unwrap_or_default();
 
         // Force a uniquely-owned positions Vector before any reduction mutates
-        // it. `self.positions` is often structurally shared — the booking engine
-        // clones an account's inventory into a working copy via imbl's O(1)
-        // `clone` — and every reduction method below mutates it in place (via
-        // `IndexMut` / `retain`). Mutating a SHARED imbl `Vector` in place drives
+        // it. `self.positions` MAY be structurally shared — BQL snapshots build
+        // `Shared` stores via `Inventory::new_shared` — and every reduction
+        // method below mutates it in place (via `IndexMut` / `retain`).
+        //
+        // NOT via the booking engine, whatever this comment used to say. Since
+        // #2056 the store is a hybrid and `PositionStore::default()` is
+        // `Owned(Vec)`, so the engine's inventories are owned and the working
+        // copy `BookingEngine::book` takes is a DEEP O(lots) copy, not an
+        // imbl O(1) one. That mattered: the claim of an O(1) clone here is
+        // part of why the copy went unexamined. It is the dominant superlinear
+        // term left in the pipeline — `Position::clone` grows 104x for 10x the
+        // input on the `investment` profiling shape, via
+        // `Position::clone <- Inventory::clone <- BookingEngine::book`.
+        //
+        // Mutating a SHARED imbl `Vector` in place drives
         // `imbl-sized-chunks`' copy-on-write into a use-after-free of the
         // interned `Arc<str>` inside `Position` — heap corruption / SIGSEGV on
         // large ledgers with many lot reductions (found by the rich-workload

@@ -255,8 +255,8 @@ pub fn format_source_grouped(source: &str, style: GroupingStyle<'_>) -> String {
 ///
 /// In debug builds, panics on a `(parse_result, source)`
 /// length-mismatch via `debug_assert_eq!`. Release builds
-/// silently emit possibly-wrong output (the producer-only
-/// invariant is the caller's responsibility).
+/// silently emit possibly-wrong output (pairing `source` with the
+/// `parse_result` it came from is the caller's responsibility).
 #[must_use]
 pub fn format_source_with_parsed(parse_result: &crate::ParseResult, source: &str) -> String {
     // Parse-error fallback. See the function rustdoc for the
@@ -288,8 +288,7 @@ pub fn format_source_with_parsed(parse_result: &crate::ParseResult, source: &str
         "format_source_with_parsed called with a `source` whose length doesn't \
          match the CST stored in `parse_result`. The two arguments came from \
          different documents — the cache path will emit text for the wrong \
-         buffer. See `ParseResult::alignment` rustdoc for the producer-only \
-         invariant.",
+         buffer.",
     );
     format_node_with_alignment(&node, parse_result.alignment())
 }
@@ -4915,9 +4914,8 @@ mod tests {
     /// Mismatched-pair safety: in debug builds, passing a
     /// length-mismatched `(parse_result, source)` pair panics via
     /// the `debug_assert_eq!`. Release builds silently emit text
-    /// for the wrong buffer (the producer-only invariant is the
-    /// caller's responsibility, documented in
-    /// `ParseResult::alignment`).
+    /// for the wrong buffer — pairing the two arguments is the
+    /// caller's responsibility, per this function's rustdoc.
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "source` whose length doesn't match")]

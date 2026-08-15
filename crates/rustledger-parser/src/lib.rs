@@ -367,6 +367,7 @@ impl ParseResult {
     /// `OnceLock`, deliberately, not `OnceCell`: `ParseResult` is shared as
     /// `Arc<ParseResult>` across the LSP's threads and there is a
     /// compile-time assertion below that it stays `Send + Sync`.
+    ///
     /// # Panics
     ///
     /// Panics if `syntax_root` is not a `SOURCE_FILE`, matching
@@ -849,11 +850,12 @@ mod parse_result_alignment_cache {
         assert_eq!(
             result.alignment(),
             fresh,
-            "ParseResult::alignment cache diverged from a fresh \
-             compute_alignment call for {label}: cache = {:?}, fresh = {:?}. \
-             Either parse_via_cst forgot to call compute_alignment, or \
-             compute_alignment's semantics changed without refreshing \
-             the cache in the converter.",
+            "ParseResult::alignment() diverged from a fresh \
+             compute_alignment call for {label}: cached = {:?}, fresh = {:?}. \
+             The accessor and this test must agree on how the alignment is \
+             derived from the tree — most likely the accessor's \
+             `GroupingStyle` no longer matches the one used here, or \
+             compute_alignment's semantics changed.",
             result.alignment(),
             fresh,
         );

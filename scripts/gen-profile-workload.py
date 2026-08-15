@@ -36,6 +36,7 @@ from __future__ import annotations
 import datetime
 import random
 import sys
+from collections.abc import Sequence
 
 # One transaction count for every shape, so cross-shape comparison is a
 # comparison of WORK PER TRANSACTION rather than of ledger size.
@@ -53,7 +54,7 @@ SHAPES: dict[str, str] = {
 }
 
 
-def _header(title: str, accounts: list[str], commodities: list[str] = []) -> None:
+def _header(title: str, accounts: list[str], commodities: Sequence[str] = ()) -> None:
     print(f'option "title" "{title}"')
     print('option "operating_currency" "USD"')
     for c in commodities:

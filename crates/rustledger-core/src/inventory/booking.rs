@@ -59,6 +59,24 @@ fn average_cost_from_positions(
     Ok(Some((total_cost / total_units, cost_currency.unwrap())))
 }
 
+/// A reduction computed from `&Inventory` but not yet applied.
+///
+/// The two variants mirror the two commit shapes the booking methods already
+/// had: the single-lot path maintains its caches incrementally, the multi-lot
+/// path rewrites lots and then rebuilds. Keeping them distinct means
+/// splitting preview from commit costs the commit path nothing.
+pub(super) enum ReductionPlan {
+    /// One lot reduced to `new_units`.
+    FromLot {
+        /// Index of the lot in `positions`.
+        idx: usize,
+        /// What that lot's units number becomes.
+        new_units: Decimal,
+    },
+    /// `(index, new units number)` pairs, applied in order.
+    Updates(SmallVec<[(usize, Decimal); 1]>),
+}
+
 impl Inventory {
     /// Try reducing positions without modifying the inventory.
     ///
@@ -91,7 +109,34 @@ impl Inventory {
         cost_spec: Option<&CostSpec>,
         method: BookingMethod,
     ) -> Result<BookingResult, BookingError> {
-        self.clone().reduce(units, cost_spec, method)
+        let spec = cost_spec.cloned().unwrap_or_default();
+
+        // Planned methods answer from `&self`. The rest still preview by
+        // cloning — correct, just O(lots). Converting them is mechanical and
+        // follows the same shape; these are simply not the ones the profiling
+        // shapes exercise.
+        if spec.merge {
+            return self.clone().reduce(units, cost_spec, method);
+        }
+        match method {
+            BookingMethod::Strict => self.plan_strict(units, &spec).map(|(r, _)| r),
+            BookingMethod::Fifo => self.plan_ordered(units, &spec, false).map(|(r, _)| r),
+            BookingMethod::Lifo => self.plan_ordered(units, &spec, true).map(|(r, _)| r),
+            BookingMethod::StrictWithSize
+            | BookingMethod::Hifo
+            | BookingMethod::Average
+            | BookingMethod::None => self.clone().reduce(units, cost_spec, method),
+        }
+    }
+
+    /// Apply a [`ReductionPlan`] produced by one of the `plan_*` methods.
+    fn commit_plan(&mut self, plan: &ReductionPlan, units: &Amount) {
+        match plan {
+            ReductionPlan::FromLot { idx, new_units } => {
+                self.commit_from_lot(*idx, units, *new_units);
+            }
+            ReductionPlan::Updates(updates) => self.commit_updates(updates),
+        }
     }
 
     /// STRICT booking: require exactly one matching lot, unless either:
@@ -132,6 +177,24 @@ impl Inventory {
         units: &Amount,
         spec: &CostSpec,
     ) -> Result<BookingResult, BookingError> {
+        let (result, plan) = self.plan_strict(units, spec)?;
+        self.commit_plan(&plan, units);
+        Ok(result)
+    }
+
+    /// The read-only half of [`Self::reduce_strict`].
+    ///
+    /// STRICT is a dispatcher: one match delegates to the single-lot path,
+    /// financially-interchangeable or wholly-consumed multi-matches fall back
+    /// to FIFO ordering, and anything else is ambiguous and mutates nothing.
+    /// This mirrors that dispatch by delegating to the same two planners the
+    /// mutating path uses. See [`Self::plan_from_lot`] for why the selection
+    /// logic must not be duplicated into `try_reduce`.
+    pub(super) fn plan_strict(
+        &self,
+        units: &Amount,
+        spec: &CostSpec,
+    ) -> Result<(BookingResult, ReductionPlan), BookingError> {
         let matching_indices: Vec<usize> = self
             .positions
             .iter()
@@ -152,7 +215,8 @@ impl Inventory {
             }),
             1 => {
                 let idx = matching_indices[0];
-                self.reduce_from_lot(idx, units)
+                let (result, new_units) = self.plan_from_lot(idx, units)?;
+                Ok((result, ReductionPlan::FromLot { idx, new_units }))
             }
             n => {
                 // Are the matched lots financially interchangeable? Two lots
@@ -174,7 +238,8 @@ impl Inventory {
                 });
 
                 if all_same_value {
-                    return self.reduce_ordered(units, spec, false);
+                    let (result, updates) = self.plan_ordered(units, spec, false)?;
+                    return Ok((result, ReductionPlan::Updates(updates)));
                 }
 
                 // Total match exception: if the reduction equals the sum of all
@@ -185,7 +250,8 @@ impl Inventory {
                     .map(|&i| self.positions[i].units.number.abs())
                     .sum();
                 if total_units == units.number.abs() {
-                    return self.reduce_ordered(units, spec, false);
+                    let (result, updates) = self.plan_ordered(units, spec, false)?;
+                    return Ok((result, ReductionPlan::Updates(updates)));
                 }
 
                 Err(BookingError::AmbiguousMatch {
@@ -399,6 +465,24 @@ impl Inventory {
         spec: &CostSpec,
         reverse: bool,
     ) -> Result<BookingResult, BookingError> {
+        let (result, updates) = self.plan_ordered(units, spec, reverse)?;
+        self.commit_updates(&updates);
+        Ok(result)
+    }
+
+    /// The read-only half of [`Self::reduce_ordered`]: pick the lots, check
+    /// sufficiency, and compute what would be matched — without touching a
+    /// single position.
+    ///
+    /// Returns the result alongside `(index, new units number)` pairs for the
+    /// caller to apply. See [`Self::plan_from_lot`] for why the split exists
+    /// and why the selection logic must not be duplicated into `try_reduce`.
+    pub(super) fn plan_ordered(
+        &self,
+        units: &Amount,
+        spec: &CostSpec,
+        reverse: bool,
+    ) -> Result<(BookingResult, SmallVec<[(usize, Decimal); 1]>), BookingError> {
         let mut remaining = units.number.abs();
         let mut matched: MatchedLots = SmallVec::new();
         let mut cost_basis = Decimal::ZERO;
@@ -458,12 +542,13 @@ impl Inventory {
             });
         }
 
+        let mut updates: SmallVec<[(usize, Decimal); 1]> = SmallVec::new();
         for idx in indices {
             if remaining.is_zero() {
                 break;
             }
 
-            let pos = &mut self.positions[idx];
+            let pos = &self.positions[idx];
             let available = pos.units.number.abs();
             let take = remaining.min(available);
 
@@ -484,25 +569,38 @@ impl Inventory {
             let (taken, _) = pos.split(take * pos.units.number.signum());
             matched.push(taken);
 
-            // Reduce the lot - modify in place to avoid cloning
+            // What the lot WOULD become. Recorded rather than applied so the
+            // preview path can run this same loop against `&self`.
             let reduction = if units.number.is_sign_negative() {
                 -take
             } else {
                 take
             };
-            pos.units.number += reduction;
+            updates.push((idx, pos.units.number + reduction));
 
             remaining -= take;
         }
 
-        // Clean up empty positions
+        Ok((
+            BookingResult {
+                matched,
+                cost_basis: cost_currency.map(|c| Amount::new(cost_basis, c)),
+            },
+            updates,
+        ))
+    }
+
+    /// Apply `(index, new units)` pairs from a plan, then restore the caches.
+    ///
+    /// `retain` + `rebuild_index` exactly as the fused `reduce_ordered` did —
+    /// the multi-lot path always paid an O(lots) cache rebuild, and changing
+    /// that is a separate question from removing the preview's clone.
+    fn commit_updates(&mut self, updates: &[(usize, Decimal)]) {
+        for &(idx, new_units) in updates {
+            self.positions[idx].units.number = new_units;
+        }
         self.positions.retain(|p| !p.is_empty());
         self.rebuild_index();
-
-        Ok(BookingResult {
-            matched,
-            cost_basis: cost_currency.map(|c| Amount::new(cost_basis, c)),
-        })
     }
 
     /// AVERAGE booking: merge all lots of the currency.
@@ -822,6 +920,30 @@ impl Inventory {
         idx: usize,
         units: &Amount,
     ) -> Result<BookingResult, BookingError> {
+        let (result, new_units) = self.plan_from_lot(idx, units)?;
+        self.commit_from_lot(idx, units, new_units);
+        Ok(result)
+    }
+
+    /// The read-only half of [`Self::reduce_from_lot`]: everything up to the
+    /// first mutation, returning what WOULD be matched plus the lot's new
+    /// units number.
+    ///
+    /// Split out so `try_reduce` can answer from `&self`. It used to be
+    /// `self.clone().reduce(..)`, which deep-copied every lot in the account
+    /// to preview a reduction that touches one of them — the dominant
+    /// superlinear term in the pipeline (`Position::clone` grew 104x for 10x
+    /// the input on the `investment` profiling shape).
+    ///
+    /// Selection logic lives HERE and only here; the mutating path calls this
+    /// too. That is deliberate — `try_reduce` duplicating `reduce`'s selection
+    /// is the exact drift that `try_reduce_equivalence` exists to police, and
+    /// it had already bitten once before that test was written.
+    pub(super) fn plan_from_lot(
+        &self,
+        idx: usize,
+        units: &Amount,
+    ) -> Result<(BookingResult, Decimal), BookingError> {
         let pos = &self.positions[idx];
         let available = pos.units.number.abs();
         let requested = units.number.abs();
@@ -850,17 +972,33 @@ impl Inventory {
         // Record matched
         let (matched, _) = pos.split(requested * pos.units.number.signum());
 
-        // Update the position
-        let currency = pos.units.currency.clone();
         // Python scale rule, same as `Inventory::add` — see
         // `crate::decimal::add_python_scale`. A reduction that brings a lot
         // through zero would otherwise drop the scale here while `add` kept
         // it, so the same lot would render differently depending on whether
         // it was last touched by an add or a reduce.
         let new_units = crate::decimal::add_python_scale(pos.units.number, units.number);
+
+        Ok((
+            BookingResult {
+                matched: smallvec![matched],
+                cost_basis,
+            },
+            new_units,
+        ))
+    }
+
+    /// The mutating half of [`Self::reduce_from_lot`], applying a
+    /// [`Self::plan_from_lot`] result.
+    ///
+    /// Keeps the incremental cache maintenance the single-lot path always
+    /// had: a full `rebuild_index` here would be O(lots) on the commit path
+    /// that this split is meant to keep cheap.
+    fn commit_from_lot(&mut self, idx: usize, units: &Amount, new_units: Decimal) {
+        let currency = self.positions[idx].units.currency.clone();
         let new_pos = Position {
             units: Amount::new(new_units, currency.clone()),
-            cost: pos.cost.clone(),
+            cost: self.positions[idx].cost.clone(),
         };
         self.positions[idx] = new_pos;
 
@@ -880,11 +1018,6 @@ impl Inventory {
                 }
             }
         }
-
-        Ok(BookingResult {
-            matched: smallvec![matched],
-            cost_basis,
-        })
     }
 }
 

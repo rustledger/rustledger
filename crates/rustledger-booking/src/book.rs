@@ -265,8 +265,42 @@ impl BookingEngine {
         // account more than once.
         let mut working_inventories: FxHashMap<rustledger_core::Account, Inventory> =
             FxHashMap::with_capacity_and_hasher(txn.postings.len(), Default::default());
+        //
+        // Only accounts with MORE THAN ONE reducing posting need a working
+        // copy at all. The copy exists so a second posting on the same account
+        // sees what the first one took; with a single posting nothing ever
+        // reads the mutation back, and `Inventory::try_reduce` answers from
+        // `&self` without copying (it stopped being `self.clone().reduce(..)`
+        // in this same change).
+        //
+        // That matters because the copy is O(lots): the engine's stores are
+        // `PositionStore::Owned`, so a long-lived investment account copied
+        // its entire lot list on every transaction that touched it.
+        // `Position::clone` grew 104x for 10x the input on the `investment`
+        // profiling shape — the dominant superlinear term left in the
+        // pipeline.
+        //
+        // The gate below must stay in step with the reduction path's own
+        // gate (`Complete` units + a cost spec). If it ever drifts toward
+        // cloning MORE, the result is only wasted work; drifting toward
+        // cloning less would silently drop a second posting's view of the
+        // first, which is what `two_reducing_postings_on_one_account_*`
+        // pins.
+        let mut reducing_postings: FxHashMap<&rustledger_core::Account, usize> =
+            FxHashMap::with_capacity_and_hasher(txn.postings.len(), Default::default());
         for posting in &txn.postings {
-            if let Some(inv) = self.inventories.get(&posting.account) {
+            if matches!(posting.units, Some(IncompleteAmount::Complete(_)))
+                && posting.cost.is_some()
+            {
+                *reducing_postings.entry(&posting.account).or_default() += 1;
+            }
+        }
+        for posting in &txn.postings {
+            if reducing_postings
+                .get(&posting.account)
+                .is_some_and(|n| *n > 1)
+                && let Some(inv) = self.inventories.get(&posting.account)
+            {
                 working_inventories
                     .entry(posting.account.clone())
                     .or_insert_with(|| inv.clone());
@@ -349,7 +383,10 @@ impl BookingEngine {
                 // This handles both:
                 // - Selling long positions (negative units, positive inventory)
                 // - Closing short positions (positive units, negative inventory)
-                if let Some(inv) = working_inventories.get_mut(&posting.account) {
+                if let Some(inv) = working_inventories
+                    .get(&posting.account)
+                    .or_else(|| self.inventories.get(&posting.account))
+                {
                     // Check if these units reduce existing cost-bearing inventory lots.
                     // Only positions with a cost basis are considered; simple (no-cost)
                     // positions are ignored to avoid misclassifying augmentations.
@@ -380,9 +417,21 @@ impl BookingEngine {
                         // out of the validator's input to avoid double-reporting against
                         // the validator's independent lot-matching pass.
                         // (`method` is resolved above next to the NONE-method gate.)
-                        let booking_result = inv
-                            .reduce(units, Some(cost_spec), method)
-                            .map_err(|e| convert_core_booking_error(e, &posting.account))?;
+                        // Mutate the working copy when we made one, so a
+                        // later posting on this account sees the reduction.
+                        // Otherwise preview against the live inventory:
+                        // nothing reads the mutation back, and this way
+                        // nothing was copied to produce it. Both call the
+                        // same planner inside `Inventory`.
+                        let booking_result = match working_inventories.get_mut(&posting.account) {
+                            Some(working) => working.reduce(units, Some(cost_spec), method),
+                            None => self.inventories[&posting.account].try_reduce(
+                                units,
+                                Some(cost_spec),
+                                method,
+                            ),
+                        }
+                        .map_err(|e| convert_core_booking_error(e, &posting.account))?;
                         {
                             // Check if multiple lots were matched
                             if booking_result.matched.len() > 1 {
@@ -2467,6 +2516,69 @@ mod tests {
     /// to remove. The third case is the one a naive guard gets wrong: the
     /// posting is tiny, but the account it lands in already sits at the
     /// ceiling, so the add still overflows.
+    /// Two reducing postings on the SAME account in one transaction: the
+    /// second must see what the first took.
+    ///
+    /// This is the case the working-copy clone exists for, and the only one
+    /// that still gets a copy — everything else previews against the live
+    /// inventory without copying. If the "does this account need a working
+    /// copy" gate ever drifts toward cloning less, both postings would match
+    /// against the full 10-unit lot and a 6+6 oversell would book cleanly.
+    ///
+    /// 10 AAPL held; sell 6 and 6 in one transaction. The second reduction
+    /// must fail on insufficient units.
+    #[test]
+    fn two_reducing_postings_on_one_account_see_each_other() {
+        let mut engine = BookingEngine::new();
+
+        let buy = Transaction::new(date(2024, 1, 1), "buy 10")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stocks", Amount::new(dec!(10), "AAPL")).with_cost(
+                    CostSpec::empty()
+                        .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(100) })
+                        .with_currency("USD"),
+                ),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(-1000), "USD")));
+        engine.apply(&buy).expect("buy applies");
+
+        let oversell = Transaction::new(date(2024, 1, 2), "sell 6 then 6")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stocks", Amount::new(dec!(-6), "AAPL"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(
+                Posting::new("Assets:Stocks", Amount::new(dec!(-6), "AAPL"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(1200), "USD")));
+
+        let result = engine.book(&oversell);
+        assert!(
+            result.is_err(),
+            "6 + 6 against a 10-unit lot must fail: the second posting has to \
+             see the first one's reduction. Got {result:?}",
+        );
+
+        // And the control: 6 + 4 exactly drains the lot and must succeed.
+        let mut engine = BookingEngine::new();
+        engine.apply(&buy).expect("buy applies");
+        let exact = Transaction::new(date(2024, 1, 2), "sell 6 then 4")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stocks", Amount::new(dec!(-6), "AAPL"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(
+                Posting::new("Assets:Stocks", Amount::new(dec!(-4), "AAPL"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(1000), "USD")));
+        assert!(
+            engine.book(&exact).is_ok(),
+            "6 + 4 exactly drains the lot and must book",
+        );
+    }
+
     #[test]
     fn the_snapshot_is_skipped_only_when_overflow_is_impossible() {
         let mut engine = BookingEngine::new();

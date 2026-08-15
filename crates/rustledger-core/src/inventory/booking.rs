@@ -1057,6 +1057,56 @@ mod reduction_tests {
         Amount::new(d(-n), "STK")
     }
 
+    /// A cost-basis overflow part-way through a multi-lot reduction must leave
+    /// the inventory untouched.
+    ///
+    /// `reduce_ordered` states the rule itself — "a failed reduction must
+    /// leave the inventory untouched" — and enforced it for the sufficiency
+    /// check, which runs up front. The overflow check did NOT get the same
+    /// treatment: it lived inside the mutation loop, so a reduction that
+    /// overflowed on the third lot returned `Err` with the first two already
+    /// drained. The validator reduces against live `LedgerState` inventories,
+    /// so that partial drain corrupts every later balance assertion on the
+    /// account.
+    ///
+    /// Computing the whole plan before committing any of it makes the rule
+    /// hold for both checks by construction.
+    #[test]
+    fn an_overflowing_multi_lot_reduction_leaves_the_inventory_untouched() {
+        // Two lots whose combined cost basis cannot be represented: each is
+        // two thirds of the range, so the first accumulates fine and the sum
+        // overflows on the second.
+        let huge = Decimal::MAX / Decimal::from(3) * Decimal::from(2);
+        let mut inv = Inventory::new();
+        for day in 1..=2 {
+            let mut cost = Cost::new(huge, "USD");
+            cost.date = naive_date(2024, 1, day);
+            inv.add(Position::with_cost(Amount::new(Decimal::ONE, "AAPL"), cost))
+                .expect("lots fit individually");
+        }
+        let before: Vec<Position> = inv.positions().cloned().collect();
+        assert_eq!(before.len(), 2, "fixture must hold two distinct lots");
+
+        let err = inv
+            .reduce(
+                &Amount::new(Decimal::from(-2), "AAPL"),
+                Some(&CostSpec::default()),
+                BookingMethod::Fifo,
+            )
+            .expect_err("the combined cost basis overflows");
+        assert!(
+            matches!(err, super::BookingError::Overflow(_)),
+            "expected an overflow, got {err:?}",
+        );
+
+        let after: Vec<Position> = inv.positions().cloned().collect();
+        assert_eq!(
+            after, before,
+            "the failed reduction drained lots anyway — a partial mutation on \
+             the error path is what this pins",
+        );
+    }
+
     fn try_reduce(inv: &Inventory, units: &Amount, method: BookingMethod) -> super::BookingResult {
         inv.try_reduce(units, Some(&CostSpec::default()), method)
             .expect("reduction should succeed")

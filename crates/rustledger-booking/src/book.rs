@@ -425,6 +425,10 @@ impl BookingEngine {
                         // same planner inside `Inventory`.
                         let booking_result = match working_inventories.get_mut(&posting.account) {
                             Some(working) => working.reduce(units, Some(cost_spec), method),
+                            // Indexing cannot panic here: reaching this arm
+                            // means the enclosing `if let` bound `inv` from
+                            // its `self.inventories` branch, so the account is
+                            // present.
                             None => self.inventories[&posting.account].try_reduce(
                                 units,
                                 Some(cost_spec),

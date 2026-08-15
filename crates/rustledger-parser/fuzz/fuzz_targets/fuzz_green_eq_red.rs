@@ -70,8 +70,13 @@ fuzz_target!(|data: &[u8]| {
         green.has_leading_bom, red.has_leading_bom,
         "green vs red has_leading_bom diverged"
     );
+    // `alignment()` rather than the field: it is a lazily-computed `OnceLock`
+    // now. Asking here is what this target wants anyway — it must compare the
+    // VALUE the two paths produce, and forcing it on both is the only way to
+    // do that.
     assert_eq!(
-        green.alignment, red.alignment,
+        green.alignment(),
+        red.alignment(),
         "green vs red alignment diverged"
     );
 });

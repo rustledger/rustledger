@@ -300,29 +300,23 @@ pub struct ParseResult {
     /// consume the cache to skip both the redundant parse and the
     /// redundant alignment walk.
     ///
-    /// **Producer-only cache invariant.** This field is populated
-    /// exactly once by `parse_via_cst`; the value is consistent with
-    /// the `directives` / `syntax_root` fields *at parse time*.
-    /// `ParseResult` exposes every cache input (`directives`,
-    /// `syntax_root`) as `pub`, so technically a consumer with a
-    /// `&mut ParseResult` can mutate one without refreshing the
-    /// other — leaving `alignment` stale. That is OUT-OF-CONTRACT
-    /// for this cache. Callers that mutate `ParseResult` directly
-    /// must either (a) refresh `alignment` by calling
-    /// `crate::format::compute_alignment(&SourceFile::cast(self.syntax_node()))`,
-    /// (b) avoid the `_with_alignment` formatter variants and use
-    /// the bare ones (which re-compute), or (c) treat the
-    /// `ParseResult` as immutable after construction (the common
-    /// case — the LSP wraps it in `Arc<ParseResult>`).
+    /// **Computed on first ask, then cached.** Nothing populates this at
+    /// parse time any more; the first call to [`ParseResult::alignment`]
+    /// computes it from `syntax_root` and every later call is free. Because
+    /// the value is derived from the tree WHEN ASKED rather than snapshotted
+    /// at parse time, the staleness hazard the old eager field carried — a
+    /// consumer mutating `directives` or `syntax_root` through their `pub`
+    /// handles and leaving a stale alignment behind — only exists if the
+    /// mutation happens after something already forced the cache.
     ///
     /// **Equivalence pinned.**
     /// `parse_result_alignment_cache::*` (7 fixtures) assert that
-    /// `parse(s).alignment` equals
+    /// `parse(s).alignment()` equals
     /// `compute_alignment(&SourceFile::cast(parse(s).syntax_node()).unwrap())`
-    /// across representative fixtures, so any future divergence
-    /// (a converter change that forgets to refresh the cache, a
-    /// `compute_alignment` change that breaks the contract)
-    /// fails CI.
+    /// across representative fixtures, so a `compute_alignment` change that
+    /// breaks the contract fails CI. `parse_leaves_the_alignment_uncomputed_until_asked`
+    /// separately pins that parsing does not force it — the value is the same
+    /// either way, so nothing else would notice the cost coming back.
     ///
     /// **Canonical-payload exclusion.** Excluded from
     /// [`__baseline_canonical_payload`] for the same reason as
@@ -373,19 +367,25 @@ impl ParseResult {
     /// `OnceLock`, deliberately, not `OnceCell`: `ParseResult` is shared as
     /// `Arc<ParseResult>` across the LSP's threads and there is a
     /// compile-time assertion below that it stays `Send + Sync`.
+    /// # Panics
+    ///
+    /// Panics if `syntax_root` is not a `SOURCE_FILE`, matching
+    /// [`crate::format::format_node_grouped`]. It always is — `parse_via_cst`
+    /// builds the root — and the alternative considered here, falling back to
+    /// `PostingAlignment::default()`, is worse than a panic: it would format
+    /// the whole file to the wrong columns while looking like it worked.
     #[must_use]
     pub fn alignment(&self) -> crate::format::PostingAlignment {
         *self.alignment.get_or_init(|| {
             use crate::cst::ast::AstNode as _;
-            let node = self.syntax_node();
-            crate::cst::ast::SourceFile::cast(node).map_or_else(
-                crate::format::PostingAlignment::default,
-                |sf| {
-                    crate::cst::format::compute_alignment(
-                        &sf,
-                        crate::cst::format::GroupingStyle::default(),
-                    )
-                },
+            // Precondition as in `format_node_grouped`, which panics on the
+            // same breach rather than guessing an alignment.
+            #[allow(clippy::expect_used)]
+            let source_file = crate::cst::ast::SourceFile::cast(self.syntax_node())
+                .expect("ParseResult::syntax_root is always a SOURCE_FILE");
+            crate::cst::format::compute_alignment(
+                &source_file,
+                crate::cst::format::GroupingStyle::default(),
             )
         })
     }

@@ -782,7 +782,7 @@ fn format_node_with_style(
     // debug_assert is a redundant no-op in release. External
     // direct callers of this entry point (FFI, future LSP
     // handlers calling `format_node_with_alignment` with a
-    // `parse_result.alignment` cache) get the panic in debug
+    // `parse_result.alignment()` cache) get the panic in debug
     // builds; in release, a wrong-kind `node` produces empty or
     // malformed output rather than panicking — acceptable for
     // a precondition that's guaranteed by the call's typed
@@ -4798,9 +4798,9 @@ mod tests {
         }
     }
 
-    /// The cached `ParseResult::alignment` value matches what
+    /// The cached [`crate::ParseResult::alignment`] value matches what
     /// `format_node` would compute on the parsed tree. End-to-end
-    /// regression: an LSP caller passing `parse_result.alignment`
+    /// regression: an LSP caller passing `parse_result.alignment()`
     /// to `format_node_with_alignment` produces the same output
     /// as the bare `format_node` (uncached path).
     #[test]

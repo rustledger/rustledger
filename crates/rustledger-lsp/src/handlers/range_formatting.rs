@@ -292,7 +292,7 @@ fn fallback_cst_snap_edit(
     let (snap_cst, mut new_text) = if style.groups_anything() {
         format_node_range_grouped(&node, cst_range, style)?
     } else {
-        format_node_range_with_alignment(&node, cst_range, parse_result.alignment)?
+        format_node_range_with_alignment(&node, cst_range, parse_result.alignment())?
     };
 
     // CRLF preservation: `format_node_range` always emits LF (it

@@ -200,7 +200,7 @@ pub fn handle_inlay_hints(
             // sits where `rledger format` *would* put the amount, which
             // may differ from where the current explicit amount renders.
             let num_text = amount.number.to_string();
-            let align = parse_result.alignment;
+            let align = parse_result.alignment();
             let field_pad = align.number_col.saturating_sub(end_col_chars).max(2);
             let justify_pad = align.number_width.saturating_sub(num_text.chars().count());
             let gap = field_pad + justify_pad;
@@ -859,7 +859,7 @@ mod tests {
         // Elided `Assets:Cash` is on line 2 (0-indexed).
         assert_eq!(h.position.line, 2);
 
-        let align = result.alignment;
+        let align = result.alignment();
         assert!(align.number_col > 0, "file should have an alignment column");
 
         // The number text must begin at the formatter's right-justified

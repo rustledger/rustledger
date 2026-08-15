@@ -291,7 +291,7 @@ pub fn format_source_with_parsed(parse_result: &crate::ParseResult, source: &str
          buffer. See `ParseResult::alignment` rustdoc for the producer-only \
          invariant.",
     );
-    format_node_with_alignment(&node, parse_result.alignment)
+    format_node_with_alignment(&node, parse_result.alignment())
 }
 
 /// Like [`format_source`], but returns the parse errors instead
@@ -4814,7 +4814,7 @@ mod tests {
         let node = parse_result.syntax_node();
         assert_eq!(
             format_node(&node),
-            format_node_with_alignment(&node, parse_result.alignment),
+            format_node_with_alignment(&node, parse_result.alignment()),
             "ParseResult::alignment must drive identical format output to format_node",
         );
     }

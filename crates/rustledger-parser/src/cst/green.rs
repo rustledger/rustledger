@@ -1327,7 +1327,7 @@ mod tests {
                     p.plugins.clone(),
                     format!("{:?}", p.warnings),
                     p.has_leading_bom,
-                    p.alignment,
+                    p.alignment(),
                 )
             };
             assert_eq!(

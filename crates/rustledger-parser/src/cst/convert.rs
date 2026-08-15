@@ -353,10 +353,12 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // `ParseResult::alignment` rustdoc for the cache contract;
     // the equivalence with a fresh `compute_alignment` call is
     // pinned by `parse_result_alignment_cache::*` (lib.rs tests).
-    let alignment = crate::cst::format::compute_alignment(
-        &source_file,
-        crate::cst::format::GroupingStyle::default(),
-    );
+    // NOT computed here: `compute_alignment` walks the tree through the red
+    // ast accessors, and rowan allocates a `Box<NodeData>` per red node with
+    // no recycling. Doing it eagerly charged every parse for a formatter pass
+    // it usually never reads — 5.7%-12.3% of instructions by workload. See
+    // `ParseResult::alignment`, which computes on first use and caches.
+    let alignment = std::sync::OnceLock::new();
 
     // Capture the green root before we drop `source_file`. `.green()`
     // borrows (`&GreenNodeData`), so promote to an owned `GreenNode`; it is

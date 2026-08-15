@@ -268,7 +268,7 @@ fn observables(r: &rustledger_parser::ParseResult) -> Vec<(&'static str, String)
         ("plugins", format!("{:?}", r.plugins)),
         ("warnings", format!("{:?}", r.warnings)),
         ("has_leading_bom", format!("{:?}", r.has_leading_bom)),
-        ("alignment", format!("{:?}", r.alignment)),
+        ("alignment", format!("{:?}", r.alignment())),
     ]
 }
 

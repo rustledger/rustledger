@@ -370,13 +370,29 @@ fn the_generator_reaches_well_formed_transactions() {
 /// braces, a link used as a metadata value, and tags/links used as
 /// `custom`/`pushmeta` values.
 ///
-/// These are pinned by hand rather than left to `ledger_source()` because the
-/// generator produces well-formed ledgers: it emits none of these three
-/// constructs, so the proptest above would report agreement without ever
-/// having compared one. The rules moved from three standalone red
-/// `descendants()` passes into the green walker, and the whole point of the
-/// move is that nothing observable changes — which is only worth asserting on
-/// inputs that actually trigger them.
+/// Complementary to the proptest above, not a replacement. Which suite catches
+/// what was verified by running deliberate mutations, not assumed:
+///
+/// | deliberate mutation                    | fixtures | proptest |
+/// |----------------------------------------|----------|----------|
+/// | `pushmeta` wrongly rejects a tag       | catches  | misses   |
+/// | BOM not subtracted on the defect path  | catches  | misses   |
+/// | double-brace closer not recognized     | catches  | catches  |
+///
+/// The last row only reads that way because the proptest found it FIRST: the
+/// fixtures missed it until the two double-brace cases below were added. That
+/// is the argument for keeping both suites — neither was sufficient alone.
+///
+/// `ledger_source()` emits WELL-FORMED ledgers. It does generate cost specs —
+/// which is how it catches a broken `R_DOUBLE_BRACE` closer, since a valid
+/// `{{1 USD}}` then reports as unclosed — but it does not generate the
+/// MALFORMED constructs these rules exist to diagnose: an unclosed brace, a
+/// link where a metadata value belongs, a tag in a `custom`. On those the
+/// proptest compares two empty error lists and reports agreement without
+/// having exercised the rule at all.
+///
+/// So the double-brace cases below are pinned here too, rather than left to
+/// the generator to rediscover.
 ///
 /// Ordering is part of the contract: all cost errors, then all link-metadata
 /// errors, then all custom/pushmeta errors, each in document order. The last
@@ -391,6 +407,18 @@ fn green_equals_red_on_the_node_shape_rules() {
         (
             "closed cost brace (control)",
             "2024-01-01 * \"t\"\n  Assets:B 1 AAPL {100 USD}\n  Assets:C\n",
+        ),
+        // `{{` / `}}` is a SEPARATE token pair from `{` / `}`, and treating
+        // only `}` as a closer makes this valid spec report as unclosed. The
+        // proptest catches that; these pin it without depending on the
+        // generator happening to emit a double-brace spec.
+        (
+            "closed double brace (control)",
+            "2024-01-01 * \"t\"\n  Assets:B 1 AAPL {{100 USD}}\n  Assets:C\n",
+        ),
+        (
+            "unclosed double brace",
+            "2024-01-01 * \"t\"\n  Assets:B 1 AAPL {{100 USD\n",
         ),
         (
             "empty cost component",
@@ -459,7 +487,7 @@ fn green_equals_red_on_the_node_shape_rules() {
             .count()
     };
     for (rule, needle, want) in [
-        ("unclosed cost brace", "unclosed cost specification", 2),
+        ("unclosed cost brace", "unclosed cost specification", 3),
         ("cost component shape", "cost-spec component", 1),
         ("link as metadata value", "not a valid metadata value", 2),
         ("custom value", "not a valid custom value", 3),

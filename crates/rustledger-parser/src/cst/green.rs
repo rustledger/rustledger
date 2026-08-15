@@ -588,6 +588,13 @@ impl DescendantsWalker<'_> {
                     // Before recursing: `self.offset` is `n`'s start byte, which is
                     // what the per-node shape rules need. They only read `n`'s
                     // IMMEDIATE children, so they cannot disturb the walk.
+                    //
+                    // NOT gated on `collect_occurrences`. That flag drops the
+                    // rename/references indices the LSP alone reads, and
+                    // `parse_without_occurrences` promises a result identical to
+                    // `parse`'s in every other respect — errors included. Gating
+                    // these here would silently strip diagnostics from the loader
+                    // and CLI, which take that path.
                     self.node_shape_errors(n, kind);
                     self.walk(n, in_error_node || kind == K::ERROR_NODE);
                 }

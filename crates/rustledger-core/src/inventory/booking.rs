@@ -1000,15 +1000,20 @@ impl Inventory {
             units: Amount::new(new_units, currency.clone()),
             cost: self.positions[idx].cost.clone(),
         };
+        // Drop the old classification before overwriting: a reduction can take
+        // a lot through zero and flip its sign bucket.
+        self.sign_index_bump(idx, -1);
         self.positions[idx] = new_pos;
+        self.sign_index_bump(idx, 1);
 
         // Update units cache incrementally (units.number is negative for reductions)
-        if let Some(cached) = self.units_cache.get_mut(&currency) {
-            *cached = crate::decimal::add_python_scale(*cached, units.number);
+        if let Some(stats) = self.units_cache.get_mut(&currency) {
+            stats.total = crate::decimal::add_python_scale(stats.total, units.number);
         }
 
         // Remove if empty and rebuild simple_index
         if self.positions[idx].is_empty() {
+            self.sign_index_bump(idx, -1);
             self.positions.remove(idx);
             // Only rebuild simple_index when position is removed
             self.simple_index.clear();

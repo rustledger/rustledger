@@ -504,7 +504,11 @@ impl Executor<'_> {
         let track_balance = balance_idx.is_some()
             && position_idx.is_some()
             && (selects_all || super::query_references_column(query, "balance"));
-        let mut running_balance = Inventory::default();
+        // SHARED backing: this is cloned once per output row below, and the
+        // clone is what #1086 is about — a contiguous copy per row holds
+        // O(rows x lots) positions at once. Structural sharing makes each
+        // snapshot O(1) and the chain O(base + deltas).
+        let mut running_balance = Inventory::new_shared();
 
         // Process each row from the table
         for row in &table.rows {
@@ -915,7 +919,8 @@ impl Executor<'_> {
         // cumulative inventory of WHERE-filtered postings — not per-account.
         // Aligns with the cumulative `balance` semantics introduced for SELECT
         // in PR #940; the JOURNAL command was missed in that change. Issue #955.
-        let mut cumulative_balance = rustledger_core::Inventory::new();
+        // Same row-per-snapshot shape as `running_balance` above.
+        let mut cumulative_balance = rustledger_core::Inventory::new_shared();
 
         // Normalize the AT mode once per query rather than calling
         // to_uppercase() per row (which would allocate twice — once for

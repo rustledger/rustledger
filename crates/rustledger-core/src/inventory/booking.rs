@@ -603,7 +603,7 @@ impl Inventory {
         // Add back the remainder (if non-zero) at the average cost, so a later
         // reduction sees the correct basis instead of a costless position.
         if !new_units.is_zero() {
-            self.positions.push_back(at_avg_cost(new_units));
+            self.positions.push(at_avg_cost(new_units));
         }
 
         self.rebuild_index();
@@ -668,7 +668,7 @@ impl Inventory {
             self.positions
                 .retain(|p| !(p.units.currency == currency && p.cost.is_some()));
             if let Some((avg_cost, cost_currency)) = avg {
-                self.positions.push_back(Position::with_cost(
+                self.positions.push(Position::with_cost(
                     Amount::new(total_units, currency.clone()),
                     Cost::new(avg_cost, cost_currency),
                 ));
@@ -761,7 +761,7 @@ impl Inventory {
         // Add back a single merged lot with the remainder
         let remaining = total_units + units.number; // units.number is negative for reductions
         if !remaining.is_zero() {
-            self.positions.push_back(Position::with_cost(
+            self.positions.push(Position::with_cost(
                 Amount::new(remaining, units.currency.clone()),
                 make_avg_cost(),
             ));

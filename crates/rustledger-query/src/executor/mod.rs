@@ -547,7 +547,10 @@ impl<'a> Executor<'a> {
         // Single cumulative running balance across WHERE-filtered postings in
         // iteration order. This is the bean-query `balance` semantic: a snapshot
         // of "everything selected so far" rather than a per-account view.
-        let mut cumulative_balance: Inventory = Inventory::default();
+        // SHARED backing: cloned once per output row below. A contiguous
+        // copy per row is what #1086 is about — 2000 lots x 2000 rows holds
+        // ~2M positions at once (measured 395 MB vs 31 MB).
+        let mut cumulative_balance: Inventory = Inventory::new_shared();
 
         // Create an iterator over (directive_index, directive) pairs
         // Handle both spanned and unspanned directives

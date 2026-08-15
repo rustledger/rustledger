@@ -416,18 +416,18 @@ impl BookingEngine {
                                 expansions.push((idx, expanded));
                                 booked_indices.insert(idx);
                             } else if let Some(cost_basis) = &booking_result.cost_basis {
-                                // Single lot match - update posting in place
-                                let per_unit = cost_basis.number / units.number.abs();
-                                // Use new_calculated since per_unit is computed from total/units
-                                let matched_cost =
-                                    Cost::new_calculated(per_unit, cost_basis.currency.clone())
-                                        .with_date_opt(
-                                            booking_result
-                                                .matched
-                                                .first()
-                                                .and_then(|p| p.cost.as_ref())
-                                                .and_then(|c| c.date),
-                                        );
+                                // Single lot match - update posting in place.
+                                // Prefer the matched lot's exact stored cost to avoid
+                                // rounding loss from `(take * c) / take` on full-precision
+                                // total-cost lots (#2048).
+                                let matched_pos = booking_result.matched.first();
+                                let matched_cost = matched_pos
+                                    .and_then(|p| p.cost.as_ref())
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        let per_unit = cost_basis.number / units.number.abs();
+                                        Cost::new_calculated(per_unit, cost_basis.currency.clone())
+                                    });
 
                                 // Update posting with filled cost. Carry the
                                 // matched lot's label (as the date already is) so
@@ -439,13 +439,9 @@ impl BookingEngine {
                                     number: Some(rustledger_core::CostNumber::PerUnit {
                                         value: matched_cost.number,
                                     }),
-                                    currency: Some(matched_cost.currency.clone()),
+                                    currency: Some(matched_cost.currency),
                                     date: matched_cost.date,
-                                    label: booking_result
-                                        .matched
-                                        .first()
-                                        .and_then(|p| p.cost.as_ref())
-                                        .and_then(|c| c.label.clone()),
+                                    label: matched_cost.label,
                                     merge: false,
                                 });
                                 booked_indices.insert(idx);
@@ -1246,6 +1242,79 @@ mod tests {
         let pos = inv.positions().next().unwrap();
         assert!(pos.cost.is_some(), "Expected cost on position");
         eprintln!("Position cost: {:?}", pos.cost);
+    }
+
+    #[test]
+    fn test_book_partial_wildcard_reduction_of_total_cost_lot() {
+        // #2048: partial `{}` reduction of a `{{total-cost}}` lot must preserve
+        // the exact stored lot cost rather than re-dividing `(take * c) / take`,
+        // which loses 96-bit decimal precision and fails subsequent application.
+        let mut engine = BookingEngine::new();
+
+        // Buy 0.923641233 ETH {{590645.78 CLP}}
+        let mut buy_cost = CostSpec::empty()
+            .with_number(rustledger_core::CostNumber::Total {
+                value: dec!(590645.78),
+            })
+            .with_currency("CLP");
+        buy_cost.label = Some("eth-batch-1".to_string());
+        let buy = Transaction::new(date(2017, 12, 3), "buy with total cost")
+            .with_synthesized_posting(
+                Posting::new("Assets:ETH", Amount::new(dec!(0.923641233), "ETH"))
+                    .with_cost(buy_cost),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:CLP",
+                Amount::new(dec!(-590645.78), "CLP"),
+            ));
+
+        engine.apply(&buy).expect("buy fits in Decimal");
+
+        // Partial sell 1: -0.02 ETH {} (failed on base: E4001 NoMatchingLot)
+        let sell1 = Transaction::new(date(2017, 12, 29), "partial sell 1")
+            .with_synthesized_posting(
+                Posting::new("Assets:ETH", Amount::new(dec!(-0.02), "ETH"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(Posting::new("Assets:CLP", Amount::new(dec!(100000), "CLP")))
+            .with_synthesized_posting(Posting::auto("Income:PnL"));
+
+        let booked1 = engine
+            .book_and_interpolate(&sell1)
+            .expect("booking sell 1 should succeed");
+
+        assert_eq!(
+            booked1.transaction.postings[0]
+                .cost
+                .as_ref()
+                .and_then(|c| c.label.as_deref()),
+            Some("eth-batch-1"),
+            "matched lot label must be preserved on single-lot reduction"
+        );
+
+        engine
+            .apply(&booked1.transaction)
+            .expect("applying booked partial reduction 1 must succeed");
+
+        // Partial sell 2: -0.029 ETH {} (also failed on base)
+        let sell2 = Transaction::new(date(2018, 1, 15), "partial sell 2")
+            .with_synthesized_posting(
+                Posting::new("Assets:ETH", Amount::new(dec!(-0.029), "ETH"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(Posting::new("Assets:CLP", Amount::new(dec!(150000), "CLP")))
+            .with_synthesized_posting(Posting::auto("Income:PnL"));
+
+        let booked2 = engine
+            .book_and_interpolate(&sell2)
+            .expect("booking sell 2 should succeed");
+
+        engine
+            .apply(&booked2.transaction)
+            .expect("applying booked partial reduction 2 must succeed");
+
+        let inv = engine.inventory(&"Assets:ETH".into()).unwrap();
+        assert_eq!(inv.units("ETH"), dec!(0.874641233));
     }
 
     #[test]

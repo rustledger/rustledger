@@ -3612,6 +3612,17 @@ fn fixup_directive_spans(
         })
         .collect();
 
+    // `all_starts` is built from `children()`, i.e. siblings in document
+    // order, and sibling text ranges are disjoint and increasing — so it is
+    // sorted ascending on `raw_start` and every key is unique. The lookup
+    // below binary-searches on that.
+    debug_assert!(
+        all_starts.windows(2).all(|w| w[0].0 < w[1].0),
+        "all_starts must be strictly ascending by raw_start for the binary \
+         search below; sibling text ranges are disjoint and increasing, so a \
+         failure here means the enumeration is no longer document-ordered",
+    );
+
     let source_end: usize =
         (u32::from(source_file.syntax().text_range().end()) + bom_offset) as usize;
 
@@ -3632,7 +3643,20 @@ fn fixup_directive_spans(
         let node = &converted_nodes[i];
         let raw_start: usize = (u32::from(node.text_range().start()) + bom_offset) as usize;
         let node_end: usize = (u32::from(node.text_range().end()) + bom_offset) as usize;
-        if let Some(pos) = all_starts.iter().position(|(rs, _)| *rs == raw_start) {
+        // Binary search, NOT a linear `position()` scan. This loop runs once
+        // per directive over an `all_starts` that has one entry per
+        // directive, so a linear probe made span fixup O(N^2) in the
+        // directive count. Measured on the `simple` profiling shape: 10x the
+        // transactions cost 21.8x the instructions, and cachegrind put ~40%
+        // of a 20k-transaction run inside this one scan and its slice-iterator
+        // internals. It is invisible on small inputs, which is why it sat
+        // here — at 2k transactions the same scan is under 2%.
+        //
+        // Semantics are unchanged: keys are unique (see the debug_assert
+        // above), so where `position` found the sole match, `binary_search`
+        // finds the same one, and a miss still falls through to the
+        // defensive branch below rather than panicking.
+        if let Ok(pos) = all_starts.binary_search_by_key(&raw_start, |(rs, _)| *rs) {
             let start = all_starts[pos].1;
             let end = all_starts
                 .get(pos + 1)
@@ -3660,6 +3684,46 @@ fn fixup_directive_spans(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directive's span ends at the next *input* directive's content start,
+    /// INCLUDING directives filtered out of the `ParseResult`
+    /// (`pushtag`/`poptag`/`pushmeta`/`popmeta`).
+    ///
+    /// This is the case that makes `all_starts` longer than `directives`, so
+    /// it is the one that breaks if the lookup ever stops keying on the CST
+    /// node's own start — e.g. "optimizing" the binary search into an index
+    /// into `directives`, which would end the `open` span at the transaction
+    /// instead of at the `pushtag` between them.
+    #[test]
+    fn spans_end_at_the_next_input_directive_even_when_it_is_filtered_out() {
+        let src = "2024-01-01 open Assets:Bank USD\n\
+                   pushtag #trip\n\
+                   2024-01-02 * \"a\"\n  Assets:Bank 1 USD\n  Assets:Other\n\
+                   poptag #trip\n\
+                   2024-01-03 close Assets:Bank\n";
+        let parsed = crate::parse(src);
+
+        let at = |needle: &str| src.find(needle).expect("fixture contains it");
+        let spans: Vec<(usize, usize)> = parsed
+            .directives
+            .iter()
+            .map(|d| (d.span.start, d.span.end))
+            .collect();
+
+        assert_eq!(
+            spans,
+            vec![
+                // `open` stops at `pushtag`, NOT at the transaction.
+                (0, at("pushtag")),
+                // the transaction stops at `poptag`, NOT at `close`.
+                (at("2024-01-02"), at("poptag")),
+                // the last directive runs to end of source.
+                (at("2024-01-03"), src.len()),
+            ],
+            "pushtag/poptag are filtered from `directives` but still bound the \
+             preceding directive's span",
+        );
+    }
 
     /// Match a `SyntaxError` by message prefix rather than by `Debug` output.
     /// The `Debug` rendering of `ParseErrorKind` can change without any

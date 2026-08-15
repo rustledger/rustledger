@@ -534,11 +534,14 @@ pub(super) fn convert_transaction(
 /// structurally), so the recursion can't blow the stack on adversarial input.
 pub(super) fn walk_descendants(
     root: &crate::SyntaxNode,
+    stripped: &str,
     bom_offset: u32,
     collect_occurrences: bool,
 ) -> DescendantsWalkResult {
     let mut w = DescendantsWalker {
         offset: bom_offset as usize,
+        bom_offset: bom_offset as usize,
+        stripped,
         preceded_by_ws: false,
         collect_occurrences,
         result: DescendantsWalkResult {
@@ -546,20 +549,31 @@ pub(super) fn walk_descendants(
             top_level_comments: Vec::new(),
             currency_occurrences: Vec::new(),
             account_occurrences: Vec::new(),
+            cost_brace_errors: Vec::new(),
+            link_meta_errors: Vec::new(),
+            custom_pushmeta_errors: Vec::new(),
         },
     };
     w.walk(root.green(), false);
     w.result
 }
 
-struct DescendantsWalker {
+struct DescendantsWalker<'a> {
     offset: usize,
+    /// `offset` starts at `bom_offset`, so subtracting this back out gives an
+    /// offset into `stripped` — which is what indexes `stripped` and what the
+    /// red passes hand to `first_cost_spec_defect` (the CST is built from
+    /// `stripped`, so red's `text_range()` is already stripped-relative).
+    bom_offset: usize,
+    /// Needed only to render a cost-spec defect message from the offending
+    /// source text, as `extract_unclosed_cost_brace_errors` does.
+    stripped: &'a str,
     preceded_by_ws: bool,
     collect_occurrences: bool,
     result: DescendantsWalkResult,
 }
 
-impl DescendantsWalker {
+impl DescendantsWalker<'_> {
     fn walk(&mut self, node: &rowan::GreenNodeData, in_error_node: bool) {
         use crate::SyntaxKind as K;
         for child in node.children() {
@@ -571,6 +585,10 @@ impl DescendantsWalker {
                     if super::ast::Directive::can_cast(kind) {
                         self.preceded_by_ws = false;
                     }
+                    // Before recursing: `self.offset` is `n`'s start byte, which is
+                    // what the per-node shape rules need. They only read `n`'s
+                    // IMMEDIATE children, so they cannot disturb the walk.
+                    self.node_shape_errors(n, kind);
                     self.walk(n, in_error_node || kind == K::ERROR_NODE);
                 }
                 NodeOrToken::Token(t) => {
@@ -581,6 +599,163 @@ impl DescendantsWalker {
                     self.token(kind, t.text(), start, len, in_error_node);
                 }
             }
+        }
+    }
+
+    /// The three per-node shape rules that used to be three SEPARATE
+    /// whole-tree red `descendants()` walks in `convert.rs`
+    /// (`extract_unclosed_cost_brace_errors`,
+    /// `extract_link_metadata_value_errors`,
+    /// `extract_custom_pushmeta_taglink_errors`).
+    ///
+    /// Each of those allocated a red `Box<NodeData>` per node visited, with no
+    /// recycling. Each carried a `stripped.contains(..)` byte-scan guard, so
+    /// they were free on a ledger with no `{`, `^` or `#` — but a `#` appears
+    /// in any tagged ledger and a `{` in any investment one, so real files paid
+    /// all three. Measured by ablation (cachegrind, 10k txns): 7.46% of ALL
+    /// instructions on the `tagged` workload shape and 2.15% on `investment`,
+    /// against 0.57% on `simple` — which is why an earlier profiling pass that
+    /// only looked at `simple` concluded these were not a hotspot.
+    ///
+    /// Folded in here they cost one `match` per node on a walk that already
+    /// visits every node, and the guards are gone: no `{` in the source means
+    /// the parser built no `COST_SPEC` node, so the rule finds nothing anyway.
+    ///
+    /// `self.offset` MUST be `node`'s start byte when this is called.
+    fn node_shape_errors(&mut self, node: &rowan::GreenNodeData, kind: crate::SyntaxKind) {
+        use crate::SyntaxKind as K;
+        match kind {
+            K::META_ENTRY => self.link_metadata_value_errors(node),
+            K::CUSTOM_DIRECTIVE => self.taglink_value_errors(node, true, "custom"),
+            K::PUSHMETA_DIRECTIVE => self.taglink_value_errors(node, false, "pushmeta"),
+            K::COST_SPEC => self.cost_spec_errors(node),
+            _ => {}
+        }
+    }
+
+    /// `node`'s immediate child tokens as `(kind, text, start, end)`, in
+    /// absolute (BOM-adjusted) byte offsets.
+    ///
+    /// The running offset advances over child NODES as well as tokens —
+    /// skipping their `text_len` would silently shift every span after the
+    /// first nested node.
+    fn child_tokens(
+        node: &rowan::GreenNodeData,
+        start: usize,
+    ) -> impl Iterator<Item = (crate::SyntaxKind, &str, usize, usize)> {
+        let mut offset = start;
+        node.children().filter_map(move |child| match child {
+            NodeOrToken::Node(n) => {
+                offset += usize::from(n.text_len());
+                None
+            }
+            NodeOrToken::Token(t) => {
+                let tok_start = offset;
+                offset += usize::from(t.text_len());
+                Some((
+                    crate::BeancountLanguage::kind_from_raw(t.kind()),
+                    t.text(),
+                    tok_start,
+                    offset,
+                ))
+            }
+        })
+    }
+
+    /// A link is not a valid metadata VALUE; beancount takes a tag here but
+    /// not a link. Mirrors `extract_link_metadata_value_errors`.
+    fn link_metadata_value_errors(&mut self, node: &rowan::GreenNodeData) {
+        for (kind, text, start, end) in Self::child_tokens(node, self.offset) {
+            if kind != crate::SyntaxKind::LINK {
+                continue;
+            }
+            self.result.link_meta_errors.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError(format!(
+                    "a link ({text}) is not a valid metadata value; beancount \
+                     accepts a tag here but not a link",
+                )),
+                Span::new(start, end),
+            ));
+        }
+    }
+
+    /// Tags and links are not valid `custom` or `pushmeta` values (#1958), by
+    /// two DIFFERENT rules: `pushmeta` follows the metadata rule and rejects
+    /// only a link, `custom` rejects both. Mirrors
+    /// `extract_custom_pushmeta_taglink_errors` — see its rustdoc for why the
+    /// check cannot live in the shared `value_tokens_to_meta`.
+    fn taglink_value_errors(&mut self, node: &rowan::GreenNodeData, reject_tag: bool, what: &str) {
+        use crate::SyntaxKind as K;
+        for (kind, text, start, end) in Self::child_tokens(node, self.offset) {
+            let bad = match kind {
+                K::LINK => true,
+                K::TAG => reject_tag,
+                _ => false,
+            };
+            if !bad {
+                continue;
+            }
+            let noun = if kind == K::TAG { "tag" } else { "link" };
+            self.result
+                .custom_pushmeta_errors
+                .push(crate::ParseError::new(
+                    crate::ParseErrorKind::SyntaxError(format!(
+                        "a {noun} ({text}) is not a valid {what} value",
+                    )),
+                    Span::new(start, end),
+                ));
+        }
+    }
+
+    /// An opener with no closer, then the component-list shape rules.
+    /// Mirrors `extract_unclosed_cost_brace_errors`, including its ordering:
+    /// an unclosed spec reports ONLY the truncation, because a shape defect on
+    /// top of it would just be noise about the same truncation.
+    fn cost_spec_errors(&mut self, node: &rowan::GreenNodeData) {
+        use crate::SyntaxKind as K;
+        let mut has_opener = false;
+        let mut has_closer = false;
+        for (kind, _, _, _) in Self::child_tokens(node, self.offset) {
+            match kind {
+                K::L_BRACE | K::L_DOUBLE_BRACE | K::L_BRACE_HASH => has_opener = true,
+                K::R_BRACE | K::R_DOUBLE_BRACE => has_closer = true,
+                _ => {}
+            }
+        }
+        if has_opener && !has_closer {
+            let end = self.offset + usize::from(node.text_len());
+            self.result.cost_brace_errors.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError(
+                    "unclosed cost specification: missing '}'".to_string(),
+                ),
+                Span::new(self.offset, end),
+            ));
+            return;
+        }
+
+        // `first_cost_spec_defect` is generic over the range payload and is
+        // THE shared rule — the red pass calls the same function, so the two
+        // paths cannot drift on what counts as a defect.
+        //
+        // Ranges here are stripped-relative (BOM subtracted back out): they
+        // index `stripped` below, exactly as red's `text_range()` does.
+        let bom = self.bom_offset;
+        let tokens = Self::child_tokens(node, self.offset)
+            .map(|(kind, _, start, end)| (kind, (start - bom)..(end - bom)));
+        if let Some((defect, range)) = super::cost_spec_shape::first_cost_spec_defect(tokens) {
+            // `get` rather than indexing: a non-char-boundary range must not
+            // panic the parser.
+            let message = match self.stripped.get(range.clone()) {
+                Some(text) => super::cost_spec_shape::cost_defect_message(defect, text),
+                None => format!(
+                    "malformed cost specification at bytes {}..{} ({defect:?})",
+                    range.start, range.end
+                ),
+            };
+            self.result.cost_brace_errors.push(crate::ParseError::new(
+                crate::ParseErrorKind::SyntaxError(message),
+                Span::new(range.start + bom, range.end + bom),
+            ));
         }
     }
 
@@ -1407,5 +1582,54 @@ mod negative_zero_tests {
             })
             .expect("one posting");
         assert_eq!(number.to_string(), "-12.34");
+    }
+}
+
+#[cfg(test)]
+mod child_tokens_offsets {
+    use super::DescendantsWalker;
+    use crate::SyntaxKind as K;
+    use rowan::{GreenNodeBuilder, Language as _};
+
+    /// `child_tokens` must advance its running offset over child NODES, not
+    /// just child tokens.
+    ///
+    /// Pinned on a hand-built green node because the real grammar cannot
+    /// currently produce one: `COST_SPEC`, `META_ENTRY`, `CUSTOM_DIRECTIVE`
+    /// and `PUSHMETA_DIRECTIVE` all have token-only children today — even a
+    /// parenthesized arithmetic cost component stays flat. So no source
+    /// fixture can reach this, and dropping the `n.text_len()` accumulation
+    /// passes the entire suite while silently shifting every span after the
+    /// first nested node. A grammar change that starts nesting here would
+    /// otherwise land the corruption with no test to catch it.
+    #[test]
+    fn a_child_node_advances_the_offset_for_later_tokens() {
+        let mut b = GreenNodeBuilder::new();
+        b.start_node(crate::BeancountLanguage::kind_to_raw(K::COST_SPEC));
+        b.token(crate::BeancountLanguage::kind_to_raw(K::L_BRACE), "{");
+        // A nested node holding 7 bytes — the case the real grammar doesn't
+        // build today.
+        b.start_node(crate::BeancountLanguage::kind_to_raw(K::AMOUNT));
+        b.token(crate::BeancountLanguage::kind_to_raw(K::NUMBER), "100");
+        b.token(crate::BeancountLanguage::kind_to_raw(K::WHITESPACE), " ");
+        b.token(crate::BeancountLanguage::kind_to_raw(K::CURRENCY), "USD");
+        b.finish_node();
+        b.token(crate::BeancountLanguage::kind_to_raw(K::R_BRACE), "}");
+        b.finish_node();
+        let node = b.finish();
+
+        let got: Vec<_> = DescendantsWalker::child_tokens(&node, 0)
+            .map(|(kind, text, start, end)| (kind, text.to_string(), start, end))
+            .collect();
+
+        assert_eq!(
+            got,
+            vec![
+                (K::L_BRACE, "{".to_string(), 0, 1),
+                // 1 + 7 nested bytes = 8, NOT 1.
+                (K::R_BRACE, "}".to_string(), 8, 9),
+            ],
+            "the child AMOUNT node's 7 bytes must be counted",
+        );
     }
 }

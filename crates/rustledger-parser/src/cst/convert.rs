@@ -109,9 +109,17 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         top_level_comments,
         currency_occurrences,
         account_occurrences,
+        cost_brace_errors,
+        link_meta_errors,
+        custom_pushmeta_errors,
     } = if use_green {
         // Green-tree walk (no per-node red allocation); byte-identical to red.
-        super::green::walk_descendants(source_file.syntax(), bom_offset, collect_occurrences)
+        super::green::walk_descendants(
+            source_file.syntax(),
+            stripped,
+            bom_offset,
+            collect_occurrences,
+        )
     } else {
         walk_descendants_once(&source_file, bom_offset, collect_occurrences)
     };
@@ -137,32 +145,46 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     comments.sort_by_key(|s| s.span.start);
     comments.dedup_by_key(|s| s.span.start);
     let mut errors = top_level_errors;
-    // Cost specs are always delimited by '{' (L_BRACE / L_DOUBLE_BRACE /
-    // L_BRACE_HASH all start with it). If the source has no '{' at all there can
-    // be no COST_SPEC node, so skip the whole-tree `descendants()` scan inside
-    // `extract_unclosed_cost_brace_errors` — it allocates a red `SyntaxNode` per
-    // node. Profiling flagged that scan as ~50k wasted allocations on
-    // cost-spec-free ledgers (the common case); the `contains('{')` guard is a
-    // memchr byte scan with no allocation. A '{' inside a string/comment only
-    // costs the (already-correct) full scan — never a false skip.
-    if stripped.contains('{') {
-        errors.extend(extract_unclosed_cost_brace_errors(
-            &source_file,
-            stripped,
-            bom_offset,
-        ));
-    }
-    // Same guard trick as above: no '^' in the source means no LINK token can
-    // exist, so the whole-tree scan is skipped on the common case.
-    if stripped.contains('^') {
-        errors.extend(extract_link_metadata_value_errors(&source_file, bom_offset));
-    }
-    // Ditto for the custom/pushmeta rules, which also care about '#'.
-    if stripped.contains('^') || stripped.contains('#') {
-        errors.extend(extract_custom_pushmeta_taglink_errors(
-            &source_file,
-            bom_offset,
-        ));
+    // Three per-node shape rules — unclosed cost braces, links as metadata
+    // values, tags/links as custom/pushmeta values — in a FIXED order that
+    // both paths below reproduce.
+    //
+    // Green folds them into `walk_descendants`, which already visits every
+    // node, so they cost a `match` per node and nothing else. Red still runs
+    // them as three standalone whole-tree `descendants()` scans, each behind a
+    // byte-scan guard (`contains('{')` and friends) that skips the scan when
+    // the source cannot contain the construct at all.
+    //
+    // The guards are what made this cost invisible for so long: they are free
+    // on a ledger with no '{', '^' or '#', which is exactly the `simple`
+    // profiling shape. Real ledgers have tags and cost specs, and there the
+    // three red scans measured 7.46% of all instructions on `tagged` and
+    // 2.15% on `investment` (cachegrind ablation, 10k txns). Green — the path
+    // every caller but the parity test takes — no longer pays any of it.
+    //
+    // The green path needs no guards: no '{' in the source means the parser
+    // built no COST_SPEC node, so the folded rule finds nothing to report.
+    if use_green {
+        errors.extend(cost_brace_errors);
+        errors.extend(link_meta_errors);
+        errors.extend(custom_pushmeta_errors);
+    } else {
+        if stripped.contains('{') {
+            errors.extend(extract_unclosed_cost_brace_errors(
+                &source_file,
+                stripped,
+                bom_offset,
+            ));
+        }
+        if stripped.contains('^') {
+            errors.extend(extract_link_metadata_value_errors(&source_file, bom_offset));
+        }
+        if stripped.contains('^') || stripped.contains('#') {
+            errors.extend(extract_custom_pushmeta_taglink_errors(
+                &source_file,
+                bom_offset,
+            ));
+        }
     }
     errors.extend(inline_errors);
     let warnings = Vec::new();
@@ -3112,6 +3134,23 @@ pub(super) struct DescendantsWalkResult {
     pub(super) top_level_comments: Vec<Spanned<String>>,
     pub(super) currency_occurrences: Vec<Spanned<Currency>>,
     pub(super) account_occurrences: Vec<Spanned<rustledger_core::Account>>,
+    /// The three per-node shape rules, kept in SEPARATE vecs rather than
+    /// merged into `inline_errors`.
+    ///
+    /// Two reasons. They are emitted at a different point in the error order
+    /// than the inline errors (see `parse_via_cst_inner`), and each vec stays
+    /// grouped the way its former standalone pass emitted it — document order
+    /// within a rule, rules in a fixed sequence. Merging them would interleave
+    /// the three by position, which no test pins today but which is
+    /// observable in every diagnostic list rledger prints.
+    ///
+    /// Populated only by the GREEN walker. The red walker leaves them empty
+    /// and `parse_via_cst_inner` calls the standalone `extract_*` functions
+    /// for that path instead — see the call site for why the fold is
+    /// green-only.
+    pub(super) cost_brace_errors: Vec<crate::ParseError>,
+    pub(super) link_meta_errors: Vec<crate::ParseError>,
+    pub(super) custom_pushmeta_errors: Vec<crate::ParseError>,
 }
 
 /// Fused single-pass visitor over `source_file`'s descendants -
@@ -3252,6 +3291,15 @@ fn walk_descendants_once(
         top_level_comments,
         currency_occurrences,
         account_occurrences,
+        // Red keeps the three shape rules as standalone `extract_*` passes;
+        // `parse_via_cst_inner` calls them for this path. Folding them in here
+        // too would need each token's IMMEDIATE parent kind, and this walk is
+        // a flat `descendants_with_tokens()` — recovering the parent means
+        // `t.parent()`, which allocates the very red `NodeData` the green fold
+        // exists to avoid.
+        cost_brace_errors: Vec::new(),
+        link_meta_errors: Vec::new(),
+        custom_pushmeta_errors: Vec::new(),
     }
 }
 

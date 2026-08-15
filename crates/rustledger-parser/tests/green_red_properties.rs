@@ -365,3 +365,112 @@ fn the_generator_reaches_well_formed_transactions() {
          already covers."
     );
 }
+
+/// Green and red must agree on the three per-node SHAPE rules — unclosed cost
+/// braces, a link used as a metadata value, and tags/links used as
+/// `custom`/`pushmeta` values.
+///
+/// These are pinned by hand rather than left to `ledger_source()` because the
+/// generator produces well-formed ledgers: it emits none of these three
+/// constructs, so the proptest above would report agreement without ever
+/// having compared one. The rules moved from three standalone red
+/// `descendants()` passes into the green walker, and the whole point of the
+/// move is that nothing observable changes — which is only worth asserting on
+/// inputs that actually trigger them.
+///
+/// Ordering is part of the contract: all cost errors, then all link-metadata
+/// errors, then all custom/pushmeta errors, each in document order. The last
+/// fixture puts all three in one file to pin the sequence, not just the set.
+#[test]
+fn green_equals_red_on_the_node_shape_rules() {
+    let fixtures: &[(&str, &str)] = &[
+        (
+            "unclosed cost brace",
+            "2024-01-01 * \"t\"\n  Assets:B 1 AAPL {100 USD\n",
+        ),
+        (
+            "closed cost brace (control)",
+            "2024-01-01 * \"t\"\n  Assets:B 1 AAPL {100 USD}\n  Assets:C\n",
+        ),
+        (
+            "empty cost component",
+            "2024-01-01 * \"t\"\n  Assets:B 1 AAPL {100 USD,}\n  Assets:C\n",
+        ),
+        (
+            "link as metadata value",
+            "2024-01-01 * \"t\"\n  key: ^alink\n  Assets:B 1 USD\n  Assets:C\n",
+        ),
+        (
+            "tag as metadata value (valid)",
+            "2024-01-01 * \"t\"\n  key: #atag\n  Assets:B 1 USD\n  Assets:C\n",
+        ),
+        ("link in custom", "2024-01-01 custom \"budget\" ^alink\n"),
+        ("tag in custom", "2024-01-01 custom \"budget\" #atag\n"),
+        ("link in pushmeta", "pushmeta key: ^alink\n"),
+        ("tag in pushmeta (valid)", "pushmeta key: #atag\n"),
+        (
+            "all three rules in one file",
+            "2024-01-01 custom \"budget\" #atag ^alink\n\
+             pushmeta key: ^blink\n\
+             2024-01-03 * \"t\"\n  key: ^clink\n  Assets:B 1 AAPL {100 USD\n",
+        ),
+        // BOM: every span in these rules is BOM-adjusted, and the green walker
+        // derives its offsets differently from red (a running counter vs
+        // `text_range()`). An off-by-BOM would show up only here.
+        (
+            "BOM + all three",
+            "\u{feff}2024-01-01 custom \"budget\" ^alink\n\
+             2024-01-02 * \"t\"\n  key: ^blink\n  Assets:B 1 AAPL {100 USD\n",
+        ),
+        // A BOM with a CLOSED but malformed cost spec. The fixture above
+        // early-returns on the unclosed spec and never reaches the
+        // component-shape rule, which is the one path that indexes `stripped`
+        // and so is the only place a BOM offset can be double-counted. With
+        // only the unclosed fixture, dropping the BOM subtraction survived
+        // the whole suite.
+        (
+            "BOM + cost component shape",
+            "\u{feff}2024-01-01 * \"t\"\n  Assets:B 1 AAPL {100 USD,}\n  Assets:C\n",
+        ),
+    ];
+
+    for (label, source) in fixtures {
+        assert_eq!(
+            observables(&parse(source)),
+            observables(&parse_red_only(source)),
+            "green and red diverged on the {label} fixture",
+        );
+    }
+
+    // Self-check. Without it the assertions above pass against a parser that
+    // lost all three rules, because two empty error lists compare equal.
+    //
+    // Counting "any error" is NOT enough and was the first version's bug: a
+    // malformed fixture yields "unexpected input" and looks like it triggered
+    // the rule. The first `pushmeta` fixtures here were written with a leading
+    // date, which is invalid — the directive never parsed, no
+    // PUSHMETA_DIRECTIVE node was built, and a deliberate mutation making
+    // `pushmeta` reject tags went undetected. So match the RULES' messages.
+    let rule_hits = |needle: &str| {
+        fixtures
+            .iter()
+            .flat_map(|(_, s)| parse(s).errors)
+            .filter(|e| format!("{:?}", e.kind).contains(needle))
+            .count()
+    };
+    for (rule, needle, want) in [
+        ("unclosed cost brace", "unclosed cost specification", 2),
+        ("cost component shape", "cost-spec component", 1),
+        ("link as metadata value", "not a valid metadata value", 2),
+        ("custom value", "not a valid custom value", 3),
+        ("pushmeta value", "not a valid pushmeta value", 2),
+    ] {
+        let got = rule_hits(needle);
+        assert!(
+            got >= want,
+            "the {rule} rule fired {got} times across the fixtures, wanted at \
+             least {want} — these fixtures no longer exercise it, so this \
+             test is not comparing green against red on it",
+        );
+    }
+}

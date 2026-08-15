@@ -619,7 +619,15 @@ impl SignCounts {
         }
     }
 
-    fn bump(&mut self, has_cost: bool, is_positive: bool, delta: i64) {
+    /// `delta` is `i32` rather than `i64` so it feeds `saturating_add_signed`
+    /// directly. The earlier `i64` version ended in `try_into().unwrap_or(0)`,
+    /// which turns a caller mistake into a silent no-op — the one outcome that
+    /// leaves the counts wrong with nothing to show for it.
+    fn bump(&mut self, has_cost: bool, is_positive: bool, delta: i32) {
+        debug_assert!(
+            delta == 1 || delta == -1,
+            "counts move one lot at a time; {delta} means a caller lost track",
+        );
         let slot = match (has_cost, is_positive) {
             (true, true) => &mut self.cost_positive,
             (true, false) => &mut self.cost_negative,
@@ -629,7 +637,7 @@ impl SignCounts {
         // Saturating: an under-count can only make `is_reduced_by` answer
         // "not a reduction" and fall back to augmentation, where a wrapped
         // u32 would claim billions of matching lots.
-        *slot = slot.saturating_add_signed(delta.try_into().unwrap_or(0));
+        *slot = slot.saturating_add_signed(delta);
     }
 }
 
@@ -1099,6 +1107,14 @@ impl Inventory {
             }
             stats.counts.bump(occupied.0, occupied.1, 1);
         } else {
+            // No entry yet means no lot of this currency has ever been added,
+            // so there is nothing to vacate: `merge_idx` came from
+            // `simple_index`, which only names a lot that `add` already
+            // counted.
+            debug_assert!(
+                vacated.is_none(),
+                "merging into a lot whose currency has no cached entry",
+            );
             let mut counts = SignCounts::default();
             counts.bump(occupied.0, occupied.1, 1);
             self.units_cache.insert(
@@ -1138,7 +1154,7 @@ impl Inventory {
     ///
     /// Called with `-1` before changing or removing a lot and `+1` after, so
     /// a sign flip lands in the right bucket.
-    pub(super) fn sign_index_bump(&mut self, idx: usize, delta: i64) {
+    pub(super) fn sign_index_bump(&mut self, idx: usize, delta: i32) {
         let Some(position) = self.positions.get(idx) else {
             return;
         };

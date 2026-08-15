@@ -614,7 +614,11 @@ impl SignCounts {
             (self.cost_positive, self.simple_positive)
         };
         match scope {
-            ReductionScope::AllPositions => cost + simple,
+            // Saturating, not `+`: these are counts of lots and a wrap would
+            // read as "no matching lot", which books a reduction as an
+            // augmentation and duplicates the lot. Saturation errs the other
+            // way, and `> 0` is all the caller asks.
+            ReductionScope::AllPositions => cost.saturating_add(simple),
             ReductionScope::CostBearingOnly => cost,
         }
     }
@@ -750,14 +754,20 @@ impl Inventory {
     /// private item, and `cargo doc -D warnings` rejects it.)
     ///
     /// **Caches are the caller's problem here.** Mutating positions through
-    /// this handle leaves `units_cache` (totals AND the sign counts) and
-    /// `simple_index`
-    /// describing the OLD contents, and those drive `units()`, cost-less
-    /// merging in `add`, and the reduction-vs-augmentation decision in
-    /// `is_reduced_by` respectively. Call [`Self::compact`] afterwards, which
-    /// rebuilds all three. Debug builds catch a missed rebuild through
-    /// `is_reduced_by`'s consistency assertion; release builds silently book
-    /// against a stale view.
+    /// this handle leaves `units_cache` — both the running totals and the
+    /// sign counts — and `simple_index` describing the OLD contents. Those
+    /// drive `units()`, the reduction-vs-augmentation decision in
+    /// `is_reduced_by`, and cost-less merging in `add` respectively.
+    ///
+    /// [`Self::compact`] rebuilds all of them, but note that it ALSO drops
+    /// every empty position on the way through. If the caller deliberately
+    /// left a zero-unit lot in place, compacting to refresh the caches will
+    /// silently remove it — so that is a semantic change, not just a cache
+    /// refresh.
+    ///
+    /// Debug builds catch a missed rebuild through `is_reduced_by`'s
+    /// consistency assertion; release builds silently book against a stale
+    /// view.
     pub fn positions_mut(&mut self) -> &mut Vec<Position> {
         self.positions.make_owned();
         match &mut self.positions {
@@ -806,8 +816,15 @@ impl Inventory {
     /// Uses an internal cache for O(1) lookups.
     #[must_use]
     pub fn units(&self, currency: &str) -> Decimal {
-        // Use cache if available, otherwise compute and the caller should
-        // ensure cache is built via rebuild_caches() after deserialization
+        // Use the cache when it is there. A miss is not a bug: the cache is
+        // `#[serde(skip)]`, and while deserialization rebuilds it (the
+        // `#[serde(try_from = "InventoryWire"]` on the struct), an inventory
+        // built some other way may not have one yet. Recomputing is O(lots)
+        // but always right.
+        //
+        // (This used to point callers at `rebuild_caches()`, which has never
+        // existed under that name — `rebuild_index` is the real one, and
+        // callers do not need it on the deserialize path any more.)
         self.units_cache.get(currency).map_or_else(
             || {
                 // Fallback to computation if cache miss (e.g., after deserialization)
@@ -1155,6 +1172,14 @@ impl Inventory {
     /// Called with `-1` before changing or removing a lot and `+1` after, so
     /// a sign flip lands in the right bucket.
     pub(super) fn sign_index_bump(&mut self, idx: usize, delta: i32) {
+        // All three call sites pass an index they just read or wrote, so this
+        // is defensive only. Returning rather than panicking keeps a future
+        // caller's off-by-one out of the panic path; the counts then disagree
+        // with a scan, which `is_reduced_by`'s assertion reports in debug.
+        debug_assert!(
+            idx < self.positions.len(),
+            "sign_index_bump called with out-of-range index {idx}",
+        );
         let Some(position) = self.positions.get(idx) else {
             return;
         };
@@ -3871,5 +3896,60 @@ mod tests {
             incremental, incremental_inv.units_cache,
             "the incrementally maintained index must equal a fresh rebuild",
         );
+    }
+
+    /// An inventory whose caches were never built still answers
+    /// `is_reduced_by` correctly.
+    ///
+    /// The caches are `#[serde(skip)]`. Deserialization rebuilds them, but
+    /// `positions_mut` hands out the position vector directly, so an
+    /// inventory CAN hold lots with an empty cache. Reading the counts then
+    /// would answer "not a reduction" for an inventory that plainly holds a
+    /// matching lot — booking a sale as a purchase and duplicating the lot,
+    /// which is the #875-class bug this predicate exists to prevent.
+    ///
+    /// So the unbuilt case falls back to the scan. This is the only test that
+    /// reaches that branch: every other route into `is_reduced_by` goes
+    /// through `add` or a rebuild, both of which populate the cache.
+    #[test]
+    fn an_unbuilt_cache_falls_back_to_the_scan_rather_than_answering_no() {
+        let mut inv = Inventory::new();
+        inv.positions_mut().push(Position::with_cost(
+            Amount::new(dec!(10), "AAPL"),
+            Cost::new(dec!(100), "USD"),
+        ));
+        assert!(
+            inv.units_cache.is_empty(),
+            "the fixture must reach `is_reduced_by` with an unbuilt cache, or \
+             it is testing the fast path instead",
+        );
+
+        assert!(
+            inv.is_reduced_by(
+                &Amount::new(dec!(-4), "AAPL"),
+                ReductionScope::CostBearingOnly
+            ),
+            "a sale against a held lot must be seen as a reduction even with \
+             no cache built",
+        );
+        assert!(
+            !inv.is_reduced_by(
+                &Amount::new(dec!(4), "AAPL"),
+                ReductionScope::CostBearingOnly
+            ),
+            "a purchase in the same direction is still an augmentation",
+        );
+
+        // And once the caches are built, the answers are unchanged.
+        inv.rebuild_index();
+        assert!(!inv.units_cache.is_empty(), "rebuild populates the cache");
+        assert!(inv.is_reduced_by(
+            &Amount::new(dec!(-4), "AAPL"),
+            ReductionScope::CostBearingOnly
+        ));
+        assert!(!inv.is_reduced_by(
+            &Amount::new(dec!(4), "AAPL"),
+            ReductionScope::CostBearingOnly
+        ));
     }
 }

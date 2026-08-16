@@ -844,12 +844,8 @@ impl Inventory {
         // Remove all matching lots of this currency
         let matching_indices: std::collections::HashSet<usize> =
             matching.iter().map(|(i, _)| *i).collect();
-        let mut idx = 0;
-        self.positions.retain(|_| {
-            let keep = !matching_indices.contains(&idx);
-            idx += 1;
-            keep
-        });
+        self.positions
+            .retain_slots(|slot, _| !matching_indices.contains(&slot));
 
         // Add back a single merged lot with the remainder
         let remaining = total_units + units.number; // units.number is negative for reductions

@@ -450,6 +450,29 @@ impl PositionStore {
         }
     }
 
+    /// [`Self::retain`], with each position's slot index — the same index
+    /// [`Self::iter_slots`] reports and [`Index`] accepts.
+    ///
+    /// `reduce_merge` needs this: it selects lots through `iter_slots` and
+    /// then drops exactly those. Written with a plain `retain` and a counter
+    /// incremented per visit, that is only correct while every element the
+    /// store holds is a live position visited in order — the same dense-store
+    /// assumption `iter_slots` exists to keep in one place, arriving by a
+    /// second route that `iter_slots` cannot cover. A sparse store whose
+    /// `retain` skips dead slots would leave the counter numbering live
+    /// positions while the selection numbered real slots, and `{*}` merges
+    /// would delete the wrong lots.
+    ///
+    /// [`Index`]: std::ops::Index
+    fn retain_slots(&mut self, mut f: impl FnMut(usize, &Position) -> bool) {
+        let mut slot = 0;
+        self.retain(|position| {
+            let keep = f(slot, position);
+            slot += 1;
+            keep
+        });
+    }
+
     /// Switch to contiguous storage, cloning if not already `Owned`.
     ///
     /// `reduce` calls this, which ALSO discharges the uniqueness requirement

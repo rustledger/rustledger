@@ -151,3 +151,169 @@ fn a_matching_reduction_still_applies() {
         .sum();
     assert_eq!(total, "16".parse::<Decimal>().unwrap(), "20 bought, 4 sold");
 }
+
+/// A failing transaction restores the reducing account's LOTS exactly, not
+/// merely its totals.
+///
+/// `a_failing_transaction_is_rolled_back_whole` checks the cash leg, which a
+/// rollback that restored totals but scrambled lots would still pass. That was
+/// adequate while `apply` snapshotted each touched account with
+/// `Inventory::clone` — restoring a whole copy cannot get the lots wrong.
+/// `apply` now records an undo log of only the slots it touched, so lot-level
+/// restoration is a real obligation rather than a free consequence, and it is
+/// asserted here.
+///
+/// The transaction reduces the SAME account twice: the first leg succeeds and
+/// mutates a lot, the second fails. That is the case where the log has to
+/// unwind more than one change, and where restoring only the last one would
+/// leave the account quietly short.
+#[test]
+fn a_failing_transaction_restores_every_lot_it_touched() {
+    let mut engine = engine_with_two_lots();
+
+    let lots_before: Vec<(Decimal, Option<Decimal>)> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Broker")
+        .flat_map(|(_, inv)| inv.positions())
+        .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+        .collect();
+    assert_eq!(lots_before.len(), 2, "fixture holds two lots");
+
+    // Leg 1 matches the 150.00 lot and succeeds. Leg 2 asks for more of the
+    // 200.00 lot than it holds, so the transaction fails after leg 1 mutated.
+    let mut ok_leg = Posting::new("Assets:Broker", amount("-4", "AAPL"));
+    ok_leg.cost = Some(spec("150.00", "USD", 5));
+    let mut bad_leg = Posting::new("Assets:Broker", amount("-99", "AAPL"));
+    bad_leg.cost = Some(spec("200.00", "USD", 6));
+
+    let txn = Transaction::new(date(10), "one good leg, one impossible")
+        .with_synthesized_posting(ok_leg)
+        .with_synthesized_posting(bad_leg);
+
+    engine
+        .apply(&txn)
+        .expect_err("the second leg cannot be satisfied");
+
+    let lots_after: Vec<(Decimal, Option<Decimal>)> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Broker")
+        .flat_map(|(_, inv)| inv.positions())
+        .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+        .collect();
+
+    assert_eq!(
+        lots_after, lots_before,
+        "the rejected transaction left the account's lots altered: the first \
+         leg's reduction was not undone",
+    );
+}
+
+/// Rollback must also undo a lot that was fully DRAINED and one that was
+/// ADDED before the failure.
+///
+/// The other rollback tests only mutate lots in place, so they exercise one of
+/// the three ways `apply` changes an inventory. Removing the recording from
+/// either of the other two — the removal of a drained lot, or the push of a
+/// new one — leaves every other test passing while a rejected transaction
+/// silently destroys a lot or leaves a phantom one behind.
+#[test]
+fn a_failing_transaction_undoes_drained_and_added_lots() {
+    let mut engine = engine_with_two_lots();
+
+    let lots_before: Vec<(Decimal, Option<Decimal>)> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Broker")
+        .flat_map(|(_, inv)| inv.positions())
+        .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+        .collect();
+    assert_eq!(lots_before.len(), 2, "fixture holds two lots");
+
+    // Leg 1 drains the 150.00 lot entirely -> the lot is REMOVED.
+    let mut drain = Posting::new("Assets:Broker", amount("-10", "AAPL"));
+    drain.cost = Some(spec("150.00", "USD", 5));
+    // Leg 2 buys a new lot -> a slot is PUSHED.
+    let mut buy = Posting::new("Assets:Broker", amount("7", "AAPL"));
+    buy.cost = Some(spec("300.00", "USD", 11));
+    // Leg 3 cannot be satisfied, so the whole transaction is rejected.
+    let mut impossible = Posting::new("Assets:Broker", amount("-99", "AAPL"));
+    impossible.cost = Some(spec("200.00", "USD", 6));
+
+    let txn = Transaction::new(date(11), "drain, buy, then fail")
+        .with_synthesized_posting(drain)
+        .with_synthesized_posting(buy)
+        .with_synthesized_posting(impossible);
+
+    engine
+        .apply(&txn)
+        .expect_err("the third leg cannot be satisfied");
+
+    let lots_after: Vec<(Decimal, Option<Decimal>)> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Broker")
+        .flat_map(|(_, inv)| inv.positions())
+        .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+        .collect();
+
+    assert_eq!(
+        lots_after, lots_before,
+        "a rejected transaction destroyed the drained lot or kept the added \
+         one: {lots_before:?} -> {lots_after:?}",
+    );
+}
+
+/// A `{*}` merge leg that is later rejected must give its lots back.
+///
+/// The merge path is the one that removes lots WITHOUT writing them first:
+/// `reduce_merge` drops every matched lot through `retain_slots`, where the
+/// other reduction paths zero a lot in place and only then remove it. On those,
+/// the in-place write is what captures the lot for the undo log, so dropping
+/// the capture in the removal path changes nothing — this is the case that
+/// tells the two apart, and without it a rejected `{*}` transaction silently
+/// destroys every lot it merged.
+#[test]
+fn a_failing_transaction_undoes_a_wildcard_merge() {
+    let mut engine = engine_with_two_lots();
+
+    let lots_before: Vec<(Decimal, Option<Decimal>)> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Broker")
+        .flat_map(|(_, inv)| inv.positions())
+        .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+        .collect();
+    assert_eq!(lots_before.len(), 2, "fixture holds two lots to merge");
+
+    // Leg 1: `{*}` merges BOTH lots into one and reduces it — removing the
+    // originals outright.
+    let mut merge_leg = Posting::new("Assets:Broker", amount("-5", "AAPL"));
+    merge_leg.cost = Some(CostSpec {
+        number: None,
+        currency: None,
+        date: None,
+        label: None,
+        merge: true,
+    });
+    // Leg 2 cannot be satisfied, so the transaction is rejected.
+    let mut impossible = Posting::new("Assets:Broker", amount("-99", "AAPL"));
+    impossible.cost = Some(spec("200.00", "USD", 6));
+
+    let txn = Transaction::new(date(12), "merge then fail")
+        .with_synthesized_posting(merge_leg)
+        .with_synthesized_posting(impossible);
+
+    engine
+        .apply(&txn)
+        .expect_err("the second leg cannot be satisfied");
+
+    let lots_after: Vec<(Decimal, Option<Decimal>)> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Broker")
+        .flat_map(|(_, inv)| inv.positions())
+        .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+        .collect();
+
+    assert_eq!(
+        lots_after, lots_before,
+        "the rejected merge destroyed the lots it consumed: {lots_before:?} \
+         -> {lots_after:?}",
+    );
+}

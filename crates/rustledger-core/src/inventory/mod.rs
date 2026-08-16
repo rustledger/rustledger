@@ -402,17 +402,43 @@ impl<'a> Iterator for PositionStoreIter<'a> {
 /// exactly the cost tombstones exist to avoid.
 #[derive(Debug, Clone, Default)]
 struct Slots {
-    slots: Vec<Option<Position>>,
+    entries: Vec<Option<Position>>,
     live: usize,
+    /// Prior contents of every slot this transaction has touched, so a failed
+    /// transaction can be undone without having copied the whole account.
+    ///
+    /// `None` while not recording. Recorded lazily and ONCE per slot — the
+    /// first write captures what to restore; later writes to the same slot are
+    /// already covered.
+    ///
+    /// Recording lives here, in the backing, rather than at the eleven call
+    /// sites that mutate positions. Those all funnel through this type's
+    /// primitives and the field is private, so covering the primitives is
+    /// complete by construction; covering call sites would be complete only
+    /// until someone adds a twelfth.
+    undo: Option<Vec<(usize, Option<Position>)>>,
 }
 
 impl Slots {
     fn from_live(positions: Vec<Position>) -> Self {
         let live = positions.len();
         Self {
-            slots: positions.into_iter().map(Some).collect(),
+            entries: positions.into_iter().map(Some).collect(),
             live,
+            undo: None,
         }
+    }
+
+    /// Capture slot `i`'s current contents, if recording and not already held.
+    fn record(&mut self, i: usize) {
+        let Some(log) = self.undo.as_mut() else {
+            return;
+        };
+        if log.iter().any(|(slot, _)| *slot == i) {
+            return;
+        }
+        let prior = self.entries.get(i).cloned().flatten();
+        log.push((i, prior));
     }
 
     /// Tombstone slot `i`, keeping `live` in step.
@@ -424,12 +450,13 @@ impl Slots {
     /// `live` count shows up later as a wrong compaction trigger with nothing
     /// pointing back here.
     fn set_dead(&mut self, i: usize) {
+        self.record(i);
         debug_assert!(
-            i < self.slots.len(),
+            i < self.entries.len(),
             "set_dead called with out-of-range slot {i} (of {})",
-            self.slots.len(),
+            self.entries.len(),
         );
-        if let Some(entry) = self.slots.get_mut(i)
+        if let Some(entry) = self.entries.get_mut(i)
             && entry.take().is_some()
         {
             self.live -= 1;
@@ -452,7 +479,7 @@ enum SlotIter<'a> {
 impl<'a> SlotIter<'a> {
     fn new(store: &'a PositionStore) -> Self {
         match store {
-            PositionStore::Owned(v) => Self::Owned(v.slots.iter().enumerate()),
+            PositionStore::Owned(v) => Self::Owned(v.entries.iter().enumerate()),
             PositionStore::Shared(v) => Self::Shared(v.iter().enumerate()),
         }
     }
@@ -509,7 +536,7 @@ impl PositionStore {
     /// invisible exactly as it was when removal shifted the vector.
     fn iter(&self) -> PositionStoreIter<'_> {
         match self {
-            Self::Owned(v) => PositionStoreIter::Owned(v.slots.iter().flatten()),
+            Self::Owned(v) => PositionStoreIter::Owned(v.entries.iter().flatten()),
             Self::Shared(v) => PositionStoreIter::Shared(v.iter()),
         }
     }
@@ -526,7 +553,7 @@ impl PositionStore {
     /// slot index, and what `push_slot` returns for the slot it fills.
     fn slot_count(&self) -> usize {
         match self {
-            Self::Owned(v) => v.slots.len(),
+            Self::Owned(v) => v.entries.len(),
             Self::Shared(v) => v.len(),
         }
     }
@@ -534,7 +561,7 @@ impl PositionStore {
     /// How many slots are tombstones.
     const fn dead(&self) -> usize {
         match self {
-            Self::Owned(v) => v.slots.len() - v.live,
+            Self::Owned(v) => v.entries.len() - v.live,
             Self::Shared(_) => 0,
         }
     }
@@ -545,7 +572,7 @@ impl PositionStore {
 
     fn get(&self, i: usize) -> Option<&Position> {
         match self {
-            Self::Owned(v) => v.slots.get(i).and_then(Option::as_ref),
+            Self::Owned(v) => v.entries.get(i).and_then(Option::as_ref),
             Self::Shared(v) => v.get(i),
         }
     }
@@ -562,7 +589,10 @@ impl PositionStore {
         let slot = self.slot_count();
         match self {
             Self::Owned(v) => {
-                v.slots.push(Some(p));
+                if let Some(log) = v.undo.as_mut() {
+                    log.push((slot, None));
+                }
+                v.entries.push(Some(p));
                 v.live += 1;
             }
             Self::Shared(v) => v.push_back(p),
@@ -586,13 +616,65 @@ impl PositionStore {
     fn retain(&mut self, mut f: impl FnMut(&Position) -> bool) {
         match self {
             Self::Owned(v) => {
-                for i in 0..v.slots.len() {
-                    if v.slots[i].as_ref().is_some_and(|p| !f(p)) {
+                for i in 0..v.entries.len() {
+                    if v.entries[i].as_ref().is_some_and(|p| !f(p)) {
                         v.set_dead(i);
                     }
                 }
             }
             Self::Shared(v) => v.retain(f),
+        }
+    }
+
+    /// Start recording an undo log, discarding any previous one.
+    fn begin_undo(&mut self) {
+        if let Self::Owned(v) = self {
+            v.undo = Some(Vec::new());
+        }
+    }
+
+    /// Stop recording and discard the log — the transaction committed.
+    fn commit_undo(&mut self) {
+        if let Self::Owned(v) = self {
+            v.undo = None;
+        }
+    }
+
+    /// Restore every slot the log captured, newest first, and stop recording.
+    ///
+    /// Newest first so that slots CREATED by this transaction are popped from
+    /// the end while they are still last. Forward order is not WRONG — each
+    /// slot is recorded once, and a created slot that cannot be popped is left
+    /// as a tombstone that compaction reclaims — but it leaves dead slots
+    /// behind for no reason. A mutation swapping the order therefore survives
+    /// the suite, and that is expected rather than a coverage gap.
+    fn rollback_undo(&mut self) {
+        let Self::Owned(v) = self else {
+            return;
+        };
+        let Some(log) = v.undo.take() else {
+            return;
+        };
+        for (slot, prior) in log.into_iter().rev() {
+            // The slot existed: put back exactly what was there. Otherwise it
+            // was created by this transaction (or was already a tombstone), so
+            // it must end up not-live — dropped entirely when it is the last
+            // one, so slot numbers do not drift upward across failed
+            // transactions.
+            if let Some(position) = prior {
+                if v.entries[slot].is_none() {
+                    v.live += 1;
+                }
+                v.entries[slot] = Some(position);
+            } else {
+                if v.entries[slot].is_some() {
+                    v.live -= 1;
+                }
+                v.entries[slot] = None;
+                if slot + 1 == v.entries.len() {
+                    v.entries.pop();
+                }
+            }
         }
     }
 
@@ -603,9 +685,9 @@ impl PositionStore {
     /// before planning, when nothing is held.
     fn compact_slots(&mut self) {
         if let Self::Owned(v) = self {
-            v.slots.retain(Option::is_some);
+            v.entries.retain(Option::is_some);
             debug_assert_eq!(
-                v.slots.len(),
+                v.entries.len(),
                 v.live,
                 "compaction must leave only live slots"
             );
@@ -629,8 +711,8 @@ impl PositionStore {
     fn retain_slots(&mut self, mut f: impl FnMut(usize, &Position) -> bool) {
         match self {
             Self::Owned(v) => {
-                for i in 0..v.slots.len() {
-                    if v.slots[i].as_ref().is_some_and(|p| !f(i, p)) {
+                for i in 0..v.entries.len() {
+                    if v.entries[i].as_ref().is_some_and(|p| !f(i, p)) {
                         v.set_dead(i);
                     }
                 }
@@ -661,7 +743,11 @@ impl PositionStore {
         if let Self::Shared(v) = self {
             let slots: Vec<Option<Position>> = v.iter().cloned().map(Some).collect();
             let live = slots.len();
-            *self = Self::Owned(Slots { slots, live });
+            *self = Self::Owned(Slots {
+                entries: slots,
+                live,
+                undo: None,
+            });
         }
     }
 }
@@ -677,7 +763,7 @@ impl std::ops::Index<usize> for PositionStore {
     /// have desynchronised, and a wrong-lot read is worse than a panic.
     fn index(&self, i: usize) -> &Position {
         match self {
-            Self::Owned(v) => v.slots[i]
+            Self::Owned(v) => v.entries[i]
                 .as_ref()
                 .expect("slot index names a live position, not a tombstone"),
             Self::Shared(v) => &v[i],
@@ -691,9 +777,14 @@ impl std::ops::IndexMut<usize> for PositionStore {
     /// As [`Index::index`](std::ops::Index::index).
     fn index_mut(&mut self, i: usize) -> &mut Position {
         match self {
-            Self::Owned(v) => v.slots[i]
-                .as_mut()
-                .expect("slot index names a live position, not a tombstone"),
+            Self::Owned(v) => {
+                // Capture BEFORE the caller writes through the returned
+                // reference — afterwards the prior value is gone.
+                v.record(i);
+                v.entries[i]
+                    .as_mut()
+                    .expect("slot index names a live position, not a tombstone")
+            }
             Self::Shared(v) => &mut v[i],
         }
     }
@@ -703,7 +794,11 @@ impl FromIterator<Position> for PositionStore {
     fn from_iter<I: IntoIterator<Item = Position>>(iter: I) -> Self {
         let slots: Vec<Option<Position>> = iter.into_iter().map(Some).collect();
         let live = slots.len();
-        Self::Owned(Slots { slots, live })
+        Self::Owned(Slots {
+            entries: slots,
+            live,
+            undo: None,
+        })
     }
 }
 
@@ -818,6 +913,15 @@ pub struct Inventory {
     /// Not serialized - rebuilt on demand, like the caches above.
     #[serde(skip)]
     cost_index: FxHashMap<CostKey, smallvec::SmallVec<[usize; 2]>>,
+    /// Whether an undo log is open. Not serialized; a transaction never spans
+    /// a round trip.
+    #[serde(skip)]
+    undo_open: bool,
+    /// Debug-only copy taken at `begin_undo`, compared against the restored
+    /// inventory to prove the log covered every mutation.
+    #[cfg(debug_assertions)]
+    #[serde(skip)]
+    undo_witness: Option<Box<Self>>,
 }
 
 /// What [`Inventory::cost_index`] groups lots by: the units they are held in,
@@ -955,6 +1059,9 @@ impl TryFrom<InventoryWire> for Inventory {
             simple_index: FxHashMap::default(),
             units_cache: FxHashMap::default(),
             cost_index: FxHashMap::default(),
+            undo_open: false,
+            #[cfg(debug_assertions)]
+            undo_witness: None,
         };
         // UNTRUSTED: the payload is input, not something this type produced, so
         // it may carry two cost-less lots for one currency — a state the
@@ -1003,6 +1110,117 @@ impl Inventory {
     #[must_use]
     pub fn position_list(&self) -> Vec<&Position> {
         self.positions.iter().collect()
+    }
+
+    /// Drop tombstones once they outnumber live lots, so slots stay within 2x
+    /// the real position count and iteration cannot degrade toward "every lot
+    /// this account ever held".
+    ///
+    /// Renumbers slots, so it must not run while an undo log is open or while
+    /// any caller holds a slot index. The engine calls it after a transaction
+    /// commits, which is the one moment both hold.
+    ///
+    /// Amortized: each compaction is O(slots) but halves them, so the cost per
+    /// removed lot is constant.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if an undo log is open.
+    pub fn compact_if_sparse(&mut self) {
+        debug_assert!(
+            !self.undo_open,
+            "compact_if_sparse would renumber slots the open undo log refers to",
+        );
+        if self.positions.dead() > self.positions.len() {
+            self.positions.compact_slots();
+            self.rebuild_index();
+        }
+    }
+
+    /// Begin recording an undo log so a failed transaction can be reverted
+    /// without having copied this inventory.
+    ///
+    /// `apply` used to snapshot every touched account with `Inventory::clone`.
+    /// That was written when the backing was `imbl::Vector` and the clone was
+    /// O(1); since #2056 booking's backing is owned, so it became O(lots) per
+    /// touched account per transaction — the largest superlinear term left in
+    /// the pipeline, worth 56% of a 20,000-transaction `investment` run.
+    ///
+    /// A reduction touches one or two lots. Recording those is proportional to
+    /// what changed instead of to what the account holds.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if a log is already open — nesting would make
+    /// "restore to the start" ambiguous.
+    pub fn begin_undo(&mut self) {
+        debug_assert!(
+            !self.undo_open,
+            "begin_undo called twice without commit or rollback",
+        );
+        self.undo_open = true;
+        #[cfg(debug_assertions)]
+        {
+            // The log is only as good as its coverage of the mutation paths.
+            // Recording lives in the backing's primitives, which is complete by
+            // construction today — this keeps it honest if that ever stops
+            // being true, at a cost paid only in debug builds.
+            self.undo_witness = Some(Box::new(self.clone_for_witness()));
+        }
+        self.positions.begin_undo();
+    }
+
+    /// Whether an undo log is currently open.
+    #[must_use]
+    pub const fn undo_is_open(&self) -> bool {
+        self.undo_open
+    }
+
+    /// Discard the log — the transaction committed.
+    pub fn commit_undo(&mut self) {
+        self.undo_open = false;
+        #[cfg(debug_assertions)]
+        {
+            self.undo_witness = None;
+        }
+        self.positions.commit_undo();
+    }
+
+    /// Restore this inventory to its state at [`Self::begin_undo`].
+    ///
+    /// Rebuilds the derived caches wholesale rather than unwinding them: this
+    /// is the failure path, so being obviously right beats being fast.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if the result differs from a witness copy taken
+    /// at `begin_undo` — that means a mutation path bypassed the log.
+    pub fn rollback_undo(&mut self) {
+        self.undo_open = false;
+        self.positions.rollback_undo();
+        self.rebuild_index();
+        #[cfg(debug_assertions)]
+        {
+            if let Some(witness) = self.undo_witness.take() {
+                let restored: Vec<&Position> = self.positions.iter().collect();
+                let expected: Vec<&Position> = witness.positions.iter().collect();
+                assert_eq!(
+                    restored, expected,
+                    "rollback did not restore the inventory: some mutation path \
+                     did not go through the backing's primitives, so the undo \
+                     log missed it",
+                );
+            }
+        }
+    }
+
+    /// A copy for the debug-only rollback witness.
+    #[cfg(debug_assertions)]
+    fn clone_for_witness(&self) -> Self {
+        let mut copy = self.clone();
+        copy.undo_witness = None;
+        copy.undo_open = false;
+        copy
     }
 
     /// Rewrite the positions wholesale, then rebuild every derived cache.
@@ -1551,18 +1769,16 @@ impl Inventory {
         // no shared chunk to corrupt.
         self.positions.make_owned();
 
-        // Drop tombstones once they outnumber live lots, so slots stay within
-        // 2x the real position count and iteration cannot degrade toward
-        // "every lot this account ever held". This is the ONLY place it can
-        // run: compaction renumbers slots, and here nothing holds one — the
-        // planners have not looked at the store yet.
-        //
-        // Amortized: each compaction is O(slots) but halves them, so the cost
-        // per removed lot is constant.
-        if self.positions.dead() > self.positions.len() {
-            self.positions.compact_slots();
-            self.rebuild_index();
-        }
+        // Compaction does NOT run here. It renumbers slots, which would
+        // invalidate an open undo log — and `apply` keeps one across the whole
+        // transaction. `compact_if_sparse` is called by the engine after a
+        // transaction commits, which is the only moment no slot index is held
+        // and no rollback can still be required.
+        // No assertion about the tombstone ratio here: a `{*}` merge legitimately
+        // tombstones every matched lot and pushes one merged lot, so dead slots
+        // CAN outnumber live ones mid-transaction. The deferral is bounded by
+        // the transaction — `apply` compacts on commit — and an earlier version
+        // of this assert fired on exactly that valid case.
 
         // {*} merge operator: merge all lots into a single weighted-average-cost
         // lot before reducing, regardless of the account's booking method.
@@ -4492,8 +4708,13 @@ mod tests {
     /// Without compaction a long-lived account accumulates one dead slot per
     /// closed lot, and every scan walks all of them — matching would degrade
     /// toward "every lot this account ever held", which is far worse than the
-    /// shifting it replaced. Compaction runs at the top of `reduce`, the one
-    /// point where no slot index is held.
+    /// shifting it replaced.
+    ///
+    /// Compaction is called at the COMMIT boundary — `BookingEngine::apply`
+    /// runs it once a transaction succeeds. It cannot run inside `reduce` any
+    /// more: it renumbers slots, and `apply` holds an undo log across the whole
+    /// transaction that refers to them. This test drives it the way the engine
+    /// does.
     #[test]
     fn tombstones_are_compacted_rather_than_accumulating() {
         let mut inv = Inventory::new();
@@ -4514,6 +4735,8 @@ mod tests {
                 BookingMethod::Strict,
             )
             .expect("drains it again");
+            // What the engine does once the transaction commits.
+            inv.compact_if_sparse();
         }
         assert_eq!(inv.positions.len(), 0, "every lot was closed");
         assert!(

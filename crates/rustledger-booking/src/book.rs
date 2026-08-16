@@ -885,30 +885,58 @@ impl BookingEngine {
         // pays `Arc::make_mut` and copies a 64-`Position` chunk. Snapshotting
         // every transaction cost 2.4x heap churn and 6% CPU on the nightly
         // profile to guard a case needing values near 7.9e28 (#1897).
-        let snapshot: Option<FxHashMap<rustledger_core::Account, Option<Inventory>>> =
-            if self.rollback_needed(txn) {
-                let mut snap =
-                    FxHashMap::with_capacity_and_hasher(txn.postings.len(), Default::default());
-                for posting in &txn.postings {
-                    snap.entry(posting.account.clone())
-                        .or_insert_with(|| self.inventories.get(&posting.account).cloned());
-                }
-                Some(snap)
-            } else {
-                None
-            };
-        let rollback =
-            |engine: &mut Self,
-             snapshot: FxHashMap<rustledger_core::Account, Option<Inventory>>| {
-                for (account, prior) in snapshot {
-                    match prior {
-                        Some(inv) => {
-                            engine.inventories.insert(account, inv);
-                        }
-                        None => {
-                            engine.inventories.remove(&account);
+        // Record what changes rather than copying what exists.
+        //
+        // This used to clone every touched account's `Inventory`, justified by
+        // a comment saying the positions were an `imbl::Vector` whose clone is
+        // O(1). That stopped being true at #2056, when booking's backing became
+        // owned — so the guard silently turned into an O(lots) copy per touched
+        // account per transaction, and grew into the largest superlinear term
+        // left in the pipeline. Ablating it was worth 56% of a
+        // 20,000-transaction `investment` run and took the curve from 19.4x to
+        // 9.9x per 10x of input.
+        //
+        // A reduction touches one or two lots; the undo log is proportional to
+        // that rather than to what the account holds.
+        //
+        // Accounts that do not exist yet are tracked separately: `apply` is the
+        // only thing that creates entries, and a failed transaction must leave
+        // no phantom empty inventory, which would change `into_inventories`'
+        // output.
+        let recording = self.rollback_needed(txn);
+        let mut created: Vec<rustledger_core::Account> = Vec::new();
+        if recording {
+            for posting in &txn.postings {
+                match self.inventories.get_mut(&posting.account) {
+                    Some(inv) => {
+                        if !inv.undo_is_open() {
+                            inv.begin_undo();
                         }
                     }
+                    None => {
+                        if !created.contains(&posting.account) {
+                            created.push(posting.account.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Roll back only the accounts this transaction touched, found through
+        // its postings rather than by sweeping every inventory the engine
+        // holds. `undo_is_open` guards the repeat visit when a transaction has
+        // two postings on one account.
+        let rollback =
+            |engine: &mut Self, txn: &Transaction, created: &[rustledger_core::Account]| {
+                for posting in &txn.postings {
+                    if let Some(inv) = engine.inventories.get_mut(&posting.account)
+                        && inv.undo_is_open()
+                    {
+                        inv.rollback_undo();
+                    }
+                }
+                for account in created {
+                    engine.inventories.remove(account);
                 }
             };
 
@@ -936,15 +964,35 @@ impl BookingEngine {
                 // nothing would be silent corruption — precisely the bug being
                 // fixed — so a violated guard must be loud rather than quiet.
                 assert!(
-                    snapshot.is_some(),
+                    recording,
                     "rollback_needed() returned false but posting application \
                      failed ({e}): the guard is unsound and the earlier \
                      postings of this transaction cannot be rolled back"
                 );
-                if let Some(snapshot) = snapshot {
-                    rollback(self, snapshot);
-                }
+                rollback(self, txn, &created);
                 return Err(e);
+            }
+        }
+
+        // Committed: drop the logs and compact the touched accounts.
+        // Compaction moved here from `reduce` because it renumbers slots, which
+        // an open undo log refers to — this is the one point where no log is
+        // open and no rollback can still be required.
+        //
+        // Skipped entirely when nothing was recorded. Only a reduction creates
+        // tombstones, `add` never does, and any reduction makes
+        // `rollback_needed` true — so `!recording` means this transaction left
+        // nothing to compact and nothing to commit. Without the guard, ledgers
+        // that never book a cost spec pay a per-posting map lookup for nothing.
+        if !recording {
+            return Ok(());
+        }
+        for posting in &txn.postings {
+            if let Some(inv) = self.inventories.get_mut(&posting.account) {
+                if inv.undo_is_open() {
+                    inv.commit_undo();
+                }
+                inv.compact_if_sparse();
             }
         }
         Ok(())

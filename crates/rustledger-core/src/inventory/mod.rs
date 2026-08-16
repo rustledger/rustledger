@@ -346,8 +346,23 @@ impl std::error::Error for AccountedBookingError {}
 #[derive(Debug, Clone)]
 enum PositionStore {
     /// Contiguous — booking's working representation.
-    Owned(Vec<Position>),
-    /// Structurally shared — BQL's snapshot representation.
+    ///
+    /// SPARSE: a slot holding `None` is a lot a reduction drained and removed.
+    /// Removing by shifting renumbers every later lot, and lot indices have to
+    /// survive removals for a cost-keyed match index to be possible at all.
+    /// Tombstoning makes removal O(1) and leaves every other slot untouched.
+    ///
+    /// `None` is NOT the same as a zero-unit position. A zero-unit lot is live
+    /// and visible — cost-less lots can merge through zero — and
+    /// [`Inventory::len`] is documented as counting them. A tombstone is a lot
+    /// that is GONE. Encoding one as the other would make drained lots visible
+    /// to `Serialize`, the FFI and wasm converters, the account validator and
+    /// `report balances`, and would change what `currency_accounts` sees when
+    /// it branches on `inv.len() == 1` to match Python.
+    Owned(Slots),
+    /// Structurally shared — BQL's snapshot representation, and dense: BQL
+    /// clones snapshots but never books against them, so it has no removals to
+    /// keep indices stable across.
     Shared(Vector<Position>),
 }
 
@@ -358,7 +373,7 @@ enum PositionStore {
 /// a heap allocation and a dynamic dispatch on paths this change exists to
 /// make cheaper. Copilot's catch on #2056.
 enum PositionStoreIter<'a> {
-    Owned(std::slice::Iter<'a, Position>),
+    Owned(std::iter::Flatten<std::slice::Iter<'a, Option<Position>>>),
     Shared(imbl::vector::Iter<'a, Position, imbl::shared_ptr::DefaultSharedPtr>),
 }
 
@@ -380,9 +395,79 @@ impl<'a> Iterator for PositionStoreIter<'a> {
     }
 }
 
+/// The sparse backing: slots plus the number that are live.
+///
+/// `live` is maintained rather than counted because `len`, `is_empty` and the
+/// compaction trigger all run per reduction, and an O(slots) scan there is
+/// exactly the cost tombstones exist to avoid.
+#[derive(Debug, Clone, Default)]
+struct Slots {
+    slots: Vec<Option<Position>>,
+    live: usize,
+}
+
+impl Slots {
+    fn from_live(positions: Vec<Position>) -> Self {
+        let live = positions.len();
+        Self {
+            slots: positions.into_iter().map(Some).collect(),
+            live,
+        }
+    }
+
+    fn set_dead(&mut self, i: usize) {
+        if let Some(entry) = self.slots.get_mut(i)
+            && entry.take().is_some()
+        {
+            self.live -= 1;
+        }
+    }
+}
+
+/// Iterator over [`PositionStore`] yielding each live position with its SLOT
+/// index — the index [`std::ops::Index`] accepts, not a running count.
+///
+/// A stack-allocated enum for the same reason as [`PositionStoreIter`]: this
+/// runs inside every reduction and must not box.
+enum SlotIter<'a> {
+    Owned(std::iter::Enumerate<std::slice::Iter<'a, Option<Position>>>),
+    Shared(
+        std::iter::Enumerate<imbl::vector::Iter<'a, Position, imbl::shared_ptr::DefaultSharedPtr>>,
+    ),
+}
+
+impl<'a> SlotIter<'a> {
+    fn new(store: &'a PositionStore) -> Self {
+        match store {
+            PositionStore::Owned(v) => Self::Owned(v.slots.iter().enumerate()),
+            PositionStore::Shared(v) => Self::Shared(v.iter().enumerate()),
+        }
+    }
+}
+
+impl<'a> Iterator for SlotIter<'a> {
+    type Item = (usize, &'a Position);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Owned(i) => {
+                // Skip tombstones, but keep the REAL slot number of what we do
+                // yield: that number is what comes back through `Index`.
+                for (slot, entry) in i.by_ref() {
+                    if let Some(position) = entry {
+                        return Some((slot, position));
+                    }
+                }
+                None
+            }
+            Self::Shared(i) => i.next(),
+        }
+    }
+}
+
 impl Default for PositionStore {
     fn default() -> Self {
-        Self::Owned(Vec::new())
+        Self::Owned(Slots::default())
     }
 }
 
@@ -401,20 +486,43 @@ impl PositionStore {
     ///
     /// [`Index`]: std::ops::Index
     fn iter_slots(&self) -> impl Iterator<Item = (usize, &Position)> {
-        self.iter().enumerate()
+        // Real slot numbers, skipping tombstones — NOT a running count of live
+        // positions. The reduction paths hand these back to `Index`.
+        SlotIter::new(self)
     }
 
+    /// Live positions, dropping tombstones. This is what `Serialize`, the FFI
+    /// converters and every external consumer see, so a drained lot stays
+    /// invisible exactly as it was when removal shifted the vector.
     fn iter(&self) -> PositionStoreIter<'_> {
         match self {
-            Self::Owned(v) => PositionStoreIter::Owned(v.iter()),
+            Self::Owned(v) => PositionStoreIter::Owned(v.slots.iter().flatten()),
             Self::Shared(v) => PositionStoreIter::Shared(v.iter()),
         }
     }
 
+    /// Number of LIVE positions. Tombstones are not positions.
     fn len(&self) -> usize {
         match self {
-            Self::Owned(v) => v.len(),
+            Self::Owned(v) => v.live,
             Self::Shared(v) => v.len(),
+        }
+    }
+
+    /// Number of slots, live or not — the exclusive upper bound on a valid
+    /// slot index, and what `push_slot` returns for the slot it fills.
+    fn slot_count(&self) -> usize {
+        match self {
+            Self::Owned(v) => v.slots.len(),
+            Self::Shared(v) => v.len(),
+        }
+    }
+
+    /// How many slots are tombstones.
+    const fn dead(&self) -> usize {
+        match self {
+            Self::Owned(v) => v.slots.len() - v.live,
+            Self::Shared(_) => 0,
         }
     }
 
@@ -424,29 +532,70 @@ impl PositionStore {
 
     fn get(&self, i: usize) -> Option<&Position> {
         match self {
-            Self::Owned(v) => v.get(i),
+            Self::Owned(v) => v.slots.get(i).and_then(Option::as_ref),
             Self::Shared(v) => v.get(i),
         }
     }
 
     fn push(&mut self, p: Position) {
+        self.push_slot(p);
+    }
+
+    /// Append a position, returning the slot index it landed in.
+    ///
+    /// The slot is `slot_count()`, not `len()`: with tombstones present those
+    /// differ, and `simple_index` stores slots.
+    fn push_slot(&mut self, p: Position) -> usize {
+        let slot = self.slot_count();
         match self {
-            Self::Owned(v) => v.push(p),
+            Self::Owned(v) => {
+                v.slots.push(Some(p));
+                v.live += 1;
+            }
             Self::Shared(v) => v.push_back(p),
         }
+        slot
     }
 
-    fn remove(&mut self, i: usize) -> Position {
+    /// Remove the position in slot `i`, leaving a tombstone behind so no other
+    /// slot is renumbered.
+    fn remove(&mut self, i: usize) {
         match self {
-            Self::Owned(v) => v.remove(i),
-            Self::Shared(v) => v.remove(i),
+            Self::Owned(v) => v.set_dead(i),
+            Self::Shared(v) => {
+                v.remove(i);
+            }
         }
     }
 
-    fn retain(&mut self, f: impl FnMut(&Position) -> bool) {
+    /// Drop positions failing `f`. On the sparse backing they become
+    /// tombstones, so no surviving lot is renumbered.
+    fn retain(&mut self, mut f: impl FnMut(&Position) -> bool) {
         match self {
-            Self::Owned(v) => v.retain(f),
+            Self::Owned(v) => {
+                for i in 0..v.slots.len() {
+                    if v.slots[i].as_ref().is_some_and(|p| !f(p)) {
+                        v.set_dead(i);
+                    }
+                }
+            }
             Self::Shared(v) => v.retain(f),
+        }
+    }
+
+    /// Physically drop tombstones, renumbering the slots that remain.
+    ///
+    /// INVALIDATES every slot index, so callers must hold none and must
+    /// rebuild anything keyed by slot. Reductions never span this: it runs
+    /// before planning, when nothing is held.
+    fn compact_slots(&mut self) {
+        if let Self::Owned(v) = self {
+            v.slots.retain(Option::is_some);
+            debug_assert_eq!(
+                v.slots.len(),
+                v.live,
+                "compaction must leave only live slots"
+            );
         }
     }
 
@@ -465,12 +614,24 @@ impl PositionStore {
     ///
     /// [`Index`]: std::ops::Index
     fn retain_slots(&mut self, mut f: impl FnMut(usize, &Position) -> bool) {
-        let mut slot = 0;
-        self.retain(|position| {
-            let keep = f(slot, position);
-            slot += 1;
-            keep
-        });
+        match self {
+            Self::Owned(v) => {
+                for i in 0..v.slots.len() {
+                    if v.slots[i].as_ref().is_some_and(|p| !f(i, p)) {
+                        v.set_dead(i);
+                    }
+                }
+            }
+            // Dense: a running count IS the slot number here.
+            Self::Shared(v) => {
+                let mut slot = 0;
+                v.retain(|position| {
+                    let keep = f(slot, position);
+                    slot += 1;
+                    keep
+                });
+            }
+        }
     }
 
     /// Switch to contiguous storage, cloning if not already `Owned`.
@@ -485,25 +646,41 @@ impl PositionStore {
     /// then contiguous instead of an RRB walk.
     fn make_owned(&mut self) {
         if let Self::Shared(v) = self {
-            *self = Self::Owned(v.iter().cloned().collect());
+            let slots: Vec<Option<Position>> = v.iter().cloned().map(Some).collect();
+            let live = slots.len();
+            *self = Self::Owned(Slots { slots, live });
         }
     }
 }
 
 impl std::ops::Index<usize> for PositionStore {
     type Output = Position;
+    /// # Panics
+    ///
+    /// Panics if `i` names a tombstone. Every index in circulation comes from
+    /// [`PositionStore::iter_slots`] or [`PositionStore::push_slot`], which
+    /// only ever report live slots, and no reduction removes a lot and then
+    /// re-reads it — so reaching a tombstone means slot numbers and the store
+    /// have desynchronised, and a wrong-lot read is worse than a panic.
     fn index(&self, i: usize) -> &Position {
         match self {
-            Self::Owned(v) => &v[i],
+            Self::Owned(v) => v.slots[i]
+                .as_ref()
+                .expect("slot index names a live position, not a tombstone"),
             Self::Shared(v) => &v[i],
         }
     }
 }
 
 impl std::ops::IndexMut<usize> for PositionStore {
+    /// # Panics
+    ///
+    /// As [`Index::index`](std::ops::Index::index).
     fn index_mut(&mut self, i: usize) -> &mut Position {
         match self {
-            Self::Owned(v) => &mut v[i],
+            Self::Owned(v) => v.slots[i]
+                .as_mut()
+                .expect("slot index names a live position, not a tombstone"),
             Self::Shared(v) => &mut v[i],
         }
     }
@@ -511,7 +688,9 @@ impl std::ops::IndexMut<usize> for PositionStore {
 
 impl FromIterator<Position> for PositionStore {
     fn from_iter<I: IntoIterator<Item = Position>>(iter: I) -> Self {
-        Self::Owned(iter.into_iter().collect())
+        let slots: Vec<Option<Position>> = iter.into_iter().map(Some).collect();
+        let live = slots.len();
+        Self::Owned(Slots { slots, live })
     }
 }
 
@@ -528,7 +707,9 @@ impl Serialize for PositionStore {
 
 impl<'de> Deserialize<'de> for PositionStore {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(Self::Owned(Vec::<Position>::deserialize(deserializer)?))
+        Ok(Self::Owned(Slots::from_live(Vec::<Position>::deserialize(
+            deserializer,
+        )?)))
     }
 }
 
@@ -609,6 +790,36 @@ pub struct Inventory {
     /// Not serialized - rebuilt on demand.
     #[serde(skip)]
     units_cache: FxHashMap<crate::Currency, CurrencyStats>,
+    /// Cost-bearing lots grouped by what a cost spec matches them on, so a
+    /// reduction naming an explicit per-unit cost finds its candidates instead
+    /// of comparing against every lot.
+    ///
+    /// That comparison was the last superlinear term in the pipeline:
+    /// `CostSpec::matches` ran once per lot per reduction and grew 111x for
+    /// 10x the input. Slots are stable across removals — that is what the
+    /// tombstoned backing buys — so the lists stay valid until compaction,
+    /// which rebuilds them.
+    ///
+    /// Only lots WITH a cost appear. A spec that names no per-unit cost still
+    /// scans, because it can match anything.
+    /// Not serialized - rebuilt on demand, like the caches above.
+    #[serde(skip)]
+    cost_index: FxHashMap<CostKey, smallvec::SmallVec<[usize; 2]>>,
+}
+
+/// What [`Inventory::cost_index`] groups lots by: the units they are held in,
+/// and the per-unit cost a spec would name to select them.
+type CostKey = (crate::Currency, Decimal, crate::Currency);
+
+/// The key for `position`, if it carries a cost.
+fn cost_key(position: &Position) -> Option<CostKey> {
+    position.cost.as_ref().map(|cost| {
+        (
+            position.units.currency.clone(),
+            cost.number,
+            cost.currency.clone(),
+        )
+    })
 }
 
 /// Everything cached per currency: the running unit total, and the per-bucket
@@ -727,9 +938,10 @@ impl TryFrom<InventoryWire> for Inventory {
     /// deserialization error.
     fn try_from(wire: InventoryWire) -> Result<Self, Self::Error> {
         let mut inv = Self {
-            positions: PositionStore::Owned(wire.positions.into_iter().collect()),
+            positions: PositionStore::Owned(Slots::from_live(wire.positions.into_iter().collect())),
             simple_index: FxHashMap::default(),
             units_cache: FxHashMap::default(),
+            cost_index: FxHashMap::default(),
         };
         // UNTRUSTED: the payload is input, not something this type produced, so
         // it may carry two cost-less lots for one currency — a state the
@@ -780,40 +992,22 @@ impl Inventory {
         self.positions.iter().collect()
     }
 
-    /// Get mutable access to the underlying positions, contiguously.
+    /// Rewrite the positions wholesale, then rebuild every derived cache.
     ///
-    /// Forces the contiguous backing first, so the caller gets a real
-    /// `&mut Vec<Position>` with O(1) indexing and amortized O(1) push. If
-    /// the inventory was using the structurally-shared backing — the BQL
-    /// snapshot representation, see [`Inventory::new_shared`] — that
-    /// conversion costs O(M) once and any sharing with earlier snapshots is
-    /// dropped for THIS inventory; the snapshots themselves are unaffected.
+    /// Replaces the old `positions_mut`, which handed out `&mut Vec<Position>`
+    /// directly. That is no longer possible — the backing is sparse, so the
+    /// vector holds `Option<Position>` alongside a live count, and a caller
+    /// writing through it could desync that count with no way to notice.
+    /// It also left `units_cache` and `simple_index` describing the OLD
+    /// contents, which this rebuilds for you.
     ///
-    /// (The backing enum is private, so this deliberately describes it in
-    /// prose rather than linking: a public doc cannot intra-doc-link a
-    /// private item, and `cargo doc -D warnings` rejects it.)
-    ///
-    /// **Caches are the caller's problem here.** Mutating positions through
-    /// this handle leaves `units_cache` — both the running totals and the
-    /// sign counts — and `simple_index` describing the OLD contents. Those
-    /// drive `units()`, the reduction-vs-augmentation decision in
-    /// `is_reduced_by`, and cost-less merging in `add` respectively.
-    ///
-    /// [`Self::compact`] rebuilds all of them, but note that it ALSO drops
-    /// every empty position on the way through. If the caller deliberately
-    /// left a zero-unit lot in place, compacting to refresh the caches will
-    /// silently remove it — so that is a semantic change, not just a cache
-    /// refresh.
-    ///
-    /// Debug builds catch a missed rebuild through `is_reduced_by`'s
-    /// consistency assertion; release builds silently book against a stale
-    /// view.
-    pub fn positions_mut(&mut self) -> &mut Vec<Position> {
-        self.positions.make_owned();
-        match &mut self.positions {
-            PositionStore::Owned(v) => v,
-            PositionStore::Shared(_) => unreachable!("make_owned just ran"),
-        }
+    /// Pre-1.0 break: the closure sees a dense `Vec<Position>` with tombstones
+    /// already dropped, and whatever it leaves becomes the inventory.
+    pub fn modify_positions(&mut self, f: impl FnOnce(&mut Vec<Position>)) {
+        let mut dense: Vec<Position> = self.positions.iter().cloned().collect();
+        f(&mut dense);
+        self.positions = PositionStore::Owned(Slots::from_live(dense));
+        self.rebuild_index();
     }
 
     /// An inventory whose positions are structurally SHARED.
@@ -1193,17 +1387,23 @@ impl Inventory {
                 return Ok(());
             }
             // No existing position - add new one and index it
-            let idx = self.positions.len();
-            self.simple_index
-                .insert(position.units.currency.clone(), idx);
-            self.positions.push(position);
+            // `push_slot`, not `len()`: with tombstones present the live
+            // count is not the slot the lot lands in, and `simple_index`
+            // stores slots.
+            let currency = position.units.currency.clone();
+            let idx = self.positions.push_slot(position);
+            self.simple_index.insert(currency, idx);
             return Ok(());
         }
 
         // For positions with cost, just add as a new lot.
         // This is O(1) and keeps all lots separate, matching Python beancount behavior.
         // Lot aggregation for display purposes is handled separately in query output.
-        self.positions.push(position);
+        let key = cost_key(&position);
+        let slot = self.positions.push_slot(position);
+        if let Some(key) = key {
+            self.cost_index.entry(key).or_default().push(slot);
+        }
         Ok(())
     }
 
@@ -1211,13 +1411,44 @@ impl Inventory {
     ///
     /// Called with `-1` before changing or removing a lot and `+1` after, so
     /// a sign flip lands in the right bucket.
+    /// Drop `idx` from [`Self::cost_index`]. Called wherever a lot is
+    /// tombstoned, since the slot stays valid but the lot is gone.
+    pub(super) fn cost_index_remove(&mut self, idx: usize) {
+        let Some(key) = self.positions.get(idx).and_then(cost_key) else {
+            return;
+        };
+        if let Some(slots) = self.cost_index.get_mut(&key) {
+            slots.retain(|slot| *slot != idx);
+            if slots.is_empty() {
+                self.cost_index.remove(&key);
+            }
+        }
+    }
+
+    /// Slots that could satisfy `spec` for `units`, or `None` when the spec
+    /// names no per-unit cost and therefore every lot is a candidate.
+    ///
+    /// Returned ascending so callers see the same order a scan would.
+    fn cost_candidates(&self, units: &Amount, spec: &CostSpec) -> Option<Vec<usize>> {
+        let number = spec.number.and_then(|n| n.per_unit())?;
+        let currency = spec.currency.clone()?;
+        let mut slots = self
+            .cost_index
+            .get(&(units.currency.clone(), number, currency))
+            .cloned()
+            .unwrap_or_default()
+            .to_vec();
+        slots.sort_unstable();
+        Some(slots)
+    }
+
     pub(super) fn sign_index_bump(&mut self, idx: usize, delta: i32) {
         // All three call sites pass an index they just read or wrote, so this
         // is defensive only. Returning rather than panicking keeps a future
         // caller's off-by-one out of the panic path; the counts then disagree
         // with a scan, which `is_reduced_by`'s assertion reports in debug.
         debug_assert!(
-            idx < self.positions.len(),
+            idx < self.positions.slot_count(),
             "sign_index_bump called with out-of-range index {idx}",
         );
         let Some(position) = self.positions.get(idx) else {
@@ -1299,6 +1530,19 @@ impl Inventory {
         // no shared chunk to corrupt.
         self.positions.make_owned();
 
+        // Drop tombstones once they outnumber live lots, so slots stay within
+        // 2x the real position count and iteration cannot degrade toward
+        // "every lot this account ever held". This is the ONLY place it can
+        // run: compaction renumbers slots, and here nothing holds one — the
+        // planners have not looked at the store yet.
+        //
+        // Amortized: each compaction is O(slots) but halves them, so the cost
+        // per removed lot is constant.
+        if self.positions.dead() > self.positions.len() {
+            self.positions.compact_slots();
+            self.rebuild_index();
+        }
+
         // {*} merge operator: merge all lots into a single weighted-average-cost
         // lot before reducing, regardless of the account's booking method.
         if spec.merge {
@@ -1345,8 +1589,12 @@ impl Inventory {
     fn try_rebuild_index_from(&mut self, source: CacheSource) -> Result<(), OverflowError> {
         self.simple_index.clear();
         self.units_cache.clear();
+        self.cost_index.clear();
 
         for (idx, pos) in self.positions.iter_slots() {
+            if let Some(key) = cost_key(pos) {
+                self.cost_index.entry(key).or_default().push(idx);
+            }
             // Update units cache for all positions. Checked, not `+=`:
             // `Decimal`'s `+` panics on overflow, and this runs over payloads.
             //
@@ -2867,8 +3115,12 @@ mod tests {
 
         // Inventory should have a single merged lot with 15 remaining @ 155
         assert_eq!(inv.positions.len(), 1);
-        assert_eq!(inv.positions[0].units.number, dec!(15));
-        let cost = inv.positions[0].cost.as_ref().expect("should have cost");
+        // Through the iterator, not a raw slot: the merged lot is appended
+        // after the tombstoned originals, and the iterator is what every
+        // consumer sees.
+        let merged = inv.positions().next().expect("one merged lot");
+        assert_eq!(merged.units.number, dec!(15));
+        let cost = merged.cost.as_ref().expect("should have cost");
         assert_eq!(cost.number, dec!(155));
     }
 
@@ -2946,7 +3198,10 @@ mod tests {
 
         assert_eq!(result.cost_basis, Some(Amount::new(dec!(450), "USD")));
         assert_eq!(inv.positions.len(), 1);
-        assert_eq!(inv.positions[0].units.number, dec!(7));
+        // Iterator, not a raw slot: the merged lot is appended after the
+        // tombstoned originals.
+        let merged = inv.positions().next().expect("one merged lot");
+        assert_eq!(merged.units.number, dec!(7));
     }
 
     #[test]
@@ -2981,8 +3236,11 @@ mod tests {
 
         assert_eq!(result.cost_basis, Some(Amount::new(dec!(900), "USD")));
         assert_eq!(inv.positions.len(), 1);
-        assert_eq!(inv.positions[0].units.number, dec!(24));
-        let cost = inv.positions[0].cost.as_ref().expect("should have cost");
+        // Iterator, not a raw slot: the merged lot is appended after the
+        // tombstoned originals.
+        let merged = inv.positions().next().expect("one merged lot");
+        assert_eq!(merged.units.number, dec!(24));
+        let cost = merged.cost.as_ref().expect("should have cost");
         assert_eq!(cost.number, dec!(150));
     }
 
@@ -3948,16 +4206,25 @@ mod tests {
     /// matching lot — booking a sale as a purchase and duplicating the lot,
     /// which is the #875-class bug this predicate exists to prevent.
     ///
-    /// So the unbuilt case falls back to the scan. This is the only test that
-    /// reaches that branch: every other route into `is_reduced_by` goes
-    /// through `add` or a rebuild, both of which populate the cache.
+    /// So the unbuilt case falls back to the scan.
+    ///
+    /// The cache is cleared DIRECTLY here. It used to be reached through
+    /// `positions_mut`, which handed out the position vector and left the
+    /// caches describing the old contents — that accessor is gone, and its
+    /// replacement `modify_positions` rebuilds them, so no public API produces
+    /// this state any more. The fallback stays because `units_cache` is
+    /// `#[serde(skip)]` and answering "not a reduction" for an inventory that
+    /// plainly holds a matching lot is the unsafe direction; this constructs
+    /// the state the only way left, and says so.
     #[test]
     fn an_unbuilt_cache_falls_back_to_the_scan_rather_than_answering_no() {
         let mut inv = Inventory::new();
-        inv.positions_mut().push(Position::with_cost(
+        inv.add(Position::with_cost(
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(100), "USD"),
-        ));
+        ))
+        .expect("fits");
+        inv.units_cache.clear();
         assert!(
             inv.units_cache.is_empty(),
             "the fixture must reach `is_reduced_by` with an unbuilt cache, or \
@@ -3993,15 +4260,18 @@ mod tests {
         ));
     }
 
-    /// Removing a drained lot shifts every later position down one, and
-    /// `simple_index` stores POSITIONS BY INDEX — so a cost-less lot sitting
-    /// after the removed one must have its stored index repaired.
+    /// A cost-less lot sitting after a removed one keeps working.
     ///
-    /// Get this wrong and `add` merges a later cost-less deposit into the
-    /// wrong lot, or indexes past the end. Nothing else in the suite covers
-    /// it: it needs a cost-bearing lot and a cost-less lot in the same
-    /// inventory, with the cost-bearing one removed first, and inventories in
-    /// most tests hold only one kind.
+    /// Removal used to shift every later position down one, so `simple_index`
+    /// — which stores positions BY INDEX — had to be repaired to follow the
+    /// shift. With tombstones nothing moves, so the entry must be left exactly
+    /// where it is; repairing it now would point `add`'s merge at the wrong
+    /// slot. Same test, opposite mechanism, and the consequence it guards is
+    /// unchanged: a later cost-less deposit must MERGE rather than duplicate.
+    ///
+    /// Nothing else in the suite covers it: it needs a cost-bearing lot and a
+    /// cost-less lot in the same inventory, with the cost-bearing one removed
+    /// first, and inventories in most tests hold only one kind.
     #[test]
     fn removing_a_lot_repairs_the_index_of_a_later_cost_less_lot() {
         let mut inv = Inventory::new();
@@ -4020,7 +4290,7 @@ mod tests {
         );
 
         // Drain the cost-bearing lot. STRICT takes the single-lot commit path,
-        // which removes in place rather than rebuilding.
+        // which tombstones the slot in place.
         inv.reduce(
             &Amount::new(dec!(-10), "AAPL"),
             Some(&CostSpec::default()),
@@ -4030,8 +4300,8 @@ mod tests {
 
         assert_eq!(
             inv.simple_index.get(&crate::Currency::new("USD")),
-            Some(&0),
-            "the cost-less lot moved to index 0 and the index must follow it",
+            Some(&1),
+            "the cost-less lot did not move, so its stored slot must not change",
         );
 
         // The consequence a stale index actually has: this must MERGE into the
@@ -4136,5 +4406,143 @@ mod tests {
             "iter_slots must visit every live position",
         );
         assert_eq!(seen, 6, "fixture must hold six lots, two of them equal");
+    }
+
+    /// The point of tombstoning: removing a lot must not renumber the lots
+    /// after it.
+    ///
+    /// Shifting was what made a cost-keyed match index impossible — every
+    /// removal invalidated every later index. This is the property the whole
+    /// sparse backing exists to provide, so it is asserted directly rather
+    /// than inferred from something downstream.
+    #[test]
+    fn a_removal_does_not_renumber_the_lots_after_it() {
+        let mut inv = Inventory::new();
+        for units in [dec!(10), dec!(20), dec!(30)] {
+            inv.add(Position::with_cost(
+                Amount::new(units, "AAPL"),
+                Cost::new(units * dec!(10), "USD"),
+            ))
+            .expect("fits");
+        }
+        let before: Vec<usize> = inv.positions.iter_slots().map(|(slot, _)| slot).collect();
+        assert_eq!(before, vec![0, 1, 2], "fixture must fill three slots");
+
+        // Drain the MIDDLE lot, so a shift would move the one after it.
+        inv.reduce(
+            &Amount::new(dec!(-20), "AAPL"),
+            Some(
+                &CostSpec::empty()
+                    .with_number(crate::CostNumber::PerUnit { value: dec!(200) })
+                    .with_currency("USD"),
+            ),
+            BookingMethod::Strict,
+        )
+        .expect("drains the middle lot");
+
+        let after: Vec<(usize, Decimal)> = inv
+            .positions
+            .iter_slots()
+            .map(|(slot, p)| (slot, p.units.number))
+            .collect();
+        assert_eq!(
+            after,
+            vec![(0, dec!(10)), (2, dec!(30))],
+            "the surviving lots must keep the slots they had; slot 1 is now a \
+             tombstone and slot 2 must NOT have become slot 1",
+        );
+        assert_eq!(inv.positions.len(), 2, "two live lots");
+        assert_eq!(inv.positions.slot_count(), 3, "three slots, one dead");
+    }
+
+    /// Tombstones must not pile up without bound.
+    ///
+    /// Without compaction a long-lived account accumulates one dead slot per
+    /// closed lot, and every scan walks all of them — matching would degrade
+    /// toward "every lot this account ever held", which is far worse than the
+    /// shifting it replaced. Compaction runs at the top of `reduce`, the one
+    /// point where no slot index is held.
+    #[test]
+    fn tombstones_are_compacted_rather_than_accumulating() {
+        let mut inv = Inventory::new();
+        for i in 0..50u32 {
+            let cost = Decimal::from(100 + i);
+            inv.add(Position::with_cost(
+                Amount::new(dec!(1), "AAPL"),
+                Cost::new(cost, "USD"),
+            ))
+            .expect("fits");
+            inv.reduce(
+                &Amount::new(dec!(-1), "AAPL"),
+                Some(
+                    &CostSpec::empty()
+                        .with_number(crate::CostNumber::PerUnit { value: cost })
+                        .with_currency("USD"),
+                ),
+                BookingMethod::Strict,
+            )
+            .expect("drains it again");
+        }
+        assert_eq!(inv.positions.len(), 0, "every lot was closed");
+        assert!(
+            inv.positions.slot_count() <= 4,
+            "50 open-and-close cycles left {} slots; compaction is not running, \
+             and every later scan pays for all of them",
+            inv.positions.slot_count(),
+        );
+    }
+
+    /// Draining a lot must take it out of the cost index.
+    ///
+    /// A stale entry is not merely wasteful: the slot it names is a tombstone,
+    /// and it would be handed to the reduction path as a candidate. The lookup
+    /// tolerates that by design, but the index still has to be maintained —
+    /// otherwise the lists grow without bound as lots close, and the whole
+    /// point of the index erodes. Asserted directly, because the tolerant
+    /// lookup means no behavioral test can see the difference.
+    #[test]
+    fn draining_a_lot_removes_it_from_the_cost_index() {
+        let spec = || {
+            CostSpec::empty()
+                .with_number(crate::CostNumber::PerUnit { value: dec!(100) })
+                .with_currency("USD")
+        };
+        let mut inv = Inventory::new();
+        inv.add(Position::with_cost(
+            Amount::new(dec!(10), "AAPL"),
+            Cost::new(dec!(100), "USD"),
+        ))
+        .expect("fits");
+        assert_eq!(inv.cost_index.len(), 1, "the lot is indexed");
+
+        inv.reduce(
+            &Amount::new(dec!(-10), "AAPL"),
+            Some(&spec()),
+            BookingMethod::Strict,
+        )
+        .expect("drains the lot");
+
+        assert!(
+            inv.cost_index.is_empty(),
+            "the drained lot is still indexed: {:?}",
+            inv.cost_index,
+        );
+
+        // And the same cost can be re-used afterwards without tripping over
+        // the old slot — the case a stale entry would reach.
+        inv.add(Position::with_cost(
+            Amount::new(dec!(5), "AAPL"),
+            Cost::new(dec!(100), "USD"),
+        ))
+        .expect("fits");
+        let result = inv
+            .reduce(
+                &Amount::new(dec!(-5), "AAPL"),
+                Some(&spec()),
+                BookingMethod::Strict,
+            )
+            .expect("re-buying at the same cost and selling must work");
+        assert_eq!(result.matched.len(), 1);
+        assert_eq!(inv.positions.len(), 0);
     }
 }

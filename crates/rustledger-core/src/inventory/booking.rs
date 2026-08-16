@@ -195,17 +195,39 @@ impl Inventory {
         units: &Amount,
         spec: &CostSpec,
     ) -> Result<(BookingResult, ReductionPlan), BookingError> {
-        let matching_indices: Vec<usize> = self
-            .positions
-            .iter_slots()
-            .filter(|(_, p)| {
-                p.units.currency == units.currency
-                    && !p.is_empty()
-                    && p.can_reduce(units)
-                    && p.matches_cost_spec(spec)
-            })
-            .map(|(i, _)| i)
-            .collect();
+        // Candidates from the cost index when the spec names a per-unit cost,
+        // otherwise every lot — a spec without one can match anything. Both
+        // arms apply the SAME predicate, so the index only narrows what is
+        // examined; it never decides a match, and a stale or missing entry
+        // costs correctness nothing that the predicate would not catch.
+        let matching_indices: Vec<usize> = match self.cost_candidates(units, spec) {
+            Some(slots) => slots
+                .into_iter()
+                .filter(|i| {
+                    // `get`, not `[]`: indexing a tombstone panics, and a
+                    // stale entry must not be able to crash on user data. With
+                    // `get` it is merely a wasted candidate, which the
+                    // predicate discards anyway.
+                    self.positions.get(*i).is_some_and(|p| {
+                        p.units.currency == units.currency
+                            && !p.is_empty()
+                            && p.can_reduce(units)
+                            && p.matches_cost_spec(spec)
+                    })
+                })
+                .collect(),
+            None => self
+                .positions
+                .iter_slots()
+                .filter(|(_, p)| {
+                    p.units.currency == units.currency
+                        && !p.is_empty()
+                        && p.can_reduce(units)
+                        && p.matches_cost_spec(spec)
+                })
+                .map(|(i, _)| i)
+                .collect(),
+        };
 
         match matching_indices.len() {
             0 => Err(BookingError::NoMatchingLot {
@@ -1005,6 +1027,7 @@ impl Inventory {
         // Remove if empty, then repair `simple_index`.
         if self.positions[idx].is_empty() {
             self.sign_index_bump(idx, -1);
+            self.cost_index_remove(idx);
             self.positions.remove(idx);
 
             // Removing shifts every later position down one, so the stored
@@ -1019,29 +1042,18 @@ impl Inventory {
             // nothing at all; it grew 164x for 10x the input on the
             // `investment` profiling shape.
             //
-            // The removed lot CAN be the cost-less lot this map names: an
-            // empty cost spec matches a cost-less position
-            // (`matches_cost_spec`: `(None, true) => true`), so STRICT selects
-            // one and drains it. An earlier version of this asserted the
-            // opposite and handled only the shift, which left the map pointing
-            // at a removed index — the next cost-less `add` then merged into a
-            // lot that was no longer there, or indexed past the end. Caught in
-            // review on #2063; pinned by
-            // `removing_a_cost_less_lot_drops_its_index_entry`.
+            // Nothing shifted: removal leaves a tombstone, so every
+            // surviving lot keeps its slot. Only the entry naming the removed
+            // lot has to go — and it CAN name it, because an empty cost spec
+            // matches a cost-less position (`matches_cost_spec`:
+            // `(None, true) => true`), so STRICT can select and drain one.
             //
-            // One pass: drop the entry naming the removed lot, shift the rest.
-            // (`>` vs `>=` here is an equivalent mutation — the `== idx` arm
-            // returns first, so no entry equal to `idx` ever reaches it. A
-            // mutation swapping them survives, and that is not a gap.)
-            self.simple_index.retain(|_, stored| {
-                if *stored == idx {
-                    return false;
-                }
-                if *stored > idx {
-                    *stored -= 1;
-                }
-                true
-            });
+            // Before tombstones this also decremented the later entries to
+            // follow the shift. Keeping that now would renumber indices that
+            // did not move, pointing `add`'s merge at a tombstone — which is
+            // exactly what `removing_a_lot_repairs_the_index_of_a_later_cost_less_lot`
+            // caught.
+            self.simple_index.retain(|_, stored| *stored != idx);
         }
     }
 }

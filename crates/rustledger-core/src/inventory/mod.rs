@@ -4079,14 +4079,31 @@ mod tests {
             ))
             .expect("fits");
         }
+        // Two lots IDENTICAL by value. `add` never merges cost-bearing lots —
+        // it keeps them separate to match Python — so this is an ordinary
+        // inventory, and it is the shape that makes the assertion below
+        // meaningful: with only distinct lots, comparing by value cannot tell
+        // "the right slot" from "a slot holding an equal position".
+        for _ in 0..2 {
+            inv.add(Position::with_cost(
+                Amount::new(dec!(7), "AAPL"),
+                Cost::new(dec!(70), "USD"),
+            ))
+            .expect("fits");
+        }
         inv.add(Position::simple(Amount::new(dec!(99), "USD")))
             .expect("fits");
 
         let mut seen = 0;
         for (slot, position) in inv.positions.iter_slots() {
-            assert_eq!(
-                &inv.positions[slot], position,
-                "slot {slot} does not address the position it was yielded with",
+            // Pointer identity, not `assert_eq!`. `Position: PartialEq`, so a
+            // value comparison passes when a wrong index happens to land on an
+            // equal lot — exactly what the duplicate pair above arranges.
+            // Review catch on #2065.
+            assert!(
+                std::ptr::eq(std::ptr::from_ref(&inv.positions[slot]), position),
+                "slot {slot} addresses a different position than the one it \
+                 was yielded with",
             );
             seen += 1;
         }
@@ -4095,6 +4112,6 @@ mod tests {
             inv.positions().count(),
             "iter_slots must visit every live position",
         );
-        assert_eq!(seen, 4, "fixture must hold four lots");
+        assert_eq!(seen, 6, "fixture must hold six lots, two of them equal");
     }
 }

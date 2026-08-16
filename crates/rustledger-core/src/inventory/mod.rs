@@ -4708,4 +4708,92 @@ mod tests {
             .expect("a snapshot with no cost index must fall back to scanning");
         assert_eq!(result.matched.len(), 1);
     }
+
+    /// Tombstones must not reach the wire, and a round trip must come back
+    /// dense.
+    ///
+    /// Every other round-trip test builds its inventory with `add` alone, so
+    /// none of them has a tombstone in it — the sparse backing was entirely
+    /// untested through serde. It matters twice over: the wire format is
+    /// pinned by downstream snapshots, and a leaked `null` would both break
+    /// them and deserialize into a lot that does not exist.
+    #[test]
+    fn a_drained_lot_does_not_reach_the_wire() {
+        let mut inv = Inventory::new();
+        for units in [dec!(10), dec!(20)] {
+            inv.add(Position::with_cost(
+                Amount::new(units, "AAPL"),
+                Cost::new(units * dec!(10), "USD"),
+            ))
+            .expect("fits");
+        }
+        inv.reduce(
+            &Amount::new(dec!(-10), "AAPL"),
+            Some(
+                &CostSpec::empty()
+                    .with_number(crate::CostNumber::PerUnit { value: dec!(100) })
+                    .with_currency("USD"),
+            ),
+            BookingMethod::Strict,
+        )
+        .expect("drains the first lot");
+        assert_eq!(
+            inv.positions.slot_count(),
+            2,
+            "the fixture must actually hold a tombstone, or this proves nothing",
+        );
+        assert_eq!(inv.positions.len(), 1, "one live lot");
+
+        let json = serde_json::to_string(&inv).expect("serializes");
+        // Check the positions ARRAY, not the whole string: `Cost`'s optional
+        // `date` and `label` serialize as `null` legitimately, so a bare
+        // "contains null" search reports a leak that is not there.
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        let wire_positions = parsed
+            .get("positions")
+            .and_then(serde_json::Value::as_array)
+            .expect("positions is an array");
+        assert_eq!(
+            wire_positions.len(),
+            1,
+            "the wire must carry only the live lot, not the tombstone: {json}",
+        );
+        assert!(
+            !wire_positions.iter().any(serde_json::Value::is_null),
+            "a tombstone leaked onto the wire as a null element: {json}",
+        );
+
+        let round_tripped: Inventory = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(
+            round_tripped.positions.slot_count(),
+            1,
+            "the round trip must come back dense, not carrying the hole",
+        );
+        assert_eq!(round_tripped.positions.len(), 1);
+        assert_eq!(round_tripped.units("AAPL"), dec!(20));
+        assert_eq!(
+            round_tripped
+                .positions()
+                .next()
+                .expect("one lot")
+                .units
+                .number,
+            dec!(20),
+        );
+
+        // The rebuilt caches must work: the surviving lot is still bookable.
+        let mut round_tripped = round_tripped;
+        round_tripped
+            .reduce(
+                &Amount::new(dec!(-20), "AAPL"),
+                Some(
+                    &CostSpec::empty()
+                        .with_number(crate::CostNumber::PerUnit { value: dec!(200) })
+                        .with_currency("USD"),
+                ),
+                BookingMethod::Strict,
+            )
+            .expect("the deserialized lot is reachable");
+        assert_eq!(round_tripped.units("AAPL"), dec!(0));
+    }
 }

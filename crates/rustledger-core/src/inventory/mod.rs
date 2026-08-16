@@ -4006,4 +4006,36 @@ mod tests {
         );
         assert_eq!(inv.units("USD"), dec!(75));
     }
+
+    /// Reducing a COST-LESS lot to zero removes it, and `simple_index` points
+    /// at exactly that lot — so the entry must go, not just shift.
+    #[test]
+    fn removing_a_cost_less_lot_drops_its_index_entry() {
+        let mut inv = Inventory::new();
+        inv.add(Position::simple(Amount::new(dec!(50), "USD")))
+            .expect("fits");
+        assert_eq!(inv.simple_index.get(&crate::Currency::new("USD")), Some(&0));
+
+        // An empty spec matches a cost-less lot (`matches_cost_spec`:
+        // `(None, true) => true`), so STRICT selects it and drains it.
+        inv.reduce(
+            &Amount::new(dec!(-50), "USD"),
+            Some(&CostSpec::default()),
+            BookingMethod::Strict,
+        )
+        .expect("drains the cost-less lot");
+
+        assert!(inv.positions().next().is_none(), "the lot is gone");
+        assert_eq!(
+            inv.simple_index.get(&crate::Currency::new("USD")),
+            None,
+            "a stale entry points at a removed lot; the next cost-less add \
+             indexes past the end",
+        );
+
+        // The consequence: this must not panic and must create a fresh lot.
+        inv.add(Position::simple(Amount::new(dec!(20), "USD")))
+            .expect("fits");
+        assert_eq!(inv.units("USD"), dec!(20));
+    }
 }

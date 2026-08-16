@@ -430,6 +430,12 @@ impl Slots {
     }
 
     /// Capture slot `i`'s current contents, if recording and not already held.
+    ///
+    /// The "already held" check is a linear scan. A transaction touches one or
+    /// two slots, where a scan beats hashing; the worst case is a `{*}` merge,
+    /// which records every matched lot and makes this O(k^2) in the lots
+    /// merged. That is bounded by one transaction and by an operation that is
+    /// rare, which is why it is not a set.
     fn record(&mut self, i: usize) {
         let Some(log) = self.undo.as_mut() else {
             return;
@@ -1158,6 +1164,19 @@ impl Inventory {
             !self.undo_open,
             "begin_undo called twice without commit or rollback",
         );
+        // Recording only exists on the owned backing. A shared inventory would
+        // set `undo_open` while capturing nothing, and rollback would then
+        // restore nothing while reporting success — silent corruption rather
+        // than a visible failure.
+        //
+        // Unreachable today: `BookingEngine` populates its map solely through
+        // `entry().or_default()`, which is owned, and accepts no inventory from
+        // outside. Asserted so it stays that way.
+        debug_assert!(
+            matches!(self.positions, PositionStore::Owned(_)),
+            "begin_undo on a shared inventory would record nothing and roll \
+             back nothing",
+        );
         self.undo_open = true;
         #[cfg(debug_assertions)]
         {
@@ -1774,11 +1793,23 @@ impl Inventory {
         // transaction. `compact_if_sparse` is called by the engine after a
         // transaction commits, which is the only moment no slot index is held
         // and no rollback can still be required.
-        // No assertion about the tombstone ratio here: a `{*}` merge legitimately
-        // tombstones every matched lot and pushes one merged lot, so dead slots
-        // CAN outnumber live ones mid-transaction. The deferral is bounded by
-        // the transaction — `apply` compacts on commit — and an earlier version
-        // of this assert fired on exactly that valid case.
+        // Compact here UNLESS a transaction is in flight. Compaction renumbers
+        // slots and an open undo log refers to them, so `apply` defers it to
+        // commit — but every other caller reduces without a log, and tying
+        // compaction to `apply` alone would leave those inventories growing a
+        // dead slot per closed lot forever.
+        //
+        // That is not hypothetical: the Late validator keeps its own
+        // inventories across transactions and calls `reduce` directly, so it
+        // would have accumulated one tombstone per sale for the life of the
+        // ledger and scanned all of them on every reduction.
+        //
+        // No assertion about the tombstone ratio: a `{*}` merge legitimately
+        // tombstones every matched lot and pushes one, so dead slots CAN
+        // outnumber live ones mid-transaction.
+        if !self.undo_open {
+            self.compact_if_sparse();
+        }
 
         // {*} merge operator: merge all lots into a single weighted-average-cost
         // lot before reducing, regardless of the account's booking method.
@@ -4710,11 +4741,11 @@ mod tests {
     /// toward "every lot this account ever held", which is far worse than the
     /// shifting it replaced.
     ///
-    /// Compaction is called at the COMMIT boundary — `BookingEngine::apply`
-    /// runs it once a transaction succeeds. It cannot run inside `reduce` any
-    /// more: it renumbers slots, and `apply` holds an undo log across the whole
-    /// transaction that refers to them. This test drives it the way the engine
-    /// does.
+    /// `reduce` compacts on its own whenever no undo log is open, which is the
+    /// case for every caller except a transaction in flight. This drives it
+    /// exactly as the Late validator does — no engine, no explicit call —
+    /// because that is the caller that would otherwise grow a dead slot per
+    /// closed lot for the life of the ledger.
     #[test]
     fn tombstones_are_compacted_rather_than_accumulating() {
         let mut inv = Inventory::new();
@@ -4735,8 +4766,6 @@ mod tests {
                 BookingMethod::Strict,
             )
             .expect("drains it again");
-            // What the engine does once the transaction commits.
-            inv.compact_if_sparse();
         }
         assert_eq!(inv.positions.len(), 0, "every lot was closed");
         assert!(

@@ -906,18 +906,24 @@ impl BookingEngine {
         let recording = self.rollback_needed(txn);
         let mut created: Vec<rustledger_core::Account> = Vec::new();
         if recording {
+            // Deduplicate the accounts FIRST, then open one log each.
+            //
+            // Skipping `begin_undo` when a log is already open would handle a
+            // repeated account too, but it would also silently adopt a log left
+            // over from an earlier transaction and roll back to the wrong
+            // point. `begin_undo` asserts it is not called twice; that
+            // assertion only does its job if this never calls it twice for a
+            // legitimate reason.
+            let mut touched: Vec<&rustledger_core::Account> = Vec::new();
             for posting in &txn.postings {
-                match self.inventories.get_mut(&posting.account) {
-                    Some(inv) => {
-                        if !inv.undo_is_open() {
-                            inv.begin_undo();
-                        }
-                    }
-                    None => {
-                        if !created.contains(&posting.account) {
-                            created.push(posting.account.clone());
-                        }
-                    }
+                if !touched.contains(&&posting.account) {
+                    touched.push(&posting.account);
+                }
+            }
+            for account in touched {
+                match self.inventories.get_mut(account) {
+                    Some(inv) => inv.begin_undo(),
+                    None => created.push(account.clone()),
                 }
             }
         }

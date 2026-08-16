@@ -1443,6 +1443,14 @@ impl Inventory {
     ///
     /// Returned ascending so callers see the same order a scan would.
     fn cost_candidates(&self, units: &Amount, spec: &CostSpec) -> Option<Vec<usize>> {
+        // An empty index means it was never built for this inventory — a
+        // shared snapshot, or one that has not been rebuilt since. Scanning is
+        // always correct, and answering from an index that is missing entries
+        // is NOT: the lot would never reach the predicate. Falling back keeps
+        // the only failure mode the harmless one.
+        if self.cost_index.is_empty() {
+            return None;
+        }
         let number = spec.number.and_then(|n| n.per_unit())?;
         let currency = spec.currency.clone()?;
         let mut slots = self
@@ -1604,8 +1612,19 @@ impl Inventory {
         self.units_cache.clear();
         self.cost_index.clear();
 
+        // The cost index is for BOOKING, and only the owned backing books.
+        //
+        // Not a micro-optimization: `Inventory` derives `Clone` and BQL clones
+        // a shared snapshot ONCE PER OUTPUT ROW (`running_balance.clone()` in
+        // the executor). This map holds roughly an entry per distinct cost, so
+        // building it for shared inventories would put O(lots) back into every
+        // per-row clone — the O(rows x lots) blow-up that #1086 is about and
+        // that the shared backing exists to avoid. Snapshots keep an empty map
+        // and clone it for free.
+        let index_costs = matches!(self.positions, PositionStore::Owned(_));
+
         for (idx, pos) in self.positions.iter_slots() {
-            if let Some(key) = cost_key(pos) {
+            if index_costs && let Some(key) = cost_key(pos) {
                 self.cost_index.entry(key).or_default().push(idx);
             }
             // Update units cache for all positions. Checked, not `+=`:
@@ -4624,5 +4643,69 @@ mod tests {
         )
         .expect("the surviving lot is still reachable through the cost index");
         assert_eq!(inv.units("AAPL"), dec!(0));
+    }
+
+    /// A shared snapshot must not carry the cost index.
+    ///
+    /// `Inventory` derives `Clone`, and BQL clones a shared running balance
+    /// ONCE PER OUTPUT ROW — the executor says so directly above the call.
+    /// The shared backing makes the positions O(1) to clone, which is what
+    /// #1086 needed; a per-inventory map holding roughly an entry per distinct
+    /// cost would put O(lots) straight back into every one of those clones and
+    /// undo it.
+    ///
+    /// Nothing else in the suite would notice: the index is invisible in
+    /// results, and no instruction profile here runs BQL. So it is asserted
+    /// directly, on the representation.
+    #[test]
+    fn a_shared_snapshot_carries_no_cost_index() {
+        let mut shared = Inventory::new_shared();
+        for units in [dec!(10), dec!(20), dec!(30)] {
+            shared
+                .add(Position::with_cost(
+                    Amount::new(units, "AAPL"),
+                    Cost::new(units * dec!(10), "USD"),
+                ))
+                .expect("fits");
+        }
+        shared.rebuild_index();
+        assert!(
+            shared.cost_index.is_empty(),
+            "a shared snapshot built an index of {} entries; every per-row \
+             clone now pays for it",
+            shared.cost_index.len(),
+        );
+
+        // The owned backing — the one that books — still gets it.
+        let mut owned = Inventory::new();
+        for units in [dec!(10), dec!(20), dec!(30)] {
+            owned
+                .add(Position::with_cost(
+                    Amount::new(units, "AAPL"),
+                    Cost::new(units * dec!(10), "USD"),
+                ))
+                .expect("fits");
+        }
+        assert_eq!(
+            owned.cost_index.len(),
+            3,
+            "the owned backing must still index its lots, or the fast path is \
+             dead everywhere",
+        );
+
+        // And a snapshot still books CORRECTLY, by scanning: an inventory with
+        // no index must never answer "no matching lot" for a lot it holds.
+        let result = shared
+            .reduce(
+                &Amount::new(dec!(-20), "AAPL"),
+                Some(
+                    &CostSpec::empty()
+                        .with_number(crate::CostNumber::PerUnit { value: dec!(200) })
+                        .with_currency("USD"),
+                ),
+                BookingMethod::Strict,
+            )
+            .expect("a snapshot with no cost index must fall back to scanning");
+        assert_eq!(result.matched.len(), 1);
     }
 }

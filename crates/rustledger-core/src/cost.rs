@@ -666,6 +666,27 @@ pub struct CostSpec {
     pub merge: bool,
 }
 
+/// `a == b`, taking a cheap path when the two share a scale.
+///
+/// `Decimal`'s `PartialEq` is `self.cmp(other) == Equal`, and that comparison
+/// aligns scales before it can answer — it is not a representation check. Lot
+/// matching runs it once per lot per reduction, and it measured as 19.9% of a
+/// 20,000-transaction `investment` profile, growing 106x for 10x the input.
+///
+/// When the scales are equal the mantissa decides the value in BOTH
+/// directions: same scale and same mantissa is the same number, same scale
+/// and different mantissa cannot be. Only differing scales (`1.0` vs `1.00`)
+/// need the general comparison. `mantissa()` is signed, so a negative zero
+/// compares equal to a positive one, exactly as `cmp` has it.
+#[inline]
+fn same_number(a: Decimal, b: Decimal) -> bool {
+    if a.scale() == b.scale() {
+        a.mantissa() == b.mantissa()
+    } else {
+        a == b
+    }
+}
+
 impl CostSpec {
     /// Create an empty cost spec.
     #[must_use]
@@ -746,7 +767,7 @@ impl CostSpec {
         // Check per-unit cost — constrains the lot whenever the spec
         // carries a per-unit value (PerUnit or PerUnitFromTotal).
         if let Some(n) = self.number.and_then(|cn| cn.per_unit())
-            && n != cost.number
+            && !same_number(n, cost.number)
         {
             return false;
         }
@@ -1463,5 +1484,70 @@ mod tests {
         // Per-unit form: just the per_unit value, not `# total`.
         assert!(s.contains("150"), "expected per-unit 150 in {s}");
         assert!(!s.contains("# 300"), "must NOT render as `# total` ({s})");
+    }
+}
+
+#[cfg(test)]
+mod same_number_equivalence {
+    use super::same_number;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
+    /// `same_number` must agree with `==` on every pair, including the cases
+    /// its fast path deliberately sidesteps.
+    ///
+    /// The fast path only fires when scales match, and then trusts the
+    /// mantissa. Two ways that could go wrong: values equal across DIFFERENT
+    /// scales (`1.0` vs `1.00`), which must fall through to the general
+    /// comparison, and signed zero at the same scale, where the
+    /// representations differ but the values do not — `mantissa()` is signed,
+    /// so both come out 0.
+    #[test]
+    fn it_agrees_with_decimal_equality() {
+        let values = [
+            dec!(0),
+            dec!(0.00),
+            -dec!(0),
+            -dec!(0.00),
+            dec!(1),
+            dec!(1.0),
+            dec!(1.00),
+            dec!(-1),
+            dec!(-1.00),
+            dec!(100),
+            dec!(100.00),
+            dec!(100.000),
+            dec!(99.99),
+            dec!(-99.99),
+            dec!(0.1),
+            dec!(0.10),
+            dec!(0.01),
+            Decimal::MAX,
+            Decimal::MIN,
+            Decimal::MAX - dec!(1),
+        ];
+        for a in values {
+            for b in values {
+                assert_eq!(
+                    same_number(a, b),
+                    a == b,
+                    "same_number({a}, {b}) disagreed with `==` (scales {} and {})",
+                    a.scale(),
+                    b.scale(),
+                );
+            }
+        }
+    }
+
+    /// The fast path must actually be reached, or the test above is only
+    /// exercising the fallback and proves nothing about it.
+    #[test]
+    fn the_fast_path_is_reachable() {
+        assert_eq!(dec!(100.00).scale(), dec!(99.99).scale());
+        assert!(!same_number(dec!(100.00), dec!(99.99)));
+        assert!(same_number(dec!(100.00), dec!(100.00)));
+        // ...and the fallback is reachable too: equal values, unequal scales.
+        assert_ne!(dec!(1.0).scale(), dec!(1.00).scale());
+        assert!(same_number(dec!(1.0), dec!(1.00)));
     }
 }

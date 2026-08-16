@@ -197,8 +197,7 @@ impl Inventory {
     ) -> Result<(BookingResult, ReductionPlan), BookingError> {
         let matching_indices: Vec<usize> = self
             .positions
-            .iter()
-            .enumerate()
+            .iter_slots()
             .filter(|(_, p)| {
                 p.units.currency == units.currency
                     && !p.is_empty()
@@ -270,8 +269,7 @@ impl Inventory {
     ) -> Result<BookingResult, BookingError> {
         let matching_indices: Vec<usize> = self
             .positions
-            .iter()
-            .enumerate()
+            .iter_slots()
             .filter(|(_, p)| {
                 p.units.currency == units.currency
                     && !p.is_empty()
@@ -353,8 +351,7 @@ impl Inventory {
         // Get matching positions with their costs
         let mut matching: Vec<(usize, Decimal)> = self
             .positions
-            .iter()
-            .enumerate()
+            .iter_slots()
             .filter(|(_, p)| {
                 p.units.currency == units.currency
                     && !p.is_empty()
@@ -491,8 +488,7 @@ impl Inventory {
         // Get indices of matching positions
         let mut indices: Vec<usize> = self
             .positions
-            .iter()
-            .enumerate()
+            .iter_slots()
             .filter(|(_, p)| {
                 p.units.currency == units.currency
                     && !p.is_empty()
@@ -786,8 +782,7 @@ impl Inventory {
         // This prevents accidentally netting long and short positions.
         let matching: Vec<(usize, &Position)> = self
             .positions
-            .iter()
-            .enumerate()
+            .iter_slots()
             .filter(|(_, p)| {
                 p.units.currency == units.currency
                     && !p.is_empty()

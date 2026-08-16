@@ -387,6 +387,23 @@ impl Default for PositionStore {
 }
 
 impl PositionStore {
+    /// Every live position paired with the index that [`Index`] will accept
+    /// for it.
+    ///
+    /// Today this is exactly `iter().enumerate()`, because every element of
+    /// the backing store is live. It exists as its own method because that
+    /// equivalence is a PROPERTY OF THE CURRENT STORAGE, not a law: the
+    /// reduction paths collect indices here and hand them back through
+    /// `Index`/`IndexMut`, so anything that makes the backing sparse — the
+    /// tombstoned lots that would let a cost-keyed index survive removals —
+    /// silently desynchronises the two unless every such site goes through
+    /// one place. This is that place.
+    ///
+    /// [`Index`]: std::ops::Index
+    fn iter_slots(&self) -> impl Iterator<Item = (usize, &Position)> {
+        self.iter().enumerate()
+    }
+
     fn iter(&self) -> PositionStoreIter<'_> {
         match self {
             Self::Owned(v) => PositionStoreIter::Owned(v.iter()),
@@ -1306,7 +1323,7 @@ impl Inventory {
         self.simple_index.clear();
         self.units_cache.clear();
 
-        for (idx, pos) in self.positions.iter().enumerate() {
+        for (idx, pos) in self.positions.iter_slots() {
             // Update units cache for all positions. Checked, not `+=`:
             // `Decimal`'s `+` panics on overflow, and this runs over payloads.
             //
@@ -4037,5 +4054,47 @@ mod tests {
         inv.add(Position::simple(Amount::new(dec!(20), "USD")))
             .expect("fits");
         assert_eq!(inv.units("USD"), dec!(20));
+    }
+
+    /// Every index `iter_slots` yields must address, through `Index`, the very
+    /// position it was yielded with.
+    ///
+    /// This is trivially true while the backing store is dense — `iter_slots`
+    /// is `iter().enumerate()` — and it is the whole reason that method
+    /// exists. The reduction paths collect indices from it and hand them back
+    /// through `Index`/`IndexMut` to mutate the lot they selected. If the
+    /// store ever becomes sparse (tombstoned lots, so a cost-keyed index can
+    /// survive removals) and `iter_slots` keeps counting from zero instead of
+    /// reporting real slots, every reduction after the first hole mutates the
+    /// WRONG LOT — silently, with correct-looking totals.
+    ///
+    /// So this pins the contract rather than the current implementation.
+    #[test]
+    fn iter_slots_yields_indices_that_address_their_own_position() {
+        let mut inv = Inventory::new();
+        for units in [dec!(10), dec!(20), dec!(30)] {
+            inv.add(Position::with_cost(
+                Amount::new(units, "AAPL"),
+                Cost::new(units * dec!(10), "USD"),
+            ))
+            .expect("fits");
+        }
+        inv.add(Position::simple(Amount::new(dec!(99), "USD")))
+            .expect("fits");
+
+        let mut seen = 0;
+        for (slot, position) in inv.positions.iter_slots() {
+            assert_eq!(
+                &inv.positions[slot], position,
+                "slot {slot} does not address the position it was yielded with",
+            );
+            seen += 1;
+        }
+        assert_eq!(
+            seen,
+            inv.positions().count(),
+            "iter_slots must visit every live position",
+        );
+        assert_eq!(seen, 4, "fixture must hold four lots");
     }
 }

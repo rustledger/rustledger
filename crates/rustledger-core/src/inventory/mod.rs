@@ -415,7 +415,20 @@ impl Slots {
         }
     }
 
+    /// Tombstone slot `i`, keeping `live` in step.
+    ///
+    /// Out of range is a caller bug, not a condition: slot indices come from
+    /// `iter_slots` or `push_slot` and are internal throughout. It cannot
+    /// panic in release — silently skipping is better than aborting on a
+    /// ledger — but it must not pass unnoticed in a test run, or a desynced
+    /// `live` count shows up later as a wrong compaction trigger with nothing
+    /// pointing back here.
     fn set_dead(&mut self, i: usize) {
+        debug_assert!(
+            i < self.slots.len(),
+            "set_dead called with out-of-range slot {i} (of {})",
+            self.slots.len(),
+        );
         if let Some(entry) = self.slots.get_mut(i)
             && entry.take().is_some()
         {
@@ -4544,5 +4557,72 @@ mod tests {
             .expect("re-buying at the same cost and selling must work");
         assert_eq!(result.matched.len(), 1);
         assert_eq!(inv.positions.len(), 0);
+    }
+
+    /// `modify_positions` hands over a DENSE vector and rebuilds every cache.
+    ///
+    /// It replaced `positions_mut`, which returned the backing vector
+    /// directly. Two promises to keep: the closure must never see tombstones
+    /// (the sparse backing is an implementation detail), and everything
+    /// derived — units totals, the cost-less merge index, the cost index and
+    /// the sign counts — must describe what the closure left, not what was
+    /// there before. The old accessor kept none of that, which its own docs
+    /// warned about.
+    #[test]
+    fn modify_positions_hands_over_a_dense_vector_and_rebuilds_the_caches() {
+        let mut inv = Inventory::new();
+        for units in [dec!(10), dec!(20)] {
+            inv.add(Position::with_cost(
+                Amount::new(units, "AAPL"),
+                Cost::new(units * dec!(10), "USD"),
+            ))
+            .expect("fits");
+        }
+        // Drain the first lot so a tombstone exists before the handover.
+        inv.reduce(
+            &Amount::new(dec!(-10), "AAPL"),
+            Some(
+                &CostSpec::empty()
+                    .with_number(crate::CostNumber::PerUnit { value: dec!(100) })
+                    .with_currency("USD"),
+            ),
+            BookingMethod::Strict,
+        )
+        .expect("drains the first lot");
+        assert_eq!(inv.positions.slot_count(), 2, "one live lot, one tombstone");
+
+        inv.modify_positions(|positions| {
+            assert_eq!(
+                positions.len(),
+                1,
+                "the closure must see only live lots; tombstones are ours, not \
+                 the caller's",
+            );
+            positions.push(Position::simple(Amount::new(dec!(5), "USD")));
+        });
+
+        // Every derived structure now describes what the closure left.
+        assert_eq!(inv.units("USD"), dec!(5), "units_cache rebuilt");
+        assert_eq!(inv.units("AAPL"), dec!(20));
+        assert_eq!(inv.positions.len(), 2);
+
+        // simple_index rebuilt: a further cost-less add MERGES.
+        inv.add(Position::simple(Amount::new(dec!(2), "USD")))
+            .expect("fits");
+        assert_eq!(inv.positions.len(), 2, "merged rather than appended");
+        assert_eq!(inv.units("USD"), dec!(7));
+
+        // cost_index rebuilt: the surviving lot is still findable by its cost.
+        inv.reduce(
+            &Amount::new(dec!(-20), "AAPL"),
+            Some(
+                &CostSpec::empty()
+                    .with_number(crate::CostNumber::PerUnit { value: dec!(200) })
+                    .with_currency("USD"),
+            ),
+            BookingMethod::Strict,
+        )
+        .expect("the surviving lot is still reachable through the cost index");
+        assert_eq!(inv.units("AAPL"), dec!(0));
     }
 }

@@ -197,9 +197,18 @@ impl Inventory {
     ) -> Result<(BookingResult, ReductionPlan), BookingError> {
         // Candidates from the cost index when the spec names a per-unit cost,
         // otherwise every lot — a spec without one can match anything. Both
-        // arms apply the SAME predicate, so the index only narrows what is
-        // examined; it never decides a match, and a stale or missing entry
-        // costs correctness nothing that the predicate would not catch.
+        // arms apply the SAME predicate, so the index never decides a match;
+        // it only narrows what the predicate is run on.
+        //
+        // That asymmetry is the whole safety argument, and it only runs one
+        // way. A STALE entry is harmless: it names a tombstone or a lot that
+        // no longer matches, and the predicate discards it. A MISSING entry is
+        // NOT: the lot is never offered to the predicate at all, so a
+        // reduction that should have matched it reports no matching lot or
+        // books as an augmentation and duplicates the position. Index
+        // maintenance is therefore a correctness obligation, not an
+        // optimization — `draining_a_lot_removes_it_from_the_cost_index` and
+        // the `add`/rebuild mutations are what hold it.
         let matching_indices: Vec<usize> = match self.cost_candidates(units, spec) {
             Some(slots) => slots
                 .into_iter()

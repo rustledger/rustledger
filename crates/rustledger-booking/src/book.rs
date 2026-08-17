@@ -495,7 +495,19 @@ impl BookingEngine {
                                     currency: Some(matched_cost.currency),
                                     date: matched_cost.date,
                                     label: matched_cost.label,
-                                    merge: false,
+                                    // Carry `{*}` through to application (#2068).
+                                    // Every other cost spec is a FILTER: it
+                                    // selects among lots that already exist, so
+                                    // booking can safely resolve it into the one
+                                    // lot it picked. `{*}` is an OPERATION — it
+                                    // merges the pool and only then reduces it.
+                                    // Resolving it into the per-unit cost of the
+                                    // pool it created names a lot that does not
+                                    // exist until the merge has run, so `apply`
+                                    // reported `No matching lot` for holdings the
+                                    // account plainly had. The marker has to
+                                    // survive so application re-runs the merge.
+                                    merge: cost_spec.merge,
                                 });
                                 booked_indices.insert(idx);
                             }
@@ -732,8 +744,33 @@ impl BookingEngine {
         if inv.is_booking_reduction(units, posting.cost.as_ref(), method) {
             // `reduce` only errors when the lot it would match is missing — a
             // "must book first" precondition violation.
-            inv.reduce(units, posting.cost.as_ref(), method)
+            let result = inv
+                .reduce(units, posting.cost.as_ref(), method)
                 .map_err(|e| convert_core_booking_error(e, &posting.account))?;
+
+            // A carried `{*}` is an operation, so it re-runs here and is only
+            // meaningful against the inventory it was booked against. Applied to
+            // different state it would silently build a different pool. Booking
+            // recorded the per-unit cost of the pool it computed, so compare.
+            if let Some(spec) = posting.cost.as_ref()
+                && spec.merge
+                && let Some(expected) = spec.number.and_then(|n| n.per_unit())
+                && let Some(got) = result
+                    .matched
+                    .first()
+                    .and_then(|p| p.cost.as_ref())
+                    .map(|c| c.number)
+                && got != expected
+            {
+                return Err(convert_core_booking_error(
+                    rustledger_core::BookingError::MergeMismatch {
+                        currency: units.currency.clone(),
+                        expected,
+                        got,
+                    },
+                    &posting.account,
+                ));
+            }
         } else {
             // Add to inventory via the canonical cost-resolve shared with the Late
             // validator, `build_balances`, and the query engine (see

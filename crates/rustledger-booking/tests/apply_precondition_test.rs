@@ -371,3 +371,105 @@ fn a_transaction_that_creates_and_then_oversells_a_lot_errors_rather_than_panick
         "the rejected transaction left its buy applied: {held:?}",
     );
 }
+
+/// A `{*}` merge books AND applies, leaving the merged pool (#2068).
+///
+/// `{*}` is the one cost spec that is an OPERATION rather than a filter: it
+/// restructures the lots before selecting from them. Booking used to resolve it
+/// into the per-unit cost of the pool it would create and clear the marker, so
+/// application went looking for a lot that only exists once the merge has run
+/// and reported `No matching lot` for a lot the account plainly held.
+#[test]
+fn a_wildcard_merge_books_and_applies_leaving_the_pool() {
+    let mut engine = BookingEngine::with_method(BookingMethod::Strict);
+    for (day, cost) in [(1u32, "100.00"), (2, "120.00")] {
+        let mut buy = Posting::new("Assets:Broker", amount("10", "AAPL"));
+        buy.cost = Some(spec(cost, "USD", day));
+        let paid = -(cost.parse::<Decimal>().unwrap() * Decimal::from(10));
+        let txn = Transaction::new(date(day), "buy")
+            .with_synthesized_posting(buy)
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(paid, "USD")));
+        engine.apply(&txn).expect("buys apply");
+    }
+
+    let mut merge_sell = Posting::new("Assets:Broker", amount("-5", "AAPL"));
+    merge_sell.cost = Some(CostSpec {
+        number: None,
+        currency: None,
+        date: None,
+        label: None,
+        merge: true,
+    });
+    let txn = Transaction::new(date(10), "sell against the merged pool")
+        .with_synthesized_posting(merge_sell)
+        .with_synthesized_posting(Posting::new("Assets:Cash", amount("600.00", "USD")));
+
+    let booked = engine.book(&txn).expect("the merge books");
+    engine
+        .apply(&booked.transaction)
+        .expect("and applies — resolving the marker away is what broke this");
+
+    // 10 @ 100 + 10 @ 120 merges to 20 @ 110; selling 5 leaves 15 @ 110.
+    let lots: Vec<(Decimal, Option<Decimal>)> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Broker")
+        .flat_map(|(_, inv)| inv.positions())
+        .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+        .collect();
+    assert_eq!(
+        lots,
+        vec![(
+            "15".parse::<Decimal>().unwrap(),
+            Some("110".parse().unwrap())
+        )],
+        "the account must hold one merged pool at the weighted average",
+    );
+}
+
+/// The pool cost booking recorded is CHECKED when the merge is re-executed.
+///
+/// Carrying an operation instead of a filter has one cost: the booked posting
+/// re-runs the merge at apply time, so it is only meaningful against the
+/// inventory it was booked against. Applied to different state it would
+/// silently produce a different pool — the outcome this codebase treats as
+/// worse than any error. Booking records the pool cost it computed, so the
+/// mismatch is reported.
+#[test]
+fn a_merge_applied_against_different_inventory_is_reported() {
+    let mut engine = BookingEngine::with_method(BookingMethod::Strict);
+    for (day, cost) in [(1u32, "100.00"), (2, "120.00")] {
+        let mut buy = Posting::new("Assets:Broker", amount("10", "AAPL"));
+        buy.cost = Some(spec(cost, "USD", day));
+        engine
+            .apply(&Transaction::new(date(day), "buy").with_synthesized_posting(buy))
+            .expect("buys apply");
+    }
+
+    let mut merge_sell = Posting::new("Assets:Broker", amount("-5", "AAPL"));
+    merge_sell.cost = Some(CostSpec {
+        number: None,
+        currency: None,
+        date: None,
+        label: None,
+        merge: true,
+    });
+    let booked = engine
+        .book(&Transaction::new(date(10), "merge sell").with_synthesized_posting(merge_sell))
+        .expect("books against 100/120, recording a pool at 110");
+
+    // Move the inventory on before applying: a third lot changes the pool.
+    let mut extra = Posting::new("Assets:Broker", amount("10", "AAPL"));
+    extra.cost = Some(spec("200.00", "USD", 3));
+    engine
+        .apply(&Transaction::new(date(3), "another buy").with_synthesized_posting(extra))
+        .expect("buy applies");
+
+    let err = engine
+        .apply(&booked.transaction)
+        .expect_err("the recorded pool cost no longer matches what the merge produces");
+    let rendered = format!("{err}");
+    assert!(
+        rendered.contains("110") && rendered.contains("merge"),
+        "the error must name the recorded and actual pool costs, got: {rendered}",
+    );
+}

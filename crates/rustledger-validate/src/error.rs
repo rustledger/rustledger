@@ -106,7 +106,12 @@ impl ErrorCode {
             B::Overflow(_) => Self::ArithmeticOverflow,
             B::InsufficientUnits { .. } => Self::InsufficientUnits,
             B::AmbiguousMatch { .. } => Self::AmbiguousLotMatch,
-            B::NoMatchingLot { .. } | B::CurrencyMismatch { .. } => Self::NoMatchingLot,
+            // A merge checksum failure means the pool booking recorded is not
+            // the pool application produced, which is a lot-matching failure
+            // from the ledger author's point of view.
+            B::NoMatchingLot { .. } | B::CurrencyMismatch { .. } | B::MergeMismatch { .. } => {
+                Self::NoMatchingLot
+            }
         }
     }
 }

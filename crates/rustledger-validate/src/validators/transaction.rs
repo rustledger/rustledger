@@ -559,7 +559,8 @@ pub fn process_inventory_reduction(
                     "Specify cost, date, or label to disambiguate".to_string()
                 }
                 rustledger_core::BookingError::NoMatchingLot { .. }
-                | rustledger_core::BookingError::CurrencyMismatch { .. } => {
+                | rustledger_core::BookingError::CurrencyMismatch { .. }
+                | rustledger_core::BookingError::MergeMismatch { .. } => {
                     format!("cost spec: {:?}", posting.cost)
                 }
                 rustledger_core::BookingError::Overflow(e) => {

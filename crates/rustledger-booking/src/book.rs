@@ -807,9 +807,29 @@ impl BookingEngine {
                 return true;
             };
             let method = self.method_for(&posting.account);
-            self.inventories
-                .get(&posting.account)
-                .is_some_and(|inv| inv.is_booking_reduction(units, posting.cost.as_ref(), method))
+            if method == BookingMethod::None {
+                // NONE accumulates every posting as an augmentation and never
+                // matches a lot, so it cannot fail this way.
+                return false;
+            }
+            // Deliberately NOT `is_booking_reduction` against the CURRENT
+            // inventory. That asks whether this posting reduces something the
+            // account holds *now*, and a transaction can create the very lot a
+            // later posting then fails to reduce:
+            //
+            //     Assets:Stock   10 X {100.00 USD}
+            //     Assets:Stock  -20 X {100.00 USD}
+            //
+            // Against an empty account that answered "no reduction", so no
+            // rollback was prepared — and then the second posting failed and
+            // the engine hit its own "the guard is unsound" assertion, turning
+            // an ordinary bad ledger into a panic out of `rledger check`.
+            //
+            // Carrying a cost spec is what makes a posting able to reduce, and
+            // that does not depend on state, so it cannot be falsified by the
+            // transaction itself. Strictly more conservative: every posting
+            // this used to catch carries a cost spec too.
+            posting.cost.is_some() && units.number.is_sign_negative()
         })
     }
 

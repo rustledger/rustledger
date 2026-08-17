@@ -317,3 +317,57 @@ fn a_failing_transaction_undoes_a_wildcard_merge() {
          -> {lots_after:?}",
     );
 }
+
+/// A transaction that CREATES the lot it then fails to reduce must report an
+/// error, not panic.
+///
+/// `rollback_needed` decides up front whether to prepare a rollback. It used
+/// to ask whether each posting reduces something the account holds *at that
+/// moment* — a question the transaction itself can falsify:
+///
+/// ```text
+///   Assets:Stock   10 X {100.00 USD}
+///   Assets:Stock  -20 X {100.00 USD}
+/// ```
+///
+/// Against an empty account that answered "no reduction", so nothing was
+/// prepared; the second posting then failed and `apply` hit its own "the guard
+/// is unsound" assertion. An ordinary bad ledger became a panic out of
+/// `rledger check`, on main as well as on this branch.
+///
+/// Carrying a cost spec is what makes a posting able to reduce, and that does
+/// not depend on state, so the transaction cannot falsify it.
+#[test]
+fn a_transaction_that_creates_and_then_oversells_a_lot_errors_rather_than_panicking() {
+    let mut engine = BookingEngine::with_method(BookingMethod::Strict);
+
+    let mut buy = Posting::new("Assets:Stock", amount("10", "X"));
+    buy.cost = Some(spec("100.00", "USD", 1));
+    let mut oversell = Posting::new("Assets:Stock", amount("-20", "X"));
+    oversell.cost = Some(spec("100.00", "USD", 1));
+
+    let txn = Transaction::new(date(1), "buy then oversell")
+        .with_synthesized_posting(buy)
+        .with_synthesized_posting(oversell);
+
+    let err = engine
+        .apply(&txn)
+        .expect_err("overselling the lot it just created must be an error");
+    assert!(
+        format!("{err:?}").contains("Insufficient") || format!("{err}").contains("not enough"),
+        "expected an insufficient-units error, got {err:?}",
+    );
+
+    // And the buy must have been rolled back with it: a rejected transaction
+    // leaves nothing behind.
+    let held: Vec<Decimal> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Stock")
+        .flat_map(|(_, inv)| inv.positions())
+        .map(|p| p.units.number)
+        .collect();
+    assert!(
+        held.is_empty(),
+        "the rejected transaction left its buy applied: {held:?}",
+    );
+}

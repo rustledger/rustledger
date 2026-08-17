@@ -155,8 +155,8 @@ user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.clap_complete_nushell]]
-version = "4.6.1"
-when = "2026-07-17"
+version = "4.6.2"
+when = "2026-08-11"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
@@ -928,15 +928,15 @@ user-login = "BurntSushi"
 user-name = "Andrew Gallant"
 
 [[publisher.thiserror]]
-version = "2.0.19"
-when = "2026-07-18"
+version = "2.0.20"
+when = "2026-08-08"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.thiserror-impl]]
-version = "2.0.19"
-when = "2026-07-18"
+version = "2.0.20"
+when = "2026-08-08"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
@@ -1102,8 +1102,8 @@ when = "2026-07-20"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-encoder]]
-version = "0.255.0"
-when = "2026-07-30"
+version = "0.256.0"
+when = "2026-08-10"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-metadata]]
@@ -1133,8 +1133,8 @@ when = "2026-07-20"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmparser]]
-version = "0.255.0"
-when = "2026-07-30"
+version = "0.256.0"
+when = "2026-08-10"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmprinter]]
@@ -1218,13 +1218,13 @@ when = "2026-07-31"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wast]]
-version = "255.0.0"
-when = "2026-07-30"
+version = "256.0.0"
+when = "2026-08-10"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wat]]
-version = "1.255.0"
-when = "2026-07-30"
+version = "1.256.0"
+when = "2026-08-10"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wiggle]]

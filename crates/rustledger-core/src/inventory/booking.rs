@@ -77,6 +77,18 @@ pub(super) enum ReductionPlan {
     Updates(SmallVec<[(usize, Decimal); 1]>),
 }
 
+/// What a `{*}` merge would do, computed without doing it.
+///
+/// The plan half of [`Inventory::reduce_merge`]; see [`Inventory::plan_merge`].
+struct MergePlan {
+    /// Slots that merge into the pool.
+    matching_indices: std::collections::HashSet<usize>,
+    /// Units held across those slots.
+    total_units: Decimal,
+    /// The pool's per-unit cost, or `None` when the lots carry no cost.
+    pool: Option<Amount>,
+}
+
 impl Inventory {
     /// Try reducing positions without modifying the inventory.
     ///
@@ -803,12 +815,17 @@ impl Inventory {
         Ok(())
     }
 
-    /// Cost merge `{*}`: merge all lots of the currency into a single
-    /// weighted-average-cost lot, then reduce from it.
+    /// What `{*}` would merge, computed from `&self`.
     ///
-    /// Example: 10 AAPL {150 USD} + 10 AAPL {160 USD} merged = 20 AAPL {155 USD}.
-    /// Reducing 5 AAPL {*} takes 5 from the merged 20 AAPL {155 USD} lot.
-    pub(super) fn reduce_merge(&mut self, units: &Amount) -> Result<BookingResult, BookingError> {
+    /// The selection half of [`Self::reduce_merge`], split out so the pool cost
+    /// can be known WITHOUT building it (#2068). `reduce_merge` is the only
+    /// mutating caller and it goes through here, so there is one implementation
+    /// of "which lots merge and at what average" — the duplication that the
+    /// plan/commit split (#2061) exists to prevent.
+    ///
+    /// `pool` is `None` when the matched lots carry no cost, which is
+    /// `reduce_merge`'s AVERAGE fallback rather than an error.
+    fn plan_merge(&self, units: &Amount) -> Result<MergePlan, BookingError> {
         // Only merge lots with opposite sign (same as other reduce methods).
         // This prevents accidentally netting long and short positions.
         let matching: Vec<(usize, &Position)> = self
@@ -840,13 +857,50 @@ impl Inventory {
             });
         }
 
-        // Compute weighted-average cost from matching lots.
         let matching_refs: Vec<&Position> = matching.iter().map(|(_, p)| *p).collect();
-        let (avg_cost, cost_currency) =
-            match average_cost_from_positions(&matching_refs, total_units)? {
-                Some(result) => result,
-                None => return self.reduce_average(units),
-            };
+        let pool = average_cost_from_positions(&matching_refs, total_units)?
+            .map(|(number, currency)| Amount::new(number, currency));
+
+        Ok(MergePlan {
+            matching_indices: matching.iter().map(|(i, _)| *i).collect(),
+            total_units,
+            pool,
+        })
+    }
+
+    /// The per-unit pool cost `{*}` would produce here, without producing it.
+    ///
+    /// `Ok(None)` means there is no pool cost to compare against — cost-less
+    /// lots, where `{*}` degrades to AVERAGE. Errors are the ones the reduction
+    /// itself would raise (no matching lots, insufficient units); a caller
+    /// checking a precondition should let the reduction report them rather than
+    /// pre-empting it, so that one function keeps owning the message.
+    ///
+    /// Exists so `BookingEngine::apply` can verify a carried `{*}` against the
+    /// cost booking recorded BEFORE the merge mutates anything (#2068).
+    pub fn merged_pool_cost(&self, units: &Amount) -> Result<Option<Amount>, BookingError> {
+        Ok(self.plan_merge(units)?.pool)
+    }
+
+    /// Cost merge `{*}`: merge all lots of the currency into a single
+    /// weighted-average-cost lot, then reduce from it.
+    ///
+    /// Example: 10 AAPL {150 USD} + 10 AAPL {160 USD} merged = 20 AAPL {155 USD}.
+    /// Reducing 5 AAPL {*} takes 5 from the merged 20 AAPL {155 USD} lot.
+    pub(super) fn reduce_merge(&mut self, units: &Amount) -> Result<BookingResult, BookingError> {
+        let plan = self.plan_merge(units)?;
+        let MergePlan {
+            matching_indices,
+            total_units,
+            pool: Some(pool),
+        } = plan
+        else {
+            // Cost-less lots: there is no pool to build (`plan_merge` says so),
+            // so `{*}` degrades to AVERAGE, exactly as before the plan split.
+            return self.reduce_average(units);
+        };
+        let reduction = units.number.abs();
+        let (avg_cost, cost_currency) = (pool.number, pool.currency);
 
         let cost_basis = Some(Amount::new(
             reduction.checked_mul(avg_cost).ok_or_else(|| {
@@ -873,8 +927,6 @@ impl Inventory {
         )];
 
         // Remove all matching lots of this currency
-        let matching_indices: std::collections::HashSet<usize> =
-            matching.iter().map(|(i, _)| *i).collect();
         self.positions
             .retain_slots(|slot, _| !matching_indices.contains(&slot));
 

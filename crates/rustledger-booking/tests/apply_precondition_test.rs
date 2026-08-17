@@ -473,11 +473,10 @@ fn a_merge_applied_against_different_inventory_is_reported() {
         "the error must name the recorded and actual pool costs, got: {rendered}",
     );
 
-    // The mismatch is detected AFTER `reduce` has merged and drained, so it
-    // relies on `apply`'s undo log (#2067) to put the pool back. A cost-bearing
-    // negative posting always opens one, but assert rather than assume: a
-    // half-merged inventory would be exactly the silent corruption the check
-    // exists to prevent.
+    // The check is a PRECONDITION: it runs before the merge mutates anything,
+    // so a rejected merge cannot leave a half-merged inventory behind. That is
+    // what makes it safe for `apply_posting` — which the query executor calls
+    // directly, without an undo log — to stay free of it.
     let mut lots: Vec<(Decimal, Option<Decimal>)> = engine
         .inventories()
         .filter(|(account, _)| account.as_str() == "Assets:Broker")

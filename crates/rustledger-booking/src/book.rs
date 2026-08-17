@@ -721,6 +721,61 @@ impl BookingEngine {
     /// overflows. Unlike [`Self::apply`] this is a SINGLE posting, so there is
     /// nothing to roll back — the caller owns transaction atomicity.
     ///
+    /// Verify a carried `{*}` against the pool booking recorded (#2068).
+    ///
+    /// `{*}` is the one cost spec that is an OPERATION rather than a filter, so
+    /// booking cannot resolve it into the lot it picked — the merged pool does
+    /// not exist until the merge runs. The marker is carried instead, which
+    /// means the booked posting re-executes the merge and is only meaningful
+    /// against the inventory it was booked against. Applied to different state
+    /// it would silently build a DIFFERENT pool.
+    ///
+    /// Booking records the per-unit cost of the pool it computed, so compare
+    /// that against the pool this inventory would produce. Read-only: nothing
+    /// has mutated when this reports, so the error needs no rollback to be
+    /// honest about the state it leaves behind.
+    ///
+    /// Skips rather than reports when there is nothing recorded to compare
+    /// against — a raw, never-booked `{*}` (`number: None`), a total or
+    /// compound cost whose per-unit value is not knowable until units are, or
+    /// cost-less lots where `{*}` degrades to AVERAGE. Errors from the merge
+    /// plan itself are also skipped: the reduction raises them with its own
+    /// message a moment later, and one function should own each message.
+    fn verify_merge_precondition(&self, posting: &Posting) -> Result<(), BookingError> {
+        let Some(spec) = posting.cost.as_ref() else {
+            return Ok(());
+        };
+        if !spec.merge {
+            return Ok(());
+        }
+        let (Some(units), Some(expected_number), Some(expected_currency)) = (
+            posting.amount(),
+            spec.number.and_then(|n| n.per_unit()),
+            spec.currency.clone(),
+        ) else {
+            return Ok(());
+        };
+        let Some(inv) = self.inventories.get(&posting.account) else {
+            return Ok(());
+        };
+        let Ok(Some(got)) = inv.merged_pool_cost(units) else {
+            return Ok(());
+        };
+
+        let expected = rustledger_core::Amount::new(expected_number, expected_currency);
+        if got == expected {
+            return Ok(());
+        }
+        Err(convert_core_booking_error(
+            rustledger_core::BookingError::MergeMismatch {
+                currency: units.currency.clone(),
+                expected,
+                got,
+            },
+            &posting.account,
+        ))
+    }
+
     /// # Precondition
     ///
     /// Same as [`Self::apply`]: the posting must already be booked.
@@ -744,33 +799,8 @@ impl BookingEngine {
         if inv.is_booking_reduction(units, posting.cost.as_ref(), method) {
             // `reduce` only errors when the lot it would match is missing — a
             // "must book first" precondition violation.
-            let result = inv
-                .reduce(units, posting.cost.as_ref(), method)
+            inv.reduce(units, posting.cost.as_ref(), method)
                 .map_err(|e| convert_core_booking_error(e, &posting.account))?;
-
-            // A carried `{*}` is an operation, so it re-runs here and is only
-            // meaningful against the inventory it was booked against. Applied to
-            // different state it would silently build a different pool. Booking
-            // recorded the per-unit cost of the pool it computed, so compare.
-            if let Some(spec) = posting.cost.as_ref()
-                && spec.merge
-                && let Some(expected) = spec.number.and_then(|n| n.per_unit())
-                && let Some(got) = result
-                    .matched
-                    .first()
-                    .and_then(|p| p.cost.as_ref())
-                    .map(|c| c.number)
-                && got != expected
-            {
-                return Err(convert_core_booking_error(
-                    rustledger_core::BookingError::MergeMismatch {
-                        currency: units.currency.clone(),
-                        expected,
-                        got,
-                    },
-                    &posting.account,
-                ));
-            }
         } else {
             // Add to inventory via the canonical cost-resolve shared with the Late
             // validator, `build_balances`, and the query engine (see
@@ -1017,7 +1047,21 @@ impl BookingEngine {
             // other. Callers already handle this — `book()` records the error
             // and marks the transaction failed, the wasm entry point checks
             // `is_ok()`, and the CLI refuses to derive a figure at all.
-            if let Err(e) = self.apply_posting(posting, txn.date) {
+            // A carried `{*}` re-executes the merge (#2068), so verify the
+            // pool it will build against the one booking recorded BEFORE
+            // anything mutates. Checked here rather than in `apply_posting`
+            // for two reasons: `apply_posting` is also how the query executor
+            // replays a FILTERED transaction stream, where a different pool is
+            // the correct answer and not a defect; and a precondition that
+            // reports after mutating would depend on rollback to stay honest.
+            //
+            // Per posting rather than as a pre-pass over the transaction: an
+            // earlier posting of this same transaction can legitimately change
+            // the pool a later `{*}` sees.
+            if let Err(e) = self
+                .verify_merge_precondition(posting)
+                .and_then(|()| self.apply_posting(posting, txn.date))
+            {
                 // `snapshot` is `Some` whenever this arm is reachable:
                 // `rollback_needed` covers both failure modes. Restoring
                 // nothing would be silent corruption — precisely the bug being

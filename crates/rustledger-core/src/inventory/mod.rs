@@ -175,12 +175,16 @@ pub enum BookingError {
     /// application checks it here — turning "applied against different state,
     /// silently different answer" into a reported error.
     MergeMismatch {
-        /// The currency being reduced.
+        /// The commodity being reduced (e.g. `AAPL`).
         currency: crate::Currency,
-        /// The per-unit pool cost booking recorded.
-        expected: Decimal,
-        /// The per-unit pool cost the merge actually produced.
-        got: Decimal,
+        /// The per-unit pool cost booking recorded, in the cost currency.
+        expected: crate::Amount,
+        /// The per-unit pool cost the merge would produce, in the cost currency.
+        ///
+        /// Carried as an [`Amount`] rather than a bare number
+        /// so the message reads `110.00 USD`: the pool cost is denominated in
+        /// the COST currency, which is not the commodity in `currency`.
+        got: crate::Amount,
     },
     /// The arithmetic left `rust_decimal`'s ~±7.9e28 range (#1863).
     ///
@@ -238,9 +242,9 @@ impl fmt::Display for BookingError {
                 got,
             } => write!(
                 f,
-                "{{*}} merge for {currency} produced a pool cost of {got}, but \
-                 booking recorded {expected}: this posting was applied against \
-                 different inventory than it was booked against"
+                "{{*}} merge of {currency} would produce a pool cost of {got}, \
+                 but booking recorded {expected}: this posting is being applied \
+                 against different inventory than it was booked against"
             ),
             Self::AmbiguousMatch {
                 num_matches,

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 44c7d8ebbf707011d82b285b37904d9331c7c8c6595b3e8b5799700ccd3772fb # shrinks to seed_costs = [103], legs = [Sell { units: 1, cost: 103 }]
+cc bb4e1af50b2061e490bb245eca5c723ad782ff8d5d0c00ff60d73f114562408e # shrinks to seed_costs = [100], legs = [Merge { units: 1 }]

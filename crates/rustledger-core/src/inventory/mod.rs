@@ -417,6 +417,19 @@ struct Slots {
     /// complete by construction; covering call sites would be complete only
     /// until someone adds a twelfth.
     undo: Option<Vec<(usize, Option<Position>)>>,
+    /// Slots already captured in `undo`, for O(1) "have I recorded this?".
+    ///
+    /// This bounds the log's size and cost; it is not what makes rollback
+    /// correct. Restoring in reverse order already makes a duplicate entry
+    /// harmless, because the earliest capture is applied last. Removing this
+    /// therefore does not fail any test — it just lets the log grow.
+    ///
+    /// A linear scan of the log reads fine for a transaction touching one or
+    /// two slots, but `{*}` merge records every matched lot, which made
+    /// recording O(k^2) in the lots merged — a fresh quadratic inside the
+    /// change that removed one. Hashing a `usize` with `FxHash` is a couple of
+    /// instructions, so the common case loses nothing.
+    undo_seen: rustc_hash::FxHashSet<usize>,
 }
 
 impl Slots {
@@ -426,6 +439,7 @@ impl Slots {
             entries: positions.into_iter().map(Some).collect(),
             live,
             undo: None,
+            undo_seen: rustc_hash::FxHashSet::default(),
         }
     }
 
@@ -437,14 +451,16 @@ impl Slots {
     /// merged. That is bounded by one transaction and by an operation that is
     /// rare, which is why it is not a set.
     fn record(&mut self, i: usize) {
-        let Some(log) = self.undo.as_mut() else {
+        if self.undo.is_none() {
             return;
-        };
-        if log.iter().any(|(slot, _)| *slot == i) {
+        }
+        if !self.undo_seen.insert(i) {
             return;
         }
         let prior = self.entries.get(i).cloned().flatten();
-        log.push((i, prior));
+        if let Some(log) = self.undo.as_mut() {
+            log.push((i, prior));
+        }
     }
 
     /// Tombstone slot `i`, keeping `live` in step.
@@ -597,6 +613,7 @@ impl PositionStore {
             Self::Owned(v) => {
                 if let Some(log) = v.undo.as_mut() {
                     log.push((slot, None));
+                    v.undo_seen.insert(slot);
                 }
                 v.entries.push(Some(p));
                 v.live += 1;
@@ -636,6 +653,7 @@ impl PositionStore {
     fn begin_undo(&mut self) {
         if let Self::Owned(v) = self {
             v.undo = Some(Vec::new());
+            v.undo_seen.clear();
         }
     }
 
@@ -643,17 +661,26 @@ impl PositionStore {
     fn commit_undo(&mut self) {
         if let Self::Owned(v) = self {
             v.undo = None;
+            v.undo_seen.clear();
         }
     }
 
     /// Restore every slot the log captured, newest first, and stop recording.
     ///
-    /// Newest first so that slots CREATED by this transaction are popped from
-    /// the end while they are still last. Forward order is not WRONG — each
-    /// slot is recorded once, and a created slot that cannot be popped is left
-    /// as a tombstone that compaction reclaims — but it leaves dead slots
-    /// behind for no reason. A mutation swapping the order therefore survives
-    /// the suite, and that is expected rather than a coverage gap.
+    /// Newest first, for two reasons that are easy to conflate.
+    ///
+    /// The visible one: slots CREATED by this transaction are popped from the
+    /// end while they are still last, so failed transactions do not leave dead
+    /// slots behind. Forward order would merely leave tombstones that
+    /// compaction reclaims, so a mutation swapping the order survives the
+    /// suite — expected, not a coverage gap.
+    ///
+    /// The load-bearing one: reverse order is what makes a slot recorded MORE
+    /// THAN ONCE safe. The earliest capture holds the true prior value, and
+    /// reverse iteration applies it last, so it wins. `record` deduplicates, so
+    /// duplicates should not arise — but the two mechanisms are independent,
+    /// and dropping BOTH is what would corrupt a rollback. Changing this to
+    /// forward order is only safe while the deduplication holds.
     fn rollback_undo(&mut self) {
         let Self::Owned(v) = self else {
             return;
@@ -661,6 +688,7 @@ impl PositionStore {
         let Some(log) = v.undo.take() else {
             return;
         };
+        v.undo_seen.clear();
         for (slot, prior) in log.into_iter().rev() {
             // The slot existed: put back exactly what was there. Otherwise it
             // was created by this transaction (or was already a tombstone), so
@@ -753,6 +781,7 @@ impl PositionStore {
                 entries: slots,
                 live,
                 undo: None,
+                undo_seen: rustc_hash::FxHashSet::default(),
             });
         }
     }
@@ -804,6 +833,7 @@ impl FromIterator<Position> for PositionStore {
             entries: slots,
             live,
             undo: None,
+            undo_seen: rustc_hash::FxHashSet::default(),
         })
     }
 }

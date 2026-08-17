@@ -1013,7 +1013,15 @@ impl BookingEngine {
         if !recording {
             return Ok(());
         }
+        // Deduplicated: a transaction with several postings on one account
+        // would otherwise re-enter `compact_if_sparse` for it, and compaction
+        // is O(slots) when it fires.
+        let mut committed: Vec<&rustledger_core::Account> = Vec::new();
         for posting in &txn.postings {
+            if committed.contains(&&posting.account) {
+                continue;
+            }
+            committed.push(&posting.account);
             if let Some(inv) = self.inventories.get_mut(&posting.account) {
                 if inv.undo_is_open() {
                     inv.commit_undo();

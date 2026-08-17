@@ -472,4 +472,35 @@ fn a_merge_applied_against_different_inventory_is_reported() {
         rendered.contains("110") && rendered.contains("merge"),
         "the error must name the recorded and actual pool costs, got: {rendered}",
     );
+
+    // The mismatch is detected AFTER `reduce` has merged and drained, so it
+    // relies on `apply`'s undo log (#2067) to put the pool back. A cost-bearing
+    // negative posting always opens one, but assert rather than assume: a
+    // half-merged inventory would be exactly the silent corruption the check
+    // exists to prevent.
+    let mut lots: Vec<(Decimal, Option<Decimal>)> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Broker")
+        .flat_map(|(_, inv)| inv.positions())
+        .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+        .collect();
+    lots.sort_by_key(|(_, cost)| *cost);
+    assert_eq!(
+        lots,
+        vec![
+            (
+                "10".parse::<Decimal>().unwrap(),
+                Some("100".parse().unwrap())
+            ),
+            (
+                "10".parse::<Decimal>().unwrap(),
+                Some("120".parse().unwrap())
+            ),
+            (
+                "10".parse::<Decimal>().unwrap(),
+                Some("200".parse().unwrap())
+            ),
+        ],
+        "the failed merge must leave all three lots unmerged and undrained",
+    );
 }

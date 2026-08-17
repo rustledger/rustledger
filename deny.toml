@@ -99,6 +99,7 @@ deny = [
 # Audited 2026-05 via `cargo deny check bans`.
 skip = [
   { crate = "addr2line" },        # gimli's, vs backtrace's
+  { crate = "base64" },           # 0.22 (wasmtime-internal-cache) vs 0.23 (ureq/ureq-proto)
   { crate = "bitflags" },         # 1.x via wasmtime stack, 2.x elsewhere
   { crate = "block-buffer" },     # digest 0.9 vs 0.10
   { crate = "cpufeatures" },      # transitive sha2 skew

@@ -20,6 +20,9 @@ use rustledger_core::{
 };
 
 const CURRENCY: &str = "X";
+/// A commodity the generated legs never mention, so the doomed posting can
+/// always find lots to fail against.
+const ANCHOR: &str = "ANCHOR";
 const COST_CURRENCY: &str = "USD";
 
 fn date(d: u32) -> NaiveDate {
@@ -102,6 +105,23 @@ proptest! {
             engine.apply(&txn).expect("seeding fits");
         }
 
+        // A lot in a commodity no generated leg touches. The doomed posting
+        // below reduces THIS, so it is a reduction no matter what the prefix
+        // did to `STK` — see the comment there.
+        let mut anchor = Posting::new("Assets:Stock", Amount::new(Decimal::from(50), ANCHOR));
+        anchor.cost = Some(CostSpec {
+            number: Some(CostNumber::PerUnit {
+                value: Decimal::from(7),
+            }),
+            currency: Some(COST_CURRENCY.into()),
+            date: Some(date(1)),
+            label: None,
+            merge: false,
+        });
+        engine
+            .apply(&Transaction::new(date(1), "anchor").with_synthesized_posting(anchor))
+            .expect("the anchor lot fits");
+
         let before = holdings(&engine);
 
         // The transaction: some legs, then one that cannot succeed.
@@ -142,9 +162,20 @@ proptest! {
             };
             txn = txn.with_synthesized_posting(posting);
         }
+        // Doomed against the ANCHOR commodity, not the generated one.
+        //
+        // It used to oversell `STK`, on the assumption that overselling always
+        // fails. It does not: a prefix of `{*}` merges can empty the account,
+        // and an empty cost spec against an empty account is an AUGMENTATION,
+        // not a failed reduction — beancount's `book_reductions` makes the same
+        // call (`if balance.is_reduced_by(units)`, else augment). So the
+        // transaction succeeded, and this property test failed at random
+        // depending on which prefix proptest generated. Reducing a commodity
+        // the prefix cannot drain restores "this leg always fails" as a fact
+        // rather than a hope.
         let mut doomed = Posting::new(
             "Assets:Stock",
-            Amount::new(Decimal::from(-100_000), CURRENCY),
+            Amount::new(Decimal::from(-100_000), ANCHOR),
         );
         doomed.cost = Some(CostSpec {
             number: None,

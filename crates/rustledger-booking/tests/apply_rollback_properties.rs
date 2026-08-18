@@ -62,13 +62,19 @@ fn leg_strategy(costs: Vec<u32>) -> impl Strategy<Value = Leg> {
 }
 
 /// The lots an account holds, as a comparable snapshot.
-fn holdings(engine: &BookingEngine) -> Vec<(Decimal, Option<Decimal>, Option<NaiveDate>)> {
+fn holdings(engine: &BookingEngine) -> Vec<(String, Decimal, Option<Decimal>, Option<NaiveDate>)> {
     engine
         .inventories()
         .filter(|(account, _)| account.as_str() == "Assets:Stock")
         .flat_map(|(_, inv)| inv.positions())
         .map(|p| {
             (
+                // The commodity is part of the snapshot because the account
+                // now holds two: the generated legs work on one, the doomed
+                // leg reduces the other. Without it, a rollback that restored
+                // the right numbers against the wrong commodity would compare
+                // equal.
+                p.units.currency.to_string(),
                 p.units.number,
                 p.cost.as_ref().map(|c| c.number),
                 p.cost.as_ref().and_then(|c| c.date),

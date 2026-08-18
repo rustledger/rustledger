@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f95d469cec5dc2e9c0331eacf9cefb527a47e7c93c414beac86004121ad2ed1a # shrinks to method = Fifo, seeds = [101, 100], txns = [[SellAny { units: 1 }, SellMerged { units: 1 }]]
+cc 61f050b17b5d2a81402e4ba07450ba82b8d2b0fdb42819db83be9e9970182303 # shrinks to method = Strict, seeds = [100], txns = [[Buy { units: 1, cost: 101 }, SellMerged { units: 1 }]]

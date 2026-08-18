@@ -1093,8 +1093,20 @@ impl BookingEngine {
         // so can only make a posting look less like a reduction. Reductions
         // keep their relative order, which is what a second reduction on one
         // account depends on.
-        let (mut ordered, rest): (Vec<_>, Vec<_>) = txn.postings.iter().partition(|posting| {
-            posting.cost.is_some()
+        // Classified ONCE, into a bitmask rather than two vectors: a
+        // transaction has a handful of postings, and this path is hot enough
+        // that #2061/#2067 exist to keep allocations out of it.
+        //
+        // `apply_posting` asks the same predicate again, which is not waste to
+        // eliminate: it asks about LIVE state, deliberately, so that a posting
+        // reclassifies as the transaction proceeds. This asks about the
+        // pre-transaction state, which is the question `book` answered. Sharing
+        // one answer between them would reintroduce the divergence. The call is
+        // a hash lookup either way — `is_reduced_by` has read per-currency sign
+        // counts since #2062, not scanned positions.
+        let mut reduces: u64 = 0;
+        for (i, posting) in txn.postings.iter().enumerate().take(64) {
+            let is_reduction = posting.cost.is_some()
                 && posting.amount().is_some_and(|units| {
                     self.inventories.get(&posting.account).is_some_and(|inv| {
                         inv.is_booking_reduction(
@@ -1103,11 +1115,20 @@ impl BookingEngine {
                             self.method_for(&posting.account),
                         )
                     })
-                })
-        });
-        ordered.extend(rest);
+                });
+            if is_reduction {
+                reduces |= 1 << i;
+            }
+        }
+        // A transaction with more than 64 postings keeps source order beyond
+        // the 64th. Ordering is an optimization of WHICH state a re-derived
+        // pool sees, not a correctness requirement for the postings themselves,
+        // so degrading to source order is safe — and `apply_posting` still
+        // classifies each posting itself.
+        let reduces_first = (0..txn.postings.len()).filter(|i| *i < 64 && reduces & (1 << i) != 0);
+        let then_the_rest = (0..txn.postings.len()).filter(|i| *i >= 64 || reduces & (1 << i) == 0);
 
-        for posting in ordered {
+        for posting in reduces_first.chain(then_the_rest).map(|i| &txn.postings[i]) {
             // EVERY posting failure aborts the transaction and rolls back —
             // overflow and failed reduction alike (#1987).
             //

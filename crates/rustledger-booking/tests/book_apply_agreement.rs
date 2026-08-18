@@ -14,8 +14,8 @@
 //! must agree on, and stays silent about the representation itself.
 //!
 //! Every existing suite passed while the divergence shipped, so treat a clean
-//! run here as meaningful only alongside `the_detector_can_report_dirty`, which
-//! pins that the comparison fails on the known-bad shape.
+//! run here as meaningful only alongside `the_comparison_can_report_dirty`,
+//! which pins that the comparison itself can report a disagreement.
 
 use proptest::prelude::*;
 use rustledger_booking::BookingEngine;
@@ -199,9 +199,10 @@ fn run(method: BookingMethod, seeds: &[u32], txns: &[Vec<Leg>]) -> (Totals, Tota
         buy.cost = Some(per_unit(*cost));
         let txn = Transaction::new(date(u32::try_from(i).unwrap_or(0) + 1), "seed")
             .with_synthesized_posting(buy);
-        if engine.apply(&txn).is_ok() {
-            add_booked_postings(&mut journal, &txn);
-        }
+        engine
+            .apply(&txn)
+            .expect("seed buys are fixtures and always apply");
+        add_booked_postings(&mut journal, &txn);
     }
 
     for (i, legs) in txns.iter().enumerate() {
@@ -209,12 +210,18 @@ fn run(method: BookingMethod, seeds: &[u32], txns: &[Vec<Leg>]) -> (Totals, Tota
         for leg in legs {
             txn = txn.with_synthesized_posting(posting_for(leg));
         }
+        // An unbookable transaction is a different failure and says nothing
+        // about this invariant, so it is skipped. A transaction that BOOKED and
+        // then failed to apply is not skipped: `apply`'s precondition is booked
+        // input, and `book` just produced it, so that combination is itself a
+        // defect and must not be swallowed into a vacuous pass.
         let Ok(booked) = engine.book(&txn) else {
             continue;
         };
-        if engine.apply(&booked.transaction).is_ok() {
-            add_booked_postings(&mut journal, &booked.transaction);
-        }
+        engine
+            .apply(&booked.transaction)
+            .expect("a transaction that booked must apply");
+        add_booked_postings(&mut journal, &booked.transaction);
     }
 
     (journal, engine_totals(&engine))

@@ -579,6 +579,7 @@ impl Inventory {
         let mut updates: SmallVec<[(usize, Decimal); 1]> = SmallVec::new();
         let mut seen_any = false;
         let mut available_total = Decimal::ZERO;
+        let mut overflow: Option<OverflowError> = None;
 
         let mut forward;
         let mut backward;
@@ -606,14 +607,22 @@ impl Inventory {
                 if cost_currency.is_none() {
                     cost_currency = Some(cost.currency.clone());
                 }
-                cost_basis = take
+                // Recorded, not returned. Sufficiency used to be settled before
+                // any basis arithmetic ran, so a reduction that was BOTH short
+                // of units and unrepresentable reported the shortfall — the
+                // actionable half. Returning here would report the overflow
+                // instead, which is a behavior change nothing asked for.
+                match take
                     .checked_mul(cost.number)
                     .and_then(|v| cost_basis.checked_add(v))
-                    .ok_or_else(|| {
-                        BookingError::Overflow(OverflowError {
+                {
+                    Some(v) => cost_basis = v,
+                    None => {
+                        overflow.get_or_insert_with(|| OverflowError {
                             currency: cost.currency.clone(),
-                        })
-                    })?;
+                        });
+                    }
+                }
             }
 
             // Record what we matched
@@ -659,6 +668,11 @@ impl Inventory {
                 requested: units.number.abs(),
                 available: available_total,
             });
+        }
+        // Only now: the reduction is satisfiable, so the arithmetic is what
+        // failed.
+        if let Some(error) = overflow {
+            return Err(BookingError::Overflow(error));
         }
 
         Ok((
@@ -1225,6 +1239,29 @@ mod reduction_tests {
             Amount::new(d(units), "STK"),
             Cost::new(d(cost), "USD").with_date(naive_date(2024, 1, day).unwrap()),
         )
+    }
+
+    /// Insufficiency outranks overflow, as it did before the walk was made lazy.
+    #[test]
+    fn insufficient_units_are_reported_even_when_the_basis_would_overflow() {
+        // A lot whose cost basis cannot be represented, and a reduction asking
+        // for more units than exist.
+        let huge = Decimal::MAX / d(2);
+        let mut inv = Inventory::new();
+        inv.add(Position::with_cost(
+            Amount::new(d(10), "STK"),
+            Cost::new(huge, "USD").with_date(naive_date(2024, 1, 1).unwrap()),
+        ))
+        .expect("fixture fits in Decimal");
+
+        let err = inv
+            .plan_ordered(&Amount::new(d(-99), "STK"), &CostSpec::default(), false)
+            .expect_err("99 units are not there");
+        assert!(
+            matches!(err, crate::BookingError::InsufficientUnits { .. }),
+            "the shortfall is the actionable error, not the arithmetic it would \
+             have done on the way: {err:?}",
+        );
     }
 
     /// The ordered index selects exactly what the scan selects (#2083).

@@ -2041,10 +2041,12 @@ impl Inventory {
         // STRICT account resolves through `cost_index` instead and never
         // reaches this, which is why the build is gated rather than
         // unconditional (#2083).
-        if matches!(
-            method,
-            BookingMethod::Fifo | BookingMethod::Lifo | BookingMethod::Hifo
-        ) && self.ordered_index.is_none()
+        // FIFO and LIFO only: `reduce_hifo` sorts by COST and has its own scan,
+        // so it never reads this index — building one for it would be pure
+        // maintenance for a map nothing consults. (That scan is the same shape
+        // this PR fixes, and still unfixed for HIFO.)
+        if matches!(method, BookingMethod::Fifo | BookingMethod::Lifo)
+            && self.ordered_index.is_none()
         {
             self.build_ordered_index();
         }

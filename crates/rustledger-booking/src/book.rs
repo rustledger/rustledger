@@ -1068,7 +1068,46 @@ impl BookingEngine {
         let mut touched: rustc_hash::FxHashSet<&rustledger_core::Account> =
             rustc_hash::FxHashSet::default();
 
-        for posting in &txn.postings {
+        // Apply this transaction's cost-bearing REDUCTIONS before its other
+        // postings (#2070).
+        //
+        // `book` decides every posting against the inventory as it stood before
+        // the transaction, threaded with that transaction's earlier reductions
+        // and NOTHING else — the same rule beancount's `book_reductions`
+        // follows, for the same reason it states: an augmentation's cost may
+        // still need interpolation, so it is not a resolvable position yet.
+        //
+        // `apply` mutated in posting order, so a buy earlier in the transaction
+        // was already in the account when a later reduction ran. For a spec
+        // naming a concrete lot that changes nothing — the lot is found either
+        // way. For the two that RE-DERIVE a pool, `AVERAGE` and `{*}`, it moves
+        // the pool, and the engine then disagreed with the journal about cost
+        // basis. Silently: `book_apply_agreement` shrinks it to holding 40 @
+        // 100, then buying 1 @ 101 and `{*}`-selling 1 in one transaction.
+        //
+        // Classifying against the PRE-transaction inventory (rather than
+        // threading, as `book` does) decides ORDER only. `apply_posting`
+        // classifies each posting itself against live state, so a posting
+        // sorted into the wrong bucket still does the right thing; and the
+        // disagreement can only run one way, since threading removes units and
+        // so can only make a posting look less like a reduction. Reductions
+        // keep their relative order, which is what a second reduction on one
+        // account depends on.
+        let (mut ordered, rest): (Vec<_>, Vec<_>) = txn.postings.iter().partition(|posting| {
+            posting.cost.is_some()
+                && posting.amount().is_some_and(|units| {
+                    self.inventories.get(&posting.account).is_some_and(|inv| {
+                        inv.is_booking_reduction(
+                            units,
+                            posting.cost.as_ref(),
+                            self.method_for(&posting.account),
+                        )
+                    })
+                })
+        });
+        ordered.extend(rest);
+
+        for posting in ordered {
             // EVERY posting failure aborts the transaction and rolls back —
             // overflow and failed reduction alike (#1987).
             //

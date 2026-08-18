@@ -663,3 +663,70 @@ fn a_buy_and_a_merge_sale_in_one_transaction_is_not_a_mismatch() {
         .apply(&booked.transaction)
         .expect("the buy moved the pool; that is the engine's own ordering, not a bad ledger");
 }
+
+/// A buy earlier in the transaction does not move the pool a later reduction
+/// draws from (#2070).
+///
+/// `book` decides against the inventory as it stood before the transaction
+/// (threaded with earlier reductions only), so it books this sale at the
+/// pre-transaction average of 100. `apply` used to have the buy in the account
+/// already, so `{*}` re-derived a pool of 110 and drained 5 at that — leaving
+/// the engine holding 1650 of basis where the journal recorded 1700.
+///
+/// The property test `book_apply_agreement` generalizes this; this pins the
+/// arithmetic in a form that names the numbers.
+#[test]
+fn a_buy_earlier_in_the_transaction_does_not_move_the_pool() {
+    let mut engine = BookingEngine::with_method(BookingMethod::Strict);
+
+    let mut seed = Posting::new("Assets:Stock", amount("10", "X"));
+    seed.cost = Some(spec("100.00", "USD", 1));
+    engine
+        .apply(&Transaction::new(date(1), "buy lot 1").with_synthesized_posting(seed))
+        .expect("the seed buy applies");
+
+    let mut buy = Posting::new("Assets:Stock", amount("10", "X"));
+    buy.cost = Some(spec("120.00", "USD", 2));
+    let mut sell = Posting::new("Assets:Stock", amount("-5", "X"));
+    sell.cost = Some(CostSpec {
+        number: None,
+        currency: None,
+        date: None,
+        label: None,
+        merge: true,
+    });
+    let txn = Transaction::new(date(2), "buy and merge-sell together")
+        .with_synthesized_posting(buy)
+        .with_synthesized_posting(sell);
+
+    let booked = engine.book(&txn).expect("the transaction books");
+    let booked_reduction = booked
+        .transaction
+        .postings
+        .iter()
+        .find(|p| p.amount().is_some_and(|u| u.number.is_sign_negative()))
+        .and_then(|p| p.cost.as_ref())
+        .and_then(|c| c.number)
+        .and_then(|n| n.per_unit())
+        .expect("the reduction carries a booked cost");
+    assert_eq!(
+        booked_reduction,
+        "100".parse::<Decimal>().expect("literal parses"),
+        "booking draws from the pre-transaction pool, as beancount does",
+    );
+
+    engine.apply(&booked.transaction).expect("applies");
+
+    let basis: Decimal = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Stock")
+        .flat_map(|(_, inv)| inv.positions())
+        .map(|p| p.units.number * p.cost.as_ref().map_or(Decimal::ZERO, |c| c.number))
+        .sum();
+    assert_eq!(
+        basis,
+        "1700".parse::<Decimal>().expect("literal parses"),
+        "the engine must hold what the booked postings add up to \
+         (1000 + 1200 - 500), not the 1650 a re-derived pool produces",
+    );
+}

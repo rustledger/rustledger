@@ -110,7 +110,7 @@ pub enum Value {
     /// Position (amount + optional cost). Boxed to reduce enum size.
     Position(Box<Position>),
     /// Inventory (aggregated positions). Boxed to reduce enum size.
-    Inventory(Box<Inventory>),
+    Inventory(std::sync::Arc<Inventory>),
     /// Set of strings (tags, links).
     StringSet(Vec<String>),
     /// Generic set of values for IN operator (supports mixed types).
@@ -392,7 +392,7 @@ pub struct PostingContext<'a> {
     /// `account_balance` column. Updated for every posting, independent of the
     /// WHERE filter, so it always reflects the true ledger balance for the
     /// account at this point in time.
-    pub account_balance: Option<Inventory>,
+    pub account_balance: Option<std::sync::Arc<Inventory>>,
     /// The directive index (for source location lookup).
     pub directive_index: Option<usize>,
 }

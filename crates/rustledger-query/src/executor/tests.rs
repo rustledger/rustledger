@@ -218,7 +218,7 @@ fn test_hash_value_all_variants() {
             Amount::new(dec!(10), "AAPL"),
             Cost::new(dec!(150), "USD"),
         ))),
-        Value::Inventory(Box::new(Inventory::new())),
+        Value::Inventory(std::sync::Arc::new(Inventory::new())),
         Value::StringSet(vec!["tag1".to_string(), "tag2".to_string()]),
         Value::Null,
     ];
@@ -285,8 +285,8 @@ fn test_inventory_hash_includes_cost() {
     ))
     .expect("fixture fits in Decimal");
 
-    let hash1 = hash_single_value(&Value::Inventory(Box::new(inv1)));
-    let hash2 = hash_single_value(&Value::Inventory(Box::new(inv2)));
+    let hash1 = hash_single_value(&Value::Inventory(std::sync::Arc::new(inv1)));
+    let hash2 = hash_single_value(&Value::Inventory(std::sync::Arc::new(inv2)));
 
     assert_ne!(hash1, hash2);
 }

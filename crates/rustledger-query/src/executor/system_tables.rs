@@ -598,7 +598,7 @@ impl Executor<'_> {
         // there are no predicates to evaluate, so the scan is infallible here —
         // assert that invariant rather than silently emitting an empty table.
         let contexts = self
-            .scan_postings(None, None, true, true, false, true)
+            .scan_postings(None, None, true, true, false, false, true)
             .expect("scan_postings(None, None, ..) evaluates no predicates, so it cannot fail")
             .postings;
 
@@ -712,12 +712,10 @@ impl Executor<'_> {
             // (`needs_balance`/`needs_account_balance` both `true` above), so they
             // are identical to the old inline accumulators — proven by the
             // #postings parity test.
-            let balance_val = ctx
-                .balance
-                .map_or(Value::Null, |inv| Value::Inventory(Box::new(inv)));
-            let account_balance_val = ctx
-                .account_balance
-                .map_or(Value::Null, |inv| Value::Inventory(Box::new(inv)));
+            let balance_val = ctx.balance.map_or(Value::Null, |inv| {
+                Value::Inventory(std::sync::Arc::new(inv))
+            });
+            let account_balance_val = ctx.account_balance.map_or(Value::Null, Value::Inventory);
 
             // Other accounts: all accounts in the transaction except this posting's.
             let other_accounts: Vec<String> = all_accounts

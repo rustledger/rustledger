@@ -445,7 +445,7 @@ impl<'a> Executor<'a> {
         // — `BALANCES` applies its own `WHERE` to the result afterward, and
         // `account_balances` is WHERE-independent by construction anyway.
         Ok(self
-            .scan_postings(from, None, false, true, false, false)?
+            .scan_postings(from, None, false, true, false, false, false)?
             .account_balances)
     }
 
@@ -482,6 +482,11 @@ impl<'a> Executor<'a> {
         // running total after the eager update above.
         let where_reads_balance =
             where_clause.is_some_and(|w| expr_references_column(w, "balance"));
+        // Same distinction for `account_balance`: referenced ANYWHERE decides
+        // whether the column is materialized at all, referenced by the WHERE
+        // decides whether it has to exist before the filter runs.
+        let where_reads_account_balance =
+            where_clause.is_some_and(|w| expr_references_column(w, "account_balance"));
 
         Ok(self
             .scan_postings(
@@ -490,6 +495,7 @@ impl<'a> Executor<'a> {
                 needs_balance,
                 needs_account_balance,
                 where_reads_balance,
+                where_reads_account_balance,
                 true,
             )?
             .postings)
@@ -521,6 +527,7 @@ impl<'a> Executor<'a> {
         needs_balance: bool,
         needs_account_balance: bool,
         where_reads_balance: bool,
+        where_reads_account_balance: bool,
         collect_contexts: bool,
     ) -> Result<PostingScan<'a>, QueryError> {
         let mut postings = Vec::new();
@@ -675,8 +682,23 @@ impl<'a> Executor<'a> {
                         } else {
                             None
                         },
-                        account_balance: if needs_account_balance {
-                            engine.inventory(&posting.account).cloned()
+                        // Cloning the account's inventory is O(lots), and it
+                        // was happening for EVERY posting the FROM clause kept,
+                        // including the ones WHERE was about to reject. That is
+                        // O(rows x lots) — 0.11s / 0.39s / 3.31s for 1k / 2k /
+                        // 6k transactions, quadratic (#2086).
+                        //
+                        // Same treatment `balance` got in #1085: the pre-WHERE
+                        // copy is only observable when the WHERE clause itself
+                        // reads the column. Otherwise it is filled in below,
+                        // for surviving rows only. Nothing mutates the engine
+                        // between here and there, so the deferred value is the
+                        // same one.
+                        account_balance: if needs_account_balance && where_reads_account_balance {
+                            engine
+                                .inventory(&posting.account)
+                                .cloned()
+                                .map(std::sync::Arc::new)
                         } else {
                             None
                         },
@@ -701,6 +723,14 @@ impl<'a> Executor<'a> {
                                 .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                         }
                         ctx.balance = Some(cumulative_balance.clone());
+                    }
+                    // The deferred half of the gate above: this row survived, so
+                    // it is one of the few that will actually be read.
+                    if needs_account_balance && !where_reads_account_balance {
+                        ctx.account_balance = engine
+                            .inventory(&posting.account)
+                            .cloned()
+                            .map(std::sync::Arc::new);
                     }
                     postings.push(ctx);
                 }
@@ -954,7 +984,7 @@ impl<'a> Executor<'a> {
                                 .add(Position::simple(pos.units.clone()))
                                 .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                         }
-                        Ok(Value::Inventory(Box::new(units_inv)))
+                        Ok(Value::Inventory(std::sync::Arc::new(units_inv)))
                     }
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
@@ -1304,7 +1334,7 @@ impl<'a> Executor<'a> {
                                 .add(pos)
                                 .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                         }
-                        Ok(Value::Inventory(Box::new(new_inv)))
+                        Ok(Value::Inventory(std::sync::Arc::new(new_inv)))
                     }
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
@@ -1453,7 +1483,7 @@ impl<'a> Executor<'a> {
                         {
                             Ok(Value::Amount(positions[0].units.clone()))
                         } else {
-                            Ok(Value::Inventory(Box::new(result)))
+                            Ok(Value::Inventory(std::sync::Arc::new(result)))
                         }
                     }
                     Value::Number(n) => Ok(Value::Amount(Amount::new(*n, &target_currency))),
@@ -1695,7 +1725,7 @@ impl<'a> Executor<'a> {
                                     .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             }
                         }
-                        Ok(Value::Inventory(Box::new(result)))
+                        Ok(Value::Inventory(std::sync::Arc::new(result)))
                     }
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
@@ -2064,7 +2094,7 @@ impl<'a> Executor<'a> {
                         out.add(rustledger_core::Position::simple(units))
                             .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                     }
-                    return Ok(Value::Inventory(Box::new(out)));
+                    return Ok(Value::Inventory(std::sync::Arc::new(out)));
                 }
                 // Two-arg form: collapse to a single Amount in the explicit
                 // target currency. NOTE (pre-existing beanquery divergence,

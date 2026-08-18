@@ -378,7 +378,7 @@ impl Executor<'_> {
                 // Cumulative running balance across WHERE-filtered postings —
                 // matches bean-query semantics. See `PostingContext::balance`.
                 if let Some(ref balance) = ctx.balance {
-                    Ok(Value::Inventory(Box::new(balance.clone())))
+                    Ok(Value::Inventory(std::sync::Arc::new(balance.clone())))
                 } else {
                     Ok(Value::Null)
                 }
@@ -387,7 +387,11 @@ impl Executor<'_> {
                 // Per-account running balance for this posting's account.
                 // Always reflects the true ledger balance, independent of WHERE.
                 if let Some(ref balance) = ctx.account_balance {
-                    Ok(Value::Inventory(Box::new(balance.clone())))
+                    // `Arc::clone`, not a copy of the inventory. Reading this
+                    // column used to deep-clone every lot a second time, on top
+                    // of the copy the context already held — once per row that
+                    // reads it (#2086).
+                    Ok(Value::Inventory(std::sync::Arc::clone(balance)))
                 } else {
                     Ok(Value::Null)
                 }

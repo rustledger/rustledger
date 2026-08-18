@@ -63,6 +63,7 @@ path = "src/bin/ag-rledger.rs"
 required-features = ["ag-rledger"]
 
 [dependencies]
+rustc-hash.workspace = true
 # Agent-native CLI deps (#1291), enabled only by the `ag-rledger` feature so
 # the sync `rledger` CLI/lib don't carry the async runtime by default.
 agcli = { workspace = true, optional = true }

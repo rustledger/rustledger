@@ -378,7 +378,7 @@ impl<'a> Executor<'a> {
                                     .merge_average()
                                     .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             }
-                            Ok(Value::Inventory(Box::new(total_inventory)))
+                            Ok(Value::Inventory(std::sync::Arc::new(total_inventory)))
                         } else if has_numbers {
                             // Pure number sum - return as Number
                             Ok(Value::Number(total_number))
@@ -885,7 +885,7 @@ impl<'a> Executor<'a> {
                                     )))
                                     .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             }
-                            Ok(Value::Inventory(Box::new(total_inventory)))
+                            Ok(Value::Inventory(std::sync::Arc::new(total_inventory)))
                         } else if has_numbers {
                             Ok(Value::Number(total_number))
                         } else {

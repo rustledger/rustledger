@@ -368,8 +368,8 @@ const fn position_renders_as_zero(pos: &rustledger_core::Position) -> bool {
 fn rendered_inventory_positions(
     inv: &rustledger_core::Inventory,
 ) -> Vec<rustledger_core::Position> {
+    use rustc_hash::FxHashMap;
     use rustledger_core::{Cost, Currency, Position};
-    use std::collections::HashMap;
 
     // Key on the typed values rather than a formatted string. `Currency` and
     // `Cost` are both `Eq + Hash`, and `rust_decimal`'s `Hash` agrees with its
@@ -377,7 +377,14 @@ fn rendered_inventory_positions(
     // `{1.00 USD}` and `{1 USD}` still net together, which is what the old
     // key's `number.normalize()` was there to ensure. Avoids two allocations
     // per lot on a path walked once per row.
-    let mut aggregated: HashMap<(Currency, Option<Cost>), Position> = HashMap::new();
+    // `FxHashMap`, sized up front. This runs once per OUTPUT ROW and inserts
+    // once per lot, so on a long-held account it was the query's single largest
+    // cost: SipHash plus the rehash of a map grown from empty accounted for
+    // roughly a fifth of the run (#2086). The hasher is free to change here
+    // because the sort below is total — the comment on its label arm records
+    // why — so iteration order cannot reach the output.
+    let mut aggregated: FxHashMap<(Currency, Option<Cost>), Position> =
+        FxHashMap::with_capacity_and_hasher(inv.len(), rustc_hash::FxBuildHasher);
     for pos in inv.positions().filter(|p| !p.is_empty()) {
         let key = (pos.units.currency.clone(), pos.cost.clone());
 
@@ -652,7 +659,7 @@ mod tests {
         let ledger_ctx = DisplayContext::new();
         let mut col_ctx = DisplayContext::new();
         for lots in &rows {
-            let value = Value::Inventory(Box::new(inv_of(lots)));
+            let value = Value::Inventory(std::sync::Arc::new(inv_of(lots)));
             update_column_context(&mut col_ctx, &value, &ledger_ctx);
         }
 
@@ -671,7 +678,7 @@ mod tests {
         let rendered = rendered_inventory_positions(&inv);
         assert_eq!(rendered.len(), 1, "lots at one cost net together");
         assert_eq!(rendered[0].units.number, dec!(545.4545455));
-        let out = format_value(&Value::Inventory(Box::new(inv)), false, &col_ctx);
+        let out = format_value(&Value::Inventory(std::sync::Arc::new(inv)), false, &col_ctx);
         assert!(out.starts_with("545.4545455 COOL_FUND_USD"), "got: {out}");
     }
 
@@ -868,7 +875,7 @@ mod tests {
             Cost::new(dec!(131.73), "USD"),
         ))
         .expect("fixture fits in Decimal");
-        let value = Value::Inventory(Box::new(inv));
+        let value = Value::Inventory(std::sync::Arc::new(inv));
         let ctx = DisplayContext::new();
         let rendered = format_value(&value, false, &ctx);
 
@@ -945,7 +952,7 @@ mod tests {
         inv.add(Position::simple(Amount::new(dec!(-0.0003183), "USD")))
             .expect("fixture fits in Decimal");
 
-        let rendered = format_value(&Value::Inventory(Box::new(inv)), false, &ctx);
+        let rendered = format_value(&Value::Inventory(std::sync::Arc::new(inv)), false, &ctx);
         assert_eq!(
             rendered, "-0.00 USD",
             "a sub-cent USD residual is a position the inventory HOLDS, so \
@@ -988,7 +995,7 @@ mod tests {
         inv.add(Position::simple(Amount::new(dec!(-0.01), "USD")))
             .expect("fixture fits in Decimal");
 
-        let rendered = format_value(&Value::Inventory(Box::new(inv)), false, &ctx);
+        let rendered = format_value(&Value::Inventory(std::sync::Arc::new(inv)), false, &ctx);
         assert!(
             rendered.contains("-0.01"),
             "-0.01 USD is exactly at USD precision; must still render. Got {rendered:?}"
@@ -1016,7 +1023,7 @@ mod tests {
         let mut inv = Inventory::new();
         inv.add(Position::simple(Amount::new(over_scale, "USD")))
             .expect("fixture fits in Decimal");
-        let inv_val = Value::Inventory(Box::new(inv));
+        let inv_val = Value::Inventory(std::sync::Arc::new(inv));
 
         assert_eq!(format_value(&amount_val, true, &ctx), "-1202.01");
         assert_eq!(format_value(&pos_val, true, &ctx), "-1202.01");
@@ -1048,7 +1055,7 @@ mod tests {
         let mut result = QueryResult::new(vec!["account".into(), "sum".into()]);
         result.add_row(vec![
             Value::String("Income:Capital-Gains".into()),
-            Value::Inventory(Box::new(inv)),
+            Value::Inventory(std::sync::Arc::new(inv)),
         ]);
 
         let mut buf: Vec<u8> = Vec::new();
@@ -1087,7 +1094,7 @@ mod tests {
             .expect("fixture fits in Decimal");
 
         let mut result = QueryResult::new(vec!["sum".into()]);
-        result.add_row(vec![Value::Inventory(Box::new(inv))]);
+        result.add_row(vec![Value::Inventory(std::sync::Arc::new(inv))]);
 
         let mut buf: Vec<u8> = Vec::new();
         write_beancount(&result, &mut buf, &ctx).expect("beancount ok");

@@ -3390,6 +3390,7 @@ dependencies = [
  "pprof",
  "rust_decimal",
  "rust_decimal_macros",
+ "rustc-hash 2.1.3",
  "rustledger-booking",
  "rustledger-budget",
  "rustledger-core",

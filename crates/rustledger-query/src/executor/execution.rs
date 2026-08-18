@@ -529,7 +529,7 @@ impl Executor<'_> {
                 }
                 let mut r = row.clone();
                 if let Some(i) = balance_idx {
-                    r[i] = Value::Inventory(Box::new(running_balance.clone()));
+                    r[i] = Value::Inventory(std::sync::Arc::new(running_balance.clone()));
                 }
                 overridden_row = r;
                 &overridden_row
@@ -1055,7 +1055,7 @@ impl Executor<'_> {
                             narration,
                             Value::String(posting.account.to_string()),
                             position_value,
-                            Value::Inventory(Box::new(balance_for_row)),
+                            Value::Inventory(std::sync::Arc::new(balance_for_row)),
                         ];
                         result.add_row(row);
                     }
@@ -1104,19 +1104,19 @@ impl Executor<'_> {
                         let cost_inventory = balance
                             .at_cost()
                             .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-                        Value::Inventory(Box::new(cost_inventory))
+                        Value::Inventory(std::sync::Arc::new(cost_inventory))
                     }
                     "UNITS" => {
                         // Just the units (remove cost info)
                         let units_inventory = balance
                             .at_units()
                             .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-                        Value::Inventory(Box::new(units_inventory))
+                        Value::Inventory(std::sync::Arc::new(units_inventory))
                     }
-                    _ => Value::Inventory(Box::new(balance.clone())),
+                    _ => Value::Inventory(std::sync::Arc::new(balance.clone())),
                 }
             } else {
-                Value::Inventory(Box::new(balance.clone()))
+                Value::Inventory(std::sync::Arc::new(balance.clone()))
             };
 
             let row = vec![Value::String(account.to_string()), balance_value];

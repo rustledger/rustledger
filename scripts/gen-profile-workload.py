@@ -51,6 +51,10 @@ SHAPES: dict[str, str] = {
     "link and taglink error passes that `simple` skips entirely.",
     "multicurrency": "Several currencies with price directives and @ "
     "conversions. Exercises price lookup and multi-currency balancing.",
+    "fifo": "Bare `{}` reductions against a FIFO account — how FIFO sells are "
+    "normally written. The other four shapes reach the ordered-selection path "
+    "twice in 2k transactions between them, so it was effectively unprofiled "
+    "until it turned out to be quadratic (#2083).",
 }
 
 
@@ -124,6 +128,48 @@ def gen_investment(n: int) -> None:
             print(f"  Assets:Broker:Cash  -{units * float(cost):.2f} USD")
 
 
+def gen_fifo(n: int) -> None:
+    """Bare `{}` reductions against a FIFO account.
+
+    `investment` writes every sell with an explicit cost, which resolves
+    through the cost index and never exercises ordered selection. Real FIFO
+    ledgers write `{}` and let the booking method choose the lot, which walks
+    lots in date order instead — a different code path with different scaling,
+    and the one that turned out to be quadratic in #2083.
+
+    One account and one commodity on purpose: the cost is proportional to lots
+    held in the account being reduced, so spreading lots over several accounts
+    would divide the very quantity this shape exists to grow.
+    """
+    rng = random.Random(45)
+    _header(
+        "Profiling Workload — fifo",
+        ['Assets:Broker:HOOL HOOL "FIFO"', "Assets:Broker:Cash USD", "Income:Gains USD"],
+        ["HOOL"],
+    )
+    d = datetime.date(2020, 1, 2)
+    held = 0
+    for _ in range(n):
+        d += datetime.timedelta(days=1)
+        # Roughly one sell in three, and only when there is something to sell,
+        # so the workload never profiles the error path.
+        if held > 0 and rng.random() < 0.33:
+            units = rng.randint(1, min(held, 10))
+            held -= units
+            price = f"{rng.uniform(5, 400):.2f}"
+            print(f'{d.isoformat()} * "Sell HOOL"')
+            print(f"  Assets:Broker:HOOL  -{units} HOOL {{}} @ {price} USD")
+            print(f"  Assets:Broker:Cash  {units * float(price):.2f} USD")
+            print("  Income:Gains")
+        else:
+            units = rng.randint(1, 50)
+            held += units
+            cost = f"{rng.uniform(5, 400):.2f}"
+            print(f'{d.isoformat()} * "Buy HOOL"')
+            print(f"  Assets:Broker:HOOL   {units} HOOL {{{cost} USD}}")
+            print(f"  Assets:Broker:Cash  -{units * float(cost):.2f} USD")
+
+
 def gen_tagged(n: int) -> None:
     """Tags, links and metadata on both transactions and postings.
 
@@ -179,6 +225,7 @@ GENERATORS = {
     "investment": gen_investment,
     "tagged": gen_tagged,
     "multicurrency": gen_multicurrency,
+    "fifo": gen_fifo,
 }
 
 

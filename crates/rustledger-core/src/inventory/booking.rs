@@ -528,72 +528,83 @@ impl Inventory {
         let mut cost_basis = Decimal::ZERO;
         let mut cost_currency = None;
 
-        // Get indices of matching positions
-        let mut indices: Vec<usize> = self
-            .positions
-            .iter_slots()
-            .filter(|(_, p)| {
+        // Candidates in FIFO order.
+        //
+        // `ordered_index` already holds this currency's cost-bearing lots in
+        // (date, slot) order, so the common path neither scans every slot nor
+        // sorts per call. It did both, once per reduction, and `{}` is how
+        // FIFO sells are written — so that was the normal case (#2083).
+        //
+        // The predicate still runs per candidate: the index knows nothing
+        // about sign, emptiness or what this spec matches, and a stale entry
+        // for a drained lot is expected, since removal is best-effort.
+        let scanned: Option<Vec<usize>> = if self.ordered_candidates(&units.currency).is_some() {
+            None
+        } else {
+            // No index — a shared snapshot, or one never rebuilt. Scanning is
+            // the only correct answer, and it is what this always did.
+            let mut all: Vec<usize> = self
+                .positions
+                .iter_slots()
+                .filter(|(_, p)| p.units.currency == units.currency)
+                .map(|(i, _)| i)
+                .collect();
+            all.sort_by_key(|&i| self.positions[i].cost.as_ref().and_then(|c| c.date));
+            Some(all)
+        };
+        let candidates: &[usize] = match &scanned {
+            Some(all) => all,
+            None => self
+                .ordered_candidates(&units.currency)
+                .expect("the branch above proved it is Some"),
+        };
+
+        let keeps = |i: usize| {
+            self.positions.get(i).is_some_and(|p| {
                 p.units.currency == units.currency
                     && !p.is_empty()
                     && p.units.number.signum() != units.number.signum()
                     && p.matches_cost_spec(spec)
             })
-            .map(|(i, _)| i)
-            .collect();
+        };
 
-        // Sort by date for correct FIFO/LIFO ordering (oldest first)
-        // This ensures we select by acquisition date, not insertion order
-        indices.sort_by_key(|&i| self.positions[i].cost.as_ref().and_then(|c| c.date));
-
-        if reverse {
-            indices.reverse();
-        }
-
-        if indices.is_empty() {
-            return Err(BookingError::NoMatchingLot {
-                currency: units.currency.clone(),
-                cost_spec: spec.clone(),
-            });
-        }
-
-        // Get cost currency from first lot (all lots of same commodity have same cost currency)
-        if let Some(&first_idx) = indices.first()
-            && let Some(cost) = &self.positions[first_idx].cost
-        {
-            cost_currency = Some(cost.currency.clone());
-        }
-
-        // Check sufficiency BEFORE mutating any lot: a failed reduction must
-        // leave the inventory untouched. The validator reduces against the
-        // live `LedgerState` inventories, so a partial drain on the error
-        // path would corrupt every later balance assertion on the account
-        // (found by the failed-reduce-must-not-mutate property in
-        // `rustledger-booking/tests/booking_properties.rs`).
-        let available: Decimal = indices
-            .iter()
-            .map(|&i| self.positions[i].units.number.abs())
-            .sum();
-        if available < remaining {
-            return Err(BookingError::InsufficientUnits {
-                currency: units.currency.clone(),
-                requested: remaining,
-                available,
-            });
-        }
-
+        // Sufficiency used to be checked up front, by summing every matching
+        // lot before taking any. That was needed when this function mutated;
+        // since the plan/commit split (#2061) it only computes and the caller
+        // commits, so exhausting the walk reports the same shortfall with the
+        // same total, having visited the same lots. The invariant it protected
+        // — a failed reduction leaves the inventory untouched — is structural
+        // now, and `booking_properties.rs` still pins it.
         let mut updates: SmallVec<[(usize, Decimal); 1]> = SmallVec::new();
-        for idx in indices {
-            if remaining.is_zero() {
-                break;
-            }
+        let mut seen_any = false;
+        let mut available_total = Decimal::ZERO;
 
+        let mut forward;
+        let mut backward;
+        let walk: &mut dyn Iterator<Item = usize> = if reverse {
+            backward = candidates.iter().rev().copied();
+            &mut backward
+        } else {
+            forward = candidates.iter().copied();
+            &mut forward
+        };
+
+        for idx in walk {
+            if !keeps(idx) {
+                continue;
+            }
+            seen_any = true;
             let pos = &self.positions[idx];
+            available_total += pos.units.number.abs();
             let available = pos.units.number.abs();
             let take = remaining.min(available);
 
             // Calculate cost basis for this portion (checked — see the
             // matching site in the FIFO/LIFO ladder above).
             if let Some(cost) = &pos.cost {
+                if cost_currency.is_none() {
+                    cost_currency = Some(cost.currency.clone());
+                }
                 cost_basis = take
                     .checked_mul(cost.number)
                     .and_then(|v| cost_basis.checked_add(v))
@@ -618,6 +629,35 @@ impl Inventory {
             updates.push((idx, pos.units.number + reduction));
 
             remaining -= take;
+
+            // Covered: stop here rather than walking the rest of the account.
+            // `available_total` is left partial on purpose — it feeds the
+            // shortfall message only, which is unreachable once the reduction
+            // is satisfied. Walking on to complete a number nobody reads is
+            // what made this O(lots): the spec is concrete by the time `apply`
+            // re-derives, so most later lots fail the predicate and the loop
+            // ran the cost comparison against every one of them.
+            if remaining.is_zero() {
+                break;
+            }
+        }
+
+        // No lot of this currency matched the spec at all.
+        if !seen_any {
+            return Err(BookingError::NoMatchingLot {
+                currency: units.currency.clone(),
+                cost_spec: spec.clone(),
+            });
+        }
+        // Lots matched but did not cover the reduction. Reported with the same
+        // total the up-front sum produced, because reaching here means the
+        // walk visited every matching lot.
+        if !remaining.is_zero() {
+            return Err(BookingError::InsufficientUnits {
+                currency: units.currency.clone(),
+                requested: units.number.abs(),
+                available: available_total,
+            });
         }
 
         Ok((
@@ -634,12 +674,55 @@ impl Inventory {
     /// `retain` + `rebuild_index` exactly as the fused `reduce_ordered` did —
     /// the multi-lot path always paid an O(lots) cache rebuild, and changing
     /// that is a separate question from removing the preview's clone.
+    /// Apply a multi-lot plan, repairing the caches rather than rebuilding
+    /// them.
+    ///
+    /// This used to `retain` away the drained lots and then `rebuild_index()`,
+    /// which is two walks of every slot plus a rehash of every key — per
+    /// reduction. In a FIFO ledger, where reductions are frequent and lots
+    /// accumulate, that is the whole cost: 20k transactions took 8.9s, of
+    /// which 7.1s was the rebuild (#2083).
+    ///
+    /// `updates` already names every slot that changed, so the repair is
+    /// proportional to the lots the reduction touched rather than to the lots
+    /// the account holds. Same treatment `commit_from_lot` got in #2063, for
+    /// the same reason; this is the multi-lot half of that change.
     fn commit_updates(&mut self, updates: &[(usize, Decimal)]) {
+        let mut delta = Decimal::ZERO;
+        let mut currency = None;
+
         for &(idx, new_units) in updates {
+            let previous = self.positions[idx].units.number;
+            delta += new_units - previous;
+            if currency.is_none() {
+                currency = Some(self.positions[idx].units.currency.clone());
+            }
+
+            // Drop the old classification before overwriting: a reduction can
+            // take a lot through zero and flip its sign bucket.
+            self.sign_index_bump(idx, -1);
             self.positions[idx].units.number = new_units;
+            self.sign_index_bump(idx, 1);
+
+            if self.positions[idx].is_empty() {
+                self.sign_index_bump(idx, -1);
+                self.cost_index_remove(idx);
+                self.positions.remove(idx);
+                // Removal leaves a tombstone, so no surviving lot is
+                // renumbered and only the entry naming this lot has to go. An
+                // empty cost spec matches a cost-less position, so ordered
+                // selection can drain one and this map can name it.
+                self.simple_index.retain(|_, stored| *stored != idx);
+            }
         }
-        self.positions.retain(|p| !p.is_empty());
-        self.rebuild_index();
+
+        // One adjustment for the whole plan: every update is a lot of the same
+        // currency, since ordered selection filtered on it.
+        if let Some(currency) = currency
+            && let Some(stats) = self.units_cache.get_mut(&currency)
+        {
+            stats.total = crate::decimal::add_python_scale(stats.total, delta);
+        }
     }
 
     /// AVERAGE booking: merge all lots of the currency.
@@ -1141,6 +1224,99 @@ mod reduction_tests {
             Amount::new(d(units), "STK"),
             Cost::new(d(cost), "USD").with_date(naive_date(2024, 1, day).unwrap()),
         )
+    }
+
+    /// The ordered index selects exactly what the scan selects (#2083).
+    ///
+    /// `plan_ordered` used to sort every matching lot on every call; it now
+    /// walks a maintained (date, slot) index and stops once the reduction is
+    /// covered. That is only sound if the index reproduces the scan's order
+    /// exactly — including the stable-sort tiebreak, `None` dates sorting
+    /// first, and lots added out of date order — so this runs both paths over
+    /// the same inventory and compares.
+    ///
+    /// Clearing `ordered_index` is what forces the scan: an empty index is
+    /// how a shared snapshot looks, and the fallback exists for exactly that.
+    #[test]
+    fn the_ordered_index_selects_what_the_scan_selects() {
+        // Deliberately awkward: out-of-order dates, a duplicate date, a
+        // date-less lot, a second currency, and a cost-less lot.
+        let mut inv = Inventory::new();
+        for lot in [
+            lot(10, 100, 5),
+            lot(10, 101, 2),
+            lot(10, 102, 9),
+            lot(10, 103, 2),
+            Position::with_cost(Amount::new(d(10), "STK"), Cost::new(d(104), "USD")),
+            Position::with_cost(Amount::new(d(10), "OTH"), Cost::new(d(105), "USD")),
+            Position::simple(Amount::new(d(10), "STK")),
+        ] {
+            inv.add(lot).expect("fixture fits in Decimal");
+        }
+
+        let specs = [
+            CostSpec::default(),
+            CostSpec {
+                number: Some(crate::CostNumber::PerUnit { value: d(101) }),
+                currency: Some("USD".into()),
+                ..CostSpec::default()
+            },
+            CostSpec {
+                date: Some(naive_date(2024, 1, 2).unwrap()),
+                ..CostSpec::default()
+            },
+        ];
+
+        for spec in &specs {
+            for reverse in [false, true] {
+                for take in [1i64, 15, 45] {
+                    let units = Amount::new(d(-take), "STK");
+
+                    // Build it explicitly: `reduce` is what normally triggers
+                    // the build, and calling `plan_ordered` directly would
+                    // otherwise leave the index empty and compare the scan
+                    // against itself. That vacuous version of this test passed
+                    // against a deliberately reversed tiebreak.
+                    let mut indexing = inv.clone();
+                    indexing.build_ordered_index();
+                    assert!(
+                        !indexing.ordered_index.is_empty(),
+                        "the fixture must produce an index, or this test compares \
+                         the scan against itself",
+                    );
+                    let indexed = indexing.plan_ordered(&units, spec, reverse);
+
+                    let mut scanning = inv.clone();
+                    scanning.ordered_index.clear();
+                    let scanned = scanning.plan_ordered(&units, spec, reverse);
+
+                    match (indexed, scanned) {
+                        (Ok((a_result, a_updates)), Ok((b_result, b_updates))) => {
+                            assert_eq!(
+                                a_updates, b_updates,
+                                "index and scan chose different lots for {spec:?} \
+                                 reverse={reverse} take={take}",
+                            );
+                            assert_eq!(
+                                a_result.cost_basis, b_result.cost_basis,
+                                "index and scan disagree on cost basis for {spec:?} \
+                                 reverse={reverse} take={take}",
+                            );
+                        }
+                        (Err(a), Err(b)) => assert_eq!(
+                            a.to_string(),
+                            b.to_string(),
+                            "index and scan report different errors for {spec:?} \
+                             reverse={reverse} take={take}",
+                        ),
+                        (a, b) => panic!(
+                            "index and scan disagree on success for {spec:?} \
+                             reverse={reverse} take={take}: {a:?} vs {b:?}"
+                        ),
+                    }
+                }
+            }
+        }
     }
 
     fn mk(lots: impl IntoIterator<Item = Position>) -> Inventory {

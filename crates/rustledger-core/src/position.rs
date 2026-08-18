@@ -129,7 +129,14 @@ impl Position {
         match (&self.cost, spec.is_empty()) {
             (None, true) => true,
             (None, false) => false,
-            (Some(cost), _) => spec.matches(cost),
+            // A spec that constrains nothing matches every lot, so skip the
+            // field-by-field walk. `matches` returns `true` for an all-`None`
+            // spec by construction, which makes this a short-circuit rather
+            // than a second rule. Ordered selection calls this once per lot
+            // per reduction, and the bare `{}` FIFO sell is the spec that
+            // reaches it most (#2083).
+            (Some(_), true) => true,
+            (Some(cost), false) => spec.matches(cost),
         }
     }
 

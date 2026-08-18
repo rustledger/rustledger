@@ -477,9 +477,11 @@ impl<'a> Executor<'a> {
         // SELECT, no WHERE-time read), the pre-snapshot is never
         // observed; we skip the extra clone and let the post-WHERE
         // refresh fill `ctx.balance`. Caught by Copilot review on
-        // PR #1085. `account_balance` doesn't need an analogous gate
-        // because it isn't refreshed post-WHERE — it's already the
-        // running total after the eager update above.
+        // PR #1085. `account_balance` now gets the same treatment, for the
+        // same reason but with a different mechanism: it is not REFRESHED
+        // post-WHERE (the eager update above already made it the running
+        // total), so instead of a late refresh it is simply filled late —
+        // after the filter, for rows that survive. See #2086.
         let where_reads_balance =
             where_clause.is_some_and(|w| expr_references_column(w, "balance"));
         // Same distinction for `account_balance`: referenced ANYWHERE decides

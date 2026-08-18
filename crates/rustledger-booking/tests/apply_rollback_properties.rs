@@ -20,6 +20,9 @@ use rustledger_core::{
 };
 
 const CURRENCY: &str = "X";
+/// A commodity the generated legs never mention, so the doomed posting can
+/// always find lots to fail against.
+const ANCHOR: &str = "ANCHOR";
 const COST_CURRENCY: &str = "USD";
 
 fn date(d: u32) -> NaiveDate {
@@ -59,13 +62,19 @@ fn leg_strategy(costs: Vec<u32>) -> impl Strategy<Value = Leg> {
 }
 
 /// The lots an account holds, as a comparable snapshot.
-fn holdings(engine: &BookingEngine) -> Vec<(Decimal, Option<Decimal>, Option<NaiveDate>)> {
+fn holdings(engine: &BookingEngine) -> Vec<(String, Decimal, Option<Decimal>, Option<NaiveDate>)> {
     engine
         .inventories()
         .filter(|(account, _)| account.as_str() == "Assets:Stock")
         .flat_map(|(_, inv)| inv.positions())
         .map(|p| {
             (
+                // The commodity is part of the snapshot because the account
+                // now holds two: the generated legs work on one, the doomed
+                // leg reduces the other. Without it, a rollback that restored
+                // the right numbers against the wrong commodity would compare
+                // equal.
+                p.units.currency.to_string(),
                 p.units.number,
                 p.cost.as_ref().map(|c| c.number),
                 p.cost.as_ref().and_then(|c| c.date),
@@ -101,6 +110,15 @@ proptest! {
                 .with_synthesized_posting(buy);
             engine.apply(&txn).expect("seeding fits");
         }
+
+        // A lot in a commodity no generated leg touches. The doomed posting
+        // below reduces THIS, so it is a reduction no matter what the prefix
+        // did to the generated commodity — see the comment there.
+        let mut anchor = Posting::new("Assets:Stock", Amount::new(Decimal::from(50), ANCHOR));
+        anchor.cost = Some(per_unit(7, 1));
+        engine
+            .apply(&Transaction::new(date(1), "anchor").with_synthesized_posting(anchor))
+            .expect("the anchor lot fits");
 
         let before = holdings(&engine);
 
@@ -142,9 +160,22 @@ proptest! {
             };
             txn = txn.with_synthesized_posting(posting);
         }
+        // Doomed against the ANCHOR commodity, not the generated one.
+        //
+        // It used to oversell the generated commodity, on the assumption that
+        // overselling always
+        // fails. It does not: a prefix of
+        // `{*}` merges can empty the account, and an empty cost spec against an
+        // empty account is an AUGMENTATION,
+        // not a failed reduction — beancount's `book_reductions` makes the same
+        // call (`if balance.is_reduced_by(units)`, else augment). So the
+        // transaction succeeded, and this property test failed at random
+        // depending on which prefix proptest generated. Reducing a commodity
+        // the prefix cannot drain restores "this leg always fails" as a fact
+        // rather than a hope.
         let mut doomed = Posting::new(
             "Assets:Stock",
-            Amount::new(Decimal::from(-100_000), CURRENCY),
+            Amount::new(Decimal::from(-100_000), ANCHOR),
         );
         doomed.cost = Some(CostSpec {
             number: None,

@@ -530,7 +530,8 @@ impl Inventory {
 
         // Candidates in FIFO order.
         //
-        // `ordered_index` already holds this currency's cost-bearing lots in
+        // `ordered_index` already holds this currency's lots — every one of
+        // them, cost-less included, since an empty spec matches those too — in
         // (date, slot) order, so the common path neither scans every slot nor
         // sorts per call. It did both, once per reduction, and `{}` is how
         // FIFO sells are written — so that was the normal case (#2083).

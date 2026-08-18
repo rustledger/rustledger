@@ -985,8 +985,15 @@ pub struct Inventory {
     /// Not serialized - rebuilt on demand, like the caches above.
     #[serde(skip)]
     cost_index: FxHashMap<CostKey, smallvec::SmallVec<[usize; 2]>>,
-    /// Cost-bearing lots per units-currency, in the order FIFO consumes them:
-    /// lot date ascending, ties broken by slot ascending.
+    /// EVERY lot per units-currency, in the order FIFO consumes them: lot date
+    /// ascending, ties broken by slot ascending.
+    ///
+    /// Cost-LESS lots are in here too, and deliberately. An empty cost spec
+    /// matches one (`matches_cost_spec`: `(None, true) => true`), so ordered
+    /// selection can drain one — an index holding only cost-bearing lots chose
+    /// a different lot than the scan it replaced, which is what the
+    /// scan-equivalence test caught. `cost_index` is the map keyed on cost;
+    /// this one is keyed on nothing but the commodity.
     ///
     /// `cost_index` cannot serve an under-specified spec — a bare `{}` names
     /// no cost to key on — so ordered selection scanned every slot instead,
@@ -1853,7 +1860,8 @@ impl Inventory {
         entry.insert(at, slot);
     }
 
-    /// Populate `ordered_index` from the current lots.
+    /// Populate `ordered_index` from the current lots — all of them, cost-less
+    /// included, because an empty cost spec selects those too.
     ///
     /// Called the first time an ordered booking method reduces against this
     /// inventory, then kept current incrementally. Ordering matches what
@@ -1882,8 +1890,10 @@ impl Inventory {
         self.ordered_index = Some(Box::new(index));
     }
 
-    /// Cost-bearing slots of `currency` in FIFO order, or `None` when the
-    /// index cannot answer and the caller must scan.
+    /// Every slot of `currency` in FIFO order, or `None` when the index cannot
+    /// answer and the caller must scan.
+    ///
+    /// Cost-less slots included — see the field's own note on why.
     fn ordered_candidates(&self, currency: &crate::Currency) -> Option<&[usize]> {
         let index = self.ordered_index.as_ref()?;
         Some(index.get(currency).map_or(&[][..], Vec::as_slice))

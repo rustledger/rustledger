@@ -703,6 +703,22 @@ impl Inventory {
     /// the account holds. Same treatment `commit_from_lot` got in #2063, for
     /// the same reason; this is the multi-lot half of that change.
     fn commit_updates(&mut self, updates: &[(usize, Decimal)]) {
+        // Every update names a lot of the same currency, because every producer
+        // of `ReductionPlan::Updates` filters on `units.currency` before
+        // planning. This repair DEPENDS on that — it adjusts one currency's
+        // running total — where the old `rebuild_index()` recomputed them all
+        // and so could not notice the invariant being violated.
+        //
+        // Checked here rather than after the loop: by then the drained lots are
+        // tombstones, and indexing one panics.
+        debug_assert!(
+            updates.windows(2).all(|pair| {
+                self.positions[pair[0].0].units.currency == self.positions[pair[1].0].units.currency
+            }),
+            "commit_updates was given lots of more than one currency; the units \
+             cache is adjusted per currency and would silently drift",
+        );
+
         let mut delta = Decimal::ZERO;
         let mut currency = None;
 
@@ -731,8 +747,7 @@ impl Inventory {
             }
         }
 
-        // One adjustment for the whole plan: every update is a lot of the same
-        // currency, since ordered selection filtered on it.
+        // One adjustment for the whole plan: see the assertion at the top.
         if let Some(currency) = currency
             && let Some(stats) = self.units_cache.get_mut(&currency)
         {
@@ -1239,6 +1254,44 @@ mod reduction_tests {
             Amount::new(d(units), "STK"),
             Cost::new(d(cost), "USD").with_date(naive_date(2024, 1, day).unwrap()),
         )
+    }
+
+    /// A multi-lot reduction removes what it drained, and nothing else.
+    ///
+    /// `commit_updates` used to `retain(|p| !p.is_empty())` over the whole
+    /// inventory, so any reduction that crossed two lots also swept away every
+    /// unrelated zero-unit position as a side effect. Zero-unit lots are not
+    /// scrap: `Inventory::len` counts them and `currency_accounts` branches on
+    /// `len() == 1`, so sweeping them changed what other surfaces reported
+    /// depending on whether a reduction happened to be multi-lot.
+    #[test]
+    fn a_multi_lot_reduction_leaves_unrelated_empty_lots_alone() {
+        let mut inv = mk([lot(10, 100, 1), lot(10, 200, 2)]);
+        // An unrelated zero-unit position in another commodity. Netted to
+        // zero rather than added as zero: `add` drops a zero-unit position
+        // outright, so the only way one exists is a cost-less lot merging
+        // through zero — which is exactly the case `Inventory::len`'s contract
+        // is about.
+        inv.add(Position::simple(Amount::new(d(5), "ZERO")))
+            .expect("fixture fits in Decimal");
+        inv.add(Position::simple(Amount::new(d(-5), "ZERO")))
+            .expect("fixture fits in Decimal");
+        let before = inv.len();
+
+        // Cross both STK lots, draining the first.
+        inv.reduce(
+            &Amount::new(d(-15), "STK"),
+            Some(&CostSpec::default()),
+            BookingMethod::Fifo,
+        )
+        .expect("15 of 20 units are there");
+
+        assert_eq!(
+            inv.len(),
+            before - 1,
+            "exactly the drained lot should be gone: the untouched zero-unit \
+             position is not this reduction's business",
+        );
     }
 
     /// Insufficiency outranks overflow, as it did before the walk was made lazy.

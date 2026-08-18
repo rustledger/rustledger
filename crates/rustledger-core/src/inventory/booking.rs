@@ -1280,14 +1280,14 @@ mod reduction_tests {
                     let mut indexing = inv.clone();
                     indexing.build_ordered_index();
                     assert!(
-                        !indexing.ordered_index.is_empty(),
+                        indexing.ordered_index.is_some(),
                         "the fixture must produce an index, or this test compares \
                          the scan against itself",
                     );
                     let indexed = indexing.plan_ordered(&units, spec, reverse);
 
                     let mut scanning = inv.clone();
-                    scanning.ordered_index.clear();
+                    scanning.ordered_index = None;
                     let scanned = scanning.plan_ordered(&units, spec, reverse);
 
                     match (indexed, scanned) {

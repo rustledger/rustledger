@@ -998,8 +998,12 @@ pub struct Inventory {
     /// entry hides a lot the reduction should have seen. Insertion is at the
     /// single `add` site; removal rides on `cost_index_remove`.
     /// Not serialized - rebuilt on demand, like the caches above.
+    /// `None` until ordered selection asks for it: boxed so an inventory that
+    /// never needs one carries a pointer rather than a map. The map itself is
+    /// three words plus its allocation, on a type that is created per account
+    /// and cloned per BQL output row.
     #[serde(skip)]
-    ordered_index: FxHashMap<crate::Currency, Vec<usize>>,
+    ordered_index: Option<Box<FxHashMap<crate::Currency, Vec<usize>>>>,
     /// Whether an undo log is open. Not serialized; a transaction never spans
     /// a round trip.
     #[serde(skip)]
@@ -1146,7 +1150,7 @@ impl TryFrom<InventoryWire> for Inventory {
             simple_index: FxHashMap::default(),
             units_cache: FxHashMap::default(),
             cost_index: FxHashMap::default(),
-            ordered_index: FxHashMap::default(),
+            ordered_index: None,
             undo_open: false,
             #[cfg(debug_assertions)]
             undo_witness: None,
@@ -1759,7 +1763,16 @@ impl Inventory {
         let Some(position) = self.positions.get(idx) else {
             return;
         };
-        let currency = position.units.currency.clone();
+        // Only pay for the ordered index when one has been built: this runs on
+        // every drained lot, and cloning the currency to probe a map that is
+        // not there is pure overhead for a ledger that never reduces with an
+        // under-specified spec.
+        let ordered = self.ordered_index.is_some().then(|| {
+            (
+                position.units.currency.clone(),
+                position.cost.as_ref().and_then(|c| c.date),
+            )
+        });
         if let Some(key) = cost_key(position)
             && let Some(slots) = self.cost_index.get_mut(&key)
         {
@@ -1771,8 +1784,13 @@ impl Inventory {
         // The list is ordered, so find the entry rather than scanning for it:
         // a FIFO account drains its oldest lot over and over, and `retain`
         // walked every lot each time.
-        let date = position.cost.as_ref().and_then(|c| c.date);
-        if let Some(slots) = self.ordered_index.get_mut(&currency) {
+        let Some((currency, date)) = ordered else {
+            return;
+        };
+        let Some(index) = self.ordered_index.as_mut() else {
+            return;
+        };
+        if let Some(slots) = index.get_mut(&currency) {
             let positions = &self.positions;
             let at = slots.partition_point(|&existing| {
                 let existing_key = (
@@ -1793,7 +1811,7 @@ impl Inventory {
                 slots.retain(|slot| *slot != idx);
             }
             if slots.is_empty() {
-                self.ordered_index.remove(&currency);
+                index.remove(&currency);
             }
         }
     }
@@ -1813,12 +1831,15 @@ impl Inventory {
         // reductions all resolve through `cost_index` never builds one and so
         // never pays for it: maintaining it from every `add` unconditionally
         // cost 6% on the `investment` shape, which never reads it.
-        if self.ordered_index.is_empty() || !matches!(self.positions, PositionStore::Owned(_)) {
+        if !matches!(self.positions, PositionStore::Owned(_)) {
             return;
         }
+        let Some(index) = self.ordered_index.as_mut() else {
+            return;
+        };
         let key = (date, slot);
         let positions = &self.positions;
-        let entry = self.ordered_index.entry(currency.clone()).or_default();
+        let entry = index.entry(currency.clone()).or_default();
         let at = entry.partition_point(|&existing| {
             let existing_key = (
                 positions
@@ -1842,15 +1863,15 @@ impl Inventory {
         if !matches!(self.positions, PositionStore::Owned(_)) {
             return;
         }
-        self.ordered_index.clear();
+        let mut index: FxHashMap<crate::Currency, Vec<usize>> = FxHashMap::default();
         for (idx, pos) in self.positions.iter_slots() {
-            self.ordered_index
+            index
                 .entry(pos.units.currency.clone())
                 .or_default()
                 .push(idx);
         }
         let positions = &self.positions;
-        for slots in self.ordered_index.values_mut() {
+        for slots in index.values_mut() {
             slots.sort_by_key(|&idx| {
                 positions
                     .get(idx)
@@ -1858,19 +1879,14 @@ impl Inventory {
                     .and_then(|c| c.date)
             });
         }
+        self.ordered_index = Some(Box::new(index));
     }
 
     /// Cost-bearing slots of `currency` in FIFO order, or `None` when the
     /// index cannot answer and the caller must scan.
     fn ordered_candidates(&self, currency: &crate::Currency) -> Option<&[usize]> {
-        if self.ordered_index.is_empty() {
-            return None;
-        }
-        Some(
-            self.ordered_index
-                .get(currency)
-                .map_or(&[][..], Vec::as_slice),
-        )
+        let index = self.ordered_index.as_ref()?;
+        Some(index.get(currency).map_or(&[][..], Vec::as_slice))
     }
 
     /// Slots that could satisfy `spec` for `units`, or `None` when the spec
@@ -2018,7 +2034,7 @@ impl Inventory {
         if matches!(
             method,
             BookingMethod::Fifo | BookingMethod::Lifo | BookingMethod::Hifo
-        ) && self.ordered_index.is_empty()
+        ) && self.ordered_index.is_none()
         {
             self.build_ordered_index();
         }
@@ -2070,7 +2086,14 @@ impl Inventory {
         self.simple_index.clear();
         self.units_cache.clear();
         self.cost_index.clear();
-        self.ordered_index.clear();
+        // Preserve whether the ordered index has been BUILT, rather than
+        // building it here. A rebuild happens on compaction and on rollback,
+        // neither of which means ordered selection is in use — repopulating
+        // unconditionally handed the index (and its maintenance cost) to every
+        // ledger, including the ones whose reductions all resolve through
+        // `cost_index`.
+        let ordered_was_built = self.ordered_index.is_some();
+        self.ordered_index = None;
 
         // The cost index is for BOOKING, and only the owned backing books.
         //
@@ -2088,10 +2111,13 @@ impl Inventory {
                 if let Some(key) = cost_key(pos) {
                     self.cost_index.entry(key).or_default().push(idx);
                 }
-                self.ordered_index
-                    .entry(pos.units.currency.clone())
-                    .or_default()
-                    .push(idx);
+                if ordered_was_built {
+                    self.ordered_index
+                        .get_or_insert_with(Box::default)
+                        .entry(pos.units.currency.clone())
+                        .or_default()
+                        .push(idx);
+                }
             }
             // Update units cache for all positions. Checked, not `+=`:
             // `Decimal`'s `+` panics on overflow, and this runs over payloads.
@@ -2135,14 +2161,16 @@ impl Inventory {
         // order with slot as the tiebreak. `sort_by_key` is stable, so the
         // slot order already there survives — the same two-level order
         // `plan_ordered` produced when it sorted per call.
-        let positions = &self.positions;
-        for slots in self.ordered_index.values_mut() {
-            slots.sort_by_key(|&idx| {
-                positions
-                    .get(idx)
-                    .and_then(|p| p.cost.as_ref())
-                    .and_then(|c| c.date)
-            });
+        if let Some(index) = self.ordered_index.as_mut() {
+            let positions = &self.positions;
+            for slots in index.values_mut() {
+                slots.sort_by_key(|&idx| {
+                    positions
+                        .get(idx)
+                        .and_then(|p| p.cost.as_ref())
+                        .and_then(|c| c.date)
+                });
+            }
         }
         Ok(())
     }

@@ -113,9 +113,9 @@ def gen_investment(n: int) -> None:
         *[f"Assets:Broker:{t} {t}" for t in tickers],
     ]
     _header("Profiling Workload — investment", accounts, tickers)
-    # open lots per ticker: list of (units, cost) still held
-    # (units, cost, acquisition date) — the date is what makes the sell's
-    # lot reference unambiguous when two buys land on the same cost.
+    # Open lots per ticker: (units, cost, acquisition date) still held. The
+    # date is what makes the sell's lot reference unambiguous when two buys
+    # land on the same cost.
     held: dict[str, list[tuple[int, str, str]]] = {t: [] for t in tickers}
     d = datetime.date(2020, 1, 2)
     for i in range(n):

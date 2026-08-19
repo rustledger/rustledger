@@ -193,12 +193,46 @@ jobs:
       - name: Measure memory usage
         id: memory
         run: |
+          set -euo pipefail
           # Peak RSS. Explicitly the PR binary at /tmp: `target/release/rledger`
           # is whichever side was built LAST, which is the base — measuring it
           # here would report the base's memory under the PR's name.
-          rustledger_mem=$(/usr/bin/time -v /tmp/rledger-pr check benchmark.beancount 2>&1 | grep "Maximum resident set size" | awk '{print $6}')
-          base_mem=$(/usr/bin/time -v /tmp/rledger-base check benchmark.beancount 2>&1 | grep "Maximum resident set size" | awk '{print $6}')
-          beancount_mem=$(/usr/bin/time -v bean-check benchmark.beancount 2>&1 | grep "Maximum resident set size" | awk '{print $6}')
+          #
+          # Each is a SINGLE sample, which is why the comment reports the
+          # memory delta without a significance verdict: there is no spread
+          # to test it against. Peak RSS for a fixed binary on a fixed input
+          # is close to deterministic, so it is worth reporting — it is just
+          # not worth calling a regression on its own.
+          peak_rss_kb() {
+            # `time -v` writes its report to stderr and exits with the
+            # child's status; an empty parse means the run died or the
+            # format changed, and a blank number must not reach the comment
+            # as a plausible-looking value.
+            # `time -v` prints a perfectly plausible report for ITSELF when the
+            # command does not exist (~0.9 MB), so a missing binary would be
+            # reported as the PR's memory rather than failing. Resolve it
+            # first.
+            if ! command -v "$1" >/dev/null 2>&1 && [ ! -x "$1" ]; then
+              echo "::error::Not executable, cannot measure: $1" >&2
+              exit 1
+            fi
+            local out
+            # `|| true` twice on purpose: the peak RSS is a valid measurement
+            # even if the child exits non-zero (a ledger with errors still
+            # ran), and a failed grep under `pipefail` would abort before the
+            # explicit check below could say what actually went wrong.
+            out=$({ /usr/bin/time -v "$@" 2>&1 >/dev/null || true; } \
+                  | grep "Maximum resident set size" | awk '{print $6}') || true
+            if [ -z "$out" ]; then
+              echo "::error::Could not read peak RSS for: $*" >&2
+              exit 1
+            fi
+            echo "$out"
+          }
+
+          rustledger_mem=$(peak_rss_kb /tmp/rledger-pr check benchmark.beancount)
+          base_mem=$(peak_rss_kb /tmp/rledger-base check benchmark.beancount)
+          beancount_mem=$(peak_rss_kb bean-check benchmark.beancount)
 
           rustledger_mb=$(echo "scale=1; $rustledger_mem / 1024" | bc)
           base_mb=$(echo "scale=1; $base_mem / 1024" | bc)

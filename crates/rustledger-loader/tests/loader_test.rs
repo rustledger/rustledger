@@ -1947,6 +1947,80 @@ fn same_date_buy_after_sell_does_not_make_an_empty_cost_spec_ambiguous() {
     );
 }
 
+#[test]
+fn same_date_reordering_does_not_change_which_lot_hifo_selects() {
+    // #2093, the silent half. The reordering did not only turn valid ledgers
+    // into errors — where it did NOT error it could still change the answer.
+    //
+    // HIFO takes the highest-cost lot available *at the moment the sale
+    // books*. Here the expensive lot is bought after the sale in file order,
+    // so Python never offers it to the sale: the cheap lot goes, and 5 X
+    // {50} + 10 X {80} = 1050.00 USD of basis remains. Floating the buys
+    // ahead of the sale offered HIFO the expensive lot instead, leaving
+    // 10 X {50} + 5 X {80} = 900.00 USD.
+    //
+    // Neither version reports an error. Verified against beancount 3.2.3,
+    // which answers 1050.00 USD.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hifo_same_date.beancount");
+    std::fs::write(
+        &path,
+        r#"option "operating_currency" "USD"
+2020-01-01 open Assets:Inv "HIFO"
+2020-01-01 open Assets:Cash
+2020-01-01 open Income:PnL
+
+2020-06-01 * "buy cheap"
+  Assets:Inv    10 X {50.00 USD}
+  Assets:Cash  -500.00 USD
+
+2020-06-01 * "sell"
+  Assets:Inv    -5 X {} @ 90.00 USD
+  Assets:Cash  450.00 USD
+  Income:PnL
+
+2020-06-01 * "buy expensive - written AFTER the sell"
+  Assets:Inv    10 X {80.00 USD}
+  Assets:Cash  -800.00 USD
+"#,
+    )
+    .unwrap();
+    let ledger = load(&path, &LoadOptions::default()).expect("should load");
+    assert!(
+        ledger
+            .errors
+            .iter()
+            .all(|e| !matches!(e.severity, ErrorSeverity::Error)),
+        "fixture books cleanly on both sides of this fix; that is the point"
+    );
+
+    // Which lot did the sale take? Assert on the booked cost, not on the
+    // absence of errors — an error is exactly what this case does NOT
+    // produce when it is wrong.
+    let sold_at = ledger
+        .directives
+        .iter()
+        .find_map(|d| match &d.value {
+            rustledger_core::Directive::Transaction(t) if t.narration.as_str() == "sell" => t
+                .postings
+                .iter()
+                .find(|p| p.account.as_str() == "Assets:Inv")
+                .and_then(|p| p.cost.as_ref())
+                .and_then(|c| c.number.as_ref()),
+            _ => None,
+        })
+        .expect("the sell posting should be booked against a lot");
+    let rustledger_core::CostNumber::PerUnit { value } = sold_at else {
+        panic!("expected a resolved per-unit cost, got {sold_at:?}");
+    };
+    assert_eq!(
+        *value,
+        rust_decimal::Decimal::new(5000, 2),
+        "HIFO must take the 50.00 lot -- the only one bought before this sale. \
+         Taking 80.00 means a same-date buy written later was floated ahead of it."
+    );
+}
+
 // ─── Zero-value interpolated posting handling (#877 + Python compat) ────
 //
 // Two competing invariants:

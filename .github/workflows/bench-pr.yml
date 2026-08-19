@@ -275,11 +275,28 @@ jobs:
               # ~14%, so a real 10% regression would read as noise.
               sem = math.sqrt(pr['stddev'] ** 2 / pr['runs'] + base['stddev'] ** 2 / base['runs'])
               gap = abs(pr['mean'] - base['mean'])
-              # And an effect-size floor, so a difference that is statistically
-              # resolvable but too small to act on is not dressed up as a
-              # finding. Applied PER SHAPE: a regression in one shape must not
-              # be diluted by the others holding steady.
-              significant = gap > 2 * sem and abs(change) >= 3.0
+              # And an effect-size floor. This is not decoration on top of the
+              # significance test — it is doing the load-bearing work, because
+              # the standard error only describes variance WITHIN a run. Two
+              # binaries built from identical source still differ run to run
+              # through code layout, page placement and a shared runner's
+              # neighbors, and that component is invisible to the SEM: with
+              # 20 tight samples a 2ms systematic offset clears 2σ easily.
+              #
+              # 3% was measured to be too low. On #2098 — a change to this
+              # workflow file and nothing else, so both sides were the same
+              # Rust source — `simple` came back +3.1%, clearing both tests
+              # and reporting 🟡 slower. Local runs of identical builds
+              # produced -3.3%, +3.0%, +2.5% and -2.5% on various shapes.
+              # 5% covers that; the regressions this exists to catch are the
+              # #2083 class, which is +1788%.
+              #
+              # Applied PER SHAPE: a regression in one shape must not be
+              # diluted by the others holding steady. Note that testing N
+              # shapes is also N chances to trip, which is a further reason
+              # for the floor to sit above the observed noise rather than at
+              # its edge.
+              significant = gap > 2 * sem and abs(change) >= 5.0
 
               bean = read(f'beancount-{shape}.json')
               bean = ms(bean['results'][0]) if bean else None
@@ -346,7 +363,7 @@ jobs:
           runs = runs_seen.pop() if len(runs_seen) == 1 else min(runs_seen, default=0)
           out += ['',
                   f'<sub>A difference counts only when it clears the combined spread of the two '
-                  f'measurements, per shape (2σ: {noise_txt}), and is at least 3%.</sub>',
+                  f'measurements, per shape (2σ: {noise_txt}), and is at least 5%.</sub>',
                   f'<sub>{gen.DEFAULT_TXNS:,} transactions per shape · {runs} runs, '
                   f"{os.environ['BENCH_WARMUP']} warmup · "
                   f'<a href="https://github.com/sharkdp/hyperfine">hyperfine</a></sub>', '',

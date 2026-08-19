@@ -105,9 +105,40 @@ export function collectLedgerFiles(entryPath: string): {
   const key = (abs: string): string =>
     path.relative(rootDir, abs).split(path.sep).join("/");
 
+  // Canonical path -> the key it was first collected under. `path.resolve`
+  // normalizes `.` and `..` but NOT symlinks, so without this a file reached
+  // both directly and through a symlink lands under two keys — and a
+  // VirtualFileSystem has no notion of symlinks to collapse them again, so the
+  // loader would read the same directives twice and silently double every
+  // amount in that file. `rledger check` resolves the link, loads it once, and
+  // reports the duplicate.
+  const canonical = new Map<string, string>();
+
   const visit = (abs: string): void => {
     if (seen.has(abs)) return;
     seen.add(abs);
+
+    let real: string;
+    try {
+      real = fs.realpathSync(abs);
+    } catch {
+      real = abs;
+    }
+
+    const firstKey = canonical.get(real);
+    if (firstKey !== undefined) {
+      // An alias for a file already in the map. It still has to RESOLVE — the
+      // include names this path — so stand in a one-line include of the
+      // canonical copy rather than the contents. The loader then reaches the
+      // same file twice and says so, which is what the CLI does, instead of
+      // counting it twice.
+      const target = path
+        .relative(path.dirname(abs), path.resolve(rootDir, firstKey))
+        .split(path.sep)
+        .join("/");
+      files[key(abs)] = `include "${target}"\n`;
+      return;
+    }
 
     let content: string;
     try {
@@ -117,6 +148,7 @@ export function collectLedgerFiles(entryPath: string): {
       // whichever file asked for it — better placed than anything we could say.
       return;
     }
+    canonical.set(real, key(abs));
     files[key(abs)] = content;
 
     const baseDir = path.dirname(abs);

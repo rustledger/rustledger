@@ -1049,6 +1049,38 @@ describe('collectLedgerFiles', () => {
       e.message.includes('Duplicate filename parsed'))).toBe(true);
   });
 
+  it('does not count a symlinked file twice', () => {
+    // `path.resolve` normalizes `.` and `..` but not symlinks, so a file
+    // reached both directly and through a link used to land under two keys —
+    // and a VirtualFileSystem has no symlinks to collapse them again, so the
+    // loader read the same directives twice and silently doubled every amount
+    // in that file: 20.00 where `rledger check` says 10.00.
+    //
+    // The alias still has to resolve, since an include names it, so it stands
+    // in a one-line include of the canonical copy.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-symlink-'));
+    fs.mkdirSync(path.join(dir, 'j'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'j/x.beancount'),
+      '2020-03-01 * "t"\n  Expenses:Food   10.00 USD\n  Assets:Cash    -10.00 USD\n'
+    );
+    fs.symlinkSync(path.join(dir, 'j/x.beancount'), path.join(dir, 'link.beancount'));
+    const main = path.join(dir, 'sym.beancount');
+    fs.writeFileSync(
+      main,
+      '2020-01-01 open Assets:Cash USD\n2020-01-01 open Expenses:Food USD\n' +
+        'include "j/x.beancount"\ninclude "link.beancount"\n'
+    );
+
+    const { files, entry } = collectLedgerFiles(main);
+    const result = rustledger.queryMultiFile(
+      files,
+      entry,
+      "SELECT sum(number(position)) AS n WHERE account='Expenses:Food'"
+    );
+    expect(result.rows[0][0]).toContain('10.00');
+  });
+
   it('attributes an error to the file and line it is on', () => {
     // The reason this architecture exists. Concatenating the ledger into one
     // string reported this same error as `file: null, line: 9` — a position in

@@ -178,14 +178,19 @@ jobs:
       - name: Measure memory usage
         id: memory
         run: |
-          # Measure peak RSS
-          rustledger_mem=$(/usr/bin/time -v ./target/release/rledger check benchmark.beancount 2>&1 | grep "Maximum resident set size" | awk '{print $6}')
+          # Peak RSS. Explicitly the PR binary at /tmp: `target/release/rledger`
+          # is whichever side was built LAST, which is the base — measuring it
+          # here would report the base's memory under the PR's name.
+          rustledger_mem=$(/usr/bin/time -v /tmp/rledger-pr check benchmark.beancount 2>&1 | grep "Maximum resident set size" | awk '{print $6}')
+          base_mem=$(/usr/bin/time -v /tmp/rledger-base check benchmark.beancount 2>&1 | grep "Maximum resident set size" | awk '{print $6}')
           beancount_mem=$(/usr/bin/time -v bean-check benchmark.beancount 2>&1 | grep "Maximum resident set size" | awk '{print $6}')
 
           rustledger_mb=$(echo "scale=1; $rustledger_mem / 1024" | bc)
+          base_mb=$(echo "scale=1; $base_mem / 1024" | bc)
           beancount_mb=$(echo "scale=1; $beancount_mem / 1024" | bc)
 
           echo "rustledger_mem_mb=$rustledger_mb" >> $GITHUB_OUTPUT
+          echo "base_mem_mb=$base_mb" >> $GITHUB_OUTPUT
           echo "beancount_mem_mb=$beancount_mb" >> $GITHUB_OUTPUT
 
           echo "rustledger: ${rustledger_mb}MB"
@@ -217,6 +222,7 @@ jobs:
             const change = parseFloat('${{ steps.benchmark.outputs.change }}');
             const noise = parseFloat('${{ steps.benchmark.outputs.noise }}');
             const significant = '${{ steps.benchmark.outputs.significant }}' === 'true';
+            const base_mem = parseFloat('${{ steps.memory.outputs.base_mem_mb }}') || 0;
 
             // Calculate memory ratio
             const mem_ratio = (beancount_mem / rustledger_mem).toFixed(1);
@@ -246,6 +252,11 @@ jobs:
                 '|--------|------|---------|--------|\n' +
                 '| Time | ' + base_ms + 'ms ± ' + base_stddev + 'ms | ' +
                 rustledger_ms + 'ms ± ' + rustledger_stddev + 'ms | ' + verdict + ' |\n' +
+                (base_mem > 0
+                  ? '| Memory | ' + base_mem + ' MB | ' + rustledger_mem + ' MB | ' +
+                    (((rustledger_mem - base_mem) / base_mem * 100) >= 0 ? '+' : '') +
+                    ((rustledger_mem - base_mem) / base_mem * 100).toFixed(1) + '% |\n'
+                  : '') +
                 '\n<sub>A difference counts only when it clears the combined spread of the two ' +
                 'measurements (2σ ≈ ' + noise.toFixed(1) + 'ms here).</sub>\n';
             } else {

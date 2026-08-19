@@ -381,7 +381,7 @@ jobs:
           script: |
             // The body is built by the previous step and read from disk.
             // It used to be assembled here from ~15 step outputs threaded
-            // through `${{ }}` interpolation, which is how the footer came to
+            // through GitHub expression interpolation, which is how the footer came to
             // claim "5 runs, 2 warmup" for a run that used 20 and 3: nothing
             // connects such a string to the value it describes. The Python
             // that computes the numbers now also formats them.

@@ -30,18 +30,50 @@ const INCLUDE_REGEX = new RegExp(INCLUDE_PATTERN, 'gm');
  * @throws Error if a file cannot be read or circular include detected
  */
 export function loadWithIncludes(filePath: string): string {
-  const visited = new Set<string>();
-  return loadFileRecursive(filePath, visited);
+  return loadFileRecursive(filePath, new Set<string>(), new Set<string>());
 }
 
-function loadFileRecursive(filePath: string, visited: Set<string>): string {
+/**
+ * @param stack  files on the current recursion path — a repeat is a CYCLE.
+ * @param emitted  every file already inlined anywhere in this load — a repeat
+ *   is a DIAMOND, and must contribute its directives only once.
+ *
+ * The two sets answer different questions and both are needed. `stack` alone
+ * (which is what this used to carry, deleting on the way out "to allow same
+ * file from different branches") lets a diamond through: include `x` directly
+ * and again via a file that includes it, and every transaction in `x` lands in
+ * the source twice. Nothing then errors — the ledger simply has doubled
+ * amounts, so balances are wrong and assertions fail against figures the user
+ * cannot find. Sharing a `prices` or `accounts` file between monthly journals
+ * is an ordinary way to reach that.
+ *
+ * `rledger check` and bean-check both parse such a file once (beancount also
+ * says `Duplicate filename parsed`), so inlining it twice made this tool
+ * disagree with the CLI it is meant to mirror.
+ *
+ * A cycle still throws, which is what the CLI does with one too — see the
+ * ordering note in the body, which is what makes that true.
+ */
+function loadFileRecursive(
+  filePath: string,
+  stack: Set<string>,
+  emitted: Set<string>
+): string {
   const absolutePath = path.resolve(filePath);
 
-  // Check for circular includes (only in current recursion stack)
-  if (visited.has(absolutePath)) {
+  // Order matters. A file on the current path is a CYCLE and must throw, the
+  // way `rledger check` errors on one; a file merely seen before is a DIAMOND
+  // and is skipped. Testing `emitted` first turns the former into the latter,
+  // because a cycle's repeat is always also a repeat — and the tool then
+  // reports a ledger clean that the CLI refuses.
+  if (stack.has(absolutePath)) {
     throw new Error(`Circular include detected: ${absolutePath}`);
   }
-  visited.add(absolutePath);
+  if (emitted.has(absolutePath)) {
+    return "";
+  }
+  stack.add(absolutePath);
+  emitted.add(absolutePath);
 
   try {
     const source = fs.readFileSync(absolutePath, "utf-8");
@@ -51,7 +83,7 @@ function loadFileRecursive(filePath: string, visited: Set<string>): string {
     return source.replace(INCLUDE_REGEX, (_match, includePath: string) => {
       const includeAbsPath = path.resolve(baseDir, includePath);
       try {
-        return loadFileRecursive(includeAbsPath, visited);
+        return loadFileRecursive(includeAbsPath, stack, emitted);
       } catch (error) {
         // Re-throw with context about which include failed
         const msg = error instanceof Error ? error.message : String(error);
@@ -59,8 +91,8 @@ function loadFileRecursive(filePath: string, visited: Set<string>): string {
       }
     });
   } finally {
-    // Remove from visited after processing to allow same file from different branches
-    visited.delete(absolutePath);
+    // Leave the recursion path; `emitted` deliberately persists for the load.
+    stack.delete(absolutePath);
   }
 }
 

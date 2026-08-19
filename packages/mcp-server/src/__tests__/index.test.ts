@@ -927,6 +927,55 @@ describe('loadWithIncludes', () => {
     expect(result).toContain('Transaction');
   });
 
+  it('inlines a file reached twice in the include graph only once', () => {
+    // A diamond: `shared` is included directly and again through `mid`.
+    // Textual inlining used to emit it on both paths, so every transaction in
+    // it landed twice. Nothing errored — the ledger just had doubled amounts,
+    // and any assertion against the real figure failed against a number the
+    // user cannot find anywhere in their files. Sharing a prices or accounts
+    // file between monthly journals reaches this ordinarily.
+    //
+    // `rledger check` and bean-check both parse such a file once.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-diamond-'));
+    const sub = path.join(dir, 'sub');
+    fs.mkdirSync(sub, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(sub, 'shared.beancount'),
+      '2020-03-01 * "shared txn"\n  Expenses:Food   100.00 USD\n  Assets:Cash    -100.00 USD\n'
+    );
+    fs.writeFileSync(path.join(sub, 'mid.beancount'), 'include "shared.beancount"\n');
+    const mainPath = path.join(dir, 'diamond.beancount');
+    fs.writeFileSync(
+      mainPath,
+      '2020-01-01 open Assets:Cash USD\n2020-01-01 open Expenses:Food USD\n' +
+        'include "sub/shared.beancount"\ninclude "sub/mid.beancount"\n'
+    );
+
+    const result = loadWithIncludes(mainPath);
+    const occurrences = result.split('shared txn').length - 1;
+    expect(occurrences).toBe(1);
+
+    // And the ledger it produces agrees with the CLI: 100.00, not 200.00.
+    const validation = rustledger.validateSource(
+      result + '\n2020-06-01 balance Assets:Cash -100.00 USD\n'
+    );
+    expect(validation.valid).toBe(true);
+  });
+
+  it('still throws on a true include cycle', () => {
+    // The de-duplication above must not swallow this: a cycle's repeat is
+    // also a repeat, so testing "seen before" ahead of "on the current path"
+    // would silently accept a ledger `rledger check` refuses.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-cycle-'));
+    fs.writeFileSync(path.join(dir, 'a.beancount'), 'include "b.beancount"\n');
+    fs.writeFileSync(path.join(dir, 'b.beancount'), 'include "a.beancount"\n');
+
+    expect(() => loadWithIncludes(path.join(dir, 'a.beancount'))).toThrow(
+      /Circular include detected/
+    );
+  });
+
   it('should resolve includes with relative paths', () => {
     const subDir = path.join(tempDir, 'subdir');
     fs.mkdirSync(subDir, { recursive: true });

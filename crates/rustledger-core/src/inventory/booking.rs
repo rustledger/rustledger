@@ -1247,6 +1247,40 @@ mod reduction_tests {
         );
     }
 
+    /// HIFO takes costed lots before cost-less ones.
+    ///
+    /// A cost-less lot has no cost to compare, and an empty cost spec matches
+    /// it, so it is a candidate. The scan this replaced counted it as zero
+    /// before reversing, which put it last; ordering on `Option<Decimal>`
+    /// would put it FIRST, because `None` sorts before `Some`. Same lots,
+    /// opposite lot chosen.
+    #[test]
+    fn hifo_takes_costed_lots_before_costless_ones() {
+        let mut inv = Inventory::new();
+        inv.add(Position::simple(Amount::new(d(10), "STK")))
+            .expect("fixture fits in Decimal");
+        inv.add(lot(10, 100, 1)).expect("fixture fits in Decimal");
+
+        let result = inv
+            .reduce(
+                &Amount::new(d(-5), "STK"),
+                Some(&CostSpec::default()),
+                BookingMethod::Hifo,
+            )
+            .expect("5 of 20 units are there");
+
+        assert_eq!(
+            result.matched[0].cost.as_ref().map(|c| c.number),
+            Some(d(100)),
+            "the 100 USD lot outranks the cost-less one",
+        );
+        assert_eq!(
+            result.cost_basis.map(|b| b.number),
+            Some(d(500)),
+            "and the basis comes from it",
+        );
+    }
+
     /// The ordered index selects exactly what the scan selects (#2083).
     ///
     /// `plan_ordered` used to sort every matching lot on every call; it now

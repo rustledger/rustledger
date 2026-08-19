@@ -1878,7 +1878,13 @@ impl Inventory {
             LotOrder::Date => (None, cost.and_then(|c| c.date)),
             // Negated rather than reversed so the tuple still sorts ascending
             // and the slot tiebreak keeps its direction.
-            LotOrder::CostDescending => (cost.map(|c| -c.number), None),
+            //
+            // A cost-less lot counts as zero rather than as `None`. `None`
+            // sorts BEFORE `Some`, which would put cost-less lots at the front
+            // of a highest-cost-first walk — the opposite of where the
+            // `map_or(Decimal::ZERO, ..)` this replaces put them. An empty cost
+            // spec matches a cost-less position, so HIFO can reach one.
+            LotOrder::CostDescending => (Some(-cost.map_or(Decimal::ZERO, |c| c.number)), None),
         }
     }
 

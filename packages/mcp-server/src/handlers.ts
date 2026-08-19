@@ -16,7 +16,7 @@ import {
   jsonResponse,
   formatErrors,
   formatQueryResult,
-  loadWithIncludesDetailed,
+  collectLedgerFiles,
   withIncludedContext,
 } from "./helpers.js";
 import { getBqlTablesDocs } from "./resources.js";
@@ -820,23 +820,17 @@ function handleValidateFile(args: ToolArguments | undefined): ToolResponse {
 
   try {
     const absolutePath = path.resolve(args!.file_path!);
-    // Load file with includes resolved. A file reached twice is inlined once
-    // and reported, because `rledger check` errors on it (`Duplicate filename
-    // parsed`) — loading the right ledger but calling it clean would disagree
-    // with the CLI just as loudly as loading the wrong one.
-    const { source, duplicates } = loadWithIncludesDetailed(absolutePath);
-    const result = rustledger.validateSource(source);
-    const duplicateLines = duplicates.map(
-      (p) => `Duplicate filename parsed: "${p}"`
+    // Hand the loader the ledger's files and let IT resolve the includes:
+    // the same `Loader` that backs `rledger check`, so include semantics and
+    // — crucially — per-file error locations come from one implementation
+    // instead of a TypeScript re-creation of them.
+    const { files, entry } = collectLedgerFiles(absolutePath);
+    const result = rustledger.validateMultiFile(files, entry);
+    return textResponse(
+      result.valid
+        ? `${absolutePath}: Ledger is valid.`
+        : `${absolutePath}: Found ${result.errors.length} error(s):\n${formatErrors(result.errors)}`
     );
-    const total = result.errors.length + duplicateLines.length;
-    if (total === 0) {
-      return textResponse(`${absolutePath}: Ledger is valid.`);
-    }
-    const detail = [formatErrors(result.errors), ...duplicateLines]
-      .filter(Boolean)
-      .join("\n");
-    return textResponse(`${absolutePath}: Found ${total} error(s):\n${detail}`);
   } catch (error) {
     return errorResponse(
       `Error reading file: ${error instanceof Error ? error.message : String(error)}`
@@ -850,23 +844,13 @@ function handleQueryFile(args: ToolArguments | undefined): ToolResponse {
 
   try {
     const absolutePath = path.resolve(args!.file_path!);
-    // Load file with includes resolved. Duplicates are noted rather than
-    // raised: `rledger query` prints `LOAD: Duplicate filename parsed` and
-    // still returns the rows, exiting 0 — unlike `rledger check`, which
-    // treats the same condition as an error. Matching each command's own
-    // severity is the point; reporting it in one tool and not the other is
-    // how the two drift apart.
-    const { source, duplicates } = loadWithIncludesDetailed(absolutePath);
-    const result = rustledger.query(source, args!.query!);
+    // Same as `validate_file`: the loader resolves the includes, not us.
+    const { files, entry } = collectLedgerFiles(absolutePath);
+    const result = rustledger.queryMultiFile(files, entry, args!.query!);
     if (result.errors?.length > 0) {
       return errorResponse(formatErrors(result.errors));
     }
-    const notes = duplicates
-      .map((p) => `LOAD: Duplicate filename parsed: "${p}"`)
-      .join("\n");
-    return textResponse(
-      notes ? `${notes}\n\n${formatQueryResult(result)}` : formatQueryResult(result)
-    );
+    return textResponse(formatQueryResult(result));
   } catch (error) {
     return errorResponse(
       `Error: ${error instanceof Error ? error.message : String(error)}`

@@ -70,106 +70,93 @@ function expandInclude(
 }
 
 /**
- * Load a beancount file with all its includes resolved.
+ * Gather a ledger's files into the `{ path: contents }` map the wasm
+ * multi-file entry points take, keyed relative to the entry point's directory.
  *
- * This recursively follows include directives and returns the concatenated
- * source with all includes inlined. Paths in include directives are resolved
- * relative to the file containing the include.
+ * This is DISCOVERY ONLY. Include *semantics* — resolution order, glob
+ * expansion, de-duplicating a file reached twice, cycle detection, and above
+ * all which file and line an error belongs to — are the loader's, reached
+ * through `validateMultiFile` / `queryMultiFile`, which run the same
+ * `Loader` as `rledger check` over a `VirtualFileSystem` built from this map.
  *
- * @param filePath - The absolute path to the main beancount file
- * @returns The concatenated source with all includes resolved
- * @throws Error if a file cannot be read or circular include detected
+ * That division is the point. The alternative this replaces concatenated every
+ * included file into one string and validated that, which meant reimplementing
+ * the loader's include handling in TypeScript — and getting it wrong four
+ * separate ways (doubled diamonds, unreported duplicates, no glob support, and
+ * the same gaps again in the sibling traverser). It also destroyed error
+ * locations: an error on line 2 of `j/2020-07.beancount` was reported as
+ * `file: null, line: 9`, a position in the concatenation that exists in none
+ * of the user's files.
+ *
+ * Being approximate here is safe in a way that being approximate about
+ * semantics is not. Over-collecting is harmless — the loader simply never
+ * visits a file nothing includes. Under-collecting is reported properly, as a
+ * missing include, against the file that asked for it.
  */
-export function loadWithIncludes(filePath: string): string {
-  return loadWithIncludesDetailed(filePath).source;
-}
-
-/**
- * As [`loadWithIncludes`], but also reports files reached more than once.
- *
- * `rledger check` and bean-check both treat a duplicate include as an ERROR
- * (`Duplicate filename parsed`, exit 1) while still loading the file once.
- * De-duplicating silently here would load the right ledger but call it clean,
- * which is the same disagreement with the CLI — just quieter — as inlining it
- * twice was.
- */
-export function loadWithIncludesDetailed(filePath: string): {
-  source: string;
-  duplicates: string[];
+export function collectLedgerFiles(entryPath: string): {
+  files: Record<string, string>;
+  entry: string;
 } {
-  const duplicates: string[] = [];
-  const source = loadFileRecursive(
-    filePath,
-    new Set<string>(),
-    new Set<string>(),
-    duplicates
-  );
-  return { source, duplicates };
-}
+  const absoluteEntry = path.resolve(entryPath);
+  const rootDir = path.dirname(absoluteEntry);
+  const files: Record<string, string> = {};
+  const seen = new Set<string>();
 
-/**
- * @param stack  files on the current recursion path — a repeat is a CYCLE.
- * @param emitted  every file already inlined anywhere in this load — a repeat
- *   is a DIAMOND, and must contribute its directives only once.
- *
- * The two sets answer different questions and both are needed. `stack` alone
- * (which is what this used to carry, deleting on the way out "to allow same
- * file from different branches") lets a diamond through: include `x` directly
- * and again via a file that includes it, and every transaction in `x` lands in
- * the source twice. Nothing then errors — the ledger simply has doubled
- * amounts, so balances are wrong and assertions fail against figures the user
- * cannot find. Sharing a `prices` or `accounts` file between monthly journals
- * is an ordinary way to reach that.
- *
- * `rledger check` and bean-check both parse such a file once (beancount also
- * says `Duplicate filename parsed`), so inlining it twice made this tool
- * disagree with the CLI it is meant to mirror.
- *
- * A cycle still throws, which is what the CLI does with one too — see the
- * ordering note in the body, which is what makes that true.
- */
-function loadFileRecursive(
-  filePath: string,
-  stack: Set<string>,
-  emitted: Set<string>,
-  duplicates: string[]
-): string {
-  const absolutePath = path.resolve(filePath);
+  const key = (abs: string): string =>
+    path.relative(rootDir, abs).split(path.sep).join("/");
 
-  // Order matters. A file on the current path is a CYCLE and must throw, the
-  // way `rledger check` errors on one; a file merely seen before is a DIAMOND
-  // and is skipped. Testing `emitted` first turns the former into the latter,
-  // because a cycle's repeat is always also a repeat — and the tool then
-  // reports a ledger clean that the CLI refuses.
-  if (stack.has(absolutePath)) {
-    throw new Error(`Circular include detected: ${absolutePath}`);
-  }
-  if (emitted.has(absolutePath)) {
-    duplicates.push(absolutePath);
-    return "";
-  }
-  stack.add(absolutePath);
-  emitted.add(absolutePath);
+  const visit = (abs: string): void => {
+    if (seen.has(abs)) return;
+    seen.add(abs);
 
-  try {
-    const source = fs.readFileSync(absolutePath, "utf-8");
-    const baseDir = path.dirname(absolutePath);
+    let content: string;
+    try {
+      content = fs.readFileSync(abs, "utf-8");
+    } catch {
+      // Leave it out and let the loader report the missing include against
+      // whichever file asked for it — better placed than anything we could say.
+      return;
+    }
+    files[key(abs)] = content;
 
-    // Replace each include directive with the contents of the included file
-    return source.replace(INCLUDE_REGEX, (_match, includePath: string) => {
+    const baseDir = path.dirname(abs);
+    // Fresh regex per call: a shared global one carries `lastIndex` across
+    // recursive invocations.
+    const includeRe = new RegExp(INCLUDE_PATTERN, "gm");
+    for (const match of content.matchAll(includeRe)) {
+      let targets: string[];
       try {
-        return expandInclude(includePath, baseDir, stack, emitted, duplicates);
-      } catch (error) {
-        // Re-throw with context about which include failed
-        const msg = error instanceof Error ? error.message : String(error);
-        throw new Error(`Failed to include "${includePath}" from ${absolutePath}: ${msg}`);
+        targets = resolveIncludeTargets(match[1], baseDir);
+      } catch {
+        // A pattern matching nothing is the loader's to report.
+        continue;
       }
-    });
-  } finally {
-    // Leave the recursion path; `emitted` deliberately persists for the load.
-    stack.delete(absolutePath);
-  }
+      for (const target of targets) visit(target);
+    }
+  };
+
+  visit(absoluteEntry);
+  return { files, entry: key(absoluteEntry) };
 }
+
+/*
+ * `loadWithIncludes` / `loadFileRecursive` used to live here: they
+ * concatenated a ledger's included files into one string for validation and
+ * querying. They are gone deliberately. That approach reimplemented the
+ * loader's include handling in TypeScript — getting diamonds, duplicate
+ * reporting, globs and directory matches wrong in turn — and, because the
+ * result was one anonymous buffer, reported an error on line 2 of an included
+ * file as `file: null, line: 9`.
+ *
+ * `collectLedgerFiles` above gathers the same files into the map the wasm
+ * multi-file entry points take, and the loader does the resolving. Keeping a
+ * concatenating entry point around would just be somewhere to reintroduce all
+ * of it.
+ *
+ * `withIncludedContext` below still concatenates, correctly: the editor tools
+ * need ONE buffer with the user's unsaved document first so a cursor offset
+ * still resolves against it, and they report no file-attributed diagnostics.
+ */
 
 /**
  * Build a whole-ledger source for the *aggregate* editor tools (hover,
@@ -313,8 +300,14 @@ export function jsonResponse(data: unknown): ToolResponse {
 export function formatErrors(errors: BeancountError[]): string {
   return errors
     .map((e) => {
-      const loc = e.line ? `:${e.line}${e.column ? `:${e.column}` : ""}` : "";
-      return `[${e.severity}]${loc} ${e.message}`;
+      // Name the file when the loader knows it. On a ledger split across
+      // monthly journals a bare `:561` is close to useless — 561 of which
+      // file? The multi-file entry points attribute each error to the file it
+      // is actually in, so say so.
+      const where = [e.file, e.line, e.line ? e.column : undefined]
+        .filter((part) => part !== null && part !== undefined && part !== "")
+        .join(":");
+      return where ? `[${e.severity}] ${where}: ${e.message}` : `[${e.severity}] ${e.message}`;
     })
     .join("\n");
 }

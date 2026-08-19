@@ -76,6 +76,54 @@ fn test_load_with_include() {
 }
 
 #[test]
+fn a_file_reached_twice_is_loaded_once_and_reported() {
+    // #2084 follow-up. A diamond, not a cycle: `shared` is included directly
+    // and again through `mid`. beancount reports `Duplicate filename parsed`
+    // and `bean-check` exits 1; this used to return `Ok(())` in silence, so a
+    // ledger beancount rejects loaded here without a word.
+    //
+    // The directives must still land exactly once — the report is in addition
+    // to loading correctly, not instead of it.
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(
+        sub.join("shared.beancount"),
+        "2020-03-01 * \"shared txn\"\n  Expenses:Food   100.00 USD\n  Assets:Cash    -100.00 USD\n",
+    )
+    .unwrap();
+    std::fs::write(sub.join("mid.beancount"), "include \"shared.beancount\"\n").unwrap();
+    let main = dir.path().join("diamond.beancount");
+    std::fs::write(
+        &main,
+        "2020-01-01 open Assets:Cash USD\n2020-01-01 open Expenses:Food USD\n\
+         include \"sub/shared.beancount\"\ninclude \"sub/mid.beancount\"\n",
+    )
+    .unwrap();
+
+    let result = load(&main, &LoadOptions::default()).expect("should load");
+
+    let txns = result
+        .directives
+        .iter()
+        .filter(|d| matches!(d.value, rustledger_core::Directive::Transaction(_)))
+        .count();
+    assert_eq!(
+        txns, 1,
+        "the shared file's transaction must land exactly once"
+    );
+
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("Duplicate filename")),
+        "the duplicate must be reported, matching beancount: {:?}",
+        result.errors
+    );
+}
+
+#[test]
 fn test_load_include_cycle_detection() {
     let path = fixtures_path("cycle_a.beancount");
     let result = Loader::new().load(&path);

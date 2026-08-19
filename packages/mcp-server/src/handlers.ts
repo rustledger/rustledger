@@ -17,6 +17,7 @@ import {
   formatErrors,
   formatQueryResult,
   loadWithIncludes,
+  loadWithIncludesDetailed,
   withIncludedContext,
 } from "./helpers.js";
 import { getBqlTablesDocs } from "./resources.js";
@@ -820,14 +821,23 @@ function handleValidateFile(args: ToolArguments | undefined): ToolResponse {
 
   try {
     const absolutePath = path.resolve(args!.file_path!);
-    // Load file with includes resolved
-    const source = loadWithIncludes(absolutePath);
+    // Load file with includes resolved. A file reached twice is inlined once
+    // and reported, because `rledger check` errors on it (`Duplicate filename
+    // parsed`) — loading the right ledger but calling it clean would disagree
+    // with the CLI just as loudly as loading the wrong one.
+    const { source, duplicates } = loadWithIncludesDetailed(absolutePath);
     const result = rustledger.validateSource(source);
-    return textResponse(
-      result.valid
-        ? `${absolutePath}: Ledger is valid.`
-        : `${absolutePath}: Found ${result.errors.length} error(s):\n${formatErrors(result.errors)}`
+    const duplicateLines = duplicates.map(
+      (p) => `Duplicate filename parsed: "${p}"`
     );
+    const total = result.errors.length + duplicateLines.length;
+    if (total === 0) {
+      return textResponse(`${absolutePath}: Ledger is valid.`);
+    }
+    const detail = [formatErrors(result.errors), ...duplicateLines]
+      .filter(Boolean)
+      .join("\n");
+    return textResponse(`${absolutePath}: Found ${total} error(s):\n${detail}`);
   } catch (error) {
     return errorResponse(
       `Error reading file: ${error instanceof Error ? error.message : String(error)}`

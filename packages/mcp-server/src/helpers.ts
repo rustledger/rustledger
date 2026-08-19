@@ -30,7 +30,30 @@ const INCLUDE_REGEX = new RegExp(INCLUDE_PATTERN, 'gm');
  * @throws Error if a file cannot be read or circular include detected
  */
 export function loadWithIncludes(filePath: string): string {
-  return loadFileRecursive(filePath, new Set<string>(), new Set<string>());
+  return loadWithIncludesDetailed(filePath).source;
+}
+
+/**
+ * As [`loadWithIncludes`], but also reports files reached more than once.
+ *
+ * `rledger check` and bean-check both treat a duplicate include as an ERROR
+ * (`Duplicate filename parsed`, exit 1) while still loading the file once.
+ * De-duplicating silently here would load the right ledger but call it clean,
+ * which is the same disagreement with the CLI — just quieter — as inlining it
+ * twice was.
+ */
+export function loadWithIncludesDetailed(filePath: string): {
+  source: string;
+  duplicates: string[];
+} {
+  const duplicates: string[] = [];
+  const source = loadFileRecursive(
+    filePath,
+    new Set<string>(),
+    new Set<string>(),
+    duplicates
+  );
+  return { source, duplicates };
 }
 
 /**
@@ -57,7 +80,8 @@ export function loadWithIncludes(filePath: string): string {
 function loadFileRecursive(
   filePath: string,
   stack: Set<string>,
-  emitted: Set<string>
+  emitted: Set<string>,
+  duplicates: string[]
 ): string {
   const absolutePath = path.resolve(filePath);
 
@@ -70,6 +94,7 @@ function loadFileRecursive(
     throw new Error(`Circular include detected: ${absolutePath}`);
   }
   if (emitted.has(absolutePath)) {
+    duplicates.push(absolutePath);
     return "";
   }
   stack.add(absolutePath);
@@ -83,7 +108,7 @@ function loadFileRecursive(
     return source.replace(INCLUDE_REGEX, (_match, includePath: string) => {
       const includeAbsPath = path.resolve(baseDir, includePath);
       try {
-        return loadFileRecursive(includeAbsPath, stack, emitted);
+        return loadFileRecursive(includeAbsPath, stack, emitted, duplicates);
       } catch (error) {
         // Re-throw with context about which include failed
         const msg = error instanceof Error ? error.message : String(error);

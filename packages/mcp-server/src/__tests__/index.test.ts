@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { initSync } from '@rustledger/wasm';
 import * as rustledger from '@rustledger/wasm';
 import { handleToolCall } from '../handlers.js';
-import { validateArgs, formatErrors, formatQueryResult, textResponse, errorResponse, jsonResponse, loadWithIncludes, withIncludedContext } from '../helpers.js';
+import { validateArgs, formatErrors, formatQueryResult, textResponse, errorResponse, jsonResponse, loadWithIncludes, loadWithIncludesDetailed, withIncludedContext } from '../helpers.js';
 import { TOOLS } from '../tools.js';
 import { RESOURCES, getResourceContents } from '../resources.js';
 import { PROMPTS, getPrompt } from '../prompts.js';
@@ -961,6 +961,33 @@ describe('loadWithIncludes', () => {
       result + '\n2020-06-01 balance Assets:Cash -100.00 USD\n'
     );
     expect(validation.valid).toBe(true);
+  });
+
+  it('reports the duplicate that de-duplication hides', () => {
+    // Loading the file once is only half of matching the CLI: `rledger check`
+    // and bean-check both ERROR on a duplicate include (`Duplicate filename
+    // parsed`, exit 1) while still loading it once. Silently de-duplicating
+    // would produce the right ledger and call it clean, which disagrees with
+    // the CLI just as much as inlining it twice did.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-dupreport-'));
+    const sub = path.join(dir, 'sub');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, 'shared.beancount'), '2020-01-01 open Assets:Cash USD\n');
+    fs.writeFileSync(path.join(sub, 'mid.beancount'), 'include "shared.beancount"\n');
+    const mainPath = path.join(dir, 'dupreport.beancount');
+    fs.writeFileSync(
+      mainPath,
+      'include "sub/shared.beancount"\ninclude "sub/mid.beancount"\n'
+    );
+
+    const { source, duplicates } = loadWithIncludesDetailed(mainPath);
+    expect(source.split('open Assets:Cash').length - 1).toBe(1);
+    expect(duplicates).toHaveLength(1);
+    expect(duplicates[0]).toContain('shared.beancount');
+
+    // And it reaches the user through the tool, not just the helper.
+    const response = handleToolCall('validate_file', { file_path: mainPath });
+    expect(response.content[0].text).toContain('Duplicate filename parsed');
   });
 
   it('still throws on a true include cycle', () => {

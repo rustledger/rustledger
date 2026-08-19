@@ -322,6 +322,36 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 }
                 error_count += 1;
             }
+            LoadError::DuplicateInclude { path } => {
+                // Same wording as the cycle case and from the same place —
+                // the variant's `#[error(...)]` — so the `"Duplicate
+                // filename"` substring the pta-standards conformance test
+                // asserts on cannot drift between the two.
+                let message = load_error.to_string();
+                if json_mode {
+                    diagnostics.push(JsonDiagnostic {
+                        file: path.clone(),
+                        line: 1,
+                        column: 1,
+                        end_line: 1,
+                        end_column: 1,
+                        severity: "error".to_string(),
+                        phase: "parse".to_string(),
+                        code: "E0004".to_string(),
+                        message,
+                        hint: Some(
+                            "the file is included from more than one place; its directives \
+                             are loaded once"
+                                .to_string(),
+                        ),
+                        context: None,
+                    });
+                    parse_error_count += 1;
+                } else if !args.quiet {
+                    writeln!(stdout, "error: {message}")?;
+                }
+                error_count += 1;
+            }
             LoadError::PathTraversal {
                 include_path,
                 base_dir,

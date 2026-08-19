@@ -141,6 +141,24 @@ pub enum LoadError {
         cycle: Vec<String>,
     },
 
+    /// The same file was reached twice in the include graph without forming a
+    /// cycle — a "diamond", e.g. a shared prices file included from two
+    /// monthly journals.
+    ///
+    /// The file's directives are loaded ONCE, as beancount does; this records
+    /// that the duplicate happened. The wording matches beancount's for the
+    /// same condition, and deliberately omits the `(include cycle: …)`
+    /// parenthetical of [`LoadError::IncludeCycle`], which this is not.
+    ///
+    /// Previously the second encounter returned `Ok(())` in silence, so a
+    /// ledger beancount rejects with `Duplicate filename parsed` loaded here
+    /// without a word (#2084 follow-up).
+    #[error("Duplicate filename parsed: \"{path}\"")]
+    DuplicateInclude {
+        /// The path reached a second time.
+        path: String,
+    },
+
     /// Parse errors occurred.
     #[error("parse errors in {path}")]
     ParseErrors {
@@ -489,8 +507,13 @@ impl Loader {
             return Err(LoadError::IncludeCycle { cycle });
         }
 
-        // Check if already loaded
+        // Check if already loaded. Beancount reports this and carries on with
+        // the single copy it already has, and `bean-check` exits non-zero for
+        // it; record the same and do the same.
         if self.loaded_files.contains(&path_buf) {
+            errors.push(LoadError::DuplicateInclude {
+                path: path.display().to_string(),
+            });
             return Ok(());
         }
 

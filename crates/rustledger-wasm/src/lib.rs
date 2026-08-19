@@ -55,6 +55,7 @@ mod cache;
 pub mod convert;
 mod editor;
 mod helpers;
+mod host_fs;
 mod utils;
 
 // Public modules

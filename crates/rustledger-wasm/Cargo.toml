@@ -62,6 +62,11 @@ getrandom.workspace = true
 # Better panic messages in WASM
 console_error_panic_hook = "0.1"
 
+# Host-callback filesystem (#2101): reading `readFile`/`glob`/`realpath` off
+# the JS object the caller passes needs Reflect, Function and Array. Already a
+# dev-dependency for the wasm-bindgen tests; promoted so `host_fs` can use it.
+js-sys = "0.3"
+
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 js-sys = "0.3"

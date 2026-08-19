@@ -26,6 +26,23 @@ use crate::utils::LineLookup;
 /// Convert [`LoadResult`] errors to detailed Error objects with line/column info.
 ///
 /// This preserves parse error details that would be lost by simple `to_string()`.
+/// Whether a load error makes the directive stream unusable.
+///
+/// Not every load error does. `DuplicateInclude` says a file was reached twice
+/// in the include graph — the loader still loaded it exactly once, so the
+/// ledger is complete and every figure derived from it is right. It has to be
+/// REPORTED (beancount says `Duplicate filename parsed` and `bean-check` exits
+/// 1, as does `rledger check`), but aborting on it throws away a correct
+/// answer: `rledger query` prints the notice and still returns the rows.
+///
+/// Treating every load error as fatal did exactly that — a query over a ledger
+/// with a shared prices file included from two journals returned NO rows,
+/// where the CLI returns them. The same shape as a warning being treated as an
+/// error, one layer down.
+fn load_error_is_fatal(error: &LoadError) -> bool {
+    !matches!(error, LoadError::DuplicateInclude { .. })
+}
+
 fn load_errors_to_errors(load_result: &LoadResult) -> Vec<Error> {
     let mut errors = Vec::new();
 
@@ -574,34 +591,20 @@ pub fn parse_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue, Js
     to_js(&result)
 }
 
-/// Validate multiple Beancount files with include resolution.
+/// The validation pipeline, over whichever [`FileSystem`] it is handed.
 ///
-/// Similar to `parseMultiFile`, but also runs validation.
-/// Returns a `ValidationResult` indicating whether the ledger is valid.
-#[wasm_bindgen(js_name = "validateMultiFile")]
-pub fn validate_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue, JsError> {
-    use rustledger_loader::{LoadOptions, Loader, VirtualFileSystem, process};
+/// One body for every backend: a file map through `validateMultiFile`, host
+/// callbacks through `validateWithHost`. Include resolution, ordering, glob
+/// expansion, duplicate detection and per-file error attribution belong to the
+/// loader in both cases — which is the point of #2101, and would be undone by
+/// giving either entry point its own copy of this.
+fn validate_with_filesystem(
+    fs: Box<dyn rustledger_loader::FileSystem>,
+    entry_point: &str,
+) -> ValidationResult {
+    use rustledger_loader::{LoadOptions, Loader, process};
 
-    // Parse the JavaScript object to a HashMap
-    let file_map: HashMap<String, String> = serde_wasm_bindgen::from_value(files)
-        .map_err(|e| JsError::new(&format!("Invalid files object: {e}")))?;
-
-    if file_map.is_empty() {
-        return Err(JsError::new("Files map cannot be empty"));
-    }
-
-    // Create virtual filesystem with all files
-    let vfs = VirtualFileSystem::from_files(file_map);
-
-    // Check entry point exists using VFS path normalization
-    if !vfs.exists(Path::new(entry_point)) {
-        return Err(JsError::new(&format!(
-            "Entry point '{entry_point}' not found in files map"
-        )));
-    }
-
-    // Create loader with virtual filesystem
-    let mut loader = Loader::new().with_filesystem(Box::new(vfs));
+    let mut loader = Loader::new().with_filesystem(fs);
 
     // Load from entry point
     let load_result = match loader.load(Path::new(entry_point)) {
@@ -611,18 +614,18 @@ pub fn validate_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue,
                 valid: false,
                 errors: vec![Error::new(format!("Load error: {e}"))],
             };
-            return to_js(&result);
+            return result;
         }
     };
 
-    // Check for parse errors first (preserves detailed per-error line info)
-    let parse_errors = load_errors_to_errors(&load_result);
-    if !parse_errors.is_empty() {
-        let result = ValidationResult {
+    // Report every load error, but abort only on one that makes the directive
+    // stream unusable — see `load_error_is_fatal`.
+    let load_errors = load_errors_to_errors(&load_result);
+    if load_result.errors.iter().any(load_error_is_fatal) {
+        return ValidationResult {
             valid: false,
-            errors: parse_errors,
+            errors: load_errors,
         };
-        return to_js(&result);
     }
 
     // Run the shared processing pipeline:
@@ -639,35 +642,26 @@ pub fn validate_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue,
                 valid: false,
                 errors: vec![Error::new(format!("Processing error: {e}"))],
             };
-            return to_js(&result);
+            return result;
         }
     };
 
     let errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
 
-    let result = ValidationResult {
+    ValidationResult {
         // Warnings do not invalidate a ledger; only actual errors do.
         valid: !has_fatal(&errors),
         errors,
-    };
-    to_js(&result)
+    }
 }
 
-/// Run a BQL query on multiple Beancount files.
+/// Validate multiple Beancount files with include resolution.
 ///
-/// Similar to `query`, but accepts multiple files with include resolution.
-///
-/// Note: Glob patterns in `include` directives are not supported in multi-file mode
-/// since there is no real filesystem to enumerate. Use explicit file paths instead.
-#[wasm_bindgen(js_name = "queryMultiFile")]
-pub fn query_multi_file(
-    files: JsValue,
-    entry_point: &str,
-    query_str: &str,
-) -> Result<JsValue, JsError> {
-    use rustledger_booking::merge_with_padding;
-    use rustledger_loader::{LoadOptions, Loader, VirtualFileSystem, process};
-    use rustledger_query::{Executor, parse as parse_query};
+/// Similar to `parseMultiFile`, but also runs validation.
+/// Returns a `ValidationResult` indicating whether the ledger is valid.
+#[wasm_bindgen(js_name = "validateMultiFile")]
+pub fn validate_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue, JsError> {
+    use rustledger_loader::VirtualFileSystem;
 
     // Parse the JavaScript object to a HashMap
     let file_map: HashMap<String, String> = serde_wasm_bindgen::from_value(files)
@@ -687,8 +681,80 @@ pub fn query_multi_file(
         )));
     }
 
-    // Create loader with virtual filesystem
-    let mut loader = Loader::new().with_filesystem(Box::new(vfs));
+    to_js(&validate_with_filesystem(Box::new(vfs), entry_point))
+}
+
+/// Validate a ledger whose files the HOST supplies, one at a time.
+///
+/// `host` is an object with:
+///
+/// - `readFile(path) => string | null` — required. `null` means "cannot read
+///   this", which the loader reports as a missing include against the file
+///   that asked for it.
+/// - `glob(pattern) => string[]` — optional. Without it, a glob `include`
+///   reports "does not match any files", as a backend without glob support
+///   does.
+/// - `realpath(path) => string` — optional, and the interesting one. The
+///   loader de-duplicates by the path this returns, so a host that resolves
+///   symlinks (and, on a case-insensitive filesystem, case) gets a file
+///   reached two ways loaded ONCE, without the caller having to know that
+///   include graphs can contain diamonds.
+///
+/// # Why this exists alongside `validateMultiFile`
+///
+/// `validateMultiFile` takes every file up front, which means the CALLER has
+/// to know which files a ledger contains — so it walks `include` directives
+/// itself. That is a second implementation of the loader's include handling,
+/// and the MCP server's copy was wrong four separate ways before it was
+/// replaced (#2100). Here the host supplies primitives that encode nothing
+/// about beancount, and the walking has one implementation: this one, the
+/// same `Loader` behind `rledger check` (#2101).
+///
+/// # Errors
+///
+/// When `host` is not an object carrying a callable `readFile`.
+#[wasm_bindgen(js_name = "validateWithHost")]
+pub fn validate_with_host(host: &JsValue, entry_point: &str) -> Result<JsValue, JsError> {
+    use crate::host_fs::{HostFs, HostScope};
+
+    // Held for the whole call; cleared on drop, including on an early return.
+    let _scope = HostScope::install(host).map_err(|e| JsError::new(&e))?;
+    let result = validate_with_filesystem(Box::new(HostFs), entry_point);
+    to_js(&result)
+}
+
+/// Run a BQL query over a ledger whose files the HOST supplies.
+///
+/// Same contract as [`validate_with_host`]; see it for the shape of `host`.
+///
+/// # Errors
+///
+/// When `host` is not an object carrying a callable `readFile`.
+#[wasm_bindgen(js_name = "queryWithHost")]
+pub fn query_with_host(
+    host: &JsValue,
+    entry_point: &str,
+    query_str: &str,
+) -> Result<JsValue, JsError> {
+    use crate::host_fs::{HostFs, HostScope};
+
+    let _scope = HostScope::install(host).map_err(|e| JsError::new(&e))?;
+    query_with_filesystem(Box::new(HostFs), entry_point, query_str)
+}
+
+/// The query pipeline, over whichever [`FileSystem`] it is handed.
+///
+/// Companion to [`validate_with_filesystem`]; see it for why both entry points
+/// share one body rather than each carrying a copy.
+fn query_with_filesystem(
+    fs: Box<dyn rustledger_loader::FileSystem>,
+    entry_point: &str,
+    query_str: &str,
+) -> Result<JsValue, JsError> {
+    use rustledger_booking::merge_with_padding;
+    use rustledger_loader::{LoadOptions, Loader, process};
+    use rustledger_query::{Executor, parse as parse_query};
+    let mut loader = Loader::new().with_filesystem(fs);
 
     // Load from entry point
     let load_result = match loader.load(Path::new(entry_point)) {
@@ -703,13 +769,15 @@ pub fn query_multi_file(
         }
     };
 
-    // Check for parse errors first (preserves detailed per-error line info)
-    let parse_errors = load_errors_to_errors(&load_result);
-    if !parse_errors.is_empty() {
+    // Report every load error, but abort only on one that makes the directive
+    // stream unusable. A duplicate include is not one: the ledger loaded
+    // correctly and `rledger query` returns its rows alongside the notice.
+    let load_errors = load_errors_to_errors(&load_result);
+    if load_result.errors.iter().any(load_error_is_fatal) {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
-            errors: parse_errors,
+            errors: load_errors,
         };
         return to_js(&result);
     }
@@ -734,8 +802,16 @@ pub fn query_multi_file(
     };
 
     // Only abort on actual errors, not warnings (matching CLI query behavior)
+    // — and not on a LOAD-phase notice either. `process` turns every load
+    // error into a blocking `LOAD` ledger error, which is right for `check`
+    // but not here: anything genuinely unusable already aborted above via
+    // `load_error_is_fatal`, so what survives to this point is reportable and
+    // no reason to throw away a correct answer. `rledger query` prints
+    // `LOAD: Duplicate filename parsed` and still returns the rows.
     let errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
-    let has_errors = errors.iter().any(|e| e.severity == Severity::Error);
+    let has_errors = errors
+        .iter()
+        .any(|e| e.severity == Severity::Error && e.code.as_deref() != Some("LOAD"));
     if has_errors {
         let result = QueryResult {
             columns: Vec::new(),
@@ -780,7 +856,7 @@ pub fn query_multi_file(
             let query_result = QueryResult {
                 columns: result.columns,
                 rows,
-                errors: Vec::new(),
+                errors: load_errors,
             };
             to_js(&query_result)
         }
@@ -793,6 +869,41 @@ pub fn query_multi_file(
             to_js(&result)
         }
     }
+}
+
+/// Run a BQL query on multiple Beancount files.
+///
+/// Similar to `query`, but accepts multiple files with include resolution.
+///
+/// Note: Glob patterns in `include` directives are not supported in multi-file mode
+/// since there is no real filesystem to enumerate. Use explicit file paths instead.
+#[wasm_bindgen(js_name = "queryMultiFile")]
+pub fn query_multi_file(
+    files: JsValue,
+    entry_point: &str,
+    query_str: &str,
+) -> Result<JsValue, JsError> {
+    use rustledger_loader::VirtualFileSystem;
+
+    // Parse the JavaScript object to a HashMap
+    let file_map: HashMap<String, String> = serde_wasm_bindgen::from_value(files)
+        .map_err(|e| JsError::new(&format!("Invalid files object: {e}")))?;
+
+    if file_map.is_empty() {
+        return Err(JsError::new("Files map cannot be empty"));
+    }
+
+    // Create virtual filesystem with all files
+    let vfs = VirtualFileSystem::from_files(file_map);
+
+    // Check entry point exists using VFS path normalization
+    if !vfs.exists(Path::new(entry_point)) {
+        return Err(JsError::new(&format!(
+            "Entry point '{entry_point}' not found in files map"
+        )));
+    }
+
+    query_with_filesystem(Box::new(vfs), entry_point, query_str)
 }
 
 /// Compute a SHA-256 fingerprint of one or more source strings.

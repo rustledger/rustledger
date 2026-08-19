@@ -2277,11 +2277,6 @@ fn expr_references_column(expr: &Expr, name: &str) -> bool {
     }
 }
 
-/// Return `true` if any part of a `SelectQuery` references the given
-/// column. Walks SELECT targets, WHERE, GROUP BY, HAVING, PIVOT BY,
-/// ORDER BY, and the FROM filter expression. A subquery in FROM is
-/// treated as opaque — its inner references don't surface to the
-/// outer query's posting iterator.
 /// Which of the expensive per-posting values a scan has to produce.
 ///
 /// Each one is a copy the scan can skip when nothing reads it, and *when* it
@@ -2333,6 +2328,11 @@ fn output_references_column(query: &SelectQuery, name: &str) -> bool {
             .is_some_and(|o| o.iter().any(|s| expr_references_column(&s.expr, name)))
 }
 
+/// Return `true` if any part of a `SelectQuery` references the given
+/// column. Walks SELECT targets, WHERE, GROUP BY, HAVING, PIVOT BY,
+/// ORDER BY, and the FROM filter expression. A subquery in FROM is
+/// treated as opaque — its inner references don't surface to the
+/// outer query's posting iterator.
 fn query_references_column(query: &SelectQuery, name: &str) -> bool {
     if query
         .targets

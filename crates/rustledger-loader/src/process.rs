@@ -787,12 +787,12 @@ impl crate::Directives<crate::LateValidated> {
 ///
 /// The caller has already sorted `directives` into canonical display
 /// order `(date, priority, file_id, span.start)`. Booking needs the
-/// extra constraint that cost-reduction transactions process AFTER
-/// augmentations on the same `(date, priority)` so lots exist when
-/// matched. Rather than re-sorting the whole vec, we walk it via a
-/// transient `Vec<usize>` of indices sorted by booking order. Stable
-/// sort preserves display-order tiebreaks between transactions with
-/// the same `has_cost_reduction` flag.
+/// same ordering. Rather than assume that, we walk the vec via a
+/// transient `Vec<usize>` of indices sorted by booking order, which
+/// keeps `booking_sort_key` the one place a booking-order tiebreak
+/// could ever be introduced. Since #2093 dropped the reduction
+/// tiebreak the permutation is the identity here, and the stable sort
+/// is what guarantees that.
 ///
 /// Failed transactions are partitioned out into the second return
 /// value so they don't flow into regular plugins or Late validation
@@ -814,10 +814,11 @@ fn run_booking(
         BookingEngine::with_method(booking_method).with_tolerance_policy(tolerance_policy);
     engine.register_account_methods(directives.iter().map(|s| &s.value));
 
-    // Build an index ordered for booking: stable sort by
-    // `has_cost_reduction` only (display order — `(date, priority,
-    // file_id, span.start)` — is already encoded in the existing
-    // positional order, and stable_sort preserves that as the tiebreak).
+    // Build an index ordered for booking. `directives` is already in
+    // display order — `(date, priority, file_id, span.start)` — and the
+    // booking key is its `(date, priority)` prefix, so a stable sort
+    // returns the identity permutation. It is kept rather than elided so
+    // that booking order has exactly one definition to change.
     let mut order: Vec<usize> = (0..directives.len()).collect();
     order.sort_by_key(|&i| rustledger_core::booking_sort_key(&directives[i].value));
 

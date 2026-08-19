@@ -1364,8 +1364,9 @@ pub struct LedgerBookResult {
 ///
 /// This is the standalone equivalent of the loader's internal booking
 /// pass. Transactions are processed in **booking order** — sorted by
-/// `(date, priority, has_cost_reduction)` — so lot matching and
-/// capital-gains tracking observe inventory in the correct sequence, while
+/// `(date, priority)`, with same-key transactions left in the caller's order
+/// — so lot matching and capital-gains tracking observe inventory in the
+/// same sequence Python does (#2093), while
 /// the returned [`LedgerBookResult::booked`] / [`LedgerBookResult::failed`]
 /// vectors preserve the caller's **original input order**. Non-transaction
 /// directives pass through untouched. Per-account booking methods declared

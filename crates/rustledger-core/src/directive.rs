@@ -627,47 +627,36 @@ impl Directive {
             Self::Custom(_) => DirectivePriority::Custom,
         }
     }
-
-    /// Check if this directive has any cost-basis reductions.
-    ///
-    /// A transaction "reduces" inventory when it has a posting with a cost
-    /// spec and negative units (selling lots). Used to order same-date
-    /// transactions: augmentations (buying) should process before
-    /// reductions (selling) so lots exist when they're matched.
-    #[must_use]
-    pub fn has_cost_reduction(&self) -> bool {
-        if let Self::Transaction(txn) = self {
-            txn.postings.iter().any(|p| {
-                p.cost.is_some()
-                    && p.units
-                        .as_ref()
-                        .and_then(IncompleteAmount::number)
-                        .is_some_and(|n| n.is_sign_negative())
-            })
-        } else {
-            false
-        }
-    }
 }
 
-/// Sort directives by date, then type priority, then cost-basis reductions last.
+/// Sort directives by date, then type priority.
 ///
-/// This is a stable sort that preserves file order for directives
-/// with the same date, type, and reduction status.
-///
-/// Within the same date, transactions without cost-basis reductions
-/// (no negative-units + cost-spec postings) are processed before
-/// those that do reduce cost-basis lots. This ensures lots exist
-/// when they're matched, regardless of file ordering.
+/// This is a stable sort, so directives sharing a date and type keep their
+/// file order — which is the order they are booked in, matching Python's
+/// `(date, type_priority, lineno)`.
 pub fn sort_directives(directives: &mut [Directive]) {
     directives.sort_by_cached_key(booking_sort_key);
 }
 
-/// The canonical booking-order sort key: `(date, priority, has_cost_reduction)`.
+/// The canonical booking-order sort key: `(date, priority)`.
 ///
-/// Within a `(date, priority)` group, cost augmentations
-/// (`has_cost_reduction == false`) sort before the reductions that match
-/// against them, so lots exist when matched regardless of file ordering.
+/// Deliberately WITHOUT a reduction tiebreak. Same-date directives book in
+/// file order (the sorts through this key are stable), which is what Python
+/// does — its `entry_sortkey` is `(date, type_priority, lineno)` and has no
+/// notion of augmentations going first.
+///
+/// This key used to carry a third component, `has_cost_reduction`, which
+/// floated cost augmentations ahead of the reductions matching against them
+/// so that lots would exist when matched (#841). That was a workaround for a
+/// missing behavior rather than an ordering problem, and the behavior has
+/// since landed: a cost-bearing posting is a REDUCTION only when the account
+/// already holds the opposite sign in that currency
+/// ([`crate::Inventory::is_booking_reduction`], #1560, mirroring Python's
+/// `balance.is_reduced_by`). Otherwise it is an augmentation and simply opens
+/// a negative lot for a later posting to close. #841's ledger passes on that
+/// path alone, with no reordering — and reordering actively broke ledgers
+/// Python accepts (#2093), because moving a same-date augmentation ahead of a
+/// reduction changes which lots an ambiguous match can see.
 ///
 /// This is the SINGLE source of the booking order. [`sort_directives`] sorts a
 /// slice in place by it, and both `book()` (rustledger-booking) and
@@ -675,8 +664,8 @@ pub fn sort_directives(directives: &mut [Directive]) {
 /// (they preserve the input order for reassembly, so they cannot sort the slice
 /// directly). Change a booking-order tiebreak here only.
 #[must_use]
-pub fn booking_sort_key(d: &Directive) -> (NaiveDate, DirectivePriority, bool) {
-    (d.date(), d.priority(), d.has_cost_reduction())
+pub const fn booking_sort_key(d: &Directive) -> (NaiveDate, DirectivePriority) {
+    (d.date(), d.priority())
 }
 
 /// A transaction directive.
@@ -1789,11 +1778,18 @@ mod tests {
     }
 
     #[test]
-    fn test_sort_augmentations_before_reductions_same_date() {
-        // Issue #841: same-date transactions should process augmentations
-        // (buying lots) before reductions (selling lots) so lots exist
-        // when they're matched.
-        let reduction = Directive::Transaction(
+    fn same_date_directives_sort_in_file_order() {
+        // #2093 / #841. These two are the transactions from #841: the
+        // "Transfer Received" that looks like a reduction is written before
+        // the "Transfer Sent" that creates the lot.
+        //
+        // The sort deliberately does NOT float the augmentation ahead. Python
+        // books same-date entries by `lineno`, and reordering them changes
+        // which lots an ambiguous match can see (#2093). #841's ledger is
+        // handled by `Inventory::is_booking_reduction` instead: with
+        // `Assets:Transit` empty, the -11.11 posting is an augmentation that
+        // opens a negative lot, and "Transfer Sent" closes it.
+        let looks_like_a_reduction = Directive::Transaction(
             Transaction::new(date(2024, 9, 1), "Transfer Received")
                 .with_synthesized_posting(
                     Posting::new("Assets:AccountB", Amount::new(dec!(11.11), "USD")).with_cost(
@@ -1826,70 +1822,22 @@ mod tests {
                 ),
         );
 
-        // Reduction first in file order — sort should fix this
-        let mut directives = vec![reduction, augmentation];
+        let mut directives = vec![looks_like_a_reduction, augmentation];
         sort_directives(&mut directives);
 
-        // Augmentation (no negative cost posting) should come first
-        assert!(
-            !directives[0].has_cost_reduction(),
-            "first directive should be augmentation"
+        let narrations: Vec<&str> = directives
+            .iter()
+            .map(|d| match d {
+                Directive::Transaction(t) => t.narration.as_str(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            narrations,
+            vec!["Transfer Received", "Transfer Sent"],
+            "same-date directives must keep file order; floating augmentations \
+             ahead of reductions is what #2093 reported"
         );
-        assert!(
-            directives[1].has_cost_reduction(),
-            "second directive should be reduction"
-        );
-    }
-
-    #[test]
-    fn test_has_cost_reduction() {
-        // Transaction with negative units + cost = reduction
-        let reduction = Directive::Transaction(
-            Transaction::new(date(2024, 1, 1), "Sell")
-                .with_synthesized_posting(
-                    Posting::new("Assets:Stock", Amount::new(dec!(-10), "AAPL")).with_cost(
-                        CostSpec::empty()
-                            .with_number(crate::CostNumber::PerUnit { value: dec!(150) })
-                            .with_currency("USD"),
-                    ),
-                )
-                .with_synthesized_posting(Posting::new(
-                    "Assets:Cash",
-                    Amount::new(dec!(1500), "USD"),
-                )),
-        );
-        assert!(reduction.has_cost_reduction());
-
-        // Transaction with positive units + cost = augmentation
-        let augmentation = Directive::Transaction(
-            Transaction::new(date(2024, 1, 1), "Buy")
-                .with_synthesized_posting(
-                    Posting::new("Assets:Stock", Amount::new(dec!(10), "AAPL")).with_cost(
-                        CostSpec::empty()
-                            .with_number(crate::CostNumber::PerUnit { value: dec!(150) })
-                            .with_currency("USD"),
-                    ),
-                )
-                .with_synthesized_posting(Posting::new(
-                    "Assets:Cash",
-                    Amount::new(dec!(-1500), "USD"),
-                )),
-        );
-        assert!(!augmentation.has_cost_reduction());
-
-        // Transaction without cost = not a reduction
-        let simple = Directive::Transaction(
-            Transaction::new(date(2024, 1, 1), "Payment")
-                .with_synthesized_posting(Posting::new(
-                    "Expenses:Food",
-                    Amount::new(dec!(50), "USD"),
-                ))
-                .with_synthesized_posting(Posting::new(
-                    "Assets:Cash",
-                    Amount::new(dec!(-50), "USD"),
-                )),
-        );
-        assert!(!simple.has_cost_reduction());
     }
 
     #[test]

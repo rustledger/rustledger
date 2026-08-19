@@ -924,3 +924,87 @@ pub fn hash_sources(sources: Vec<String>) -> String {
     let refs: Vec<&str> = sources.iter().map(String::as_str).collect();
     crate::cache::hash_sources(&refs)
 }
+
+#[cfg(test)]
+mod load_error_tests {
+    use super::*;
+    use rustledger_loader::VirtualFileSystem;
+    use std::collections::HashMap;
+
+    /// A diamond — `shared` reached directly and again through `mid` — that
+    /// ALSO fails a balance assertion.
+    ///
+    /// The second error is what makes the test discriminating. Both errors
+    /// being present proves the pipeline RAN; the duplicate alone would prove
+    /// only that something reported it, which an abort does too. An earlier
+    /// version of this test asserted just the duplicate and passed happily
+    /// with the abort restored.
+    fn diamond_with_a_failing_assertion() -> VirtualFileSystem {
+        let mut files = HashMap::new();
+        files.insert(
+            "main.beancount".to_string(),
+            "2020-01-01 open Assets:Cash USD\n2020-01-01 open Expenses:Food USD\n\
+             include \"sub/shared.beancount\"\ninclude \"sub/mid.beancount\"\n\
+             2020-06-01 balance Assets:Cash  -999999.00 USD\n"
+                .to_string(),
+        );
+        files.insert(
+            "sub/shared.beancount".to_string(),
+            "2020-03-01 * \"s\"\n  Expenses:Food   100.00 USD\n  Assets:Cash    -100.00 USD\n"
+                .to_string(),
+        );
+        files.insert(
+            "sub/mid.beancount".to_string(),
+            "include \"shared.beancount\"\n".to_string(),
+        );
+        VirtualFileSystem::from_files(files)
+    }
+
+    #[test]
+    fn a_duplicate_include_is_reported_but_does_not_abort() {
+        // The ledger is COMPLETE — the loader loaded the shared file once — so
+        // processing must still run. Aborting instead is what made a wasm
+        // query over such a ledger return no rows at all, where `rledger
+        // query` prints the notice and answers.
+        let result = validate_with_filesystem(
+            Box::new(diamond_with_a_failing_assertion()),
+            "main.beancount",
+        );
+
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Duplicate filename")),
+            "the duplicate must be reported, as `rledger check` reports it: {:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Balance failed")),
+            "the balance assertion must have been CHECKED, which only happens \
+             if the duplicate did not abort the pipeline: {:?}",
+            result.errors
+        );
+        assert!(!result.valid, "matching bean-check's exit 1");
+    }
+
+    #[test]
+    fn only_unusable_load_errors_are_fatal() {
+        // A duplicate include leaves a usable directive stream; a parse error
+        // does not. This predicate is what lets the query path answer over the
+        // first and refuse the second.
+        assert!(!load_error_is_fatal(&LoadError::DuplicateInclude {
+            path: "shared.beancount".to_string(),
+        }));
+        assert!(load_error_is_fatal(&LoadError::IncludeCycle {
+            cycle: vec!["a".to_string(), "a".to_string()],
+        }));
+        assert!(load_error_is_fatal(&LoadError::PathTraversal {
+            include_path: "../../etc/passwd".to_string(),
+            base_dir: std::path::PathBuf::from("/ledger"),
+        }));
+    }
+}

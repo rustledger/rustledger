@@ -84,7 +84,20 @@ export function collectLedgerFiles(entryPath: string): {
   files: Record<string, string>;
   entry: string;
 } {
-  const absoluteEntry = path.resolve(entryPath);
+  // Canonicalize the ENTRY before anything derives from it. Its directory
+  // becomes the root every key is relative to, and a relative include inside a
+  // file resolves against the directory that file really lives in — which for
+  // a symlinked entry point is the target's directory, not the link's. Reading
+  // through the link and then resolving `include "x.beancount"` beside the
+  // LINK looked for a file that is not there, so the whole ledger failed with
+  // `file not found` on a tree `rledger check` reads without trouble.
+  const linkedEntry = path.resolve(entryPath);
+  let absoluteEntry: string;
+  try {
+    absoluteEntry = fs.realpathSync(linkedEntry);
+  } catch {
+    absoluteEntry = linkedEntry;
+  }
   const rootDir = path.dirname(absoluteEntry);
   const files: Record<string, string> = {};
   const seen = new Set<string>();

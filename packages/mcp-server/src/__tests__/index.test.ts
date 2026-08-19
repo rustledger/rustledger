@@ -1096,6 +1096,35 @@ describe('collectLedgerFiles', () => {
       e.message.includes('Duplicate filename parsed'))).toBe(true);
   });
 
+  it('resolves includes relative to a symlinked entry point\'s real directory', () => {
+    // A relative include resolves against the directory the file really lives
+    // in. Reading through a symlinked entry and then resolving its includes
+    // beside the LINK looked for files that are not there, so the whole ledger
+    // failed with `file not found` on a tree `rledger check` reads fine.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-linkentry-'));
+    fs.mkdirSync(path.join(dir, 'real'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'real/x.beancount'),
+      '2020-03-01 * "t"\n  Expenses:Food   10.00 USD\n  Assets:Cash    -10.00 USD\n'
+    );
+    fs.writeFileSync(
+      path.join(dir, 'real/main.beancount'),
+      '2020-01-01 open Assets:Cash USD\n2020-01-01 open Expenses:Food USD\ninclude "x.beancount"\n'
+    );
+    const link = path.join(dir, 'entry.beancount');
+    fs.symlinkSync(path.join(dir, 'real/main.beancount'), link);
+
+    const { files, entry } = collectLedgerFiles(link);
+    expect(Object.keys(files).sort()).toEqual(['main.beancount', 'x.beancount']);
+    expect(entry).toBe('main.beancount');
+    const result = rustledger.queryMultiFile(
+      files,
+      entry,
+      "SELECT sum(number(position)) AS n WHERE account='Expenses:Food'"
+    );
+    expect(result.rows[0][0]).toContain('10.00');
+  });
+
   it('does not count a symlinked file twice', () => {
     // `path.resolve` normalizes `.` and `..` but not symlinks, so a file
     // reached both directly and through a link used to land under two keys —

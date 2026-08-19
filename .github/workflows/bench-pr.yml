@@ -117,6 +117,12 @@ jobs:
           EOF
       - name: Run benchmark (PR vs base, same runner)
         id: benchmark
+        # One source for the sampling parameters: hyperfine reads them, and
+        # the comment footer reports them back. They used to be stated twice,
+        # and the footer went stale the moment the run count changed.
+        env:
+          BENCH_WARMUP: 3
+          BENCH_RUNS: 20
         run: |
           echo "=== PR vs base (10K transactions) ==="
 
@@ -124,8 +130,8 @@ jobs:
           # and five samples cannot support one. Still well inside the job's
           # budget at ~40ms per run.
           hyperfine \
-            --warmup 3 \
-            --runs 20 \
+            --warmup "$BENCH_WARMUP" \
+            --runs "$BENCH_RUNS" \
             --export-json bench-pr.json \
             --command-name 'rustledger-pr' '/tmp/rledger-pr check benchmark.beancount' \
             --command-name 'rustledger-base' '/tmp/rledger-base check benchmark.beancount' \
@@ -174,6 +180,10 @@ jobs:
               f.write(f"change={change:.1f}\n")
               f.write(f"noise={combined:.1f}\n")
               f.write(f"significant={'true' if significant else 'false'}\n")
+              # Observed, not assumed: read back off the samples hyperfine
+              # actually recorded.
+              f.write(f"runs={runs}\n")
+              f.write(f"warmup={os.environ['BENCH_WARMUP']}\n")
 
           print(f"pr:       {pr['mean']:.1f}ms ± {pr['stddev']:.1f}ms")
           print(f"base:     {base['mean']:.1f}ms ± {base['stddev']:.1f}ms")
@@ -220,6 +230,10 @@ jobs:
             const beancount_ms = parseFloat('${{ steps.benchmark.outputs.beancount_ms }}');
             const beancount_stddev = parseFloat('${{ steps.benchmark.outputs.beancount_stddev }}');
             const speedup = parseFloat('${{ steps.benchmark.outputs.speedup }}');
+            // Strings: these are reported verbatim in the footer, and the
+            // run count is whatever hyperfine actually sampled.
+            const runs = '${{ steps.benchmark.outputs.runs }}';
+            const warmup = '${{ steps.benchmark.outputs.warmup }}';
             const rustledger_mem = parseFloat('${{ steps.memory.outputs.rustledger_mem_mb }}');
             const beancount_mem = parseFloat('${{ steps.memory.outputs.beancount_mem_mb }}');
             const base_ms = parseFloat('${{ steps.benchmark.outputs.base_ms }}');
@@ -275,7 +289,7 @@ jobs:
               '| beancount | ' + beancount_ms + 'ms ± ' + beancount_stddev + 'ms | ' + beancount_mem + ' MB |\n' +
               '| **Comparison** | **' + speedup + 'x faster** | **' + mem_ratio + 'x less** |\n' +
               baselineSection +
-              '<sub>10K transactions · 5 runs, 2 warmup · <a href="https://github.com/sharkdp/hyperfine">hyperfine</a></sub>\n\n' +
+              '<sub>10K transactions · ' + runs + ' runs, ' + warmup + ' warmup · <a href="https://github.com/sharkdp/hyperfine">hyperfine</a></sub>\n\n' +
               '<details>\n' +
               '<summary>What do these numbers mean?</summary>\n\n' +
               '- **Time**: Wall-clock time to parse and validate the ledger (± std dev)\n' +

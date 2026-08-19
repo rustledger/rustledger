@@ -99,130 +99,99 @@ jobs:
           (cd /tmp/base && cargo build --release -p rustledger --no-default-features \
              --target-dir "$GITHUB_WORKSPACE/target")
           cp "$GITHUB_WORKSPACE/target/release/rledger" /tmp/rledger-base
-      - name: Generate test ledger (10K transactions)
-        run: |
-          python3 << 'EOF'
-          import random
-          from datetime import date, timedelta
-
-          random.seed(42)
-
-          accounts = [
-              "Assets:Bank:Checking", "Assets:Bank:Savings",
-              "Expenses:Food", "Expenses:Transport",
-              "Income:Salary", "Equity:Opening",
-          ]
-
-          with open("benchmark.beancount", "w") as f:
-              f.write('option "operating_currency" "USD"\n\n')
-              for acc in accounts:
-                  f.write(f"2020-01-01 open {acc}\n")
-              f.write("\n")
-
-              start_date = date(2020, 1, 1)
-              for i in range(10000):
-                  d = start_date + timedelta(days=i // 50)
-                  amount = round(random.uniform(5, 500), 2)
-                  expense = random.choice([a for a in accounts if a.startswith("Expenses:")])
-                  f.write(f'{d} * "Payee {i % 100}" "Transaction {i}"\n')
-                  f.write(f"  {expense}  {amount} USD\n")
-                  f.write(f"  Assets:Bank:Checking\n\n")
-
-          print("Generated benchmark.beancount (10K transactions)")
-          EOF
-      - name: Run benchmark (PR vs base, same runner)
-        id: benchmark
-        # One source for the sampling parameters: hyperfine reads them, and
-        # the comment footer reports them back. They used to be stated twice,
-        # and the footer went stale the moment the run count changed.
+      - name: Generate workloads
         env:
-          BENCH_WARMUP: 3
-          BENCH_RUNS: 20
-        run: |
-          echo "=== PR vs base (10K transactions) ==="
-
-          # More runs than before: the verdict below is a significance test,
-          # and five samples cannot support one. Still well inside the job's
-          # budget at ~40ms per run.
-          hyperfine \
-            --warmup "$BENCH_WARMUP" \
-            --runs "$BENCH_RUNS" \
-            --export-json bench-pr.json \
-            --command-name 'rustledger-pr' '/tmp/rledger-pr check benchmark.beancount' \
-            --command-name 'rustledger-base' '/tmp/rledger-base check benchmark.beancount' \
-            --command-name 'beancount' 'bean-check benchmark.beancount'
-
-          python3 << 'EOF'
-          import json
-          import math
-          import os
-
-          with open('bench-pr.json') as f:
-              results = json.load(f)
-
-          times = {
-              r['command']: {'mean': r['mean'] * 1000, 'stddev': r['stddev'] * 1000}
-              for r in results['results']
-          }
-          pr = times['rustledger-pr']
-          base = times['rustledger-base']
-          beancount = times['beancount']
-
-          change = (pr['mean'] - base['mean']) / base['mean'] * 100 if base['mean'] else 0.0
-          # Significant only if the gap clears the uncertainty in the two
-          # MEANS — the standard error, not the spread of individual runs.
-          # Comparing means against per-run spread is conservative by a factor
-          # of sqrt(runs): at these numbers it would only report changes above
-          # ~14%, so a real 10% regression would read as noise.
-          runs = len(results['results'][0]['times'])
-          sem = math.sqrt(pr['stddev'] ** 2 / runs + base['stddev'] ** 2 / runs)
-          gap = abs(pr['mean'] - base['mean'])
-          # And an effect-size floor, so a difference that is statistically
-          # resolvable but too small to act on is not dressed up as a finding.
-          significant = gap > 2 * sem and abs(change) >= 3.0
-          combined = 2 * sem
-
-          speedup = beancount['mean'] / pr['mean'] if pr['mean'] > 0 else 0
-
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f"rustledger_ms={pr['mean']:.1f}\n")
-              f.write(f"rustledger_stddev={pr['stddev']:.1f}\n")
-              f.write(f"base_ms={base['mean']:.1f}\n")
-              f.write(f"base_stddev={base['stddev']:.1f}\n")
-              f.write(f"beancount_ms={beancount['mean']:.1f}\n")
-              f.write(f"beancount_stddev={beancount['stddev']:.1f}\n")
-              f.write(f"speedup={speedup:.1f}\n")
-              f.write(f"change={change:.1f}\n")
-              f.write(f"noise={combined:.1f}\n")
-              f.write(f"significant={'true' if significant else 'false'}\n")
-              # Observed, not assumed: read back off the samples hyperfine
-              # actually recorded.
-              f.write(f"runs={runs}\n")
-              f.write(f"warmup={os.environ['BENCH_WARMUP']}\n")
-
-          print(f"pr:       {pr['mean']:.1f}ms ± {pr['stddev']:.1f}ms")
-          print(f"base:     {base['mean']:.1f}ms ± {base['stddev']:.1f}ms")
-          print(f"change:   {change:+.1f}% (gap {gap:.1f}ms vs 2*sem {combined:.1f}ms, floor 3%)")
-          print(f"verdict:  {'significant' if significant else 'within noise'}")
-          EOF
-      - name: Measure memory usage
-        id: memory
+          BENCH_SHAPES: simple investment fifo
         run: |
           set -euo pipefail
-          # Peak RSS. Explicitly the PR binary at /tmp: `target/release/rledger`
-          # is whichever side was built LAST, which is the base — measuring it
-          # here would report the base's memory under the PR's name.
+          # The generator is `scripts/gen-profile-workload.py`, the same one
+          # `profile.yml` uses, rather than a heredoc private to this file.
+          # The heredoc it replaces emitted two-posting expenses only: no cost
+          # specs, no lots, no reductions. Booking and the whole inventory
+          # engine ran zero times, so the quadratics fixed in #2083, #2086 and
+          # #2091 could not have shown up here however sound the comparison
+          # was (#2096).
+          #
+          # Shapes are seeded per-shape, so the workload is stable run to run
+          # and reproducible locally byte-for-byte.
+          for shape in $BENCH_SHAPES; do
+            python3 scripts/gen-profile-workload.py "$shape" > "bench-$shape.beancount"
+            echo "$shape: $(wc -l < "bench-$shape.beancount") lines"
+          done
+      - name: Run benchmarks (PR vs base, same runner)
+        id: benchmark
+        # One source for the sampling parameters: hyperfine reads them and the
+        # comment footer reports them back. They used to be stated twice, and
+        # the footer went stale the moment the run count changed.
+        env:
+          BENCH_SHAPES: simple investment fifo
+          BENCH_WARMUP: 3
+          BENCH_RUNS: 20
+          # Both tools cache parsed output to disk, and hyperfine's warmup
+          # populates that cache — so every measured run was a cache hit.
+          # bean-check on `fifo` is 18.4s cold and 0.3s warm, a 60x
+          # difference, and rledger's own cache short-circuits the parser
+          # entirely, which is most of what `check` does. A parser regression
+          # was therefore invisible here no matter which workload ran.
+          #
+          # This env var is Python beancount's own, and rledger honors it
+          # deliberately to match, so one variable disables both.
+          BEANCOUNT_DISABLE_LOAD_CACHE: 1
+          # beancount is the context number, not the regression signal, and it
+          # is three orders of magnitude slower on some shapes (18s per run on
+          # `fifo` against ~40ms for rledger). Sampling it as heavily as the
+          # two rledger builds would dominate the job for a figure no verdict
+          # depends on.
+          BEANCOUNT_WARMUP: 1
+          BEANCOUNT_RUNS: 3
+        run: |
+          set -euo pipefail
+          for shape in $BENCH_SHAPES; do
+            ledger="bench-$shape.beancount"
+            echo "=== $shape: PR vs base ==="
+            hyperfine \
+              --warmup "$BENCH_WARMUP" \
+              --runs "$BENCH_RUNS" \
+              --export-json "bench-$shape.json" \
+              --command-name 'rustledger-pr'   "/tmp/rledger-pr check $ledger" \
+              --command-name 'rustledger-base' "/tmp/rledger-base check $ledger"
+
+            # Only measure beancount on shapes it can actually process, and
+            # DETECT that rather than assume it: `investment` currently fails
+            # under bean-check (#2097), and timing a run that errors out early
+            # would report a flattering number for a comparison that never
+            # happened.
+            if bean-check "$ledger" >/dev/null 2>&1; then
+              hyperfine \
+                --warmup "$BEANCOUNT_WARMUP" \
+                --runs "$BEANCOUNT_RUNS" \
+                --export-json "beancount-$shape.json" \
+                --command-name 'beancount' "bean-check $ledger"
+            else
+              echo "::notice::bean-check reports errors on $shape; skipping its timing"
+            fi
+          done
+      - name: Measure memory usage
+        id: memory
+        env:
+          BENCH_SHAPES: simple investment fifo
+          # Same reason as the timing step: a warm cache changes peak RSS as
+          # well as wall clock, and the two numbers must describe the same
+          # run.
+          BEANCOUNT_DISABLE_LOAD_CACHE: 1
+        run: |
+          set -euo pipefail
+          # Peak RSS, per shape. Explicitly the binaries at /tmp:
+          # `target/release/rledger` is whichever side was built LAST, which is
+          # the base — measuring it here would report the base's memory under
+          # the PR's name.
           #
           # Each is a SINGLE sample, which is why the comment reports the
-          # memory delta without a significance verdict: there is no spread
-          # to test it against. Peak RSS for a fixed binary on a fixed input
-          # is close to deterministic, so it is worth reporting — it is just
-          # not worth calling a regression on its own.
+          # memory delta without a significance verdict: there is no spread to
+          # test it against. Peak RSS for a fixed binary on a fixed input is
+          # close to deterministic, so it is worth reporting — it is just not
+          # worth calling a regression on its own.
           peak_rss_kb() {
-            # `time -v` writes its report to stderr and exits with the
-            # child's status; an empty parse means the run died or the
-            # format changed, and a blank number must not reach the comment
-            # as a plausible-looking value.
             # `time -v` prints a perfectly plausible report for ITSELF when the
             # command does not exist (~0.9 MB), so a missing binary would be
             # reported as the PR's memory rather than failing. Resolve it
@@ -245,20 +214,156 @@ jobs:
             echo "$out"
           }
 
-          rustledger_mem=$(peak_rss_kb /tmp/rledger-pr check benchmark.beancount)
-          base_mem=$(peak_rss_kb /tmp/rledger-base check benchmark.beancount)
-          beancount_mem=$(peak_rss_kb bean-check benchmark.beancount)
+          for shape in $BENCH_SHAPES; do
+            ledger="bench-$shape.beancount"
+            pr_kb=$(peak_rss_kb /tmp/rledger-pr check "$ledger")
+            base_kb=$(peak_rss_kb /tmp/rledger-base check "$ledger")
+            if [ -f "beancount-$shape.json" ]; then
+              bean_kb=$(peak_rss_kb bean-check "$ledger")
+            else
+              bean_kb=""
+            fi
+            printf '{"pr_kb":%s,"base_kb":%s,"beancount_kb":%s}\n' \
+              "$pr_kb" "$base_kb" "${bean_kb:-null}" > "mem-$shape.json"
+            echo "$shape: pr=${pr_kb}KB base=${base_kb}KB beancount=${bean_kb:-n/a}KB"
+          done
+      - name: Build the comment
+        id: report
+        env:
+          BENCH_SHAPES: simple investment fifo
+          BENCH_WARMUP: 3
+        run: |
+          set -euo pipefail
+          python3 << 'PYEOF'
+          import importlib.util
+          import json
+          import math
+          import os
+          import pathlib
 
-          rustledger_mb=$(echo "scale=1; $rustledger_mem / 1024" | bc)
-          base_mb=$(echo "scale=1; $base_mem / 1024" | bc)
-          beancount_mb=$(echo "scale=1; $beancount_mem / 1024" | bc)
+          shapes = os.environ['BENCH_SHAPES'].split()
 
-          echo "rustledger_mem_mb=$rustledger_mb" >> $GITHUB_OUTPUT
-          echo "base_mem_mb=$base_mb" >> $GITHUB_OUTPUT
-          echo "beancount_mem_mb=$beancount_mb" >> $GITHUB_OUTPUT
+          # Shape descriptions come from the generator, so the comment cannot
+          # describe a workload differently from the thing that produced it.
+          spec = importlib.util.spec_from_file_location(
+              'genworkload', 'scripts/gen-profile-workload.py')
+          gen = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(gen)
 
-          echo "rustledger: ${rustledger_mb}MB"
-          echo "beancount:  ${beancount_mb}MB"
+          def read(path):
+              p = pathlib.Path(path)
+              return json.loads(p.read_text()) if p.exists() else None
+
+          def ms(entry):
+              return {'mean': entry['mean'] * 1000, 'stddev': entry['stddev'] * 1000,
+                      'runs': len(entry['times'])}
+
+          rows, runs_seen = [], set()
+          for shape in shapes:
+              data = read(f'bench-{shape}.json')
+              if data is None:
+                  continue
+              by_name = {r['command']: ms(r) for r in data['results']}
+              pr, base = by_name['rustledger-pr'], by_name['rustledger-base']
+              runs_seen.add(pr['runs'])
+
+              change = (pr['mean'] - base['mean']) / base['mean'] * 100 if base['mean'] else 0.0
+              # Significant only if the gap clears the uncertainty in the two
+              # MEANS — the standard error, not the spread of individual runs.
+              # Comparing means against per-run spread is conservative by a
+              # factor of sqrt(runs): at these numbers it would only fire above
+              # ~14%, so a real 10% regression would read as noise.
+              sem = math.sqrt(pr['stddev'] ** 2 / pr['runs'] + base['stddev'] ** 2 / base['runs'])
+              gap = abs(pr['mean'] - base['mean'])
+              # And an effect-size floor, so a difference that is statistically
+              # resolvable but too small to act on is not dressed up as a
+              # finding. Applied PER SHAPE: a regression in one shape must not
+              # be diluted by the others holding steady.
+              significant = gap > 2 * sem and abs(change) >= 3.0
+
+              bean = read(f'beancount-{shape}.json')
+              bean = ms(bean['results'][0]) if bean else None
+              mem = read(f'mem-{shape}.json') or {}
+
+              rows.append({'shape': shape, 'pr': pr, 'base': base, 'bean': bean,
+                           'change': change, 'significant': significant,
+                           'noise': 2 * sem, 'mem': mem})
+
+          if not rows:
+              # An empty table renders as a perfectly well-formed comment that
+              # happens to say nothing, which is indistinguishable from a run
+              # where everything was fine.
+              raise SystemExit(
+                  f'no benchmark results found for shapes {shapes!r} in '
+                  f'{pathlib.Path.cwd()}; expected bench-<shape>.json')
+
+          def verdict(row):
+              sign = '+' if row['change'] >= 0 else ''
+              txt = f"{sign}{row['change']:.1f}%"
+              if not row['significant']:
+                  return f'{txt} ✅ within noise'
+              if row['change'] > 10:
+                  return f'{txt} 🔴 regression'
+              if row['change'] > 0:
+                  return f'{txt} 🟡 slower'
+              return f'{txt} 🟢 faster'
+
+          def mb(kb):
+              return f'{kb / 1024:.1f} MB' if kb else 'n/a'
+
+          out = ['## 📊 Benchmark Results', '']
+
+          regressed = [r['shape'] for r in rows if r['significant'] and r['change'] > 0]
+          if regressed:
+              out += [f"> 🔴 **Slower than base on: {', '.join(regressed)}**", '']
+
+          out += ['| Shape | rustledger | beancount | Speedup | RSS (rledger / beancount) |',
+                  '|-------|-----------|-----------|---------|---------------------------|']
+          for r in rows:
+              b = r['bean']
+              bean_txt = f"{b['mean']:.1f}ms ± {b['stddev']:.1f}ms" if b else '—'
+              speed = f"{b['mean'] / r['pr']['mean']:.1f}x" if b and r['pr']['mean'] else '—'
+              out.append(
+                  f"| `{r['shape']}` | {r['pr']['mean']:.1f}ms ± {r['pr']['stddev']:.1f}ms | "
+                  f"{bean_txt} | {speed} | "
+                  f"{mb(r['mem'].get('pr_kb'))} / {mb(r['mem'].get('beancount_kb'))} |")
+
+          out += ['', '### vs base, measured in this run', '',
+                  '| Shape | base | this PR | Change | RSS base → PR |',
+                  '|-------|------|---------|--------|---------------|']
+          for r in rows:
+              pr_kb, base_kb = r['mem'].get('pr_kb'), r['mem'].get('base_kb')
+              if pr_kb and base_kb:
+                  d = (pr_kb - base_kb) / base_kb * 100
+                  mem_txt = f"{mb(base_kb)} → {mb(pr_kb)} ({'+' if d >= 0 else ''}{d:.1f}%)"
+              else:
+                  mem_txt = '—'
+              out.append(
+                  f"| `{r['shape']}` | {r['base']['mean']:.1f}ms ± {r['base']['stddev']:.1f}ms | "
+                  f"{r['pr']['mean']:.1f}ms ± {r['pr']['stddev']:.1f}ms | {verdict(r)} | {mem_txt} |")
+
+          noise_txt = ', '.join(f"`{r['shape']}` {r['noise']:.1f}ms" for r in rows)
+          runs = runs_seen.pop() if len(runs_seen) == 1 else min(runs_seen, default=0)
+          out += ['',
+                  f'<sub>A difference counts only when it clears the combined spread of the two '
+                  f'measurements, per shape (2σ: {noise_txt}), and is at least 3%.</sub>',
+                  f'<sub>{gen.DEFAULT_TXNS:,} transactions per shape · {runs} runs, '
+                  f"{os.environ['BENCH_WARMUP']} warmup · "
+                  f'<a href="https://github.com/sharkdp/hyperfine">hyperfine</a></sub>', '',
+                  '<details>', '<summary>What do these numbers mean?</summary>', '']
+          for r in rows:
+              out.append(f"- **`{r['shape']}`** — {gen.SHAPES[r['shape']]}")
+          out += ['- **vs base**: the PR and the base-branch commit it is built on, '
+                  'built and measured in the same job',
+                  '- **RSS**: peak resident set size, a single sample — reported without a '
+                  'verdict because there is no spread to test it against',
+                  '- A shape with no beancount column is one bean-check reports errors on; '
+                  'it is timed for rledger only',
+                  '', '</details>']
+
+          pathlib.Path('comment.md').write_text('\n'.join(out) + '\n')
+          print('\n'.join(out))
+          PYEOF
       # Note: Criterion benchmarks aren't run here (timings are noisy on shared
       # runners and weren't reported in the PR comment anyway). They are compiled
       # — but not run — by the `Benchmarks Compile` job in ci.yml, which guards
@@ -274,78 +379,13 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const rustledger_ms = parseFloat('${{ steps.benchmark.outputs.rustledger_ms }}');
-            const rustledger_stddev = parseFloat('${{ steps.benchmark.outputs.rustledger_stddev }}');
-            const beancount_ms = parseFloat('${{ steps.benchmark.outputs.beancount_ms }}');
-            const beancount_stddev = parseFloat('${{ steps.benchmark.outputs.beancount_stddev }}');
-            const speedup = parseFloat('${{ steps.benchmark.outputs.speedup }}');
-            // Strings: these are reported verbatim in the footer, and the
-            // run count is whatever hyperfine actually sampled.
-            const runs = '${{ steps.benchmark.outputs.runs }}';
-            const warmup = '${{ steps.benchmark.outputs.warmup }}';
-            const rustledger_mem = parseFloat('${{ steps.memory.outputs.rustledger_mem_mb }}');
-            const beancount_mem = parseFloat('${{ steps.memory.outputs.beancount_mem_mb }}');
-            const base_ms = parseFloat('${{ steps.benchmark.outputs.base_ms }}');
-            const base_stddev = parseFloat('${{ steps.benchmark.outputs.base_stddev }}');
-            const change = parseFloat('${{ steps.benchmark.outputs.change }}');
-            const noise = parseFloat('${{ steps.benchmark.outputs.noise }}');
-            const significant = '${{ steps.benchmark.outputs.significant }}' === 'true';
-            const base_mem = parseFloat('${{ steps.memory.outputs.base_mem_mb }}') || 0;
-
-            // Calculate memory ratio
-            const mem_ratio = (beancount_mem / rustledger_mem).toFixed(1);
-
-            // Both sides were built and measured in THIS job, so the
-            // comparison is between two binaries on one runner rather than
-            // against a number recorded elsewhere on another day (#2090).
-            let baselineSection = '';
-            if (base_ms > 0) {
-              const changeStr = change.toFixed(1);
-              const sign = change >= 0 ? '+' : '';
-              let status, emoji;
-              if (!significant) {
-                status = 'within noise'; emoji = '✅';
-              } else if (change > 10) {
-                status = 'regression'; emoji = '🔴';
-              } else if (change > 0) {
-                status = 'slower'; emoji = '🟡';
-              } else {
-                status = 'faster'; emoji = '🟢';
-              }
-              const verdict = significant
-                ? sign + changeStr + '% ' + emoji
-                : sign + changeStr + '% ' + emoji + ' (' + status + ')';
-              baselineSection = '\n### vs base, measured in this run\n' +
-                '| Metric | base | this PR | Change |\n' +
-                '|--------|------|---------|--------|\n' +
-                '| Time | ' + base_ms + 'ms ± ' + base_stddev + 'ms | ' +
-                rustledger_ms + 'ms ± ' + rustledger_stddev + 'ms | ' + verdict + ' |\n' +
-                (base_mem > 0
-                  ? '| Memory | ' + base_mem + ' MB | ' + rustledger_mem + ' MB | ' +
-                    (((rustledger_mem - base_mem) / base_mem * 100) >= 0 ? '+' : '') +
-                    ((rustledger_mem - base_mem) / base_mem * 100).toFixed(1) + '% |\n'
-                  : '') +
-                '\n<sub>A difference counts only when it clears the combined spread of the two ' +
-                'measurements (2σ ≈ ' + noise.toFixed(1) + 'ms here).</sub>\n';
-            } else {
-              baselineSection = '\n> ℹ️ *Base build unavailable; no comparison.*\n';
-            }
-
-            const body = '## 📊 Benchmark Results\n\n' +
-              '| Tool | Time | Memory |\n' +
-              '|------|------|--------|\n' +
-              '| **rustledger** | ' + rustledger_ms + 'ms ± ' + rustledger_stddev + 'ms | ' + rustledger_mem + ' MB |\n' +
-              '| beancount | ' + beancount_ms + 'ms ± ' + beancount_stddev + 'ms | ' + beancount_mem + ' MB |\n' +
-              '| **Comparison** | **' + speedup + 'x faster** | **' + mem_ratio + 'x less** |\n' +
-              baselineSection +
-              '<sub>10K transactions · ' + runs + ' runs, ' + warmup + ' warmup · <a href="https://github.com/sharkdp/hyperfine">hyperfine</a></sub>\n\n' +
-              '<details>\n' +
-              '<summary>What do these numbers mean?</summary>\n\n' +
-              '- **Time**: Wall-clock time to parse and validate the ledger (± std dev)\n' +
-              '- **Memory**: Peak resident set size (RSS)\n' +
-              '- **vs base**: The PR and the base-branch commit it is built on, built and measured in the same job\n' +
-              '- A change is reported only when it exceeds the combined spread of both measurements\n\n' +
-              '</details>';
+            // The body is built by the previous step and read from disk.
+            // It used to be assembled here from ~15 step outputs threaded
+            // through `${{ }}` interpolation, which is how the footer came to
+            // claim "5 runs, 2 warmup" for a run that used 20 and 3: nothing
+            // connects such a string to the value it describes. The Python
+            // that computes the numbers now also formats them.
+            const body = require('fs').readFileSync('comment.md', 'utf8');
 
             // Find existing comment
             const { data: comments } = await github.rest.issues.listComments({

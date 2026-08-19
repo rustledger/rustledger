@@ -132,21 +132,20 @@ impl HostFs {
 impl FileSystem for HostFs {
     fn read(&self, path: &Path) -> Result<Arc<str>, LoadError> {
         let display = path.display().to_string();
-        HOST.with(|h| {
-            let borrowed = h.borrow();
-            let host = borrowed
-                .as_ref()
-                .ok_or_else(|| not_found(path, "no host filesystem installed"))?;
-            let value = Self::call1(&host.read_file, &display)
-                .map_err(|message| not_found(path, &message))?;
-            value
-                .as_string()
-                .map(Arc::from)
-                // `null` is the host saying it cannot read this path. It is
-                // NOT an error to raise here — a missing include is reported
-                // against the file that asked for it, with that file's span.
-                .ok_or_else(|| not_found(path, "file not found"))
-        })
+        // Clone the handle out and DROP the borrow before calling into JS. A
+        // callback is free to re-enter — a caching or logging host might — and
+        // re-entering while this borrow is live panics the `RefCell`. Cloning
+        // a `js_sys::Function` copies a handle, not a function.
+        let f = HOST.with(|h| h.borrow().as_ref().map(|host| host.read_file.clone()));
+        let f = f.ok_or_else(|| not_found(path, "no host filesystem installed"))?;
+        let value = Self::call1(&f, &display).map_err(|message| not_found(path, &message))?;
+        value
+            .as_string()
+            .map(Arc::from)
+            // `null` is the host saying it cannot read this path. It is NOT an
+            // error to raise here — a missing include is reported against the
+            // file that asked for it, with that file's span.
+            .ok_or_else(|| not_found(path, "file not found"))
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -169,22 +168,16 @@ impl FileSystem for HostFs {
 
     fn normalize(&self, path: &Path) -> PathBuf {
         let display = path.display().to_string();
-        HOST.with(|h| {
-            let borrowed = h.borrow();
-            let resolved = borrowed
-                .as_ref()
-                .and_then(|host| host.realpath.as_ref())
-                .and_then(|f| Self::call1(f, &display).ok())
-                .and_then(|v| v.as_string());
-            match resolved {
-                Some(real) => PathBuf::from(real),
-                // No `realpath` callback, or the host could not resolve it:
-                // fall back to a textual clean-up. A file reached two ways is
-                // then two files, which is exactly the bug a host that
-                // implements `realpath` avoids.
-                None => PathBuf::from(display.replace('\\', "/")),
-            }
-        })
+        let f = HOST.with(|h| h.borrow().as_ref().and_then(|host| host.realpath.clone()));
+        match f.and_then(|f| Self::call1(&f, &display).ok().and_then(|v| v.as_string())) {
+            Some(real) => PathBuf::from(real),
+            // No `realpath`, or the host could not resolve it. Fall back to
+            // the same textual normalization the virtual backend applies, so
+            // `./j/x` and `j/x` stay ONE file — otherwise the loader reads it
+            // twice and doubles everything in it. What this cannot collapse is
+            // a symlink or a case-fold, which is what `realpath` is for.
+            None => textual_normalize(&display),
+        }
     }
 
     fn supports_parallel_read(&self) -> bool {
@@ -195,29 +188,91 @@ impl FileSystem for HostFs {
     }
 
     fn glob(&self, pattern: &str) -> Result<Vec<PathBuf>, String> {
-        HOST.with(|h| {
-            let borrowed = h.borrow();
-            let Some(f) = borrowed.as_ref().and_then(|host| host.glob.as_ref()) else {
-                return Err("glob is not supported by this filesystem".to_string());
-            };
-            let value = Self::call1(f, pattern)?;
-            let array = js_sys::Array::from(&value);
-            let mut matched: Vec<PathBuf> = array
-                .iter()
-                .filter_map(|v| v.as_string())
-                .map(PathBuf::from)
-                .collect();
-            // Sorted for the same reason the disk backend sorts: the assembled
-            // ledger must not depend on the order a host happened to list in.
-            matched.sort();
-            Ok(matched)
-        })
+        // Same reason as `read`: the borrow must not span the JS call.
+        let f = HOST.with(|h| h.borrow().as_ref().and_then(|host| host.glob.clone()));
+        let Some(f) = f else {
+            return Err("glob is not supported by this filesystem".to_string());
+        };
+        let value = Self::call1(&f, pattern)?;
+        let array = js_sys::Array::from(&value);
+        let mut matched: Vec<PathBuf> = array
+            .iter()
+            .filter_map(|v| v.as_string())
+            .map(PathBuf::from)
+            .collect();
+        // Sorted for the same reason the disk backend sorts: the assembled
+        // ledger must not depend on the order a host happened to list in.
+        matched.sort();
+        Ok(matched)
     }
+}
+
+/// The clean-up the virtual backend applies: forward slashes, no leading
+/// `./`, `..` resolved. Mirrors the loader's private `normalize_vfs_path`; if
+/// the two drift, a path spelled two ways is two files here and one there.
+fn textual_normalize(path: &str) -> PathBuf {
+    let normalized = path.replace('\\', "/");
+    let stripped = normalized.strip_prefix("./").unwrap_or(&normalized);
+    let mut components: Vec<&str> = Vec::new();
+    for part in stripped.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            other => components.push(other),
+        }
+    }
+    let joined = components.join("/");
+    PathBuf::from(if stripped.starts_with('/') {
+        format!("/{joined}")
+    } else {
+        joined
+    })
 }
 
 fn not_found(path: &Path, message: &str) -> LoadError {
     LoadError::Io {
         path: path.to_path_buf(),
         source: std::io::Error::new(std::io::ErrorKind::NotFound, message.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::textual_normalize;
+    use std::path::PathBuf;
+
+    #[test]
+    fn the_fallback_collapses_paths_that_name_one_file() {
+        // Without a host `realpath`, this is all that keeps `./j/x` and `j/x`
+        // from being two entries in the loader's "already loaded" set — and
+        // two entries means the file's directives are read twice and every
+        // amount in it doubles.
+        for spelling in [
+            "j/x.beancount",
+            "./j/x.beancount",
+            "j/./x.beancount",
+            "j/y/../x.beancount",
+        ] {
+            assert_eq!(
+                textual_normalize(spelling),
+                PathBuf::from("j/x.beancount"),
+                "{spelling} names the same file"
+            );
+        }
+        assert_eq!(
+            textual_normalize("j\\x.beancount"),
+            PathBuf::from("j/x.beancount"),
+            "a Windows separator names the same file too"
+        );
+    }
+
+    #[test]
+    fn the_fallback_keeps_an_absolute_path_absolute() {
+        assert_eq!(
+            textual_normalize("/ledger/./j/../main.beancount"),
+            PathBuf::from("/ledger/main.beancount")
+        );
     }
 }

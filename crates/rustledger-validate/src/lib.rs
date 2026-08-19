@@ -2094,9 +2094,17 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_multiple_lot_match_uses_fifo() {
-        // In Python beancount, when multiple lots match the same cost spec,
-        // STRICT mode falls back to FIFO order rather than erroring.
+    fn test_validate_reports_a_partial_sale_matching_two_dated_lots() {
+        // #2097. Two lots at the same price bought on different days; the
+        // sale names only the price, so it matches both. STRICT reports it
+        // rather than silently draining the older one — whichever lot
+        // survives carries its own acquisition date, and that drives the
+        // short/long split in `report capgains`.
+        //
+        // This test previously asserted the opposite, on the stated grounds
+        // that "in Python beancount ... STRICT mode falls back to FIFO order
+        // rather than erroring". Beancount's `booking_method_STRICT` has no
+        // such branch, and 3.2.3 reports `Ambiguous matches` on this ledger.
         use rustledger_core::CostSpec;
 
         let cost_spec = CostSpec::empty()
@@ -2132,9 +2140,9 @@ mod tests {
                         Amount::new(dec!(-1500), "USD"),
                     )),
             ),
-            // Sell with cost spec that matches both lots - STRICT falls back to FIFO
+            // Sell naming only the price, so it matches both lots.
             Directive::Transaction(
-                Transaction::new(date(2024, 6, 1), "Sell using FIFO fallback")
+                Transaction::new(date(2024, 6, 1), "Sell matching two lots")
                     .with_synthesized_posting(
                         Posting::new("Assets:Stock", Amount::new(dec!(-5), "AAPL"))
                             .with_cost(cost_spec),
@@ -2147,21 +2155,14 @@ mod tests {
         ];
 
         let errors = validate(&directives);
-        // Filter out only booking errors - balance may or may not match
-        let booking_errors: Vec<_> = errors
+        let ambiguous = errors
             .iter()
-            .filter(|e| {
-                matches!(
-                    e.code,
-                    ErrorCode::InsufficientUnits
-                        | ErrorCode::NoMatchingLot
-                        | ErrorCode::AmbiguousLotMatch
-                )
-            })
-            .collect();
-        assert!(
-            booking_errors.is_empty(),
-            "Should not have booking errors when multiple lots match (FIFO fallback): {booking_errors:?}"
+            .filter(|e| e.code == ErrorCode::AmbiguousLotMatch)
+            .count();
+        assert_eq!(
+            ambiguous, 1,
+            "a sale naming only the price matches both dated lots and must be \
+             reported, not resolved silently: {errors:?}"
         );
     }
 

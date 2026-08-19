@@ -270,33 +270,64 @@ impl Inventory {
                 Ok((result, ReductionPlan::FromLot { idx, new_units }))
             }
             n => {
-                // Are the matched lots financially interchangeable? Two lots
-                // count as identical if they have the same cost number + cost
-                // currency — the user-visible monetary identity. Date and label
-                // differences don't make a reduction ambiguous because the user
-                // could not have observed a different outcome based on the cost
-                // spec they wrote. Beancount falls back to FIFO in that case.
-                let first_key = self.positions[matching_indices[0]]
-                    .cost
-                    .as_ref()
-                    .map(|c| (c.number, c.currency.clone()));
-                let all_same_value = matching_indices.iter().skip(1).all(|&i| {
-                    let key = self.positions[i]
-                        .cost
-                        .as_ref()
-                        .map(|c| (c.number, c.currency.clone()));
-                    key == first_key
-                });
+                // Two or more lots match, so the spec the user wrote does not
+                // name one. STRICT's contract is to refuse to guess, and this
+                // arm is deliberately the whole of it — the only escape is the
+                // total-match exception below.
+                //
+                // The one escape besides that is lots which are identical in
+                // EVERY cost field — number, currency, date and label. Those
+                // are indistinguishable by construction, so draining them in
+                // date order cannot be observed.
+                //
+                // This used to compare the number and currency ALONE, on the
+                // stated grounds that "the user could not have observed a
+                // different outcome" and that "beancount falls back to FIFO in
+                // that case". Both were wrong (#2097). Beancount's
+                // `booking_method_STRICT` has no fallback at all: more than one
+                // match is the total-match exception or an
+                // `AmbiguousMatchError`. And ignoring the date made the outcome
+                // very much observable — selling 16 of
+                // `4 GLOB {74.09, 2022-05-10}` + `16 GLOB {74.09, 2024-02-09}`
+                // leaves 4 GLOB dated 2024 under FIFO and 4 GLOB dated 2022
+                // under any other choice. Same cost basis, which is what made
+                // it quiet, but a different HOLDING PERIOD — and this codebase
+                // acts on holding periods, in `report capgains`'s short/long
+                // split and in the per-lot IRR eligibility predicate. That is a
+                // tax-visible decision, made silently, under the one booking
+                // method whose entire purpose is to make the user state it.
+                //
+                // Why keep the narrowed form rather than delete it outright:
+                // beancount's `Inventory` is keyed by `(currency, cost)`, so
+                // two buys of the same commodity at the same price on the same
+                // day are ONE position there and can never be ambiguous. Ours
+                // stays two lots, so deleting this arm would reject a ledger
+                // beancount accepts — a very ordinary one. Comparing the full
+                // cost reproduces beancount's observable behavior without
+                // changing how positions are stored; merging them at `add`
+                // would be the more faithful model and a much larger change
+                // (`Inventory::len` counts lots, and `currency_accounts`
+                // branches on it).
+                //
+                // The user disambiguates by naming the lot: `{74.09 USD,
+                // 2022-05-10}`, a label, or an account booked FIFO/HIFO if
+                // they genuinely do not care which goes.
+                let first_cost = self.positions[matching_indices[0]].cost.as_ref();
+                let all_indistinguishable = matching_indices
+                    .iter()
+                    .skip(1)
+                    .all(|&i| self.positions[i].cost.as_ref() == first_cost);
 
-                if all_same_value {
+                if all_indistinguishable {
                     let (result, updates) =
                         self.plan_ordered(units, spec, LotOrder::Date, false)?;
                     return Ok((result, ReductionPlan::Updates(updates)));
                 }
 
                 // Total match exception: if the reduction equals the sum of all
-                // matching lots, the user is selling the entire matched
-                // inventory and the lot choice doesn't matter — accept it.
+                // matching lots, every matched lot is consumed, so no lot
+                // survives to carry a date and the choice cannot be observed.
+                // Beancount has this same exception, and for the same reason.
                 let total_units: Decimal = matching_indices
                     .iter()
                     .map(|&i| self.positions[i].units.number.abs())

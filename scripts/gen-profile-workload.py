@@ -93,9 +93,17 @@ def gen_investment(n: int) -> None:
     """Buys that create lots and sells that reduce them.
 
     Sells are emitted only against a lot the generator knows is still open,
-    and always at that lot's exact cost, so every reduction matches under
-    STRICT booking. A workload that fails to book would profile the error
-    path instead of the inventory engine.
+    and name that lot by BOTH its cost and its acquisition date, so every
+    reduction matches exactly one lot under STRICT booking. A workload that
+    fails to book would profile the error path instead of the inventory
+    engine.
+
+    The date is not decoration. Costs are drawn from a few tens of thousands
+    of possible strings and there are thousands of buys per ticker, so two
+    lots of the same ticker sharing a cost is a birthday-problem certainty,
+    not an edge case — at n=10000 it happened 46 times. Naming the cost alone
+    left those sells matching two lots, which STRICT is right to reject
+    (#2097).
     """
     rng = random.Random(43)
     tickers = ["HOOL", "CORP", "ACME", "GLOB"]
@@ -106,23 +114,28 @@ def gen_investment(n: int) -> None:
     ]
     _header("Profiling Workload — investment", accounts, tickers)
     # open lots per ticker: list of (units, cost) still held
-    held: dict[str, list[tuple[int, str]]] = {t: [] for t in tickers}
+    # (units, cost, acquisition date) — the date is what makes the sell's
+    # lot reference unambiguous when two buys land on the same cost.
+    held: dict[str, list[tuple[int, str, str]]] = {t: [] for t in tickers}
     d = datetime.date(2020, 1, 2)
     for i in range(n):
         d += datetime.timedelta(days=1)
         t = rng.choice(tickers)
         # Sell only when a lot exists; otherwise buy. Roughly 1 sell in 3.
         if held[t] and rng.random() < 0.33:
-            units, cost = held[t].pop()
+            units, cost, acquired = held[t].pop()
             price = f"{float(cost) * rng.uniform(0.8, 1.3):.2f}"
             print(f'{d.isoformat()} * "Sell {t}" "lot {i}"')
-            print(f"  Assets:Broker:{t}  -{units} {t} {{{cost} USD}} @ {price} USD")
+            print(
+                f"  Assets:Broker:{t}  -{units} {t} "
+                f"{{{cost} USD, {acquired}}} @ {price} USD"
+            )
             print(f"  Assets:Broker:Cash  {units * float(price):.2f} USD")
             print("  Income:Gains")
         else:
             units = rng.randint(1, 50)
             cost = f"{rng.uniform(5, 400):.2f}"
-            held[t].append((units, cost))
+            held[t].append((units, cost, d.isoformat()))
             print(f'{d.isoformat()} * "Buy {t}" "lot {i}"')
             print(f"  Assets:Broker:{t}   {units} {t} {{{cost} USD}}")
             print(f"  Assets:Broker:Cash  -{units * float(cost):.2f} USD")

@@ -33,15 +33,24 @@ fi
 
 # shape:regex — the feature whose ABSENCE would make the shape pointless.
 declare -A REQUIRED=(
-    [investment]='\{[0-9.]+ USD\}'
+    # Dated lot reference, not a bare cost: `investment` names the lot it is
+    # selling by cost AND acquisition date. Costs collide across thousands of
+    # buys, so naming the cost alone matched two lots and STRICT rejected it
+    # (#2097) — the date is load-bearing, and this asserts it stays.
+    [investment]='\{[0-9.]+ USD, [0-9]{4}-[0-9]{2}-[0-9]{2}\}'
     [tagged]='#[a-z]'
     [multicurrency]='^[0-9-]+ price '
+    # Bare braces: the whole point of `fifo` is that the booking method picks
+    # the lot. An explicit cost here would collapse it into `investment`.
+    [fifo]='\{\} @'
 )
 # `simple` deliberately has no required feature: it is the floor, kept to show
 # what the cheapest path costs. It is asserted to load, nothing more.
 
 failed=0
-for shape in simple investment tagged multicurrency; do
+# `fifo` was absent from this list for as long as it has existed, so the shape
+# added because ordered selection was unprofiled was itself unchecked.
+for shape in simple investment tagged multicurrency fifo; do
     file="$TMP/$shape.beancount"
     if ! python3 "$GEN" "$shape" "$TXNS" > "$file" 2>"$TMP/$shape.gen.err"; then
         echo "FAIL $shape: generator failed"
@@ -67,6 +76,27 @@ for shape in simple investment tagged multicurrency; do
     printf 'ok   %-14s loads clean%s\n' "$shape" \
         "${want:+, contains /$want/}"
 done
+
+# Cross-check against Python where it is available. `investment` spent months
+# loading cleanly here while bean-check rejected it outright (#2097), which
+# made it useless as an input for any rustledger-vs-beancount comparison and
+# hid a real divergence. Optional, so this script still runs without a Python
+# beancount installed.
+if command -v bean-check >/dev/null 2>&1; then
+    for shape in simple investment tagged multicurrency fifo; do
+        file="$TMP/$shape.beancount"
+        [ -f "$file" ] || continue
+        if bean-check "$file" > "$TMP/$shape.bean.out" 2>&1; then
+            printf 'ok   %-14s loads under bean-check too\n' "$shape"
+        else
+            echo "FAIL $shape: bean-check rejects it — the shape is rledger-only"
+            head -3 "$TMP/$shape.bean.out" | sed 's/^/     /'
+            failed=1
+        fi
+    done
+else
+    echo "note: bean-check not on PATH; skipped the Python cross-check"
+fi
 
 # The floor must stay the floor: if `simple` ever grows these features it
 # stops being the cheap-path baseline the others are compared against.

@@ -2780,12 +2780,15 @@ mod tests {
     }
 
     #[test]
-    fn test_reduce_strict_multiple_match_different_dates_same_cost_uses_fifo() {
+    fn test_reduce_strict_same_cost_different_dates_is_ambiguous() {
+        // #2097. Two lots at the same cost number, differing only in
+        // acquisition date. This used to drain them FIFO on the grounds that
+        // the lots were interchangeable. They are not: whichever survives
+        // carries its own date, and holding period drives the short/long
+        // split in `report capgains` and per-lot IRR eligibility. Beancount
+        // rejects it too — `booking_method_STRICT` has no fallback.
         let mut inv = Inventory::new();
 
-        // Two lots at the same cost number but different acquisition dates.
-        // The user's cost spec could not have constrained the date without
-        // naming it, so the lots are interchangeable for the spec — FIFO.
         let cost1 = Cost::new(dec!(150.00), "USD").with_date(date(2024, 1, 15));
         let cost2 = Cost::new(dec!(150.00), "USD").with_date(date(2024, 2, 15));
 
@@ -2794,13 +2797,41 @@ mod tests {
         inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost2))
             .expect("fixture fits in Decimal");
 
-        let result = inv
+        let err = inv
             .reduce(&Amount::new(dec!(-5), "AAPL"), None, BookingMethod::Strict)
-            .expect("same cost number, different dates should fall back to FIFO");
+            .expect_err("a partial sale cannot choose between two dated lots");
+        assert!(
+            matches!(err, BookingError::AmbiguousMatch { num_matches: 2, .. }),
+            "expected AmbiguousMatch over the two dated lots, got {err:?}"
+        );
 
-        assert_eq!(inv.units("AAPL"), dec!(15));
-        // Reduced from the first (oldest) lot at 150.00 USD: 5 * 150 = 750.
-        assert_eq!(result.cost_basis.unwrap().number, dec!(750.00));
+        // And it left the inventory alone.
+        assert_eq!(inv.units("AAPL"), dec!(20));
+    }
+
+    #[test]
+    fn test_reduce_strict_selling_every_matched_lot_is_not_ambiguous() {
+        // The total-match exception, which beancount has too: consume every
+        // matched lot and no lot survives to carry a date, so the choice
+        // cannot be observed.
+        let mut inv = Inventory::new();
+
+        inv.add(Position::with_cost(
+            Amount::new(dec!(10), "AAPL"),
+            Cost::new(dec!(150.00), "USD").with_date(date(2024, 1, 15)),
+        ))
+        .expect("fixture fits in Decimal");
+        inv.add(Position::with_cost(
+            Amount::new(dec!(10), "AAPL"),
+            Cost::new(dec!(150.00), "USD").with_date(date(2024, 2, 15)),
+        ))
+        .expect("fixture fits in Decimal");
+
+        let result = inv
+            .reduce(&Amount::new(dec!(-20), "AAPL"), None, BookingMethod::Strict)
+            .expect("selling the whole matched set names no lot to choose");
+        assert_eq!(inv.units("AAPL"), dec!(0));
+        assert_eq!(result.cost_basis.unwrap().number, dec!(3000.00));
     }
 
     #[test]

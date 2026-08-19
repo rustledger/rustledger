@@ -1754,6 +1754,19 @@ mod reduction_tests {
         let inv = mk([lot(10, 100, 1), lot(10, 200, 2)]);
         let r = try_reduce(&inv, &sell_stk(20), BookingMethod::StrictWithSize);
         assert_eq!(basis(&r), dec!(3000)); // total match → FIFO: 1000 + 2000
+
+        // The basis alone cannot tell FIFO from LIFO here: a total match
+        // consumes every matching lot, so any order sums to 3000. The name of
+        // this test is about the ORDER, so assert it — flipping the fallback
+        // to LIFO used to leave this green.
+        assert_eq!(
+            r.matched
+                .iter()
+                .map(|p| p.cost.as_ref().map(|c| c.number))
+                .collect::<Vec<_>>(),
+            vec![Some(dec!(100)), Some(dec!(200))],
+            "oldest lot first",
+        );
     }
 
     // ---- Mutating reduce() path (reduce_*) ----------------------------

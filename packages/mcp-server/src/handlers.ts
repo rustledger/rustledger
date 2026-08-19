@@ -15,6 +15,7 @@ import {
   textResponse,
   jsonResponse,
   formatErrors,
+  formatValidation,
   formatQueryResult,
   collectLedgerFiles,
   withIncludedContext,
@@ -251,11 +252,7 @@ function handleValidate(args: ToolArguments | undefined): ToolResponse {
 
   const source = args!.source!;
   const result = rustledger.validateSource(source);
-  return textResponse(
-    result.valid
-      ? "Ledger is valid."
-      : `Found ${result.errors.length} error(s):\n${formatErrors(result.errors)}`
-  );
+  return textResponse(formatValidation(result));
 }
 
 function handleQuery(args: ToolArguments | undefined): ToolResponse {
@@ -826,11 +823,7 @@ function handleValidateFile(args: ToolArguments | undefined): ToolResponse {
     // instead of a TypeScript re-creation of them.
     const { files, entry } = collectLedgerFiles(absolutePath);
     const result = rustledger.validateMultiFile(files, entry);
-    return textResponse(
-      result.valid
-        ? `${absolutePath}: Ledger is valid.`
-        : `${absolutePath}: Found ${result.errors.length} error(s):\n${formatErrors(result.errors)}`
-    );
+    return textResponse(formatValidation(result, absolutePath));
   } catch (error) {
     return errorResponse(
       `Error reading file: ${error instanceof Error ? error.message : String(error)}`

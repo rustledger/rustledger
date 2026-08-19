@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { initSync } from '@rustledger/wasm';
 import * as rustledger from '@rustledger/wasm';
 import { handleToolCall } from '../handlers.js';
-import { validateArgs, formatErrors, formatQueryResult, textResponse, errorResponse, jsonResponse, collectLedgerFiles, withIncludedContext } from '../helpers.js';
+import { validateArgs, formatErrors, formatValidation, formatQueryResult, textResponse, errorResponse, jsonResponse, collectLedgerFiles, withIncludedContext } from '../helpers.js';
 import { TOOLS } from '../tools.js';
 import { RESOURCES, getResourceContents } from '../resources.js';
 import { PROMPTS, getPrompt } from '../prompts.js';
@@ -287,6 +287,38 @@ describe('Helper Functions', () => {
       expect(result).toContain('[error]');
       expect(result).toContain('10:5');
       expect(result).toContain('Test error');
+    });
+
+    it('lists warnings on a ledger that is still valid', () => {
+      // A warning is not an error — the ledger is valid and `rledger check`
+      // exits 0 — but it still has to be SHOWN. Reporting only when `valid` is
+      // false meant a ledger the CLI describes as `⚠ 1 warning` came back as a
+      // bare "Ledger is valid.", from a tool whose description promises
+      // "validation errors and warnings".
+      const out = formatValidation({
+        valid: true,
+        errors: [{ message: 'Unrealized gain on 10 AAPL', severity: 'warning' as const }],
+      });
+      expect(out).toContain('valid');
+      expect(out).toContain('1 warning');
+      expect(out).toContain('Unrealized gain on 10 AAPL');
+    });
+
+    it('says nothing extra when there is nothing to say', () => {
+      expect(formatValidation({ valid: true, errors: [] })).toBe('Ledger is valid.');
+    });
+
+    it('counts errors, not warnings, when reporting a failure', () => {
+      const out = formatValidation({
+        valid: false,
+        errors: [
+          { message: 'Balance failed', severity: 'error' as const },
+          { message: 'Unrealized gain', severity: 'warning' as const },
+        ],
+      });
+      expect(out).toContain('Found 1 error(s)');
+      // The warning is still listed — it just does not inflate the count.
+      expect(out).toContain('Unrealized gain');
     });
 
     it('names the file when the error carries one', () => {

@@ -56,19 +56,6 @@ function resolveIncludeTargets(includePath: string, baseDir: string): string[] {
   }
   return matches;
 }
-
-function expandInclude(
-  includePath: string,
-  baseDir: string,
-  stack: Set<string>,
-  emitted: Set<string>,
-  duplicates: string[]
-): string {
-  return resolveIncludeTargets(includePath, baseDir)
-    .map((m) => loadFileRecursive(m, stack, emitted, duplicates))
-    .join("\n");
-}
-
 /**
  * Gather a ledger's files into the `{ path: contents }` map the wasm
  * multi-file entry points take, keyed relative to the entry point's directory.
@@ -342,6 +329,32 @@ export function formatErrors(errors: BeancountError[]): string {
       return where ? `[${e.severity}] ${where}: ${e.message}` : `[${e.severity}] ${e.message}`;
     })
     .join("\n");
+}
+
+/**
+ * Render a validation result the way `rledger check` reports one.
+ *
+ * Warnings are NOT errors — a warning-only ledger is valid and the CLI exits 0
+ * — but they still have to be shown. Reporting only when `valid` is false
+ * meant a ledger the CLI describes as `⚠ 1 warning` came back as a bare
+ * "Ledger is valid.", with the tool's own description promising "validation
+ * errors and warnings".
+ */
+export function formatValidation(
+  result: { valid: boolean; errors: BeancountError[] },
+  prefix = ""
+): string {
+  const head = prefix ? `${prefix}: ` : "";
+  const warnings = result.errors.filter((e) => e.severity === "warning");
+
+  if (!result.valid) {
+    const errorCount = result.errors.length - warnings.length;
+    return `${head}Found ${errorCount} error(s):\n${formatErrors(result.errors)}`;
+  }
+  if (warnings.length > 0) {
+    return `${head}Ledger is valid, with ${warnings.length} warning(s):\n${formatErrors(warnings)}`;
+  }
+  return `${head}Ledger is valid.`;
 }
 
 /**

@@ -32,7 +32,9 @@ export interface ToolDefinition {
 export const validateTool: ToolDefinition = {
   name: "validate",
   description:
-    "Validate a Beancount ledger. Returns validation errors and warnings if any issues are found.",
+    "Validate a Beancount ledger — the same checks the `rledger check` CLI runs, " +
+    "including booking, balance assertions and per-transaction zero-sum. " +
+    "Returns validation errors and warnings if any issues are found.",
   inputSchema: {
     type: "object",
     properties: {
@@ -469,7 +471,9 @@ export const reportTool: ToolDefinition = {
 export const validateFileTool: ToolDefinition = {
   name: "validate_file",
   description:
-    "Validate a Beancount file from the filesystem. Handles includes automatically.",
+    "Validate a Beancount file from the filesystem — the same checks the " +
+    "`rledger check` CLI runs, including booking, balance assertions and " +
+    "per-transaction zero-sum. Handles includes automatically.",
   inputSchema: {
     type: "object",
     properties: {

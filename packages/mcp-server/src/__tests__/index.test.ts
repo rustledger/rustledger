@@ -60,6 +60,70 @@ describe('rustledger WASM bindings', () => {
       expect(result.valid).toBe(false);
       expect(result.errors.length).toBeGreaterThan(0);
     });
+
+    // The three shapes from #2084. The reporter's ledger validated clean here
+    // while `rledger check` found real errors, and the coverage above could
+    // not have caught it: an unopened account is refused during the early
+    // phase, whereas a failed assertion and an out-of-balance transaction are
+    // only decided once the ledger has been booked. Those are the checks a
+    // user reaches for this tool to run.
+
+    it('reports a failed balance assertion', () => {
+      const result = rustledger.validateSource(`
+2020-01-01 open Assets:Cash USD
+2020-01-01 open Equity:O USD
+
+2020-06-01 * "deposit"
+  Assets:Cash   100.00 USD
+  Equity:O     -100.00 USD
+
+2020-07-01 balance Assets:Cash  -999999.00 USD
+`);
+      expect(result.valid).toBe(false);
+      expect(result.errors.map((e: { code: string }) => e.code)).toContain('E2001');
+    });
+
+    it('reports a transaction that does not balance', () => {
+      const result = rustledger.validateSource(`
+2020-01-01 open Assets:Bank KRW
+2020-01-01 open Liabilities:Card KRW
+2020-01-01 open Equity:Opening-Balances KRW
+
+2020-01-02 * "opening balances"
+  Assets:Bank              1000000 KRW
+  Liabilities:Card         -179720 KRW
+  Equity:Opening-Balances  -500000 KRW
+`);
+      expect(result.valid).toBe(false);
+      expect(result.errors.map((e: { code: string }) => e.code)).toContain('E3001');
+    });
+
+    it('still validates a ledger that also emits a warning', () => {
+      // This is the regression itself. Before #1464, `run_validation` bailed
+      // on `!load.errors.is_empty()`, so a single plugin WARNING skipped every
+      // check that follows — and a large ledger almost always emits one. The
+      // assertion below is wrong by a million, and the tool reported success.
+      const result = rustledger.validateSource(`
+plugin "unrealized" "Equity:Unrealized"
+2020-01-01 open Assets:Stock
+2020-01-01 open Assets:Cash
+2020-01-01 open Equity:Unrealized
+
+2020-01-02 * "buy"
+  Assets:Stock  10 AAPL {100.00 USD}
+  Assets:Cash  -1000.00 USD
+
+2020-06-01 price AAPL 150.00 USD
+
+2020-07-01 balance Assets:Cash  -999999.00 USD
+`);
+      const warnings = result.errors.filter(
+        (e: { severity: string }) => e.severity === 'warning'
+      );
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(result.valid).toBe(false);
+      expect(result.errors.map((e: { code: string }) => e.code)).toContain('E2001');
+    });
   });
 
   describe('query', () => {

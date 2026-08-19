@@ -20,9 +20,14 @@ jobs:
   pr-benchmark:
     name: PR Benchmark
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Two release builds now (PR and base), so the budget is doubled.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The base commit is built and measured alongside the PR, so its
+          # history has to be here.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
         with:
           toolchain: 1.97.0 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
@@ -51,8 +56,24 @@ jobs:
           fi
           curl -sSfL "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp
           sudo mv "/tmp/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu/hyperfine" /usr/local/bin/
-      - name: Build rustledger
-        run: cargo build --release -p rustledger --no-default-features
+      - name: Build rustledger (PR and base)
+        run: |
+          set -euo pipefail
+          # Both sides are built here, by the same toolchain, and measured in
+          # the same hyperfine invocation below. The previous comparison read
+          # a number recorded by an earlier nightly on a different runner, so
+          # it mixed the code change with runner-to-runner variance and
+          # reported swings of 20% for changes that could not touch the
+          # measured path (#2090).
+          cargo build --release -p rustledger --no-default-features
+          cp target/release/rledger /tmp/rledger-pr
+
+          BASE_SHA='${{ github.event.pull_request.base.sha }}'
+          echo "Building base $BASE_SHA"
+          git worktree add /tmp/base "$BASE_SHA"
+          (cd /tmp/base && cargo build --release -p rustledger --no-default-features \
+             --target-dir /tmp/base-target)
+          cp /tmp/base-target/release/rledger /tmp/rledger-base
       - name: Generate test ledger (10K transactions)
         run: |
           python3 << 'EOF'
@@ -84,49 +105,66 @@ jobs:
 
           print("Generated benchmark.beancount (10K transactions)")
           EOF
-      - name: Run PR benchmark
+      - name: Run benchmark (PR vs base, same runner)
         id: benchmark
         run: |
-          echo "=== PR Benchmark (10K transactions) ==="
+          echo "=== PR vs base (10K transactions) ==="
 
-          # Quick benchmark: 5 runs, 2 warmup
+          # More runs than before: the verdict below is a significance test,
+          # and five samples cannot support one. Still well inside the job's
+          # budget at ~40ms per run.
           hyperfine \
-            --warmup 2 \
-            --runs 5 \
+            --warmup 3 \
+            --runs 20 \
             --export-json bench-pr.json \
-            --command-name 'rustledger' './target/release/rledger check benchmark.beancount' \
+            --command-name 'rustledger-pr' '/tmp/rledger-pr check benchmark.beancount' \
+            --command-name 'rustledger-base' '/tmp/rledger-base check benchmark.beancount' \
             --command-name 'beancount' 'bean-check benchmark.beancount'
 
-          # Extract results
           python3 << 'EOF'
           import json
+          import math
           import os
 
           with open('bench-pr.json') as f:
               results = json.load(f)
 
-          times = {}
-          for r in results['results']:
-              name = r['command']
-              mean_ms = r['mean'] * 1000
-              stddev_ms = r['stddev'] * 1000
-              times[name] = {'mean': round(mean_ms, 1), 'stddev': round(stddev_ms, 1)}
+          times = {
+              r['command']: {'mean': r['mean'] * 1000, 'stddev': r['stddev'] * 1000}
+              for r in results['results']
+          }
+          pr = times['rustledger-pr']
+          base = times['rustledger-base']
+          beancount = times['beancount']
 
-          rustledger = times.get('rustledger', {'mean': 0, 'stddev': 0})
-          beancount = times.get('beancount', {'mean': 0, 'stddev': 0})
+          change = (pr['mean'] - base['mean']) / base['mean'] * 100 if base['mean'] else 0.0
 
-          speedup = beancount['mean'] / rustledger['mean'] if rustledger['mean'] > 0 else 0
+          # Significant only if the gap clears the combined spread of the two
+          # measurements. Two standard deviations of the difference is a
+          # deliberately blunt test; the point is that a threshold below the
+          # noise floor reports noise, which is what #2090 was about.
+          combined = 2 * math.sqrt(pr['stddev'] ** 2 + base['stddev'] ** 2)
+          gap = abs(pr['mean'] - base['mean'])
+          significant = gap > combined
+
+          speedup = beancount['mean'] / pr['mean'] if pr['mean'] > 0 else 0
 
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f"rustledger_ms={rustledger['mean']}\n")
-              f.write(f"rustledger_stddev={rustledger['stddev']}\n")
-              f.write(f"beancount_ms={beancount['mean']}\n")
-              f.write(f"beancount_stddev={beancount['stddev']}\n")
+              f.write(f"rustledger_ms={pr['mean']:.1f}\n")
+              f.write(f"rustledger_stddev={pr['stddev']:.1f}\n")
+              f.write(f"base_ms={base['mean']:.1f}\n")
+              f.write(f"base_stddev={base['stddev']:.1f}\n")
+              f.write(f"beancount_ms={beancount['mean']:.1f}\n")
+              f.write(f"beancount_stddev={beancount['stddev']:.1f}\n")
               f.write(f"speedup={speedup:.1f}\n")
+              f.write(f"change={change:.1f}\n")
+              f.write(f"noise={combined:.1f}\n")
+              f.write(f"significant={'true' if significant else 'false'}\n")
 
-          print(f"rustledger: {rustledger['mean']}ms ± {rustledger['stddev']}ms")
-          print(f"beancount:  {beancount['mean']}ms ± {beancount['stddev']}ms")
-          print(f"speedup:    {speedup:.1f}x")
+          print(f"pr:       {pr['mean']:.1f}ms ± {pr['stddev']:.1f}ms")
+          print(f"base:     {base['mean']:.1f}ms ± {base['stddev']:.1f}ms")
+          print(f"change:   {change:+.1f}% (gap {gap:.1f}ms vs noise {combined:.1f}ms)")
+          print(f"verdict:  {'significant' if significant else 'within noise'}")
           EOF
       - name: Measure memory usage
         id: memory
@@ -147,27 +185,6 @@ jobs:
       # runners and weren't reported in the PR comment anyway). They are compiled
       # — but not run — by the `Benchmarks Compile` job in ci.yml, which guards
       # against the criterion bench targets bitrotting.
-      - name: Fetch baseline from main branch
-        id: baseline
-        run: |
-          # Try to get baseline from benchmarks branch
-          HISTORY_URL="https://raw.githubusercontent.com/${{ github.repository }}/benchmarks/.github/badges/validation-history.json"
-          if curl -sSf "$HISTORY_URL" -o /tmp/history.json 2>/dev/null; then
-            baseline=$(jq -r '.[-1].rustledger_ms // empty' /tmp/history.json)
-            baseline_date=$(jq -r '.[-1].date // empty' /tmp/history.json)
-            if [ -n "$baseline" ] && [ "$baseline" != "null" ] && [ "$baseline" != "0" ]; then
-              echo "baseline_ms=$baseline" >> $GITHUB_OUTPUT
-              echo "baseline_date=$baseline_date" >> $GITHUB_OUTPUT
-              echo "has_baseline=true" >> $GITHUB_OUTPUT
-              echo "Found baseline: ${baseline}ms from $baseline_date"
-            else
-              echo "has_baseline=false" >> $GITHUB_OUTPUT
-              echo "No valid baseline in history"
-            fi
-          else
-            echo "has_baseline=false" >> $GITHUB_OUTPUT
-            echo "Could not fetch baseline history"
-          fi
       - name: Post PR comment
         # GITHUB_TOKEN is read-only on `pull_request` workflows from forks
         # (a GitHub security guarantee; `permissions: pull-requests: write`
@@ -186,35 +203,44 @@ jobs:
             const speedup = parseFloat('${{ steps.benchmark.outputs.speedup }}');
             const rustledger_mem = parseFloat('${{ steps.memory.outputs.rustledger_mem_mb }}');
             const beancount_mem = parseFloat('${{ steps.memory.outputs.beancount_mem_mb }}');
-            const has_baseline = '${{ steps.baseline.outputs.has_baseline }}' === 'true';
-            const baseline_ms = parseFloat('${{ steps.baseline.outputs.baseline_ms }}') || 0;
-            const baseline_date = '${{ steps.baseline.outputs.baseline_date }}' || '';
+            const base_ms = parseFloat('${{ steps.benchmark.outputs.base_ms }}');
+            const base_stddev = parseFloat('${{ steps.benchmark.outputs.base_stddev }}');
+            const change = parseFloat('${{ steps.benchmark.outputs.change }}');
+            const noise = parseFloat('${{ steps.benchmark.outputs.noise }}');
+            const significant = '${{ steps.benchmark.outputs.significant }}' === 'true';
 
             // Calculate memory ratio
             const mem_ratio = (beancount_mem / rustledger_mem).toFixed(1);
 
-            // Build comparison with main section
+            // Both sides were built and measured in THIS job, so the
+            // comparison is between two binaries on one runner rather than
+            // against a number recorded elsewhere on another day (#2090).
             let baselineSection = '';
-            if (has_baseline && baseline_ms > 0) {
-              const change = ((rustledger_ms - baseline_ms) / baseline_ms * 100);
+            if (base_ms > 0) {
               const changeStr = change.toFixed(1);
-              let status, emoji;
-              if (change > 10) {
-                status = 'regression'; emoji = '🔴';
-              } else if (change > 5) {
-                status = 'slower'; emoji = '🟡';
-              } else if (change < -5) {
-                status = 'faster'; emoji = '🟢';
-              } else {
-                status = 'unchanged'; emoji = '✅';
-              }
               const sign = change >= 0 ? '+' : '';
-              baselineSection = '\n### vs main branch (' + baseline_date + ')\n' +
-                '| Metric | main | this PR | Change |\n' +
+              let status, emoji;
+              if (!significant) {
+                status = 'within noise'; emoji = '✅';
+              } else if (change > 10) {
+                status = 'regression'; emoji = '🔴';
+              } else if (change > 0) {
+                status = 'slower'; emoji = '🟡';
+              } else {
+                status = 'faster'; emoji = '🟢';
+              }
+              const verdict = significant
+                ? sign + changeStr + '% ' + emoji
+                : sign + changeStr + '% ' + emoji + ' (' + status + ')';
+              baselineSection = '\n### vs base, measured in this run\n' +
+                '| Metric | base | this PR | Change |\n' +
                 '|--------|------|---------|--------|\n' +
-                '| Time | ' + baseline_ms + 'ms | ' + rustledger_ms + 'ms | ' + sign + changeStr + '% ' + emoji + ' |\n';
+                '| Time | ' + base_ms + 'ms ± ' + base_stddev + 'ms | ' +
+                rustledger_ms + 'ms ± ' + rustledger_stddev + 'ms | ' + verdict + ' |\n' +
+                '\n<sub>A difference counts only when it clears the combined spread of the two ' +
+                'measurements (2σ ≈ ' + noise.toFixed(1) + 'ms here).</sub>\n';
             } else {
-              baselineSection = '\n> ℹ️ *No baseline available yet. Comparison will appear after first merge to main.*\n';
+              baselineSection = '\n> ℹ️ *Base build unavailable; no comparison.*\n';
             }
 
             const body = '## 📊 Benchmark Results\n\n' +
@@ -229,7 +255,8 @@ jobs:
               '<summary>What do these numbers mean?</summary>\n\n' +
               '- **Time**: Wall-clock time to parse and validate the ledger (± std dev)\n' +
               '- **Memory**: Peak resident set size (RSS)\n' +
-              '- **vs main**: Compared to latest nightly benchmark on main branch\n\n' +
+              '- **vs base**: The PR and its merge base, built and measured in the same job\n' +
+              '- A change is reported only when it exceeds the combined spread of both measurements\n\n' +
               '</details>';
 
             // Find existing comment

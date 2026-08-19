@@ -995,6 +995,42 @@ describe('loadWithIncludes', () => {
     expect(result.indexOf('"t02"')).toBeLessThan(result.indexOf('"t03"'));
   });
 
+  it('ignores directories a glob happens to match', () => {
+    // `include "d/*"` in a tree where `d` also holds a subdirectory. There is
+    // no sane reference to copy here: beancount 3.2.3 dies with an unhandled
+    // IsADirectoryError, and `rledger check` reports `failed to read ...: Is
+    // a directory`. Only files can be included, so matching one and skipping
+    // the rest is what the pattern means.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-globdir-'));
+    const d = path.join(dir, 'd');
+    fs.mkdirSync(path.join(d, 'subdir'), { recursive: true });
+    fs.writeFileSync(
+      path.join(d, 'x.beancount'),
+      '2020-03-01 * "t"\n  Expenses:Food   10.00 USD\n  Assets:Cash    -10.00 USD\n'
+    );
+    const mainPath = path.join(dir, 'dir.beancount');
+    fs.writeFileSync(
+      mainPath,
+      '2020-01-01 open Assets:Cash USD\n2020-01-01 open Expenses:Food USD\ninclude "d/*"\n'
+    );
+
+    const result = loadWithIncludes(mainPath);
+    expect(result).toContain('"t"');
+  });
+
+  it('treats a glob matching its own file as a cycle', () => {
+    // `include "*.beancount"` sitting in the directory it globs matches the
+    // including file. All three tools reject it: `rledger check` says
+    // `Duplicate filename parsed ... (include cycle: self -> self)` and
+    // bean-check says `Duplicate filename parsed`. The wording differs here
+    // but the verdict must not.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-globself-'));
+    const mainPath = path.join(dir, 'self.beancount');
+    fs.writeFileSync(mainPath, 'include "*.beancount"\n');
+
+    expect(() => loadWithIncludes(mainPath)).toThrow(/Circular include detected/);
+  });
+
   it('errors when a glob include matches nothing', () => {
     // Same wording `rledger check` and bean-check use, so the three agree
     // about a pattern that has gone stale.

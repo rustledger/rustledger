@@ -22,18 +22,41 @@ const INCLUDE_REGEX = new RegExp(INCLUDE_PATTERN, 'gm');
 const GLOB_CHARS = /[*?[\]]/;
 
 /**
- * Resolve one `include` target, which may be a glob.
+ * Resolve one `include` target to the absolute paths it names.
  *
  * `include "journals/*.beancount"` is how a ledger split into monthly files is
- * normally written, and both `rledger check` and bean-check expand it. This
- * loader treated the pattern as a literal filename, so every file tool here
- * failed with `ENOENT ... 'journals/*.beancount'` on a ledger the CLI loads
- * without complaint.
+ * normally written, and both `rledger check` and bean-check expand it. Both
+ * traversers here used to hand the pattern to `path.resolve` as a literal
+ * filename and fail with `ENOENT ... 'journals/*.beancount'` on a ledger the
+ * CLI loads without complaint — so this lives in one place and both use it.
  *
- * Matches are sorted so the assembled source is stable run to run —
- * `fs.globSync` gives no ordering guarantee — and a pattern matching nothing
- * is an error, with the wording both reference tools use.
+ * Matches are sorted so the assembled source is stable run to run
+ * (`fs.globSync` gives no ordering guarantee), directories are dropped since
+ * only files can be included, and a pattern matching nothing is an error with
+ * the wording both reference tools use.
  */
+function resolveIncludeTargets(includePath: string, baseDir: string): string[] {
+  if (!GLOB_CHARS.test(includePath)) {
+    return [path.resolve(baseDir, includePath)];
+  }
+
+  const matches = fs
+    .globSync(includePath, { cwd: baseDir })
+    .map((m) => path.resolve(baseDir, m))
+    .filter((m) => {
+      try {
+        return fs.statSync(m).isFile();
+      } catch {
+        return false;
+      }
+    })
+    .sort();
+  if (matches.length === 0) {
+    throw new Error(`include pattern "${includePath}" does not match any files`);
+  }
+  return matches;
+}
+
 function expandInclude(
   includePath: string,
   baseDir: string,
@@ -41,23 +64,7 @@ function expandInclude(
   emitted: Set<string>,
   duplicates: string[]
 ): string {
-  if (!GLOB_CHARS.test(includePath)) {
-    return loadFileRecursive(
-      path.resolve(baseDir, includePath),
-      stack,
-      emitted,
-      duplicates
-    );
-  }
-
-  const matches = fs
-    .globSync(includePath, { cwd: baseDir })
-    .map((m) => path.resolve(baseDir, m))
-    .sort();
-  if (matches.length === 0) {
-    throw new Error(`include pattern "${includePath}" does not match any files`);
-  }
-  return matches
+  return resolveIncludeTargets(includePath, baseDir)
     .map((m) => loadFileRecursive(m, stack, emitted, duplicates))
     .join("\n");
 }
@@ -205,7 +212,17 @@ function appendIncludes(
   // state across recursive invocations.
   const includeRe = new RegExp(INCLUDE_PATTERN, 'gm');
   for (const match of source.matchAll(includeRe)) {
-    const includeAbsPath = path.resolve(baseDir, match[1]);
+    // Glob-aware, like `loadWithIncludes`: an aggregate lookup over a ledger
+    // written as `include "journals/*.beancount"` used to throw ENOENT on the
+    // pattern and take hover and completions down with it.
+    let targets: string[];
+    try {
+      targets = resolveIncludeTargets(match[1], baseDir);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to include "${match[1]}": ${msg}`);
+    }
+    for (const includeAbsPath of targets) {
     // A single global `visited` set, added to BEFORE recursing, both
     // de-duplicates a diamond graph (a shared file is appended once, which is
     // what aggregate counts want) and makes a cycle (A -> B -> A) terminate
@@ -224,6 +241,7 @@ function appendIncludes(
     out.push(content);
     // Nested includes resolve relative to the included file's directory.
     appendIncludes(content, path.dirname(includeAbsPath), visited, out);
+    }
   }
 }
 

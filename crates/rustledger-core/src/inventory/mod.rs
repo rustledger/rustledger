@@ -1010,7 +1010,7 @@ pub struct Inventory {
     /// three words plus its allocation, on a type that is created per account
     /// and cloned per BQL output row.
     #[serde(skip)]
-    ordered_index: Option<Box<FxHashMap<crate::Currency, Vec<usize>>>>,
+    ordered_index: Option<Box<OrderedIndex>>,
     /// Whether an undo log is open. Not serialized; a transaction never spans
     /// a round trip.
     #[serde(skip)]
@@ -1020,6 +1020,28 @@ pub struct Inventory {
     #[cfg(debug_assertions)]
     #[serde(skip)]
     undo_witness: Option<Box<Self>>,
+}
+
+/// The order a booking method consumes lots in.
+///
+/// One inventory needs one ordering, because an account has one booking
+/// method — so this is stored alongside the index rather than a second index
+/// being kept in step with the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LotOrder {
+    /// Oldest lot first. FIFO walks it forward, LIFO backward.
+    Date,
+    /// Most expensive lot first, which is what HIFO takes.
+    CostDescending,
+}
+
+/// Lots per units-currency, in the order some booking method consumes them.
+#[derive(Debug, Clone)]
+pub(super) struct OrderedIndex {
+    /// Which ordering `by_currency` is sorted in.
+    order: LotOrder,
+    /// Slots per units-currency, sorted by `order` then slot ascending.
+    by_currency: FxHashMap<crate::Currency, Vec<usize>>,
 }
 
 /// What [`Inventory::cost_index`] groups lots by: the units they are held in,
@@ -1747,16 +1769,12 @@ impl Inventory {
         // matches a cost-less lot (`matches_cost_spec`: `(None, true)`), so
         // ordered selection can drain one, and an index that omitted them
         // picked a different lot than the scan.
-        let ordering = (
-            position.units.currency.clone(),
-            position.cost.as_ref().and_then(|cost| cost.date),
-        );
+        let ordering = position.units.currency.clone();
         let slot = self.positions.push_slot(position);
         if let Some(key) = key {
             self.cost_index.entry(key).or_default().push(slot);
         }
-        let (currency, date) = ordering;
-        self.ordered_index_insert(&currency, date, slot);
+        self.ordered_index_insert(&ordering, slot);
         Ok(())
     }
 
@@ -1774,12 +1792,10 @@ impl Inventory {
         // every drained lot, and cloning the currency to probe a map that is
         // not there is pure overhead for a ledger that never reduces with an
         // under-specified spec.
-        let ordered = self.ordered_index.is_some().then(|| {
-            (
-                position.units.currency.clone(),
-                position.cost.as_ref().and_then(|c| c.date),
-            )
-        });
+        let ordered = self
+            .ordered_index
+            .is_some()
+            .then(|| position.units.currency.clone());
         if let Some(key) = cost_key(position)
             && let Some(slots) = self.cost_index.get_mut(&key)
         {
@@ -1791,34 +1807,23 @@ impl Inventory {
         // The list is ordered, so find the entry rather than scanning for it:
         // a FIFO account drains its oldest lot over and over, and `retain`
         // walked every lot each time.
-        let Some((currency, date)) = ordered else {
+        let Some(currency) = ordered else {
             return;
         };
         let Some(index) = self.ordered_index.as_mut() else {
             return;
         };
-        if let Some(slots) = index.get_mut(&currency) {
-            let positions = &self.positions;
-            let at = slots.partition_point(|&existing| {
-                let existing_key = (
-                    positions
-                        .get(existing)
-                        .and_then(|p| p.cost.as_ref())
-                        .and_then(|c| c.date),
-                    existing,
-                );
-                existing_key < (date, idx)
-            });
-            if slots.get(at) == Some(&idx) {
+        if let Some(slots) = index.by_currency.get_mut(&currency) {
+            // Linear here rather than a binary search: `order_key` needs
+            // `&self.positions`, which is already borrowed through `index`.
+            // Removal is off the hot path — the walk is what this index exists
+            // to speed up — and it keeps the ordering rule in one place.
+            let at = slots.iter().position(|&existing| existing == idx);
+            if let Some(at) = at {
                 slots.remove(at);
-            } else {
-                // Not where the order says it should be — a lot mutated in
-                // place since it was indexed. Fall back rather than leave it:
-                // a stale entry is safe, but cheap removal is the point.
-                slots.retain(|slot| *slot != idx);
             }
             if slots.is_empty() {
-                index.remove(&currency);
+                index.by_currency.remove(&currency);
             }
         }
     }
@@ -1828,12 +1833,7 @@ impl Inventory {
     /// Ledgers book in date order, so the new lot almost always belongs at the
     /// end and the search settles immediately; the binary search is what keeps
     /// an out-of-order lot correct rather than fast.
-    fn ordered_index_insert(
-        &mut self,
-        currency: &crate::Currency,
-        date: Option<crate::NaiveDate>,
-        slot: usize,
-    ) {
+    fn ordered_index_insert(&mut self, currency: &crate::Currency, slot: usize) {
         // Maintain only an index that has been built. A ledger whose
         // reductions all resolve through `cost_index` never builds one and so
         // never pays for it: maintaining it from every `add` unconditionally
@@ -1841,23 +1841,20 @@ impl Inventory {
         if !matches!(self.positions, PositionStore::Owned(_)) {
             return;
         }
-        let Some(index) = self.ordered_index.as_mut() else {
+        let Some(mut index) = self.ordered_index.take() else {
             return;
         };
-        let key = (date, slot);
-        let positions = &self.positions;
-        let entry = index.entry(currency.clone()).or_default();
-        let at = entry.partition_point(|&existing| {
-            let existing_key = (
-                positions
-                    .get(existing)
-                    .and_then(|p| p.cost.as_ref())
-                    .and_then(|c| c.date),
-                existing,
-            );
-            existing_key < key
-        });
+        let order = index.order;
+        let key = (self.order_key(order, slot), slot);
+        // The index is OUT of `self` for the search, so the binary search can
+        // read `self.positions` for each probe. Materializing the keys instead
+        // — the obvious way around the borrow — makes every `add` walk the
+        // whole currency, which is the quadratic this index exists to remove.
+        let entry = index.by_currency.entry(currency.clone()).or_default();
+        let at =
+            entry.partition_point(|&existing| (self.order_key(order, existing), existing) < key);
         entry.insert(at, slot);
+        self.ordered_index = Some(index);
     }
 
     /// Populate `ordered_index` from the current lots — all of them, cost-less
@@ -1867,36 +1864,58 @@ impl Inventory {
     /// inventory, then kept current incrementally. Ordering matches what
     /// `plan_ordered` produced when it sorted per call: date ascending, slot
     /// ascending within a date.
-    pub(super) fn build_ordered_index(&mut self) {
+    /// The value `order` sorts `slot` by. Ties fall through to the slot
+    /// number, which is what makes both orderings match the stable sorts they
+    /// replace: `sort_by_key(date)` and `sort_by_key(Reverse(cost))` both left
+    /// equal keys in ascending slot order.
+    fn order_key(
+        &self,
+        order: LotOrder,
+        slot: usize,
+    ) -> (Option<Decimal>, Option<crate::NaiveDate>) {
+        let cost = self.positions.get(slot).and_then(|p| p.cost.as_ref());
+        match order {
+            LotOrder::Date => (None, cost.and_then(|c| c.date)),
+            // Negated rather than reversed so the tuple still sorts ascending
+            // and the slot tiebreak keeps its direction.
+            LotOrder::CostDescending => (cost.map(|c| -c.number), None),
+        }
+    }
+
+    pub(super) fn build_ordered_index(&mut self, order: LotOrder) {
         if !matches!(self.positions, PositionStore::Owned(_)) {
             return;
         }
-        let mut index: FxHashMap<crate::Currency, Vec<usize>> = FxHashMap::default();
+        let mut by_currency: FxHashMap<crate::Currency, Vec<usize>> = FxHashMap::default();
         for (idx, pos) in self.positions.iter_slots() {
-            index
+            by_currency
                 .entry(pos.units.currency.clone())
                 .or_default()
                 .push(idx);
         }
-        let positions = &self.positions;
-        for slots in index.values_mut() {
-            slots.sort_by_key(|&idx| {
-                positions
-                    .get(idx)
-                    .and_then(|p| p.cost.as_ref())
-                    .and_then(|c| c.date)
-            });
+        for slots in by_currency.values_mut() {
+            slots.sort_by_key(|&idx| self.order_key(order, idx));
         }
-        self.ordered_index = Some(Box::new(index));
+        self.ordered_index = Some(Box::new(OrderedIndex { order, by_currency }));
     }
 
     /// Every slot of `currency` in FIFO order, or `None` when the index cannot
     /// answer and the caller must scan.
     ///
     /// Cost-less slots included — see the field's own note on why.
-    fn ordered_candidates(&self, currency: &crate::Currency) -> Option<&[usize]> {
+    fn ordered_candidates(&self, currency: &crate::Currency, order: LotOrder) -> Option<&[usize]> {
         let index = self.ordered_index.as_ref()?;
-        Some(index.get(currency).map_or(&[][..], Vec::as_slice))
+        // A different ordering answers a different question; scanning is the
+        // only correct fallback until something rebuilds it.
+        if index.order != order {
+            return None;
+        }
+        Some(
+            index
+                .by_currency
+                .get(currency)
+                .map_or(&[][..], Vec::as_slice),
+        )
     }
 
     /// Slots that could satisfy `spec` for `units`, or `None` when the spec
@@ -2041,14 +2060,18 @@ impl Inventory {
         // STRICT account resolves through `cost_index` instead and never
         // reaches this, which is why the build is gated rather than
         // unconditional (#2083).
-        // FIFO and LIFO only: `reduce_hifo` sorts by COST and has its own scan,
-        // so it never reads this index — building one for it would be pure
-        // maintenance for a map nothing consults. (That scan is the same shape
-        // this PR fixes, and still unfixed for HIFO.)
-        if matches!(method, BookingMethod::Fifo | BookingMethod::Lifo)
-            && self.ordered_index.is_none()
+        // Which ordering this account's method consumes, if any. STRICT
+        // resolves through `cost_index` instead and never reaches the walk, so
+        // it builds nothing.
+        let wanted_order = match method {
+            BookingMethod::Fifo | BookingMethod::Lifo => Some(LotOrder::Date),
+            BookingMethod::Hifo => Some(LotOrder::CostDescending),
+            _ => None,
+        };
+        if let Some(order) = wanted_order
+            && self.ordered_index.as_ref().is_none_or(|i| i.order != order)
         {
-            self.build_ordered_index();
+            self.build_ordered_index(order);
         }
 
         // {*} merge operator: merge all lots into a single weighted-average-cost
@@ -2104,7 +2127,7 @@ impl Inventory {
         // unconditionally handed the index (and its maintenance cost) to every
         // ledger, including the ones whose reductions all resolve through
         // `cost_index`.
-        let ordered_was_built = self.ordered_index.is_some();
+        let ordered_was_built = self.ordered_index.as_ref().map(|i| i.order);
         self.ordered_index = None;
 
         // The cost index is for BOOKING, and only the owned backing books.
@@ -2123,9 +2146,15 @@ impl Inventory {
                 if let Some(key) = cost_key(pos) {
                     self.cost_index.entry(key).or_default().push(idx);
                 }
-                if ordered_was_built {
+                if let Some(order) = ordered_was_built {
                     self.ordered_index
-                        .get_or_insert_with(Box::default)
+                        .get_or_insert_with(|| {
+                            Box::new(OrderedIndex {
+                                order,
+                                by_currency: FxHashMap::default(),
+                            })
+                        })
+                        .by_currency
                         .entry(pos.units.currency.clone())
                         .or_default()
                         .push(idx);
@@ -2173,15 +2202,22 @@ impl Inventory {
         // order with slot as the tiebreak. `sort_by_key` is stable, so the
         // slot order already there survives — the same two-level order
         // `plan_ordered` produced when it sorted per call.
-        if let Some(index) = self.ordered_index.as_mut() {
-            let positions = &self.positions;
-            for slots in index.values_mut() {
-                slots.sort_by_key(|&idx| {
-                    positions
-                        .get(idx)
-                        .and_then(|p| p.cost.as_ref())
-                        .and_then(|c| c.date)
-                });
+        if let Some(order) = ordered_was_built {
+            let keys: Vec<(crate::Currency, Vec<usize>)> = self
+                .ordered_index
+                .as_ref()
+                .map(|i| {
+                    i.by_currency
+                        .iter()
+                        .map(|(c, slots)| (c.clone(), slots.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (currency, mut slots) in keys {
+                slots.sort_by_key(|&idx| self.order_key(order, idx));
+                if let Some(index) = self.ordered_index.as_mut() {
+                    index.by_currency.insert(currency, slots);
+                }
             }
         }
         Ok(())

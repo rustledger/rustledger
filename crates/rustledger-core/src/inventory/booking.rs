@@ -9,7 +9,9 @@ use rust_decimal::prelude::Signed;
 
 use smallvec::{SmallVec, smallvec};
 
-use super::{BookingError, BookingMethod, BookingResult, Inventory, MatchedLots, OverflowError};
+use super::{
+    BookingError, BookingMethod, BookingResult, Inventory, LotOrder, MatchedLots, OverflowError,
+};
 use crate::{Amount, Cost, CostSpec, Currency, Position};
 
 /// Compute weighted-average cost from a set of positions.
@@ -132,12 +134,19 @@ impl Inventory {
         }
         match method {
             BookingMethod::Strict => self.plan_strict(units, &spec).map(|(r, _)| r),
-            BookingMethod::Fifo => self.plan_ordered(units, &spec, false).map(|(r, _)| r),
-            BookingMethod::Lifo => self.plan_ordered(units, &spec, true).map(|(r, _)| r),
-            BookingMethod::StrictWithSize
-            | BookingMethod::Hifo
-            | BookingMethod::Average
-            | BookingMethod::None => self.clone().reduce(units, cost_spec, method),
+            BookingMethod::Fifo => self
+                .plan_ordered(units, &spec, LotOrder::Date, false)
+                .map(|(r, _)| r),
+            BookingMethod::Lifo => self
+                .plan_ordered(units, &spec, LotOrder::Date, true)
+                .map(|(r, _)| r),
+            BookingMethod::Hifo => self.plan_hifo(units, &spec).map(|(r, _)| r),
+            BookingMethod::StrictWithSize => {
+                self.plan_strict_with_size(units, &spec).map(|(r, _)| r)
+            }
+            BookingMethod::Average | BookingMethod::None => {
+                self.clone().reduce(units, cost_spec, method)
+            }
         }
     }
 
@@ -280,7 +289,8 @@ impl Inventory {
                 });
 
                 if all_same_value {
-                    let (result, updates) = self.plan_ordered(units, spec, false)?;
+                    let (result, updates) =
+                        self.plan_ordered(units, spec, LotOrder::Date, false)?;
                     return Ok((result, ReductionPlan::Updates(updates)));
                 }
 
@@ -292,7 +302,8 @@ impl Inventory {
                     .map(|&i| self.positions[i].units.number.abs())
                     .sum();
                 if total_units == units.number.abs() {
-                    let (result, updates) = self.plan_ordered(units, spec, false)?;
+                    let (result, updates) =
+                        self.plan_ordered(units, spec, LotOrder::Date, false)?;
                     return Ok((result, ReductionPlan::Updates(updates)));
                 }
 
@@ -305,64 +316,90 @@ impl Inventory {
     }
 
     /// `STRICT_WITH_SIZE` booking: like STRICT, but exact-size matches accept oldest lot.
-    pub(super) fn reduce_strict_with_size(
-        &mut self,
+    /// `STRICT_WITH_SIZE`: an explicit cost, disambiguated by lot size.
+    ///
+    /// Planned from `&self` so `try_reduce` can preview it without copying the
+    /// inventory. It used to be reachable only through `self.clone().reduce()`
+    /// — an O(lots) copy per reducing posting, which is quadratic across a
+    /// ledger and was most of this method's cost (#2091). The conversion is the
+    /// one #2061 left as "mechanical" when it split STRICT, FIFO and LIFO.
+    pub(super) fn plan_strict_with_size(
+        &self,
         units: &Amount,
         spec: &CostSpec,
-    ) -> Result<BookingResult, BookingError> {
-        let matching_indices: Vec<usize> = self
-            .positions
-            .iter_slots()
-            .filter(|(_, p)| {
-                p.units.currency == units.currency
-                    && !p.is_empty()
-                    && p.can_reduce(units)
-                    && p.matches_cost_spec(spec)
+    ) -> Result<(BookingResult, ReductionPlan), BookingError> {
+        // Narrow through the cost index before filtering, the way `plan_strict`
+        // does. This walked every slot in the account on every reduction. A
+        // spec naming a cost has a handful of candidates; one that names none
+        // still scans, because it can match anything.
+        let candidates: Vec<usize> = self.cost_candidates(units, spec).unwrap_or_else(|| {
+            self.positions
+                .iter_slots()
+                .filter(|(_, p)| p.units.currency == units.currency)
+                .map(|(i, _)| i)
+                .collect()
+        });
+        let matching_indices: Vec<usize> = candidates
+            .into_iter()
+            .filter(|&i| {
+                self.positions.get(i).is_some_and(|p| {
+                    p.units.currency == units.currency
+                        && !p.is_empty()
+                        && p.can_reduce(units)
+                        && p.matches_cost_spec(spec)
+                })
             })
-            .map(|(i, _)| i)
             .collect();
+
+        let from_lot = |idx: usize| {
+            self.plan_from_lot(idx, units)
+                .map(|(result, new_units)| (result, ReductionPlan::FromLot { idx, new_units }))
+        };
 
         match matching_indices.len() {
             0 => Err(BookingError::NoMatchingLot {
                 currency: units.currency.clone(),
                 cost_spec: spec.clone(),
             }),
-            1 => {
-                let idx = matching_indices[0];
-                self.reduce_from_lot(idx, units)
-            }
+            1 => from_lot(matching_indices[0]),
             n => {
-                // Check for exact-size match with any lot
-                let exact_matches: Vec<usize> = matching_indices
+                // A lot of exactly the reduction's size disambiguates.
+                let exact = matching_indices
                     .iter()
-                    .filter(|&&i| self.positions[i].units.number.abs() == units.number.abs())
                     .copied()
-                    .collect();
-
-                if exact_matches.is_empty() {
-                    // Total match exception
-                    let total_units: Decimal = matching_indices
-                        .iter()
-                        .map(|&i| self.positions[i].units.number.abs())
-                        .sum();
-                    if total_units == units.number.abs() {
-                        self.reduce_ordered(units, spec, false)
-                    } else {
-                        Err(BookingError::AmbiguousMatch {
-                            num_matches: n,
-                            currency: units.currency.clone(),
-                        })
-                    }
-                } else {
-                    // Use oldest (first) exact-size match
-                    let idx = exact_matches[0];
-                    self.reduce_from_lot(idx, units)
+                    .find(|&i| self.positions[i].units.number.abs() == units.number.abs());
+                if let Some(idx) = exact {
+                    return from_lot(idx);
                 }
+                // Total match exception: selling the whole matched inventory
+                // makes the choice of lot irrelevant.
+                let total_units: Decimal = matching_indices
+                    .iter()
+                    .map(|&i| self.positions[i].units.number.abs())
+                    .sum();
+                if total_units == units.number.abs() {
+                    let (result, updates) =
+                        self.plan_ordered(units, spec, LotOrder::Date, false)?;
+                    return Ok((result, ReductionPlan::Updates(updates)));
+                }
+                Err(BookingError::AmbiguousMatch {
+                    num_matches: n,
+                    currency: units.currency.clone(),
+                })
             }
         }
     }
 
-    /// FIFO booking: reduce from oldest lots first.
+    pub(super) fn reduce_strict_with_size(
+        &mut self,
+        units: &Amount,
+        spec: &CostSpec,
+    ) -> Result<BookingResult, BookingError> {
+        let (result, plan) = self.plan_strict_with_size(units, spec)?;
+        self.commit_plan(&plan, units);
+        Ok(result)
+    }
+
     pub(super) fn reduce_fifo(
         &mut self,
         units: &Amount,
@@ -381,131 +418,40 @@ impl Inventory {
     }
 
     /// HIFO booking: reduce from highest-cost lots first.
+    /// HIFO booking: take from the most expensive lots first.
+    ///
+    /// The plan half of the ordered walk with a cost key, which is all HIFO
+    /// ever was. It used to carry its own copy of that walk — scan every slot,
+    /// sort the survivors by cost, sum them for sufficiency, then take — which
+    /// is O(lots) per reduction and was 18s on a 20,000-transaction ledger
+    /// against FIFO's 0.27s (#2091). Sharing `plan_ordered` gives it the
+    /// maintained index, the early stop, and a plan half so `try_reduce` can
+    /// preview without cloning the inventory.
+    pub(super) fn plan_hifo(
+        &self,
+        units: &Amount,
+        spec: &CostSpec,
+    ) -> Result<(BookingResult, SmallVec<[(usize, Decimal); 1]>), BookingError> {
+        self.plan_ordered(units, spec, LotOrder::CostDescending, false)
+    }
+
     pub(super) fn reduce_hifo(
         &mut self,
         units: &Amount,
         spec: &CostSpec,
     ) -> Result<BookingResult, BookingError> {
-        let mut remaining = units.number.abs();
-        let mut matched: MatchedLots = SmallVec::new();
-        let mut cost_basis = Decimal::ZERO;
-        let mut cost_currency = None;
-
-        // Get matching positions with their costs
-        let mut matching: Vec<(usize, Decimal)> = self
-            .positions
-            .iter_slots()
-            .filter(|(_, p)| {
-                p.units.currency == units.currency
-                    && !p.is_empty()
-                    && p.units.number.signum() != units.number.signum()
-                    && p.matches_cost_spec(spec)
-            })
-            .map(|(i, p)| {
-                let cost = p.cost.as_ref().map_or(Decimal::ZERO, |c| c.number);
-                (i, cost)
-            })
-            .collect();
-
-        if matching.is_empty() {
-            return Err(BookingError::NoMatchingLot {
-                currency: units.currency.clone(),
-                cost_spec: spec.clone(),
-            });
-        }
-
-        // Sort by cost descending (highest first)
-        matching.sort_by_key(|(_, cost)| std::cmp::Reverse(*cost));
-
-        let indices: Vec<usize> = matching.into_iter().map(|(i, _)| i).collect();
-
-        // Check sufficiency BEFORE mutating any lot: a failed reduction must
-        // leave the inventory untouched (same invariant as `reduce_ordered`;
-        // see the comment there and `booking_properties.rs`).
-        let available: Decimal = indices
-            .iter()
-            .map(|&i| self.positions[i].units.number.abs())
-            .sum();
-        if available < remaining {
-            return Err(BookingError::InsufficientUnits {
-                currency: units.currency.clone(),
-                requested: remaining,
-                available,
-            });
-        }
-
-        for idx in indices {
-            if remaining.is_zero() {
-                break;
-            }
-
-            let pos = &self.positions[idx];
-            let available = pos.units.number.abs();
-            let take = remaining.min(available);
-
-            // Calculate cost basis for this portion
-            if let Some(cost) = &pos.cost {
-                // Checked, not clamped: a clamped cost basis becomes a
-                // fabricated capital gain (#1863).
-                //
-                // DEFENSE-IN-DEPTH, not a currently-reachable fix: no ledger
-                // was found that gets here with an overflowing accumulation —
-                // to sum two in-range cost bases past the ceiling, the
-                // reducing posting's own weight must exceed it too, and that
-                // is reported earlier (verified by removing this check and
-                // re-running the multi-lot fixtures, which still did not
-                // panic). Kept because reachability rests on those upstream
-                // checks, and a future caller reaching `reduce` directly must
-                // not resurrect the panic.
-                cost_basis = take
-                    .checked_mul(cost.number)
-                    .and_then(|v| cost_basis.checked_add(v))
-                    .ok_or_else(|| {
-                        BookingError::Overflow(OverflowError {
-                            currency: cost.currency.clone(),
-                        })
-                    })?;
-                cost_currency = Some(cost.currency.clone());
-            }
-
-            // Record what we matched
-            let (taken, _) = pos.split(take * pos.units.number.signum());
-            matched.push(taken);
-
-            // Reduce the lot
-            let reduction = if units.number.is_sign_negative() {
-                -take
-            } else {
-                take
-            };
-
-            let new_pos = Position {
-                units: Amount::new(pos.units.number + reduction, pos.units.currency.clone()),
-                cost: pos.cost.clone(),
-            };
-            self.positions[idx] = new_pos;
-
-            remaining -= take;
-        }
-
-        // Clean up empty positions
-        self.positions.retain(|p| !p.is_empty());
-        self.rebuild_index();
-
-        Ok(BookingResult {
-            matched,
-            cost_basis: cost_currency.map(|c| Amount::new(cost_basis, c)),
-        })
+        let (result, updates) = self.plan_hifo(units, spec)?;
+        self.commit_updates(&updates);
+        Ok(result)
     }
 
-    /// Reduce in order (FIFO or LIFO).
     pub(super) fn reduce_ordered(
         &mut self,
         units: &Amount,
         spec: &CostSpec,
         reverse: bool,
     ) -> Result<BookingResult, BookingError> {
-        let (result, updates) = self.plan_ordered(units, spec, reverse)?;
+        let (result, updates) = self.plan_ordered(units, spec, LotOrder::Date, reverse)?;
         self.commit_updates(&updates);
         Ok(result)
     }
@@ -521,6 +467,7 @@ impl Inventory {
         &self,
         units: &Amount,
         spec: &CostSpec,
+        order: LotOrder,
         reverse: bool,
     ) -> Result<(BookingResult, SmallVec<[(usize, Decimal); 1]>), BookingError> {
         let mut remaining = units.number.abs();
@@ -539,24 +486,25 @@ impl Inventory {
         // The predicate still runs per candidate: the index knows nothing
         // about sign, emptiness or what this spec matches, and a stale entry
         // for a drained lot is expected, since removal is best-effort.
-        let scanned: Option<Vec<usize>> = if self.ordered_candidates(&units.currency).is_some() {
-            None
-        } else {
-            // No index — a shared snapshot, or one never rebuilt. Scanning is
-            // the only correct answer, and it is what this always did.
-            let mut all: Vec<usize> = self
-                .positions
-                .iter_slots()
-                .filter(|(_, p)| p.units.currency == units.currency)
-                .map(|(i, _)| i)
-                .collect();
-            all.sort_by_key(|&i| self.positions[i].cost.as_ref().and_then(|c| c.date));
-            Some(all)
-        };
+        let scanned: Option<Vec<usize>> =
+            if self.ordered_candidates(&units.currency, order).is_some() {
+                None
+            } else {
+                // No index — a shared snapshot, or one never rebuilt. Scanning is
+                // the only correct answer, and it is what this always did.
+                let mut all: Vec<usize> = self
+                    .positions
+                    .iter_slots()
+                    .filter(|(_, p)| p.units.currency == units.currency)
+                    .map(|(i, _)| i)
+                    .collect();
+                all.sort_by_key(|&i| self.order_key(order, i));
+                Some(all)
+            };
         let candidates: &[usize] = match &scanned {
             Some(all) => all,
             None => self
-                .ordered_candidates(&units.currency)
+                .ordered_candidates(&units.currency, order)
                 .expect("the branch above proved it is Some"),
         };
 
@@ -1102,30 +1050,6 @@ impl Inventory {
     }
 
     /// Reduce from a specific lot.
-    pub(super) fn reduce_from_lot(
-        &mut self,
-        idx: usize,
-        units: &Amount,
-    ) -> Result<BookingResult, BookingError> {
-        let (result, new_units) = self.plan_from_lot(idx, units)?;
-        self.commit_from_lot(idx, units, new_units);
-        Ok(result)
-    }
-
-    /// The read-only half of [`Self::reduce_from_lot`]: everything up to the
-    /// first mutation, returning what WOULD be matched plus the lot's new
-    /// units number.
-    ///
-    /// Split out so `try_reduce` can answer from `&self`. It used to be
-    /// `self.clone().reduce(..)`, which deep-copied every lot in the account
-    /// to preview a reduction that touches one of them — the dominant
-    /// superlinear term in the pipeline (`Position::clone` grew 104x for 10x
-    /// the input on the `investment` profiling shape).
-    ///
-    /// Selection logic lives HERE and only here; the mutating path calls this
-    /// too. That is deliberate — `try_reduce` duplicating `reduce`'s selection
-    /// is the exact drift that `try_reduce_equivalence` exists to police, and
-    /// it had already bitten once before that test was written.
     pub(super) fn plan_from_lot(
         &self,
         idx: usize,
@@ -1240,6 +1164,7 @@ mod reduction_tests {
     //! the lot-reduction mutants surfaced by the #1309 audit are killed
     //! (the public mutating `reduce_*` path was covered indirectly, but
     //! the `try_reduce_*` preview path had no direct assertions).
+    use super::LotOrder;
     use crate::{Amount, BookingMethod, Cost, CostSpec, Inventory, Position, naive_date};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -1308,7 +1233,12 @@ mod reduction_tests {
         .expect("fixture fits in Decimal");
 
         let err = inv
-            .plan_ordered(&Amount::new(d(-99), "STK"), &CostSpec::default(), false)
+            .plan_ordered(
+                &Amount::new(d(-99), "STK"),
+                &CostSpec::default(),
+                LotOrder::Date,
+                false,
+            )
             .expect_err("99 units are not there");
         assert!(
             matches!(err, crate::BookingError::InsufficientUnits { .. }),
@@ -1328,6 +1258,14 @@ mod reduction_tests {
     ///
     /// Clearing `ordered_index` is what forces the scan: an empty index is
     /// how a shared snapshot looks, and the fallback exists for exactly that.
+    ///
+    /// What this does NOT check is whether the ORDER is the right one. Both
+    /// sides call `order_key`, so reversing it moves them together and this
+    /// test stays green — verified by mutating it. The orderings themselves
+    /// are pinned by the method tests (`test_hifo_reduces_highest_cost_first`,
+    /// `test_fifo_respects_dates` and their neighbors), which is the division
+    /// of labor: those say what order a method takes lots in, this says the
+    /// index reproduces whatever that order is.
     #[test]
     fn the_ordered_index_selects_what_the_scan_selects() {
         // Deliberately awkward: out-of-order dates, a duplicate date, a
@@ -1358,52 +1296,61 @@ mod reduction_tests {
             },
         ];
 
-        for spec in &specs {
-            for reverse in [false, true] {
-                for take in [1i64, 15, 45] {
-                    let units = Amount::new(d(-take), "STK");
+        for (order, reverse) in [
+            (LotOrder::Date, false),
+            (LotOrder::Date, true),
+            // HIFO: the cost ordering added in #2091. Its tiebreak has to match
+            // the `sort_by_key(Reverse(cost))` it replaced — stable, so equal
+            // costs stayed in ascending slot order.
+            (LotOrder::CostDescending, false),
+        ] {
+            for spec in &specs {
+                {
+                    for take in [1i64, 15, 45] {
+                        let units = Amount::new(d(-take), "STK");
 
-                    // Build it explicitly: `reduce` is what normally triggers
-                    // the build, and calling `plan_ordered` directly would
-                    // otherwise leave the index empty and compare the scan
-                    // against itself. That vacuous version of this test passed
-                    // against a deliberately reversed tiebreak.
-                    let mut indexing = inv.clone();
-                    indexing.build_ordered_index();
-                    assert!(
-                        indexing.ordered_index.is_some(),
-                        "the fixture must produce an index, or this test compares \
+                        // Build it explicitly: `reduce` is what normally triggers
+                        // the build, and calling `plan_ordered` directly would
+                        // otherwise leave the index empty and compare the scan
+                        // against itself. That vacuous version of this test passed
+                        // against a deliberately reversed tiebreak.
+                        let mut indexing = inv.clone();
+                        indexing.build_ordered_index(order);
+                        assert!(
+                            indexing.ordered_index.is_some(),
+                            "the fixture must produce an index, or this test compares \
                          the scan against itself",
-                    );
-                    let indexed = indexing.plan_ordered(&units, spec, reverse);
+                        );
+                        let indexed = indexing.plan_ordered(&units, spec, order, reverse);
 
-                    let mut scanning = inv.clone();
-                    scanning.ordered_index = None;
-                    let scanned = scanning.plan_ordered(&units, spec, reverse);
+                        let mut scanning = inv.clone();
+                        scanning.ordered_index = None;
+                        let scanned = scanning.plan_ordered(&units, spec, order, reverse);
 
-                    match (indexed, scanned) {
-                        (Ok((a_result, a_updates)), Ok((b_result, b_updates))) => {
-                            assert_eq!(
-                                a_updates, b_updates,
-                                "index and scan chose different lots for {spec:?} \
+                        match (indexed, scanned) {
+                            (Ok((a_result, a_updates)), Ok((b_result, b_updates))) => {
+                                assert_eq!(
+                                    a_updates, b_updates,
+                                    "index and scan chose different lots for {spec:?} \
                                  reverse={reverse} take={take}",
-                            );
-                            assert_eq!(
-                                a_result.cost_basis, b_result.cost_basis,
-                                "index and scan disagree on cost basis for {spec:?} \
+                                );
+                                assert_eq!(
+                                    a_result.cost_basis, b_result.cost_basis,
+                                    "index and scan disagree on cost basis for {spec:?} \
                                  reverse={reverse} take={take}",
-                            );
-                        }
-                        (Err(a), Err(b)) => assert_eq!(
-                            a.to_string(),
-                            b.to_string(),
-                            "index and scan report different errors for {spec:?} \
+                                );
+                            }
+                            (Err(a), Err(b)) => assert_eq!(
+                                a.to_string(),
+                                b.to_string(),
+                                "index and scan report different errors for {spec:?} \
                              reverse={reverse} take={take}",
-                        ),
-                        (a, b) => panic!(
-                            "index and scan disagree on success for {spec:?} \
-                             reverse={reverse} take={take}: {a:?} vs {b:?}"
-                        ),
+                            ),
+                            (a, b) => panic!(
+                                "index and scan disagree on success for {spec:?} \
+                             order={order:?} reverse={reverse} take={take}: {a:?} vs {b:?}"
+                            ),
+                        }
                     }
                 }
             }

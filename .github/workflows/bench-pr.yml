@@ -25,6 +25,15 @@ jobs:
   pr-benchmark:
     name: PR Benchmark
     runs-on: ubuntu-latest
+    env:
+      # ONE definition. Generation, timing, RSS and the report all read this;
+      # stating it per-step let the four drift apart, which is the same defect
+      # as the footer that claimed a run count nothing tied it to.
+      BENCH_SHAPES: simple investment fifo
+      # Same reason: hyperfine consumes this and the comment footer reports
+      # it back, and a footer describing sampling that did not happen is the
+      # exact bug this workflow already shipped once.
+      BENCH_WARMUP: 3
     # Two release builds now (PR and base), so the budget is doubled.
     timeout-minutes: 30
     steps:
@@ -100,8 +109,6 @@ jobs:
              --target-dir "$GITHUB_WORKSPACE/target")
           cp "$GITHUB_WORKSPACE/target/release/rledger" /tmp/rledger-base
       - name: Generate workloads
-        env:
-          BENCH_SHAPES: simple investment fifo
         run: |
           set -euo pipefail
           # The generator is `scripts/gen-profile-workload.py`, the same one
@@ -124,8 +131,6 @@ jobs:
         # comment footer reports them back. They used to be stated twice, and
         # the footer went stale the moment the run count changed.
         env:
-          BENCH_SHAPES: simple investment fifo
-          BENCH_WARMUP: 3
           BENCH_RUNS: 20
           # Both tools cache parsed output to disk, and hyperfine's warmup
           # populates that cache — so every measured run was a cache hit.
@@ -142,7 +147,13 @@ jobs:
           # `fifo` against ~40ms for rledger). Sampling it as heavily as the
           # two rledger builds would dominate the job for a figure no verdict
           # depends on.
-          BEANCOUNT_WARMUP: 1
+          # 0, not 1: the eligibility probe below is itself a full cold run
+          # of the same command, so it already does what a warmup would. With
+          # the parse caches disabled the probe cannot leave a picklecache
+          # behind either, so it warms exactly what hyperfine's own warmup
+          # would have — the page cache and Python's imports — and no more.
+          # Paying for both would add another 18s on `fifo` for nothing.
+          BEANCOUNT_WARMUP: 0
           BEANCOUNT_RUNS: 3
         run: |
           set -euo pipefail
@@ -174,7 +185,6 @@ jobs:
       - name: Measure memory usage
         id: memory
         env:
-          BENCH_SHAPES: simple investment fifo
           # Same reason as the timing step: a warm cache changes peak RSS as
           # well as wall clock, and the two numbers must describe the same
           # run.
@@ -229,9 +239,6 @@ jobs:
           done
       - name: Build the comment
         id: report
-        env:
-          BENCH_SHAPES: simple investment fifo
-          BENCH_WARMUP: 3
         run: |
           set -euo pipefail
           python3 << 'PYEOF'

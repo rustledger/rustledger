@@ -23,9 +23,6 @@ use crate::types::{
 use crate::types::{PluginInfo, PluginResult};
 use crate::utils::LineLookup;
 
-/// Convert [`LoadResult`] errors to detailed Error objects with line/column info.
-///
-/// This preserves parse error details that would be lost by simple `to_string()`.
 /// Whether a load error makes the directive stream unusable.
 ///
 /// Not every load error does. `DuplicateInclude` says a file was reached twice
@@ -43,6 +40,9 @@ fn load_error_is_fatal(error: &LoadError) -> bool {
     !matches!(error, LoadError::DuplicateInclude { .. })
 }
 
+/// Convert [`LoadResult`] errors to detailed Error objects with line/column info.
+///
+/// This preserves parse error details that would be lost by simple `to_string()`.
 fn load_errors_to_errors(load_result: &LoadResult) -> Vec<Error> {
     let mut errors = Vec::new();
 

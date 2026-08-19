@@ -43,6 +43,10 @@ use wasm_bindgen::JsValue;
 
 /// The host functions installed for the duration of one entry-point call.
 struct HostCallbacks {
+    /// The object the callbacks came from, used as their `this`. A host is
+    /// free to write `{ readFile(p) { return this.cache.get(p); } }`, and
+    /// calling that with a null receiver breaks it at runtime.
+    receiver: JsValue,
     /// `(path: string) => string | null` — contents, or null if unreadable.
     read_file: js_sys::Function,
     /// `(pattern: string) => string[]` — optional; without it a glob include
@@ -73,6 +77,21 @@ impl HostScope {
     /// When `readFile` is absent or is not callable. The other two are
     /// optional; the loader degrades the way a backend without them does.
     pub fn install(host: &JsValue) -> Result<Self, String> {
+        // Refuse rather than clobber. An inner scope would overwrite the outer
+        // one's callbacks and then clear them on drop, leaving the OUTER load
+        // to fail with "no host filesystem installed" — a confusing error a
+        // long way from its cause. This can only happen if a host callback
+        // re-enters, which is legal but not something the loader can be in the
+        // middle of.
+        let occupied = HOST.with(|h| h.borrow().is_some());
+        if occupied {
+            return Err(
+                "a host filesystem is already installed — a host callback cannot re-enter \
+                 `validateWithHost` or `queryWithHost` while a load is in progress"
+                    .to_string(),
+            );
+        }
+
         let read_file = js_fn(host, "readFile")?
             .ok_or_else(|| "host must provide a `readFile(path) => string | null`".to_string())?;
         let glob = js_fn(host, "glob")?;
@@ -80,6 +99,7 @@ impl HostScope {
 
         HOST.with(|h| {
             *h.borrow_mut() = Some(HostCallbacks {
+                receiver: host.clone(),
                 read_file,
                 glob,
                 realpath,
@@ -120,12 +140,11 @@ use wasm_bindgen::JsCast;
 pub struct HostFs;
 
 impl HostFs {
-    fn call1(f: &js_sys::Function, arg: &str) -> Result<JsValue, String> {
-        f.call1(&JsValue::NULL, &JsValue::from_str(arg))
-            .map_err(|e| {
-                e.as_string()
-                    .unwrap_or_else(|| "host callback threw".to_string())
-            })
+    fn call1(f: &js_sys::Function, receiver: &JsValue, arg: &str) -> Result<JsValue, String> {
+        f.call1(receiver, &JsValue::from_str(arg)).map_err(|e| {
+            e.as_string()
+                .unwrap_or_else(|| "host callback threw".to_string())
+        })
     }
 }
 
@@ -136,9 +155,14 @@ impl FileSystem for HostFs {
         // callback is free to re-enter — a caching or logging host might — and
         // re-entering while this borrow is live panics the `RefCell`. Cloning
         // a `js_sys::Function` copies a handle, not a function.
-        let f = HOST.with(|h| h.borrow().as_ref().map(|host| host.read_file.clone()));
-        let f = f.ok_or_else(|| not_found(path, "no host filesystem installed"))?;
-        let value = Self::call1(&f, &display).map_err(|message| not_found(path, &message))?;
+        let pair = HOST.with(|h| {
+            h.borrow()
+                .as_ref()
+                .map(|host| (host.read_file.clone(), host.receiver.clone()))
+        });
+        let (f, receiver) = pair.ok_or_else(|| not_found(path, "no host filesystem installed"))?;
+        let value =
+            Self::call1(&f, &receiver, &display).map_err(|message| not_found(path, &message))?;
         value
             .as_string()
             .map(Arc::from)
@@ -168,8 +192,15 @@ impl FileSystem for HostFs {
 
     fn normalize(&self, path: &Path) -> PathBuf {
         let display = path.display().to_string();
-        let f = HOST.with(|h| h.borrow().as_ref().and_then(|host| host.realpath.clone()));
-        match f.and_then(|f| Self::call1(&f, &display).ok().and_then(|v| v.as_string())) {
+        let pair = HOST.with(|h| {
+            h.borrow()
+                .as_ref()
+                .and_then(|host| host.realpath.clone().map(|f| (f, host.receiver.clone())))
+        });
+        match pair
+            .and_then(|(f, r)| Self::call1(&f, &r, &display).ok())
+            .and_then(|v| v.as_string())
+        {
             Some(real) => PathBuf::from(real),
             // No `realpath`, or the host could not resolve it. Fall back to
             // the same textual normalization the virtual backend applies, so
@@ -189,11 +220,15 @@ impl FileSystem for HostFs {
 
     fn glob(&self, pattern: &str) -> Result<Vec<PathBuf>, String> {
         // Same reason as `read`: the borrow must not span the JS call.
-        let f = HOST.with(|h| h.borrow().as_ref().and_then(|host| host.glob.clone()));
-        let Some(f) = f else {
+        let pair = HOST.with(|h| {
+            h.borrow()
+                .as_ref()
+                .and_then(|host| host.glob.clone().map(|f| (f, host.receiver.clone())))
+        });
+        let Some((f, receiver)) = pair else {
             return Err("glob is not supported by this filesystem".to_string());
         };
-        let value = Self::call1(&f, pattern)?;
+        let value = Self::call1(&f, &receiver, pattern)?;
         let array = js_sys::Array::from(&value);
         let mut matched: Vec<PathBuf> = array
             .iter()

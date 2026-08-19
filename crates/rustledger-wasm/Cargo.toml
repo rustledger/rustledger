@@ -69,7 +69,6 @@ js-sys = "0.3"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
-js-sys = "0.3"
 # TypeScript export (#1218 Phase 1): ts-rs is a host-only optional dep,
 # opt-in via the `ts-export` feature above. With the feature on,
 # `cargo test -p rustledger-wasm --features ts-export` writes per-type

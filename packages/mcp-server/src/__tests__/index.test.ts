@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { initSync } from '@rustledger/wasm';
 import * as rustledger from '@rustledger/wasm';
 import { handleToolCall } from '../handlers.js';
-import { validateArgs, formatErrors, formatValidation, formatQueryResult, textResponse, errorResponse, jsonResponse, collectLedgerFiles, withIncludedContext } from '../helpers.js';
+import { validateArgs, formatErrors, formatValidation, fatalErrors, formatQueryResult, textResponse, errorResponse, jsonResponse, collectLedgerFiles, withIncludedContext } from '../helpers.js';
 import { TOOLS } from '../tools.js';
 import { RESOURCES, getResourceContents } from '../resources.js';
 import { PROMPTS, getPrompt } from '../prompts.js';
@@ -287,6 +287,21 @@ describe('Helper Functions', () => {
       expect(result).toContain('[error]');
       expect(result).toContain('10:5');
       expect(result).toContain('Test error');
+    });
+
+    it('treats only errors as blocking, not warnings', () => {
+      // The wasm entry points carry non-fatal notices in the same `errors`
+      // array as real failures, so a bare `errors.length > 0` check made a
+      // plugin warning fatal. That is how `query` on a ledger using the
+      // `unrealized` plugin returned the warning and threw away the rows,
+      // where `rledger query` prints them.
+      const mixed = [
+        { message: 'Unrealized gain', severity: 'warning' as const },
+        { message: 'parse error', severity: 'error' as const },
+      ];
+      expect(fatalErrors(mixed).map((e) => e.message)).toEqual(['parse error']);
+      expect(fatalErrors([{ message: 'Unrealized gain', severity: 'warning' as const }])).toEqual([]);
+      expect(fatalErrors(undefined)).toEqual([]);
     });
 
     it('lists warnings on a ledger that is still valid', () => {

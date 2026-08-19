@@ -16,6 +16,7 @@ import {
   jsonResponse,
   formatErrors,
   formatValidation,
+  fatalErrors,
   formatQueryResult,
   collectLedgerFiles,
   withIncludedContext,
@@ -118,8 +119,9 @@ function handleImportCategorize(
     // intermediate JSON string). Pre-#1227 this called `JSON.parse(result)`,
     // which threw at runtime because the value was already an object.
     const result = rustledger.parse(source);
-    if (result.errors?.length > 0) {
-      return errorResponse(formatErrors(result.errors));
+    const blocking = fatalErrors(result.errors);
+    if (blocking.length > 0) {
+      return errorResponse(formatErrors(blocking));
     }
     const directives = result.ledger?.directives ?? [];
 
@@ -188,8 +190,9 @@ function handleImportReview(args: ToolArguments | undefined): ToolResponse {
     // See `handleImportCategorize` (above) for the parse-result shape
     // notes; same fix as in #1227.
     const result = rustledger.parse(source);
-    if (result.errors?.length > 0) {
-      return errorResponse(formatErrors(result.errors));
+    const blocking = fatalErrors(result.errors);
+    if (blocking.length > 0) {
+      return errorResponse(formatErrors(blocking));
     }
     const directives = result.ledger?.directives ?? [];
 
@@ -260,8 +263,9 @@ function handleQuery(args: ToolArguments | undefined): ToolResponse {
   if (validation) return validation;
 
   const result = rustledger.query(args!.source!, args!.query!);
-  if (result.errors?.length > 0) {
-    return errorResponse(formatErrors(result.errors));
+  const blocking = fatalErrors(result.errors);
+  if (blocking.length > 0) {
+    return errorResponse(formatErrors(blocking));
   }
   return textResponse(formatQueryResult(result));
 }
@@ -271,8 +275,9 @@ function handleBalances(args: ToolArguments | undefined): ToolResponse {
   if (validation) return validation;
 
   const result = rustledger.balances(args!.source!);
-  if (result.errors?.length > 0) {
-    return errorResponse(formatErrors(result.errors));
+  const blocking = fatalErrors(result.errors);
+  if (blocking.length > 0) {
+    return errorResponse(formatErrors(blocking));
   }
   return textResponse(formatQueryResult(result));
 }
@@ -282,8 +287,9 @@ function handleFormat(args: ToolArguments | undefined): ToolResponse {
   if (validation) return validation;
 
   const result = rustledger.format(args!.source!);
-  if (result.errors?.length > 0) {
-    return errorResponse(formatErrors(result.errors));
+  const blocking = fatalErrors(result.errors);
+  if (blocking.length > 0) {
+    return errorResponse(formatErrors(blocking));
   }
   return textResponse(result.formatted || "");
 }
@@ -293,8 +299,9 @@ function handleParse(args: ToolArguments | undefined): ToolResponse {
   if (validation) return validation;
 
   const result = rustledger.parse(args!.source!);
-  if (result.errors?.length > 0) {
-    return errorResponse(formatErrors(result.errors));
+  const blocking = fatalErrors(result.errors);
+  if (blocking.length > 0) {
+    return errorResponse(formatErrors(blocking));
   }
   return jsonResponse(result.ledger);
 }
@@ -317,8 +324,9 @@ function handleRunPlugin(args: ToolArguments | undefined): ToolResponse {
   if (validation) return validation;
 
   const result = rustledger.runPlugin(args!.source!, args!.plugin_name!);
-  if (result.errors?.length > 0) {
-    return errorResponse(formatErrors(result.errors));
+  const blocking = fatalErrors(result.errors);
+  if (blocking.length > 0) {
+    return errorResponse(formatErrors(blocking));
   }
   return textResponse(`Plugin processed ${result.directives.length} directives.`);
 }
@@ -688,8 +696,9 @@ function handleFormatCheck(args: ToolArguments | undefined): ToolResponse {
 
   const source = args!.source!;
   const result = rustledger.format(source);
-  if (result.errors?.length > 0) {
-    return errorResponse(formatErrors(result.errors));
+  const blocking = fatalErrors(result.errors);
+  if (blocking.length > 0) {
+    return errorResponse(formatErrors(blocking));
   }
   const formatted = result.formatted || "";
   const isFormatted = source === formatted;
@@ -802,8 +811,9 @@ function handleReport(args: ToolArguments | undefined): ToolResponse {
   }
 
   const result = rustledger.query(args!.source!, query);
-  if (result.errors?.length > 0) {
-    return errorResponse(formatErrors(result.errors));
+  const blocking = fatalErrors(result.errors);
+  if (blocking.length > 0) {
+    return errorResponse(formatErrors(blocking));
   }
 
   return textResponse(`# ${reportType.toUpperCase()} Report\n\n${formatQueryResult(result)}`);
@@ -840,8 +850,9 @@ function handleQueryFile(args: ToolArguments | undefined): ToolResponse {
     // Same as `validate_file`: the loader resolves the includes, not us.
     const { files, entry } = collectLedgerFiles(absolutePath);
     const result = rustledger.queryMultiFile(files, entry, args!.query!);
-    if (result.errors?.length > 0) {
-      return errorResponse(formatErrors(result.errors));
+    const blocking = fatalErrors(result.errors);
+    if (blocking.length > 0) {
+      return errorResponse(formatErrors(blocking));
     }
     return textResponse(formatQueryResult(result));
   } catch (error) {
@@ -859,8 +870,9 @@ function handleFormatFile(args: ToolArguments | undefined): ToolResponse {
     const absolutePath = path.resolve(args!.file_path!);
     const source = fs.readFileSync(absolutePath, "utf-8");
     const result = rustledger.format(source);
-    if (result.errors?.length > 0) {
-      return errorResponse(formatErrors(result.errors));
+    const blocking = fatalErrors(result.errors);
+    if (blocking.length > 0) {
+      return errorResponse(formatErrors(blocking));
     }
     if (args?.write && result.formatted) {
       fs.writeFileSync(absolutePath, result.formatted);

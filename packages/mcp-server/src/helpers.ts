@@ -338,6 +338,20 @@ export function formatErrors(errors: BeancountError[]): string {
 }
 
 /**
+ * The diagnostics that make a result unusable.
+ *
+ * A warning does not. The wasm entry points carry non-fatal notices in the
+ * same `errors` array as real failures — `query` documents that it passes
+ * "load warnings through every result path so callers still see them" — so a
+ * bare `errors.length > 0` treats a plugin notice as a hard failure. That is
+ * how a `query` on a ledger with an `unrealized` plugin returned the warning
+ * and THREW AWAY the rows, where `rledger query` prints them.
+ */
+export function fatalErrors(errors?: BeancountError[]): BeancountError[] {
+  return (errors ?? []).filter((e) => e.severity === "error");
+}
+
+/**
  * Render a validation result the way `rledger check` reports one.
  *
  * Warnings are NOT errors — a warning-only ledger is valid and the CLI exits 0

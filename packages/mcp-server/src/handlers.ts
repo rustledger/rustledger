@@ -16,7 +16,6 @@ import {
   jsonResponse,
   formatErrors,
   formatQueryResult,
-  loadWithIncludes,
   loadWithIncludesDetailed,
   withIncludedContext,
 } from "./helpers.js";
@@ -851,13 +850,23 @@ function handleQueryFile(args: ToolArguments | undefined): ToolResponse {
 
   try {
     const absolutePath = path.resolve(args!.file_path!);
-    // Load file with includes resolved
-    const source = loadWithIncludes(absolutePath);
+    // Load file with includes resolved. Duplicates are noted rather than
+    // raised: `rledger query` prints `LOAD: Duplicate filename parsed` and
+    // still returns the rows, exiting 0 — unlike `rledger check`, which
+    // treats the same condition as an error. Matching each command's own
+    // severity is the point; reporting it in one tool and not the other is
+    // how the two drift apart.
+    const { source, duplicates } = loadWithIncludesDetailed(absolutePath);
     const result = rustledger.query(source, args!.query!);
     if (result.errors?.length > 0) {
       return errorResponse(formatErrors(result.errors));
     }
-    return textResponse(formatQueryResult(result));
+    const notes = duplicates
+      .map((p) => `LOAD: Duplicate filename parsed: "${p}"`)
+      .join("\n");
+    return textResponse(
+      notes ? `${notes}\n\n${formatQueryResult(result)}` : formatQueryResult(result)
+    );
   } catch (error) {
     return errorResponse(
       `Error: ${error instanceof Error ? error.message : String(error)}`

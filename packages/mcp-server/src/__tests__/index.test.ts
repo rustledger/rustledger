@@ -963,6 +963,48 @@ describe('loadWithIncludes', () => {
     expect(validation.valid).toBe(true);
   });
 
+  it('expands a glob include', () => {
+    // `include "journals/*.beancount"` is how a ledger split into monthly
+    // files is normally written, and both `rledger check` and bean-check
+    // expand it. This loader treated the pattern as a literal filename, so
+    // every file tool failed with ENOENT on a ledger the CLI loads fine.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-glob-'));
+    const j = path.join(dir, 'j');
+    fs.mkdirSync(j, { recursive: true });
+    for (const m of ['01', '02', '03']) {
+      fs.writeFileSync(
+        path.join(j, `2020-${m}.beancount`),
+        `2020-${m}-05 * "t${m}"\n  Expenses:Food   1${m}.00 USD\n  Assets:Cash    -1${m}.00 USD\n`
+      );
+    }
+    const mainPath = path.join(dir, 'glob.beancount');
+    fs.writeFileSync(
+      mainPath,
+      '2020-01-01 open Assets:Cash USD\n2020-01-01 open Expenses:Food USD\n' +
+        'include "j/*.beancount"\n'
+    );
+
+    const result = loadWithIncludes(mainPath);
+    for (const m of ['01', '02', '03']) {
+      expect(result).toContain(`"t${m}"`);
+    }
+
+    // Matches are sorted, so the assembled source is stable across runs —
+    // fs.globSync gives no ordering guarantee.
+    expect(result.indexOf('"t01"')).toBeLessThan(result.indexOf('"t02"'));
+    expect(result.indexOf('"t02"')).toBeLessThan(result.indexOf('"t03"'));
+  });
+
+  it('errors when a glob include matches nothing', () => {
+    // Same wording `rledger check` and bean-check use, so the three agree
+    // about a pattern that has gone stale.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-globempty-'));
+    const mainPath = path.join(dir, 'empty.beancount');
+    fs.writeFileSync(mainPath, 'include "nothing/*.beancount"\n');
+
+    expect(() => loadWithIncludes(mainPath)).toThrow(/does not match any files/);
+  });
+
   it('reports the duplicate that de-duplication hides', () => {
     // Loading the file once is only half of matching the CLI: `rledger check`
     // and bean-check both ERROR on a duplicate include (`Duplicate filename

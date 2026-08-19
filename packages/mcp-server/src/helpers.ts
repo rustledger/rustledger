@@ -18,6 +18,50 @@ import type {
 const INCLUDE_PATTERN = '^\\uFEFF?include\\s+"([^"]+)"[ \\t]*(?:;[^\\r\\n]*)?[ \\t\\r]*$';
 const INCLUDE_REGEX = new RegExp(INCLUDE_PATTERN, 'gm');
 
+/** Glob metacharacters beancount honors in an `include`. */
+const GLOB_CHARS = /[*?[\]]/;
+
+/**
+ * Resolve one `include` target, which may be a glob.
+ *
+ * `include "journals/*.beancount"` is how a ledger split into monthly files is
+ * normally written, and both `rledger check` and bean-check expand it. This
+ * loader treated the pattern as a literal filename, so every file tool here
+ * failed with `ENOENT ... 'journals/*.beancount'` on a ledger the CLI loads
+ * without complaint.
+ *
+ * Matches are sorted so the assembled source is stable run to run —
+ * `fs.globSync` gives no ordering guarantee — and a pattern matching nothing
+ * is an error, with the wording both reference tools use.
+ */
+function expandInclude(
+  includePath: string,
+  baseDir: string,
+  stack: Set<string>,
+  emitted: Set<string>,
+  duplicates: string[]
+): string {
+  if (!GLOB_CHARS.test(includePath)) {
+    return loadFileRecursive(
+      path.resolve(baseDir, includePath),
+      stack,
+      emitted,
+      duplicates
+    );
+  }
+
+  const matches = fs
+    .globSync(includePath, { cwd: baseDir })
+    .map((m) => path.resolve(baseDir, m))
+    .sort();
+  if (matches.length === 0) {
+    throw new Error(`include pattern "${includePath}" does not match any files`);
+  }
+  return matches
+    .map((m) => loadFileRecursive(m, stack, emitted, duplicates))
+    .join("\n");
+}
+
 /**
  * Load a beancount file with all its includes resolved.
  *
@@ -106,9 +150,8 @@ function loadFileRecursive(
 
     // Replace each include directive with the contents of the included file
     return source.replace(INCLUDE_REGEX, (_match, includePath: string) => {
-      const includeAbsPath = path.resolve(baseDir, includePath);
       try {
-        return loadFileRecursive(includeAbsPath, stack, emitted, duplicates);
+        return expandInclude(includePath, baseDir, stack, emitted, duplicates);
       } catch (error) {
         // Re-throw with context about which include failed
         const msg = error instanceof Error ? error.message : String(error);

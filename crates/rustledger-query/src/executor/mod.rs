@@ -445,7 +445,18 @@ impl<'a> Executor<'a> {
         // — `BALANCES` applies its own `WHERE` to the result afterward, and
         // `account_balances` is WHERE-independent by construction anyway.
         Ok(self
-            .scan_postings(from, None, false, true, false, false, false)?
+            .scan_postings(
+                from,
+                None,
+                ScanNeeds {
+                    balance: false,
+                    account_balance: true,
+                    where_reads_balance: false,
+                    where_reads_account_balance: false,
+                    output_reads_account_balance: true,
+                },
+                false,
+            )?
             .account_balances)
     }
 
@@ -489,15 +500,23 @@ impl<'a> Executor<'a> {
         // decides whether it has to exist before the filter runs.
         let where_reads_account_balance =
             where_clause.is_some_and(|w| expr_references_column(w, "account_balance"));
+        // And whether anything AFTER the filter reads it. A snapshot the WHERE
+        // needed but nothing else does must be released once the filter is
+        // done, or it keeps the engine's `Arc` shared and forces that account
+        // to copy on its next mutation — the copy this exists to avoid.
+        let output_reads_account_balance = output_references_column(query, "account_balance");
 
         Ok(self
             .scan_postings(
                 from,
                 where_clause,
-                needs_balance,
-                needs_account_balance,
-                where_reads_balance,
-                where_reads_account_balance,
+                ScanNeeds {
+                    balance: needs_balance,
+                    account_balance: needs_account_balance,
+                    where_reads_balance,
+                    where_reads_account_balance,
+                    output_reads_account_balance,
+                },
                 true,
             )?
             .postings)
@@ -526,12 +545,16 @@ impl<'a> Executor<'a> {
         &self,
         from: Option<&FromClause>,
         where_clause: Option<&Expr>,
-        needs_balance: bool,
-        needs_account_balance: bool,
-        where_reads_balance: bool,
-        where_reads_account_balance: bool,
+        needs: ScanNeeds,
         collect_contexts: bool,
     ) -> Result<PostingScan<'a>, QueryError> {
+        let ScanNeeds {
+            balance: needs_balance,
+            account_balance: needs_account_balance,
+            where_reads_balance,
+            where_reads_account_balance,
+            output_reads_account_balance,
+        } = needs;
         let mut postings = Vec::new();
         // Per-account running balance — accumulates every posting the FROM clause
         // keeps (plus the pre-`open_on` carry-in below), independent of the WHERE
@@ -684,8 +707,8 @@ impl<'a> Executor<'a> {
                         } else {
                             None
                         },
-                        // Cloning the account's inventory is O(lots), and it
-                        // was happening for EVERY posting the FROM clause kept,
+                        // Snapshotting the account's inventory used to copy
+                        // every lot, for EVERY posting the FROM clause kept,
                         // including the ones WHERE was about to reject. That is
                         // O(rows x lots) — 0.11s / 0.39s / 3.31s for 1k / 2k /
                         // 6k transactions, quadratic (#2086).
@@ -697,10 +720,7 @@ impl<'a> Executor<'a> {
                         // between here and there, so the deferred value is the
                         // same one.
                         account_balance: if needs_account_balance && where_reads_account_balance {
-                            engine
-                                .inventory(&posting.account)
-                                .cloned()
-                                .map(std::sync::Arc::new)
+                            engine.inventory_snapshot(&posting.account)
                         } else {
                             None
                         },
@@ -728,11 +748,16 @@ impl<'a> Executor<'a> {
                     }
                     // The deferred half of the gate above: this row survived, so
                     // it is one of the few that will actually be read.
-                    if needs_account_balance && !where_reads_account_balance {
-                        ctx.account_balance = engine
-                            .inventory(&posting.account)
-                            .cloned()
-                            .map(std::sync::Arc::new);
+                    if output_reads_account_balance {
+                        if ctx.account_balance.is_none() {
+                            ctx.account_balance = engine.inventory_snapshot(&posting.account);
+                        }
+                    } else {
+                        // The filter has had its look. Dropping the snapshot
+                        // here returns the engine's `Arc` to unique ownership,
+                        // so the next posting on this account mutates in place
+                        // instead of copying every lot (#2086).
+                        ctx.account_balance = None;
                     }
                     postings.push(ctx);
                 }
@@ -2257,6 +2282,57 @@ fn expr_references_column(expr: &Expr, name: &str) -> bool {
 /// ORDER BY, and the FROM filter expression. A subquery in FROM is
 /// treated as opaque — its inner references don't surface to the
 /// outer query's posting iterator.
+/// Which of the expensive per-posting values a scan has to produce.
+///
+/// Each one is a copy the scan can skip when nothing reads it, and *when* it
+/// is read decides how long it must be kept: a value the filter reads can be
+/// released once the filter has run, while one the output reads has to survive
+/// until the row is rendered. Passed as a struct because six booleans in a row
+/// at a call site say nothing about which is which.
+#[derive(Debug, Clone, Copy)]
+struct ScanNeeds {
+    /// The cumulative `balance` column is read somewhere.
+    balance: bool,
+    /// The `account_balance` column is read somewhere.
+    account_balance: bool,
+    /// The WHERE clause itself reads `balance`, so it must exist pre-filter.
+    where_reads_balance: bool,
+    /// The WHERE clause itself reads `account_balance`.
+    where_reads_account_balance: bool,
+    /// Something other than the WHERE reads `account_balance`, so the snapshot
+    /// has to outlive the filter.
+    output_reads_account_balance: bool,
+}
+
+/// Return `true` if any part of a `SelectQuery` OTHER than its `WHERE` clause
+/// references the given column.
+///
+/// The distinction matters for values that are expensive to keep: a column the
+/// filter reads and nothing else can be released as soon as the filter has run,
+/// while one the output reads has to survive until the row is rendered.
+fn output_references_column(query: &SelectQuery, name: &str) -> bool {
+    query
+        .targets
+        .iter()
+        .any(|t| expr_references_column(&t.expr, name))
+        || query
+            .group_by
+            .as_ref()
+            .is_some_and(|g| g.iter().any(|e| expr_references_column(e, name)))
+        || query
+            .having
+            .as_ref()
+            .is_some_and(|h| expr_references_column(h, name))
+        || query
+            .pivot_by
+            .as_ref()
+            .is_some_and(|p| p.iter().any(|e| expr_references_column(e, name)))
+        || query
+            .order_by
+            .as_ref()
+            .is_some_and(|o| o.iter().any(|s| expr_references_column(&s.expr, name)))
+}
+
 fn query_references_column(query: &SelectQuery, name: &str) -> bool {
     if query
         .targets

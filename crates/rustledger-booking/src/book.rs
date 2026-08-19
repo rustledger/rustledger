@@ -100,7 +100,15 @@ pub struct CapitalGain {
 #[derive(Debug, Default)]
 pub struct BookingEngine {
     /// Inventory per account.
-    inventories: FxHashMap<rustledger_core::Account, Inventory>,
+    /// Per-account inventories, behind `Arc` so a caller can take a snapshot
+    /// without copying the lots.
+    ///
+    /// Booking itself never shares one, so `Arc::make_mut` below hands back
+    /// `&mut` without copying and the engine pays nothing for this. A caller
+    /// that HOLDS a snapshot makes the next mutation of that account copy
+    /// once — which is the copy it asked for, and no longer a copy per row
+    /// whether anyone wanted it or not (#2086).
+    inventories: FxHashMap<rustledger_core::Account, std::sync::Arc<Inventory>>,
     /// Default booking method, used for accounts without an explicit
     /// booking method on their `open` directive.
     booking_method: BookingMethod,
@@ -196,7 +204,23 @@ impl BookingEngine {
     /// Get the inventory for an account.
     #[must_use]
     pub fn inventory(&self, account: &rustledger_core::Account) -> Option<&Inventory> {
-        self.inventories.get(account)
+        self.inventories.get(account).map(AsRef::as_ref)
+    }
+
+    /// A snapshot of an account's inventory that costs a refcount bump.
+    ///
+    /// The engine keeps mutating; this hands back the state as of now, without
+    /// copying the lots. The copy happens later and only if it has to — the
+    /// next mutation of this account finds the `Arc` shared and clones once
+    /// (`Arc::make_mut`). A caller that drops the snapshot before then, such as
+    /// a query filter that reads the balance and moves on, causes no copy at
+    /// all (#2086).
+    #[must_use]
+    pub fn inventory_snapshot(
+        &self,
+        account: &rustledger_core::Account,
+    ) -> Option<std::sync::Arc<Inventory>> {
+        self.inventories.get(account).map(std::sync::Arc::clone)
     }
 
     /// Consume the engine and return its realized per-account inventories.
@@ -210,6 +234,17 @@ impl BookingEngine {
     #[must_use]
     pub fn into_inventories(self) -> FxHashMap<rustledger_core::Account, Inventory> {
         self.inventories
+            .into_iter()
+            .map(|(account, inv)| {
+                // Unwrap when this engine holds the only reference, which is
+                // the normal case; a caller still holding a snapshot pays for
+                // the copy it kept alive.
+                (
+                    account,
+                    std::sync::Arc::try_unwrap(inv).unwrap_or_else(|shared| (*shared).clone()),
+                )
+            })
+            .collect()
     }
 
     /// Borrow the realized per-account inventories without consuming the engine.
@@ -222,7 +257,9 @@ impl BookingEngine {
     /// matters.
     // (No `#[must_use]`: the returned `impl Iterator` already carries it.)
     pub fn inventories(&self) -> impl Iterator<Item = (&rustledger_core::Account, &Inventory)> {
-        self.inventories.iter()
+        self.inventories
+            .iter()
+            .map(|(account, inv)| (account, inv.as_ref()))
     }
 
     /// Book a transaction: fill in empty cost specs and calculate gains.
@@ -303,7 +340,7 @@ impl BookingEngine {
             {
                 working_inventories
                     .entry(posting.account.clone())
-                    .or_insert_with(|| inv.clone());
+                    .or_insert_with(|| (**inv).clone());
             }
         }
 
@@ -385,7 +422,7 @@ impl BookingEngine {
                 // - Closing short positions (positive units, negative inventory)
                 if let Some(inv) = working_inventories
                     .get(&posting.account)
-                    .or_else(|| self.inventories.get(&posting.account))
+                    .or_else(|| self.inventories.get(&posting.account).map(AsRef::as_ref))
                 {
                     // Check if these units reduce existing cost-bearing inventory lots.
                     // Only positions with a cost basis are considered; simple (no-cost)
@@ -805,7 +842,10 @@ impl BookingEngine {
         // Resolve the per-account booking method before mutably borrowing the
         // inventories map.
         let method = self.method_for(&posting.account);
-        let inv = self.inventories.entry(posting.account.clone()).or_default();
+        // `make_mut` copies only when a caller is holding a snapshot of this
+        // account. Booking on its own never is, so this is a plain `&mut`.
+        let inv =
+            std::sync::Arc::make_mut(self.inventories.entry(posting.account.clone()).or_default());
 
         // Reduction vs augmentation — the single source for this decision
         // (`Inventory::is_booking_reduction`), shared with the Late validator so
@@ -1034,7 +1074,7 @@ impl BookingEngine {
             }
             for account in touched {
                 match self.inventories.get_mut(account) {
-                    Some(inv) => inv.begin_undo(),
+                    Some(inv) => std::sync::Arc::make_mut(inv).begin_undo(),
                     None => created.push(account.clone()),
                 }
             }
@@ -1050,7 +1090,7 @@ impl BookingEngine {
                     if let Some(inv) = engine.inventories.get_mut(&posting.account)
                         && inv.undo_is_open()
                     {
-                        inv.rollback_undo();
+                        std::sync::Arc::make_mut(inv).rollback_undo();
                     }
                 }
                 for account in created {
@@ -1202,6 +1242,7 @@ impl BookingEngine {
             }
             committed.push(&posting.account);
             if let Some(inv) = self.inventories.get_mut(&posting.account) {
+                let inv = std::sync::Arc::make_mut(inv);
                 if inv.undo_is_open() {
                     inv.commit_undo();
                 }

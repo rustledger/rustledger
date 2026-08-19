@@ -598,7 +598,18 @@ impl Executor<'_> {
         // there are no predicates to evaluate, so the scan is infallible here —
         // assert that invariant rather than silently emitting an empty table.
         let contexts = self
-            .scan_postings(None, None, true, true, false, false, true)
+            .scan_postings(
+                None,
+                None,
+                super::ScanNeeds {
+                    balance: true,
+                    account_balance: true,
+                    where_reads_balance: false,
+                    where_reads_account_balance: false,
+                    output_reads_account_balance: true,
+                },
+                true,
+            )
             .expect("scan_postings(None, None, ..) evaluates no predicates, so it cannot fail")
             .postings;
 

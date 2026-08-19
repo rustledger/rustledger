@@ -218,9 +218,10 @@ function appendIncludes(
   // state across recursive invocations.
   const includeRe = new RegExp(INCLUDE_PATTERN, 'gm');
   for (const match of source.matchAll(includeRe)) {
-    // Glob-aware, like `loadWithIncludes`: an aggregate lookup over a ledger
-    // written as `include "journals/*.beancount"` used to throw ENOENT on the
-    // pattern and take hover and completions down with it.
+    // Glob-aware, the same way `collectLedgerFiles` is and through the same
+    // resolver: an aggregate lookup over a ledger written as
+    // `include "journals/*.beancount"` used to throw ENOENT on the pattern and
+    // take hover and completions down with it.
     let targets: string[];
     try {
       targets = resolveIncludeTargets(match[1], baseDir);
@@ -228,25 +229,30 @@ function appendIncludes(
       const msg = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to include "${match[1]}": ${msg}`);
     }
+
     for (const includeAbsPath of targets) {
-    // A single global `visited` set, added to BEFORE recursing, both
-    // de-duplicates a diamond graph (a shared file is appended once, which is
-    // what aggregate counts want) and makes a cycle (A -> B -> A) terminate
-    // without re-appending. Unlike `loadWithIncludes`, this does NOT throw on a
-    // cycle: an aggregate lookup for hover/completions stays useful even if the
-    // ledger has an include cycle elsewhere, rather than failing the whole tool.
-    if (visited.has(includeAbsPath)) continue;
-    visited.add(includeAbsPath);
-    let content: string;
-    try {
-      content = fs.readFileSync(includeAbsPath, "utf-8");
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to include "${match[1]}": ${msg}`);
-    }
-    out.push(content);
-    // Nested includes resolve relative to the included file's directory.
-    appendIncludes(content, path.dirname(includeAbsPath), visited, out);
+      // A single global `visited` set, added to BEFORE recursing, both
+      // de-duplicates a diamond graph (a shared file is appended once, which
+      // is what aggregate counts want) and makes a cycle (A -> B -> A)
+      // terminate without re-appending.
+      //
+      // Terminating quietly is the whole behavior here, deliberately. Unlike
+      // the validation path there is no loader behind this to report the
+      // cycle — this assembles one buffer for hover and completions, which
+      // should keep working on a ledger that has a cycle elsewhere rather
+      // than failing the tool outright.
+      if (visited.has(includeAbsPath)) continue;
+      visited.add(includeAbsPath);
+      let content: string;
+      try {
+        content = fs.readFileSync(includeAbsPath, "utf-8");
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to include "${match[1]}": ${msg}`);
+      }
+      out.push(content);
+      // Nested includes resolve relative to the included file's directory.
+      appendIncludes(content, path.dirname(includeAbsPath), visited, out);
     }
   }
 }

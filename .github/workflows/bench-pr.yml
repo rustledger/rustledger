@@ -11,6 +11,11 @@ on:
       - 'crates/**/*.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      # A change to this workflow must exercise itself: the numbers it
+      # posts are only trustworthy if the measuring code has been run.
+      # Without this, a PR editing this file skips the benchmark and
+      # lands unvalidated (which is exactly what happened on #2094).
+      - '.github/workflows/bench-pr.yml'
 permissions:
   contents: read
   pull-requests: write

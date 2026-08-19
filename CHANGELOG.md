@@ -4,6 +4,7 @@ Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadma
 
 ### Breaking
 
+- **Same-date directives now book in file order** — booking previously floated cost augmentations ahead of the reductions matching against them within a `(date, priority)` group. Python has no such rule (`entry_sortkey` is `(date, type_priority, lineno)`), and the reordering changed which lots a match could see: a sell with an empty cost spec written before a same-date buy became an ambiguous match on a ledger Python accepts (issue #2093). Ledgers that relied on the reorder — a sell written before the same-date transaction that supplies its lot — now report the same error Python does. Writing the two in the order they happen fixes them. `Directive::has_cost_reduction` is removed with the tiebreak it existed for (PR #2095).
 - **`rustledger-lsp` URI conversion is now fallible and typed** — `uri_to_path` and `path_to_uri` return `Result<AbsPathBuf, PathUriError>` / `Result<Uri, PathUriError>` instead of `Option`. `uri_to_path` also refuses a non-`file:` scheme and any URI whose path segment percent-decodes into path syntax, both of which previously resolved to real filesystem paths. Embedders calling these directly must handle the error; the variants name which step failed (PR #1869).
 
 ### Performance

@@ -571,16 +571,16 @@ fn validate_phase_inner<D: ValidatableDirective>(
 
     // Sort directives into canonical booking order: date, then type
     // priority (e.g., balance assertions before transactions on the same
-    // day), then the cost-reduction-last tiebreak — the full
-    // `booking_sort_key` tuple, shared with the loader, booking engine,
-    // and LSP. Parallel sort only for large collections (threading
+    // day) — the `booking_sort_key` tuple, shared with the loader, booking
+    // engine, and LSP. Parallel sort only for large collections (threading
     // overhead otherwise).
-    // Decorate-sort-undecorate: compute the canonical key ONCE per
-    // directive (O(n)) instead of per comparison (O(n log n)) — the key's
-    // cost-reduction component walks a transaction's postings, and a
-    // comparator recomputes it eagerly even on date mismatches where the
-    // old hand-rolled `then_with` chain short-circuited. Both sorts are
-    // stable, so equal-key directives keep source order exactly as before.
+    // Decorate-sort-undecorate: compute the key ONCE per directive (O(n))
+    // rather than per comparison. The key is two cheap field reads since
+    // #2093 dropped its cost-reduction component, so this now buys much
+    // less than it did; it is kept because it also keeps the parallel and
+    // serial paths keyed identically. Both sorts are stable, so equal-key
+    // directives keep source order — which since #2093 is also the order
+    // they book in.
     let mut keyed: Vec<(_, &D)> = directives
         .iter()
         .map(|d| (rustledger_core::booking_sort_key(d.directive()), d))

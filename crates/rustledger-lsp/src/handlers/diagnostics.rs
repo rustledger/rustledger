@@ -273,8 +273,9 @@ pub(crate) fn run_ledger_validation(
     LEDGER_VALIDATION_RUNS.with(|c| c.set(c.get() + 1));
 
     // Booking order via the canonical comparator — the SINGLE source for
-    // (date, priority, cost-reduction-last), shared with the loader and
-    // booking engine so the LSP cannot drift from `rledger check`'s order.
+    // (date, priority), shared with the loader and booking engine so the LSP
+    // cannot drift from `rledger check`'s order. The sort is stable, so
+    // same-date directives keep file order, which is the order they book in.
     booked_directives.sort_by_cached_key(|d| rustledger_core::booking_sort_key(&d.value));
 
     // Run booking/interpolation on transactions before validation.

@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as path from "path";
 import type {
   BeancountError,
+  ValidationOutcome,
   QueryResult,
   ToolResponse,
   ToolArguments,
@@ -373,10 +374,7 @@ export function fatalErrors(errors?: BeancountError[]): BeancountError[] {
  * "Ledger is valid.", with the tool's own description promising "validation
  * errors and warnings".
  */
-export function formatValidation(
-  result: { valid: boolean; errors: BeancountError[] },
-  prefix = ""
-): string {
+export function formatValidation(result: ValidationOutcome, prefix = ""): string {
   const head = prefix ? `${prefix}: ` : "";
   const warnings = result.errors.filter((e) => e.severity === "warning");
 

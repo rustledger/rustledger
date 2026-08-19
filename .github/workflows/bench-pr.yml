@@ -71,9 +71,14 @@ jobs:
           BASE_SHA='${{ github.event.pull_request.base.sha }}'
           echo "Building base $BASE_SHA"
           git worktree add /tmp/base "$BASE_SHA"
+          # Same target directory on purpose: the two commits share their
+          # dependency graph, so this recompiles the workspace crates and
+          # reuses everything else. A separate target dir would be a cold
+          # build of every dependency, which is what would push this job past
+          # its timeout.
           (cd /tmp/base && cargo build --release -p rustledger --no-default-features \
-             --target-dir /tmp/base-target)
-          cp /tmp/base-target/release/rledger /tmp/rledger-base
+             --target-dir "$GITHUB_WORKSPACE/target")
+          cp "$GITHUB_WORKSPACE/target/release/rledger" /tmp/rledger-base
       - name: Generate test ledger (10K transactions)
         run: |
           python3 << 'EOF'
@@ -138,14 +143,18 @@ jobs:
           beancount = times['beancount']
 
           change = (pr['mean'] - base['mean']) / base['mean'] * 100 if base['mean'] else 0.0
-
-          # Significant only if the gap clears the combined spread of the two
-          # measurements. Two standard deviations of the difference is a
-          # deliberately blunt test; the point is that a threshold below the
-          # noise floor reports noise, which is what #2090 was about.
-          combined = 2 * math.sqrt(pr['stddev'] ** 2 + base['stddev'] ** 2)
+          # Significant only if the gap clears the uncertainty in the two
+          # MEANS — the standard error, not the spread of individual runs.
+          # Comparing means against per-run spread is conservative by a factor
+          # of sqrt(runs): at these numbers it would only report changes above
+          # ~14%, so a real 10% regression would read as noise.
+          runs = len(results['results'][0]['times'])
+          sem = math.sqrt(pr['stddev'] ** 2 / runs + base['stddev'] ** 2 / runs)
           gap = abs(pr['mean'] - base['mean'])
-          significant = gap > combined
+          # And an effect-size floor, so a difference that is statistically
+          # resolvable but too small to act on is not dressed up as a finding.
+          significant = gap > 2 * sem and abs(change) >= 3.0
+          combined = 2 * sem
 
           speedup = beancount['mean'] / pr['mean'] if pr['mean'] > 0 else 0
 
@@ -163,7 +172,7 @@ jobs:
 
           print(f"pr:       {pr['mean']:.1f}ms ± {pr['stddev']:.1f}ms")
           print(f"base:     {base['mean']:.1f}ms ± {base['stddev']:.1f}ms")
-          print(f"change:   {change:+.1f}% (gap {gap:.1f}ms vs noise {combined:.1f}ms)")
+          print(f"change:   {change:+.1f}% (gap {gap:.1f}ms vs 2*sem {combined:.1f}ms, floor 3%)")
           print(f"verdict:  {'significant' if significant else 'within noise'}")
           EOF
       - name: Measure memory usage

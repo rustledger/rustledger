@@ -73,7 +73,22 @@ jobs:
           cargo build --release -p rustledger --no-default-features
           cp target/release/rledger /tmp/rledger-pr
 
-          BASE_SHA='${{ github.event.pull_request.base.sha }}'
+          # On a pull_request event actions/checkout leaves HEAD at the
+          # merge commit GitHub computed, so the PR side already contains the
+          # base branch. Its FIRST parent is therefore exactly what this build
+          # sits on top of, and comparing against it isolates the PR's own
+          # changes. Read it from the commit rather than from the event
+          # payload's base.sha: the payload is a snapshot from when the event
+          # fired and can skew from the merge ref the runner actually checked
+          # out. Note this is the base branch HEAD, not the merge-base with
+          # it — which is the correct baseline precisely BECAUSE the PR side
+          # is a merge commit.
+          if git rev-parse -q --verify 'HEAD^2' >/dev/null 2>&1; then
+            BASE_SHA=$(git rev-parse 'HEAD^1')
+          else
+            # Not a merge commit (e.g. a checkout pinned to the PR head).
+            BASE_SHA='${{ github.event.pull_request.base.sha }}'
+          fi
           echo "Building base $BASE_SHA"
           git worktree add /tmp/base "$BASE_SHA"
           # Same target directory on purpose: the two commits share their
@@ -328,7 +343,7 @@ jobs:
               '<summary>What do these numbers mean?</summary>\n\n' +
               '- **Time**: Wall-clock time to parse and validate the ledger (± std dev)\n' +
               '- **Memory**: Peak resident set size (RSS)\n' +
-              '- **vs base**: The PR and its merge base, built and measured in the same job\n' +
+              '- **vs base**: The PR and the base-branch commit it is built on, built and measured in the same job\n' +
               '- A change is reported only when it exceeds the combined spread of both measurements\n\n' +
               '</details>';
 

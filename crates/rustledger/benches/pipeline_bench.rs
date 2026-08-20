@@ -196,6 +196,28 @@ fn bench_transaction_throughput(c: &mut Criterion) {
         });
     });
 
+    // The two phases `10k_transactions` is made of, so a parse regression can
+    // be attributed without a profiler. On this workload the split is roughly
+    // lexing 2.4 ms, building the green tree 13.8 ms, and converting that tree
+    // into directives 40.8 ms — i.e. the CST-to-AST conversion is about 70% of
+    // parse time, and neither the lexer nor rowan is where parse work goes.
+    group.bench_function("10k_phase1_lex", |b| {
+        b.iter(|| {
+            std::hint::black_box(
+                rustledger_parser::logos_lexer::tokenize_lossless(std::hint::black_box(&ledger))
+                    .len(),
+            )
+        });
+    });
+
+    group.bench_function("10k_phase2_lex_and_green_tree", |b| {
+        b.iter(|| {
+            std::hint::black_box(rustledger_parser::parse_structured(std::hint::black_box(
+                &ledger,
+            )))
+        });
+    });
+
     group.finish();
 }
 

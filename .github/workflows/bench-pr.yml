@@ -79,7 +79,18 @@ jobs:
           # it mixed the code change with runner-to-runner variance and
           # reported swings of 20% for changes that could not touch the
           # measured path (#2090).
-          cargo build --release -p rustledger --no-default-features
+          #
+          # `--features mimalloc` because release-build.yml ships it: the
+          # binary users run does not use the system allocator, and a
+          # benchmark on a different allocator measures a build nobody
+          # installs. This is not academic — a string-interning change
+          # measured -14% against glibc here and 0% against mimalloc, because
+          # what it was really recovering was glibc's per-allocation
+          # overhead, which mimalloc does not charge in the first place. The
+          # feature is opt-in rather than default only so that library
+          # consumers are not forced to vendor a C dependency; see the
+          # `[features]` comment in crates/rustledger/Cargo.toml.
+          cargo build --release -p rustledger --no-default-features --features mimalloc
           cp target/release/rledger /tmp/rledger-pr
 
           # On a pull_request event actions/checkout leaves HEAD at the
@@ -106,7 +117,7 @@ jobs:
           # build of every dependency, which is what would push this job past
           # its timeout.
           (cd /tmp/base && cargo build --release -p rustledger --no-default-features \
-             --target-dir "$GITHUB_WORKSPACE/target")
+             --features mimalloc --target-dir "$GITHUB_WORKSPACE/target")
           cp "$GITHUB_WORKSPACE/target/release/rledger" /tmp/rledger-base
       - name: Generate workloads
         run: |

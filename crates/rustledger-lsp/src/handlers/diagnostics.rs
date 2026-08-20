@@ -246,9 +246,14 @@ thread_local! {
 ///
 /// `rledger check` prints these under a single `BOOK` label, but LSP
 /// diagnostics carry a machine-readable code, so the classes are separated
-/// here. Only kinds that booking can actually return are listed; the catch-all
-/// keeps a new `BookingError` variant compiling rather than silently
-/// misclassifying it, at the cost of a less specific code until it is added.
+/// here.
+///
+/// The match is EXHAUSTIVE over `BookingError`, deliberately. An earlier
+/// version of this comment claimed a catch-all kept a new variant compiling;
+/// there was none — only `B::Interpolation(_)`, which catches new
+/// *interpolation* kinds — and adding `NotBooked` duly failed the build. That
+/// is the better outcome: a new booking failure should be classified on
+/// purpose, not silently mapped to whatever arm happens to be last.
 fn booking_error_code(err: &rustledger_booking::BookingError) -> rustledger_validate::ErrorCode {
     use rustledger_booking::BookingError as B;
     use rustledger_booking::InterpolationError as I;
@@ -261,6 +266,13 @@ fn booking_error_code(err: &rustledger_booking::BookingError) -> rustledger_vali
         // reports them from booking, so the mapping lives here alone.
         B::Interpolation(I::Unrepresentable { .. }) => ErrorCode::ArithmeticOverflow,
         B::Interpolation(_) => ErrorCode::TransactionUnbalanced,
+        // A posting that never went through booking is a caller fault, not a
+        // fault in the user's ledger — no directive of theirs is wrong. The
+        // LSP has no code for "we were handed an unbooked ledger", and
+        // inventing a ledger-shaped one would point the user at their own
+        // file. `MultipleInterpolation` is the nearest honest neighbor: both
+        // say the posting's amount was never resolved.
+        B::NotBooked { .. } => ErrorCode::MultipleInterpolation,
     }
 }
 

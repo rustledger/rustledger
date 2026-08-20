@@ -814,3 +814,38 @@ fn realizing_refuses_a_moved_pool_and_replaying_does_not() {
         "the `{{*}}` merged the pool rather than being skipped, got {lots:?}"
     );
 }
+
+/// An unbooked posting is refused rather than silently skipped.
+///
+/// `apply` and `replay_posting` both document "the posting must already be
+/// booked". That was a claim with nothing behind it: a posting whose units are
+/// still elided returned `Ok(())`, so replaying a ledger that never went
+/// through booking produced empty balances and no complaint — a wrong figure
+/// delivered quietly, which is the worse of the two failures.
+///
+/// Booking fills the units in, so this is unreachable for a booked ledger:
+/// nothing in the workspace suite and none of the 735 corpus files reach it.
+/// It exists for the caller who skipped a step.
+#[test]
+fn a_posting_that_was_never_booked_is_refused() {
+    let mut engine = engine_with_two_lots();
+
+    // Units still elided — what a posting looks like before booking runs.
+    let mut unbooked = Posting::new("Assets:Broker", amount("-5", "AAPL"));
+    unbooked.units = None;
+
+    let err = engine
+        .replay_posting(&unbooked, date(12))
+        .expect_err("an unbooked posting must be refused, not skipped");
+    let rendered = format!("{err}");
+    assert!(
+        rendered.contains("not booked") && rendered.contains("Assets:Broker"),
+        "the refusal must name the posting's account and say why, got: {rendered}"
+    );
+
+    // Realizing refuses it too — same precondition, same answer.
+    let err = engine
+        .apply(&Transaction::new(date(12), "unbooked").with_synthesized_posting(unbooked))
+        .expect_err("realizing an unbooked posting must be refused as well");
+    assert!(format!("{err}").contains("not booked"));
+}

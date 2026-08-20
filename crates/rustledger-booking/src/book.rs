@@ -48,6 +48,22 @@ pub enum BookingError {
     /// Interpolation failed after booking.
     #[error("interpolation failed: {0}")]
     Interpolation(#[from] InterpolationError),
+
+    /// A posting reached application with its units still elided, which means
+    /// it never went through booking.
+    ///
+    /// Separate from [`BookingError::Interpolation`] on purpose: interpolation
+    /// did not FAIL here, it never ran. Reporting an interpolation failure
+    /// would send a reader looking for a residual that does not exist.
+    ///
+    /// This used to be a silent `Ok(())`. A caller replaying an unbooked
+    /// ledger got empty balances and no complaint — a wrong figure delivered
+    /// quietly, which is worse than a refusal.
+    #[error("posting for {account} was not booked: its units are still elided")]
+    NotBooked {
+        /// The account whose posting was not booked.
+        account: rustledger_core::Account,
+    },
 }
 
 /// Result of booking a single transaction.
@@ -892,7 +908,13 @@ impl BookingEngine {
         date: rustledger_core::NaiveDate,
     ) -> Result<(), BookingError> {
         let Some(IncompleteAmount::Complete(units)) = &posting.units else {
-            return Ok(());
+            // Booking fills these in, so reaching here means the caller skipped
+            // it. Refusing beats the silent `Ok(())` this used to return, which
+            // handed back empty balances for an unbooked ledger and said
+            // nothing.
+            return Err(BookingError::NotBooked {
+                account: posting.account.clone(),
+            });
         };
         // Resolve the per-account booking method before mutably borrowing the
         // inventories map.

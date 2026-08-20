@@ -14,34 +14,49 @@ pub struct SourceFile {
     /// Source content (shared via Arc to avoid cloning).
     pub source: Arc<str>,
     /// Line start offsets (byte positions where each line starts).
-    line_starts: Vec<usize>,
+    ///
+    /// Built on first use, not on construction. Every consumer is a
+    /// diagnostic — `line_col`, `line`, `line_start`, `num_lines` — so a
+    /// ledger that reports nothing never needs it, and building it eagerly
+    /// meant scanning the whole source for newlines and keeping a `usize`
+    /// per line: 3.9% of a warm `check` and 320 KB on a 40,000-line ledger,
+    /// for a table nothing read.
+    line_starts: std::sync::OnceLock<Vec<usize>>,
 }
 
 impl SourceFile {
     /// Create a new source file.
-    fn new(id: usize, path: PathBuf, source: Arc<str>) -> Self {
-        let line_starts = std::iter::once(0)
-            .chain(source.match_indices('\n').map(|(i, _)| i + 1))
-            .collect();
-
+    const fn new(id: usize, path: PathBuf, source: Arc<str>) -> Self {
         Self {
             id,
             path,
             source,
-            line_starts,
+            line_starts: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The line-start table, built on first use.
+    fn line_starts(&self) -> &[usize] {
+        self.line_starts.get_or_init(|| {
+            std::iter::once(0)
+                .chain(self.source.match_indices('\n').map(|(i, _)| i + 1))
+                .collect()
+        })
     }
 
     /// Get the line and column (1-based) for a byte offset.
     #[must_use]
     pub fn line_col(&self, offset: usize) -> (usize, usize) {
-        let line = self
-            .line_starts
-            .iter()
-            .rposition(|&start| start <= offset)
-            .unwrap_or(0);
+        // `partition_point`, not `rposition`: the table is sorted ascending,
+        // so the linear scan this replaces was O(lines) per lookup — fine for
+        // one diagnostic, quadratic for a file that reports thousands. The
+        // predicate is monotone over a sorted slice, so the count of entries
+        // satisfying it is one past the last that does; entry 0 is always 0,
+        // so the count is never zero and the subtraction cannot underflow.
+        let starts = self.line_starts();
+        let line = starts.partition_point(|&start| start <= offset) - 1;
 
-        let col = offset - self.line_starts[line];
+        let col = offset - starts[line];
 
         (line + 1, col + 1)
     }
@@ -55,13 +70,14 @@ impl SourceFile {
     /// Get a specific line (1-based).
     #[must_use]
     pub fn line(&self, line_num: usize) -> Option<&str> {
-        if line_num == 0 || line_num > self.line_starts.len() {
+        let starts = self.line_starts();
+        if line_num == 0 || line_num > starts.len() {
             return None;
         }
 
-        let start = self.line_starts[line_num - 1];
-        let end = if line_num < self.line_starts.len() {
-            self.line_starts[line_num] - 1 // Exclude newline
+        let start = starts[line_num - 1];
+        let end = if line_num < starts.len() {
+            starts[line_num] - 1 // Exclude newline
         } else {
             self.source.len()
         };
@@ -71,8 +87,8 @@ impl SourceFile {
 
     /// Get the total number of lines.
     #[must_use]
-    pub const fn num_lines(&self) -> usize {
-        self.line_starts.len()
+    pub fn num_lines(&self) -> usize {
+        self.line_starts().len()
     }
 
     /// Get the byte offset where a line starts (1-based line number).
@@ -80,10 +96,11 @@ impl SourceFile {
     /// Returns `None` if the line number is out of range.
     #[must_use]
     pub fn line_start(&self, line_num: usize) -> Option<usize> {
-        if line_num == 0 || line_num > self.line_starts.len() {
+        let starts = self.line_starts();
+        if line_num == 0 || line_num > starts.len() {
             return None;
         }
-        Some(self.line_starts[line_num - 1])
+        Some(starts[line_num - 1])
     }
 }
 

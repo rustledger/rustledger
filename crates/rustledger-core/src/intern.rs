@@ -49,6 +49,94 @@ pub type AsOptionInternedStr = rkyv::with::Map<AsInternedStr>;
 #[cfg(feature = "rkyv")]
 pub type AsVecInternedStr = rkyv::with::Map<AsInternedStr>;
 
+/// A [`StringInterner`] installed for the duration of a deserialization.
+///
+/// `InternedStr` fields built while it is in scope share one `Arc<str>` per
+/// distinct string, rather than being deduplicated by a second pass
+/// afterwards.
+///
+/// The cache-hit path used to do both halves of that: rkyv handed every
+/// occurrence its own fresh `Arc` (40,015 of them for a ledger with a few
+/// dozen distinct strings), and `reintern_directives` then walked every
+/// directive again to collapse them. Interning on the way in makes the walk
+/// unnecessary — it establishes exactly the postcondition that pass exists to
+/// guarantee, that equal strings share a pointer.
+///
+/// Scoped rather than process-wide on purpose: an interner that outlives the
+/// call would accumulate every distinct payee and narration a long-running
+/// LSP or FFI host had ever seen, and this crate already offers explicit
+/// [`StringInterner`] / [`AccountInterner`] for callers that want to own one.
+/// The table here is dropped with the guard; the `Arc`s it handed out live on
+/// in the deserialized values, which is the whole point.
+///
+/// Nesting is safe: an inner scope observes that one is already installed,
+/// leaves it in place, and is a no-op on drop, so the outer scope keeps
+/// interning through to its own end.
+#[cfg(feature = "rkyv")]
+#[must_use = "the interner is uninstalled as soon as the guard drops"]
+pub struct InternScope {
+    /// Whether THIS guard installed the interner and so must remove it.
+    installed: bool,
+}
+
+#[cfg(feature = "rkyv")]
+thread_local! {
+    static SCOPED_INTERNER: std::cell::RefCell<Option<StringInterner>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "rkyv")]
+impl InternScope {
+    /// Install an interner for this thread until the returned guard drops.
+    pub fn new() -> Self {
+        let installed = SCOPED_INTERNER.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_some() {
+                false
+            } else {
+                *slot = Some(StringInterner::with_capacity(1024));
+                true
+            }
+        });
+        Self { installed }
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl Default for InternScope {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "rkyv")]
+impl Drop for InternScope {
+    fn drop(&mut self) {
+        if self.installed {
+            SCOPED_INTERNER.with(|cell| {
+                *cell.borrow_mut() = None;
+            });
+        }
+    }
+}
+
+/// Intern `s` through the active [`InternScope`], or `None` if none is
+/// installed.
+#[cfg(feature = "rkyv")]
+fn intern_scoped(s: &str) -> Option<InternedStr> {
+    SCOPED_INTERNER.with(|cell| {
+        // `try_borrow_mut` rather than `borrow_mut`: interning must never
+        // panic on a path that is only an optimization. A reentrant call
+        // cannot happen through `deserialize_with` today, and if one ever
+        // does it falls back to an un-shared `Arc` instead of aborting a
+        // load.
+        cell.try_borrow_mut()
+            .ok()?
+            .as_mut()
+            .map(|interner| interner.intern(s))
+    })
+}
+
 #[cfg(feature = "rkyv")]
 mod rkyv_impl {
     use super::InternedStr;
@@ -91,7 +179,11 @@ mod rkyv_impl {
             field: &ArchivedString,
             _deserializer: &mut D,
         ) -> Result<InternedStr, D::Error> {
-            Ok(InternedStr::new(field.as_str()))
+            // rkyv's deserializer carries no interner, so the sharing comes
+            // from an `InternScope` the caller installed. Without one this is
+            // the old behavior: a fresh `Arc` per occurrence.
+            let s = field.as_str();
+            Ok(super::intern_scoped(s).unwrap_or_else(|| InternedStr::new(s)))
         }
     }
 }

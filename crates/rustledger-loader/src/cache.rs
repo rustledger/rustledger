@@ -657,7 +657,21 @@ pub fn load_cache_entry(main_file: &Path) -> Option<CacheEntry> {
     file.read_exact(&mut data).ok()?;
 
     // Deserialize
-    let entry: CacheEntry = rkyv::from_bytes::<CacheEntry, rkyv::rancor::Error>(&data).ok()?;
+    // Intern while deserializing rather than deduplicating afterwards.
+    // rkyv's deserializer carries no interner, so `AsInternedStr` handed
+    // every occurrence its own `Arc<str>` — 40,015 of them on a
+    // 10,000-transaction ledger holding a few dozen distinct strings — and
+    // the caller then walked every directive again through
+    // `reintern_directives` to collapse them. The scope establishes the same
+    // postcondition (equal strings share a pointer) on the way in, so the
+    // second walk is redundant on this path; see `load_result_cached`.
+    //
+    // The guard drops at the end of this function, including on the `?`
+    // paths below, so nothing outlives the load.
+    let entry: CacheEntry = {
+        let _intern = rustledger_core::intern::InternScope::new();
+        rkyv::from_bytes::<CacheEntry, rkyv::rancor::Error>(&data).ok()?
+    };
 
     // Validate hash against the files stored in the cache
     let file_paths = entry.file_paths();
@@ -1340,6 +1354,81 @@ mod tests {
         // - "Assets:Checking" appears 5 times but only first is new (4 dedup)
         // Total: 12 deduplications
         assert_eq!(dedup_count, 12);
+    }
+
+    /// The property `load_result_cached` relies on when it skips
+    /// `reintern_directives`: deserializing under an `InternScope` leaves
+    /// equal strings sharing one `Arc`, which is exactly what that pass
+    /// exists to guarantee.
+    ///
+    /// Asserts the NEGATIVE half first. Without the scope every occurrence
+    /// gets its own `Arc`, so if the scope ever stopped working this test
+    /// would still be checking something real rather than passing because
+    /// `ptr_eq` happened to hold for another reason.
+    #[test]
+    fn cache_hit_directives_share_one_arc_per_distinct_string() {
+        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
+        let mut directives = vec![];
+        for i in 0..5 {
+            let txn = Transaction::new(date, format!("Txn {i}"))
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(10.00), "USD"),
+                ))
+                .with_synthesized_posting(Posting::auto("Assets:Checking"));
+            directives.push(Spanned::new(Directive::Transaction(txn), Span::new(0, 50)));
+        }
+
+        let bytes =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&directives).expect("directives serialize");
+
+        // Pull the `Expenses:Food` account out of the first and last
+        // transaction, which are distinct occurrences of the same string.
+        let accounts = |ds: &[Spanned<Directive>]| {
+            let pick = |d: &Spanned<Directive>| match &d.value {
+                Directive::Transaction(t) => t.postings[0].account.clone(),
+                other => panic!("expected a transaction, got {other:?}"),
+            };
+            (pick(&ds[0]), pick(&ds[4]))
+        };
+
+        let plain: Vec<Spanned<Directive>> =
+            rkyv::from_bytes::<Vec<Spanned<Directive>>, rkyv::rancor::Error>(&bytes)
+                .expect("deserialize without a scope");
+        let (a, b) = accounts(&plain);
+        assert_eq!(a.as_str(), b.as_str());
+        assert!(
+            !a.ptr_eq(&b),
+            "without an InternScope each occurrence should get its own Arc - \
+             if this now holds, the positive assertion below proves nothing"
+        );
+
+        let scoped: Vec<Spanned<Directive>> = {
+            let _intern = rustledger_core::intern::InternScope::new();
+            rkyv::from_bytes::<Vec<Spanned<Directive>>, rkyv::rancor::Error>(&bytes)
+                .expect("deserialize under a scope")
+        };
+        let (a, b) = accounts(&scoped);
+        assert!(
+            a.ptr_eq(&b),
+            "under an InternScope equal strings must share one Arc, which is \
+             what lets the cache-hit path skip reintern_directives"
+        );
+    }
+
+    /// The scope must not outlive its guard, or a long-running host would
+    /// accumulate every string it ever deserialized.
+    #[test]
+    fn the_intern_scope_stops_interning_once_the_guard_drops() {
+        let mine = {
+            let _intern = rustledger_core::intern::InternScope::new();
+            rustledger_core::intern::InternedStr::new("Assets:Checking")
+        };
+        // Outside the scope the table is gone, so a fresh value of the same
+        // string cannot be pointer-equal to one built inside it.
+        let after = rustledger_core::intern::InternedStr::new("Assets:Checking");
+        assert_eq!(mine.as_str(), after.as_str());
+        assert!(!mine.ptr_eq(&after));
     }
 
     #[test]

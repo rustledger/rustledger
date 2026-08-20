@@ -19,7 +19,7 @@ use std::path::Path;
 
 use rustledger_loader::{
     CacheEntry, CachedOptions, CachedPlugin, LoadResult, Loader, cache_disabled_by_env,
-    load_cache_entry, reintern_directives, save_cache_entry,
+    load_cache_entry, save_cache_entry,
 };
 
 /// Load a file's parsed [`LoadResult`], using the on-disk parse cache
@@ -48,16 +48,23 @@ pub fn load_result_cached(
         load_cache_entry(file)
     };
 
-    if let Some(mut entry) = cache_entry {
+    if let Some(entry) = cache_entry {
         if verbose {
             eprintln!("Loaded {} directives from cache", entry.directives.len());
         }
 
-        // Re-intern strings to deduplicate memory before reconstruction.
-        let dedup_count = reintern_directives(&mut entry.directives);
-        if verbose {
-            eprintln!("Re-interned strings ({dedup_count} deduplicated)");
-        }
+        // No `reintern_directives` here. That pass exists because each parsed
+        // FILE gets its own `StringInterner`, so the same account name in two
+        // included files lands in two `Arc`s and `InternedStr`'s pointer-
+        // equality fast path misses. A cache hit has no such split:
+        // `load_cache_entry` deserializes under an `InternScope`, so equal
+        // strings already share one `Arc` — the exact postcondition the walk
+        // guarantees. Running it anyway re-hashed every string in every
+        // directive to discover they were already shared, which cost 13.5M
+        // instructions, 7.2% of a warm `check` on a 10,000-transaction ledger.
+        //
+        // `cache_hit_directives_share_one_arc_per_distinct_string` pins the
+        // property this relies on.
 
         // Reconstruct an equivalent `LoadResult` (source map, plugins,
         // and a rebuilt display context) - see `CacheEntry::into_load_result`.

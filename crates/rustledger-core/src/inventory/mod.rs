@@ -1472,11 +1472,15 @@ impl Inventory {
             return false;
         }
 
-        let fits = |v: Decimal| {
-            v.abs()
-                .checked_add(needed)
-                .is_some_and(|sum| sum <= Decimal::MAX)
-        };
+        // `checked_add` is the whole test: it returns `None` exactly when the
+        // sum is not representable, so any `Some` it hands back is already a
+        // `Decimal` and therefore already `<= Decimal::MAX`. Comparing against
+        // the ceiling as well was a tautology, and not a free one — `Decimal`'s
+        // `PartialOrd` aligns the scales of both operands before it can answer,
+        // and `Decimal::MAX` has scale 0 and a full 96-bit mantissa, so it was
+        // the most expensive shape that comparison has. This runs twice per
+        // posting via `overflow_is_possible`.
+        let fits = |v: Decimal| v.abs().checked_add(needed).is_some();
 
         let cached_ok = self
             .units_cache

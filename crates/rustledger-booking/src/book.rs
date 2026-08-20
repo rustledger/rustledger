@@ -860,6 +860,16 @@ impl BookingEngine {
     /// # Precondition
     ///
     /// Same as [`Self::apply`]: the posting must already be booked.
+    ///
+    /// This is a precondition, not a check. A posting whose units are still
+    /// elided is SKIPPED and reports success — booking is what fills them in,
+    /// so replaying a ledger that never went through it produces empty
+    /// balances rather than an error. Nothing in the workspace suite reaches
+    /// that path, and the callers that exist all replay booked directives
+    /// (`process` partitions failed transactions out before the query
+    /// executor sees them), but a caller that skipped booking would be told
+    /// nothing. Making it loud is a behavior change and belongs in its own
+    /// commit, not a rename.
     pub fn replay_posting(
         &mut self,
         posting: &Posting,
@@ -1234,9 +1244,9 @@ impl BookingEngine {
             // A carried `{*}` re-executes the merge (#2068), so verify the
             // pool it will build against the one booking recorded BEFORE
             // anything mutates. Checked here rather than per-posting for
-            // two reasons: `replay_posting` answers the query executor's
-            // replays a FILTERED transaction stream, where a different pool is
-            // the correct answer and not a defect; and a precondition that
+            // two reasons: `replay_posting` replays a FILTERED transaction
+            // stream for the query executor, where a different pool is the
+            // correct answer and not a defect; and a precondition that
             // reports after mutating would depend on rollback to stay honest.
             //
             // Per posting rather than as a pre-pass over the transaction: an

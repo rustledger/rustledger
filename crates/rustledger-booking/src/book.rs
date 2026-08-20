@@ -1282,7 +1282,11 @@ impl BookingEngine {
             touched.insert(&posting.account);
             if let Err(e) = checked.and_then(|()| self.realize_posting(posting, txn.date)) {
                 // `snapshot` is `Some` whenever this arm is reachable:
-                // `rollback_needed` covers both failure modes. Restoring
+                // `rollback_needed` covers every way this can fail. Overflow
+                // and a failed reduction were the original two; `NotBooked` is
+                // a third, and both predicates already return `true` for a
+                // posting with no amount — deliberately, since an unfilled
+                // posting means booking did not complete. Restoring
                 // nothing would be silent corruption — precisely the bug being
                 // fixed — so a violated guard must be loud rather than quiet.
                 assert!(

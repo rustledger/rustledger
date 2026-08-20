@@ -2053,7 +2053,7 @@ fn same_date_reordering_does_not_change_which_lot_hifo_selects() {
                 .postings
                 .iter()
                 .find(|p| p.account.as_str() == "Assets:Inv")
-                .and_then(|p| p.cost.as_ref())
+                .and_then(|p| p.cost.as_deref())
                 .and_then(|c| c.number.as_ref()),
             _ => None,
         })

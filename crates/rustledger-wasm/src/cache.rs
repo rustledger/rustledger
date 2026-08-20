@@ -64,7 +64,12 @@ use crate::types::{Error, LedgerOptions};
 /// v14: a literal `-0.00` parses to an UNSIGNED zero. Loader v28 — archived
 /// VALUES again, so a stale blob would serve `-0.00` where the build no longer
 /// produces one.
-pub const CACHE_VERSION: u32 = 14;
+/// v15: `Posting::cost` and `Posting::price` are boxed. Loader v29 — the first
+/// entry here that changes neither the parser's output nor anything
+/// loader-internal: the archived VALUES are identical, but `ArchivedPosting`
+/// changed SHAPE, and a v14 blob read by this build would interpret an inline
+/// `CostSpec` as a relative pointer.
+pub const CACHE_VERSION: u32 = 15;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -81,6 +86,12 @@ pub const CACHE_VERSION: u32 = 14;
 ///
 ///   parser OUTPUT changed  -> bump `CACHE_VERSION` above too, then update
 ///                             this pin to match
+///   archived LAYOUT changed -> bump `CACHE_VERSION` above too. Same answer as
+///                             an output change and for a sharper reason: the
+///                             values agree, so nothing downstream would look
+///                             wrong, while the bytes are read at the wrong
+///                             offsets (v15 / loader v29, boxing
+///                             `Posting::cost`)
 ///   loader-internal only   -> only update this pin (layout of a loader-side
 ///                             struct moved; our archived directives did not)
 ///
@@ -90,7 +101,7 @@ pub const CACHE_VERSION: u32 = 14;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 28;
+const LOADER_CACHE_VERSION_PIN: u32 = 29;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

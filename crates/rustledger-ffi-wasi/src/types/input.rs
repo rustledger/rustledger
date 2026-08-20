@@ -381,8 +381,8 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                     Ok::<_, String>(rustledger_core::Spanned::synthesized(rustledger_core::Posting {
                         account: parse_account("posting", &p.account)?,
                         units,
-                        cost,
-                        price,
+                        cost: cost.map(Box::new),
+                        price: price.map(Box::new),
                         flag: None,
                         meta: json_map_to_metadata(&p.meta),
                         comments: Vec::new(),

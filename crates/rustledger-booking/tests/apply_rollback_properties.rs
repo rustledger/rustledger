@@ -105,7 +105,7 @@ proptest! {
         for (i, cost) in seed_costs.iter().enumerate() {
             let day = u32::try_from(i).unwrap_or(0) + 1;
             let mut buy = Posting::new("Assets:Stock", Amount::new(Decimal::from(50), CURRENCY));
-            buy.cost = Some(per_unit(*cost, day));
+            buy.cost = Some(Box::new(per_unit(*cost, day)));
             let txn = Transaction::new(date(day), "seed")
                 .with_synthesized_posting(buy);
             engine.apply(&txn).expect("seeding fits");
@@ -115,7 +115,7 @@ proptest! {
         // below reduces THIS, so it is a reduction no matter what the prefix
         // did to the generated commodity — see the comment there.
         let mut anchor = Posting::new("Assets:Stock", Amount::new(Decimal::from(50), ANCHOR));
-        anchor.cost = Some(per_unit(7, 1));
+        anchor.cost = Some(Box::new(per_unit(7, 1)));
         engine
             .apply(&Transaction::new(date(1), "anchor").with_synthesized_posting(anchor))
             .expect("the anchor lot fits");
@@ -132,7 +132,7 @@ proptest! {
                         "Assets:Stock",
                         Amount::new(Decimal::from(*units), CURRENCY),
                     );
-                    p.cost = Some(per_unit(*cost, day));
+                    p.cost = Some(Box::new(per_unit(*cost, day)));
                     p
                 }
                 Leg::Sell { units, cost } => {
@@ -140,7 +140,7 @@ proptest! {
                         "Assets:Stock",
                         Amount::new(-Decimal::from(*units), CURRENCY),
                     );
-                    p.cost = Some(per_unit(*cost, day));
+                    p.cost = Some(Box::new(per_unit(*cost, day)));
                     p
                 }
                 Leg::Merge { units } => {
@@ -148,13 +148,13 @@ proptest! {
                         "Assets:Stock",
                         Amount::new(-Decimal::from(*units), CURRENCY),
                     );
-                    p.cost = Some(CostSpec {
+                    p.cost = Some(Box::new(CostSpec {
                         number: None,
                         currency: None,
                         date: None,
                         label: None,
                         merge: true,
-                    });
+                    }));
                     p
                 }
             };
@@ -177,13 +177,13 @@ proptest! {
             "Assets:Stock",
             Amount::new(Decimal::from(-100_000), ANCHOR),
         );
-        doomed.cost = Some(CostSpec {
+        doomed.cost = Some(Box::new(CostSpec {
             number: None,
             currency: None,
             date: None,
             label: None,
             merge: false,
-        });
+        }));
         txn = txn.with_synthesized_posting(doomed);
 
         // Some generated prefixes fail before the doomed leg (an ambiguous

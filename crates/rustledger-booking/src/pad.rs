@@ -159,7 +159,7 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                         && let Some(inv) = inventories.get_mut(&posting.account)
                     {
                         let position =
-                            Position::from_posting(units, posting.cost.as_ref(), txn.date);
+                            Position::from_posting(units, posting.cost.as_deref(), txn.date);
                         // A running balance that leaves range makes every pad
                         // measured against it wrong, so report it here rather
                         // than pad from a clamped total (#1863).

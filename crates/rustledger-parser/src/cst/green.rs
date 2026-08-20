@@ -457,8 +457,8 @@ pub(super) fn convert_simple_posting(
         Posting {
             account,
             units,
-            cost,
-            price,
+            cost: cost.map(Box::new),
+            price: price.map(Box::new),
             flag,
             meta,
             comments: Vec::new(),
@@ -481,10 +481,13 @@ pub(super) fn convert_transaction(
 ) -> Option<Spanned<rustledger_core::Directive>> {
     use crate::SyntaxKind as K;
     let (mut txn, span) = convert_transaction_header(node, base)?;
-    // Sized from the node rather than grown. `Spanned<Posting>` is 304 bytes,
+    // Sized from the node rather than grown. `Spanned<Posting>` is 184 bytes,
     // and `Vec`'s first allocation is 4 elements for a type this size, so a
-    // two-posting transaction — most of them — took 1216 bytes to hold 608,
-    // and a three-posting one reallocated and copied the first two.
+    // two-posting transaction — most of them — took 736 bytes to hold 368,
+    // and a three-posting one reallocated and copied the first two. (It was
+    // 304 bytes and 1216-for-608 when this was written; boxing
+    // `Posting::cost` and `::price` shrank it, which shrinks the win here
+    // without removing it.)
     //
     // Counting first is a second walk of the same green children, which are a
     // slice: no allocation, no parsing, once per transaction. It pays for

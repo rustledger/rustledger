@@ -1687,7 +1687,7 @@ mod finalize_price_tests {
             .directives
             .iter()
             .find_map(|s| match &s.value {
-                Directive::Transaction(t) => t.postings.iter().find_map(|p| p.price.as_ref()),
+                Directive::Transaction(t) => t.postings.iter().find_map(|p| p.price.as_deref()),
                 _ => None,
             })
             .expect("the `@@` posting should carry a price");

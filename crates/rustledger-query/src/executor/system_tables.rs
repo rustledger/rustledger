@@ -701,7 +701,7 @@ impl Executor<'_> {
             let position_val = if let Some(units) = posting.amount() {
                 Value::Position(Box::new(Position::from_posting(
                     units,
-                    posting.cost.as_ref(),
+                    posting.cost.as_deref(),
                     txn.date,
                 )))
             } else {

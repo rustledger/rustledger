@@ -412,7 +412,7 @@ pub(crate) fn cost_currency_of(
     posting: &rustledger_core::Posting,
     infer_currency: impl FnOnce() -> Option<Currency>,
 ) -> Option<Currency> {
-    let cost_spec = posting.cost.as_ref()?;
+    let cost_spec = posting.cost.as_deref()?;
     cost_spec
         .currency
         .clone()
@@ -437,7 +437,7 @@ fn cost_weight<D: WeightNum>(
     units: &Amount,
     infer_currency: impl FnOnce() -> Option<Currency>,
 ) -> Result<Option<(Currency, D)>, Overflow> {
-    let Some(cost_spec) = posting.cost.as_ref() else {
+    let Some(cost_spec) = posting.cost.as_deref() else {
         return Ok(None);
     };
     // Match the number FIRST so an empty `{}` spec short-circuits without
@@ -845,7 +845,7 @@ pub fn normalize_prices(txn: &mut Transaction) {
                 }
             };
             if let Some(normalized_price) = normalized {
-                posting.price = Some(normalized_price);
+                posting.price = Some(Box::new(normalized_price));
             }
         }
     }

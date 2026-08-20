@@ -321,36 +321,36 @@ fn cost_price_and_flag_are_part_of_posting_identity() {
     };
 
     let plain = build(&|_| {});
-    let cost_100 = build(&|p| p.cost = Some(cost(per_unit(100))));
-    let cost_200 = build(&|p| p.cost = Some(cost(per_unit(200))));
+    let cost_100 = build(&|p| p.cost = Some(Box::new(cost(per_unit(100)))));
+    let cost_200 = build(&|p| p.cost = Some(Box::new(cost(per_unit(200)))));
     let cost_total = build(&|p| {
-        p.cost = Some(cost(Some(CostNumber::Total {
+        p.cost = Some(Box::new(cost(Some(CostNumber::Total {
             value: Decimal::from(100),
-        })));
+        }))));
     });
     let cost_labelled = build(&|p| {
         let mut c = cost(per_unit(100));
         c.label = Some("lot-a".to_owned());
-        p.cost = Some(c);
+        p.cost = Some(Box::new(c));
     });
     let flagged = build(&|p| p.flag = Some('!'));
     let priced = build(&|p| {
-        p.price = Some(rustledger_core::PriceAnnotation {
+        p.price = Some(Box::new(rustledger_core::PriceAnnotation {
             kind: PriceKind::Unit,
             amount: Some(IncompleteAmount::complete(
                 Decimal::from(100),
                 "USD".to_owned(),
             )),
-        });
+        }));
     });
     let priced_total = build(&|p| {
-        p.price = Some(rustledger_core::PriceAnnotation {
+        p.price = Some(Box::new(rustledger_core::PriceAnnotation {
             kind: PriceKind::Total,
             amount: Some(IncompleteAmount::complete(
                 Decimal::from(100),
                 "USD".to_owned(),
             )),
-        });
+        }));
     });
 
     let cases: [(&Directive, &Directive, &str); 7] = [

@@ -491,7 +491,7 @@ pub fn update_inventories(
         // (issue #1182) every posting is an augmentation. Sharing it means this
         // validator pass and `BookingEngine::apply` can't drift, and the #1182 gate
         // lives in one place instead of being maintained in both crates.
-        let is_reduction = inv.is_booking_reduction(units, posting.cost.as_ref(), booking_method);
+        let is_reduction = inv.is_booking_reduction(units, posting.cost.as_deref(), booking_method);
 
         if is_reduction {
             process_inventory_reduction(inv, posting, units, booking_method, txn, errors);
@@ -542,7 +542,7 @@ pub fn process_inventory_reduction(
         return;
     }
 
-    match inv.reduce(units, posting.cost.as_ref(), booking_method) {
+    match inv.reduce(units, posting.cost.as_deref(), booking_method) {
         Ok(_) => {}
         Err(err) => {
             // On pre-booked directives, reduce() with a fully-specified cost
@@ -591,7 +591,8 @@ pub fn process_inventory_addition(
     units: &Amount,
     txn: &Transaction,
 ) -> Result<(), rustledger_core::OverflowError> {
-    let position = rustledger_core::Position::from_posting(units, posting.cost.as_ref(), txn.date);
+    let position =
+        rustledger_core::Position::from_posting(units, posting.cost.as_deref(), txn.date);
 
     inv.add(position)
 }

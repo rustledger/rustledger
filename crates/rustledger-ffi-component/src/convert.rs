@@ -117,7 +117,7 @@ fn posting_from_core(p: &rustledger_core::Posting) -> wit::Posting {
             .as_ref()
             .and_then(|u| u.as_amount())
             .map(amount_from_core),
-        cost: p.cost.as_ref().map(cost_from_core),
+        cost: p.cost.as_deref().map(cost_from_core),
         price: p
             .price
             .as_ref()

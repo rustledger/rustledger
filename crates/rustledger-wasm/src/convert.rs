@@ -114,7 +114,7 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                         number: u.number().map(|n| n.to_string()).unwrap_or_default(),
                         currency: u.currency().map(ToString::to_string).unwrap_or_default(),
                     }),
-                    cost: p.cost.as_ref().map(|c| PostingCostJson {
+                    cost: p.cost.as_deref().map(|c| PostingCostJson {
                         // The wire `CostNumberJson` is a tagged enum
                         // mirroring `CostNumber`; JS branches on `kind`.
                         number: c.number.map(|n| match n {
@@ -145,7 +145,7 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                         date: c.date.map(|d| d.to_string()),
                         label: c.label.clone(),
                     }),
-                    price: p.price.as_ref().and_then(price_annotation_to_amount),
+                    price: p.price.as_deref().and_then(price_annotation_to_amount),
                     flag: p.flag.map(|c| c.to_string()),
                     meta: metadata_to_json(&p.meta),
                 })

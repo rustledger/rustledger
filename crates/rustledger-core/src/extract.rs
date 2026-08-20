@@ -385,14 +385,17 @@ mod tests {
                 postings: vec![crate::Spanned::synthesized(Posting {
                     account: "Assets:Stock".into(),
                     units: Some(crate::IncompleteAmount::from(Amount::new(dec!(10), "AAPL"))),
-                    cost: Some(CostSpec {
+                    cost: Some(Box::new(CostSpec {
                         number: Some(crate::CostNumber::PerUnit { value: dec!(150) }),
                         currency: Some("JPY".into()),
                         date: None,
                         label: None,
                         merge: false,
-                    }),
-                    price: Some(PriceAnnotation::unit(Amount::new(dec!(1.1), "CHF"))),
+                    })),
+                    price: Some(Box::new(PriceAnnotation::unit(Amount::new(
+                        dec!(1.1),
+                        "CHF",
+                    )))),
                     flag: None,
                     meta: posting_meta,
                     comments: vec![],

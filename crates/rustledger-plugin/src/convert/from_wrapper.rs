@@ -92,8 +92,8 @@ pub(super) fn data_to_posting(data: &PostingData) -> Result<Posting, ConversionE
     Ok(Posting {
         account: data.account.clone().into(),
         units,
-        cost,
-        price,
+        cost: cost.map(Box::new),
+        price: price.map(Box::new),
         flag,
         meta,
         comments: Vec::new(),

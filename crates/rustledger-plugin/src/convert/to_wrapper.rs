@@ -50,8 +50,8 @@ pub(super) fn posting_to_data(posting: &Posting) -> PostingData {
     PostingData {
         account: posting.account.to_string(),
         units: posting.units.as_ref().and_then(incomplete_amount_to_data),
-        cost: posting.cost.as_ref().map(cost_to_data),
-        price: posting.price.as_ref().map(price_annotation_to_data),
+        cost: posting.cost.as_deref().map(cost_to_data),
+        price: posting.price.as_deref().map(price_annotation_to_data),
         flag: posting.flag.map(|c| c.to_string()),
         metadata: posting
             .meta

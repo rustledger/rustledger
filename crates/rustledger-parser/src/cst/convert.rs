@@ -1356,8 +1356,8 @@ fn convert_posting(
     let posting = Posting {
         account,
         units,
-        cost,
-        price,
+        cost: cost.map(Box::new),
+        price: price.map(Box::new),
         flag,
         meta,
         comments: Vec::new(),
@@ -5160,7 +5160,7 @@ mod tests {
         };
         txn.postings
             .first()
-            .and_then(|p| p.cost.clone())
+            .and_then(|p| p.cost.as_deref().cloned())
             .unwrap_or_else(|| panic!("expected a cost spec from {src:?}"))
     }
 

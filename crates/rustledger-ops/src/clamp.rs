@@ -90,7 +90,7 @@ fn synthetic_posting(
                 number,
                 currency: currency.clone(),
             })),
-            cost,
+            cost: cost.map(Box::new),
             price: None,
             flag: None,
             meta: Metadata::default(),
@@ -243,7 +243,7 @@ pub fn clamp_indexed(
                         let p = &sp.value;
                         if let Some(units) = p.units.as_ref().and_then(IncompleteAmount::as_amount)
                         {
-                            let pos = posting_position(units, p.cost.as_ref(), t.date);
+                            let pos = posting_position(units, p.cost.as_deref(), t.date);
                             balances
                                 .entry(p.account.to_string())
                                 .or_default()

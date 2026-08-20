@@ -374,7 +374,7 @@ fn units_weight(
 ) -> UnitsWeight {
     // Cost beats price, exactly as in `cost_weight`: a posting with both
     // annotations weighs at cost, so the price is not what we invert.
-    if let Some(cost_spec) = posting.cost.as_ref() {
+    if let Some(cost_spec) = posting.cost.as_deref() {
         return match cost_spec.number {
             Some(CostNumber::PerUnit { value }) if !value.is_zero() => {
                 match crate::cost_currency_of(posting, infer_currency) {
@@ -412,7 +412,7 @@ fn units_weight(
         };
     }
 
-    if let Some(price) = posting.price.as_ref() {
+    if let Some(price) = posting.price.as_deref() {
         let Some(price_amt) = price.amount.as_ref().and_then(IncompleteAmount::as_amount) else {
             // A bare `@` sigil is itself a request to compute the price
             // (#1915). Together with a missing units number that is two
@@ -890,7 +890,11 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
                         // does not name one: with candidates from more than
                         // one non-cost posting, beancount fails to categorize
                         // the posting (edge e15).
-                        if posting.cost.as_ref().is_some_and(|c| c.currency.is_none()) {
+                        if posting
+                            .cost
+                            .as_deref()
+                            .is_some_and(|c| c.currency.is_none())
+                        {
                             // Candidates are currencies of COMPLETE cost-less
                             // postings, excluding any currency that already
                             // has its own missing-amount posting: that group
@@ -1172,13 +1176,13 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
         let Some(weight) = crate::price_weight(units.number, price_number, kind) else {
             return Err(InterpolationError::Unrepresentable { currency });
         };
-        result.postings[idx].price = Some(rustledger_core::PriceAnnotation {
+        result.postings[idx].price = Some(Box::new(rustledger_core::PriceAnnotation {
             kind,
             amount: Some(IncompleteAmount::Complete(Amount::new(
                 price_number,
                 &currency,
             ))),
-        });
+        }));
         accumulate_residual(&mut residuals, &mut unrepresentable, &currency, weight);
         if unrepresentable.contains(&currency) {
             return Err(InterpolationError::Unrepresentable { currency });
@@ -1303,8 +1307,8 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
         let existing = result.postings[idx]
             .cost
             .take()
-            .unwrap_or_else(CostSpec::empty);
-        result.postings[idx].cost = Some(CostSpec {
+            .map_or_else(CostSpec::empty, |boxed| *boxed);
+        result.postings[idx].cost = Some(Box::new(CostSpec {
             number: Some(CostNumber::PerUnitFromTotal(BookedCost::new(
                 per_unit,
                 total,
@@ -1314,7 +1318,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
             date: existing.date.or(Some(transaction.date)),
             label: existing.label,
             merge: existing.merge,
-        });
+        }));
         // Fold the now-known cost weight into the residual so downstream
         // missing-amount solving sees a balanced cost currency.
         *residuals.entry(currency).or_default() += total * signum;
@@ -1395,10 +1399,10 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
             });
         }
 
-        result.postings[idx].price = Some(rustledger_core::PriceAnnotation {
+        result.postings[idx].price = Some(Box::new(rustledger_core::PriceAnnotation {
             kind,
             amount: Some(IncompleteAmount::Complete(Amount::new(solved, &currency))),
-        });
+        }));
         *residuals.entry(currency).or_default() += weight;
     }
 
@@ -3691,7 +3695,7 @@ mod tests {
     }
 
     fn solved_price(posting: &Posting) -> Option<(Decimal, Currency, rustledger_core::PriceKind)> {
-        let price = posting.price.as_ref()?;
+        let price = posting.price.as_deref()?;
         let amount = price
             .amount
             .as_ref()

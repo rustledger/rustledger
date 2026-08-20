@@ -617,7 +617,7 @@ include "accounts.beancount"
             })
             .expect("should have PROP posting");
 
-        let cost = prop_posting.cost.as_ref().expect("should have cost");
+        let cost = prop_posting.cost.as_deref().expect("should have cost");
         let per_unit = cost
             .number
             .as_ref()
@@ -717,7 +717,7 @@ include "accounts.beancount"
                 .iter()
                 .find_map(|d| match d {
                     rustledger_core::Directive::Transaction(t) => t.postings.iter().find_map(|p| {
-                        p.cost.as_ref().and_then(|c| {
+                        p.cost.as_deref().and_then(|c| {
                             c.number
                                 .as_ref()
                                 .and_then(rustledger_core::CostNumber::per_unit)

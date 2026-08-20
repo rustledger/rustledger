@@ -165,22 +165,22 @@ fn posting_for(leg: &Leg) -> Posting {
     match leg {
         Leg::Buy { units, cost } => {
             let mut p = Posting::new(ACCOUNT, Amount::new(Decimal::from(*units), CURRENCY));
-            p.cost = Some(per_unit(*cost));
+            p.cost = Some(Box::new(per_unit(*cost)));
             p
         }
         Leg::SellAt { units, cost } => {
             let mut p = Posting::new(ACCOUNT, Amount::new(-Decimal::from(*units), CURRENCY));
-            p.cost = Some(per_unit(*cost));
+            p.cost = Some(Box::new(per_unit(*cost)));
             p
         }
         Leg::SellAny { units } => {
             let mut p = Posting::new(ACCOUNT, Amount::new(-Decimal::from(*units), CURRENCY));
-            p.cost = Some(empty_spec());
+            p.cost = Some(Box::new(empty_spec()));
             p
         }
         Leg::SellMerged { units } => {
             let mut p = Posting::new(ACCOUNT, Amount::new(-Decimal::from(*units), CURRENCY));
-            p.cost = Some(merge_spec());
+            p.cost = Some(Box::new(merge_spec()));
             p
         }
     }
@@ -196,7 +196,7 @@ fn run(method: BookingMethod, seeds: &[u32], txns: &[Vec<Leg>]) -> (Totals, Tota
 
     for (i, cost) in seeds.iter().enumerate() {
         let mut buy = Posting::new(ACCOUNT, Amount::new(Decimal::from(40), CURRENCY));
-        buy.cost = Some(per_unit(*cost));
+        buy.cost = Some(Box::new(per_unit(*cost)));
         let txn = Transaction::new(date(u32::try_from(i).unwrap_or(0) + 1), "seed")
             .with_synthesized_posting(buy);
         engine

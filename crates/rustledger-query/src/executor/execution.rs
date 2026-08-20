@@ -957,7 +957,7 @@ impl Executor<'_> {
                         // posting carries a cost annotation; bare units
                         // otherwise.
                         let pos = posting.amount().map(|units| {
-                            Position::from_posting(units, posting.cost.as_ref(), txn.date)
+                            Position::from_posting(units, posting.cost.as_deref(), txn.date)
                         });
 
                         if let Some(ref p) = pos {

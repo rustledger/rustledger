@@ -601,7 +601,7 @@ impl<'a> Executor<'a> {
         let resolve_position = |posting: &rustledger_core::Posting, txn_date: NaiveDate| {
             posting
                 .amount()
-                .map(|units| Position::from_posting(units, posting.cost.as_ref(), txn_date))
+                .map(|units| Position::from_posting(units, posting.cost.as_deref(), txn_date))
         };
 
         for (directive_index, directive) in directive_iter {

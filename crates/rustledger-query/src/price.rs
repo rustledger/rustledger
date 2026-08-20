@@ -369,7 +369,7 @@ impl PriceDatabase {
             // an amount and currency are available; the helper pairs
             // the returned per-unit value with the matching currency
             // by construction.
-            let annotation = posting.price.as_ref().and_then(|annotation| {
+            let annotation = posting.price.as_deref().and_then(|annotation| {
                 let amount = annotation.amount()?;
                 Some((
                     !annotation.is_unit(),
@@ -377,7 +377,7 @@ impl PriceDatabase {
                     amount.currency.clone(),
                 ))
             });
-            let cost = posting.cost.as_ref().and_then(|c| {
+            let cost = posting.cost.as_deref().and_then(|c| {
                 let currency = c.currency.clone()?;
                 Some((c.number, currency))
             });

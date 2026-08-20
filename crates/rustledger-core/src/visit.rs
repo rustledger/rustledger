@@ -486,14 +486,14 @@ mod tests {
                 postings: vec![Spanned::synthesized(Posting {
                     account: "Assets:Stock".into(),
                     units: Some(crate::IncompleteAmount::from(Amount::new(dec!(10), "USD"))),
-                    cost: Some(CostSpec {
+                    cost: Some(Box::new(CostSpec {
                         number: Some(crate::CostNumber::PerUnit { value: dec!(1) }),
                         currency: Some("USD".into()),
                         date: None,
                         label: None,
                         merge: false,
-                    }),
-                    price: Some(PriceAnnotation::unit(Amount::new(dec!(1), "USD"))),
+                    })),
+                    price: Some(Box::new(PriceAnnotation::unit(Amount::new(dec!(1), "USD")))),
                     flag: None,
                     meta: Default::default(),
                     comments: vec![],
@@ -706,7 +706,7 @@ mod tests {
                 account: "Assets:X".into(),
                 units: Some(crate::IncompleteAmount::from(Amount::new(dec!(1), "AAPL"))),
                 cost: None,
-                price: Some(price),
+                price: Some(Box::new(price)),
                 flag: None,
                 meta: Default::default(),
                 comments: vec![],

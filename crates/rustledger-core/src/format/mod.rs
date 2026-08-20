@@ -1032,7 +1032,7 @@ mod tests {
             flag: None,
             account: "Assets:Brokerage".into(),
             units: Some(IncompleteAmount::Complete(Amount::new(dec!(10), "AAPL"))),
-            cost: Some(CostSpec {
+            cost: Some(Box::new(CostSpec {
                 number: Some(crate::CostNumber::PerUnit {
                     value: dec!(150.00),
                 }),
@@ -1040,8 +1040,11 @@ mod tests {
                 date: Some(date(2024, 1, 15)),
                 label: None,
                 merge: false,
-            }),
-            price: Some(PriceAnnotation::unit(Amount::new(dec!(155.00), "USD"))),
+            })),
+            price: Some(Box::new(PriceAnnotation::unit(Amount::new(
+                dec!(155.00),
+                "USD",
+            )))),
             meta: Default::default(),
             comments: Vec::new(),
             trailing_comments: Vec::new(),

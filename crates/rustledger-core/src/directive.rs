@@ -204,10 +204,18 @@ pub struct Posting {
     pub account: crate::Account,
     /// The units (may be incomplete or None for auto-calculated postings)
     pub units: Option<IncompleteAmount>,
-    /// Cost specification for the position
-    pub cost: Option<CostSpec>,
-    /// Price annotation (@ or @@)
-    pub price: Option<PriceAnnotation>,
+    /// Cost specification for the position.
+    ///
+    /// Boxed because it is absent on the overwhelming majority of postings
+    /// and `CostSpec` is the largest field by far. Inline, `Posting` was 280
+    /// bytes and a plain two-posting expense carried ~190 bytes of `None`.
+    /// rkyv mirrors the in-memory layout, so that padding was also written to
+    /// and validated from the parse cache — the archive ran 5.2x the size of
+    /// the ledger it came from. Use `as_deref()` to read through it.
+    pub cost: Option<Box<CostSpec>>,
+    /// Price annotation (`@` or `@@`). Boxed for the same reason as
+    /// [`Self::cost`].
+    pub price: Option<Box<PriceAnnotation>>,
     /// Whether this posting has the "!" flag
     pub flag: Option<char>,
     /// Posting metadata
@@ -290,7 +298,7 @@ impl Posting {
     /// ```
     #[must_use]
     pub fn with_cost(mut self, cost: CostSpec) -> Self {
-        self.cost = Some(cost);
+        self.cost = Some(Box::new(cost));
         self
     }
 
@@ -299,7 +307,7 @@ impl Posting {
     /// See [`Self::with_cost`] for the `Spanned<Posting>` pattern.
     #[must_use]
     pub fn with_price(mut self, price: PriceAnnotation) -> Self {
-        self.price = Some(price);
+        self.price = Some(Box::new(price));
         self
     }
 

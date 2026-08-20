@@ -408,7 +408,7 @@ fn test_parse_transaction_with_cost() {
     if let Directive::Transaction(txn) = &result.directives[0].value {
         let posting = &txn.postings[0];
         assert!(posting.cost.is_some());
-        let cost = posting.cost.as_ref().unwrap();
+        let cost = posting.cost.as_deref().unwrap();
         assert_eq!(
             cost.number.unwrap().per_unit().unwrap().to_string(),
             "185.50"

@@ -50,7 +50,7 @@ fn engine_with_two_lots() -> BookingEngine {
     // bearing for a test that does.
     for (day, units, cost) in [(5u32, "10", "150.00"), (6, "10", "200.00")] {
         let mut buy = Posting::new("Assets:Broker", amount(units, "AAPL"));
-        buy.cost = Some(spec(cost, "USD", day));
+        buy.cost = Some(Box::new(spec(cost, "USD", day)));
         let paid = -(units.parse::<Decimal>().unwrap() * cost.parse::<Decimal>().unwrap());
         let txn = Transaction::new(date(day), "buy")
             .with_synthesized_posting(buy)
@@ -71,7 +71,7 @@ fn an_ambiguous_reduction_is_reported() {
     let mut engine = engine_with_two_lots();
 
     let mut sell = Posting::new("Assets:Broker", amount("-5", "AAPL"));
-    sell.cost = Some(empty_spec());
+    sell.cost = Some(Box::new(empty_spec()));
     let txn = Transaction::new(date(10), "sell 5")
         .with_synthesized_posting(sell)
         .with_synthesized_posting(Posting::new("Assets:Cash", amount("900.00", "USD")));
@@ -108,7 +108,7 @@ fn a_failing_transaction_is_rolled_back_whole() {
     let cash_before = cash_units(&engine);
 
     let mut sell = Posting::new("Assets:Broker", amount("-5", "AAPL"));
-    sell.cost = Some(empty_spec());
+    sell.cost = Some(Box::new(empty_spec()));
     let txn = Transaction::new(date(10), "sell 5")
         .with_synthesized_posting(Posting::new("Assets:Cash", amount("900.00", "USD")))
         .with_synthesized_posting(sell);
@@ -132,7 +132,7 @@ fn a_matching_reduction_still_applies() {
     let mut engine = engine_with_two_lots();
 
     let mut sell = Posting::new("Assets:Broker", amount("-4", "AAPL"));
-    sell.cost = Some(spec("150.00", "USD", 5));
+    sell.cost = Some(Box::new(spec("150.00", "USD", 5)));
     let txn = Transaction::new(date(10), "sell")
         .with_synthesized_posting(sell)
         .with_synthesized_posting(Posting::new("Assets:Cash", amount("600.00", "USD")));
@@ -182,9 +182,9 @@ fn a_failing_transaction_restores_every_lot_it_touched() {
     // Leg 1 matches the 150.00 lot and succeeds. Leg 2 asks for more of the
     // 200.00 lot than it holds, so the transaction fails after leg 1 mutated.
     let mut ok_leg = Posting::new("Assets:Broker", amount("-4", "AAPL"));
-    ok_leg.cost = Some(spec("150.00", "USD", 5));
+    ok_leg.cost = Some(Box::new(spec("150.00", "USD", 5)));
     let mut bad_leg = Posting::new("Assets:Broker", amount("-99", "AAPL"));
-    bad_leg.cost = Some(spec("200.00", "USD", 6));
+    bad_leg.cost = Some(Box::new(spec("200.00", "USD", 6)));
 
     let txn = Transaction::new(date(10), "one good leg, one impossible")
         .with_synthesized_posting(ok_leg)
@@ -230,13 +230,13 @@ fn a_failing_transaction_undoes_drained_and_added_lots() {
 
     // Leg 1 drains the 150.00 lot entirely -> the lot is REMOVED.
     let mut drain = Posting::new("Assets:Broker", amount("-10", "AAPL"));
-    drain.cost = Some(spec("150.00", "USD", 5));
+    drain.cost = Some(Box::new(spec("150.00", "USD", 5)));
     // Leg 2 buys a new lot -> a slot is PUSHED.
     let mut buy = Posting::new("Assets:Broker", amount("7", "AAPL"));
-    buy.cost = Some(spec("300.00", "USD", 11));
+    buy.cost = Some(Box::new(spec("300.00", "USD", 11)));
     // Leg 3 cannot be satisfied, so the whole transaction is rejected.
     let mut impossible = Posting::new("Assets:Broker", amount("-99", "AAPL"));
-    impossible.cost = Some(spec("200.00", "USD", 6));
+    impossible.cost = Some(Box::new(spec("200.00", "USD", 6)));
 
     let txn = Transaction::new(date(11), "drain, buy, then fail")
         .with_synthesized_posting(drain)
@@ -285,16 +285,16 @@ fn a_failing_transaction_undoes_a_wildcard_merge() {
     // Leg 1: `{*}` merges BOTH lots into one and reduces it — removing the
     // originals outright.
     let mut merge_leg = Posting::new("Assets:Broker", amount("-5", "AAPL"));
-    merge_leg.cost = Some(CostSpec {
+    merge_leg.cost = Some(Box::new(CostSpec {
         number: None,
         currency: None,
         date: None,
         label: None,
         merge: true,
-    });
+    }));
     // Leg 2 cannot be satisfied, so the transaction is rejected.
     let mut impossible = Posting::new("Assets:Broker", amount("-99", "AAPL"));
-    impossible.cost = Some(spec("200.00", "USD", 6));
+    impossible.cost = Some(Box::new(spec("200.00", "USD", 6)));
 
     let txn = Transaction::new(date(12), "merge then fail")
         .with_synthesized_posting(merge_leg)
@@ -342,9 +342,9 @@ fn a_transaction_that_creates_and_then_oversells_a_lot_errors_rather_than_panick
     let mut engine = BookingEngine::with_method(BookingMethod::Strict);
 
     let mut buy = Posting::new("Assets:Stock", amount("10", "X"));
-    buy.cost = Some(spec("100.00", "USD", 1));
+    buy.cost = Some(Box::new(spec("100.00", "USD", 1)));
     let mut oversell = Posting::new("Assets:Stock", amount("-20", "X"));
-    oversell.cost = Some(spec("100.00", "USD", 1));
+    oversell.cost = Some(Box::new(spec("100.00", "USD", 1)));
 
     let txn = Transaction::new(date(1), "buy then oversell")
         .with_synthesized_posting(buy)
@@ -384,7 +384,7 @@ fn a_wildcard_merge_books_and_applies_leaving_the_pool() {
     let mut engine = BookingEngine::with_method(BookingMethod::Strict);
     for (day, cost) in [(1u32, "100.00"), (2, "120.00")] {
         let mut buy = Posting::new("Assets:Broker", amount("10", "AAPL"));
-        buy.cost = Some(spec(cost, "USD", day));
+        buy.cost = Some(Box::new(spec(cost, "USD", day)));
         let paid = -(cost.parse::<Decimal>().unwrap() * Decimal::from(10));
         let txn = Transaction::new(date(day), "buy")
             .with_synthesized_posting(buy)
@@ -393,13 +393,13 @@ fn a_wildcard_merge_books_and_applies_leaving_the_pool() {
     }
 
     let mut merge_sell = Posting::new("Assets:Broker", amount("-5", "AAPL"));
-    merge_sell.cost = Some(CostSpec {
+    merge_sell.cost = Some(Box::new(CostSpec {
         number: None,
         currency: None,
         date: None,
         label: None,
         merge: true,
-    });
+    }));
     let txn = Transaction::new(date(10), "sell against the merged pool")
         .with_synthesized_posting(merge_sell)
         .with_synthesized_posting(Posting::new("Assets:Cash", amount("600.00", "USD")));
@@ -439,27 +439,27 @@ fn a_merge_applied_against_different_inventory_is_reported() {
     let mut engine = BookingEngine::with_method(BookingMethod::Strict);
     for (day, cost) in [(1u32, "100.00"), (2, "120.00")] {
         let mut buy = Posting::new("Assets:Broker", amount("10", "AAPL"));
-        buy.cost = Some(spec(cost, "USD", day));
+        buy.cost = Some(Box::new(spec(cost, "USD", day)));
         engine
             .apply(&Transaction::new(date(day), "buy").with_synthesized_posting(buy))
             .expect("buys apply");
     }
 
     let mut merge_sell = Posting::new("Assets:Broker", amount("-5", "AAPL"));
-    merge_sell.cost = Some(CostSpec {
+    merge_sell.cost = Some(Box::new(CostSpec {
         number: None,
         currency: None,
         date: None,
         label: None,
         merge: true,
-    });
+    }));
     let booked = engine
         .book(&Transaction::new(date(10), "merge sell").with_synthesized_posting(merge_sell))
         .expect("books against 100/120, recording a pool at 110");
 
     // Move the inventory on before applying: a third lot changes the pool.
     let mut extra = Posting::new("Assets:Broker", amount("10", "AAPL"));
-    extra.cost = Some(spec("200.00", "USD", 3));
+    extra.cost = Some(Box::new(spec("200.00", "USD", 3)));
     engine
         .apply(&Transaction::new(date(3), "another buy").with_synthesized_posting(extra))
         .expect("buy applies");
@@ -522,7 +522,7 @@ fn a_wildcard_augmentation_is_added_not_checked() {
     let mut engine = BookingEngine::with_method(BookingMethod::None);
 
     let mut short = Posting::new("Assets:Short", amount("-10", "X"));
-    short.cost = Some(spec("100.00", "USD", 1));
+    short.cost = Some(Box::new(spec("100.00", "USD", 1)));
     engine
         .apply(&Transaction::new(date(1), "open a short lot").with_synthesized_posting(short))
         .expect("the short lot applies");
@@ -530,7 +530,7 @@ fn a_wildcard_augmentation_is_added_not_checked() {
     // Positive units, explicit cost, merge marker: an augmentation whose stated
     // cost differs from the pool the short lot would merge into.
     let mut augment = Posting::new("Assets:Short", amount("10", "X"));
-    augment.cost = Some(CostSpec {
+    augment.cost = Some(Box::new(CostSpec {
         number: Some(rustledger_core::CostNumber::PerUnit {
             value: "110".parse().expect("literal parses"),
         }),
@@ -538,7 +538,7 @@ fn a_wildcard_augmentation_is_added_not_checked() {
         date: None,
         label: None,
         merge: true,
-    });
+    }));
     engine
         .apply(&Transaction::new(date(2), "augment").with_synthesized_posting(augment))
         .expect("an augmentation is added, not compared against a pool");
@@ -581,7 +581,7 @@ fn a_rejected_merge_closing_a_short_errors_rather_than_panicking() {
     let mut engine = BookingEngine::with_method(BookingMethod::Strict);
 
     let mut short = Posting::new("Assets:Short", amount("-10", "X"));
-    short.cost = Some(spec("100.00", "USD", 1));
+    short.cost = Some(Box::new(spec("100.00", "USD", 1)));
     engine
         .apply(&Transaction::new(date(1), "open a short").with_synthesized_posting(short))
         .expect("the short lot applies");
@@ -589,7 +589,7 @@ fn a_rejected_merge_closing_a_short_errors_rather_than_panicking() {
     // Positive units REDUCING the short, carrying a pool cost that no longer
     // matches — the shape that used to panic.
     let mut close = Posting::new("Assets:Short", amount("10", "X"));
-    close.cost = Some(CostSpec {
+    close.cost = Some(Box::new(CostSpec {
         number: Some(rustledger_core::CostNumber::PerUnit {
             value: "110".parse().expect("literal parses"),
         }),
@@ -597,7 +597,7 @@ fn a_rejected_merge_closing_a_short_errors_rather_than_panicking() {
         date: None,
         label: None,
         merge: true,
-    });
+    }));
     let err = engine
         .apply(&Transaction::new(date(2), "close the short").with_synthesized_posting(close))
         .expect_err("the recorded pool cost does not match this inventory");
@@ -639,21 +639,21 @@ fn a_buy_and_a_merge_sale_in_one_transaction_is_not_a_mismatch() {
     let mut engine = BookingEngine::with_method(BookingMethod::Strict);
 
     let mut first = Posting::new("Assets:Stock", amount("10", "X"));
-    first.cost = Some(spec("100.00", "USD", 1));
+    first.cost = Some(Box::new(spec("100.00", "USD", 1)));
     engine
         .apply(&Transaction::new(date(1), "buy lot 1").with_synthesized_posting(first))
         .expect("the first buy applies");
 
     let mut buy = Posting::new("Assets:Stock", amount("10", "X"));
-    buy.cost = Some(spec("120.00", "USD", 2));
+    buy.cost = Some(Box::new(spec("120.00", "USD", 2)));
     let mut sell = Posting::new("Assets:Stock", amount("-5", "X"));
-    sell.cost = Some(CostSpec {
+    sell.cost = Some(Box::new(CostSpec {
         number: None,
         currency: None,
         date: None,
         label: None,
         merge: true,
-    });
+    }));
     let txn = Transaction::new(date(2), "buy and merge-sell together")
         .with_synthesized_posting(buy)
         .with_synthesized_posting(sell);
@@ -680,21 +680,21 @@ fn a_buy_earlier_in_the_transaction_does_not_move_the_pool() {
     let mut engine = BookingEngine::with_method(BookingMethod::Strict);
 
     let mut seed = Posting::new("Assets:Stock", amount("10", "X"));
-    seed.cost = Some(spec("100.00", "USD", 1));
+    seed.cost = Some(Box::new(spec("100.00", "USD", 1)));
     engine
         .apply(&Transaction::new(date(1), "buy lot 1").with_synthesized_posting(seed))
         .expect("the seed buy applies");
 
     let mut buy = Posting::new("Assets:Stock", amount("10", "X"));
-    buy.cost = Some(spec("120.00", "USD", 2));
+    buy.cost = Some(Box::new(spec("120.00", "USD", 2)));
     let mut sell = Posting::new("Assets:Stock", amount("-5", "X"));
-    sell.cost = Some(CostSpec {
+    sell.cost = Some(Box::new(CostSpec {
         number: None,
         currency: None,
         date: None,
         label: None,
         merge: true,
-    });
+    }));
     let txn = Transaction::new(date(2), "buy and merge-sell together")
         .with_synthesized_posting(buy)
         .with_synthesized_posting(sell);
@@ -705,7 +705,7 @@ fn a_buy_earlier_in_the_transaction_does_not_move_the_pool() {
         .postings
         .iter()
         .find(|p| p.amount().is_some_and(|u| u.number.is_sign_negative()))
-        .and_then(|p| p.cost.as_ref())
+        .and_then(|p| p.cost.as_deref())
         .and_then(|c| c.number)
         .and_then(|n| n.per_unit())
         .expect("the reduction carries a booked cost");
@@ -756,7 +756,7 @@ fn realizing_refuses_a_moved_pool_and_replaying_does_not() {
     /// against the one the inventory would build now.
     fn booked_wildcard_sale() -> Posting {
         let mut leg = Posting::new("Assets:Broker", amount("-5", "AAPL"));
-        leg.cost = Some(CostSpec {
+        leg.cost = Some(Box::new(CostSpec {
             number: Some(CostNumber::PerUnit {
                 value: "110".parse().unwrap(),
             }),
@@ -764,7 +764,7 @@ fn realizing_refuses_a_moved_pool_and_replaying_does_not() {
             date: None,
             label: None,
             merge: true,
-        });
+        }));
         leg
     }
 
@@ -773,7 +773,7 @@ fn realizing_refuses_a_moved_pool_and_replaying_does_not() {
     fn engine_with_a_moved_pool() -> BookingEngine {
         let mut engine = engine_with_two_lots();
         let mut extra = Posting::new("Assets:Broker", amount("10", "AAPL"));
-        extra.cost = Some(spec("200.00", "USD", 6));
+        extra.cost = Some(Box::new(spec("200.00", "USD", 6)));
         engine
             .apply(&Transaction::new(date(11), "third lot").with_synthesized_posting(extra))
             .expect("adding a lot is fine");

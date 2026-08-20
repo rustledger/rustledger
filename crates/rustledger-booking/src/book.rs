@@ -426,7 +426,7 @@ impl BookingEngine {
                 };
                 let normalized_owned;
                 let cost_spec = if let Some(normalized) = normalized_compound {
-                    result.postings[idx].cost = Some(normalized.clone());
+                    result.postings[idx].cost = Some(Box::new(normalized.clone()));
                     normalized_owned = normalized;
                     &normalized_owned
                 } else {
@@ -507,7 +507,7 @@ impl BookingEngine {
                                         Some(IncompleteAmount::Complete(expanded_units));
                                     // Set cost from the matched lot
                                     if let Some(cost) = &matched_pos.cost {
-                                        new_posting.cost = Some(CostSpec {
+                                        new_posting.cost = Some(Box::new(CostSpec {
                                             number: Some(rustledger_core::CostNumber::PerUnit {
                                                 value: cost.number,
                                             }),
@@ -515,7 +515,7 @@ impl BookingEngine {
                                             date: cost.date,
                                             label: cost.label.clone(),
                                             merge: false,
-                                        });
+                                        }));
                                     }
                                     expanded.push(new_posting);
                                 }
@@ -541,7 +541,7 @@ impl BookingEngine {
                                 // augmenting lot and nets against it — otherwise a
                                 // labeled reduction leaves a phantom unlabeled
                                 // negative lot in the holdings view (#1666).
-                                result.postings[idx].cost = Some(CostSpec {
+                                result.postings[idx].cost = Some(Box::new(CostSpec {
                                     number: Some(rustledger_core::CostNumber::PerUnit {
                                         value: matched_cost.number,
                                     }),
@@ -561,7 +561,7 @@ impl BookingEngine {
                                     // account plainly had. The marker has to
                                     // survive so application re-runs the merge.
                                     merge: cost_spec.merge,
-                                });
+                                }));
                                 booked_indices.insert(idx);
                             }
                         }
@@ -659,7 +659,7 @@ impl BookingEngine {
                         && !units.number.is_zero()
                     {
                         let per_unit = total / units.number.abs();
-                        result.postings[idx].cost = Some(CostSpec {
+                        result.postings[idx].cost = Some(Box::new(CostSpec {
                             number: Some(rustledger_core::CostNumber::PerUnitFromTotal(
                                 rustledger_core::BookedCost::new(per_unit, total, units.number),
                             )),
@@ -668,7 +668,7 @@ impl BookingEngine {
                             date: cost_spec.date.or(Some(txn.date)),
                             label: cost_spec.label.clone(),
                             merge: cost_spec.merge,
-                        });
+                        }));
                         booked_indices.insert(idx);
                     }
                 }
@@ -706,13 +706,13 @@ impl BookingEngine {
 
                     // Only update if we actually inferred something
                     if inferred_currency.is_some() || inferred_date.is_some() {
-                        result.postings[idx].cost = Some(CostSpec {
+                        result.postings[idx].cost = Some(Box::new(CostSpec {
                             number: cost_spec.number,
                             currency: inferred_currency.or_else(|| cost_spec.currency.clone()),
                             date: inferred_date.or(cost_spec.date),
                             label: cost_spec.label.clone(),
                             merge: cost_spec.merge,
-                        });
+                        }));
                     }
                 }
             }
@@ -795,7 +795,7 @@ impl BookingEngine {
     /// plan itself are also skipped: the reduction raises them with its own
     /// message a moment later, and one function should own each message.
     fn verify_merge_precondition(&self, posting: &Posting) -> Result<(), BookingError> {
-        let Some(spec) = posting.cost.as_ref() else {
+        let Some(spec) = posting.cost.as_deref() else {
             return Ok(());
         };
         if !spec.merge {
@@ -823,7 +823,7 @@ impl BookingEngine {
         // where `rollback_needed` said failure was impossible — an assert, not
         // an error.
         let method = self.method_for(&posting.account);
-        if !inv.is_booking_reduction(units, posting.cost.as_ref(), method) {
+        if !inv.is_booking_reduction(units, posting.cost.as_deref(), method) {
             return Ok(());
         }
         let Ok(Some(got)) = inv.merged_pool_cost(units) else {
@@ -928,10 +928,10 @@ impl BookingEngine {
         // (`Inventory::is_booking_reduction`), shared with the Late validator so
         // the two can't drift (including the #1182 NONE gate that previously had
         // to be maintained in both crates).
-        if inv.is_booking_reduction(units, posting.cost.as_ref(), method) {
+        if inv.is_booking_reduction(units, posting.cost.as_deref(), method) {
             // `reduce` only errors when the lot it would match is missing — a
             // "must book first" precondition violation.
-            inv.reduce(units, posting.cost.as_ref(), method)
+            inv.reduce(units, posting.cost.as_deref(), method)
                 .map_err(|e| convert_core_booking_error(e, &posting.account))?;
         } else {
             // Add to inventory via the canonical cost-resolve shared with the Late
@@ -939,7 +939,7 @@ impl BookingEngine {
             // `CostSpec::resolve`). `apply`'s callers book first, which fills the
             // inferred currency into `cost_spec.currency`; direct-`apply` tests use
             // explicit-currency fixtures, which need no inference.
-            inv.add(Position::from_posting(units, posting.cost.as_ref(), date))
+            inv.add(Position::from_posting(units, posting.cost.as_deref(), date))
                 .map_err(|e| {
                     convert_core_booking_error(
                         rustledger_core::BookingError::Overflow(e),
@@ -1026,7 +1026,7 @@ impl BookingEngine {
             // that does not depend on state, so it cannot be falsified by the
             // transaction itself. Strictly more conservative: every posting
             // this used to catch carries a cost spec too.
-            let Some(spec) = posting.cost.as_ref() else {
+            let Some(spec) = posting.cost.as_deref() else {
                 return false;
             };
             // `{*}` fails in BOTH directions (#2068). It is checked against the
@@ -1228,7 +1228,7 @@ impl BookingEngine {
                     self.inventories.get(&posting.account).is_some_and(|inv| {
                         inv.is_booking_reduction(
                             units,
-                            posting.cost.as_ref(),
+                            posting.cost.as_deref(),
                             self.method_for(&posting.account),
                         )
                     })
@@ -1789,7 +1789,7 @@ mod tests {
         // Check that per-unit cost was calculated (300/1.763)
         let buy_posting = &booked_buy.transaction.postings[0];
         assert!(buy_posting.cost.is_some());
-        let cost_spec = buy_posting.cost.as_ref().unwrap();
+        let cost_spec = buy_posting.cost.as_deref().unwrap();
         // Booking should have converted the user-written Total into
         // the post-booking PerUnitFromTotal shape — the per-unit value
         // is computed for lot tracking and the total is preserved for

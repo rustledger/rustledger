@@ -775,7 +775,7 @@ mod tests {
     use super::*;
     use crate::dedup::reintern_directives;
     use rust_decimal_macros::dec;
-    use rustledger_core::{Amount, Posting, Transaction};
+    use rustledger_core::{Amount, IncompleteAmount, Posting, Transaction};
     use rustledger_parser::Span;
 
     #[test]
@@ -1375,8 +1375,11 @@ mod tests {
     fn cache_hit_directives_share_one_arc_per_distinct_string() {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
         let mut directives = vec![];
-        for i in 0..5 {
-            let txn = Transaction::new(date, format!("Txn {i}"))
+        for _ in 0..5 {
+            // Every field the same, so each of the four categories below has
+            // five occurrences of one string to share.
+            let txn = Transaction::new(date, "SAME-NARRATION")
+                .with_payee("SAME-PAYEE")
                 .with_synthesized_posting(Posting::new(
                     "Expenses:Food",
                     Amount::new(dec!(10.00), "USD"),
@@ -1388,11 +1391,26 @@ mod tests {
         let bytes =
             rkyv::to_bytes::<rkyv::rancor::Error>(&directives).expect("directives serialize");
 
-        // Pull the `Expenses:Food` account out of the first and last
-        // transaction, which are distinct occurrences of the same string.
-        let accounts = |ds: &[Spanned<Directive>]| {
+        // All four categories of `InternedStr` a transaction carries, because
+        // `reintern_directives` covers all of them and skipping it is only
+        // sound if the scope does too. `account` reaches `AsInternedStr`
+        // through the `Account` newtype and `currency` through `Amount`,
+        // neither of which names the wrapper at the field, so covering one
+        // does not imply covering the others.
+        let pairs = |ds: &[Spanned<Directive>]| {
             let pick = |d: &Spanned<Directive>| match &d.value {
-                Directive::Transaction(t) => t.postings[0].account.clone(),
+                Directive::Transaction(t) => {
+                    let currency = match &t.postings[0].units {
+                        Some(IncompleteAmount::Complete(a)) => a.currency.clone(),
+                        other => panic!("expected complete units, got {other:?}"),
+                    };
+                    (
+                        t.postings[0].account.clone(),
+                        currency,
+                        t.payee.clone().expect("payee"),
+                        t.narration.clone(),
+                    )
+                }
                 other => panic!("expected a transaction, got {other:?}"),
             };
             (pick(&ds[0]), pick(&ds[4]))
@@ -1401,12 +1419,12 @@ mod tests {
         let plain: Vec<Spanned<Directive>> =
             rkyv::from_bytes::<Vec<Spanned<Directive>>, rkyv::rancor::Error>(&bytes)
                 .expect("deserialize without a scope");
-        let (a, b) = accounts(&plain);
-        assert_eq!(a.as_str(), b.as_str());
+        let (x, y) = pairs(&plain);
+        assert_eq!(x.0.as_str(), y.0.as_str());
         assert!(
-            !a.ptr_eq(&b),
+            !x.0.ptr_eq(&y.0) && !x.1.ptr_eq(&y.1) && !x.2.ptr_eq(&y.2) && !x.3.ptr_eq(&y.3),
             "without an InternScope each occurrence should get its own Arc - \
-             if this now holds, the positive assertion below proves nothing"
+             if this now holds, the positive assertions below prove nothing"
         );
 
         let scoped: Vec<Spanned<Directive>> = {
@@ -1414,27 +1432,93 @@ mod tests {
             rkyv::from_bytes::<Vec<Spanned<Directive>>, rkyv::rancor::Error>(&bytes)
                 .expect("deserialize under a scope")
         };
-        let (a, b) = accounts(&scoped);
-        assert!(
-            a.ptr_eq(&b),
-            "under an InternScope equal strings must share one Arc, which is \
-             what lets the cache-hit path skip reintern_directives"
-        );
+        let (x, y) = pairs(&scoped);
+        for (label, shared) in [
+            ("account", x.0.ptr_eq(&y.0)),
+            ("currency", x.1.ptr_eq(&y.1)),
+            ("payee", x.2.ptr_eq(&y.2)),
+            ("narration", x.3.ptr_eq(&y.3)),
+        ] {
+            assert!(
+                shared,
+                "under an InternScope {label} must share one Arc, which is \
+                 what lets the cache-hit path skip reintern_directives"
+            );
+        }
     }
 
-    /// The scope must not outlive its guard, or a long-running host would
+    /// Deserialize `bytes` (optionally under a scope) and return the account
+    /// of the first transaction. Interning only happens inside
+    /// `AsInternedStr::deserialize_with`, so a scope test that builds an
+    /// `InternedStr` directly proves nothing — `InternedStr::new` does not
+    /// consult the scope at all.
+    fn first_account(bytes: &[u8]) -> rustledger_core::Account {
+        let ds = rkyv::from_bytes::<Vec<Spanned<Directive>>, rkyv::rancor::Error>(bytes)
+            .expect("deserialize");
+        match &ds[0].value {
+            Directive::Transaction(t) => t.postings[0].account.clone(),
+            other => panic!("expected a transaction, got {other:?}"),
+        }
+    }
+
+    /// The table must not outlive its guard, or a long-running host would
     /// accumulate every string it ever deserialized.
     #[test]
     fn the_intern_scope_stops_interning_once_the_guard_drops() {
-        let mine = {
+        let bytes = one_txn_archive();
+        let inside = {
             let _intern = rustledger_core::intern::InternScope::new();
-            rustledger_core::intern::InternedStr::new("Assets:Checking")
+            let a = first_account(&bytes);
+            // Same scope, second deserialization: shares.
+            assert!(first_account(&bytes).ptr_eq(&a));
+            a
         };
-        // Outside the scope the table is gone, so a fresh value of the same
-        // string cannot be pointer-equal to one built inside it.
-        let after = rustledger_core::intern::InternedStr::new("Assets:Checking");
-        assert_eq!(mine.as_str(), after.as_str());
-        assert!(!mine.ptr_eq(&after));
+        // The guard has dropped, so a fresh deserialization cannot reach the
+        // table that produced `inside`.
+        let after = first_account(&bytes);
+        assert_eq!(inside.as_str(), after.as_str());
+        assert!(
+            !inside.ptr_eq(&after),
+            "the table must be gone once the guard drops"
+        );
+    }
+
+    /// An inner scope must not pull the table out from under an outer one
+    /// when it drops. `InternScope::new` returns a guard either way, so
+    /// without the `installed` flag the inner `Drop` would clear the table
+    /// and silently stop interning for the rest of the outer scope — which
+    /// no assertion about a single scope would notice.
+    #[test]
+    fn a_nested_intern_scope_leaves_the_outer_one_interning() {
+        let bytes = one_txn_archive();
+        let outer = rustledger_core::intern::InternScope::new();
+        let first = first_account(&bytes);
+        {
+            let _inner = rustledger_core::intern::InternScope::new();
+            assert!(
+                first_account(&bytes).ptr_eq(&first),
+                "the inner scope should adopt the outer table, not replace it"
+            );
+        }
+        assert!(
+            first_account(&bytes).ptr_eq(&first),
+            "the outer scope must still be interning after the inner guard drops"
+        );
+        drop(outer);
+        assert!(!first_account(&bytes).ptr_eq(&first));
+    }
+
+    /// One archived transaction, for the scope tests above.
+    fn one_txn_archive() -> rkyv::util::AlignedVec {
+        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
+        let txn = Transaction::new(date, "N")
+            .with_synthesized_posting(Posting::new(
+                "Expenses:Food",
+                Amount::new(dec!(10.00), "USD"),
+            ))
+            .with_synthesized_posting(Posting::auto("Assets:Checking"));
+        let ds = vec![Spanned::new(Directive::Transaction(txn), Span::new(0, 50))];
+        rkyv::to_bytes::<rkyv::rancor::Error>(&ds).expect("serialize")
     }
 
     #[test]

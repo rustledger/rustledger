@@ -443,11 +443,16 @@ impl Loader {
         // `InternedStr`'s `PartialEq` and forcing all cross-file
         // equality through byte comparison.
         //
-        // The cache-hit path already runs `reintern_directives` to fix
-        // this (see `crates/rustledger/src/cmd/check.rs`). Doing the
-        // same here aligns the fresh-parse path with the cache path:
-        // every consumer of `LoadResult` sees a deduplicated directive
-        // list regardless of how it was produced. Closes #1071.
+        // This is the fresh-parse path, and it is the only one that needs
+        // the walk. A cache hit has no per-file split to repair: it
+        // deserializes one archive under an `InternScope` (see
+        // `cache::load_cache_entry`), which interns as it builds and so
+        // arrives at the same postcondition without a second pass. The
+        // WASM parsed-ledger constructor has no scope either and calls
+        // `reintern_plain_directives` for itself.
+        //
+        // Either way every consumer of `LoadResult` sees a deduplicated
+        // directive list regardless of how it was produced. Closes #1071.
         dedup::reintern_directives(&mut directives);
 
         // Build display context from directives and options

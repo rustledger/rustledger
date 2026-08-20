@@ -962,9 +962,6 @@ pub struct Inventory {
     positions: PositionStore,
     /// Index for O(1) lookup of simple positions (no cost) by currency.
     /// Maps currency to position index in the `positions` vector.
-    /// Not serialized - rebuilt on demand.
-    #[serde(skip)]
-    simple_index: FxHashMap<crate::Currency, usize>,
     /// Cache of total units per currency for O(1) `units()` lookups.
     /// Updated incrementally on `add()` and `reduce()`.
     /// Not serialized - rebuilt on demand.
@@ -1074,6 +1071,17 @@ struct CurrencyStats {
     total: Decimal,
     /// Position counts by (sign, cost-bearing) bucket.
     counts: SignCounts,
+    /// Slot of the single cost-less lot of this currency, if there is one —
+    /// the lot a later cost-less `add` merges into.
+    ///
+    /// Folded in here rather than kept in its own map because every reader
+    /// wants it alongside the totals: `add` looked the currency up once for
+    /// the total and again for this, and `add_headroom_for` did the same, so
+    /// each posting hashed the same interned string twice for no reason. The
+    /// two have identical lifetimes — neither is ever pruned, both are
+    /// `#[serde(skip)]` and both are rebuilt together by `rebuild_caches` —
+    /// so there was never a state one could describe and the other could not.
+    simple_slot: Option<usize>,
 }
 
 /// How many positions of a currency fall in each (sign, cost-bearing) bucket.
@@ -1176,7 +1184,6 @@ impl TryFrom<InventoryWire> for Inventory {
     fn try_from(wire: InventoryWire) -> Result<Self, Self::Error> {
         let mut inv = Self {
             positions: PositionStore::Owned(Slots::from_live(wire.positions.into_iter().collect())),
-            simple_index: FxHashMap::default(),
             units_cache: FxHashMap::default(),
             cost_index: FxHashMap::default(),
             ordered_index: None,
@@ -1482,19 +1489,19 @@ impl Inventory {
         // posting via `overflow_is_possible`.
         let fits = |v: Decimal| v.abs().checked_add(needed).is_some();
 
-        let cached_ok = self
-            .units_cache
-            .get(currency)
-            .map(|s| s.total)
-            .is_none_or(fits);
-        if !cached_ok {
+        // One lookup for both halves: the running total and the cost-less lot
+        // a merge would land in.
+        let Some(stats) = self.units_cache.get(currency) else {
+            return true;
+        };
+        if !fits(stats.total) {
             return false;
         }
-        // Only a cost-less add merges, and `simple_index` names the one lot it
+        // Only a cost-less add merges, and `simple_slot` names the one lot it
         // would merge into.
-        self.simple_index
-            .get(currency)
-            .and_then(|idx| self.positions.get(*idx))
+        stats
+            .simple_slot
+            .and_then(|idx| self.positions.get(idx))
             .is_none_or(|lot| fits(lot.units.number))
     }
 
@@ -1682,7 +1689,11 @@ impl Inventory {
         let merge_idx = position
             .cost
             .is_none()
-            .then(|| self.simple_index.get(&position.units.currency).copied())
+            .then(|| {
+                self.units_cache
+                    .get(&position.units.currency)
+                    .and_then(|s| s.simple_slot)
+            })
             .flatten();
         let merged_units = merge_idx
             .map(|idx| {
@@ -1742,6 +1753,7 @@ impl Inventory {
                 CurrencyStats {
                     total: new_cached,
                     counts,
+                    simple_slot: None,
                 },
             );
         }
@@ -1761,7 +1773,9 @@ impl Inventory {
             // stores slots.
             let currency = position.units.currency.clone();
             let idx = self.positions.push_slot(position);
-            self.simple_index.insert(currency, idx);
+            // The stats entry exists: the totals above were written before
+            // this point for every currency that reaches here.
+            self.units_cache.entry(currency).or_default().simple_slot = Some(idx);
             return Ok(());
         }
 
@@ -2128,7 +2142,6 @@ impl Inventory {
     }
 
     fn try_rebuild_index_from(&mut self, source: CacheSource) -> Result<(), OverflowError> {
-        self.simple_index.clear();
         self.units_cache.clear();
         self.cost_index.clear();
         // Preserve whether the ordered index has been BUILT, rather than
@@ -2192,19 +2205,25 @@ impl Inventory {
                     currency: pos.units.currency.clone(),
                 })?;
 
-            // Update simple_index only for positions without cost
+            // Record the cost-less lot only for positions without cost
             if pos.cost.is_none() {
                 debug_assert!(
                     source == CacheSource::Untrusted
-                        || !self.simple_index.contains_key(&pos.units.currency),
+                        || self
+                            .units_cache
+                            .get(&pos.units.currency)
+                            .is_none_or(|s| s.simple_slot.is_none()),
                     "Invariant violated: multiple simple positions for currency {}",
                     pos.units.currency
                 );
                 // Last-wins on a duplicate, matching the pre-existing behavior
-                // of this insert. `units_cache` sums every position either way,
+                // of this write. `units_cache` sums every position either way,
                 // so the total stays right; only which lot a later cost-less
                 // `add` merges into is affected.
-                self.simple_index.insert(pos.units.currency.clone(), idx);
+                self.units_cache
+                    .entry(pos.units.currency.clone())
+                    .or_default()
+                    .simple_slot = Some(idx);
             }
         }
 
@@ -4913,8 +4932,10 @@ mod tests {
         inv.add(Position::simple(Amount::new(dec!(50), "USD")))
             .expect("fits");
         assert_eq!(
-            inv.simple_index.get(&crate::Currency::new("USD")),
-            Some(&1),
+            inv.units_cache
+                .get(&crate::Currency::new("USD"))
+                .and_then(|s| s.simple_slot),
+            Some(1),
             "fixture must put the cost-less lot second, or the shift is untested",
         );
 
@@ -4928,8 +4949,10 @@ mod tests {
         .expect("drains the lot");
 
         assert_eq!(
-            inv.simple_index.get(&crate::Currency::new("USD")),
-            Some(&1),
+            inv.units_cache
+                .get(&crate::Currency::new("USD"))
+                .and_then(|s| s.simple_slot),
+            Some(1),
             "the cost-less lot did not move, so its stored slot must not change",
         );
 
@@ -4953,7 +4976,12 @@ mod tests {
         let mut inv = Inventory::new();
         inv.add(Position::simple(Amount::new(dec!(50), "USD")))
             .expect("fits");
-        assert_eq!(inv.simple_index.get(&crate::Currency::new("USD")), Some(&0));
+        assert_eq!(
+            inv.units_cache
+                .get(&crate::Currency::new("USD"))
+                .and_then(|s| s.simple_slot),
+            Some(0)
+        );
 
         // An empty spec matches a cost-less lot (`matches_cost_spec`:
         // `(None, true) => true`), so STRICT selects it and drains it.
@@ -4966,7 +4994,9 @@ mod tests {
 
         assert!(inv.positions().next().is_none(), "the lot is gone");
         assert_eq!(
-            inv.simple_index.get(&crate::Currency::new("USD")),
+            inv.units_cache
+                .get(&crate::Currency::new("USD"))
+                .and_then(|s| s.simple_slot),
             None,
             "a stale entry points at a removed lot; the next cost-less add \
              indexes past the end",

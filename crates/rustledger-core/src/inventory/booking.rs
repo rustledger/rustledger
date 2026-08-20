@@ -752,7 +752,10 @@ impl Inventory {
                 // renumbered and only the entry naming this lot has to go. An
                 // empty cost spec matches a cost-less position, so ordered
                 // selection can drain one and this map can name it.
-                self.simple_index.retain(|_, stored| *stored != idx);
+                self.units_cache
+                    .values_mut()
+                    .filter(|stats| stats.simple_slot == Some(idx))
+                    .for_each(|stats| stats.simple_slot = None);
             }
         }
 
@@ -1212,7 +1215,10 @@ impl Inventory {
             // did not move, pointing `add`'s merge at a tombstone — which is
             // exactly what `removing_a_lot_repairs_the_index_of_a_later_cost_less_lot`
             // caught.
-            self.simple_index.retain(|_, stored| *stored != idx);
+            self.units_cache
+                .values_mut()
+                .filter(|stats| stats.simple_slot == Some(idx))
+                .for_each(|stats| stats.simple_slot = None);
         }
     }
 }

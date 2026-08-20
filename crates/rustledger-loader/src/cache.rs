@@ -246,8 +246,21 @@ impl CacheEntry {
             // and silently skip a non-UTF8 source file, leaving the
             // cache-hit source map missing text the uncached run has -
             // an error-reporting parity gap.
+            //
+            // Structured exactly as `DiskFileSystem::read` rather than as
+            // `from_utf8_lossy(&bytes).into_owned()`, which is the same
+            // operation by a much slower route: it validates through
+            // `Utf8Chunks` a byte at a time instead of the word-at-a-time
+            // check `String::from_utf8` runs, and then copies the whole file
+            // even when every byte was already valid. `String::from_utf8`
+            // takes the `Vec` by value and keeps the allocation. Only a
+            // genuinely non-UTF-8 file pays for the lossy rebuild, and that
+            // branch produces the identical string.
             if let Ok(bytes) = fs::read(&path) {
-                let content = String::from_utf8_lossy(&bytes).into_owned();
+                let content = match String::from_utf8(bytes) {
+                    Ok(s) => s,
+                    Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+                };
                 source_map.add_file(path, content.into());
             }
         }

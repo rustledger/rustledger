@@ -811,12 +811,116 @@ pub fn interpolate_with_tolerances(
 ///
 /// # Errors
 /// Same as [`interpolate`].
+/// Restores the postings interpolation touched, so a failure leaves the
+/// transaction exactly as the author wrote it.
+///
+/// A failed transaction is not discarded — `run_booking` partitions it into
+/// `failed` and `finalize` merges it back into `Ledger.directives`, so a user
+/// sees it. Leaving a half-interpolated one there would show amounts nobody
+/// wrote and booking rejected.
+///
+/// Saving the touched postings rather than cloning the whole transaction is
+/// the point: interpolation fills one or two postings, so this copies one or
+/// two, where the clone it replaced copied every posting and allocated a
+/// vector to hold them, on every transaction, purely so a rare failure could
+/// be undone.
+#[derive(Default)]
+pub struct Rollback {
+    /// `(index, posting as it was)`, first write per index wins.
+    saved: smallvec::SmallVec<[(usize, rustledger_core::Spanned<rustledger_core::Posting>); 2]>,
+    /// Posting count before the first append, if anything was appended.
+    original_len: Option<usize>,
+}
+
+impl Rollback {
+    fn touch(&mut self, txn: &Transaction, idx: usize) {
+        if !self.saved.iter().any(|(i, _)| *i == idx) {
+            self.saved.push((idx, txn.postings[idx].clone()));
+        }
+    }
+
+    fn note_push(&mut self, txn: &Transaction) {
+        self.original_len.get_or_insert(txn.postings.len());
+    }
+
+    pub fn restore(self, txn: &mut Transaction) {
+        // Appended postings go first, so the indices below address the same
+        // postings they were saved from.
+        if let Some(len) = self.original_len {
+            txn.postings.truncate(len);
+        }
+        for (idx, posting) in self.saved {
+            if let Some(slot) = txn.postings.get_mut(idx) {
+                *slot = posting;
+            }
+        }
+    }
+}
+
+/// Interpolate `transaction` in place.
+///
+/// On `Err` the transaction is left exactly as it was passed in; see
+/// [`Rollback`].
+///
+/// # Errors
+///
+/// Propagates every [`InterpolationError`] the analysis can raise.
+pub fn interpolate_in_place<S: std::hash::BuildHasher>(
+    transaction: &mut Transaction,
+    tolerances: &std::collections::HashMap<Currency, Decimal, S>,
+) -> Result<(Vec<usize>, HashMap<Currency, Decimal>), InterpolationError> {
+    interpolate_capturing(transaction, tolerances).map(|(found, _)| found)
+}
+
+/// [`interpolate_in_place`], handing back the [`Rollback`] so a caller that
+/// does more fallible work afterwards — `apply`, in `book_interpolate_apply`
+/// — can put the transaction back if its own step fails.
+pub fn interpolate_in_place_undoable<S: std::hash::BuildHasher>(
+    transaction: &mut Transaction,
+    tolerances: &std::collections::HashMap<Currency, Decimal, S>,
+) -> Result<Rollback, InterpolationError> {
+    interpolate_capturing(transaction, tolerances).map(|(_, rollback)| rollback)
+}
+
+/// Runs the analysis, restoring `transaction` if it fails.
+fn interpolate_capturing<S: std::hash::BuildHasher>(
+    transaction: &mut Transaction,
+    tolerances: &std::collections::HashMap<Currency, Decimal, S>,
+) -> Result<((Vec<usize>, HashMap<Currency, Decimal>), Rollback), InterpolationError> {
+    let mut rollback = Rollback::default();
+    match interpolate_inner(transaction, tolerances, &mut rollback) {
+        Ok(found) => Ok((found, rollback)),
+        Err(e) => {
+            rollback.restore(transaction);
+            Err(e)
+        }
+    }
+}
+
+/// [`interpolate_in_place`] against a copy, for callers that only have a
+/// `&Transaction`.
+///
+/// # Errors
+///
+/// Propagates every [`InterpolationError`] the analysis can raise.
 pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
     transaction: &Transaction,
     tolerances: &std::collections::HashMap<Currency, Decimal, S>,
 ) -> Result<InterpolationResult, InterpolationError> {
-    // Clone the transaction for modification
-    let mut result = transaction.clone();
+    let mut owned = transaction.clone();
+    let (filled_indices, residuals) = interpolate_in_place(&mut owned, tolerances)?;
+    Ok(InterpolationResult {
+        transaction: owned,
+        filled_indices,
+        residuals,
+    })
+}
+
+fn interpolate_inner<S: std::hash::BuildHasher>(
+    transaction: &mut Transaction,
+    tolerances: &std::collections::HashMap<Currency, Decimal, S>,
+    rollback: &mut Rollback,
+) -> Result<(Vec<usize>, HashMap<Currency, Decimal>), InterpolationError> {
     let mut filled_indices = Vec::new();
     // Fills whose RESIDUAL was already exactly zero, as opposed to fills that
     // merely quantized to zero. Beancount treats the two differently and so
@@ -824,13 +928,16 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
     let mut zero_residual_fills: std::collections::HashSet<usize> =
         std::collections::HashSet::new();
 
-    // Lazily compute inferred currency only when needed (most transactions don't need it)
-    let mut inferred_cost_currency: Option<Option<Currency>> = None;
-    let get_inferred_currency = |cache: &mut Option<Option<Currency>>| -> Option<Currency> {
-        cache
-            .get_or_insert_with(|| crate::infer_cost_currency_from_postings(transaction))
-            .clone()
-    };
+    // Computed up front, from the transaction as it was handed in.
+    //
+    // This used to be memoized behind a closure that borrowed `transaction`,
+    // which was sound while interpolation worked on a clone: the source was
+    // pristine whenever the closure first fired, so the answer did not depend
+    // on when. Writing through the same reference removes that, and a lazy
+    // read would see whatever had already been filled. The scan returns at the
+    // first simple posting carrying units, so paying for it eagerly is a few
+    // dozen instructions against the ~1,200 the clone cost.
+    let inferred_cost_currency = crate::infer_cost_currency_from_postings(transaction);
 
     // Calculate initial residuals from postings with amounts
     let mut residuals = Residuals::default();
@@ -918,17 +1025,16 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
                 // interpolation and the balance residual can no longer disagree
                 // (the rule: cost beats price; else price; else units).
                 let Ok(cost_contribution) = crate::cost_weight::<Decimal>(posting, amount, || {
-                    get_inferred_currency(&mut inferred_cost_currency)
+                    inferred_cost_currency.clone()
                 }) else {
                     // This posting's weight is out of range. Mark the
                     // currency the weight WOULD have been denominated in —
                     // marking `amount.currency` instead would leave the
                     // cost currency's residual quietly short by this
                     // posting while looking representable (#1863).
-                    let weight_currency = crate::cost_currency_of(posting, || {
-                        get_inferred_currency(&mut inferred_cost_currency)
-                    })
-                    .unwrap_or_else(|| amount.currency.clone());
+                    let weight_currency =
+                        crate::cost_currency_of(posting, || inferred_cost_currency.clone())
+                            .unwrap_or_else(|| amount.currency.clone());
                     unrepresentable.insert(weight_currency);
                     // `continue`, NOT `None`: falling through would reach
                     // the `posting.cost.is_some()` branch and be counted as
@@ -961,9 +1067,8 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
                     // Track this as one unknown for the cost currency. The
                     // post-loop check then enforces the "at most one unknown
                     // per currency group" rule that bean-check enforces.
-                    let cost_currency = crate::cost_currency_of(posting, || {
-                        get_inferred_currency(&mut inferred_cost_currency)
-                    });
+                    let cost_currency =
+                        crate::cost_currency_of(posting, || inferred_cost_currency.clone());
                     if let Some(curr) = cost_currency {
                         *weight_unknowns_by_currency.entry(curr.clone()).or_default() += 1;
                         // An empty `{}` reaching here is an augmentation (a
@@ -1125,9 +1230,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
                 // from the residual of whichever currency this posting's WEIGHT
                 // lands in — the units currency only when no cost or price
                 // redenominates it (#1911).
-                match units_weight(posting, || {
-                    get_inferred_currency(&mut inferred_cost_currency)
-                }) {
+                match units_weight(posting, || inferred_cost_currency.clone()) {
                     UnitsWeight::Units => {
                         missing_by_currency.push(units_currency.clone(), i);
                     }
@@ -1242,7 +1345,8 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
                 }
             }
         };
-        result.postings[idx].units =
+        rollback.touch(transaction, idx);
+        transaction.postings[idx].units =
             Some(IncompleteAmount::Complete(Amount::new(number, &currency)));
         filled_indices.push(idx);
         // The blanket unrepresentable gate ran further up, so guard here too:
@@ -1266,7 +1370,8 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
         let Some(weight) = crate::price_weight(units.number, price_number, kind) else {
             return Err(InterpolationError::Unrepresentable { currency });
         };
-        result.postings[idx].price = Some(Box::new(rustledger_core::PriceAnnotation {
+        rollback.touch(transaction, idx);
+        transaction.postings[idx].price = Some(Box::new(rustledger_core::PriceAnnotation {
             kind,
             amount: Some(IncompleteAmount::Complete(Amount::new(
                 price_number,
@@ -1392,11 +1497,12 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
             return Err(InterpolationError::NegativeInferredCost { currency, per_unit });
         }
 
-        let existing = result.postings[idx]
+        let existing = transaction.postings[idx]
             .cost
             .take()
             .map_or_else(CostSpec::empty, |boxed| *boxed);
-        result.postings[idx].cost = Some(Box::new(CostSpec {
+        rollback.touch(transaction, idx);
+        transaction.postings[idx].cost = Some(Box::new(CostSpec {
             number: Some(CostNumber::PerUnitFromTotal(BookedCost::new(
                 per_unit,
                 total,
@@ -1487,7 +1593,8 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
             });
         }
 
-        result.postings[idx].price = Some(Box::new(rustledger_core::PriceAnnotation {
+        rollback.touch(transaction, idx);
+        transaction.postings[idx].price = Some(Box::new(rustledger_core::PriceAnnotation {
             kind,
             amount: Some(IncompleteAmount::Complete(Amount::new(solved, &currency))),
         }));
@@ -1508,7 +1615,8 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
             if residual.is_zero() {
                 zero_residual_fills.insert(idx);
             }
-            result.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
+            rollback.touch(transaction, idx);
+            transaction.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
                 interpolated,
                 &weight_currency,
             )));
@@ -1534,7 +1642,8 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
             zero_residual_fills.insert(idx);
         }
 
-        result.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
+        rollback.touch(transaction, idx);
+        transaction.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
             interpolated,
             &units_currency,
         )));
@@ -1564,7 +1673,11 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
         // This is multi-currency interpolation - split into multiple postings
         if unassigned_missing.len() == 1 && non_zero_residuals.len() > 1 {
             let idx = unassigned_missing[0];
-            let original_posting = &transaction.postings[idx];
+            // Copied, not borrowed, and taken BEFORE the fill below. The
+            // extra postings are built from the posting as the author wrote
+            // it; reading it after `postings[idx]` has been filled would give
+            // each of them the first currency's units.
+            let original_posting = transaction.postings[idx].clone();
 
             // Fill the first currency into the original posting
             let (first_currency, first_residual) = &non_zero_residuals[0];
@@ -1573,7 +1686,8 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
             if first_residual.is_zero() {
                 zero_residual_fills.insert(idx);
             }
-            result.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
+            rollback.touch(transaction, idx);
+            transaction.postings[idx].units = Some(IncompleteAmount::Complete(Amount::new(
                 interpolated,
                 first_currency,
             )));
@@ -1585,14 +1699,15 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
                 let mut new_posting = original_posting.clone();
                 let interpolated = round_interpolated(*residual, tolerances.get(currency).copied());
                 if residual.is_zero() {
-                    zero_residual_fills.insert(result.postings.len());
+                    zero_residual_fills.insert(transaction.postings.len());
                 }
                 new_posting.units = Some(IncompleteAmount::Complete(Amount::new(
                     interpolated,
                     currency,
                 )));
-                result.postings.push(new_posting);
-                filled_indices.push(result.postings.len() - 1);
+                rollback.note_push(transaction);
+                transaction.postings.push(new_posting);
+                filled_indices.push(transaction.postings.len() - 1);
                 *residuals.slot(currency) += interpolated;
             }
         } else {
@@ -1617,26 +1732,28 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
                     if residual.is_zero() {
                         zero_residual_fills.insert(*idx);
                     }
-                    result.postings[*idx].units = Some(IncompleteAmount::Complete(Amount::new(
-                        interpolated,
-                        currency,
-                    )));
+                    rollback.touch(transaction, *idx);
+                    transaction.postings[*idx].units = Some(IncompleteAmount::Complete(
+                        Amount::new(interpolated, currency),
+                    ));
                     filled_indices.push(*idx);
                     *residuals.slot(currency) += interpolated;
                 } else if !non_zero_residuals.is_empty() {
                     // Use the first currency
                     let (currency, _) = &non_zero_residuals[0];
-                    result.postings[*idx].units =
+                    rollback.touch(transaction, *idx);
+                    transaction.postings[*idx].units =
                         Some(IncompleteAmount::Complete(Amount::zero(currency)));
                     filled_indices.push(*idx);
                     zero_residual_fills.insert(*idx);
-                } else if let Some(currency) = get_inferred_currency(&mut inferred_cost_currency) {
+                } else if let Some(currency) = inferred_cost_currency.clone() {
                     // No residuals but we can infer currency from cost basis
                     // This handles balanced cost-basis transactions like:
                     //   Assets:Crypto  100 USDC {1.0 USD}
                     //   Assets:Cash   -100 USD
                     //   Income:Trading  ; <- infer 0 USD from cost basis
-                    result.postings[*idx].units =
+                    rollback.touch(transaction, *idx);
+                    transaction.postings[*idx].units =
                         Some(IncompleteAmount::Complete(Amount::zero(&currency)));
                     filled_indices.push(*idx);
                     zero_residual_fills.insert(*idx);
@@ -1684,7 +1801,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
         .iter()
         .filter(|&&idx| zero_residual_fills.contains(&idx))
         .filter(|&&idx| {
-            result.postings.get(idx).is_some_and(|p| {
+            transaction.postings.get(idx).is_some_and(|p| {
                 p.units
                     .as_ref()
                     .and_then(|u| u.as_amount())
@@ -1696,7 +1813,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
     indices_to_remove.sort_unstable_by(|a, b| b.cmp(a));
 
     for idx in &indices_to_remove {
-        result.postings.remove(*idx);
+        transaction.postings.remove(*idx);
     }
 
     // Drop the removed indices from filled_indices and shift the
@@ -1712,11 +1829,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
 
     // Return the residuals we've been tracking incrementally
     // (no need to recalculate - we've updated residuals as we filled amounts)
-    Ok(InterpolationResult {
-        transaction: result,
-        filled_indices: final_filled_indices,
-        residuals: residuals.into_map(),
-    })
+    Ok((final_filled_indices, residuals.into_map()))
 }
 
 #[cfg(test)]
@@ -2170,6 +2283,48 @@ mod tests {
         }
         assert!(found_cad, "should have -440.00 CAD posting");
         assert!(found_usd, "should have 431.92 USD posting");
+    }
+
+    /// A failure after a write must leave the transaction as the author wrote
+    /// it.
+    ///
+    /// This is the invariant `Rollback` exists for, and it is not hypothetical:
+    /// the number-only branch writes `units` and only then folds the value
+    /// into the residual, so an overflow there fails with a posting already
+    /// filled. A failed transaction is not discarded — `run_booking` sets it
+    /// aside and `finalize` merges it back into `Ledger.directives` — so
+    /// leaving the fill in place would show the user an amount nobody wrote.
+    ///
+    /// Before this was in-place the property came free from interpolating a
+    /// clone and dropping it. Now it has to be maintained, so it is asserted.
+    #[test]
+    fn a_failure_after_a_write_leaves_the_transaction_untouched() {
+        use rustledger_core::IncompleteAmount;
+
+        // MAX + 1 overflows, and the second posting's units are written
+        // before the addition that discovers it.
+        let mut txn = Transaction::new(date(2024, 1, 15), "overflow")
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(Decimal::MAX, "USD")))
+            .with_synthesized_posting(Posting {
+                units: Some(IncompleteAmount::NumberOnly(dec!(1))),
+                ..Posting::auto("Assets:B")
+            });
+        let before = txn.clone();
+
+        let tolerances: std::collections::HashMap<Currency, Decimal> =
+            std::collections::HashMap::new();
+        let err =
+            interpolate_in_place(&mut txn, &tolerances).expect_err("MAX + 1 must not interpolate");
+
+        assert!(
+            matches!(err, InterpolationError::Unrepresentable { .. }),
+            "expected the overflow to be reported, got {err:?}"
+        );
+        assert_eq!(
+            txn, before,
+            "a transaction that failed to interpolate must read exactly as it \
+             was passed in - it is merged back into the ledger and shown"
+        );
     }
 
     /// The elided posting absorbs currencies in the order the transaction

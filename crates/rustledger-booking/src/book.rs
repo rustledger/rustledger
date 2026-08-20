@@ -1345,6 +1345,52 @@ impl BookingEngine {
         Ok(self.book_and_interpolate_with_gains(txn)?.0)
     }
 
+    /// Book, interpolate and apply `txn` in one step, mutating it in place.
+    ///
+    /// The three are one step because they share a failure rule: a transaction
+    /// that fails any of them is set aside by `run_booking` and merged back
+    /// into the ledger by `finalize`, so a user sees it, and it must read as
+    /// the author wrote it. Splitting them would hand the caller a
+    /// half-interpolated transaction to put back.
+    ///
+    /// This exists so the common path stops cloning. `book_and_interpolate_
+    /// with_gains` hands back an owned transaction the caller assigns over the
+    /// original, so every transaction paid a full clone and the original's
+    /// drop — 6.9M and 6.0M instructions on a 10,000-transaction ledger, 7.7%
+    /// of a warm `check` — to keep a rare failure undoable. Interpolation
+    /// touches one or two postings, so `Rollback` saves those instead.
+    ///
+    /// # Errors
+    ///
+    /// Any booking, interpolation or apply failure. On every one of them
+    /// `txn` is left exactly as it was passed in.
+    pub fn book_interpolate_apply(
+        &mut self,
+        txn: &mut Transaction,
+    ) -> Result<Vec<CapitalGain>, BookingError> {
+        // Fast path, as in `book_and_interpolate_with_gains`: with no cost
+        // specs `book` is an identity, so interpolate the transaction itself.
+        if !txn.postings.iter().any(|p| p.cost.is_some()) {
+            let tolerances = crate::transaction_tolerances(txn, &self.tolerance.options());
+            let undo = crate::interpolate::interpolate_in_place_undoable(txn, &tolerances)?;
+            if let Err(e) = self.apply(txn) {
+                undo.restore(txn);
+                return Err(e);
+            }
+            return Ok(Vec::new());
+        }
+        // Slow path: `book` already produces an owned transaction, so work on
+        // that and commit only once apply has succeeded. Nothing needs undoing
+        // — `txn` is not touched until the end.
+        let tolerances = crate::transaction_tolerances(txn, &self.tolerance.options());
+        let booked = self.book(txn)?;
+        let mut candidate = booked.transaction;
+        let _ = crate::interpolate::interpolate_in_place_undoable(&mut candidate, &tolerances)?;
+        self.apply(&candidate)?;
+        *txn = candidate;
+        Ok(booked.gains)
+    }
+
     /// Book and interpolate a transaction, also returning the per-lot
     /// [`CapitalGain`]s `book` computed for it.
     ///

@@ -24,31 +24,6 @@ pub fn should_use_color() -> bool {
     std::io::stdout().is_terminal()
 }
 
-/// A source cache for error reporting.
-pub struct SourceCache {
-    sources: HashMap<String, String>,
-}
-
-impl SourceCache {
-    /// Create a new source cache.
-    pub fn new() -> Self {
-        Self {
-            sources: HashMap::new(),
-        }
-    }
-
-    /// Add a source file to the cache.
-    pub fn add(&mut self, path: &str, content: String) {
-        self.sources.insert(path.to_string(), content);
-    }
-}
-
-impl Default for SourceCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Build a miette report handler with the given color settings.
 fn build_handler(use_color: bool) -> GraphicalReportHandler {
     if use_color {

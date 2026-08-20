@@ -1,7 +1,7 @@
 //! Shared implementation for bean-check and rledger check commands.
 
 use crate::cmd::completions::ShellType;
-use crate::report::{self, SourceCache};
+use crate::report;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use rustledger_loader::LoadError;
@@ -212,23 +212,6 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         args.no_cache,
         args.verbose && !args.quiet,
     )?;
-
-    // Build source cache for error reporting
-    let mut cache = SourceCache::new();
-    for source_file in load_result.source_map.files() {
-        // Use lossy UTF-8 decoding to handle non-UTF-8 files gracefully
-        let content = std::fs::read(&source_file.path)
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .unwrap_or_default();
-        let path_str = source_file.path.display().to_string();
-        cache.add(&path_str, content);
-    }
-
-    // Also add the main file (use lossy decoding for non-UTF-8 files)
-    let main_content = std::fs::read(file)
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .with_context(|| format!("failed to read {}", file.display()))?;
-    cache.add(&file.display().to_string(), main_content);
 
     // Count errors split by phase
     let mut error_count = 0;

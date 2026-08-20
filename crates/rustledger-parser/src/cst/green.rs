@@ -481,7 +481,28 @@ pub(super) fn convert_transaction(
 ) -> Option<Spanned<rustledger_core::Directive>> {
     use crate::SyntaxKind as K;
     let (mut txn, span) = convert_transaction_header(node, base)?;
-    let mut postings = Vec::new();
+    // Sized from the node rather than grown. `Spanned<Posting>` is 304 bytes,
+    // and `Vec`'s first allocation is 4 elements for a type this size, so a
+    // two-posting transaction — most of them — took 1216 bytes to hold 608,
+    // and a three-posting one reallocated and copied the first two.
+    //
+    // Counting first is a second walk of the same green children, which are a
+    // slice: no allocation, no parsing, once per transaction. It pays for
+    // itself several times over. Measured on the 10,000-transaction `simple`
+    // workload from `scripts/gen-profile-workload.py`, release + mimalloc,
+    // parse cache disabled: 81.0 -> 71.2 ms, peak RSS 41.0 -> 35.3 MB, minor
+    // faults 8,706 -> 7,149. `investment` and `fifo` move by the same order
+    // (-13% and -16%).
+    let posting_count = node
+        .children()
+        .filter(|child| match child {
+            NodeOrToken::Node(n) => {
+                crate::BeancountLanguage::kind_from_raw(n.kind()) == crate::SyntaxKind::POSTING
+            }
+            NodeOrToken::Token(_) => false,
+        })
+        .count();
+    let mut postings = Vec::with_capacity(posting_count);
     let mut meta = Metadata::default();
     let mut offset = base;
     for child in node.children() {

@@ -442,7 +442,7 @@ fn no_errors_does_not_permit_answering_from_an_unbooked_ledger() {
 /// Under AVERAGE the reduction is booked at the MERGED average cost, a key
 /// belonging to no augmentation, so it survived as a dangling negative.
 ///
-/// BQL now realizes through `BookingEngine::apply_posting`, the same decision
+/// BQL now replays through `BookingEngine::replay_posting`, the same decision
 /// reports use, so this is one realization rather than two that agree by
 /// luck.
 ///

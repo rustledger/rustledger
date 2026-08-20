@@ -572,7 +572,7 @@ impl<'a> Executor<'a> {
         // BALANCES reported `10 {200}  10 {150}  -5 {175}` for an account
         // holding 15 (#1985).
         //
-        // `apply_posting` is the same decision `report balances` realizes
+        // `replay_posting` is the same decision `report balances` realizes
         // through, which is the point: two realizations of one ledger is the
         // duplication registry's realization family, and this was the drift.
         let mut engine = rustledger_booking::BookingEngine::new();
@@ -618,7 +618,7 @@ impl<'a> Executor<'a> {
                         if needs_account_balance {
                             for posting in &txn.postings {
                                 engine
-                                    .apply_posting(posting, txn.date)
+                                    .replay_posting(posting, txn.date)
                                     .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             }
                         }
@@ -651,7 +651,7 @@ impl<'a> Executor<'a> {
                     // saving compounds across a long run).
                     // Only `needs_balance` reads this now. Before #1985 the
                     // per-account accumulation used it too, so it was
-                    // unconditional; `apply_posting` resolves the position
+                    // unconditional; `replay_posting` resolves the position
                     // itself, so computing it here for a query that reads
                     // neither column was a `Position::from_posting` per
                     // posting for nothing. Copilot's catch.
@@ -660,7 +660,7 @@ impl<'a> Executor<'a> {
                         .flatten();
                     if needs_account_balance {
                         engine
-                            .apply_posting(posting, txn.date)
+                            .replay_posting(posting, txn.date)
                             .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                     }
 

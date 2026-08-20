@@ -475,7 +475,7 @@ fn a_merge_applied_against_different_inventory_is_reported() {
 
     // The check is a PRECONDITION: it runs before the merge mutates anything,
     // so a rejected merge cannot leave a half-merged inventory behind. That is
-    // what makes it safe for `apply_posting` — which the query executor calls
+    // what makes it safe for `replay_posting` — which the query executor calls
     // directly, without an undo log — to stay free of it.
     let mut lots: Vec<(Decimal, Option<Decimal>)> = engine
         .inventories()
@@ -515,7 +515,7 @@ fn a_merge_applied_against_different_inventory_is_reported() {
 /// Worse than a spurious error: `rollback_needed` counts cost-bearing NEGATIVE
 /// postings, so no undo log is open for an augmentation, and failing here trips
 /// `apply`'s soundness assert rather than returning. The check is gated on the
-/// same `is_booking_reduction` that decides whether `apply_posting` reduces at
+/// same `is_booking_reduction` that decides whether a replayed posting reduces at
 /// all, so the two cannot disagree.
 #[test]
 fn a_wildcard_augmentation_is_added_not_checked() {
@@ -728,5 +728,89 @@ fn a_buy_earlier_in_the_transaction_does_not_move_the_pool() {
         "1700".parse::<Decimal>().expect("literal parses"),
         "the engine must hold what the booked postings add up to \
          (1000 + 1200 - 500), not the 1650 a re-derived pool produces",
+    );
+}
+
+/// Realizing and replaying are different questions, and only one of them
+/// refuses a `{*}` whose pool has moved.
+///
+/// `apply` realizes the booked ledger: booking's decision is authoritative, so
+/// a `{*}` meeting a pool other than the one booking recorded is a defect and
+/// is refused (#2068, #2070).
+///
+/// `replay_posting` answers the query executor's question instead — what the
+/// inventory would be for a FILTERED subset of transactions. There a different
+/// pool is the correct answer for the stream it was given, not corruption
+/// (#1985), so the same posting must go through.
+///
+/// The two shared one public entry point until this was split, distinguished
+/// only by which level a caller happened to reach for. This test is what stops
+/// them merging back: the same posting against the same state, one refused and
+/// one accepted. It fails if `replay_posting` starts enforcing the
+/// precondition, and it fails if `apply` stops.
+#[test]
+fn realizing_refuses_a_moved_pool_and_replaying_does_not() {
+    /// A booked `{*}` sale: the marker is carried, and the pool booking
+    /// computed (110, from the two fixture lots) is recorded alongside it.
+    /// Both parts are needed — the precondition compares the recorded pool
+    /// against the one the inventory would build now.
+    fn booked_wildcard_sale() -> Posting {
+        let mut leg = Posting::new("Assets:Broker", amount("-5", "AAPL"));
+        leg.cost = Some(CostSpec {
+            number: Some(CostNumber::PerUnit {
+                value: "110".parse().unwrap(),
+            }),
+            currency: Some("USD".into()),
+            date: None,
+            label: None,
+            merge: true,
+        });
+        leg
+    }
+
+    /// The fixture's two lots plus a third, so the pool a `{*}` builds now is
+    /// no longer the 110 that was recorded.
+    fn engine_with_a_moved_pool() -> BookingEngine {
+        let mut engine = engine_with_two_lots();
+        let mut extra = Posting::new("Assets:Broker", amount("10", "AAPL"));
+        extra.cost = Some(spec("200.00", "USD", 6));
+        engine
+            .apply(&Transaction::new(date(11), "third lot").with_synthesized_posting(extra))
+            .expect("adding a lot is fine");
+        engine
+    }
+
+    // Realize: refused, because booking's decision is authoritative here.
+    let mut realize_engine = engine_with_a_moved_pool();
+    let err = realize_engine
+        .apply(
+            &Transaction::new(date(12), "sell from the pool")
+                .with_synthesized_posting(booked_wildcard_sale()),
+        )
+        .expect_err("a pool that has moved is a defect when realizing the booked ledger");
+    let rendered = format!("{err}");
+    assert!(
+        rendered.contains("110"),
+        "the refusal must name the recorded pool, got: {rendered}"
+    );
+
+    // Replay: accepted, because a filtered stream legitimately meets a
+    // different pool. Same posting, same state, opposite verdict.
+    let mut replay_engine = engine_with_a_moved_pool();
+    replay_engine
+        .replay_posting(&booked_wildcard_sale(), date(12))
+        .expect("a filtered replay must accept the pool it actually meets");
+
+    // And it really merged, so the acceptance is not a no-op.
+    let lots: Vec<Decimal> = replay_engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Broker")
+        .flat_map(|(_, inv)| inv.positions())
+        .map(|p| p.units.number)
+        .collect();
+    assert_eq!(
+        lots.len(),
+        1,
+        "the `{{*}}` merged the pool rather than being skipped, got {lots:?}"
     );
 }

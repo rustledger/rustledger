@@ -798,7 +798,7 @@ impl BookingEngine {
         // Only a posting that will actually REDUCE runs the merge; an
         // augmentation carrying `{*}` is added, and comparing it against a pool
         // it never builds would reject a valid posting. Uses the canonical
-        // predicate `apply_posting` itself consults, so the two cannot drift.
+        // predicate `realize_posting` itself consults, so the two cannot drift.
         //
         // This also keeps `apply`'s rollback guard sound: every posting this
         // can reject is a cost-bearing reduction, which is exactly what
@@ -828,10 +828,55 @@ impl BookingEngine {
         ))
     }
 
+    /// Replay one booked posting against this engine's inventories,
+    /// **re-deriving** what it does rather than being told.
+    ///
+    /// # Which question this answers
+    ///
+    /// Two different questions run through this engine, and they are not the
+    /// same computation done twice:
+    ///
+    /// - **Realize the booked ledger** — [`Self::apply`]. Every posting of a
+    ///   transaction, against the real inventories, in booking's order. What
+    ///   booking decided is authoritative, and a disagreement is a defect:
+    ///   #2068 and #2070 were both this, and [`Self::apply`]'s `{*}`
+    ///   precondition exists to catch a third.
+    /// - **Replay a filtered subset** — this method. The query executor feeds
+    ///   it whatever transactions a `WHERE` clause left, and asks what the
+    ///   inventory would be if only those existed. Under AVERAGE or `{*}` that
+    ///   is a genuinely different pool, and answering it with the whole
+    ///   ledger's pool is the bug (#1985).
+    ///
+    /// So re-derivation here is the FEATURE, not a shortcut, and the
+    /// disagreement [`Self::apply`] refuses to tolerate is exactly what this
+    /// method is for. That is why the `{*}` precondition sits on
+    /// [`Self::apply`] and not here.
+    ///
+    /// The two used to share one public entry point, distinguished only by
+    /// which level a caller happened to call and a comment explaining the
+    /// difference. Nothing stopped a filtered replay from being handed
+    /// booking's answer, or the realize path from quietly re-deriving.
+    ///
     /// # Precondition
     ///
     /// Same as [`Self::apply`]: the posting must already be booked.
-    pub fn apply_posting(
+    pub fn replay_posting(
+        &mut self,
+        posting: &Posting,
+        date: rustledger_core::NaiveDate,
+    ) -> Result<(), BookingError> {
+        self.realize_posting(posting, date)
+    }
+
+    /// Realize one booked posting as part of [`Self::apply`].
+    ///
+    /// Private on purpose. This is the per-posting half of the *realize*
+    /// question, and a caller outside this engine has no business reaching it:
+    /// realizing means [`Self::apply`], which applies a whole transaction and
+    /// runs the `{*}` precondition first. Replaying a filtered stream means
+    /// [`Self::replay_posting`], which is a different question. Leaving this
+    /// public is what let the two blur together.
+    fn realize_posting(
         &mut self,
         posting: &Posting,
         date: rustledger_core::NaiveDate,
@@ -1126,7 +1171,7 @@ impl BookingEngine {
         // 100, then buying 1 @ 101 and `{*}`-selling 1 in one transaction.
         //
         // Classifying against the PRE-transaction inventory (rather than
-        // threading, as `book` does) decides ORDER only. `apply_posting`
+        // threading, as `book` does) decides ORDER only. `realize_posting`
         // classifies each posting itself against live state, so a posting
         // sorted into the wrong bucket still does the right thing; and the
         // disagreement can only run one way, since threading removes units and
@@ -1137,7 +1182,7 @@ impl BookingEngine {
         // transaction has a handful of postings, and this path is hot enough
         // that #2061/#2067 exist to keep allocations out of it.
         //
-        // `apply_posting` asks the same predicate again, which is not waste to
+        // `realize_posting` asks the same predicate again, which is not waste to
         // eliminate: it asks about LIVE state, deliberately, so that a posting
         // reclassifies as the transaction proceeds. This asks about the
         // pre-transaction state, which is the question `book` answered. Sharing
@@ -1163,7 +1208,7 @@ impl BookingEngine {
         // A transaction with more than 64 postings keeps source order beyond
         // the 64th. Ordering is an optimization of WHICH state a re-derived
         // pool sees, not a correctness requirement for the postings themselves,
-        // so degrading to source order is safe — and `apply_posting` still
+        // so degrading to source order is safe — and `realize_posting` still
         // classifies each posting itself.
         let reduces_first = (0..txn.postings.len()).filter(|i| *i < 64 && reduces & (1 << i) != 0);
         let then_the_rest = (0..txn.postings.len()).filter(|i| *i >= 64 || reduces & (1 << i) == 0);
@@ -1188,8 +1233,8 @@ impl BookingEngine {
             // `is_ok()`, and the CLI refuses to derive a figure at all.
             // A carried `{*}` re-executes the merge (#2068), so verify the
             // pool it will build against the one booking recorded BEFORE
-            // anything mutates. Checked here rather than in `apply_posting`
-            // for two reasons: `apply_posting` is also how the query executor
+            // anything mutates. Checked here rather than per-posting for
+            // two reasons: `replay_posting` answers the query executor's
             // replays a FILTERED transaction stream, where a different pool is
             // the correct answer and not a defect; and a precondition that
             // reports after mutating would depend on rollback to stay honest.
@@ -1203,7 +1248,7 @@ impl BookingEngine {
                 self.verify_merge_precondition(posting)
             };
             touched.insert(&posting.account);
-            if let Err(e) = checked.and_then(|()| self.apply_posting(posting, txn.date)) {
+            if let Err(e) = checked.and_then(|()| self.realize_posting(posting, txn.date)) {
                 // `snapshot` is `Some` whenever this arm is reachable:
                 // `rollback_needed` covers both failure modes. Restoring
                 // nothing would be silent corruption — precisely the bug being

@@ -9,7 +9,7 @@
 //! that must NOT be checked that way: a `FROM` filter deliberately replays a
 //! subset of the transactions, so a different pool is the correct answer for
 //! the stream it was given, not evidence of corruption. Checking inside
-//! `apply_posting` (which the executor calls directly) aborted such a query
+//! `replay_posting` (which the executor calls directly) aborted such a query
 //! with a `{*}` merge mismatch.
 
 mod common;

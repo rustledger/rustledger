@@ -13,6 +13,7 @@ authors.workspace = true
 readme = "README.md"
 
 [dependencies]
+smallvec.workspace = true
 rustledger-core.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros = "1.40"

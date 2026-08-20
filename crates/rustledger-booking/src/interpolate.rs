@@ -176,18 +176,109 @@ pub struct InterpolationResult {
 /// matching Python beancount, whose `decimal` context has no magnitude
 /// ceiling. Aborting here would replace that precise diagnostic with a vaguer
 /// one.
+/// Per-currency running totals for one transaction, in the order the
+/// currencies were first seen.
+///
+/// This replaced a `std::collections::HashMap`, and the order is the point as
+/// much as the allocation is. `HashMap`'s `RandomState` is seeded per process,
+/// so `residuals.iter()` yielded a different order on every run — and the
+/// multi-currency split below picks `non_zero_residuals[0]` to fill the
+/// original posting, so the same ledger produced postings in a different
+/// currency order from one run to the next. Amounts agreed; the ordering did
+/// not, which is enough to make a diff churn and a snapshot flake.
+///
+/// A transaction has one currency, occasionally two. A linear scan over two
+/// entries beats a hash of an interned string before the hash is computed,
+/// and it allocates nothing until there are more than two.
+#[derive(Debug, Default, Clone)]
+struct Residuals(smallvec::SmallVec<[(Currency, Decimal); 2]>);
+
+impl Residuals {
+    /// The running total for `currency`, inserted as zero if unseen.
+    fn slot(&mut self, currency: &Currency) -> &mut Decimal {
+        if let Some(i) = self.0.iter().position(|(c, _)| c == currency) {
+            return &mut self.0[i].1;
+        }
+        self.0.push((currency.clone(), Decimal::ZERO));
+        &mut self.0.last_mut().expect("just pushed").1
+    }
+
+    fn get(&self, currency: &Currency) -> Option<Decimal> {
+        self.0.iter().find(|(c, _)| c == currency).map(|(_, v)| *v)
+    }
+
+    fn remove(&mut self, currency: &Currency) {
+        self.0.retain(|(c, _)| c != currency);
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&Currency, &Decimal)> {
+        self.0.iter().map(|(c, v)| (c, v))
+    }
+
+    /// The public `InterpolationResult::residuals` shape. Allocates only when
+    /// something is left over, which for a transaction that balanced is
+    /// nothing.
+    fn into_map(self) -> HashMap<Currency, Decimal> {
+        self.0.into_iter().collect()
+    }
+}
+
 fn accumulate_residual(
-    residuals: &mut HashMap<Currency, Decimal>,
+    residuals: &mut Residuals,
     unrepresentable: &mut std::collections::HashSet<Currency>,
     currency: &Currency,
     amount: Decimal,
 ) {
-    let slot = residuals.entry(currency.clone()).or_default();
+    let slot = residuals.slot(currency);
     match slot.checked_add(amount) {
         Some(v) => *slot = v,
         None => {
             unrepresentable.insert(currency.clone());
         }
+    }
+}
+
+/// The missing-amount posting indices for each weight currency, in the order
+/// the currencies were first seen.
+///
+/// Ordered for the same reason as [`Residuals`]: the `HashMap` this replaced
+/// was iterated to decide which currency's postings get filled first, and
+/// `RandomState` made that order differ per process. One use site already
+/// sorted `keys()` to dodge it — with a comment saying unsorted order "would
+/// produce non-reproducible test output" — but the consuming iteration below
+/// did not, so the workaround covered one of the two. Insertion order is
+/// deterministic at every use site without anyone remembering to sort.
+#[derive(Debug, Default)]
+struct MissingByCurrency(smallvec::SmallVec<[(Currency, smallvec::SmallVec<[usize; 2]>); 2]>);
+
+impl MissingByCurrency {
+    fn push(&mut self, currency: Currency, index: usize) {
+        if let Some(i) = self.0.iter().position(|(c, _)| *c == currency) {
+            self.0[i].1.push(index);
+            return;
+        }
+        let mut indices = smallvec::SmallVec::new();
+        indices.push(index);
+        self.0.push((currency, indices));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &Currency> {
+        self.0.iter().map(|(c, _)| c)
+    }
+
+    fn count(&self, currency: &Currency) -> usize {
+        self.0
+            .iter()
+            .find(|(c, _)| c == currency)
+            .map_or(0, |(_, v)| v.len())
+    }
+
+    fn into_iter_pairs(self) -> impl Iterator<Item = (Currency, smallvec::SmallVec<[usize; 2]>)> {
+        self.0.into_iter()
     }
 }
 
@@ -488,7 +579,7 @@ fn declared_price_currency(posting: &rustledger_core::Posting) -> Option<Currenc
 fn bare_price_currency(
     txn: &Transaction,
     self_index: usize,
-    residuals: &HashMap<Currency, Decimal>,
+    residuals: &Residuals,
 ) -> Option<Currency> {
     if let Some(declared) = declared_price_currency(&txn.postings[self_index]) {
         return Some(declared);
@@ -742,13 +833,11 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
     };
 
     // Calculate initial residuals from postings with amounts
-    // Pre-allocate for typical case (1-2 currencies per transaction)
-    let num_postings = transaction.postings.len();
-    let mut residuals: HashMap<Currency, Decimal> = HashMap::with_capacity(num_postings.min(4));
+    let mut residuals = Residuals::default();
     // Currencies whose running residual left `rust_decimal`'s range (#1863).
     let mut unrepresentable: std::collections::HashSet<Currency> = std::collections::HashSet::new();
-    let mut missing_by_currency: HashMap<Currency, Vec<usize>> = HashMap::with_capacity(2);
-    let mut unassigned_missing: Vec<usize> = Vec::with_capacity(2);
+    let mut missing_by_currency = MissingByCurrency::default();
+    let mut unassigned_missing: smallvec::SmallVec<[usize; 2]> = smallvec::SmallVec::new();
 
     // `tolerances` (computed above from the INPUT transaction) is the rounding
     // grid for every solved number — see `round_interpolated`. It comes from
@@ -1040,17 +1129,14 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
                     get_inferred_currency(&mut inferred_cost_currency)
                 }) {
                     UnitsWeight::Units => {
-                        missing_by_currency
-                            .entry(units_currency.clone())
-                            .or_default()
-                            .push(i);
+                        missing_by_currency.push(units_currency.clone(), i);
                     }
                     UnitsWeight::Scaled {
                         currency,
                         multiplier,
                     } => {
                         scaled_missing.insert(i, (units_currency.clone(), multiplier));
-                        missing_by_currency.entry(currency).or_default().push(i);
+                        missing_by_currency.push(currency, i);
                     }
                     UnitsWeight::Undetermined { reason } => {
                         // Unconditionally unsolvable: the multiplier is a
@@ -1142,14 +1228,18 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
     // contribute a KNOWN weight and a sigil should see the residual that is
     // actually left over once they have.
     for (idx, number) in number_only {
-        let mut nonzero = residuals.iter().filter(|(_, value)| !value.is_zero());
-        let currency = match (nonzero.next(), nonzero.next()) {
-            (Some((currency, _)), None) => currency.clone(),
-            // Nothing to read the currency off, or more than one candidate.
-            _ => {
-                return Err(InterpolationError::CannotInferCurrency {
-                    account: transaction.postings[idx].account.clone(),
-                });
+        // Scoped so the borrow ends before `accumulate_residual` below wants
+        // `residuals` mutably.
+        let currency = {
+            let mut nonzero = residuals.iter().filter(|(_, value)| !value.is_zero());
+            match (nonzero.next(), nonzero.next()) {
+                (Some((currency, _)), None) => currency.clone(),
+                // Nothing to read the currency off, or more than one candidate.
+                _ => {
+                    return Err(InterpolationError::CannotInferCurrency {
+                        account: transaction.postings[idx].account.clone(),
+                    });
+                }
             }
         };
         result.postings[idx].units =
@@ -1221,9 +1311,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
     currencies_with_unknowns.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     currencies_with_unknowns.dedup();
     for currency in currencies_with_unknowns {
-        let missing_count = missing_by_currency
-            .get(currency)
-            .map_or(0, std::vec::Vec::len);
+        let missing_count = missing_by_currency.count(currency);
         let weight_unknown_count = weight_unknowns_by_currency
             .get(currency)
             .copied()
@@ -1282,7 +1370,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
         if units_number.is_zero() {
             continue; // BookedCost is undefined for zero units.
         }
-        let residual = residuals.get(&currency).copied().unwrap_or(Decimal::ZERO);
+        let residual = residuals.get(&currency).unwrap_or(Decimal::ZERO);
         // The posting's cost weight must cancel the residual. For
         // `PerUnitFromTotal` the weight is `total * signum(units)`, so pick
         // `total = -residual * signum(units)` and `per_unit = total / |units|`.
@@ -1321,7 +1409,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
         }));
         // Fold the now-known cost weight into the residual so downstream
         // missing-amount solving sees a balanced cost currency.
-        *residuals.entry(currency).or_default() += total * signum;
+        *residuals.slot(&currency) += total * signum;
     }
 
     // Answer each bare price sigil from the residual it has to cancel (#1915).
@@ -1340,7 +1428,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
     // balance there is -1.2, and a negative price is not a price, so the honest
     // answer is to refuse and say why.
     for (idx, units, kind, currency) in bare_price_solved {
-        let residual = residuals.get(&currency).copied().unwrap_or(Decimal::ZERO);
+        let residual = residuals.get(&currency).unwrap_or(Decimal::ZERO);
 
         if units.number.is_zero() {
             // Zero units weigh nothing at any price, so the balance says
@@ -1403,16 +1491,13 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
             kind,
             amount: Some(IncompleteAmount::Complete(Amount::new(solved, &currency))),
         }));
-        *residuals.entry(currency).or_default() += weight;
+        *residuals.slot(&currency) += weight;
     }
 
     // Fill in known-currency missing postings
-    for (weight_currency, indices) in missing_by_currency {
+    for (weight_currency, indices) in missing_by_currency.into_iter_pairs() {
         let idx = indices[0];
-        let residual = residuals
-            .get(&weight_currency)
-            .copied()
-            .unwrap_or(Decimal::ZERO);
+        let residual = residuals.get(&weight_currency).unwrap_or(Decimal::ZERO);
 
         // `scaled_missing` is empty unless a cost or price redenominates this
         // posting's weight, so the common path below is the original one: the
@@ -1429,7 +1514,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
             )));
             filled_indices.push(idx);
             // Reflect the actual interpolated amount (rounding may have moved it).
-            *residuals.entry(weight_currency).or_default() += interpolated;
+            *residuals.slot(&weight_currency) += interpolated;
             continue;
         };
 
@@ -1462,7 +1547,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
                 currency: weight_currency,
             });
         };
-        *residuals.entry(weight_currency).or_default() += weight;
+        *residuals.slot(&weight_currency) += weight;
     }
 
     // Handle unassigned missing postings
@@ -1493,7 +1578,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
                 first_currency,
             )));
             filled_indices.push(idx);
-            *residuals.entry(first_currency.clone()).or_default() += interpolated;
+            *residuals.slot(first_currency) += interpolated;
 
             // Add new postings for remaining currencies
             for (currency, residual) in non_zero_residuals.iter().skip(1) {
@@ -1508,7 +1593,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
                 )));
                 result.postings.push(new_posting);
                 filled_indices.push(result.postings.len() - 1);
-                *residuals.entry(currency.clone()).or_default() += interpolated;
+                *residuals.slot(currency) += interpolated;
             }
         } else {
             // Check for ambiguous elision: more unassigned missing postings than
@@ -1537,7 +1622,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
                         currency,
                     )));
                     filled_indices.push(*idx);
-                    *residuals.entry(currency.clone()).or_default() += interpolated;
+                    *residuals.slot(currency) += interpolated;
                 } else if !non_zero_residuals.is_empty() {
                     // Use the first currency
                     let (currency, _) = &non_zero_residuals[0];
@@ -1630,7 +1715,7 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
     Ok(InterpolationResult {
         transaction: result,
         filled_indices: final_filled_indices,
-        residuals,
+        residuals: residuals.into_map(),
     })
 }
 
@@ -2085,6 +2170,46 @@ mod tests {
         }
         assert!(found_cad, "should have -440.00 CAD posting");
         assert!(found_usd, "should have 431.92 USD posting");
+    }
+
+    /// The elided posting absorbs currencies in the order the transaction
+    /// introduces them.
+    ///
+    /// This is what `Residuals` being ordered buys. The `HashMap` it replaced
+    /// used `RandomState`, seeded per process, so the split below emitted its
+    /// postings in a different currency order on each run — `report balances`
+    /// on a two-currency ledger produced two different outputs across 30 runs
+    /// before this change and one after. Amounts always agreed, which is why
+    /// `test_interpolate_multi_currency_three_currencies` above never caught
+    /// it: it asserts the posting COUNT and that residuals are ~zero, and
+    /// deliberately says nothing about which currency landed where.
+    #[test]
+    fn multi_currency_absorption_follows_source_order() {
+        let txn = Transaction::new(date(2024, 1, 15), "order")
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(100), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(200), "EUR")))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(300), "GBP")))
+            .with_synthesized_posting(Posting::auto("Equity:Opening"));
+
+        let result = interpolate(&txn).expect("interpolation should succeed");
+
+        // Postings 0..3 are the ones written; 3.. are what the elided posting
+        // became.
+        let absorbed: Vec<&str> = result.transaction.postings[3..]
+            .iter()
+            .map(|p| {
+                get_amount(p)
+                    .expect("every absorbed posting is filled")
+                    .currency
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(
+            absorbed,
+            ["USD", "EUR", "GBP"],
+            "absorbed currencies must follow the order the transaction \
+             introduces them, not a hash order that varies per process"
+        );
     }
 
     #[test]

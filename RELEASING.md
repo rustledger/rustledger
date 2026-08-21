@@ -62,11 +62,28 @@ before:
   version — which is what happened between v0.16.5 and v0.21.0. Also check
   `BuildRequires: rust >= X.Y` against `[workspace.package].rust-version`: an
   out-of-date pin makes COPR fail at parse time on edition2024 syntax (#927).
-- **The two `sample_stub` fixture lockfiles** —
-  `crates/rustledger-importer/tests/fixtures/sample_stub/Cargo.lock` and
-  `crates/rustledger-plugin/tests/fixtures/sample_stub/Cargo.lock` pin the
-  workspace version and are not workspace members, so nothing refreshes them
-  for you.
+- **Eight standalone lockfiles.** Every `Cargo.lock` outside the root belongs
+  to a nested project that is not a workspace member — the four `fuzz`
+  targets, the two `sample_stub` test fixtures, and the two `examples/wasm-*`
+  templates. Each records path-dependent `rustledger-*` versions, and neither
+  `cargo set-version` nor `cargo check --workspace` touches any of them.
+  Regenerate them all:
+
+  ```bash
+  for lock in $(git ls-files '*Cargo.lock' | grep -v '^Cargo.lock$'); do
+    cargo update --manifest-path "$(dirname "$lock")/Cargo.toml" --workspace
+  done
+  ```
+
+  `--workspace` updates only the path dependencies, leaving third-party
+  versions alone, so this cannot smuggle an unrelated dependency bump into a
+  release commit.
+
+  This is not theoretical bookkeeping: `crates/rustledger-ffi-wasi/fuzz/Cargo.lock`
+  was still recording `0.20.2` two releases after that version shipped,
+  because the instructions here named no such file. Only the two fixture
+  locks moved in the v0.21.0 release commit, which is what a hand-maintained
+  list of files looks like when it drifts.
 
 Not bumped here: `packages/vscode/package.json` (synced from the release tag
 at build time), the AUR `PKGBUILD`s under `packaging/arch/` (`release-publish.yml`
@@ -144,8 +161,11 @@ gh run list --workflow=release-test.yml --limit 1   # runs after publish
 npm view @rustledger/wasm version
 npm view @rustledger/mcp-server version
 
-# The FFI component artifact rustfava and desktop depend on
-gh release view vX.Y.Z --json assets --jq '.assets[].name' | grep ffi-component
+# The FFI component artifact rustfava and desktop depend on. Exact match:
+# the release also carries `...wasm.sha256`, so a substring grep passes when
+# only the checksum was uploaded and the wasm itself is missing.
+gh release view vX.Y.Z --json assets --jq '.assets[].name' \
+  | grep -Fxq "rustledger-ffi-component-vX.Y.Z.wasm" && echo "component attached"
 ```
 
 Both npm queries should return the new version. Check all three workflows —

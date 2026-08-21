@@ -48,14 +48,23 @@ cargo check --workspace      # refreshes Cargo.lock
 `cargo set-version` does **not** touch these, and each has broken a release
 before:
 
-- **`packages/mcp-server/package.json`** — both `version` and the
-  `@rustledger/wasm` entry under `dependencies`. It is a standalone npm
-  package whose version comes from no Cargo.toml. **Don't update
-  `package-lock.json`** — `@rustledger/wasm@X.Y.Z` doesn't exist on npm yet
-  during the bump PR, so `npm install` fails with `ETARGET`; the publish
-  workflow regenerates the lockfile after wasm is published. `release-publish.yml`
-  also force-syncs this to the tag, after v0.17.0 shipped with package.json
-  still at 0.16.5 and `@rustledger/mcp-server@0.17.0` was never published.
+- **`packages/mcp-server/package.json`** — bump `version` only. It is a
+  standalone npm package whose version comes from no Cargo.toml.
+
+  **Leave the `@rustledger/wasm` dependency alone**, and leave
+  `package-lock.json` alone with it. That version does not exist on npm until
+  the publish workflow's earlier job puts it there, so a manifest naming it
+  cannot install: `npm ci` fails `ETARGET`, which fails the `MCP Server` CI
+  job, which `build` requires — and the release PR can never merge.
+  `release-publish.yml` sets the dependency to the release version itself,
+  just before its `npm install`, the same way it force-syncs the package
+  version.
+
+  Both force-syncs exist because the manual step was missed: v0.17.0 shipped
+  with `package.json` still at 0.16.5, so `@rustledger/mcp-server@0.17.0` was
+  never published. The dependency one was added during the v0.22.0 cut, which
+  was the first release after the `MCP Server` gate landed (#1885) and so the
+  first to hit the deadlock.
 - **`packaging/rpm/rustledger.spec`** — `Version`, the `Source0` URL, and the
   `%setup -n rustledger-X.Y.Z` directory all hardcode the version. COPR pulls
   this from the release tag, so missing it means COPR keeps building the old

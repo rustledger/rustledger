@@ -280,6 +280,28 @@ jobs:
           # still 0.16.5, so @rustledger/mcp-server@0.17.0 was never published).
           cd packages/mcp-server
           npm version "${RELEASE_TAG#v}" --no-git-tag-version --allow-same-version
+      - name: Point the wasm dependency at this release
+        run: |
+          # The same argument as the version sync above, for the dependency
+          # rather than the package — and here the repo CANNOT carry the right
+          # value ahead of time.
+          #
+          # `@rustledger/mcp-server` depends on `@rustledger/wasm`, which is
+          # published by an earlier job in this same workflow. So during the
+          # release PR the new version does not exist on npm yet, and a
+          # package.json pinning it makes `npm ci` fail ETARGET — which fails
+          # the `MCP Server` CI job, which `build` requires, so the release PR
+          # could never merge. RELEASING.md used to tell you to bump it anyway;
+          # that was written before the gate existed (#1885, after v0.21.0) and
+          # nobody cut a release in between to discover it.
+          #
+          # Setting it here instead means the checked-in manifest always names
+          # a version npm can resolve, and the published artifact still depends
+          # on its own release. `--save-exact=false` keeps the `^` range the
+          # manifest has always used.
+          cd packages/mcp-server
+          npm pkg set "dependencies.@rustledger/wasm=^${RELEASE_TAG#v}"
+          echo "wasm dependency is now: $(npm pkg get 'dependencies.@rustledger/wasm')"
       - name: Install dependencies
         run: |
           cd packages/mcp-server

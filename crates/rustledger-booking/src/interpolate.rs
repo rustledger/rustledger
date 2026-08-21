@@ -863,6 +863,12 @@ impl Rollback {
         self.removed = true;
     }
 
+    /// Put `txn` back the way it was before interpolation touched it.
+    ///
+    /// Call this when a step AFTER interpolation fails — `apply`, in
+    /// `book_interpolate_apply`. Interpolation rolls itself back on its own
+    /// failure, so a `Rollback` handed to a caller has already been used if
+    /// interpolation was the thing that failed.
     pub fn restore(self, txn: &mut Transaction) {
         debug_assert!(
             !self.removed,

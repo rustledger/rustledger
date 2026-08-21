@@ -840,7 +840,10 @@ pub struct Rollback {
     /// prune. A removal also shifts every later index, so the saved indices
     /// below would restore into the wrong postings; the failure would be
     /// silent and would corrupt a ledger.
-    #[cfg(debug_assertions)]
+    ///
+    /// Not `#[cfg(debug_assertions)]`: `debug_assert!` type-checks its
+    /// expression in every profile, so a gated field breaks the release
+    /// build — which `cargo test` does not compile.
     removed: bool,
 }
 
@@ -857,10 +860,7 @@ impl Rollback {
 
     /// Records that a posting was removed. See the `removed` field.
     const fn note_removal(&mut self) {
-        #[cfg(debug_assertions)]
-        {
-            self.removed = true;
-        }
+        self.removed = true;
     }
 
     pub fn restore(self, txn: &mut Transaction) {

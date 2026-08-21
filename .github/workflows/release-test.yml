@@ -29,9 +29,23 @@ jobs:
   # Extract version and validate before running tests
   prepare:
     runs-on: ubuntu-latest
-    # Only run if triggered manually OR if the publish workflow succeeded
+    # Runs whenever Release Publish finished, success or failure — not only
+    # on success.
+    #
+    # Gating on success meant one unrelated packaging credential could
+    # suppress the verification entirely. At v0.22.0 an expired COPR token
+    # failed that job, the whole publish run concluded `failure`, and this
+    # workflow never fired — so nothing checked whether crates.io and npm were
+    # actually serving the release, which is the question this exists to
+    # answer and the one you most want answered when a release went sideways.
+    #
+    # A partial publish now produces red channel tests naming exactly which
+    # channels are short, which is strictly more useful than silence.
+    # `cancelled` and `skipped` are still skipped: there is nothing to verify.
     if: >-
-      github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success' ||
+      github.event.workflow_run.conclusion == 'failure'
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:

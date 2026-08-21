@@ -110,6 +110,15 @@ changes belong in the release notes.
 Before opening the release PR, build the things CI doesn't exercise on every PR. The mcp-server in particular has its own `tsc` step that the regular CI matrix doesn't run, and a TS error there silently blocks `Publish MCP server to npm` (this hid an `amount`/`date` type bug across both v0.13.0 and v0.14.0 — see #926).
 
 ```bash
+# Every crate in release-publish.yml's CRATES array must already EXIST on
+# crates.io. Trusted publishing cannot create one, so a crate added since the
+# last release fails the crates.io job part-way through and takes every
+# dependent crate down with it — which is how v0.22.0 broke, with
+# rustledger-returns and rustledger-budget both correctly listed and neither
+# ever published. Without `--check-registry` this is the offline per-PR check
+# that the array matches the workspace.
+python3 scripts/check-publish-crates.py --check-registry
+
 cargo check --workspace --all-features --all-targets
 
 # mcp-server: needs @rustledger/wasm@<previous version> available on npm to install.
@@ -150,7 +159,7 @@ This creates the `v0.14.0` tag and starts a chain of **three** workflows:
 
 - `release-build.yml` — builds binaries for all 8 platforms, the WASM package, the FFI-WASI binary, the FFI-Component (wasip2) wasm, and the VS Code extension; attaches them to the release.
 - `release-publish.yml` — distributes to crates.io, npm, Docker, Scoop, COPR, AUR (Homebrew autobumps separately).
-- `release-test.yml` — fires on `workflow_run` once Release Publish *completes*, and checks the published channels actually serve the new version. This is the one that catches a publish that "succeeded" without shipping: v0.17.0 passed build and publish while `@rustledger/mcp-server@0.17.0` was never published, because `package.json` was still 0.16.5.
+- `release-test.yml` — fires on `workflow_run` once Release Publish *completes*, success **or** failure, and checks the published channels actually serve the new version. It used to run only on success, so one expired packaging credential could suppress the verification entirely: at v0.22.0 a stale COPR token failed the run and nothing checked crates.io or npm at all. This is the one that catches a publish that "succeeded" without shipping: v0.17.0 passed build and publish while `@rustledger/mcp-server@0.17.0` was never published, because `package.json` was still 0.16.5.
 
 The first two run in parallel (see the race note under Troubleshooting); the
 third waits on the second. The full release takes ~30–45 minutes.
@@ -270,6 +279,24 @@ The publish workflow is idempotent. Already-published artifacts are skipped (the
 gh run view <release-publish-run-id> --json jobs --jq '.jobs[] | select(.conclusion == "failure") | .databaseId'
 gh run rerun --failed --job=<job-id>
 ```
+
+### COPR build wasn't triggered
+
+`Trigger COPR build` fails with `Login invalid/expired`. COPR tokens expire
+(180 days), and the job authenticates from **repository secrets**, not from
+any file in the tree — a local `~/.config/copr` does nothing for CI. Renew at
+<https://copr.fedorainfracloud.org/api>, then set both halves of the pair;
+each prompts with hidden input, so neither value lands in shell history:
+
+```bash
+gh secret set COPR_LOGIN   # the `login` field from the COPR page
+gh secret set COPR_TOKEN   # the `token` field
+gh run rerun --failed <release-publish-run-id>
+```
+
+`username` is hardcoded in the workflow, so only those two move. Until this
+succeeds COPR keeps building the previous version — silently, which is why
+the job fails the run rather than warning.
 
 ### Homebrew formula didn't update
 

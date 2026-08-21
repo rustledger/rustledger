@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Guardrail: keep the crates.io publish list in sync with the workspace.
 
+With `--check-registry`, also verifies every listed crate already EXISTS on
+crates.io. Off by default so the per-PR run stays offline; RELEASING.md calls
+it with the flag at release pre-flight.
+
 `release-publish.yml` publishes a hand-maintained `CRATES=( ... )` array to
 crates.io. If a new publishable crate is added to the workspace but not to that
 array, the release silently skips it — and any crate that depends on it then
@@ -17,8 +21,14 @@ import json
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 
 WORKFLOW = ".github/workflows/release-publish.yml"
+
+# crates.io rejects requests without one, with 403 — which reads as "exists"
+# to a naive status check. Send a real one and treat only 404 as absent.
+USER_AGENT = "rustledger release pre-flight (https://github.com/rustledger/rustledger)"
 
 
 def publishable_crates() -> set[str]:
@@ -39,7 +49,39 @@ def listed_crates() -> set[str]:
     return set(m.group(1).split())
 
 
+def unpublished(crates: set[str]) -> list[str]:
+    """Which of `crates` crates.io has never seen.
+
+    Trusted-publishing OIDC tokens cannot CREATE a crate, only push new
+    versions of one that exists, so a crate that has never been published by
+    hand fails the release with `403 Trusted Publishing tokens do not support
+    creating new crates` — and every crate depending on it then fails with
+    `no matching package`. That is v0.22.0, where `rustledger-returns` and
+    `rustledger-budget` were both correctly listed in the array and neither
+    had ever been published, so this script passed and the release broke
+    half-way through distributing.
+    """
+    absent = []
+    for crate in sorted(crates):
+        req = urllib.request.Request(
+            f"https://crates.io/api/v1/crates/{crate}",
+            headers={"User-Agent": USER_AGENT},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                absent.append(crate)
+                continue
+            sys.exit(f"::error::crates.io returned {e.code} for {crate}; cannot verify")
+        except urllib.error.URLError as e:
+            sys.exit(f"::error::could not reach crates.io ({e.reason}); cannot verify")
+    return absent
+
+
 def main() -> int:
+    check_registry = "--check-registry" in sys.argv[1:]
     publishable = publishable_crates()
     listed = listed_crates()
 
@@ -69,6 +111,29 @@ def main() -> int:
 
     if status == 0:
         print(f"✓ crates.io publish list matches all {len(publishable)} publishable crates")
+
+    if check_registry and status == 0:
+        absent = unpublished(listed)
+        if absent:
+            print("::error::Crate(s) in the CRATES array have never been published to crates.io:")
+            for c in absent:
+                print(f"  - {c}")
+            print()
+            print("Trusted publishing cannot create a crate. Publish each ONCE by hand:")
+            print("  cargo login <token from https://crates.io/settings/tokens>")
+            for c in absent:
+                print(f"  cargo publish -p {c}")
+            print("then configure trusted publishing at")
+            for c in absent:
+                print(f"  https://crates.io/crates/{c}/settings")
+            print()
+            print("Doing this BEFORE the release is the whole point: left until the")
+            print("release runs, the crates.io job fails part-way through and every")
+            print("dependent crate cascades behind it.")
+            status = 1
+        else:
+            print(f"✓ all {len(listed)} listed crates exist on crates.io")
+
     return status
 
 

@@ -55,6 +55,11 @@ jobs:
             # every Rust PR pay for a Node install.
             vscode:
               - 'packages/vscode/**'
+              # `flake.nix` pins the extension's `npmDepsHash`, so a flake edit
+              # has to re-run the Nix build below even when the extension
+              # itself is untouched.
+              - 'flake.nix'
+              - 'flake.lock'
       - name: Decide if build needed
         id: decide
         env:
@@ -270,6 +275,29 @@ jobs:
   # would miss the case that actually bites — the server calls into
   # `@rustledger/wasm`, so a Rust change can break it without touching a single
   # file here.
+  vscode-nix:
+    name: VS Code Extension (Nix)
+    needs: [changes]
+    if: needs.changes.outputs.vscode == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      # `flake.nix` pins `npmDepsHash` for the extension, and NOTHING built
+      # that derivation — no workflow ran `nix build` or `nix flake check` at
+      # all. The hash went stale the moment `packages/vscode/package-lock.json`
+      # moved and stayed that way through two PRs and a release: it was set on
+      # 2026-08-09 (#2004), the lockfile changed on 2026-08-13 (#2038, a
+      # js-yaml advisory) and 2026-08-17 (#2079), and v0.22.0 shipped a flake
+      # that could not evaluate. It took an external report (#2109) to find.
+      #
+      # The npm job below builds the same extension through npm, which cannot
+      # see this: the hash only matters to Nix consumers.
+      - name: Build the flake's VS Code extension package
+        run: nix build .#vscode-extension --no-link --print-build-logs
+
   vscode-extension:
     name: VS Code Extension
     needs: [changes]
@@ -687,7 +715,7 @@ jobs:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, uri-boundary, lsp-platform, mcp-server, vscode-extension, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate]
+    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, uri-boundary, lsp-platform, mcp-server, vscode-extension, vscode-nix, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate]
     steps:
       - name: Check results
         run: |
@@ -742,6 +770,17 @@ jobs:
           echo "vscode-extension result: $vscode"
           if [[ "$vscode" != "success" && "$vscode" != "skipped" ]]; then
             echo "vscode-extension must pass when packages/vscode changed"
+            exit 1
+          fi
+
+          # Same gating, same reason, for the Nix build of the same extension.
+          # It is a separate job because it catches a different failure: the
+          # npm build above cannot see a stale `npmDepsHash`, which is what
+          # shipped broken in v0.22.0 (#2109).
+          vscode_nix="${{ needs.vscode-nix.result }}"
+          echo "vscode-nix result: $vscode_nix"
+          if [[ "$vscode_nix" != "success" && "$vscode_nix" != "skipped" ]]; then
+            echo "vscode-nix must pass when packages/vscode or the flake changed"
             exit 1
           fi
 

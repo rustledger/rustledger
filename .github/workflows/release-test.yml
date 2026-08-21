@@ -41,11 +41,16 @@ jobs:
     #
     # A partial publish now produces red channel tests naming exactly which
     # channels are short, which is strictly more useful than silence.
-    # `cancelled` and `skipped` are still skipped: there is nothing to verify.
+    #
+    # Expressed as "unless there is nothing to verify" rather than by listing
+    # the conclusions that should run. `conclusion` also takes `timed_out`,
+    # `action_required` and `neutral`, and every one of those can leave a
+    # partial publish behind — enumerating `success`/`failure` would have gone
+    # quiet on exactly the messiest outcomes.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success' ||
-      github.event.workflow_run.conclusion == 'failure'
+      (github.event.workflow_run.conclusion != 'cancelled' &&
+       github.event.workflow_run.conclusion != 'skipped')
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:

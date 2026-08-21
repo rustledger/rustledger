@@ -21,6 +21,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -29,6 +30,12 @@ WORKFLOW = ".github/workflows/release-publish.yml"
 # crates.io rejects requests without one, with 403 — which reads as "exists"
 # to a naive status check. Send a real one and treat only 404 as absent.
 USER_AGENT = "rustledger release pre-flight (https://github.com/rustledger/rustledger)"
+
+# Retried rather than treated as an answer: rate limiting and gateway errors
+# say nothing about whether the crate exists.
+RETRYABLE = frozenset({408, 425, 429, 500, 502, 503, 504})
+ATTEMPTS = 4
+BACKOFF_SECONDS = 1.5
 
 
 def publishable_crates() -> set[str]:
@@ -67,16 +74,35 @@ def unpublished(crates: set[str]) -> list[str]:
             f"https://crates.io/api/v1/crates/{crate}",
             headers={"User-Agent": USER_AGENT},
         )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                resp.read()
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                absent.append(crate)
-                continue
-            sys.exit(f"::error::crates.io returned {e.code} for {crate}; cannot verify")
-        except urllib.error.URLError as e:
-            sys.exit(f"::error::could not reach crates.io ({e.reason}); cannot verify")
+        # 404 is the answer we are here for and never retried. Everything else
+        # that is not a definitive answer — rate limiting, a bad gateway, a
+        # dropped connection — is retried, because failing pre-flight on a
+        # transient blip would train people to ignore this check, which is
+        # worse than not having it.
+        last = None
+        for attempt in range(ATTEMPTS):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    resp.read()
+                last = None
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    absent.append(crate)
+                    last = None
+                    break
+                if e.code not in RETRYABLE:
+                    sys.exit(f"::error::crates.io returned {e.code} for {crate}; cannot verify")
+                last = f"HTTP {e.code}"
+            except urllib.error.URLError as e:
+                last = str(e.reason)
+            if attempt + 1 < ATTEMPTS:
+                time.sleep(BACKOFF_SECONDS * (2**attempt))
+        if last is not None:
+            sys.exit(
+                f"::error::crates.io unreachable for {crate} after {ATTEMPTS} attempts "
+                f"({last}); cannot verify"
+            )
     return absent
 
 

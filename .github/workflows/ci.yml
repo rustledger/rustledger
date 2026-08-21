@@ -27,6 +27,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       vscode: ${{ steps.filter.outputs.vscode }}
+      vscode_nix: ${{ steps.filter.outputs.vscode_nix }}
       should_build: ${{ steps.decide.outputs.should_build }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,9 +56,15 @@ jobs:
             # every Rust PR pay for a Node install.
             vscode:
               - 'packages/vscode/**'
-              # `flake.nix` pins the extension's `npmDepsHash`, so a flake edit
-              # has to re-run the Nix build below even when the extension
-              # itself is untouched.
+            # Separate from `vscode` on purpose. `flake.nix` pins the
+            # extension's `npmDepsHash`, so a flake edit has to re-run the NIX
+            # build even when the extension is untouched — but folding the
+            # flake paths into `vscode` would also drag the npm job along,
+            # making a flake-only PR pay for a Node install and risk failing on
+            # vsce packaging that it never touched. Same reasoning as the note
+            # above about Rust PRs.
+            vscode_nix:
+              - 'packages/vscode/**'
               - 'flake.nix'
               - 'flake.lock'
       - name: Decide if build needed
@@ -262,39 +269,28 @@ jobs:
       - name: Test rustledger-lsp on Windows
         run: cargo test -p rustledger-lsp
 
-  # Build + test the MCP server. Nothing did, until now.
+  # Build the extension the way Nix consumers get it.
   #
-  # `packages/mcp-server` is published to npm as `@rustledger/mcp-server` and
-  # was covered by no PR job at all — only the release workflows touched it. An
-  # SDK MAJOR migration (#1879, monolithic `@modelcontextprotocol/sdk` v1 to the
-  # scoped v2 packages) went through with zero automated verification; it was
-  # checked by hand, which does not scale and does not repeat.
+  # `flake.nix` pins `npmDepsHash`, and NOTHING built that derivation — no
+  # workflow ran `nix build` or `nix flake check` at all. The hash went stale
+  # the moment `packages/vscode/package-lock.json` moved and stayed that way
+  # through two PRs and a release: set on 2026-08-09 (#2004), lockfile changed
+  # 2026-08-13 (#2038, a js-yaml advisory) and 2026-08-17 (#2079), and v0.22.0
+  # shipped a flake that could not evaluate. An external report found it
+  # (#2109).
   #
-  # No `should_build` gate: that filter is for Rust sources, and this package
-  # is TypeScript. Path-filtering on `packages/mcp-server/**` was tempting but
-  # would miss the case that actually bites — the server calls into
-  # `@rustledger/wasm`, so a Rust change can break it without touching a single
-  # file here.
+  # Separate from the npm job above because it catches a different failure: an
+  # npm build cannot see a stale `npmDepsHash`, which only matters to Nix.
   vscode-nix:
     name: VS Code Extension (Nix)
     needs: [changes]
-    if: needs.changes.outputs.vscode == 'true'
+    if: needs.changes.outputs.vscode_nix == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           nix_path: nixpkgs=channel:nixos-unstable
-      # `flake.nix` pins `npmDepsHash` for the extension, and NOTHING built
-      # that derivation — no workflow ran `nix build` or `nix flake check` at
-      # all. The hash went stale the moment `packages/vscode/package-lock.json`
-      # moved and stayed that way through two PRs and a release: it was set on
-      # 2026-08-09 (#2004), the lockfile changed on 2026-08-13 (#2038, a
-      # js-yaml advisory) and 2026-08-17 (#2079), and v0.22.0 shipped a flake
-      # that could not evaluate. It took an external report (#2109) to find.
-      #
-      # The npm job below builds the same extension through npm, which cannot
-      # see this: the hash only matters to Nix consumers.
       - name: Build the flake's VS Code extension package
         run: nix build .#vscode-extension --no-link --print-build-logs
 
@@ -393,6 +389,19 @@ jobs:
           fi
           echo "checked $found example plugin(s)"
 
+  # Build + test the MCP server. Nothing did, until now.
+  #
+  # `packages/mcp-server` is published to npm as `@rustledger/mcp-server` and
+  # was covered by no PR job at all — only the release workflows touched it. An
+  # SDK MAJOR migration (#1879, monolithic `@modelcontextprotocol/sdk` v1 to the
+  # scoped v2 packages) went through with zero automated verification; it was
+  # checked by hand, which does not scale and does not repeat.
+  #
+  # No `should_build` gate: that filter is for Rust sources, and this package
+  # is TypeScript. Path-filtering on `packages/mcp-server/**` was tempting but
+  # would miss the case that actually bites — the server calls into
+  # `@rustledger/wasm`, so a Rust change can break it without touching a single
+  # file here.
   mcp-server:
     name: MCP Server
     runs-on: ubuntu-latest

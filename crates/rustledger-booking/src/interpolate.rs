@@ -830,6 +830,18 @@ pub struct Rollback {
     saved: smallvec::SmallVec<[(usize, rustledger_core::Spanned<rustledger_core::Posting>); 2]>,
     /// Posting count before the first append, if anything was appended.
     original_len: Option<usize>,
+    /// Whether a posting has been REMOVED, which this cannot undo.
+    ///
+    /// The zero-fill prune at the tail of `interpolate_inner` removes
+    /// postings, and nothing fallible runs after it, so a removal is never
+    /// followed by a rollback. That is the whole reason removals need no
+    /// recording — but it is an ordering invariant, invisible at the point
+    /// where someone would break it by adding a fallible step after the
+    /// prune. A removal also shifts every later index, so the saved indices
+    /// below would restore into the wrong postings; the failure would be
+    /// silent and would corrupt a ledger.
+    #[cfg(debug_assertions)]
+    removed: bool,
 }
 
 impl Rollback {
@@ -843,7 +855,21 @@ impl Rollback {
         self.original_len.get_or_insert(txn.postings.len());
     }
 
+    /// Records that a posting was removed. See the `removed` field.
+    const fn note_removal(&mut self) {
+        #[cfg(debug_assertions)]
+        {
+            self.removed = true;
+        }
+    }
+
     pub fn restore(self, txn: &mut Transaction) {
+        debug_assert!(
+            !self.removed,
+            "interpolation removed a posting and then failed: the prune must \
+             stay the last thing that runs, or this restores into shifted \
+             indices with a posting missing"
+        );
         // Appended postings go first, so the indices below address the same
         // postings they were saved from.
         if let Some(len) = self.original_len {
@@ -1813,6 +1839,7 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
     indices_to_remove.sort_unstable_by(|a, b| b.cmp(a));
 
     for idx in &indices_to_remove {
+        rollback.note_removal();
         transaction.postings.remove(*idx);
     }
 

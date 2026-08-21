@@ -1491,6 +1491,15 @@ impl Inventory {
 
         // One lookup for both halves: the running total and the cost-less lot
         // a merge would land in.
+        //
+        // No entry means this inventory holds nothing of `currency`, so
+        // nothing can overflow — and it is the same answer the two-map version
+        // gave, which fell through to the lot check here. That fall-through
+        // could never find anything: `add` writes the totals before the slot,
+        // `rebuild_caches` writes both in one pass, and only the slot is ever
+        // cleared, so a recorded slot always had a stats entry beside it. The
+        // wholly-empty cache of a just-deserialized inventory is refused
+        // above, which is the case where this reasoning would not hold.
         let Some(stats) = self.units_cache.get(currency) else {
             return true;
         };

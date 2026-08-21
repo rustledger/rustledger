@@ -142,6 +142,20 @@ jobs:
             echo "Version mismatch!"
             exit 1
           fi
+      - name: Test the flake's VS Code extension package
+        run: |
+          # `nix run` above builds the DEFAULT package only, so the tag's other
+          # flake outputs went unevaluated. v0.22.0 shipped a
+          # `vscode-extension` derivation that could not build at all — a
+          # stale `npmDepsHash` — and this job passed, because nothing here
+          # ever asked for that output (#2109).
+          #
+          # Per-PR CI covers this on main now, and the tag is cut from main, so
+          # this is belt-and-braces rather than the primary guard. It costs one
+          # build and closes the gap between "main is green" and "the thing
+          # users actually pin builds".
+          nix build "github:rustledger/rustledger/v${VERSION}#vscode-extension" \
+            --no-link --print-build-logs
       - name: Create test file
         run: echo '${{ env.TEST_BEANCOUNT }}' > /tmp/test.beancount
       - name: Test rledger check

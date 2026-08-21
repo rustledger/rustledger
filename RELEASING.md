@@ -32,19 +32,52 @@ cargo semver-checks check-release --feature-group all-features
 
 ### 2. Bump versions
 
-The version surface is:
+Bump the Cargo surface with `cargo set-version` (in the dev shell). Do not
+hand-edit it: there are 17 crates carrying a literal `version`, plus 15
+`[workspace.dependencies]` entries whose pinned version must match, and
+`cargo publish` rejects a crate whose dep version disagrees with what is on
+crates.io.
 
-- Workspace `Cargo.toml`:
-  - `[workspace.package].version`.
-  - All 13 entries under `[workspace.dependencies]` that path-depend on a sibling crate (`rustledger-core`, `rustledger-parser`, `rustledger-loader`, `rustledger-booking`, `rustledger-validate`, `rustledger-query`, `rustledger-completion`, `rustledger-plugin`, `rustledger-plugin-types`, `rustledger-importer`, `rustledger-ops`, `rustledger-ffi-wasi`, `rustledger-wasm`). Their pinned `version = "X.Y.Z"` must match — `cargo publish` rejects a crate whose dep version doesn't match what's on crates.io.
-- All 15 publishable crate `Cargo.toml` files under `crates/` that pin `version = "X.Y.Z"` (each hardcodes its own version rather than inheriting from the workspace). Note the exceptions, which you do **not** bump by hand: `rustledger-ffi-component` and `rustledger-ffi-component-tests` use `version.workspace = true` (they inherit the `[workspace.package].version` bump above), and `rustledger-wire-format-tests` pins `0.0.0` and is never released.
-- `packages/mcp-server/package.json`: both `version` and the `@rustledger/wasm` entry under `dependencies`. **Don't try to update `package-lock.json`** — `@rustledger/wasm@X.Y.Z` doesn't exist on npm yet during the bump PR, so `npm install` fails with `ETARGET`. The publish workflow regenerates the lockfile after wasm is published.
-- `packaging/rpm/rustledger.spec`:
-  - `Version`, `Source0` URL, and the `%setup -n rustledger-X.Y.Z` directory all hardcode the version. COPR pulls this file from the release tag via SCM integration, so missing this means COPR keeps building the old version.
-  - `BuildRequires: rust >= X.Y` must match `[workspace.package].rust-version` in the root `Cargo.toml`. Since Edition 2024 stabilized in 1.85, an out-of-date pin makes COPR fail at parse time on edition2024 syntax — caught in v0.14.1 (#927) where the pin was still `1.75` long after MSRV moved to `1.95`.
-- `Cargo.lock`: refreshed by `cargo check` after the Cargo.toml edits.
+```bash
+cargo set-version 0.22.0     # workspace package version, every member's
+                             # `[package] version`, and the sibling pins
+                             # under `[workspace.dependencies]`
+cargo check --workspace      # refreshes Cargo.lock
+```
 
-`packages/vscode/package.json` is *not* bumped here — the VS Code extension version is synced from the release tag at build time. The AUR `PKGBUILD`s under `packaging/arch/` also don't need manual edits — `release-publish.yml` `sed`-bumps them at release time. The Homebrew formula needs no action either — homebrew-core **autobumps** rustledger: BrewTestBot detects each GitHub release and opens the version-bump PR itself (~every 3 hours).
+`cargo set-version` does **not** touch these, and each has broken a release
+before:
+
+- **`packages/mcp-server/package.json`** — both `version` and the
+  `@rustledger/wasm` entry under `dependencies`. It is a standalone npm
+  package whose version comes from no Cargo.toml. **Don't update
+  `package-lock.json`** — `@rustledger/wasm@X.Y.Z` doesn't exist on npm yet
+  during the bump PR, so `npm install` fails with `ETARGET`; the publish
+  workflow regenerates the lockfile after wasm is published. `release-publish.yml`
+  also force-syncs this to the tag, after v0.17.0 shipped with package.json
+  still at 0.16.5 and `@rustledger/mcp-server@0.17.0` was never published.
+- **`packaging/rpm/rustledger.spec`** — `Version`, the `Source0` URL, and the
+  `%setup -n rustledger-X.Y.Z` directory all hardcode the version. COPR pulls
+  this from the release tag, so missing it means COPR keeps building the old
+  version — which is what happened between v0.16.5 and v0.21.0. Also check
+  `BuildRequires: rust >= X.Y` against `[workspace.package].rust-version`: an
+  out-of-date pin makes COPR fail at parse time on edition2024 syntax (#927).
+- **The two `sample_stub` fixture lockfiles** —
+  `crates/rustledger-importer/tests/fixtures/sample_stub/Cargo.lock` and
+  `crates/rustledger-plugin/tests/fixtures/sample_stub/Cargo.lock` pin the
+  workspace version and are not workspace members, so nothing refreshes them
+  for you.
+
+Not bumped here: `packages/vscode/package.json` (synced from the release tag
+at build time), the AUR `PKGBUILD`s under `packaging/arch/` (`release-publish.yml`
+`sed`-bumps them), and the Homebrew formula (homebrew-core **autobumps** —
+BrewTestBot opens the PR itself, roughly every 3 hours).
+
+`crates/rustledger-lsp/Cargo.toml` carries a comment worth reading before you
+try to hand-set a crate's version to signal a breaking change: the workspace
+runs in lockstep, `cargo set-version` overwrites anything hand-written, and the
+only result is a downstream pin no published crate can satisfy. Breaking
+changes belong in the release notes.
 
 ### 3. Pre-flight smoke check
 
@@ -87,25 +120,38 @@ gh release create v0.14.0 --target "$(git rev-parse HEAD)" --generate-notes
 
 `--target <sha>` is important — without it, `gh release create` tags whatever the default branch points to *at the moment the API request lands*, which races with any subsequent merges. Pinning to the SHA you just pulled guarantees the tag points at the version-bump commit.
 
-This creates the `v0.14.0` tag and triggers two workflows:
+This creates the `v0.14.0` tag and starts a chain of **three** workflows:
 
 - `release-build.yml` — builds binaries for all 8 platforms, the WASM package, the FFI-WASI binary, the FFI-Component (wasip2) wasm, and the VS Code extension; attaches them to the release.
 - `release-publish.yml` — distributes to crates.io, npm, Docker, Scoop, COPR, AUR (Homebrew autobumps separately).
+- `release-test.yml` — fires on `workflow_run` once Release Publish *completes*, and checks the published channels actually serve the new version. This is the one that catches a publish that "succeeded" without shipping: v0.17.0 passed build and publish while `@rustledger/mcp-server@0.17.0` was never published, because `package.json` was still 0.16.5.
 
-The full release takes ~30–45 minutes.
+The first two run in parallel (see the race note under Troubleshooting); the
+third waits on the second. The full release takes ~30–45 minutes.
+
+`rustledger-ffi-component-<tag>.wasm` must end up attached to the release —
+rustfava and the desktop app resolve it from there, so a build that drops it
+breaks them without failing anything here.
 
 ### 6. Verify
 
 ```bash
 gh run list --workflow=release-build.yml --limit 1
 gh run list --workflow=release-publish.yml --limit 1
+gh run list --workflow=release-test.yml --limit 1   # runs after publish
 
 # After publish completes, confirm npm `latest` moved
 npm view @rustledger/wasm version
 npm view @rustledger/mcp-server version
+
+# The FFI component artifact rustfava and desktop depend on
+gh release view vX.Y.Z --json assets --jq '.assets[].name' | grep ffi-component
 ```
 
-Both npm queries should return the new version.
+Both npm queries should return the new version. Check all three workflows —
+`release-test.yml` is the only one that looks at what the registries actually
+serve, so a green build and publish on their own do not mean the release
+shipped.
 
 ## What Gets Released
 
@@ -155,6 +201,7 @@ Trusted-publish tokens are publish-scoped only — they cannot run `npm dist-tag
 |------|---------|
 | `release-build.yml` | Builds binaries, WASM, FFI-WASI, FFI-Component, VSCode extension; attaches to GitHub Release |
 | `release-publish.yml` | Distributes to crates.io, npm, Docker, Scoop, COPR, AUR (Homebrew autobumps separately) |
+| `release-test.yml` | Runs after Release Publish completes; verifies the published channels serve the new version |
 
 ## Adding a new workspace crate
 

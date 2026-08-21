@@ -11,7 +11,7 @@ name = "rustledger-lsp"
 # downstream `rustledger-lsp = "0.22"` pin that no published crate would ever
 # satisfy. The break belongs in the release notes, which is where this repo's
 # consumers actually learn about one.
-version = "0.21.0"
+version = "0.22.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

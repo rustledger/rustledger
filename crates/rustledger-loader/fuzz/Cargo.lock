@@ -599,6 +599,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "munge"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -984,12 +993,13 @@ dependencies = [
 
 [[package]]
 name = "rowan"
-version = "0.16.1"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "417a3a9f582e349834051b8a10c8d71ca88da4211e4093528e36b9845f6b5f21"
+checksum = "14b574c58582fa59fa43a2feb6608b8744184659f08a2e0117e4b8224d95ed61"
 dependencies = [
  "countme",
  "hashbrown 0.14.5",
+ "memoffset",
  "rustc-hash 1.1.0",
  "text-size",
 ]
@@ -1035,19 +1045,20 @@ checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustledger-booking"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "bigdecimal",
  "rust_decimal",
  "rust_decimal_macros",
  "rustc-hash 2.1.3",
  "rustledger-core",
+ "smallvec",
  "thiserror",
 ]
 
 [[package]]
 name = "rustledger-budget"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "jiff",
  "rust_decimal",
@@ -1058,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-core"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "imbl",
  "jiff",
@@ -1073,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-loader"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "glob",
@@ -1101,7 +1112,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-ops"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "jiff",
@@ -1113,7 +1124,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-parser"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "logos",
  "num_enum",
@@ -1127,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-plugin"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "anyhow",
  "jiff",
@@ -1145,14 +1156,14 @@ dependencies = [
 
 [[package]]
 name = "rustledger-plugin-types"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "rustledger-validate"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "bigdecimal",
  "jiff",

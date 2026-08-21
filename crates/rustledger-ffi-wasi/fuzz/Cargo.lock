@@ -1192,7 +1192,7 @@ checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustledger-booking"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "bigdecimal",
  "rust_decimal",
@@ -1205,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-budget"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "jiff",
  "rust_decimal",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-core"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "imbl",
  "jiff",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-ffi-wasi"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "jiff",
  "rustc-hash 2.1.3",
@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-loader"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "glob",
@@ -1280,7 +1280,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-ops"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "blake3",
  "jiff",
@@ -1292,7 +1292,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-parser"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "logos",
  "num_enum",
@@ -1306,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-plugin"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "anyhow",
  "jiff",
@@ -1324,14 +1324,14 @@ dependencies = [
 
 [[package]]
 name = "rustledger-plugin-types"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "rustledger-query"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "chumsky",
  "jiff",
@@ -1350,7 +1350,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-returns"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "rust_decimal",
  "rustledger-core",
@@ -1359,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-validate"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "bigdecimal",
  "jiff",

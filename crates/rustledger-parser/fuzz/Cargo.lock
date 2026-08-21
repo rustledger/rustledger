@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-core"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "imbl",
  "jiff",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-parser"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "logos",
  "num_enum",

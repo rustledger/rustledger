@@ -710,13 +710,14 @@ checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 
 [[package]]
 name = "rustledger-booking"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "bigdecimal",
  "rust_decimal",
  "rust_decimal_macros",
  "rustc-hash",
  "rustledger-core",
+ "smallvec",
  "thiserror",
 ]
 
@@ -733,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "rustledger-core"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "imbl",
  "jiff",

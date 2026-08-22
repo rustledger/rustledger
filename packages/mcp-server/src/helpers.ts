@@ -17,7 +17,6 @@ import type {
 // that need a fresh `lastIndex` (recursion) build a new RegExp from this; the
 // module-level constant is used by `.replace()`, which manages `lastIndex`.
 const INCLUDE_PATTERN = '^\\uFEFF?include\\s+"([^"]+)"[ \\t]*(?:;[^\\r\\n]*)?[ \\t\\r]*$';
-const INCLUDE_REGEX = new RegExp(INCLUDE_PATTERN, 'gm');
 
 /** Glob metacharacters beancount honors in an `include`. */
 const GLOB_CHARS = /[*?[\]]/;

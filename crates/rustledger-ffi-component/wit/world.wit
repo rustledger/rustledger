@@ -81,6 +81,22 @@ interface types {
   record meta {
     filename: string,
     lineno: u32,
+    /// Content digest identifying this directive within a single loaded
+    /// session.
+    ///
+    /// The algorithm is an implementation detail, and the value is stable
+    /// only within a WIT package version: it hashes the directive's content,
+    /// so any change to what is hashed, or how, changes every digest. #1961
+    /// did exactly that — length-prefixing each field to fix collisions, the
+    /// worst being a transaction with a payee hashing identically to one
+    /// without — and every downstream snapshot pinning the old values broke
+    /// at once (#1967).
+    ///
+    /// So do not persist it, pin it in tests, or compare it across versions.
+    /// A consumer needing a durable identifier should derive its own.
+    ///
+    /// Comments are deliberately excluded (#1968): two directives differing
+    /// only in their comments share a digest.
     hash: string,
     user: list<meta-entry>,
   }

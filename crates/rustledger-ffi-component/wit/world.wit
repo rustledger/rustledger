@@ -81,22 +81,23 @@ interface types {
   record meta {
     filename: string,
     lineno: u32,
-    /// Content digest identifying this directive within a single loaded
-    /// session.
+    /// Content digest identifying this directive.
     ///
-    /// The algorithm is an implementation detail, and the value is stable
-    /// only within a WIT package version: it hashes the directive's content,
-    /// so any change to what is hashed, or how, changes every digest. #1961
-    /// did exactly that — length-prefixing each field to fix collisions, the
-    /// worst being a transaction with a payee hashing identically to one
-    /// without — and every downstream snapshot pinning the old values broke
-    /// at once (#1967).
+    /// Deterministic: the same directive, loaded by the same build of
+    /// rustledger, always produces the same value. It covers the directive's
+    /// semantic content only — comments are deliberately excluded (#1968),
+    /// so two directives differing just in their comments share a digest.
     ///
-    /// So do not persist it, pin it in tests, or compare it across versions.
-    /// A consumer needing a durable identifier should derive its own.
+    /// It carries NO cross-version stability guarantee. The algorithm is an
+    /// implementation detail and has already changed in an ordinary release,
+    /// without a WIT package version bump: #1961 length-prefixed every hashed
+    /// field to fix real collisions — a transaction with a payee hashed
+    /// identically to one without — which changed every digest, and the
+    /// downstream snapshots pinning the old values all broke at once (#1967).
     ///
-    /// Comments are deliberately excluded (#1968): two directives differing
-    /// only in their comments share a digest.
+    /// So compare it within one loaded ledger; do not persist it, pin it in
+    /// tests, or compare it across rustledger versions. A consumer needing a
+    /// durable identifier should derive its own.
     hash: string,
     user: list<meta-entry>,
   }

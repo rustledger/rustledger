@@ -12,7 +12,7 @@ written a test for.
 So this generates ledgers instead and compares the BOOKED LOTS against Python
 beancount, which is an independent implementation rather than a restatement of
 our own logic. For every account it compares the full lot identity —
-(currency, per-unit cost, cost currency, lot date) -> units — so consuming the
+(currency, per-unit cost, cost currency, lot date, label) -> units — so consuming the
 wrong lot at the same total value is still a failure.
 
 It also compares ACCEPTANCE. A ledger one engine books and the other rejects
@@ -106,16 +106,17 @@ def gen_ledger(rng: random.Random) -> tuple[str, str, str]:
     if tie in ("cost", "both"):
         for i in range(1, group):
             costs[i] = costs[0]
-    elif tie == "date":
-        # Inside a date-tied group, draw costs from a deliberately narrow pool
-        # so repeats land NON-CONTIGUOUSLY — costs like [10, 12, 10] across one
-        # date. That shape is what separates "same lot, coalesced" from "two
-        # lots that merely share a price", and it is the configuration the
-        # FIFO divergence needs. A uniform draw over the full pool produced it
-        # about once in seven date-tied runs, which is too rare to rely on.
-        narrow = rng.sample(pool, 2)
+    elif tie == "date" and group >= 3:
+        # Inside a date-tied group of three or more, CONSTRUCT the
+        # non-contiguous repeat — [a, b, a] — rather than hope a random draw
+        # produces it. That shape is what separates "one coalesced lot" from
+        # "two lots that merely share a price", and it is the configuration
+        # the FIFO coalescing divergence needs. Drawing independently from a
+        # narrowed pool still yielded contiguous runs ([a, a, b]) or all-equal
+        # costs most of the time, so the shape was described but not ensured.
+        first, second = rng.sample(pool, 2)
         for i in range(group):
-            costs[i] = Decimal(rng.choice(narrow))
+            costs[i] = Decimal(first if i % 2 == 0 else second)
     if tie == "label":
         # Same date and cost, distinguished only by label — the one axis that
         # makes two otherwise identical lots addressable separately.
@@ -189,7 +190,7 @@ def booked_rledger(rledger: str, path: str) -> Booked | str:
     # looks like it has a cost of 1.
     query = (
         "SELECT account, units(position) AS u, cost_number AS cn, "
-        "cost_currency AS cc, cost_date AS cd"
+        "cost_currency AS cc, cost_date AS cd, cost_label AS cl"
     )
     out = subprocess.run(
         [rledger, "query", path, "--format", "json", query],
@@ -219,9 +220,10 @@ def booked_rledger(rledger: str, path: str) -> Booked | str:
                 row["account"], units.get("currency", ""),
                 format(Decimal(str(cost_number)).normalize(), "f"),
                 row.get("cc") or "", str(row.get("cd") or ""),
+                row.get("cl") or "",
             )
         else:
-            key = (row["account"], units.get("currency", ""), "", "", "")
+            key = (row["account"], units.get("currency", ""), "", "", "", "")
         lots[key] = lots.get(key, Decimal(0)) + number
     return {k: v for k, v in lots.items() if v != 0}
 
@@ -244,9 +246,10 @@ for entry in entries:
         if p.cost is not None:
             key = "|".join([p.account, p.units.currency,
                             format(Decimal(p.cost.number).normalize(), "f"),
-                            p.cost.currency, str(p.cost.date or "")])
+                            p.cost.currency, str(p.cost.date or ""),
+                            p.cost.label or ""])
         else:
-            key = "|".join([p.account, p.units.currency, "", "", ""])
+            key = "|".join([p.account, p.units.currency, "", "", "", ""])
         out[key] = str(Decimal(out.get(key, "0")) + n)
 print(json.dumps({k: v for k, v in out.items() if Decimal(v) != 0}))
 """

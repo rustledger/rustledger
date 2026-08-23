@@ -28,6 +28,15 @@ Deliberately NOT generated:
   - Prices on reductions, which interact with cost inference in ways that are
     a separate surface from lot selection.
 
+Lot identity has three components a method can tie on — acquisition date,
+per-unit cost, and label — and the first campaign only ever collided on them
+by accident. Every divergence it found had same-date lots (12/12, against
+0/189 for seeds without them), which meant the generator was answering one
+question well and never asking the others: two lots at the same HIGHEST cost
+under HIFO, or two lots on the same date under STRICT, essentially never
+appeared. `TIES` now constructs each configuration deliberately, and the tie
+mode is reported with every divergence so the classes stay separable.
+
 Usage:
     scripts/compat-booking-fuzz.py --runs 200
     scripts/compat-booking-fuzz.py --seed 12345        # reproduce one case
@@ -52,9 +61,18 @@ COMMODITIES = ["HOOL", "ACME", "CORP"]
 CASH = "USD"
 
 
-def gen_ledger(rng: random.Random) -> tuple[str, str]:
-    """A ledger exercising lot selection, and the method it uses."""
+# Lot identity has three components a method can tie on: acquisition date,
+# per-unit cost, and label. Random generation collides on them only by
+# accident, so the interesting configurations — two lots at the same highest
+# cost under HIFO, two lots on the same date under STRICT — were never
+# reliably reached. These modes construct the tie instead of hoping for it.
+TIES = ["none", "date", "cost", "both", "label"]
+
+
+def gen_ledger(rng: random.Random) -> tuple[str, str, str]:
+    """A ledger exercising lot selection: source, booking method, tie mode."""
     method = rng.choice(METHODS)
+    tie = rng.choice(TIES)
     commodity = rng.choice(COMMODITIES)
     lines = [
         f'option "booking_method" "{method}"',
@@ -63,35 +81,79 @@ def gen_ledger(rng: random.Random) -> tuple[str, str]:
         f"2020-01-01 open Income:Gains  {CASH}",
     ]
 
-    # Augmentations. Distinct costs keep FIFO/LIFO/HIFO distinguishable; a
-    # repeated cost (rng permitting) exercises coalescing into one lot.
-    day = 2
-    lots: list[tuple[Decimal, Decimal]] = []
-    for _ in range(rng.randint(2, 5)):
-        units = Decimal(rng.randint(1, 20))
-        cost = Decimal(rng.choice(["10.00", "11.00", "12.00", "9.50", "10.00"]))
+    count = rng.randint(2, 5)
+    pool = ["10.00", "11.00", "12.00", "9.50", "13.25", "8.75"]
+    if tie == "none":
+        # A control has to control for BOTH axes. Drawing costs with
+        # replacement from a short pool collided ~79% of the time, so "no
+        # tie" runs were quietly full of cost ties and could not be used to
+        # attribute a divergence to the date axis.
+        costs = [Decimal(c) for c in rng.sample(pool, count)]
+    else:
+        costs = [Decimal(rng.choice(pool)) for _ in range(count)]
+    days = list(range(2, 2 + count))
+    labels: list[str | None] = [None] * count
+
+    # Tie a RANDOM-SIZED GROUP, not just the first two. Tying exactly two lost
+    # the configuration that found the FIFO coalescing divergence — three lots
+    # sharing a date with two of them sharing a cost — because that needs a
+    # group of three. The rest stay random so a tie is never the only thing
+    # distinguishing the ledger.
+    group = rng.randint(2, count)
+    if tie in ("date", "both"):
+        for i in range(1, group):
+            days[i] = days[0]
+    if tie in ("cost", "both"):
+        for i in range(1, group):
+            costs[i] = costs[0]
+    elif tie == "date":
+        # Inside a date-tied group, draw costs from a deliberately narrow pool
+        # so repeats land NON-CONTIGUOUSLY — costs like [10, 12, 10] across one
+        # date. That shape is what separates "same lot, coalesced" from "two
+        # lots that merely share a price", and it is the configuration the
+        # FIFO divergence needs. A uniform draw over the full pool produced it
+        # about once in seven date-tied runs, which is too rare to rely on.
+        narrow = rng.sample(pool, 2)
+        for i in range(group):
+            costs[i] = Decimal(rng.choice(narrow))
+    if tie == "label":
+        # Same date and cost, distinguished only by label — the one axis that
+        # makes two otherwise identical lots addressable separately.
+        days[1] = days[0]
+        costs[1] = costs[0]
+        labels[0], labels[1] = "lot-a", "lot-b"
+
+    lots: list[tuple[Decimal, Decimal, str | None]] = []
+    for units_i, cost, day, label in zip(
+        [Decimal(rng.randint(1, 20)) for _ in range(count)],
+        costs, days, labels, strict=True,
+    ):
+        spec = f"{cost} {CASH}" + (f', "{label}"' if label else "")
         lines += [
             f'2020-01-{day:02d} * "buy"',
-            f"  Assets:Stock  {units} {commodity} {{{cost} {CASH}}}",
-            f"  Assets:Cash  {-(units * cost)} {CASH}",
+            f"  Assets:Stock  {units_i} {commodity} {{{spec}}}",
+            f"  Assets:Cash  {-(units_i * cost)} {CASH}",
         ]
-        lots.append((units, cost))
-        # Same-date augmentations exercise file-order booking (#2093).
-        if rng.random() < 0.3:
-            day -= 1
-        day += 1
+        lots.append((units_i, cost, label))
 
-    held = sum(u for u, _ in lots)
+    held = sum(u for u, _, _ in lots)
 
-    # Reductions. `{}` leaves the method to choose; an explicit cost pins a
-    # lot and must select exactly it (or fail, if ambiguous).
+    # Reductions. `{}` leaves the choice to the method — the case a tie makes
+    # ambiguous. An explicit cost pins a lot, and under a cost tie it pins TWO,
+    # which STRICT is supposed to refuse rather than resolve.
+    day = 3
     for _ in range(rng.randint(1, 3)):
         if held <= 0:
             break
         qty = Decimal(rng.randint(1, int(held)))
-        spec = "{}"
-        if rng.random() < 0.4:
-            spec = f"{{{rng.choice([c for _, c in lots])} {CASH}}}"
+        roll = rng.random()
+        if roll < 0.3:
+            spec = f"{{{rng.choice([c for _, c, _ in lots])} {CASH}}}"
+        elif roll < 0.45 and any(lbl for _, _, lbl in lots):
+            chosen = rng.choice([lbl for _, _, lbl in lots if lbl])
+            spec = f'{{"{chosen}"}}'
+        else:
+            spec = "{}"
         proceeds = qty * Decimal("13.00")
         lines += [
             f'2020-02-{day:02d} * "sell"',
@@ -102,7 +164,7 @@ def gen_ledger(rng: random.Random) -> tuple[str, str]:
         held -= qty
         day += 1
 
-    return "\n".join(lines) + "\n", method
+    return "\n".join(lines) + "\n", method, tie
 
 
 # A booked result is either an error or lot identity -> units.
@@ -219,7 +281,7 @@ def compare(rl: Booked | str, bq: Booked | str) -> list[str]:
 def check_one(rledger: str, python: str, seed: int) -> list[str]:
     """Run one generated ledger through both engines."""
     rng = random.Random(seed)
-    source, method = gen_ledger(rng)
+    source, method, tie = gen_ledger(rng)
     with tempfile.NamedTemporaryFile(
         "w", suffix=".beancount", delete=False
     ) as fh:
@@ -232,7 +294,7 @@ def check_one(rledger: str, python: str, seed: int) -> list[str]:
     finally:
         Path(path).unlink(missing_ok=True)
     if diffs:
-        return [f"seed={seed} method={method}", *diffs, source]
+        return [f"seed={seed} method={method} tie={tie}", *diffs, source]
     return []
 
 

@@ -121,16 +121,16 @@ def booked_rledger(rledger: str, path: str) -> Booked | str:
     )
     if check.returncode != 0:
         return ERROR
+    # cost_number is the PER-UNIT cost and is null for a costless posting,
+    # which is what makes it the right discriminator. `cost(position)` is not:
+    # for a costless posting it returns the units themselves, so a cash leg
+    # looks like it has a cost of 1.
+    query = (
+        "SELECT account, units(position) AS u, cost_number AS cn, "
+        "cost_currency AS cc, cost_date AS cd"
+    )
     out = subprocess.run(
-        [
-            rledger, "query", path, "--format", "json",
-            # cost_number is the PER-UNIT cost and is null for a costless
-            # posting, which is what makes it the right discriminator.
-            # `cost(position)` is not: for a costless posting it returns the
-            # units themselves, so a cash leg looks like it has a cost of 1.
-            "SELECT account, units(position) AS u, cost_number AS cn, "
-            "cost_currency AS cc, cost_date AS cd",
-        ],
+        [rledger, "query", path, "--format", "json", query],
         capture_output=True,
         text=True,
         env={"BEANCOUNT_DISABLE_LOAD_CACHE": "1", "PATH": "/usr/bin:/bin"},
@@ -138,8 +138,15 @@ def booked_rledger(rledger: str, path: str) -> Booked | str:
     )
     if out.returncode != 0:
         return ERROR
+    try:
+        rows = json.loads(out.stdout).get("rows", [])
+    except json.JSONDecodeError:
+        # A banner or log line on stdout is a failure to read the booking, not
+        # a reason to abort the campaign — the beancount side already treats
+        # undecodable output this way and the two must agree.
+        return ERROR
     lots: Booked = {}
-    for row in json.loads(out.stdout).get("rows", []):
+    for row in rows:
         units = row.get("u") or {}
         number = Decimal(str(units.get("number", "0")))
         if number == 0:
@@ -269,13 +276,17 @@ def main() -> int:
     ap.add_argument("--seed", type=int, help="run a single seed and report")
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--rledger", default="target/release/rledger")
-    ap.add_argument("--python", default="/home/dev/.compat-venv/bin/python")
+    # Defaults to the running interpreter, matching the sibling compat
+    # scripts, which CI invokes under an interpreter that already has
+    # beancount. Point it at a dedicated venv when running from elsewhere.
+    ap.add_argument("--python", default=sys.executable)
     args = ap.parse_args()
 
     if args.self_test:
         return self_test(args.rledger, args.python)
 
-    seeds = [args.seed] if args.seed is not None else range(args.runs)
+    seeds = [args.seed] if args.seed is not None else list(range(args.runs))
+    total = len(seeds)
     failures = 0
     for seed in seeds:
         report = check_one(args.rledger, args.python, seed)
@@ -283,7 +294,6 @@ def main() -> int:
             failures += 1
             print("\n".join(report))
             print("-" * 60)
-    total = len(list(seeds))
     print(f"{total - failures}/{total} agreed")
     return 1 if failures else 0
 

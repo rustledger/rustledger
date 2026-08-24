@@ -1588,6 +1588,40 @@ mod reduction_tests {
         );
     }
 
+    /// A date-less lot is consumed LAST under LIFO, not first.
+    ///
+    /// `DateDescending` holds `Reverse<Option<NaiveDate>>`, so `None` — which
+    /// normally sorts before every `Some` — lands at the END. That is where
+    /// the reversed walk it replaced left date-less lots, so this is the half
+    /// of the #2115 change that must NOT move.
+    ///
+    /// The distinction is one layer of nesting: `Option<Reverse<NaiveDate>>`
+    /// is equally plausible to write and puts date-less lots FIRST. No other
+    /// test separates the two. `the_ordered_index_selects_what_the_scan_selects`
+    /// calls `order_key` on both sides, so it moves with any change to the
+    /// key, and every other LIFO test uses dated lots only.
+    #[test]
+    fn lifo_takes_the_date_less_lot_last() {
+        let mut inv = Inventory::new();
+        // Date-less first in the file, so slot order alone would take it first
+        // and cannot be what produces the expected answer.
+        inv.add(Position::with_cost(
+            Amount::new(d(10), "STK"),
+            Cost::new(d(100), "USD"),
+        ))
+        .expect("fixture fits in Decimal");
+        inv.add(lot(10, 200, 1)).expect("fixture fits in Decimal");
+
+        let r = try_reduce(&inv, &sell_stk(15), BookingMethod::Lifo);
+        assert_eq!(
+            r.matched[0].cost.as_ref().unwrap().number,
+            dec!(200),
+            "LIFO must reach the DATED lot before the date-less one",
+        );
+        // 10 @200 then 5 @100 = 2500. Date-less-first would be 2000.
+        assert_eq!(basis(&r), dec!(2500));
+    }
+
     #[test]
     fn fifo_single_lot_partial_cost_basis() {
         let inv = mk([lot(10, 100, 1)]);

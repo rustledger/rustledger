@@ -136,10 +136,10 @@ impl Inventory {
         match method {
             BookingMethod::Strict => self.plan_strict(units, &spec).map(|(r, _)| r),
             BookingMethod::Fifo => self
-                .plan_ordered(units, &spec, LotOrder::Date, false)
+                .plan_ordered(units, &spec, LotOrder::Date)
                 .map(|(r, _)| r),
             BookingMethod::Lifo => self
-                .plan_ordered(units, &spec, LotOrder::Date, true)
+                .plan_ordered(units, &spec, LotOrder::DateDescending)
                 .map(|(r, _)| r),
             BookingMethod::Hifo => self.plan_hifo(units, &spec).map(|(r, _)| r),
             BookingMethod::StrictWithSize => {
@@ -320,8 +320,7 @@ impl Inventory {
                     .all(|&i| self.positions[i].cost.as_ref() == first_cost);
 
                 if all_indistinguishable {
-                    let (result, updates) =
-                        self.plan_ordered(units, spec, LotOrder::Date, false)?;
+                    let (result, updates) = self.plan_ordered(units, spec, LotOrder::Date)?;
                     return Ok((result, ReductionPlan::Updates(updates)));
                 }
 
@@ -334,8 +333,7 @@ impl Inventory {
                     .map(|&i| self.positions[i].units.number.abs())
                     .sum();
                 if total_units == units.number.abs() {
-                    let (result, updates) =
-                        self.plan_ordered(units, spec, LotOrder::Date, false)?;
+                    let (result, updates) = self.plan_ordered(units, spec, LotOrder::Date)?;
                     return Ok((result, ReductionPlan::Updates(updates)));
                 }
 
@@ -439,8 +437,7 @@ impl Inventory {
                     .map(|&i| self.positions[i].units.number.abs())
                     .sum();
                 if total_units == units.number.abs() {
-                    let (result, updates) =
-                        self.plan_ordered(units, spec, LotOrder::Date, false)?;
+                    let (result, updates) = self.plan_ordered(units, spec, LotOrder::Date)?;
                     return Ok((result, ReductionPlan::Updates(updates)));
                 }
                 Err(BookingError::AmbiguousMatch {
@@ -466,7 +463,7 @@ impl Inventory {
         units: &Amount,
         spec: &CostSpec,
     ) -> Result<BookingResult, BookingError> {
-        self.reduce_ordered(units, spec, false)
+        self.reduce_ordered(units, spec, LotOrder::Date)
     }
 
     /// LIFO booking: reduce from newest lots first.
@@ -475,7 +472,7 @@ impl Inventory {
         units: &Amount,
         spec: &CostSpec,
     ) -> Result<BookingResult, BookingError> {
-        self.reduce_ordered(units, spec, true)
+        self.reduce_ordered(units, spec, LotOrder::DateDescending)
     }
 
     /// HIFO booking: reduce from highest-cost lots first.
@@ -493,7 +490,7 @@ impl Inventory {
         units: &Amount,
         spec: &CostSpec,
     ) -> Result<(BookingResult, SmallVec<[(usize, Decimal); 1]>), BookingError> {
-        self.plan_ordered(units, spec, LotOrder::CostDescending, false)
+        self.plan_ordered(units, spec, LotOrder::CostDescending)
     }
 
     pub(super) fn reduce_hifo(
@@ -510,9 +507,9 @@ impl Inventory {
         &mut self,
         units: &Amount,
         spec: &CostSpec,
-        reverse: bool,
+        order: LotOrder,
     ) -> Result<BookingResult, BookingError> {
-        let (result, updates) = self.plan_ordered(units, spec, LotOrder::Date, reverse)?;
+        let (result, updates) = self.plan_ordered(units, spec, order)?;
         self.commit_updates(&updates);
         Ok(result)
     }
@@ -529,7 +526,6 @@ impl Inventory {
         units: &Amount,
         spec: &CostSpec,
         order: LotOrder,
-        reverse: bool,
     ) -> Result<(BookingResult, SmallVec<[(usize, Decimal); 1]>), BookingError> {
         let mut remaining = units.number.abs();
         let mut matched: MatchedLots = SmallVec::new();
@@ -590,17 +586,11 @@ impl Inventory {
         let mut available_total = Decimal::ZERO;
         let mut overflow: Option<OverflowError> = None;
 
-        let mut forward;
-        let mut backward;
-        let walk: &mut dyn Iterator<Item = usize> = if reverse {
-            backward = candidates.iter().rev().copied();
-            &mut backward
-        } else {
-            forward = candidates.iter().copied();
-            &mut forward
-        };
-
-        for idx in walk {
+        // Always forward. The direction of a method lives in its `order_key`,
+        // never here: reversing the WALK reverses the slot tiebreak along with
+        // the sort key, which is how LIFO came to take the last of two
+        // same-date lots while FIFO and HIFO take the first (#2115).
+        for idx in candidates.iter().copied() {
             if !keeps(idx) {
                 continue;
             }
@@ -1101,7 +1091,7 @@ impl Inventory {
             // simple position.
             let sign = units.number.signum();
             let consumed = Amount::new(available * sign, units.currency.clone());
-            let result = self.reduce_ordered(&consumed, &CostSpec::default(), false)?;
+            let result = self.reduce_ordered(&consumed, &CostSpec::default(), LotOrder::Date)?;
             self.add(Position::simple(Amount::new(
                 (requested - available) * sign,
                 units.currency.clone(),
@@ -1110,7 +1100,7 @@ impl Inventory {
         }
 
         // Reduce positions proportionally (simplified: just reduce first matching)
-        self.reduce_ordered(units, &CostSpec::default(), false)
+        self.reduce_ordered(units, &CostSpec::default(), LotOrder::Date)
     }
 
     /// Reduce from a specific lot.
@@ -1304,7 +1294,6 @@ mod reduction_tests {
                 &Amount::new(d(-99), "STK"),
                 &CostSpec::default(),
                 LotOrder::Date,
-                false,
             )
             .expect_err("99 units are not there");
         assert!(
@@ -1397,13 +1386,16 @@ mod reduction_tests {
             },
         ];
 
-        for (order, reverse) in [
-            (LotOrder::Date, false),
-            (LotOrder::Date, true),
+        for order in [
+            LotOrder::Date,
+            // LIFO's ordering. It used to be `(Date, reverse: true)`; the
+            // direction moved into the key so the slot tiebreak stops being
+            // reversed with it (#2115).
+            LotOrder::DateDescending,
             // HIFO: the cost ordering added in #2091. Its tiebreak has to match
             // the `sort_by_key(Reverse(cost))` it replaced — stable, so equal
             // costs stayed in ascending slot order.
-            (LotOrder::CostDescending, false),
+            LotOrder::CostDescending,
         ] {
             for spec in &specs {
                 {
@@ -1422,34 +1414,34 @@ mod reduction_tests {
                             "the fixture must produce an index, or this test compares \
                          the scan against itself",
                         );
-                        let indexed = indexing.plan_ordered(&units, spec, order, reverse);
+                        let indexed = indexing.plan_ordered(&units, spec, order);
 
                         let mut scanning = inv.clone();
                         scanning.ordered_index = None;
-                        let scanned = scanning.plan_ordered(&units, spec, order, reverse);
+                        let scanned = scanning.plan_ordered(&units, spec, order);
 
                         match (indexed, scanned) {
                             (Ok((a_result, a_updates)), Ok((b_result, b_updates))) => {
                                 assert_eq!(
                                     a_updates, b_updates,
                                     "index and scan chose different lots for {spec:?} \
-                                 reverse={reverse} take={take}",
+                                 take={take}",
                                 );
                                 assert_eq!(
                                     a_result.cost_basis, b_result.cost_basis,
                                     "index and scan disagree on cost basis for {spec:?} \
-                                 reverse={reverse} take={take}",
+                                 take={take}",
                                 );
                             }
                             (Err(a), Err(b)) => assert_eq!(
                                 a.to_string(),
                                 b.to_string(),
                                 "index and scan report different errors for {spec:?} \
-                             reverse={reverse} take={take}",
+                             take={take}",
                             ),
                             (a, b) => panic!(
                                 "index and scan disagree on success for {spec:?} \
-                             order={order:?} reverse={reverse} take={take}: {a:?} vs {b:?}"
+                             order={order:?} take={take}: {a:?} vs {b:?}"
                             ),
                         }
                     }
@@ -1550,9 +1542,122 @@ mod reduction_tests {
         let inv = mk([lot(10, 100, 1), lot(10, 200, 2)]);
         let r = try_reduce(&inv, &sell_stk(15), BookingMethod::Lifo);
         // LIFO: 10@200 + 5@100 = 2000 + 500 = 2500 (distinguishes the
-        // `reverse` flag from FIFO's 2000).
+        // `DateDescending` ordering from FIFO's 2000).
         assert_eq!(basis(&r), dec!(2500));
         assert_eq!(r.matched[0].cost.as_ref().unwrap().number, dec!(200));
+    }
+
+    /// Every ordered method breaks a tie the same way: the lot that appears
+    /// FIRST in the file wins.
+    ///
+    /// This is the property a reversed walk silently broke. LIFO used to take
+    /// the LAST of two same-date lots while FIFO and HIFO took the first,
+    /// because `candidates.iter().rev()` reversed the slot tiebreak along with
+    /// the sort key (#2115). Nothing caught it: the tiebreak is invisible to
+    /// any assertion on units or total basis, so `test_hifo_with_tie_breaking`
+    /// — whose whole subject is this — passed with the tiebreak reversed at
+    /// every sort site, because all of its lots share one cost.
+    ///
+    /// Each case below ties on the key its OWN method sorts by, so the primary
+    /// key cannot decide the outcome and only the tiebreak can. Asserting on
+    /// the identity of the consumed lot rather than on its value is the point:
+    /// consuming the wrong lot at the same total is exactly the failure that
+    /// hides from a basis assertion.
+    #[test]
+    fn ordered_methods_break_ties_on_insertion_order() {
+        // Same date, two costs. FIFO and LIFO both sort on date, so neither
+        // can separate these by its primary key.
+        for method in [BookingMethod::Fifo, BookingMethod::Lifo] {
+            let inv = mk([lot(1, 10, 3), lot(1, 12, 3)]);
+            let r = try_reduce(&inv, &sell_stk(1), method);
+            assert_eq!(
+                r.matched[0].cost.as_ref().unwrap().number,
+                dec!(10),
+                "{method:?} must consume the FIRST of two same-date lots, not the last",
+            );
+        }
+
+        // Same cost, two dates. HIFO sorts on cost, so its primary key cannot
+        // separate these.
+        let inv = mk([lot(1, 11, 3), lot(1, 11, 4)]);
+        let r = try_reduce(&inv, &sell_stk(1), BookingMethod::Hifo);
+        assert_eq!(
+            r.matched[0].cost.as_ref().unwrap().date,
+            Some(naive_date(2024, 1, 3).unwrap()),
+            "HIFO must consume the FIRST of two same-cost lots, not the last",
+        );
+    }
+
+    /// A date-less lot is consumed LAST under LIFO, not first.
+    ///
+    /// `DateDescending` holds `Reverse<Option<NaiveDate>>`, so `None` — which
+    /// normally sorts before every `Some` — lands at the END. That is where
+    /// the reversed walk it replaced left date-less lots, so this is the half
+    /// of the #2115 change that must NOT move.
+    ///
+    /// The distinction is one layer of nesting: `Option<Reverse<NaiveDate>>`
+    /// is equally plausible to write and puts date-less lots FIRST. No other
+    /// test separates the two. `the_ordered_index_selects_what_the_scan_selects`
+    /// calls `order_key` on both sides, so it moves with any change to the
+    /// key, and every other LIFO test uses dated lots only.
+    #[test]
+    fn lifo_takes_the_date_less_lot_last() {
+        let mut inv = Inventory::new();
+        // Date-less first in the file, so slot order alone would take it first
+        // and cannot be what produces the expected answer.
+        inv.add(Position::with_cost(
+            Amount::new(d(10), "STK"),
+            Cost::new(d(100), "USD"),
+        ))
+        .expect("fixture fits in Decimal");
+        inv.add(lot(10, 200, 1)).expect("fixture fits in Decimal");
+
+        let r = try_reduce(&inv, &sell_stk(15), BookingMethod::Lifo);
+        assert_eq!(
+            r.matched[0].cost.as_ref().unwrap().number,
+            dec!(200),
+            "LIFO must reach the DATED lot before the date-less one",
+        );
+        // 10 @200 then 5 @100 = 2500. Date-less-first would be 2000.
+        assert_eq!(basis(&r), dec!(2500));
+    }
+
+    /// A lot acquired AFTER the index exists lands in LIFO order too.
+    ///
+    /// `ordered_index` is built on the first ordered reduction and then
+    /// maintained by `ordered_index_insert` on every later `add`. Those are
+    /// two different code paths and only the first one was covered:
+    /// `the_ordered_index_selects_what_the_scan_selects` calls
+    /// `build_ordered_index` directly, so it never exercises an incremental
+    /// insert at all.
+    ///
+    /// The distinction matters most for `DateDescending`, where a newly
+    /// acquired lot is the NEWEST and therefore belongs at the FRONT — the
+    /// opposite end from where every ascending order puts it. An insert that
+    /// appended would be invisible to FIFO and wrong for LIFO.
+    #[test]
+    fn lifo_orders_a_lot_added_after_the_index_was_built() {
+        let mut inv = mk([lot(10, 100, 1), lot(10, 200, 2)]);
+
+        // Forces the index to exist; 20 held, take 5 off the newest (day 2).
+        let first = inv
+            .reduce(&sell_stk(5), None, BookingMethod::Lifo)
+            .expect("15 units remain");
+        assert_eq!(first.matched[0].cost.as_ref().unwrap().number, dec!(200));
+
+        // Acquired last, so LIFO must reach it FIRST — and it has to travel
+        // to the front of a descending index to get there.
+        inv.add(lot(10, 300, 3)).expect("fixture fits in Decimal");
+
+        let r = inv
+            .reduce(&sell_stk(10), None, BookingMethod::Lifo)
+            .expect("25 units remain");
+        assert_eq!(
+            r.matched[0].cost.as_ref().unwrap().number,
+            dec!(300),
+            "a lot added after the index was built must still sort newest-first",
+        );
+        assert_eq!(basis(&r), dec!(3000));
     }
 
     #[test]

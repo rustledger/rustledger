@@ -37,6 +37,16 @@ under HIFO, or two lots on the same date under STRICT, essentially never
 appeared. `TIES` now constructs each configuration deliberately, and the tie
 mode is reported with every divergence so the classes stay separable.
 
+One divergence class is KNOWN and deliberately not fixed: beancount pools
+acquisitions sharing (cost, date, label) into a single inventory position,
+while rustledger keeps a slot per acquisition, so the two consume in
+different orders once a lot identity repeats non-contiguously within a date
+(#2118). rustledger's answer respects acquisition order and beancount's
+cannot, so we keep ours. Those runs are still compared and still printed —
+only their verdict changes, and they are tallied on their own line. The exit
+code tracks UNEXPLAINED divergences alone: a permanently red run teaches
+everyone to ignore it, which is how the next real regression gets missed.
+
 Usage:
     scripts/compat-booking-fuzz.py --runs 200
     scripts/compat-booking-fuzz.py --seed 12345        # reproduce one case
@@ -69,8 +79,43 @@ CASH = "USD"
 TIES = ["none", "date", "cost", "both", "label"]
 
 
-def gen_ledger(rng: random.Random) -> tuple[str, str, str]:
-    """A ledger exercising lot selection: source, booking method, tie mode."""
+def pooling_shape(
+    days: list[int], costs: list[Decimal], labels: list[str | None]
+) -> bool:
+    """True when beancount's lot pooling could reorder consumption (#2118).
+
+    beancount's `Inventory` is keyed by `(currency, cost)`, so acquisitions
+    sharing `(cost, date, label)` collapse into ONE position, sitting where
+    the FIRST of them sat. rustledger keeps a slot per acquisition. That only
+    changes the consumption ORDER when a repeated identity is NON-CONTIGUOUS
+    within its date: `[a, b, a]` pools `a`'s later units forward, ahead of
+    `b`, while `[a, a, b]` pools into the order it already had.
+
+    Deliberately narrow. This downgrades a real divergence to an expected one,
+    so every case it matches is a case this harness stops guarding. Requiring
+    the non-contiguous repeat -- rather than merely "some identity repeats" --
+    keeps it to the shape #2118 actually describes.
+    """
+    by_day: dict[int, list[tuple[Decimal, str | None]]] = {}
+    for day, cost, label in zip(days, costs, labels, strict=True):
+        by_day.setdefault(day, []).append((cost, label))
+    for seq in by_day.values():
+        for i, ident in enumerate(seq):
+            rest = seq[i + 1 :]
+            if ident not in rest:
+                continue
+            j = i + 1 + rest.index(ident)
+            if any(seq[k] != ident for k in range(i + 1, j)):
+                return True
+    return False
+
+
+def gen_ledger(rng: random.Random) -> tuple[str, str, str, bool]:
+    """A ledger exercising lot selection.
+
+    Returns source, booking method, tie mode, and whether the lots take the
+    shape beancount's pooling reorders (#2118).
+    """
     method = rng.choice(METHODS)
     tie = rng.choice(TIES)
     commodity = rng.choice(COMMODITIES)
@@ -165,7 +210,12 @@ def gen_ledger(rng: random.Random) -> tuple[str, str, str]:
         held -= qty
         day += 1
 
-    return "\n".join(lines) + "\n", method, tie
+    return (
+        "\n".join(lines) + "\n",
+        method,
+        tie,
+        pooling_shape(days, costs, labels),
+    )
 
 
 # A booked result is either an error or lot identity -> units.
@@ -281,24 +331,44 @@ def compare(rl: Booked | str, bq: Booked | str) -> list[str]:
     return diffs
 
 
-def check_one(rledger: str, python: str, seed: int) -> list[str]:
-    """Run one generated ledger through both engines."""
+def check_one(rledger: str, python: str, seed: int) -> tuple[str, list[str]]:
+    """Run one generated ledger through both engines.
+
+    Returns a verdict -- "agree", "expected", or "real" -- and the report.
+
+    "expected" is #2118 and nothing else: a KNOWN divergence we have decided
+    not to fix, because rustledger's answer respects acquisition order and
+    beancount's cannot. It is still compared, never skipped; only its verdict
+    changes. An unexplained divergence stays "real" and still fails the run,
+    which is the whole point of separating them -- five permanent reds is how
+    a genuine regression goes unnoticed.
+    """
     rng = random.Random(seed)
-    source, method, tie = gen_ledger(rng)
+    source, method, tie, pooled = gen_ledger(rng)
     with tempfile.NamedTemporaryFile(
         "w", suffix=".beancount", delete=False
     ) as fh:
         fh.write(source)
         path = fh.name
     try:
-        diffs = compare(
-            booked_rledger(rledger, path), booked_beancount(python, path)
-        )
+        rl = booked_rledger(rledger, path)
+        bq = booked_beancount(python, path)
+        diffs = compare(rl, bq)
     finally:
         Path(path).unlink(missing_ok=True)
-    if diffs:
-        return [f"seed={seed} method={method} tie={tie}", *diffs, source]
-    return []
+    if not diffs:
+        return "agree", []
+    # Pooling redistributes units across lots. It can never make one engine
+    # REJECT a ledger the other accepts, so an acceptance divergence is
+    # always unexplained no matter what shape the lots take.
+    rejected = ERROR in (rl, bq)
+    verdict = "expected" if (pooled and not rejected) else "real"
+    tag = " [expected: #2118 lot pooling]" if verdict == "expected" else ""
+    return verdict, [
+        f"seed={seed} method={method} tie={tie}{tag}",
+        *diffs,
+        source,
+    ]
 
 
 def self_test(rledger: str, python: str) -> int:
@@ -327,9 +397,30 @@ def self_test(rledger: str, python: str) -> int:
             ok = False
 
     # And the real engines must agree on a hand-checked ledger.
-    if check_one(rledger, python, seed=1):
+    if check_one(rledger, python, seed=1)[0] != "agree":
         print("FAIL self-test: engines disagreed on seed=1")
         ok = False
+
+    # The #2118 classifier decides which divergences stop being guarded, so
+    # it needs its own evidence that it can still say "no". Shapes it must
+    # match, and near-misses it must NOT.
+    d = [Decimal(x) for x in ("10", "11")]
+    shapes = [
+        ("non-contiguous repeat, one date", [2, 2, 2], [d[0], d[1], d[0]],
+         [None] * 3, True),
+        ("contiguous repeat pools in place", [2, 2, 2], [d[0], d[0], d[1]],
+         [None] * 3, False),
+        ("repeat across DIFFERENT dates cannot pool", [2, 3, 4],
+         [d[0], d[1], d[0]], [None] * 3, False),
+        ("no repeat at all", [2, 2], [d[0], d[1]], [None] * 2, False),
+        ("labels make the repeat a different identity", [2, 2, 2],
+         [d[0], d[1], d[0]], ["a", None, "b"], False),
+    ]
+    for name, days, costs, labels, want in shapes:
+        got = pooling_shape(days, costs, labels)
+        if got != want:
+            print(f"FAIL self-test 'pooling_shape: {name}': {got}, want {want}")
+            ok = False
 
     print("self-test passed" if ok else "self-test FAILED")
     return 0 if ok else 1
@@ -352,15 +443,25 @@ def main() -> int:
 
     seeds = [args.seed] if args.seed is not None else list(range(args.runs))
     total = len(seeds)
-    failures = 0
+    real = expected = 0
     for seed in seeds:
-        report = check_one(args.rledger, args.python, seed)
-        if report:
-            failures += 1
-            print("\n".join(report))
-            print("-" * 60)
-    print(f"{total - failures}/{total} agreed")
-    return 1 if failures else 0
+        verdict, report = check_one(args.rledger, args.python, seed)
+        if verdict == "agree":
+            continue
+        if verdict == "expected":
+            expected += 1
+        else:
+            real += 1
+        print("\n".join(report))
+        print("-" * 60)
+    agreed = total - real - expected
+    print(f"{agreed}/{total} agreed")
+    # Printed unconditionally, including the zero. A count that only appears
+    # when non-zero reads as "nothing was waived" when the line is simply
+    # absent, and waived cases are exactly the ones worth keeping in view.
+    print(f"{expected} expected divergence(s) (#2118 lot pooling)")
+    print(f"{real} unexplained divergence(s)")
+    return 1 if real else 0
 
 
 if __name__ == "__main__":

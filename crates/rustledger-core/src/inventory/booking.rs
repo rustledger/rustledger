@@ -1622,6 +1622,44 @@ mod reduction_tests {
         assert_eq!(basis(&r), dec!(2500));
     }
 
+    /// A lot acquired AFTER the index exists lands in LIFO order too.
+    ///
+    /// `ordered_index` is built on the first ordered reduction and then
+    /// maintained by `ordered_index_insert` on every later `add`. Those are
+    /// two different code paths and only the first one was covered:
+    /// `the_ordered_index_selects_what_the_scan_selects` calls
+    /// `build_ordered_index` directly, so it never exercises an incremental
+    /// insert at all.
+    ///
+    /// The distinction matters most for `DateDescending`, where a newly
+    /// acquired lot is the NEWEST and therefore belongs at the FRONT — the
+    /// opposite end from where every ascending order puts it. An insert that
+    /// appended would be invisible to FIFO and wrong for LIFO.
+    #[test]
+    fn lifo_orders_a_lot_added_after_the_index_was_built() {
+        let mut inv = mk([lot(10, 100, 1), lot(10, 200, 2)]);
+
+        // Forces the index to exist; 20 held, take 5 off the newest (day 2).
+        let first = inv
+            .reduce(&sell_stk(5), None, BookingMethod::Lifo)
+            .expect("15 units remain");
+        assert_eq!(first.matched[0].cost.as_ref().unwrap().number, dec!(200));
+
+        // Acquired last, so LIFO must reach it FIRST — and it has to travel
+        // to the front of a descending index to get there.
+        inv.add(lot(10, 300, 3)).expect("fixture fits in Decimal");
+
+        let r = inv
+            .reduce(&sell_stk(10), None, BookingMethod::Lifo)
+            .expect("25 units remain");
+        assert_eq!(
+            r.matched[0].cost.as_ref().unwrap().number,
+            dec!(300),
+            "a lot added after the index was built must still sort newest-first",
+        );
+        assert_eq!(basis(&r), dec!(3000));
+    }
+
     #[test]
     fn fifo_single_lot_partial_cost_basis() {
         let inv = mk([lot(10, 100, 1)]);

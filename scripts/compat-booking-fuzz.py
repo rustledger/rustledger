@@ -49,6 +49,7 @@ everyone to ignore it, which is how the next real regression gets missed.
 
 Usage:
     scripts/compat-booking-fuzz.py --runs 200
+    scripts/compat-booking-fuzz.py --runs 500 --start-seed 9000
     scripts/compat-booking-fuzz.py --seed 12345        # reproduce one case
     scripts/compat-booking-fuzz.py --self-test         # prove it detects a bug
 """
@@ -496,6 +497,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--runs", type=int, default=100)
     ap.add_argument("--seed", type=int, help="run a single seed and report")
+    # Seeds are `range(start, start + runs)`. CI fixes the start for PR and
+    # push so a red X does not move when an unrelated commit lands, and uses
+    # the run id nightly so the campaign explores ground the fixed window
+    # never reaches. Same policy as the budget fuzzer.
+    ap.add_argument(
+        "--start-seed", type=int, default=0, help="first seed of the sweep"
+    )
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--rledger", default="target/release/rledger")
     # Defaults to the running interpreter, matching the sibling compat
@@ -507,7 +515,11 @@ def main() -> int:
     if args.self_test:
         return self_test(args.rledger, args.python)
 
-    seeds = [args.seed] if args.seed is not None else list(range(args.runs))
+    seeds = (
+        [args.seed]
+        if args.seed is not None
+        else list(range(args.start_seed, args.start_seed + args.runs))
+    )
     total = len(seeds)
     real = expected = 0
     for seed in seeds:

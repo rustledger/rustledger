@@ -841,6 +841,47 @@ jobs:
             echo "failed=1" >> "$GITHUB_OUTPUT"
           fi
 
+      # Booking decides WHICH lot a reduction consumes. Get it wrong and the
+      # postings still balance, the count is right and the error list is
+      # empty — the ledger is simply wrong about what you own and what you
+      # gained. That is the failure example-based tests are worst at
+      # catching, so it is generated and compared against beancount as an
+      # independent implementation rather than a restatement of our logic.
+      #
+      # Runs HERE rather than with the gates for the same reason as the
+      # budget fuzz above: the "Commit results to compatibility branch" step
+      # checks out an orphan branch with no `scripts/` and no `target/`, so a
+      # gate placed after it could not find this script.
+      #
+      # #2118 (beancount pools lots we keep per-acquisition) is a divergence
+      # we decided to keep. It is tallied on its own line and does NOT fail
+      # the run; the exit code tracks unexplained divergences alone. A
+      # permanently red run is one nobody reads, which is how the next real
+      # regression gets missed.
+      #
+      # Seeding matches the budget fuzz and the synthetic corpus policy:
+      # fresh nightly, fixed for PR/push so a red X does not move when an
+      # unrelated commit lands. Reproduce any failure with `--seed <n>`.
+      - name: Booking fuzz
+        id: booking_fuzz
+        continue-on-error: true
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            BOOKING_START="${{ github.run_id }}"; BOOKING_RUNS=2000
+          else
+            BOOKING_START=0; BOOKING_RUNS=250
+          fi
+          printf 'start=%s\nruns=%s\n' "$BOOKING_START" "$BOOKING_RUNS" >> "$GITHUB_OUTPUT"
+          if python3 scripts/compat-booking-fuzz.py --self-test \
+                  --rledger ./target/release/rledger \
+             && python3 scripts/compat-booking-fuzz.py \
+                  --rledger ./target/release/rledger \
+                  --start-seed "$BOOKING_START" --runs "$BOOKING_RUNS"; then
+            echo "failed=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=1" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate YAML summary
         run: |
           cat > compat-results.yaml << EOF
@@ -1350,6 +1391,15 @@ jobs:
         if: ${{ !cancelled() && steps.budget_fuzz.outputs.failed == '1' }}
         run: |
           echo "::error::Budget report fuzz found a divergence (seed=${{ steps.budget_fuzz.outputs.seed }}, count=${{ steps.budget_fuzz.outputs.count }}). Reproduce with: python3 scripts/compat-budget-fuzz.py --rledger ./target/release/rledger --seed <n> --count 1"
+          exit 1
+
+      # Fails only on UNEXPLAINED divergences. Known ones (#2118) are printed
+      # and tallied by the step above without failing it, so this alarm keeps
+      # meaning "something new".
+      - name: Gate on booking fuzz
+        if: ${{ !cancelled() && steps.booking_fuzz.outputs.failed == '1' }}
+        run: |
+          echo "::error::Booking fuzz found an unexplained divergence (start-seed=${{ steps.booking_fuzz.outputs.start }}, runs=${{ steps.booking_fuzz.outputs.runs }}). The seed of each is printed in the step log. Reproduce one with: python3 scripts/compat-booking-fuzz.py --rledger ./target/release/rledger --seed <n>"
           exit 1
 
       # Mirrors the BQL step's `--baseline` (which exits non-zero on a BQL

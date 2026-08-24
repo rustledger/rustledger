@@ -983,6 +983,27 @@ pub struct Inventory {
     /// Not serialized - rebuilt on demand, like the caches above.
     #[serde(skip)]
     cost_index: FxHashMap<CostKey, smallvec::SmallVec<[usize; 2]>>,
+
+    /// Ordering anchor per lot identity, assigned when that identity is first
+    /// acquired and held until every lot carrying it is gone.
+    ///
+    /// Interchangeable lots consume as ONE position, so the GROUP has a
+    /// position rather than each member. Deriving that from the earliest
+    /// surviving member looks equivalent and is not: draining the earliest
+    /// moves the survivors, so a group sitting before another lot jumps
+    /// behind it mid-ledger. Python beancount holds the pooled position until
+    /// its units reach zero and re-inserts a re-acquired identity at the end,
+    /// which a monotonic ordinal reproduces exactly (#2118).
+    #[serde(skip)]
+    ident_ordinal: FxHashMap<LotIdent, u64>,
+    /// Next ordinal to hand out, so a re-acquired identity sorts after
+    /// everything currently held.
+    #[serde(skip)]
+    next_ordinal: u64,
+    /// Per-slot view of `ident_ordinal`, so the sort comparator reads an
+    /// integer rather than rebuilding an identity on every probe.
+    #[serde(skip)]
+    slot_ordinal: FxHashMap<usize, u64>,
     /// EVERY lot per units-currency, in the order FIFO consumes them: lot date
     /// ascending, ties broken by slot ascending.
     ///
@@ -1026,15 +1047,7 @@ pub struct Inventory {
 /// method — so this is stored alongside the index rather than a second index
 /// being kept in step with the first.
 /// What makes two lots interchangeable: every attribute the model records.
-type LotIdent = (
-    crate::Currency,
-    Option<(
-        Decimal,
-        crate::Currency,
-        Option<crate::NaiveDate>,
-        Option<String>,
-    )>,
-);
+type LotIdent = (CostKey, Option<crate::NaiveDate>, Option<String>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LotOrder {
@@ -1069,11 +1082,6 @@ pub(super) struct OrderedIndex {
     /// Slots per units-currency, sorted by `order`, then by the earliest slot
     /// holding an interchangeable lot, then slot ascending.
     by_currency: FxHashMap<crate::Currency, Vec<usize>>,
-    /// Slot to the earliest slot holding an interchangeable lot, for slots
-    /// where those differ. Consulted by the insert's binary search, which is
-    /// why it is keyed on the SLOT: rebuilding a `LotIdent` per probe clones
-    /// a currency and a label `String` O(log lots) times per `add`.
-    canonical_of: FxHashMap<usize, usize>,
 }
 
 /// What [`Inventory::cost_index`] groups lots by: the units they are held in,
@@ -1218,6 +1226,9 @@ impl TryFrom<InventoryWire> for Inventory {
     /// deserialization error.
     fn try_from(wire: InventoryWire) -> Result<Self, Self::Error> {
         let mut inv = Self {
+            ident_ordinal: FxHashMap::default(),
+            next_ordinal: 0,
+            slot_ordinal: FxHashMap::default(),
             positions: PositionStore::Owned(Slots::from_live(wire.positions.into_iter().collect())),
             units_cache: FxHashMap::default(),
             cost_index: FxHashMap::default(),
@@ -1832,7 +1843,24 @@ impl Inventory {
         // ordered selection can drain one, and an index that omitted them
         // picked a different lot than the scan.
         let ordering = position.units.currency.clone();
+        // The group anchor, assigned before the slot exists so the ordered
+        // insert below can read it. A first acquisition of this identity takes
+        // the next ordinal; a later one joins the group already holding it.
+        // Built from the `key` already computed above rather than calling
+        // `cost_key` a second time: that clones two currencies per `add`.
+        let ident = key
+            .clone()
+            .zip(position.cost.as_ref())
+            .map(|(k, c)| (k, c.date, c.label.clone()));
         let slot = self.positions.push_slot(position);
+        if let Some(ident) = ident {
+            let next = self.next_ordinal;
+            let ordinal = *self.ident_ordinal.entry(ident).or_insert(next);
+            if ordinal == next {
+                self.next_ordinal += 1;
+            }
+            self.slot_ordinal.insert(slot, ordinal);
+        }
         if let Some(key) = key {
             self.cost_index.entry(key).or_default().push(slot);
         }
@@ -1858,12 +1886,36 @@ impl Inventory {
             .ordered_index
             .is_some()
             .then(|| position.units.currency.clone());
+        // Release the group anchor once no lot carries the identity. Holding
+        // it would make a re-acquisition rejoin a group that no longer exists;
+        // releasing it sends the re-acquisition to the end, which is where
+        // Python beancount's dict re-insertion puts it.
+        let ident = Self::lot_ident(position);
+        self.slot_ordinal.remove(&idx);
         if let Some(key) = cost_key(position)
             && let Some(slots) = self.cost_index.get_mut(&key)
         {
             slots.retain(|slot| *slot != idx);
             if slots.is_empty() {
                 self.cost_index.remove(&key);
+            }
+        }
+        if let Some(ident) = ident {
+            // Ask the cost bucket, not every slot. The bucket holds only lots
+            // sharing this cost and is a `SmallVec<[usize; 2]>`; scanning
+            // `slot_ordinal` instead is O(lots) on every drained lot, which is
+            // the quadratic shape #2083 and #2091 removed (measured at +23%
+            // on a 20,000-transaction load).
+            let still_held = self.cost_index.get(&ident.0).is_some_and(|slots| {
+                slots.iter().any(|&i| {
+                    self.positions
+                        .get(i)
+                        .and_then(|p| p.cost.as_ref())
+                        .is_some_and(|c| c.date == ident.1 && c.label == ident.2)
+                })
+            });
+            if !still_held {
+                self.ident_ordinal.remove(&ident);
             }
         }
         // The list is ordered, so find the entry rather than scanning for it:
@@ -1907,122 +1959,44 @@ impl Inventory {
             return;
         };
         let order = index.order;
-        // The new slot's canonical is whatever already claimed its identity,
-        // or itself when it is the first of its kind.
-        // ONE identity construction per insert, to place the new slot. Every
-        // later comparison reads `canonical_of` by slot number.
-        let own_canonical = self.canonical_via_cost_index(slot);
-        if own_canonical != slot {
-            index.canonical_of.insert(slot, own_canonical);
-        }
-        let canonical_of = &index.canonical_of;
-        let canon_of = |i: usize| *canonical_of.get(&i).unwrap_or(&i);
-        let key = (self.order_key(order, slot), own_canonical, slot);
+        // The slot's anchor is already recorded by `add`, so this reads it.
+        let key = (self.order_key(order, slot), self.anchor(slot));
         // The index is OUT of `self` for the search, so the binary search can
         // read `self.positions` for each probe. Materializing the keys instead
         // — the obvious way around the borrow — makes every `add` walk the
         // whole currency, which is the quadratic this index exists to remove.
         let entry = index.by_currency.entry(currency.clone()).or_default();
         let at = entry.partition_point(|&existing| {
-            (
-                self.order_key(order, existing),
-                canon_of(existing),
-                existing,
-            ) < key
+            (self.order_key(order, existing), self.anchor(existing)) < key
         });
         entry.insert(at, slot);
         self.ordered_index = Some(index);
     }
 
-    /// Populate `ordered_index` from the current lots — all of them, cost-less
-    /// included, because an empty cost spec selects those too.
+    /// The interchangeability key of a position, or `None` for a cost-less
+    /// one.
     ///
-    /// Called the first time an ordered booking method reduces against this
-    /// inventory, then kept current incrementally. Ordering matches what
-    /// `plan_ordered` produced when it sorted per call: date ascending, slot
-    /// ascending within a date.
-    /// The value `order` sorts `slot` by. Ties fall through to the slot
-    /// number, which is what makes every ordering match the stable sorts they
-    /// replace: `sort_by_key(date)` and `sort_by_key(Reverse(cost))` both left
-    /// equal keys in ascending slot order.
-    ///
-    /// That ascending tiebreak is the same for ALL THREE orderings, including
-    /// the descending ones. A descending method reverses its KEY here; nothing
-    /// reverses the walk, because doing so reverses the tiebreak with it
-    /// (#2115).
-    /// Map every slot to the earliest slot holding an INTERCHANGEABLE lot.
-    ///
-    /// Two lots are interchangeable when they agree on commodity, cost per
-    /// unit, cost currency, acquisition date and label: every attribute the
-    /// model records. Breaking ordering ties on this rather than on the
-    /// slot's own index makes interchangeable lots consume contiguously from
-    /// the position of the earliest of them, so the outcome stops depending
-    /// on the order the acquisitions happen to be written (#2118).
-    ///
-    /// Built in ONE pass and handed to the sort, never recomputed per
-    /// comparison. Answering `canonical(slot)` by scanning the inventory
-    /// costs O(lots) inside a comparator, which is O(lots^2 log lots) over a
-    /// sort: measured at 213s on a 20,000-transaction ledger against 23s
-    /// before, the same quadratic shape as #2083 and #2091.
-    fn canonical_slots(&self) -> (FxHashMap<usize, usize>, FxHashMap<LotIdent, usize>) {
-        let mut first: FxHashMap<LotIdent, usize> = FxHashMap::default();
-        let mut out: FxHashMap<usize, usize> = FxHashMap::default();
-        for (idx, pos) in self.positions.iter_slots() {
-            let ident = Self::lot_ident(pos);
-            let canonical = *first.entry(ident).or_insert(idx);
-            if canonical != idx {
-                out.insert(idx, canonical);
-            }
-        }
-        (out, first)
+    /// `add` merges cost-less positions into a single `simple_slot` per
+    /// currency, so no two ever coexist and they need no group anchor.
+    fn lot_ident(pos: &Position) -> Option<LotIdent> {
+        let cost = pos.cost.as_ref()?;
+        Some((cost_key(pos)?, cost.date, cost.label.clone()))
     }
 
-    /// The earliest slot interchangeable with `slot`, via the cost index.
-    ///
-    /// `cost_index` already buckets by `(units currency, cost number, cost
-    /// currency)` in slot order, so the answer is the first member of that
-    /// bucket agreeing on date and label. Buckets are a `SmallVec<[usize; 2]>`
-    /// and typically hold one or two entries, so this is cheaper than the
-    /// identity map it replaced: that map hashed a currency and a label
-    /// `String` on every `add`, which cost 15% on the `fifo` shape.
-    ///
-    /// A cost-less position is its own canonical. `add` already merges those
-    /// into one `simple_slot` per currency, so no two ever coexist.
-    fn canonical_via_cost_index(&self, slot: usize) -> usize {
-        let Some(pos) = self.positions.get(slot) else {
-            return slot;
-        };
-        let Some(cost) = pos.cost.as_ref() else {
-            return slot;
-        };
-        let Some(key) = cost_key(pos) else {
-            return slot;
-        };
-        let Some(bucket) = self.cost_index.get(&key) else {
-            return slot;
-        };
-        bucket
-            .iter()
-            .copied()
-            .find(|&i| {
-                self.positions
-                    .get(i)
-                    .and_then(|p| p.cost.as_ref())
-                    .is_some_and(|c| c.date == cost.date && c.label == cost.label)
-            })
-            .unwrap_or(slot)
+    /// The ordering anchor of `slot`: its group's ordinal, or the slot itself
+    /// scaled past every ordinal so ungrouped lots keep source order.
+    fn anchor(&self, slot: usize) -> (u64, usize) {
+        (*self.slot_ordinal.get(&slot).unwrap_or(&u64::MAX), slot)
     }
 
-    /// The interchangeability key of a position.
-    fn lot_ident(pos: &Position) -> LotIdent {
-        (
-            pos.units.currency.clone(),
-            pos.cost
-                .as_ref()
-                .map(|c| (c.number, c.currency.clone(), c.date, c.label.clone())),
-        )
-    }
-
+    /// The value `order` sorts `slot` by.
+    ///
+    /// Ties fall through to [`Self::anchor`], which keeps interchangeable lots
+    /// together at the position of the first of them and otherwise preserves
+    /// source order. That tiebreak is ascending for EVERY ordering, including
+    /// the descending ones: a descending method reverses its KEY here, and
+    /// nothing reverses the walk, because reversing the walk reverses the
+    /// tiebreak with it (#2115).
     fn order_key(&self, order: LotOrder, slot: usize) -> OrderKey {
         let cost = self.positions.get(slot).and_then(|p| p.cost.as_ref());
         match order {
@@ -2060,21 +2034,10 @@ impl Inventory {
                 .or_default()
                 .push(idx);
         }
-        let (canonical, _) = self.canonical_slots();
-        let canonical_ref = &canonical;
         for slots in by_currency.values_mut() {
-            slots.sort_by_key(|&idx| {
-                (
-                    self.order_key(order, idx),
-                    *canonical_ref.get(&idx).unwrap_or(&idx),
-                )
-            });
+            slots.sort_by_key(|&idx| (self.order_key(order, idx), self.anchor(idx)));
         }
-        self.ordered_index = Some(Box::new(OrderedIndex {
-            order,
-            by_currency,
-            canonical_of: canonical,
-        }));
+        self.ordered_index = Some(Box::new(OrderedIndex { order, by_currency }));
     }
 
     /// Every slot of `currency` in FIFO order, or `None` when the index cannot
@@ -2299,6 +2262,11 @@ impl Inventory {
     fn try_rebuild_index_from(&mut self, source: CacheSource) -> Result<(), OverflowError> {
         self.units_cache.clear();
         self.cost_index.clear();
+        // Slot numbers move here, so the per-slot view of the anchors is
+        // stale. `ident_ordinal` is NOT cleared: the anchor of a group must
+        // survive compaction, which is the whole reason it is keyed by
+        // identity rather than derived from a surviving slot.
+        self.slot_ordinal.clear();
         // Preserve whether the ordered index has been BUILT, rather than
         // building it here. A rebuild happens on compaction and on rollback,
         // neither of which means ordered selection is in use — repopulating
@@ -2319,8 +2287,14 @@ impl Inventory {
         // and clone it for free.
         let index_costs = matches!(self.positions, PositionStore::Owned(_));
 
+        let mut rebuilt_ordinals: Vec<(usize, u64)> = Vec::new();
         for (idx, pos) in self.positions.iter_slots() {
             if index_costs {
+                if let Some(ordinal) =
+                    Self::lot_ident(pos).and_then(|i| self.ident_ordinal.get(&i).copied())
+                {
+                    rebuilt_ordinals.push((idx, ordinal));
+                }
                 if let Some(key) = cost_key(pos) {
                     self.cost_index.entry(key).or_default().push(idx);
                 }
@@ -2330,7 +2304,6 @@ impl Inventory {
                             Box::new(OrderedIndex {
                                 order,
                                 by_currency: FxHashMap::default(),
-                                canonical_of: FxHashMap::default(),
                             })
                         })
                         .by_currency
@@ -2382,6 +2355,7 @@ impl Inventory {
                     .simple_slot = Some(idx);
             }
         }
+        self.slot_ordinal.extend(rebuilt_ordinals);
 
         // The walk above pushed in slot order; ordered selection wants date
         // order with slot as the tiebreak. `sort_by_key` is stable, so the
@@ -2400,20 +2374,11 @@ impl Inventory {
                 .unwrap_or_default();
             // Compaction renumbers slots, so the identity map is rebuilt with
             // them rather than patched.
-            let (canonical, _) = self.canonical_slots();
             for (currency, mut slots) in keys {
-                slots.sort_by_key(|&idx| {
-                    (
-                        self.order_key(order, idx),
-                        *canonical.get(&idx).unwrap_or(&idx),
-                    )
-                });
+                slots.sort_by_key(|&idx| (self.order_key(order, idx), self.anchor(idx)));
                 if let Some(index) = self.ordered_index.as_mut() {
                     index.by_currency.insert(currency, slots);
                 }
-            }
-            if let Some(index) = self.ordered_index.as_mut() {
-                index.canonical_of = canonical;
             }
         }
         Ok(())

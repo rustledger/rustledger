@@ -555,8 +555,7 @@ impl Inventory {
                     .filter(|(_, p)| p.units.currency == units.currency)
                     .map(|(i, _)| i)
                     .collect();
-                let (canonical, _) = self.canonical_slots();
-                all.sort_by_key(|&i| (self.order_key(order, i), *canonical.get(&i).unwrap_or(&i)));
+                all.sort_by_key(|&i| (self.order_key(order, i), self.anchor(i)));
                 Some(all)
             };
         let candidates: &[usize] = match &scanned {

@@ -555,7 +555,8 @@ impl Inventory {
                     .filter(|(_, p)| p.units.currency == units.currency)
                     .map(|(i, _)| i)
                     .collect();
-                all.sort_by_key(|&i| self.order_key(order, i));
+                let (canonical, _) = self.canonical_slots();
+                all.sort_by_key(|&i| (self.order_key(order, i), *canonical.get(&i).unwrap_or(&i)));
                 Some(all)
             };
         let candidates: &[usize] = match &scanned {
@@ -1658,6 +1659,91 @@ mod reduction_tests {
             "a lot added after the index was built must still sort newest-first",
         );
         assert_eq!(basis(&r), dec!(3000));
+    }
+
+    /// Reordering INTERCHANGEABLE acquisitions does not change what is
+    /// consumed.
+    ///
+    /// Two lots agreeing on commodity, cost, cost currency, date and label are
+    /// interchangeable: no recorded attribute separates them. Consuming them
+    /// from the position of the earliest makes the outcome independent of the
+    /// order they happen to be written in, which is what stops a cost basis
+    /// depending on an editing accident (#2118).
+    ///
+    /// Before this rule, `A B C` and `A C B` disagreed by 50 USD of remaining
+    /// basis on exactly these fixtures.
+    ///
+    /// Both code paths are exercised deliberately. `try_reduce` on a fresh
+    /// inventory sorts a scanned list; a reduction after the index exists
+    /// places later acquisitions through `ordered_index_insert`. An earlier
+    /// version covered only the scan, and disabling the canonical lookup on
+    /// the insert path failed nothing.
+    #[test]
+    fn interchangeable_lots_consume_independently_of_write_order() {
+        let a = || lot(10, 10, 2);
+        let b = || lot(10, 20, 2);
+        let c = || lot(10, 10, 2);
+
+        let consumed = |lots: [Position; 3]| -> Vec<Decimal> {
+            let inv = mk(lots);
+            try_reduce(&inv, &sell_stk(15), BookingMethod::Fifo)
+                .matched
+                .iter()
+                .map(|m| m.cost.as_ref().unwrap().number)
+                .collect()
+        };
+
+        let after_first = [
+            ("A B C", consumed([a(), b(), c()])),
+            ("A C B", consumed([a(), c(), b()])),
+            ("C A B", consumed([c(), a(), b()])),
+            ("C B A", consumed([c(), b(), a()])),
+        ];
+        for (name, got) in &after_first {
+            assert_eq!(
+                got.iter().sum::<Decimal>(),
+                dec!(20),
+                "{name}: both takes should come from the 10.00 lots, got {got:?}",
+            );
+        }
+        let first = &after_first[0].1;
+        for (name, got) in &after_first[1..] {
+            assert_eq!(got, first, "{name} must match A B C: {got:?} vs {first:?}");
+        }
+
+        // The same property through the MAINTAINED INDEX rather than the scan.
+        let via_index = |lots: [Position; 3]| -> Vec<Decimal> {
+            let mut inv = mk([lots[0].clone()]);
+            inv.reduce(&sell_stk(1), None, BookingMethod::Fifo)
+                .expect("one unit is there");
+            for l in &lots[1..] {
+                inv.add(l.clone()).expect("fixture fits in Decimal");
+            }
+            inv.reduce(&sell_stk(14), None, BookingMethod::Fifo)
+                .expect("29 units remain")
+                .matched
+                .iter()
+                .map(|m| m.cost.as_ref().unwrap().number)
+                .collect()
+        };
+        assert_eq!(
+            via_index([a(), b(), c()]),
+            via_index([a(), c(), b()]),
+            "the maintained index must order interchangeable lots the same way \
+             the scan does",
+        );
+
+        // B written first IS distinguishable, and legitimately differs.
+        for (name, got) in [
+            ("B A C", consumed([b(), a(), c()])),
+            ("B C A", consumed([b(), c(), a()])),
+        ] {
+            assert_eq!(
+                got,
+                vec![dec!(20), dec!(10)],
+                "{name}: B first must be consumed first, got {got:?}",
+            );
+        }
     }
 
     #[test]

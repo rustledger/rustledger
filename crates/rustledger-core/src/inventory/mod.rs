@@ -1058,8 +1058,11 @@ pub(super) enum OrderKey {
 pub(super) struct OrderedIndex {
     /// Which ordering `by_currency` is sorted in.
     order: LotOrder,
-    /// Slots per units-currency, sorted by `order`, then by the earliest slot
-    /// holding an interchangeable lot, then slot ascending.
+    /// Slots per units-currency, sorted by `order` then slot ascending.
+    ///
+    /// No tiebreak beyond the slot is needed: `add` stores interchangeable
+    /// lots as ONE position (#2118), so a group has one slot rather than
+    /// several needing to be kept adjacent.
     by_currency: FxHashMap<crate::Currency, Vec<usize>>,
 }
 
@@ -1926,7 +1929,6 @@ impl Inventory {
             return;
         };
         let order = index.order;
-        // The slot's anchor is already recorded by `add`, so this reads it.
         let key = (self.order_key(order, slot), slot);
         // The index is OUT of `self` for the search, so the binary search can
         // read `self.positions` for each probe. Materializing the keys instead
@@ -1941,9 +1943,8 @@ impl Inventory {
 
     /// The value `order` sorts `slot` by.
     ///
-    /// Ties fall through to [`Self::anchor`], which keeps interchangeable lots
-    /// together at the position of the first of them and otherwise preserves
-    /// source order. That tiebreak is ascending for EVERY ordering, including
+    /// Ties fall through to the slot number, which preserves source order.
+    /// That tiebreak is ascending for EVERY ordering, including
     /// the descending ones: a descending method reverses its KEY here, and
     /// nothing reverses the walk, because reversing the walk reverses the
     /// tiebreak with it (#2115).
@@ -2310,8 +2311,6 @@ impl Inventory {
                         .collect()
                 })
                 .unwrap_or_default();
-            // Compaction renumbers slots, so the identity map is rebuilt with
-            // them rather than patched.
             for (currency, mut slots) in keys {
                 slots.sort_by_key(|&idx| (self.order_key(order, idx), idx));
                 if let Some(index) = self.ordered_index.as_mut() {

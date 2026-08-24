@@ -949,12 +949,15 @@ describe('collectLedgerFiles', () => {
     // The loader now REPORTS the diamond, matching Python's
     // `Duplicate filename parsed`, so the result is no longer `valid`. The
     // sibling test above asserts that report directly; here it only means the
-    // verdict flipped, not that the collection doubled. Checking the message
-    // keeps this test honest about WHY it is invalid: a doubled balance would
-    // show up as a balance-assertion failure instead.
+    // verdict flipped, not that the collection doubled. Naming the specific
+    // message keeps this test honest about WHY it is invalid -- a doubled
+    // balance would surface as a balance-assertion failure, which this would
+    // not accept.
     const result = rustledger.validateMultiFile(files, entry);
     expect(result.valid).toBe(false);
-    expect(JSON.stringify(result)).toContain('Duplicate');
+    expect(
+      result.errors.some((e) => e.message.includes('Duplicate filename parsed')),
+    ).toBe(true);
   });
 
   it('collects every file a glob matches', () => {

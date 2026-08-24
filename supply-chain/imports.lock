@@ -1102,8 +1102,8 @@ when = "2026-07-20"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-encoder]]
-version = "0.256.0"
-when = "2026-08-10"
+version = "0.257.1"
+when = "2026-08-19"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-metadata]]
@@ -1133,8 +1133,8 @@ when = "2026-07-20"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmparser]]
-version = "0.256.0"
-when = "2026-08-10"
+version = "0.257.1"
+when = "2026-08-19"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmprinter]]
@@ -1218,13 +1218,13 @@ when = "2026-07-31"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wast]]
-version = "256.0.0"
-when = "2026-08-10"
+version = "257.0.1"
+when = "2026-08-19"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wat]]
-version = "1.256.0"
-when = "2026-08-10"
+version = "1.257.1"
+when = "2026-08-19"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wiggle]]
@@ -1929,15 +1929,6 @@ who = "Pat Hickey <phickey@fastly.com>"
 criteria = "safe-to-deploy"
 version = "0.1.6"
 notes = "Contains no unsafe code, no IO, no build.rs."
-
-[[audits.bytecode-alliance.audits.arrayref]]
-who = "Nick Fitzgerald <fitzgen@gmail.com>"
-criteria = "safe-to-deploy"
-version = "0.3.6"
-notes = """
-Unsafe code, but its logic looks good to me. Necessary given what it is
-doing. Well tested, has quickchecks.
-"""
 
 [[audits.bytecode-alliance.audits.arrayvec]]
 who = "Nick Fitzgerald <fitzgen@gmail.com>"
@@ -3579,19 +3570,6 @@ criteria = "safe-to-deploy"
 delta = "0.5.2 -> 0.6.3"
 notes = "New unsafe code mostly deals with lining up things for newly-supported processor intrinsics."
 aggregated-from = "https://hg.mozilla.org/mozilla-central/raw-file/tip/supply-chain/audits.toml"
-
-[[audits.zcash.audits.arrayref]]
-who = "Daira-Emma Hopwood <daira@jacaranda.org>"
-criteria = "safe-to-deploy"
-delta = "0.3.6 -> 0.3.8"
-aggregated-from = "https://raw.githubusercontent.com/zcash/zcash/master/qa/supply-chain/audits.toml"
-
-[[audits.zcash.audits.arrayref]]
-who = "Jack Grigg <jack@electriccoin.co>"
-criteria = "safe-to-deploy"
-delta = "0.3.8 -> 0.3.9"
-notes = "Changes to `unsafe` lines are to make some existing `unsafe fn`s `const`."
-aggregated-from = "https://raw.githubusercontent.com/zcash/zcash/master/qa/supply-chain/audits.toml"
 
 [[audits.zcash.audits.block-buffer]]
 who = "Jack Grigg <jack@electriccoin.co>"

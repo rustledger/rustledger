@@ -120,7 +120,7 @@ version = "1.0.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.blake3]]
-version = "1.8.6"
+version = "1.8.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.block-buffer]]
@@ -752,7 +752,7 @@ version = "0.1.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.similar]]
-version = "3.1.2"
+version = "3.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.spin]]

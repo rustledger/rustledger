@@ -64,6 +64,12 @@ See [Plugins Reference](../reference/plugins.md) for full list.
    them, the two engines then consume in different orders.
 
    ```beancount
+   option "booking_method" "FIFO"
+
+   2020-01-01 open Assets:Stock  ACME
+   2020-01-01 open Assets:Cash   USD
+   2020-01-01 open Income:Gains  USD
+
    2020-01-02 * "buy A"
      Assets:Stock  10 ACME {10.00 USD}
      Assets:Cash  -100.00 USD

@@ -409,23 +409,7 @@ describe('Tool Handlers', () => {
       expect(result.content[0].text).toContain('valid');
     });
 
-    // `it.fails` — pinned to issue #1884, NOT a disabled test. The wasm's
-    // `validateSource` drops the loader's parse errors, so it answers
-    // `valid: true` for input `rledger check` rejects with P0012. These
-    // assertions are correct; the binding is not.
-    //
-    // `it.fails` inverts the verdict: the suite is GREEN while this assertion
-    // fails, and turns RED if it ever passes. So fixing #1884 breaks this
-    // test, which is the point — the marker cannot outlive the defect, and
-    // whoever fixes the binding is told to delete the `.fails` rather than
-    // discovering a stale skip years later.
-    //
-    // #1884 is FIXED in the parser (EOF now terminates a line), but this
-    // package depends on the PUBLISHED `@rustledger/wasm`, so the marker
-    // clears on the next release rather than at that merge. When a release
-    // lands and this turns red, delete the `.fails` — that is the signal, not
-    // a regression.
-    it.fails('should report validation errors', () => {
+    it('should report validation errors', () => {
       const result = handleToolCall('validate', { source: '2024-01-01 invalid directive' });
       expect(result.content[0].text).toContain('error');
     });
@@ -531,23 +515,7 @@ describe('Tool Handlers', () => {
       expect(payload.transaction.date).toBe('2024-01-15');
     });
 
-    // `it.fails` — pinned to issue #1884, NOT a disabled test. The wasm's
-    // `validateSource` drops the loader's parse errors, so it answers
-    // `valid: true` for input `rledger check` rejects with P0012. These
-    // assertions are correct; the binding is not.
-    //
-    // `it.fails` inverts the verdict: the suite is GREEN while this assertion
-    // fails, and turns RED if it ever passes. So fixing #1884 breaks this
-    // test, which is the point — the marker cannot outlive the defect, and
-    // whoever fixes the binding is told to delete the `.fails` rather than
-    // discovering a stale skip years later.
-    //
-    // #1884 is FIXED in the parser (EOF now terminates a line), but this
-    // package depends on the PUBLISHED `@rustledger/wasm`, so the marker
-    // clears on the next release rather than at that merge. When a release
-    // lands and this turns red, delete the `.fails` — that is the signal, not
-    // a regression.
-    it.fails('returns an error response when parsing fails', () => {
+    it('returns an error response when parsing fails', () => {
       // Pre-fix this would have silently produced a categorization
       // prompt with an empty accounts list; now it surfaces the parser
       // diagnostic, matching `handleParse`'s behavior.
@@ -585,23 +553,7 @@ describe('Tool Handlers', () => {
       expect(payload.low_confidence).toBe(0);
     });
 
-    // `it.fails` — pinned to issue #1884, NOT a disabled test. The wasm's
-    // `validateSource` drops the loader's parse errors, so it answers
-    // `valid: true` for input `rledger check` rejects with P0012. These
-    // assertions are correct; the binding is not.
-    //
-    // `it.fails` inverts the verdict: the suite is GREEN while this assertion
-    // fails, and turns RED if it ever passes. So fixing #1884 breaks this
-    // test, which is the point — the marker cannot outlive the defect, and
-    // whoever fixes the binding is told to delete the `.fails` rather than
-    // discovering a stale skip years later.
-    //
-    // #1884 is FIXED in the parser (EOF now terminates a line), but this
-    // package depends on the PUBLISHED `@rustledger/wasm`, so the marker
-    // clears on the next release rather than at that merge. When a release
-    // lands and this turns red, delete the `.fails` — that is the signal, not
-    // a regression.
-    it.fails('returns an error response when parsing fails', () => {
+    it('returns an error response when parsing fails', () => {
       const result = handleToolCall('import_review', {
         source: '@@@ not beancount @@@',
       });
@@ -990,9 +942,19 @@ describe('collectLedgerFiles', () => {
     expect(Object.keys(files).sort()).toEqual([
       'main.beancount', 'sub/mid.beancount', 'sub/shared.beancount',
     ]);
-    // 100.00, not 200.00: the shared file contributes once.
+    // The map is unique by construction, so the shared file contributes once
+    // and the balance holds at 100.00 rather than doubling to 200.00. That is
+    // this test's subject and it is unchanged.
+    //
+    // The loader now REPORTS the diamond, matching Python's
+    // `Duplicate filename parsed`, so the result is no longer `valid`. The
+    // sibling test above asserts that report directly; here it only means the
+    // verdict flipped, not that the collection doubled. Checking the message
+    // keeps this test honest about WHY it is invalid: a doubled balance would
+    // show up as a balance-assertion failure instead.
     const result = rustledger.validateMultiFile(files, entry);
-    expect(result.valid).toBe(true);
+    expect(result.valid).toBe(false);
+    expect(JSON.stringify(result)).toContain('Duplicate');
   });
 
   it('collects every file a glob matches', () => {
@@ -1071,18 +1033,7 @@ describe('collectLedgerFiles', () => {
     expect(result.errors[0].message).toContain('gone.beancount');
   });
 
-  // `it.fails` — pinned to the bundled wasm version, NOT a disabled test.
-  // The loader reports `Duplicate filename parsed` for a file reached twice
-  // (see the sibling change in `rustledger-loader`), but the `@rustledger/wasm`
-  // build pinned in package.json predates it, so `validateMultiFile` still
-  // answers `valid: true` here. The assertion is correct; the bundled binding
-  // is stale.
-  //
-  // `it.fails` inverts the verdict: the suite is GREEN while this fails and
-  // turns RED once the wasm is rebuilt — at which point delete the `.fails`.
-  // That is the point: the marker cannot outlive the staleness, and whoever
-  // bumps the dependency is told rather than finding a skip years later.
-  it.fails('reports a file reached twice, once the wasm carries the loader fix', () => {
+  it('reports a file reached twice, once the wasm carries the loader fix', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-dupwasm-'));
     fs.mkdirSync(path.join(dir, 'sub'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'sub/shared.beancount'), '2020-01-01 open Assets:Cash USD\n');

@@ -207,24 +207,52 @@ def check_report(rep: dict) -> list[str]:
         if Decimal(r["units"]) <= 0:
             problems.append(f"non-positive units {r['units']} sold {r['sold']}")
 
-    # Partition. A row that reaches neither bucket vanishes from the totals a
-    # reader actually looks at, while every individual row still checks out.
-    bucketed = sum(
-        len(rep.get(k, [])) for k in ("short_term", "long_term", "unknown_term")
-    )
-    if rows and bucketed == 0:
-        problems.append(f"{len(rows)} disposal(s) but no term buckets at all")
-
-    by_term: dict[str, Decimal] = {}
+    # Partition, checked exactly. A row reaching no bucket vanishes from the
+    # totals a reader actually looks at while every individual row still
+    # checks out, so this compares COUNT and every money column, per term and
+    # per currency, in both directions.
+    #
+    # The buckets are one summary object per CURRENCY carrying a `disposals`
+    # count, not one object per disposal. An earlier version counted
+    # `len(bucket)` and only complained when every bucket was empty, which
+    # made a dropped row, a wrong `disposals` count, or a missing
+    # `unknown_term` entry all invisible.
+    fields = ("disposals", "proceeds", "cost_basis", "gain")
+    expected: dict[tuple[str, str], dict[str, Decimal]] = {}
     for r in rows:
-        by_term[r["term"]] = by_term.get(r["term"], Decimal(0)) + Decimal(r["gain"])
-    for key, term in (("short_term", "short"), ("long_term", "long")):
-        reported = sum(Decimal(b.get("gain", "0")) for b in rep.get(key, []))
-        expected = by_term.get(term, Decimal(0))
-        if reported != expected:
+        acc = expected.setdefault(
+            (r["term"], r["currency"]), dict.fromkeys(fields, Decimal(0))
+        )
+        acc["disposals"] += 1
+        for f in ("proceeds", "cost_basis", "gain"):
+            acc[f] += Decimal(r[f])
+
+    reported: dict[tuple[str, str], dict[str, Decimal]] = {}
+    for key, term in (
+        ("short_term", "short"),
+        ("long_term", "long"),
+        ("unknown_term", "unknown"),
+    ):
+        for b in rep.get(key, []):
+            reported[(term, b["currency"])] = {
+                f: Decimal(str(b.get(f, 0))) for f in fields
+            }
+
+    for k in sorted(set(expected) | set(reported), key=str):
+        exp, got = expected.get(k), reported.get(k)
+        if exp is None:
+            problems.append(f"{k[0]}_term/{k[1]} reported but no disposal rows have it")
+            continue
+        if got is None:
             problems.append(
-                f"{key} total {reported} != sum of its rows {expected}"
+                f"{int(exp['disposals'])} {k[0]}-term {k[1]} disposal(s) reach no bucket"
             )
+            continue
+        for f in fields:
+            if exp[f] != got[f]:
+                problems.append(
+                    f"{k[0]}_term/{k[1]} {f}: bucket={got[f]} rows={exp[f]}"
+                )
     return problems
 
 
@@ -250,12 +278,33 @@ def check_term_rules(rledger: str, path: str) -> list[str]:
                 f"{row['term']}, rule says {want} ({row['acquired']} -> {row['sold']})"
             )
 
-    keyed = {
-        (r["acquired"], r["sold"], r["units"]): r for r in fixed.get("disposals", [])
-    }
+    # Compare the row SETS first. Looking rows up one at a time and skipping
+    # misses treated a dropped row as agreement: if the override lost a
+    # disposal, only the survivors were compared and the run stayed clean.
+    def keyof(r):
+        return (r["acquired"], r["sold"], r["units"], r["currency"], r["account"])
+
+    d_keys = sorted(keyof(r) for r in default.get("disposals", []))
+    f_keys = sorted(keyof(r) for r in fixed.get("disposals", []))
+    if d_keys != f_keys:
+        only_default = [k for k in d_keys if k not in f_keys]
+        only_fixed = [k for k in f_keys if k not in d_keys]
+        if only_default:
+            problems.append(
+                f"--long-term-days 365 dropped {len(only_default)} disposal(s) "
+                f"the default reports, e.g. {only_default[0]}"
+            )
+        if only_fixed:
+            problems.append(
+                f"--long-term-days 365 reports {len(only_fixed)} disposal(s) the "
+                f"default does not, e.g. {only_fixed[0]}"
+            )
+        return problems
+
+    keyed = {keyof(r): r for r in fixed.get("disposals", [])}
     for row in default.get("disposals", []):
-        other = keyed.get((row["acquired"], row["sold"], row["units"]))
-        if other is None or row["term"] == other["term"]:
+        other = keyed[keyof(row)]
+        if row["term"] == other["term"]:
             continue
         acquired = date.fromisoformat(row["acquired"])
         sold = date.fromisoformat(row["sold"])
@@ -288,34 +337,41 @@ def check_year_filter(rledger: str, path: str, rep: dict) -> list[str]:
     return problems
 
 
-def check_one(rledger: str, seed: int, leap_report: bool) -> list[str]:
+def check_one(
+    rledger: str, seed: int, leap_report: bool
+) -> tuple[list[str], list[str]]:
     rng = random.Random(seed)
     source, method = gen_ledger(rng)
     with tempfile.NamedTemporaryFile("w", suffix=".beancount", delete=False) as fh:
         fh.write(source)
         path = fh.name
+    notes: list[str] = []
     try:
         rep = run_capgains(rledger, path, [])
         if rep == ERROR:
             # A ledger rledger refuses is not a capgains finding: booking
             # errors are the booking fuzzer's subject, not this one.
-            return []
+            return [], []
         problems = check_report(rep)
         problems += check_term_rules(rledger, path)
         problems += check_year_filter(rledger, path, rep)
         if leap_report:
+            # Diagnostics, kept OUT of `problems`. These are the deliberately
+            # ambiguous 29 February spans this script declines to assert on;
+            # counting them as failures made the documented inspection mode
+            # exit 1 on ledgers the generator produces on purpose.
             for r in rep.get("disposals", []):
                 a = date.fromisoformat(r["acquired"])
                 if (a.month, a.day) == (2, 29):
-                    problems.append(
-                        f"LEAP (report only): acquired {r['acquired']} sold "
+                    notes.append(
+                        f"seed={seed} LEAP acquired {r['acquired']} sold "
                         f"{r['sold']} held {r['held_days']}d -> {r['term']}"
                     )
     finally:
         Path(path).unlink(missing_ok=True)
     if problems:
-        return [f"seed={seed} method={method}", *problems, source]
-    return []
+        return [f"seed={seed} method={method}", *problems, source], notes
+    return [], notes
 
 
 def self_test(rledger: str) -> int:
@@ -332,23 +388,39 @@ def self_test(rledger: str) -> int:
         base.update(kw)
         return base
 
+    def bucket(**kw):
+        base = {
+            "currency": "USD", "disposals": 1,
+            "proceeds": "90.00", "cost_basis": "60.00", "gain": "30.00",
+        }
+        base.update(kw)
+        return base
+
     good = {
         "disposals": [row()],
         "short_term": [],
-        "long_term": [{"currency": "USD", "gain": "30.00"}],
+        "long_term": [bucket()],
         "unknown_term": [],
     }
     planted = [
         ("clean report", good, 0),
+        # One money column wrong in the row: the arithmetic check fires, and so
+        # does the partition, since the row no longer sums to its bucket.
         ("gain does not match proceeds - basis",
-         {**good, "disposals": [row(gain="31.00")],
-          "long_term": [{"currency": "USD", "gain": "31.00"}]}, 1),
+         {**good, "disposals": [row(gain="31.00")]}, 2),
         ("held_days disagrees with the dates",
          {**good, "disposals": [row(held_days=999)]}, 1),
-        ("bucket total does not match its rows",
-         {**good, "long_term": [{"currency": "USD", "gain": "99.00"}]}, 1),
+        ("bucket gain does not match its rows",
+         {**good, "long_term": [bucket(gain="99.00")]}, 1),
+        ("bucket disposals count is wrong",
+         {**good, "long_term": [bucket(disposals=7)]}, 1),
         ("disposals exist but nothing is bucketed",
-         {**good, "long_term": [], "unknown_term": []}, 2),
+         {**good, "long_term": []}, 1),
+        ("a bucket exists with no rows behind it",
+         {**good, "unknown_term": [bucket(currency="EUR")]}, 1),
+        # The unknown_term bucket was previously unchecked entirely.
+        ("unknown-term rows reach no bucket",
+         {**good, "disposals": [row(term="unknown")], "long_term": []}, 1),
         ("non-positive units", {**good, "disposals": [row(units="0")]}, 1),
     ]
     for name, rep, want in planted:
@@ -443,13 +515,21 @@ def main() -> int:
         else list(range(args.start_seed, args.start_seed + args.runs))
     )
     failures = 0
+    all_notes: list[str] = []
     for seed in seeds:
-        report = check_one(args.rledger, seed, args.leap_report)
+        report, notes = check_one(args.rledger, seed, args.leap_report)
+        all_notes += notes
         if report:
             failures += 1
             print("\n".join(report))
             print("-" * 60)
-    print(f"{len(seeds) - failures}/{len(seeds)} clean")
+    if all_notes:
+        # Printed after the failures and tallied separately, so `--leap-report`
+        # never changes the verdict.
+        print(f"\n{len(all_notes)} leap-day acquisition(s), reported not asserted:")
+        for n in all_notes:
+            print(f"  {n}")
+    print(f"\n{len(seeds) - failures}/{len(seeds)} clean")
     return 1 if failures else 0
 
 

@@ -1234,6 +1234,39 @@ mod tests {
     /// The calendar long-term rule is leap-year correct: a holding from Jan 1 2020
     /// (a leap year) to Jan 1 2021 is 366 days but NOT more than one calendar year,
     /// so it is short-term — where a raw `> 365` day count would wrongly say long.
+    /// A lot ACQUIRED on 29 February has no anniversary in a common year, and
+    /// the rule resolves it to 28 February — so long-term begins 1 March.
+    ///
+    /// This pins a `jiff` behavior, not ours. The module comment states it
+    /// ("jiff anniversaries a Feb-29 acquisition to Feb-28") and the whole
+    /// short/long split for such a lot rests on it, but nothing checked it:
+    /// `long_term_calendar_rule_handles_leap_year` uses a span that CROSSES a
+    /// leap day, which is a different thing from a lot bought ON one. If a
+    /// future jiff resolved the anniversary to 1 March instead, the boundary
+    /// would move a day and every affected disposal would silently change
+    /// term — on a figure that goes to a tax return.
+    ///
+    /// The convention itself is genuinely arguable; this test records which
+    /// one we implement, so changing it has to be deliberate.
+    #[test]
+    fn long_term_rule_resolves_a_leap_day_acquisition_to_feb_28() {
+        let acquired = d(2020, 2, 29);
+        for (sold, want, why) in [
+            (
+                d(2021, 2, 28),
+                false,
+                "365d, the resolved anniversary itself",
+            ),
+            (d(2021, 3, 1), true, "366d, the first day past it"),
+        ] {
+            assert_eq!(
+                is_long_term(acquired, sold, held(acquired, sold), None),
+                want,
+                "2020-02-29 -> {sold}: {why}",
+            );
+        }
+    }
+
     #[test]
     fn long_term_calendar_rule_handles_leap_year() {
         // Exactly one year later — 366 days across the 2020 leap day.

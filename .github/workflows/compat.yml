@@ -882,6 +882,40 @@ jobs:
             echo "failed=1" >> "$GITHUB_OUTPUT"
           fi
 
+      # `report capgains` produces numbers that go on a tax return and has no
+      # Python beancount counterpart to diff against, so it is checked by
+      # PROPERTIES and against itself: gain == proceeds - basis per row, the
+      # term buckets partitioning the disposals exactly, held_days matching
+      # the dates, `--year` filtering to what it says, and the calendar
+      # long-term rule agreeing with an explicit `--long-term-days` count
+      # everywhere a leap day does not legitimately separate them.
+      #
+      # It classifies each closed lot from the SURVIVING lot's acquisition
+      # date, so it consumes whatever booking decided — and booking produced
+      # two real bugs in the last few weeks (#2097, #2115). A wrong term or a
+      # lot attributed to the wrong acquisition still balances and still reports no error.
+      #
+      # Same placement and seeding policy as the fuzzers above.
+      - name: Capital gains fuzz
+        id: capgains_fuzz
+        continue-on-error: true
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            CG_START="${{ github.run_id }}"; CG_RUNS=2000
+          else
+            CG_START=0; CG_RUNS=400
+          fi
+          printf 'start=%s\nruns=%s\n' "$CG_START" "$CG_RUNS" >> "$GITHUB_OUTPUT"
+          if python3 scripts/compat-capgains-fuzz.py --self-test \
+                  --rledger ./target/release/rledger \
+             && python3 scripts/compat-capgains-fuzz.py \
+                  --rledger ./target/release/rledger \
+                  --start-seed "$CG_START" --runs "$CG_RUNS"; then
+            echo "failed=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=1" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate YAML summary
         run: |
           cat > compat-results.yaml << EOF
@@ -1400,6 +1434,12 @@ jobs:
         if: ${{ !cancelled() && steps.booking_fuzz.outputs.failed == '1' }}
         run: |
           echo "::error::Booking fuzz found an unexplained divergence (start-seed=${{ steps.booking_fuzz.outputs.start }}, runs=${{ steps.booking_fuzz.outputs.runs }}). The seed of each is printed in the step log. Reproduce one with: python3 scripts/compat-booking-fuzz.py --rledger ./target/release/rledger --seed <n>"
+          exit 1
+
+      - name: Gate on capital gains fuzz
+        if: ${{ !cancelled() && steps.capgains_fuzz.outputs.failed == '1' }}
+        run: |
+          echo "::error::Capital gains fuzz found a property violation (start-seed=${{ steps.capgains_fuzz.outputs.start }}, runs=${{ steps.capgains_fuzz.outputs.runs }}). The seed of each is printed in the step log. Reproduce one with: python3 scripts/compat-capgains-fuzz.py --rledger ./target/release/rledger --seed <n>"
           exit 1
 
       # Mirrors the BQL step's `--baseline` (which exits non-zero on a BQL

@@ -79,6 +79,13 @@ CASH = "USD"
 # reliably reached. These modes construct the tie instead of hoping for it.
 TIES = ["none", "date", "cost", "both", "label"]
 
+# Prices on a reduction. Annotation-only for balancing -- a posting carrying
+# a cost takes its weight from the COST, so a price that disagrees with the
+# proceeds is still a balanced transaction, verified against both engines.
+# That is what makes this safe to vary: a wrong price produces a divergence,
+# not an unbalanced ledger the comparison would reject for the wrong reason.
+PRICES = ["12.00", "13.00", "14.50"]
+
 
 def pooling_shape(
     days: list[int], costs: list[Decimal], labels: list[str | None]
@@ -111,11 +118,12 @@ def pooling_shape(
     return False
 
 
-def gen_ledger(rng: random.Random) -> tuple[str, str, str, bool]:
+def gen_ledger(rng: random.Random) -> tuple[str, str, str, bool, bool]:
     """A ledger exercising lot selection.
 
-    Returns source, booking method, tie mode, and whether the lots take the
-    shape beancount's pooling reorders (#2118).
+    Returns source, booking method, tie mode, whether the lots take the shape
+    beancount's pooling reorders (#2118), and whether any reduction carried a
+    price annotation.
     """
     method = rng.choice(METHODS)
     tie = rng.choice(TIES)
@@ -189,6 +197,7 @@ def gen_ledger(rng: random.Random) -> tuple[str, str, str, bool]:
     # ambiguous. An explicit cost pins a lot, and under a cost tie it pins TWO,
     # which STRICT is supposed to refuse rather than resolve.
     day = 3
+    priced = False
     for _ in range(rng.randint(1, 3)):
         if held <= 0:
             break
@@ -202,9 +211,21 @@ def gen_ledger(rng: random.Random) -> tuple[str, str, str, bool]:
         else:
             spec = "{}"
         proceeds = qty * Decimal("13.00")
+        # A price on the reduction. Deliberately NOT always the rate the cash
+        # leg implies: cost decides the weight, so a disagreeing price is
+        # legal, and pinning it to the proceeds would only ever exercise the
+        # case where the two agree.
+        price = ""
+        price_roll = rng.random()
+        if price_roll < 0.25:
+            price = f" @ {rng.choice(PRICES)} {CASH}"
+            priced = True
+        elif price_roll < 0.35:
+            price = f" @@ {qty * Decimal(rng.choice(PRICES))} {CASH}"
+            priced = True
         lines += [
             f'2020-02-{day:02d} * "sell"',
-            f"  Assets:Stock  {-qty} {commodity} {spec}",
+            f"  Assets:Stock  {-qty} {commodity} {spec}{price}",
             f"  Assets:Cash   {proceeds} {CASH}",
             "  Income:Gains",
         ]
@@ -216,6 +237,7 @@ def gen_ledger(rng: random.Random) -> tuple[str, str, str, bool]:
         method,
         tie,
         pooling_shape(days, costs, labels),
+        priced,
     )
 
 
@@ -375,7 +397,7 @@ def check_one(rledger: str, python: str, seed: int) -> tuple[str, list[str]]:
     a genuine regression goes unnoticed.
     """
     rng = random.Random(seed)
-    source, method, tie, pooled = gen_ledger(rng)
+    source, method, tie, pooled, priced = gen_ledger(rng)
     with tempfile.NamedTemporaryFile(
         "w", suffix=".beancount", delete=False
     ) as fh:
@@ -393,11 +415,18 @@ def check_one(rledger: str, python: str, seed: int) -> tuple[str, list[str]]:
     # from the divergence itself: a ledger can take the pooling shape and
     # still diverge for an unrelated reason, and waiving that would hide it.
     #
-    # Pooling REDISTRIBUTES units between lot identities. It can never make
-    # one engine reject a ledger the other accepts, and it can never change
-    # how many units an account ends up holding -- only which lots they sit
-    # in. So an acceptance divergence, or one where the per-currency totals
-    # move, is unexplained whatever shape the lots take.
+    # Acceptance divergences are never waived. The first version of this said
+    # pooling "can never" cause one; that was wrong and the fuzzer disproved
+    # it in both directions. Pooling changes which lots SURVIVE a reduction,
+    # so a later reduction naming an explicit cost can find its lot drained
+    # on one engine and present on the other: seed 117 has rledger reject
+    # what beancount books, seed 394 the reverse. They stay unexplained
+    # anyway, on the stronger ground that a ledger one engine refuses to load
+    # is too severe to wave through on a heuristic -- see #2118.
+    #
+    # The units-total guard still rests on a claim that holds: pooling moves
+    # units BETWEEN lot identities of a holding and cannot create or destroy
+    # them.
     rejected = ERROR in (rl, bq)
     verdict = (
         "expected"
@@ -406,7 +435,8 @@ def check_one(rledger: str, python: str, seed: int) -> tuple[str, list[str]]:
     )
     tag = " [expected: #2118 lot pooling]" if verdict == "expected" else ""
     return verdict, [
-        f"seed={seed} method={method} tie={tie}{tag}",
+        f"seed={seed} method={method} tie={tie} "
+        f"price={'yes' if priced else 'no'}{tag}",
         *diffs,
         source,
     ]

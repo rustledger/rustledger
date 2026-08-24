@@ -1826,6 +1826,58 @@ mod reduction_tests {
         );
     }
 
+    /// Two size matches sharing a date resolve by insertion order.
+    ///
+    /// The date comparison cannot separate these, so only the `i` in
+    /// `min_by_key`'s key decides — and the comment above it promises a
+    /// deterministic result. Nothing pinned that: reversing the slot tiebreak
+    /// to `Reverse(i)` leaves all 485 core tests passing.
+    ///
+    /// Determinism here is not decoration. `report capgains` splits short from
+    /// long on the surviving lot's acquisition date, and per-lot IRR keys
+    /// eligibility off it, so a reduction that picks arbitrarily between two
+    /// same-date lots moves tax figures between runs.
+    #[test]
+    fn strict_with_size_breaks_a_date_tie_by_insertion_order() {
+        // Same date, same size, different costs — so the choice is visible in
+        // the basis and nothing but the tiebreak can make it.
+        let inv = mk([lot(10, 100, 7), lot(10, 200, 7)]);
+        let r = try_reduce(&inv, &sell_stk(10), BookingMethod::StrictWithSize);
+        assert_eq!(
+            basis(&r),
+            dec!(1000),
+            "must take the FIRST of two same-date size matches (cost 100)",
+        );
+    }
+
+    /// A date-less size match loses to a dated one.
+    ///
+    /// `map_or((1, NaiveDate::MAX), ..)` sorts `None` last, on the reasoning
+    /// that a booked lot always carries a date and an unbooked one is not what
+    /// the user meant. That is a real decision — `None` sorts BEFORE `Some`
+    /// naturally, so the encoding exists precisely to override it — and it was
+    /// unpinned: flipping it to sort `None` first leaves the whole core suite
+    /// green.
+    #[test]
+    fn strict_with_size_prefers_a_dated_lot_over_a_date_less_one() {
+        let mut inv = Inventory::new();
+        // Date-less FIRST, so insertion order alone would pick it and cannot
+        // be what produces the expected answer.
+        inv.add(Position::with_cost(
+            Amount::new(d(10), "STK"),
+            Cost::new(d(100), "USD"),
+        ))
+        .expect("fixture fits in Decimal");
+        inv.add(lot(10, 200, 9)).expect("fixture fits in Decimal");
+
+        let r = try_reduce(&inv, &sell_stk(10), BookingMethod::StrictWithSize);
+        assert_eq!(
+            basis(&r),
+            dec!(2000),
+            "must take the DATED size match (cost 200), not the date-less one",
+        );
+    }
+
     #[test]
     fn strict_with_size_ambiguous_without_exact_or_total() {
         let inv = mk([lot(10, 100, 1), lot(10, 200, 2)]);

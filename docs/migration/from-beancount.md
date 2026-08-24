@@ -98,8 +98,23 @@ See [Plugins Reference](../reference/plugins.md) for full list.
    a date, not a time, so A and C are genuinely the same lot under its model
    and pooling is the only thing its inventory can represent.
 
+   It can also make a ledger **fail to load**, in either direction, not just
+   report different figures. Pooling changes which lots survive a reduction,
+   so a later reduction naming an explicit cost may find its lot already
+   drained on one engine and still present on the other:
+
+   ```
+   error[BOOK]: Not enough units in Assets:Stock: requested 14, available 6;
+   not enough to reduce (2020-02-04, "sell")
+   ```
+
+   Nothing in that message points at same-day repeated lots, so it is worth
+   knowing about before you meet it. The reverse happens too — a ledger
+   rustledger accepts can be one Python rejects.
+
    If you reconcile figures against Python and see a difference on a holding
-   you bought more than once in a day, this is the likely cause. Give the
+   you bought more than once in a day, or a reduction fails on a lot you
+   believe you still hold, this is the likely cause. Give the
    repeated purchases distinct labels (`{10.00 USD, "morning"}`) to make
    them separate lots in both engines. Tracked in
    [#2118](https://github.com/rustledger/rustledger/issues/2118).

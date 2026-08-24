@@ -93,7 +93,7 @@ jobs:
           restore-keys: |
             aur-cargo-
       - name: Set up Docker
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       # For release PRs, we need to create a test tarball since the version
       # won't be published to GitHub yet
       - name: Get version from Cargo.toml

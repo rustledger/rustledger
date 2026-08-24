@@ -1850,18 +1850,19 @@ mod reduction_tests {
         );
     }
 
-    /// A date-less size match loses to a dated one.
+    /// An undated size match loses to a dated one.
     ///
     /// `map_or((1, NaiveDate::MAX), ..)` sorts `None` last, on the reasoning
     /// that a booked lot always carries a date and an unbooked one is not what
     /// the user meant. That is a real decision — `None` sorts BEFORE `Some`
     /// naturally, so the encoding exists precisely to override it — and it was
     /// unpinned: flipping it to sort `None` first leaves the whole core suite
-    /// green.
+    /// green, along with `rustledger`, `rustledger-validate` and
+    /// `rustledger-query`.
     #[test]
-    fn strict_with_size_prefers_a_dated_lot_over_a_date_less_one() {
+    fn strict_with_size_prefers_a_dated_lot_over_an_undated_lot() {
         let mut inv = Inventory::new();
-        // Date-less FIRST, so insertion order alone would pick it and cannot
+        // Undated FIRST, so insertion order alone would pick it and cannot
         // be what produces the expected answer.
         inv.add(Position::with_cost(
             Amount::new(d(10), "STK"),
@@ -1874,7 +1875,7 @@ mod reduction_tests {
         assert_eq!(
             basis(&r),
             dec!(2000),
-            "must take the DATED size match (cost 200), not the date-less one",
+            "must take the DATED size match (cost 200), not the undated one",
         );
     }
 

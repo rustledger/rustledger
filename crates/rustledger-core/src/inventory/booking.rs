@@ -1664,31 +1664,32 @@ mod reduction_tests {
     /// consumed.
     ///
     /// Two lots agreeing on commodity, cost, cost currency, date and label are
-    /// interchangeable: no recorded attribute separates them. Consuming them
-    /// from the position of the earliest makes the outcome independent of the
-    /// order they happen to be written in, which is what stops a cost basis
-    /// depending on an editing accident (#2118).
+    /// interchangeable: no recorded attribute separates them, so `add` stores
+    /// them as ONE position. That is what makes the outcome independent of the
+    /// order they happen to be written in, and it is why a cost basis no
+    /// longer depends on an editing accident (#2118).
     ///
     /// Before this rule, `A B C` and `A C B` disagreed by 50 USD of remaining
     /// basis on exactly these fixtures.
     ///
     /// Both code paths are exercised deliberately. `try_reduce` on a fresh
     /// inventory sorts a scanned list; a reduction after the index exists
-    /// places later acquisitions through `ordered_index_insert`. An earlier
-    /// version covered only the scan, and disabling the canonical lookup on
-    /// the insert path failed nothing.
+    /// places later acquisitions through `ordered_index_insert`.
     #[test]
     fn interchangeable_lots_consume_independently_of_write_order() {
         let a = || lot(10, 10, 2);
         let b = || lot(10, 20, 2);
         let c = || lot(10, 10, 2);
 
-        let consumed = |lots: [Position; 3]| -> Vec<Decimal> {
+        // A and C merge, so any ledger writing B after the first acquisition
+        // holds the same two positions and consumes identically.
+        let consumed = |lots: [Position; 3]| -> Vec<(Decimal, Decimal)> {
             let inv = mk(lots);
+            assert_eq!(inv.len(), 2, "A and C are interchangeable: one position");
             try_reduce(&inv, &sell_stk(15), BookingMethod::Fifo)
                 .matched
                 .iter()
-                .map(|m| m.cost.as_ref().unwrap().number)
+                .map(|m| (m.cost.as_ref().unwrap().number, m.units.number.abs()))
                 .collect()
         };
 
@@ -1700,14 +1701,10 @@ mod reduction_tests {
         ];
         for (name, got) in &after_first {
             assert_eq!(
-                got.iter().sum::<Decimal>(),
-                dec!(20),
-                "{name}: both takes should come from the 10.00 lots, got {got:?}",
+                got,
+                &vec![(dec!(10), dec!(15))],
+                "{name}: 15 units all come from the merged 10.00 position",
             );
-        }
-        let first = &after_first[0].1;
-        for (name, got) in &after_first[1..] {
-            assert_eq!(got, first, "{name} must match A B C: {got:?} vs {first:?}");
         }
 
         // The same property through the MAINTAINED INDEX rather than the scan.
@@ -1728,15 +1725,18 @@ mod reduction_tests {
         assert_eq!(
             via_index([a(), b(), c()]),
             via_index([a(), c(), b()]),
-            "the maintained index must order interchangeable lots the same way \
-             the scan does",
+            "the maintained index must order merged lots the same way the scan does",
         );
 
-        // B written first IS distinguishable, and legitimately differs.
-        for (name, got) in [
-            ("B A C", consumed([b(), a(), c()])),
-            ("B C A", consumed([b(), c(), a()])),
-        ] {
+        // B written FIRST is distinguishable and legitimately differs: it is
+        // not interchangeable with either of the others.
+        for (name, lots) in [("B A C", [b(), a(), c()]), ("B C A", [b(), c(), a()])] {
+            let inv = mk(lots);
+            let got: Vec<Decimal> = try_reduce(&inv, &sell_stk(15), BookingMethod::Fifo)
+                .matched
+                .iter()
+                .map(|m| m.cost.as_ref().unwrap().number)
+                .collect();
             assert_eq!(
                 got,
                 vec![dec!(20), dec!(10)],

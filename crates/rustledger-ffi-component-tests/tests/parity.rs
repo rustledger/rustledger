@@ -18,7 +18,7 @@
 use anyhow::Result;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 wasmtime::component::bindgen!({
     world: "rustledger",
@@ -92,7 +92,7 @@ fn instantiate_in(host_dir: &std::path::Path) -> Result<(Store<Host>, Rustledger
         |h| h,
     )?;
     let wasi = WasiCtxBuilder::new()
-        .preopened_dir(host_dir, "/work", DirPerms::READ, FilePerms::READ)?
+        .preopened_dir(host_dir, "/work", FsPerms::ReadOnly)?
         .build();
     let mut store = Store::new(
         &engine,

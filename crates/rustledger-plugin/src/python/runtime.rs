@@ -12,7 +12,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use wasmtime::{Config, Engine, Linker, Module, Store};
 use wasmtime_wasi::p1;
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
+use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
 
 /// Per-instance linear-memory cap for the Python plugin runtime.
 ///
@@ -297,12 +297,12 @@ with open('/work/output.json', 'w') as f:
         // Map the python-wasi directory as "/" (root) so Python can find /lib
         // This is critical - Python needs absolute paths for PYTHONHOME/PYTHONPATH
         wasi_builder
-            .preopened_dir(python_root, "/", DirPerms::READ, FilePerms::READ)
+            .preopened_dir(python_root, "/", FsPerms::ReadOnly)
             .map_err(PythonError::Wasm)?;
 
         // Set up work directory for script and output (read-write)
         wasi_builder
-            .preopened_dir(work_dir.path(), "/work", DirPerms::all(), FilePerms::all())
+            .preopened_dir(work_dir.path(), "/work", FsPerms::ReadWrite)
             .map_err(PythonError::Wasm)?;
 
         // Set environment for Python - use absolute paths from guest perspective

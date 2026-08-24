@@ -10,6 +10,7 @@ use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use std::cmp::Reverse;
 use std::fmt;
 use std::str::FromStr;
 
@@ -1026,10 +1027,27 @@ pub struct Inventory {
 /// being kept in step with the first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LotOrder {
-    /// Oldest lot first. FIFO walks it forward, LIFO backward.
+    /// Oldest lot first, which is what FIFO takes.
     Date,
+    /// Newest lot first, which is what LIFO takes.
+    DateDescending,
     /// Most expensive lot first, which is what HIFO takes.
     CostDescending,
+}
+
+/// The sort key `order_key` produces for a slot.
+///
+/// One `LotOrder` drives a whole sort, so keys of different variants are never
+/// compared with each other; the derived `Ord` comparing discriminants first
+/// is therefore unreachable, not load-bearing.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum OrderKey {
+    /// Oldest first. `None` sorts before `Some`, so date-less lots lead.
+    Date(Option<crate::NaiveDate>),
+    /// Newest first, date-less lots last.
+    DateDescending(Reverse<Option<crate::NaiveDate>>),
+    /// Most expensive first.
+    CostDescending(Decimal),
 }
 
 /// Lots per units-currency, in the order some booking method consumes them.
@@ -1892,26 +1910,37 @@ impl Inventory {
     /// `plan_ordered` produced when it sorted per call: date ascending, slot
     /// ascending within a date.
     /// The value `order` sorts `slot` by. Ties fall through to the slot
-    /// number, which is what makes both orderings match the stable sorts they
+    /// number, which is what makes every ordering match the stable sorts they
     /// replace: `sort_by_key(date)` and `sort_by_key(Reverse(cost))` both left
     /// equal keys in ascending slot order.
-    fn order_key(
-        &self,
-        order: LotOrder,
-        slot: usize,
-    ) -> (Option<Decimal>, Option<crate::NaiveDate>) {
+    ///
+    /// That ascending tiebreak is the same for ALL THREE orderings, including
+    /// the descending ones. A descending method reverses its KEY here; nothing
+    /// reverses the walk, because doing so reverses the tiebreak with it
+    /// (#2115).
+    fn order_key(&self, order: LotOrder, slot: usize) -> OrderKey {
         let cost = self.positions.get(slot).and_then(|p| p.cost.as_ref());
         match order {
-            LotOrder::Date => (None, cost.and_then(|c| c.date)),
-            // Negated rather than reversed so the tuple still sorts ascending
-            // and the slot tiebreak keeps its direction.
+            LotOrder::Date => OrderKey::Date(cost.and_then(|c| c.date)),
+            // Reversed KEY, never a reversed WALK. Reversing the walk reverses
+            // the slot tiebreak along with it, which is how LIFO came to take
+            // the LAST of two same-date lots while FIFO and HIFO take the
+            // first (#2115). `Reverse` keeps the tiebreak ascending like its
+            // siblings, and it sorts `None` LAST — exactly where the reversed
+            // walk used to leave date-less lots, so only the tie moves.
+            LotOrder::DateDescending => {
+                OrderKey::DateDescending(Reverse(cost.and_then(|c| c.date)))
+            }
+            // Negated rather than reversed, for the same reason.
             //
             // A cost-less lot counts as zero rather than as `None`. `None`
             // sorts BEFORE `Some`, which would put cost-less lots at the front
             // of a highest-cost-first walk — the opposite of where the
             // `map_or(Decimal::ZERO, ..)` this replaces put them. An empty cost
             // spec matches a cost-less position, so HIFO can reach one.
-            LotOrder::CostDescending => (Some(-cost.map_or(Decimal::ZERO, |c| c.number)), None),
+            LotOrder::CostDescending => {
+                OrderKey::CostDescending(-cost.map_or(Decimal::ZERO, |c| c.number))
+            }
         }
     }
 
@@ -2097,7 +2126,8 @@ impl Inventory {
         // resolves through `cost_index` instead and never reaches the walk, so
         // it builds nothing.
         let wanted_order = match method {
-            BookingMethod::Fifo | BookingMethod::Lifo => Some(LotOrder::Date),
+            BookingMethod::Fifo => Some(LotOrder::Date),
+            BookingMethod::Lifo => Some(LotOrder::DateDescending),
             BookingMethod::Hifo => Some(LotOrder::CostDescending),
             _ => None,
         };
@@ -3261,14 +3291,32 @@ mod tests {
         inv.add(Position::with_cost(Amount::new(dec!(10), "AAPL"), cost3))
             .expect("fixture fits in Decimal");
 
-        // HIFO with tied costs should reduce in some deterministic order
+        // Tied on cost, so only the tiebreak can decide: insertion order,
+        // oldest slot first.
         let result = inv
             .reduce(&Amount::new(dec!(-15), "AAPL"), None, BookingMethod::Hifo)
             .unwrap();
 
         assert_eq!(inv.units("AAPL"), dec!(15));
-        // All at same cost, so 15 * 100 = 1500
+        // All at same cost, so 15 * 100 = 1500. This says nothing about WHICH
+        // lots were taken — every lot here has the same cost, so units and
+        // basis are identical under any tiebreak. Kept as a sanity check, but
+        // the assertions that give this test its name are the ones below: with
+        // only these two, it passed with the tiebreak reversed at every sort
+        // site (#2115).
         assert_eq!(result.cost_basis.unwrap().number, dec!(1500.00));
+
+        // 10 from the first lot, then 5 from the second — by lot DATE, which
+        // is the only thing distinguishing them.
+        assert_eq!(
+            result
+                .matched
+                .iter()
+                .map(|p| (p.cost.as_ref().unwrap().date.unwrap(), p.units.number.abs()))
+                .collect::<Vec<_>>(),
+            vec![(date(2024, 1, 1), dec!(10)), (date(2024, 2, 1), dec!(5))],
+            "HIFO must break a cost tie by insertion order, oldest slot first",
+        );
     }
 
     #[test]

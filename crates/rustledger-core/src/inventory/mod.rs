@@ -1933,14 +1933,11 @@ impl Inventory {
         // — the obvious way around the borrow — makes every `add` walk the
         // whole currency, which is the quadratic this index exists to remove.
         let entry = index.by_currency.entry(currency.clone()).or_default();
-        let at = entry.partition_point(|&existing| {
-            (self.order_key(order, existing), existing) < key
-        });
+        let at =
+            entry.partition_point(|&existing| (self.order_key(order, existing), existing) < key);
         entry.insert(at, slot);
         self.ordered_index = Some(index);
     }
-
-
 
     /// The value `order` sorts `slot` by.
     ///

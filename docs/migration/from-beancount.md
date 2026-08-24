@@ -55,6 +55,49 @@ See [Plugins Reference](../reference/plugins.md) for full list.
 
 1. **Plugin loading**: Python plugins require WASM compilation.
 
+1. **Repeated same-day lots**: buying the same holding twice on one day at
+   the same cost can produce a different cost basis and different realized
+   gains than Python beancount. Python's inventory is keyed by
+   `(currency, cost)`, so two acquisitions sharing a cost, date and label
+   collapse into a single position; rustledger keeps one lot per
+   acquisition. When a third lot at a different cost was acquired between
+   them, the two engines then consume in different orders.
+
+   ```beancount
+   2020-01-02 * "buy A"
+     Assets:Stock  10 ACME {10.00 USD}
+     Assets:Cash  -100.00 USD
+
+   2020-01-02 * "buy B"
+     Assets:Stock  10 ACME {20.00 USD}
+     Assets:Cash  -200.00 USD
+
+   2020-01-02 * "buy C"          ; same cost and date as A
+     Assets:Stock  10 ACME {10.00 USD}
+     Assets:Cash  -100.00 USD
+
+   2020-03-01 * "sell 15"
+     Assets:Stock  -15 ACME {}
+     Assets:Cash   300.00 USD
+     Income:Gains
+   ```
+
+   Under FIFO, rustledger consumes A then B, leaving `10 @10.00` and
+   `5 @20.00`. Python pools A and C into one `20 @10.00` position and drains
+   it, consuming A then **C** and leaving `5 @10.00` and `10 @20.00` — B
+   untouched despite being acquired before C.
+
+   rustledger's answer respects acquisition order, which is why it is not
+   being changed to match. Python is not being careless: `Cost` carries only
+   a date, not a time, so A and C are genuinely the same lot under its model
+   and pooling is the only thing its inventory can represent.
+
+   If you reconcile figures against Python and see a difference on a holding
+   you bought more than once in a day, this is the likely cause. Give the
+   repeated purchases distinct labels (`{10.00 USD, "morning"}`) to make
+   them separate lots in both engines. Tracked in
+   [#2118](https://github.com/rustledger/rustledger/issues/2118).
+
 ## Migration Steps
 
 ### 1. Install rustledger

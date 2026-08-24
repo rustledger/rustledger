@@ -31,10 +31,16 @@ pub(super) fn report_journal<W: Write>(
 
     entries.sort_by_key(|t| t.date);
 
-    let entries_to_show = if let Some(n) = limit {
-        entries.into_iter().rev().take(n).collect::<Vec<_>>()
-    } else {
-        entries
+    // Take the last N without reversing them. `--limit` means "the most
+    // recent N", but reaching them with `.rev().take(n)` left the ROWS
+    // reversed too, so adding a limit silently flipped the report from
+    // oldest-first to newest-first (#2122). `sort_by_key` is stable, so the
+    // same reversal also undid the file order of same-date transactions —
+    // the order booking itself uses (#2093), which makes it more than
+    // cosmetic. `tail` does not print its lines backwards either.
+    let entries_to_show = match limit {
+        Some(n) => entries.split_off(entries.len().saturating_sub(n)),
+        None => entries,
     };
 
     match format {

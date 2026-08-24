@@ -1907,3 +1907,70 @@ fn test_format_check_flags_invalid_utf8() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// `--limit N` selects the most recent N and leaves them in the SAME order
+/// the unlimited report uses.
+///
+/// The limit was reached with `.rev().take(n)`, which left the rows reversed
+/// too: the unlimited journal read oldest-first and adding a limit silently
+/// flipped it newest-first (#2122). Because `sort_by_key` is stable, the same
+/// reversal also undid the file order of same-date transactions — the order
+/// booking itself uses (#2093), so it was not only cosmetic.
+///
+/// Asserts the property rather than a fixed transcript: the limited rows must
+/// be the tail of the unlimited rows, unchanged. A test pinning literal
+/// output would pass just as happily on a reversed list with the expectation
+/// written backwards.
+#[test]
+fn test_journal_limit_preserves_report_order() {
+    let rledger = require_rledger!();
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    std::fs::write(
+        tmp.path(),
+        "2020-01-01 open Assets:Cash   USD\n\
+         2020-01-01 open Expenses:Food USD\n\
+         2020-01-02 * \"first\"\n  Expenses:Food   1.00 USD\n  Assets:Cash\n\
+         2020-01-03 * \"second\"\n  Expenses:Food   2.00 USD\n  Assets:Cash\n\
+         2020-01-05 * \"same-day A\"\n  Expenses:Food   3.00 USD\n  Assets:Cash\n\
+         2020-01-05 * \"same-day B\"\n  Expenses:Food   4.00 USD\n  Assets:Cash\n",
+    )
+    .expect("write");
+
+    let narrations = |args: &[&str]| -> Vec<String> {
+        let output = Command::new(&rledger)
+            .arg("report")
+            .arg(tmp.path())
+            .arg("journal")
+            .args(args)
+            .output()
+            .expect("Failed to run rledger report journal");
+        assert!(
+            output.status.success(),
+            "journal failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        ["first", "second", "same-day A", "same-day B"]
+            .iter()
+            .filter_map(|n| stdout.find(n).map(|at| (at, (*n).to_string())))
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into_values()
+            .collect()
+    };
+
+    let all = narrations(&[]);
+    assert_eq!(
+        all,
+        vec!["first", "second", "same-day A", "same-day B"],
+        "unlimited journal should read oldest-first, same-date in file order",
+    );
+
+    for n in 1..=all.len() {
+        let limited = narrations(&["--limit", &n.to_string()]);
+        assert_eq!(
+            limited,
+            all[all.len() - n..],
+            "--limit {n} must be the tail of the unlimited report, in the same order",
+        );
+    }
+}

@@ -219,7 +219,8 @@ def gen_ledger(rng: random.Random) -> tuple[str, str, str, bool]:
 
 
 # A booked result is either an error or lot identity -> units.
-Booked = dict[tuple[str, str, str, str, str], Decimal]
+# Key: account, currency, per-unit cost, cost currency, cost date, label.
+Booked = dict[tuple[str, str, str, str, str, str], Decimal]
 ERROR = "ERROR"
 
 
@@ -331,6 +332,35 @@ def compare(rl: Booked | str, bq: Booked | str) -> list[str]:
     return diffs
 
 
+def same_totals(rl: Booked | str, bq: Booked | str) -> bool:
+    """True when both engines hold the same units per LOT-BEARING holding.
+
+    Pooling moves units BETWEEN lot identities of one account; it cannot
+    create or destroy them. So matching totals is a necessary condition for
+    #2118 to be the explanation, and a mismatch means something else is
+    wrong no matter how the lots are shaped.
+
+    Cost-less positions are excluded, and that is not a loophole: consuming a
+    different lot changes the COST BASIS, so the cash and income legs
+    legitimately differ under this divergence -- that difference is the whole
+    reason #2118 matters. Including them rejected all five known cases.
+    Restricting to lots keeps the guard on the only quantity pooling must
+    leave alone, the units held per commodity.
+    """
+    if isinstance(rl, str) or isinstance(bq, str):
+        return False
+
+    def totals(b: Booked) -> dict[tuple[str, str], Decimal]:
+        out: dict[tuple[str, str], Decimal] = {}
+        for (account, currency, cost, *_), units in b.items():
+            if not cost:
+                continue
+            out[(account, currency)] = out.get((account, currency), Decimal(0)) + units
+        return out
+
+    return totals(rl) == totals(bq)
+
+
 def check_one(rledger: str, python: str, seed: int) -> tuple[str, list[str]]:
     """Run one generated ledger through both engines.
 
@@ -358,11 +388,21 @@ def check_one(rledger: str, python: str, seed: int) -> tuple[str, list[str]]:
         Path(path).unlink(missing_ok=True)
     if not diffs:
         return "agree", []
-    # Pooling redistributes units across lots. It can never make one engine
-    # REJECT a ledger the other accepts, so an acceptance divergence is
-    # always unexplained no matter what shape the lots take.
+    # Two guards, because the shape is computed from the GENERATOR and not
+    # from the divergence itself: a ledger can take the pooling shape and
+    # still diverge for an unrelated reason, and waiving that would hide it.
+    #
+    # Pooling REDISTRIBUTES units between lot identities. It can never make
+    # one engine reject a ledger the other accepts, and it can never change
+    # how many units an account ends up holding -- only which lots they sit
+    # in. So an acceptance divergence, or one where the per-currency totals
+    # move, is unexplained whatever shape the lots take.
     rejected = ERROR in (rl, bq)
-    verdict = "expected" if (pooled and not rejected) else "real"
+    verdict = (
+        "expected"
+        if pooled and not rejected and same_totals(rl, bq)
+        else "real"
+    )
     tag = " [expected: #2118 lot pooling]" if verdict == "expected" else ""
     return verdict, [
         f"seed={seed} method={method} tie={tie}{tag}",
@@ -420,6 +460,32 @@ def self_test(rledger: str, python: str) -> int:
         got = pooling_shape(days, costs, labels)
         if got != want:
             print(f"FAIL self-test 'pooling_shape: {name}': {got}, want {want}")
+            ok = False
+
+    # The totals guard is the other half of the waiver, so it needs its own
+    # evidence that it can refuse.
+    k_a = ("Assets:Stock", "HOOL", "10", "USD", "2020-01-02", "")
+    k_b = ("Assets:Stock", "HOOL", "11", "USD", "2020-01-02", "")
+    k_cash = ("Income:Gains", "USD", "", "", "", "")
+    totals_cases = [
+        ("units moved between lots, same total", {k_a: Decimal(3), k_b: Decimal(7)},
+         {k_a: Decimal(7), k_b: Decimal(3)}, True),
+        ("a unit went missing", {k_a: Decimal(3), k_b: Decimal(7)},
+         {k_a: Decimal(3), k_b: Decimal(6)}, False),
+        ("one side rejected", ERROR, {k_a: Decimal(3)}, False),
+        # The income leg legitimately differs under #2118, so it must not
+        # decide the verdict -- while the lots themselves still must match.
+        ("cost-less leg differs, lots agree",
+         {k_a: Decimal(3), k_cash: Decimal("-21.50")},
+         {k_a: Decimal(3), k_cash: Decimal("-39.00")}, True),
+        ("cost-less leg agrees, lots do not",
+         {k_a: Decimal(3), k_cash: Decimal("-21.50")},
+         {k_a: Decimal(4), k_cash: Decimal("-21.50")}, False),
+    ]
+    for name, rl, bq, want in totals_cases:
+        got = same_totals(rl, bq)
+        if got != want:
+            print(f"FAIL self-test 'same_totals: {name}': {got}, want {want}")
             ok = False
 
     print("self-test passed" if ok else "self-test FAILED")

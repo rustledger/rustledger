@@ -299,6 +299,19 @@ def check_one(rledger: str, seed: int) -> tuple[str, list[str]]:
         Path(path).unlink(missing_ok=True)
 
 
+def _flows_for_seed(rledger: str, seed: int):
+    """beangrow's flows for one generated seed, or None. Used by the self-test."""
+    import random as _random
+    src = gen_ledger(_random.Random(seed))
+    with tempfile.NamedTemporaryFile("w", suffix=".beancount", delete=False) as fh:
+        fh.write(src)
+        path = fh.name
+    try:
+        return beangrow_flows(path)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
 def self_test(rledger: str) -> int:
     """Prove each check can FAIL, not merely that it passes."""
     ok = True
@@ -345,6 +358,27 @@ def self_test(rledger: str) -> int:
     #    than silently returning a bracket endpoint.
     if bisect_irr([(d(2020, 1, 1), -10.0), (d(2021, 1, 1), -20.0)]) is not None:
         fail("referee invented a root for all-negative flows")
+
+    # 4b. SEVERAL sign changes mean several real roots, and the referee must
+    #     decline rather than pick one: adjudicating toward a root rledger
+    #     never claimed would be worse than giving no verdict. Outflow, larger
+    #     inflow, larger outflow is the classic shape.
+    two_roots = [(END - datetime.timedelta(days=730), -1.0),
+                 (END - datetime.timedelta(days=365), 5.0),
+                 (END, -6.0)]
+    if bisect_irr(two_roots) is not None:
+        fail("referee ruled on a series with multiple roots instead of declining")
+
+    # 4c. And the decline must stay RARE. `None` means "no verdict", so a
+    #     guard that fires often would silently switch the solver check off,
+    #     which is the failure it was added to prevent. Measured at 0/300
+    #     generated seeds when written.
+    declined = sum(
+        1 for seed in range(30)
+        if (fl := _flows_for_seed(rledger, seed)) and bisect_irr(fl) is None
+    )
+    if declined > 3:
+        fail(f"referee declined on {declined}/30 seeds; the solver check is mostly off")
 
     # 5. The EXTRACTION and SOLVER verdicts must be reachable. Running only a
     #    clean seed proves the harness can say "agree" and nothing else:

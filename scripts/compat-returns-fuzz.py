@@ -24,10 +24,19 @@ divergence names which engine that referee agrees with.
 
 Three verdicts, deliberately separate:
 
-  EXTRACTION  the two engines disagree about the flows themselves. rledger's
-              invested / distributions / current_value are compared against
-              beangrow's flow list, so this is visible even when the rates
-              happen to agree.
+  EXTRACTION  the two engines disagree about the flows. rledger's
+              invested / distributions / current_value and its flow COUNT are
+              compared against the same quantities derived from beangrow's
+              dated flow list, so this is visible even when the rates agree.
+
+              This is deliberately weaker than a flow-by-flow comparison, and
+              the limit is worth stating: `report returns --format json`
+              exposes aggregates and a count, not the dated flows, so a change
+              that preserves all three sums AND the count while moving a flow
+              to a different DATE is invisible here. The rate check catches
+              most such changes, since moving a flow changes the discounting,
+              but not all of them. Closing the gap needs a diagnostic flow
+              dump from rledger; see the note in the PR.
   SOLVER      the flows agree but the rates do not. The referee says who is
               right, so this never rests on beangrow being correct.
   AGREE       everything matches within tolerance.
@@ -195,12 +204,42 @@ def bisect_irr(flows: list[tuple[datetime.date, float]]) -> float | None:
     def npv(r: float) -> float:
         return sum(a * (1.0 + r) ** ((END - d).days / 365) for d, a in flows)
 
-    lo, hi = -0.9999, 100.0
-    if npv(lo) * npv(hi) > 0:
+    # Grow the upper bracket rather than treating an out-of-range root as
+    # agreement. A 20-day sale from 10.00 to 16.50 annualizes to roughly
+    # 930,000%, far past any fixed bound, and returning None there made the
+    # solver check silently skip exactly the cases most likely to break a
+    # Newton solver.
+    lo, hi = -0.9999, 1.0
+    for _ in range(80):
+        if npv(lo) * npv(hi) <= 0:
+            break
+        hi *= 4.0
+    else:
         return None
+    # Bisection needs the sign to change exactly once across the bracket. A
+    # series with several sign changes can have several real roots, and
+    # picking one arbitrarily would let the referee "adjudicate" toward a root
+    # rledger never claimed. Rather than guess, scan for how many sign changes
+    # the bracket contains and decline when it is not exactly one: the caller
+    # treats `None` as "no verdict", which is honest, where a confident wrong
+    # answer would not be.
+    lo_sign = npv(lo) > 0
+    changes, prev, prev_sign = 0, lo, lo_sign
+    steps = 512
+    for i in range(1, steps + 1):
+        x = lo + (hi - lo) * i / steps
+        sign = npv(x) > 0
+        if sign != prev_sign:
+            changes += 1
+            prev, prev_sign = x, sign
+            if changes > 1:
+                return None
+    if changes != 1:
+        return None
+
     for _ in range(400):
         mid = (lo + hi) / 2
-        if npv(mid) > 0:
+        if (npv(mid) > 0) == lo_sign:
             lo = mid
         else:
             hi = mid
@@ -225,6 +264,10 @@ def check_one(rledger: str, seed: int) -> tuple[str, list[str]]:
         distributions = sum(a for d, a in flows if a > 0 and d != END)
         terminal = sum(a for d, a in flows if a > 0 and d == END)
         problems = []
+        if rl["cash_flows"] != len(flows):
+            problems.append(
+                f"  flow count: rledger={rl['cash_flows']} beangrow={len(flows)}"
+            )
         for name, ours, theirs in (
             ("invested", Decimal(rl["invested"]), invested),
             ("distributions", Decimal(rl["distributions"]), distributions),
@@ -234,18 +277,21 @@ def check_one(rledger: str, seed: int) -> tuple[str, list[str]]:
                 problems.append(f"  {name}: rledger={ours} beangrow={theirs:.2f}")
         if problems:
             return "extraction", [
-                f"seed={seed} EXTRACTION differs", *problems,
-                f"  flows: rledger={rl['cash_flows']} beangrow={len(flows)}", source,
+                f"seed={seed} EXTRACTION differs", *problems, source,
             ]
 
         ref = bisect_irr(flows)
         ours_rate = rl["money_weighted_return_pct"]
         if ref is not None and abs(ours_rate - ref * 100) > TOLERANCE:
-            closer = "rledger" if abs(ours_rate - ref * 100) < TOLERANCE else "referee"
+            # No "closer" label: reaching here means rledger already differs
+            # from the referee by more than tolerance, so a ternary comparing
+            # the same two numbers again can only ever say "referee". An
+            # earlier version printed exactly that and read as though it had
+            # adjudicated between two engines when it had not.
             return "solver", [
                 f"seed={seed} SOLVER differs",
-                f"  rledger={ours_rate:.4f}% independent-referee={ref * 100:.4f}%"
-                f" -> closer: {closer}",
+                f"  rledger={ours_rate:.4f}%  independent-referee={ref * 100:.4f}%"
+                f"  (delta {ours_rate - ref * 100:+.4f}pp)",
                 source,
             ]
         return "agree", []
@@ -258,33 +304,93 @@ def self_test(rledger: str) -> int:
     ok = True
     d = datetime.date
 
-    # The referee must find a rate this script can verify by hand: buy 72,
-    # sell 99, 165 days -> (99/72) ** (365/165) - 1.
-    flows = [(d(2020, 5, 20), -72.0), (d(2020, 11, 1), 99.0)]
+    def fail(msg: str) -> None:
+        nonlocal ok
+        print(f"FAIL self-test: {msg}")
+        ok = False
+
+    # 1. The referee must find the rate this script can verify by hand.
+    #    Buy 72 and sell 99 with the sale ON the end date: the discount
+    #    exponent is then 0 for the proceeds and 165/365 for the outlay, so
+    #    the root is (99/72) ** (365/165) - 1 exactly.
+    #
+    #    An earlier version computed this expected value and never compared
+    #    it, so the test accepted ANY non-None result, including a wrong
+    #    bisection. Copilot and CodeQL both flagged the unused variable; the
+    #    variable was the symptom and the missing assertion was the defect.
+    horizon = (END - d(2020, 11, 1)).days
+    flows = [(END - datetime.timedelta(days=165 + horizon), -72.0),
+             (END - datetime.timedelta(days=horizon), 99.0)]
     want = (99 / 72) ** (365 / 165) - 1
-    got = bisect_irr([(dt, a) for dt, a in flows])
-    # Re-base: bisect_irr discounts to END, so build an equivalent case.
+    got = bisect_irr(flows)
     if got is None:
-        print("FAIL self-test: referee found no root")
-        ok = False
+        fail("referee found no root for a plain buy-then-sell")
+    elif abs(got - want) > 1e-6:
+        fail(f"referee rate {got:.8f} != hand-computed {want:.8f}")
 
-    # The referee must NOT return the -100% root that traps a Newton solver.
+    # 2. It must NOT return the -100% root that traps a Newton solver.
     if got is not None and abs(got + 1.0) < 1e-6:
-        print("FAIL self-test: referee converged on the -100% asymptote")
-        ok = False
+        fail("referee converged on the -100% asymptote")
 
-    # A flow set with no sign change has no root, and must be reported as such
-    # rather than silently returning a bracket endpoint.
+    # 3. It must find a very large rate rather than giving up. A 20-day
+    #    10.00 -> 16.50 sale annualizes past 900,000%, which a fixed upper
+    #    bracket missed entirely, silently skipping the solver check on the
+    #    cases most likely to break a Newton solver.
+    steep = [(END - datetime.timedelta(days=20), -10.0), (END, 16.50)]
+    big = bisect_irr(steep)
+    if big is None or big < 100:
+        fail(f"referee failed on a steep short-horizon return: {big}")
+
+    # 4. No sign change means no root, and must be reported as such rather
+    #    than silently returning a bracket endpoint.
     if bisect_irr([(d(2020, 1, 1), -10.0), (d(2021, 1, 1), -20.0)]) is not None:
-        print("FAIL self-test: referee invented a root for all-negative flows")
-        ok = False
+        fail("referee invented a root for all-negative flows")
 
-    # And the real engines must agree on a hand-checked portfolio.
+    # 5. The EXTRACTION and SOLVER verdicts must be reachable. Running only a
+    #    clean seed proves the harness can say "agree" and nothing else:
+    #    deleting either comparison would leave `--self-test` green. These
+    #    drive `check_one`'s comparisons directly with planted values.
+    class _Stub:
+        """Minimal stand-in for the two engine results check_one compares."""
+
+    planted = [
+        ("extraction", {"invested": "100.00", "distributions": "0.00",
+                        "current_value": "0.00", "cash_flows": 1,
+                        "money_weighted_return_pct": 0.0},
+         [(d(2020, 1, 1), -999.0)]),
+        # The +99 flow lands ON the end date, so it is TERMINAL VALUE, not a
+        # distribution. Getting that backwards made this fixture trip the
+        # extraction check instead of the solver one.
+        ("solver", {"invested": "72.00", "distributions": "0.00",
+                    "current_value": "99.00", "cash_flows": 2,
+                    "money_weighted_return_pct": -100.0},
+         [(END - datetime.timedelta(days=165), -72.0), (END, 99.0)]),
+    ]
+    for want_verdict, rl, flows in planted:
+        invested = sum(-a for _, a in flows if a < 0)
+        distributions = sum(a for dt, a in flows if a > 0 and dt != END)
+        terminal = sum(a for dt, a in flows if a > 0 and dt == END)
+        mismatched = any(
+            abs(float(Decimal(rl[k])) - v) > 0.02
+            for k, v in (("invested", invested), ("distributions", distributions),
+                         ("current_value", terminal))
+        )
+        ref = bisect_irr(flows)
+        if want_verdict == "extraction" and not mismatched:
+            fail("planted extraction difference was not detected")
+        if want_verdict == "solver":
+            if mismatched:
+                fail("planted solver case tripped the extraction check instead")
+            elif ref is None or abs(rl["money_weighted_return_pct"] - ref * 100) <= TOLERANCE:
+                fail("planted solver difference was not detected")
+
+    # 6. And the real engines must agree on a hand-checked portfolio.
     verdict, report = check_one(rledger, seed=1)
-    if verdict not in ("agree", "skip"):
-        print(f"FAIL self-test: seed=1 reported {verdict}")
+    if verdict == "skip":
+        fail("seed=1 skipped; the harness compared nothing")
+    elif verdict != "agree":
+        fail(f"seed=1 reported {verdict}")
         print("\n".join(report))
-        ok = False
 
     print("self-test passed" if ok else "self-test FAILED")
     return 0 if ok else 1
@@ -321,10 +427,21 @@ def main() -> int:
             continue
         print("\n".join(report))
         print("-" * 60)
-    agreed = len(seeds) - extraction - solver - skipped
-    print(f"{agreed}/{len(seeds) - skipped} agreed ({skipped} skipped)")
+    executed = len(seeds) - skipped
+    agreed = executed - extraction - solver
+    print(f"{agreed}/{executed} agreed ({skipped} skipped)")
     print(f"{extraction} extraction difference(s)")
     print(f"{solver} solver difference(s)")
+    # A run that compared NOTHING is a failure, not a pass. Both engines turn
+    # load and execution failures into `skip`, so an incompatible beangrow
+    # API or a generator that stopped producing valid ledgers would otherwise
+    # print "0/0 agreed" and exit 0: a green gate that ran no comparison.
+    if executed == 0:
+        print("ERROR: no seed produced a comparison; the gate proved nothing")
+        return 1
+    if skipped > len(seeds) // 2:
+        print(f"ERROR: {skipped}/{len(seeds)} seeds skipped, too many to trust")
+        return 1
     return 1 if (extraction or solver) else 0
 
 

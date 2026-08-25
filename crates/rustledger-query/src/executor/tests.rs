@@ -2116,3 +2116,76 @@ fn commodity_meta_takes_the_last_declaration() {
         Value::String("Second".to_string()),
     );
 }
+
+/// Argument guards for the functions added in #2153.
+///
+/// These branches were verified by hand against bean-query while writing the
+/// feature, which is worth exactly nothing once someone refactors the match.
+/// Codecov flagged 36 uncovered lines in `evaluate_function_on_values`, and
+/// almost all of them were these arms.
+///
+/// The Null rows matter as much as the error rows: bean-query answers Null
+/// rather than raising for a Null input, so an arm that errored instead would
+/// turn a query over a ledger with one missing payee into a hard failure.
+#[test]
+fn issue_2153_functions_guard_their_arguments() {
+    let directives = vec![Directive::Transaction(
+        Transaction::new(date(2024, 2, 15), "t")
+            .with_flag('*')
+            .with_tag("t1")
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(1.00), "USD")))
+            .with_synthesized_posting(Posting::new("Equity:O", Amount::new(dec!(-1.00), "USD"))),
+    )];
+
+    let run = |sql: &str| {
+        let mut executor = Executor::new(&directives);
+        let query = parse(sql).unwrap();
+        executor.execute(&query).map(|r| r.rows[0][0].clone())
+    };
+
+    // Wrong arity is an error, not a silent Null.
+    for sql in [
+        "SELECT COMMODITY_META()",
+        "SELECT COMMODITY_META(\"USD\", \"a\", \"b\")",
+        "SELECT FINDFIRST(\"x\")",
+        "SELECT YEARMONTH(date, date)",
+        "SELECT COMMODITY(units(position), units(position))",
+    ] {
+        assert!(run(sql).is_err(), "expected an arity error from `{sql}`");
+    }
+
+    // Wrong types are errors too, and each names the function so the message
+    // is actionable rather than a bare "type error".
+    for sql in [
+        "SELECT COMMODITY(1)",
+        "SELECT COMMODITY_META(1, 2)",
+        "SELECT FINDFIRST(1, tags)",
+        "SELECT YEARMONTH(\"notadate\")",
+    ] {
+        assert!(run(sql).is_err(), "expected a type error from `{sql}`");
+    }
+
+    // An invalid regex is reported rather than treated as "matches nothing",
+    // which would silently answer false/Null for a typo'd pattern.
+    assert!(run("SELECT FINDFIRST(\"[\", tags)").is_err());
+    assert!(run("SELECT HAS_ACCOUNT(\"[\")").is_err());
+
+    // Null in, Null out, matching bean-query. `payee` is Null on this
+    // transaction, so these are the real shapes a ledger produces.
+    for sql in [
+        "SELECT COMMODITY_META(payee, \"name\")",
+        "SELECT COMMODITY_META(\"USD\", payee)",
+        "SELECT FINDFIRST(payee, tags)",
+        "SELECT HAS_ACCOUNT(payee)",
+    ] {
+        assert_eq!(run(sql).unwrap(), Value::Null, "expected Null from `{sql}`");
+    }
+
+    // A currency with no `commodity` directive is Null in both the
+    // one-argument and two-argument forms.
+    assert_eq!(run("SELECT COMMODITY_META(\"USD\")").unwrap(), Value::Null);
+    assert_eq!(
+        run("SELECT COMMODITY_META(\"USD\", \"name\")").unwrap(),
+        Value::Null,
+    );
+}

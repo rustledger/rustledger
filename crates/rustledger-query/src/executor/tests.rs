@@ -1953,3 +1953,98 @@ fn the_division_operator_matches_bean_query_scale() {
         assert_eq!(n.to_string(), want, "{expr}");
     }
 }
+
+/// The six beanquery functions added in #2153, each pinned against the answer
+/// `bean-query` gives for the same ledger.
+///
+/// They were absent for different reasons and the tests are written to keep
+/// those reasons visible. `HAS_ACCOUNT` existed the whole time as a FROM-clause
+/// predicate and simply was not reachable from a projection, so the interesting
+/// assertion is that both spellings now agree. The other five had no
+/// implementation at all.
+///
+/// `REPR` is deliberately NOT here: beanquery's `repr` returns Python's own
+/// object syntax (`Decimal('10.00')`, `datetime.date(2024, 2, 1)`,
+/// `frozenset({'t1'})`), which describes the `CPython` runtime rather
+/// than of the ledger. See the PR for why matching it was rejected.
+#[test]
+fn beanquery_functions_from_issue_2153_match_bean_query() {
+    let mut usd_meta: Metadata = Metadata::default();
+    usd_meta.insert(
+        "name".to_string(),
+        MetaValue::String("US Dollar".to_string()),
+    );
+
+    let directives = vec![
+        Directive::Commodity(rustledger_core::Commodity {
+            date: date(2024, 1, 1),
+            currency: "USD".into(),
+            meta: usd_meta,
+        }),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 15), "t")
+                .with_flag('*')
+                .with_tag("t1")
+                .with_tag("zz")
+                .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(10.00), "USD")))
+                .with_synthesized_posting(Posting::new(
+                    "Equity:O",
+                    Amount::new(dec!(-10.00), "USD"),
+                )),
+        ),
+    ];
+
+    let one = |sql: &str| -> Value {
+        let mut executor = Executor::new(&directives);
+        let query = parse(sql).unwrap();
+        executor.execute(&query).unwrap().rows[0][0].clone()
+    };
+
+    // COMMODITY(amount) -> currency. bean-query: 'USD'
+    assert_eq!(
+        one("SELECT COMMODITY(units(position))"),
+        Value::String("USD".to_string()),
+    );
+
+    // COMMODITY_META / CURRENCY_META read the `commodity` directive, not the
+    // posting. bean-query: 'US Dollar' for both spellings.
+    assert_eq!(
+        one("SELECT COMMODITY_META(\"USD\", \"name\")"),
+        Value::String("US Dollar".to_string()),
+    );
+    assert_eq!(
+        one("SELECT CURRENCY_META(\"USD\", \"name\")"),
+        Value::String("US Dollar".to_string()),
+    );
+    // A currency with no `commodity` directive is Null, not an error.
+    assert_eq!(
+        one("SELECT COMMODITY_META(\"NOPE\", \"name\")"),
+        Value::Null
+    );
+
+    // FINDFIRST(regex, set) -> first match, or Null. bean-query: 'zz' / None.
+    assert_eq!(
+        one("SELECT FINDFIRST(\"z\", tags)"),
+        Value::String("zz".to_string()),
+    );
+    assert_eq!(one("SELECT FINDFIRST(\"nomatch\", tags)"), Value::Null);
+
+    // YEARMONTH truncates to the first of the month and stays a DATE, so it
+    // remains comparable and orderable. bean-query: datetime.date(2024, 2, 1).
+    assert_eq!(one("SELECT YEARMONTH(date)"), Value::Date(date(2024, 2, 1)),);
+
+    // HAS_ACCOUNT asks about the entry, so it must answer identically whether
+    // it is used as a projection or as the FROM predicate it always supported.
+    assert_eq!(one("SELECT HAS_ACCOUNT(\"Assets\")"), Value::Boolean(true));
+    assert_eq!(one("SELECT HAS_ACCOUNT(\"Nope\")"), Value::Boolean(false));
+
+    let from_rows = {
+        let mut executor = Executor::new(&directives);
+        let query = parse("SELECT account FROM has_account(\"Assets\")").unwrap();
+        executor.execute(&query).unwrap().rows.len()
+    };
+    assert_eq!(
+        from_rows, 2,
+        "the FROM predicate must still select the entry the projection reports true for",
+    );
+}

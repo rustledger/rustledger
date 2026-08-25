@@ -74,6 +74,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install beancount beanquery matplotlib pyyaml
+          # beangrow: the differential partner for `report returns`.
+          pip install beangrow
           # Third-party plugins used by test files. Compat tests rely on
           # them — a silent install failure means tests using these
           # plugins get skipped and we get false-green CI. Fail loudly
@@ -1436,10 +1438,48 @@ jobs:
           echo "::error::Booking fuzz found an unexplained divergence (start-seed=${{ steps.booking_fuzz.outputs.start }}, runs=${{ steps.booking_fuzz.outputs.runs }}). The seed of each is printed in the step log. Reproduce one with: python3 scripts/compat-booking-fuzz.py --rledger ./target/release/rledger --seed <n>"
           exit 1
 
+      # `report returns` answers "what did this portfolio earn", which is hard
+      # to eyeball and easy to get subtly wrong. beangrow is an independent
+      # implementation from the beancount project, so agreement on the
+      # extracted cash flows is real evidence rather than a restatement of our
+      # own logic.
+      #
+      # It is NOT the oracle for the RATE. beangrow's `compute_irr` converges
+      # on spurious roots and can answer -100% for a profitable position
+      # (beancount/beangrow#51), so the rate is adjudicated by an independent
+      # bisection solve over the same flows.
+      #
+      # Same placement and seeding policy as the fuzzers above.
+      - name: Returns fuzz
+        id: returns_fuzz
+        continue-on-error: true
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            RET_START="${{ github.run_id }}"; RET_RUNS=2000
+          else
+            RET_START=0; RET_RUNS=400
+          fi
+          printf 'start=%s\nruns=%s\n' "$RET_START" "$RET_RUNS" >> "$GITHUB_OUTPUT"
+          if python3 scripts/compat-returns-fuzz.py --self-test \
+                  --rledger ./target/release/rledger \
+             && python3 scripts/compat-returns-fuzz.py \
+                  --rledger ./target/release/rledger \
+                  --start-seed "$RET_START" --runs "$RET_RUNS"; then
+            echo "failed=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=1" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Gate on capital gains fuzz
         if: ${{ !cancelled() && steps.capgains_fuzz.outputs.failed == '1' }}
         run: |
           echo "::error::Capital gains fuzz found a property violation (start-seed=${{ steps.capgains_fuzz.outputs.start }}, runs=${{ steps.capgains_fuzz.outputs.runs }}). The seed of each is printed in the step log. Reproduce one with: python3 scripts/compat-capgains-fuzz.py --rledger ./target/release/rledger --seed <n>"
+          exit 1
+
+      - name: Gate on returns fuzz
+        if: ${{ !cancelled() && steps.returns_fuzz.outputs.failed == '1' }}
+        run: |
+          echo "::error::Returns fuzz found a divergence (start-seed=${{ steps.returns_fuzz.outputs.start }}, runs=${{ steps.returns_fuzz.outputs.runs }}). EXTRACTION means the cash flows differ from beangrow's; SOLVER means the rate differs from an independent solve over the same flows. Reproduce one with: python3 scripts/compat-returns-fuzz.py --rledger ./target/release/rledger --seed <n>"
           exit 1
 
       # Mirrors the BQL step's `--baseline` (which exits non-zero on a BQL

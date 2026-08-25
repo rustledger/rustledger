@@ -1,5 +1,19 @@
 #!/usr/bin/env bash
-# Format idempotence check (#1323).
+# Formatter property checks over the compatibility corpus.
+#
+# Two properties, both over the fetched corpus:
+#
+#   IDEMPOTENT (#1323)  re-formatting already-formatted output is
+#                       byte-identical.
+#   PRESERVING (#2142)  formatting does not change the set of diagnostic
+#                       CODES a file produces. Formatting is a layout
+#                       change; if `check` says something different
+#                       afterwards, content moved or vanished.
+#
+# The second was added after `format` was found to DELETE a posting's
+# currency, cost spec and price annotation when it had no units number
+# (#2142). That is invisible to the idempotence check, because deleting the
+# same tokens twice is perfectly stable.
 #
 # `rledger format` must be a fixed point: re-formatting an
 # already-formatted file must produce byte-identical output. This
@@ -39,11 +53,25 @@ fi
 
 once=$(mktemp) || { echo "error: mktemp failed" >&2; exit 2; }
 twice=$(mktemp) || { echo "error: mktemp failed" >&2; exit 2; }
-trap 'rm -f "$once" "$twice"' EXIT
+trap 'rm -f "$once" "$twice" "${sib:-}"' EXIT
+
+# Diagnostic CODES only, sorted: message wording and spans legitimately move
+# when layout does, but a code appearing or disappearing means the meaning
+# changed.
+codes_of() {
+  # `"code": "E3004"` — the JSON is pretty-printed, so there IS a space after
+  # the colon. Matching `"code":"` found nothing, both sides compared empty,
+  # and the check silently passed everything. Caught by running it against a
+  # binary with the bug it was written for.
+  "$RLEDGER" check --format json "$1" 2>/dev/null \
+    | grep -oE '"code":[[:space:]]*"[^"]*"' \
+    | sed 's/.*"\([^"]*\)"$/\1/' | sort | tr '\n' ' '
+}
 
 checked=0
 skipped=0
 fail=0
+drift=0
 failed_files=()
 
 while IFS= read -r -d '' f; do
@@ -67,11 +95,29 @@ while IFS= read -r -d '' f; do
     failed_files+=("$f")
     fail=$((fail + 1))
   fi
+
+  # Semantic preservation. The formatted copy is written BESIDE the original,
+  # not in /tmp: a relative `include` or plugin path resolves against the
+  # file's own directory, and moving the copy elsewhere breaks them and
+  # reports two false drifts.
+  sib="$(dirname "$f")/.fmtcheck.$$.beancount"
+  cp "$once" "$sib" 2>/dev/null || { rm -f "$sib"; continue; }
+  before=$(codes_of "$f")
+  after=$(codes_of "$sib")
+  rm -f "$sib"
+  if [ "$before" != "$after" ]; then
+    echo "FAIL (diagnostics changed): $f"
+    echo "  before: $before"
+    echo "  after:  $after"
+    failed_files+=("$f")
+    drift=$((drift + 1))
+  fi
 done < <(find "$CORPUS" -name '*.beancount' -type f -print0)
 
 echo "----"
-echo "format idempotence: checked=$checked skipped=$skipped non_idempotent=$fail"
+echo "format properties: checked=$checked skipped=$skipped non_idempotent=$fail diagnostics_changed=$drift"
 
+fail=$((fail + drift))
 if [ "$fail" -gt 0 ]; then
   {
     echo "non-idempotent files:"

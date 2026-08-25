@@ -2080,10 +2080,25 @@ fn emit_posting(
                 out.push_str(&part);
             }
         }
-    } else if let Some(cs) = p.cost_spec() {
-        // No amount node at all, yet a cost spec parsed. Same rule: keep it.
-        out.push_str("  ");
-        out.push_str(&format_cost_spec(&cs, group));
+    } else {
+        // No amount node at all, yet a cost spec or price annotation parsed:
+        // the CST attaches them after the account whether or not an AMOUNT
+        // was recognized. Same rule as above, keep whatever is there.
+        //
+        // An earlier version of this fix handled only the cost spec, so
+        // `Assets:MSFT @@ 2000.00 USD` still lost its price. Both are listed
+        // here so neither can be forgotten again.
+        for part in [
+            p.cost_spec().map(|cs| format_cost_spec(&cs, group)),
+            p.price_annotation()
+                .map(|pa| format_price_annotation(&pa, group)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            out.push_str("  ");
+            out.push_str(&part);
+        }
     }
     out.push('\n');
     // Splice the trailing comment in BEFORE the posting-line
@@ -3159,26 +3174,42 @@ mod tests {
     /// so mistyping a units number and saving deleted the rest of the line.
     #[test]
     fn issue_2142_numberless_posting_keeps_currency_cost_and_price() {
+        // Each expectation names the WHOLE posting line, not a fragment.
+        // An earlier version asserted only `"USD"` for the currency-only
+        // case, which the OTHER posting (`-5.00 USD`) satisfies, so the test
+        // would have passed while the currency-only posting still lost its
+        // currency. A test written to prove content survives must not be
+        // satisfiable by unrelated content.
         for (name, src, must_contain) in [
             (
                 "currency only",
                 "2024-01-15 * \"x\"\n  Assets:Bank  -5.00 USD\n  Assets:Other USD\n",
-                "USD",
+                "Assets:Other  USD",
+            ),
+            (
+                "price with no amount node at all",
+                "2013-05-18 * \"x\"\n  Assets:MSFT @@ 2000.00 USD\n  Assets:Cash  -2000.00 USD\n",
+                "Assets:MSFT  @@ 2000.00 USD",
+            ),
+            (
+                "cost with no amount node at all",
+                "2013-05-18 * \"x\"\n  Assets:MSFT {12.00 USD}\n  Assets:Cash  -120.00 USD\n",
+                "Assets:MSFT  {12.00 USD}",
             ),
             (
                 "total price without units",
                 "2013-05-18 * \"x\"\n  Assets:MSFT  MSFT @@ 2000.00 USD\n  Assets:Cash  -2000.00 USD\n",
-                "@@ 2000.00 USD",
+                "Assets:MSFT  MSFT  @@ 2000.00 USD",
             ),
             (
                 "cost without units",
                 "2013-05-18 * \"x\"\n  Assets:MSFT  MSFT {12.00 USD}\n  Assets:Cash  -120.00 USD\n",
-                "{12.00 USD}",
+                "Assets:MSFT  MSFT  {12.00 USD}",
             ),
             (
                 "per-unit price without units",
                 "2013-05-18 * \"x\"\n  Assets:MSFT  MSFT @ 12.00 USD\n  Assets:Cash  -120.00 USD\n",
-                "@ 12.00 USD",
+                "Assets:MSFT  MSFT  @ 12.00 USD",
             ),
         ] {
             let out = format_source(src);

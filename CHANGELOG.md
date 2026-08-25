@@ -20,6 +20,9 @@ Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadma
 
 ### Fixed
 
+- **`rledger format` no longer deletes a posting's currency, cost or price when it has no units number** — `emit_posting` rendered the amount only when a number was present, and the currency, cost spec and price annotation all sat inside that branch, so a posting without a number lost every one of them. The tokens were not reformatted, they were dropped, and what the author wrote could not be recovered from the output. `Assets:Other USD` is valid beancount that constrains interpolation to USD, so this was data loss on CORRECT input; the malformed shapes matter too, since `format` runs on editor save and mistyping a units number then saving deleted the rest of the line. Found by checking two properties across the 735-file compatibility corpus: formatting is idempotent, and it does not change the set of diagnostics a file produces (issue #2142).
+
+
 - **`report journal --limit N` no longer reverses the report** — the limit was reached with `.rev().take(n)`, which left the ROWS reversed as well as selecting the last N: the unlimited journal read oldest-first and adding a limit silently flipped it newest-first. `sort_by_key` is stable, so the same reversal also undid the file order of same-date transactions — the order booking itself uses (#2093) — so a limited journal disagreed with the ledger about which of two same-day entries came first. All three output formats were affected; they share the selection. Found by variant analysis from #2115, which was the same `.rev()`-over-a-sorted-list shape in the booking path (issue #2122).
 
 ### Performance

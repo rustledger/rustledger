@@ -2056,7 +2056,34 @@ fn emit_posting(
                 out.push(' ');
                 out.push_str(&format_price_annotation(&pa, group));
             }
+        } else {
+            // No NUMBER, but the posting may still carry a currency, a cost
+            // spec or a price. `Assets:Other USD` is valid beancount that
+            // constrains interpolation to USD, and a units-less posting with
+            // a cost or price is malformed but is still what the author
+            // wrote. Emitting nothing here deleted all of it (#2142).
+            //
+            // Two spaces rather than the aligned number column: there is no
+            // number to align, and `compute_alignment` deliberately excludes
+            // these postings from the column width so a long currency-only
+            // account cannot widen the file.
+            for part in [
+                amt.currency().map(|c| c.text().to_string()),
+                p.cost_spec().map(|cs| format_cost_spec(&cs, group)),
+                p.price_annotation()
+                    .map(|pa| format_price_annotation(&pa, group)),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                out.push_str("  ");
+                out.push_str(&part);
+            }
         }
+    } else if let Some(cs) = p.cost_spec() {
+        // No amount node at all, yet a cost spec parsed. Same rule: keep it.
+        out.push_str("  ");
+        out.push_str(&format_cost_spec(&cs, group));
     }
     out.push('\n');
     // Splice the trailing comment in BEFORE the posting-line
@@ -3116,6 +3143,58 @@ mod tests {
             "number column must align to the numbered posting, not the longer \
              currency-only one; got:\n{out}"
         );
+    }
+
+    /// A posting with no NUMBER keeps its currency, cost and price.
+    ///
+    /// `emit_posting` renders the amount only when `amount_number_text`
+    /// yields a number, and everything else was inside that branch, so a
+    /// posting without one lost its currency, its cost spec and its price
+    /// annotation. The tokens were not reformatted, they were deleted, and
+    /// what the author wrote could not be recovered from the output (#2142).
+    ///
+    /// `Assets:Other USD` is VALID beancount that constrains interpolation to
+    /// USD, so this was data loss on correct input, not only on malformed
+    /// input. The malformed shapes matter too: `format` runs on editor save,
+    /// so mistyping a units number and saving deleted the rest of the line.
+    #[test]
+    fn issue_2142_numberless_posting_keeps_currency_cost_and_price() {
+        for (name, src, must_contain) in [
+            (
+                "currency only",
+                "2024-01-15 * \"x\"\n  Assets:Bank  -5.00 USD\n  Assets:Other USD\n",
+                "USD",
+            ),
+            (
+                "total price without units",
+                "2013-05-18 * \"x\"\n  Assets:MSFT  MSFT @@ 2000.00 USD\n  Assets:Cash  -2000.00 USD\n",
+                "@@ 2000.00 USD",
+            ),
+            (
+                "cost without units",
+                "2013-05-18 * \"x\"\n  Assets:MSFT  MSFT {12.00 USD}\n  Assets:Cash  -120.00 USD\n",
+                "{12.00 USD}",
+            ),
+            (
+                "per-unit price without units",
+                "2013-05-18 * \"x\"\n  Assets:MSFT  MSFT @ 12.00 USD\n  Assets:Cash  -120.00 USD\n",
+                "@ 12.00 USD",
+            ),
+        ] {
+            let out = format_source(src);
+            assert!(
+                out.contains(must_contain),
+                "{name}: formatting deleted {must_contain:?}; got:\n{out}"
+            );
+            // And formatting the result again must not change it further: a
+            // fix that re-emitted the tokens in a shape it could not reparse
+            // would show up here rather than in the assertion above.
+            assert_eq!(
+                format_source(&out),
+                out,
+                "{name}: not idempotent; got:\n{out}"
+            );
+        }
     }
 
     #[test]

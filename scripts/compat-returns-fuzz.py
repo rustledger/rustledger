@@ -350,9 +350,6 @@ def self_test(rledger: str) -> int:
     #    clean seed proves the harness can say "agree" and nothing else:
     #    deleting either comparison would leave `--self-test` green. These
     #    drive `check_one`'s comparisons directly with planted values.
-    class _Stub:
-        """Minimal stand-in for the two engine results check_one compares."""
-
     planted = [
         ("extraction", {"invested": "100.00", "distributions": "0.00",
                         "current_value": "0.00", "cash_flows": 1,

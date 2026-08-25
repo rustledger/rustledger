@@ -410,6 +410,22 @@ impl<'a> Executor<'a> {
     }
 
     /// Get or compile a regex pattern, returning an error if invalid.
+    /// Does any posting on this entry have an account matching `pattern`?
+    ///
+    /// ONE implementation for both spellings of `HAS_ACCOUNT`: the FROM
+    /// predicate in `evaluate_from_filter` and the projection arm in
+    /// `evaluate_function`. They answer the same question about the same
+    /// entry, so a second copy is a divergence waiting to happen -- the
+    /// two already differed in their error text before this was extracted.
+    fn entry_has_account(
+        &self,
+        txn: &rustledger_core::Transaction,
+        pattern: &str,
+    ) -> Result<bool, QueryError> {
+        let regex = self.require_regex(pattern)?;
+        Ok(txn.postings.iter().any(|p| regex.is_match(&p.account)))
+    }
+
     fn require_regex(&self, pattern: &str) -> Result<Arc<Regex>, QueryError> {
         self.get_or_compile_regex(pattern)
             .ok_or_else(|| QueryError::Type(format!("invalid regex: {pattern}")))
@@ -864,12 +880,8 @@ impl<'a> Executor<'a> {
                         )),
                     };
                 };
-                let regex = self.require_regex(pattern)?;
                 Ok(Value::Boolean(
-                    ctx.transaction
-                        .postings
-                        .iter()
-                        .any(|posting| regex.is_match(&posting.account)),
+                    self.entry_has_account(ctx.transaction, pattern)?,
                 ))
             }
             // Aggregates evaluate to Null per row; real aggregation happens in
@@ -2062,9 +2074,11 @@ impl<'a> Executor<'a> {
                         )),
                     };
                 };
-                let candidates: Vec<String> = match haystack {
-                    Value::StringSet(items) => items.clone(),
-                    Value::String(single) => vec![single.clone()],
+                // Borrowed scan: only the matching element is cloned, so a hit
+                // on the first tag does not copy the whole set.
+                let candidates: &[String] = match haystack {
+                    Value::StringSet(items) => items,
+                    Value::String(single) => std::slice::from_ref(single),
                     Value::Null => return Ok(Value::Null),
                     _ => {
                         return Err(QueryError::Type(
@@ -2074,9 +2088,9 @@ impl<'a> Executor<'a> {
                 };
                 let regex = self.require_regex(pattern)?;
                 Ok(candidates
-                    .into_iter()
+                    .iter()
                     .find(|c| regex.is_match(c))
-                    .map_or(Value::Null, Value::String))
+                    .map_or(Value::Null, |c| Value::String(c.clone())))
             }
             // Truncate a date to the first of its month. beanquery returns a
             // date here, not a string, so `yearmonth(date)` stays orderable

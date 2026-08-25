@@ -1966,7 +1966,7 @@ fn the_division_operator_matches_bean_query_scale() {
 /// `REPR` is deliberately NOT here: beanquery's `repr` returns Python's own
 /// object syntax (`Decimal('10.00')`, `datetime.date(2024, 2, 1)`,
 /// `frozenset({'t1'})`), which describes the `CPython` runtime rather
-/// than of the ledger. See the PR for why matching it was rejected.
+/// than the ledger. See the PR for why matching it was rejected.
 #[test]
 fn beanquery_functions_from_issue_2153_match_bean_query() {
     let mut usd_meta: Metadata = Metadata::default();
@@ -1994,10 +1994,24 @@ fn beanquery_functions_from_issue_2153_match_bean_query() {
         ),
     ];
 
+    // Asserts the value is the same on EVERY row, not just the first. These
+    // functions are evaluated per posting, and the fixture has two, so
+    // checking `rows[0][0]` alone would pass even if the second row
+    // disagreed.
     let one = |sql: &str| -> Value {
         let mut executor = Executor::new(&directives);
         let query = parse(sql).unwrap();
-        executor.execute(&query).unwrap().rows[0][0].clone()
+        let rows = executor.execute(&query).unwrap().rows;
+        assert!(!rows.is_empty(), "query returned no rows: {sql}");
+        let first = rows[0][0].clone();
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row[0], first,
+                "row {index} disagrees with row 0 for `{sql}`; a per-row \
+                 function must answer identically for every posting here",
+            );
+        }
+        first
     };
 
     // COMMODITY(amount) -> currency. bean-query: 'USD'

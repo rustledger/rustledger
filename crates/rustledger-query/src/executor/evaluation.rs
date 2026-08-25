@@ -36,14 +36,9 @@ impl Executor<'_> {
                             ));
                         }
                     };
-                    // Check if any posting matches the account pattern (using cache)
-                    let regex = self.require_regex(&pattern)?;
-                    for posting in &txn.postings {
-                        if regex.is_match(&posting.account) {
-                            return Ok(true);
-                        }
-                    }
-                    Ok(false)
+                    // Same helper the projection arm uses, so the two spellings
+                    // cannot drift.
+                    self.entry_has_account(txn, &pattern)
                 } else {
                     // For other functions, create a dummy context and evaluate
                     let dummy_ctx = PostingContext {

@@ -2189,3 +2189,83 @@ fn issue_2153_functions_guard_their_arguments() {
         Value::Null,
     );
 }
+
+/// `COMMODITY_META` must work under `new_with_sources`, not just `new`.
+///
+/// The two constructors each build their own directive caches, so a lookup
+/// added to one and not the other fails only on the path that constructor
+/// serves. `new_with_sources` is the CLI and LSP path, which is where a user
+/// would actually hit this, and it is invisible to a test that only ever
+/// calls `Executor::new`.
+///
+/// Coverage said so plainly: the `Directive::Commodity` arm in this
+/// constructor was the one block of #2153's change with no test reaching it,
+/// even though the commit that added it claimed updating both constructors
+/// mattered.
+///
+/// This also covers the one-argument form returning a real metadata map
+/// rather than Null, which the other tests only exercise on the missing-
+/// currency path.
+#[test]
+fn commodity_meta_resolves_under_the_sourced_constructor() {
+    use rustledger_loader::SourceMap;
+
+    let mut source_map = SourceMap::new();
+    let source: std::sync::Arc<str> = "2024-01-01 commodity USD\n  name: \"US Dollar\"\n".into();
+    let file_id = source_map.add_file("test.beancount".into(), source);
+
+    let mut usd_meta: Metadata = Metadata::default();
+    usd_meta.insert(
+        "name".to_string(),
+        MetaValue::String("US Dollar".to_string()),
+    );
+
+    let spanned_directives = vec![
+        Spanned {
+            value: Directive::Commodity(rustledger_core::Commodity {
+                date: date(2024, 1, 1),
+                currency: "USD".into(),
+                meta: usd_meta,
+            }),
+            span: rustledger_parser::Span { start: 0, end: 40 },
+            file_id: file_id as u16,
+        },
+        Spanned {
+            value: Directive::Transaction(
+                Transaction::new(date(2024, 2, 15), "t")
+                    .with_flag('*')
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:A",
+                        Amount::new(dec!(1.00), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Equity:O",
+                        Amount::new(dec!(-1.00), "USD"),
+                    )),
+            ),
+            span: rustledger_parser::Span { start: 40, end: 90 },
+            file_id: file_id as u16,
+        },
+    ];
+
+    let run = |sql: &str| {
+        let mut executor = Executor::new_with_sources(&spanned_directives, &source_map);
+        let query = parse(sql).unwrap();
+        executor.execute(&query).unwrap().rows[0][0].clone()
+    };
+
+    assert_eq!(
+        run("SELECT COMMODITY_META(\"USD\", \"name\")"),
+        Value::String("US Dollar".to_string()),
+        "the sourced constructor must resolve commodity metadata too",
+    );
+
+    // One-argument form: the whole map, not Null, and carrying the key.
+    let Value::Metadata(meta) = run("SELECT COMMODITY_META(\"USD\")") else {
+        panic!("expected a metadata map from the one-argument form");
+    };
+    assert_eq!(
+        meta.get("name"),
+        Some(&MetaValue::String("US Dollar".to_string())),
+    );
+}

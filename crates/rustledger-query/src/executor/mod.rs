@@ -188,9 +188,11 @@ impl<'a> Executor<'a> {
                     info.close_date = Some(close.date);
                 }
                 Directive::Commodity(commodity) => {
-                    commodity_meta
-                        .entry(commodity.currency.to_string())
-                        .or_insert_with(|| commodity.meta.clone());
+                    // Last declaration wins, matching bean-query: a ledger
+                    // that declares `commodity USD` twice resolves to the
+                    // later directive's metadata. `or_insert_with` here kept
+                    // the FIRST and disagreed.
+                    commodity_meta.insert(commodity.currency.to_string(), commodity.meta.clone());
                 }
                 _ => {}
             }
@@ -280,9 +282,11 @@ impl<'a> Executor<'a> {
                     info.close_date = Some(close.date);
                 }
                 Directive::Commodity(commodity) => {
-                    commodity_meta
-                        .entry(commodity.currency.to_string())
-                        .or_insert_with(|| commodity.meta.clone());
+                    // Last declaration wins, matching bean-query: a ledger
+                    // that declares `commodity USD` twice resolves to the
+                    // later directive's metadata. `or_insert_with` here kept
+                    // the FIRST and disagreed.
+                    commodity_meta.insert(commodity.currency.to_string(), commodity.meta.clone());
                 }
                 _ => {}
             }
@@ -1998,21 +2002,17 @@ impl<'a> Executor<'a> {
                     ))),
                 }
             }
-            // The currency of an amount or position. beanquery types this as
-            // `commodity(Amount) -> str`; a `Position` is accepted too because
-            // `commodity(cost(position))` is the idiomatic call and `cost()`
-            // may hand back either depending on the posting (#2153).
+            // The currency of an amount. bean-query types this strictly as
+            // `commodity(Amount) -> str` and rejects a position, so
+            // `commodity(position)` is an error on both sides; the idiomatic
+            // spellings are `commodity(units(position))` and
+            // `commodity(cost(position))`, both of which yield an Amount.
             "COMMODITY" => {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
                     Value::Amount(amount) => Ok(Value::String(amount.currency.to_string())),
-                    Value::Position(position) => {
-                        Ok(Value::String(position.units.currency.to_string()))
-                    }
                     Value::Null => Ok(Value::Null),
-                    _ => Err(QueryError::Type(
-                        "COMMODITY expects an amount or position".to_string(),
-                    )),
+                    _ => Err(QueryError::Type("COMMODITY expects an amount".to_string())),
                 }
             }
             // `CURRENCY_META` is beanquery's own alias for `COMMODITY_META`;

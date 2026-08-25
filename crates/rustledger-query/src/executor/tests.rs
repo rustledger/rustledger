@@ -2047,4 +2047,58 @@ fn beanquery_functions_from_issue_2153_match_bean_query() {
         from_rows, 2,
         "the FROM predicate must still select the entry the projection reports true for",
     );
+
+    // `commodity` is typed `commodity(Amount)`. bean-query rejects a position
+    // outright, so accepting one here would be a silent extension -- and the
+    // idiomatic calls both already yield an Amount.
+    let mut executor = Executor::new(&directives);
+    let query = parse("SELECT COMMODITY(position)").unwrap();
+    assert!(
+        executor.execute(&query).is_err(),
+        "COMMODITY(position) must be rejected, as bean-query rejects it",
+    );
+}
+
+/// A currency declared twice resolves to the LAST `commodity` directive.
+///
+/// bean-query answers `'Second'` for the ledger below. Collecting these with
+/// `or_insert_with` keeps the first instead, which is the shape this pins:
+/// the two directives differ only in metadata, so nothing else in the query
+/// output would reveal which one was used.
+#[test]
+fn commodity_meta_takes_the_last_declaration() {
+    let meta_named = |name: &str| {
+        let mut m: Metadata = Metadata::default();
+        m.insert("name".to_string(), MetaValue::String(name.to_string()));
+        m
+    };
+
+    let directives = vec![
+        Directive::Commodity(rustledger_core::Commodity {
+            date: date(2024, 1, 1),
+            currency: "USD".into(),
+            meta: meta_named("First"),
+        }),
+        Directive::Commodity(rustledger_core::Commodity {
+            date: date(2024, 6, 1),
+            currency: "USD".into(),
+            meta: meta_named("Second"),
+        }),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 15), "t")
+                .with_flag('*')
+                .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(1.00), "USD")))
+                .with_synthesized_posting(Posting::new(
+                    "Equity:O",
+                    Amount::new(dec!(-1.00), "USD"),
+                )),
+        ),
+    ];
+
+    let mut executor = Executor::new(&directives);
+    let query = parse("SELECT COMMODITY_META(\"USD\", \"name\")").unwrap();
+    assert_eq!(
+        executor.execute(&query).unwrap().rows[0][0],
+        Value::String("Second".to_string()),
+    );
 }

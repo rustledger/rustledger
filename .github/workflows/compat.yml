@@ -1494,22 +1494,30 @@ jobs:
           echo "::error::Returns fuzz found a divergence (start-seed=${{ steps.returns_fuzz.outputs.start }}, runs=${{ steps.returns_fuzz.outputs.runs }}). EXTRACTION means the cash flows differ from beangrow's; SOLVER means the rate differs from an independent solve over the same flows. Reproduce one with: python3 scripts/compat-returns-fuzz.py --rledger ./target/release/rledger --seed <n>"
           exit 1
 
+      # Fails only on divergences outside the recorded baseline. Until this
+      # existed the booked-value comparison reported into a step summary and
+      # nothing ever went red, so a PR could introduce a fresh "right shape,
+      # wrong numbers" divergence and stay green (#2147).
+      #
+      # `!= '0'` rather than the `== '1'` the fuzz gates above use: those
+      # report a boolean, this forwards the script's exit code, and an
+      # argparse/usage error exits 2. `outcome != 'skipped'` keeps an empty
+      # output from reading as a divergence when an earlier step aborted the
+      # job -- `'' != '0'` is true, and a false "divergence found" annotation
+      # on an already-red run sends the next reader after a bug that is not
+      # there.
+      - name: Gate on booked-value divergences
+        if: ${{ !cancelled() && steps.booked_values.outcome != 'skipped' && steps.booked_values.outputs.failed != '0' }}
+        run: |
+          echo "::error::Booked-value comparison did not come back clean (exit ${{ steps.booked_values.outputs.failed }}). Divergences against beancount that are not in tests/compatibility/known-value-divergences.json are listed under '=== BASELINE ===' in the step log; any other exit code means the comparison itself failed. Investigate the divergence first -- this gate exists to catch wrong numbers. If it is genuinely intended, re-record with: python3 scripts/compat-values.py --rledger ./target/release/rledger --corpus tests/compatibility/files tests/regressions --write-baseline tests/compatibility/known-value-divergences.json"
+          exit 1
+
       # Mirrors the BQL step's `--baseline` (which exits non-zero on a BQL
       # regression). Previously check regressions were only printed and written
       # to compat-regressions.txt — a file that matched on the previous run and
       # mismatches now scrolled by silently. A one-shot red alert: the committed
       # baseline advances, and the details live in compat-regressions.txt on the
       # compatibility branch.
-      # Fails only on divergences outside the recorded baseline. Until this
-      # existed the booked-value comparison reported into a step summary and
-      # nothing ever went red, so a PR could introduce a fresh "right shape,
-      # wrong numbers" divergence and stay green (#2147).
-      - name: Gate on booked-value divergences
-        if: ${{ !cancelled() && steps.booked_values.outputs.failed != '0' }}
-        run: |
-          echo "::error::Booked-value comparison found a divergence against beancount that is not in tests/compatibility/known-value-divergences.json. The offending (file, field) pairs are listed under '=== BASELINE ===' in the step log. If the change is intended, regenerate with: python3 scripts/compat-values.py --rledger ./target/release/rledger --corpus tests/compatibility/files tests/regressions --write-baseline tests/compatibility/known-value-divergences.json"
-          exit 1
-
       - name: Gate on check regressions
         if: ${{ !cancelled() && steps.compat_test.outcome == 'success' && steps.compat_test.outputs.regression_count != '0' }}
         run: |

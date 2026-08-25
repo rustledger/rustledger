@@ -1258,6 +1258,13 @@ def main() -> int:
 
     if not args.corpus:
         ap.error("--corpus is required unless --self-test is given")
+
+    # --limit truncates the corpus, so `found` would be a subset of reality.
+    # Writing under it silently shrinks the baseline; checking under it reports
+    # every unvisited entry as RESOLVED and passes. Both look like success.
+    if args.limit and (args.baseline or args.write_baseline):
+        ap.error("--limit cannot be combined with --baseline/--write-baseline: "
+                 "a truncated corpus yields a partial divergence set")
     files = sorted(p for d in args.corpus for p in Path(d).rglob("*.beancount"))
     if args.limit:
         files = files[: args.limit]
@@ -1522,17 +1529,30 @@ def _divergence_keys(value_div, posting_div, price_div):
     Basename, not full path: the corpus is fetched to different absolute
     locations in CI and locally, and a baseline keyed on absolute paths would
     match nothing. This mirrors how `KNOWN_POSTING_DIVERGENCES` is keyed.
-    """
-    import os
 
+    The key deliberately omits the two values. It pins WHERE we diverge, not
+    by how much, so a known-diverging cell whose numbers get worse still
+    passes. Pinning values was considered and rejected: CI installs beancount
+    from master, so its side of every pair can move without any change here,
+    and a baseline that churns on upstream commits gets regenerated
+    reflexively rather than read. The narrower guarantee -- no divergence in a
+    cell that agreed before -- is the one that survives that.
+
+    Note this is the second layer for the posting axis:
+    `KNOWN_POSTING_DIVERGENCES` already suppresses individually-reasoned
+    fields before they reach `posting_div`, and carries a rationale string per
+    entry. Prefer adding to that dict when a divergence has an explanation
+    worth writing down; this file is the generated catch-all for the value and
+    price axes, which have no such dict.
+    """
     keys = set()
     for path, diffs in value_div:
         for (acct, cur), _x, _y in diffs:
-            keys.add((os.path.basename(path), f"value:{acct} {cur}"))
+            keys.add((path.name, f"value:{acct} {cur}"))
     for axis, div in (("posting", posting_div), ("price", price_div)):
         for path, diffs in div:
             for where, _x, _y in diffs:
-                keys.add((os.path.basename(path), f"{axis}:{where}".rstrip(": ")))
+                keys.add((path.name, f"{axis}:{where}".rstrip(": ")))
     return keys
 
 

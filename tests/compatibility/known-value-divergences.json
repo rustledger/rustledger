@@ -1,0 +1,138 @@
+[
+  [
+    "examples_defs__rx_def_INITIAL_COPY.beancount",
+    "posting:Assets:US:Vanguard:Cash 2022-10-07 number"
+  ],
+  [
+    "examples_defs__rx_def_INITIAL_COPY.beancount",
+    "posting:Assets:US:Vanguard:RGAGX 2022-10-07 price_number"
+  ],
+  [
+    "examples_defs__rx_def_INITIAL_COPY.beancount",
+    "value:Assets:US:Vanguard:Cash USD"
+  ],
+  [
+    "examples_defs_rx_def.beancount",
+    "posting:Assets:US:Vanguard:Cash 2022-10-07 number"
+  ],
+  [
+    "examples_defs_rx_def.beancount",
+    "posting:Assets:US:Vanguard:RGAGX 2022-10-07 price_number"
+  ],
+  [
+    "examples_defs_rx_def.beancount",
+    "value:Assets:US:Vanguard:Cash USD"
+  ],
+  [
+    "examples_defs_rx_updated.beancount",
+    "value:Assets:US:Vanguard:Cash USD"
+  ],
+  [
+    "examples_recon_rx_updated.beancount",
+    "value:Assets:US:Vanguard:Cash USD"
+  ],
+  [
+    "tests_data_cool_fund_example.beancount",
+    "posting:Assets:CoolFund:Total 2024-04-15 number"
+  ],
+  [
+    "tests_data_cool_fund_example.beancount",
+    "posting:Assets:CoolFund:Total 2024-04-15 price_number"
+  ],
+  [
+    "tests_data_cool_fund_example.beancount",
+    "price:COOL_FUND_USD 2024-04-11 price_number"
+  ],
+  [
+    "tests_data_cool_fund_example.beancount",
+    "value:Assets:CoolFund:Total COOL_FUND_USD"
+  ],
+  [
+    "tests_data_some_fund_example.beancount",
+    "posting:Assets:SomeFund:Total 2024-03-07 cost_date"
+  ],
+  [
+    "tests_data_some_fund_example.beancount",
+    "posting:Assets:SomeFund:Total 2024-03-07 cost_number"
+  ],
+  [
+    "tests_data_some_fund_example.beancount",
+    "posting:Assets:SomeFund:Total 2024-03-07 number"
+  ],
+  [
+    "tests_data_some_fund_example.beancount",
+    "posting:Assets:SomeFund:Total 2024-03-07 price_number"
+  ],
+  [
+    "tests_data_some_fund_example.beancount",
+    "posting:Income:SomeFund:PnL 2024-03-07 number"
+  ],
+  [
+    "tests_data_some_fund_example.beancount",
+    "price:SOME_FUND_USD 2024-03-05 price_number"
+  ],
+  [
+    "tests_data_some_fund_example.beancount",
+    "value:Assets:SomeFund:Total SOME_FUND_USD"
+  ],
+  [
+    "tests_data_some_fund_example.beancount",
+    "value:Income:SomeFund:PnL USD"
+  ],
+  [
+    "tests_resources_defs_defs.beancount",
+    "posting:Assets:US:Vanguard:Cash 2022-10-07 number"
+  ],
+  [
+    "tests_resources_defs_defs.beancount",
+    "posting:Assets:US:Vanguard:RGAGX 2022-10-07 price_number"
+  ],
+  [
+    "tests_resources_defs_defs.beancount",
+    "value:Assets:US:Vanguard:Cash USD"
+  ],
+  [
+    "tests_resources_defs_defs_opts.beancount",
+    "posting:Biens:US:Vanguard:Cash 2022-10-07 number"
+  ],
+  [
+    "tests_resources_defs_defs_opts.beancount",
+    "posting:Biens:US:Vanguard:RGAGX 2022-10-07 price_number"
+  ],
+  [
+    "tests_resources_defs_defs_opts.beancount",
+    "value:Biens:US:Vanguard:Cash USD"
+  ],
+  [
+    "tests_resources_defs_defs_repeat_payee.beancount",
+    "posting:Assets:US:Vanguard:Cash 2022-10-07 number"
+  ],
+  [
+    "tests_resources_defs_defs_repeat_payee.beancount",
+    "posting:Assets:US:Vanguard:RGAGX 2022-10-07 price_number"
+  ],
+  [
+    "tests_resources_defs_defs_repeat_payee.beancount",
+    "value:Assets:US:Vanguard:Cash USD"
+  ],
+  [
+    "tests_resources_defs_rx_221231.beancount",
+    "value:Assets:US:Vanguard:Cash USD"
+  ],
+  [
+    "tests_resources_defs_rx_230630.beancount",
+    "value:Assets:US:Vanguard:Cash USD"
+  ],
+  [
+    "tests_resources_defs_rx_opts_221231.beancount",
+    "value:Biens:US:Vanguard:Cash USD"
+  ],
+  [
+    "tests_resources_example_rx.beancount",
+    "value:Assets:US:Vanguard:Cash USD"
+  ],
+  [
+    "tests_resources_recon_rx.beancount",
+    "value:Assets:US:Vanguard:Cash USD"
+  ]
+]

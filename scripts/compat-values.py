@@ -1474,10 +1474,29 @@ def main() -> int:
 
     try:
         with open(args.baseline) as fh:
-            known = set(map(tuple, json.load(fh)))
+            raw = json.load(fh)
     except FileNotFoundError:
         print(f"\nERROR: baseline not found: {args.baseline}")
         return 1
+    except json.JSONDecodeError as exc:
+        # Most likely an unresolved merge conflict: this file is generated, so
+        # two PRs recording divergences will collide in it. A stack trace in a
+        # CI log is a poor way to learn that. Regenerate with --write-baseline.
+        print(f"\nERROR: baseline is not valid JSON: {args.baseline}: {exc}")
+        return 1
+
+    # Shape matters as much as syntax. `tuple("value:x")` is a tuple of
+    # characters, not a key, so a hand-edit that leaves bare strings in the
+    # list would match nothing and report every real divergence as new.
+    if not isinstance(raw, list) or any(
+        not (isinstance(e, (list, tuple)) and len(e) == 2 and all(isinstance(x, str) for x in e))
+        for e in raw
+    ):
+        print(
+            f"\nERROR: baseline must be a list of [file, field] string pairs: {args.baseline}"
+        )
+        return 1
+    known = {tuple(e) for e in raw}
 
     new = sorted(k for k in found if k not in known)
     fixed = sorted(k for k in known if k not in found)

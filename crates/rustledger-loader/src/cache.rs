@@ -451,12 +451,21 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     This is a layout change rather than a content change, so unlike the
 ///     entries above nothing about the ledger's meaning moved.
 ///
+///   v30: options declared in an INCLUDED file are no longer applied unless
+///     they accumulate across includes (#2151). `Options` is part of the
+///     cached payload, so a v29 cache replays the old resolution and
+///     resurrects the behavior: a sub-ledger's `booking_method` still
+///     changing lot selection, a sub-ledger's `inferred_tolerance_default`
+///     still letting an unbalanced transaction pass. Caught exactly that way
+///     while testing the fix -- the matrices kept diverging until the stale
+///     caches were cleared.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 29;
+pub const CACHE_VERSION: u32 = 30;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1189,7 +1198,11 @@ mod tests {
         // v25 (#2008) is another v15: transaction headers beancount rejects now
         // produce a parse error. That changes WHICH errors are emitted, not how
         // a `CostNumber` is archived, so the byte arrays are still valid.
-        const FIXTURE_VERSION: u32 = 29;
+        // v30 (#2151) is the same shape again: options declared in an included
+        // file stop being applied. That changes which OPTIONS a load resolves,
+        // not how a `CostNumber` is archived, so the byte arrays below are
+        // untouched and only FIXTURE_VERSION moves.
+        const FIXTURE_VERSION: u32 = 30;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1290,7 +1303,9 @@ mod tests {
         // an UNSIGNED zero. Like v19 that changes which VALUE a source text
         // produces, not the variants or their encodings, so the hash below
         // must still match — and the assertion, not this comment, proves it.
-        const FIXTURE_VERSION: u32 = 29;
+        // v30 (#2151) changes which options an included file contributes,
+        // not how a `MetaValue` is archived; the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 30;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

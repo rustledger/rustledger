@@ -41,6 +41,37 @@ const KNOWN_OPTIONS: &[&str] = &[
 ];
 
 /// Options that can be specified multiple times.
+/// Options that survive an `include` boundary.
+///
+/// Everything else is taken from the TOP-LEVEL file only. The split is by what
+/// an option governs, not by one blanket rule (#2151):
+///
+/// * These describe the file that declares them. A sub-ledger naming its own
+///   operating currency or document root is describing itself, not overriding
+///   its includer, so they accumulate.
+/// * Everything else defines global computation or the ledger's identity.
+///   `booking_method` decides which lot a sale consumes and
+///   `inferred_tolerance_default` decides what counts as balanced, so letting
+///   an included file set them means a sub-ledger silently changes results for
+///   every other entity in the tree — including the master's own transactions.
+///
+/// Note this is NOT the same list as [`REPEATABLE_OPTIONS`]. Repeating within
+/// one file and carrying across an include are different properties:
+/// `inferred_tolerance_default` accumulates within a file and must still not
+/// cross an include, which is exactly the combination that let an unbalanced
+/// transaction pass.
+///
+/// `plugin` is absent because it never routes through here; plugins are
+/// collected separately and already accumulate. That is deliberate — bean-query
+/// discards plugins declared in included files, which leaves the user with
+/// errors about accounts a plugin they did declare would have opened.
+const ACCUMULATE_ACROSS_INCLUDES: &[&str] = &[
+    "operating_currency",
+    "documents",
+    "insert_pythonpath",
+    "display_precision",
+];
+
 const REPEATABLE_OPTIONS: &[&str] = &[
     "operating_currency",
     "insert_pythonpath",
@@ -222,6 +253,33 @@ impl Options {
     ///
     /// Validates the option and collects any warnings in `self.warnings`.
     pub fn set(&mut self, key: &str, value: &str) {
+        self.set_scoped(key, value, true);
+    }
+
+    /// Apply an option, knowing whether it came from the top-level file.
+    ///
+    /// See the `ACCUMULATE_ACROSS_INCLUDES` list. An option outside it, seen in
+    /// an INCLUDED file, is reported and dropped rather than applied: the
+    /// top-level file's value governs, so an included sub-ledger cannot change
+    /// how the whole tree books or balances.
+    pub fn set_scoped(&mut self, key: &str, value: &str, top_level: bool) {
+        if !top_level && KNOWN_OPTIONS.contains(&key) && !ACCUMULATE_ACROSS_INCLUDES.contains(&key)
+        {
+            self.warnings.push(OptionWarning {
+                code: "E7003",
+                message: format!(
+                    "Option \"{key}\" set in an included file is ignored; \
+                     the top-level ledger's value governs"
+                ),
+                option: key.to_string(),
+                value: value.to_string(),
+            });
+            return;
+        }
+        self.set_inner(key, value);
+    }
+
+    fn set_inner(&mut self, key: &str, value: &str) {
         // Check for unknown options (E7001)
         let is_known = KNOWN_OPTIONS.contains(&key);
         if !is_known {
@@ -256,7 +314,7 @@ impl Options {
         if is_known && !is_repeatable && self.set_options.contains(key) {
             self.warnings.push(OptionWarning {
                 code: "E7003",
-                message: format!("Option \"{key}\" can only be specified once"),
+                message: format!("Option \"{key}\" is set more than once; the last value wins"),
                 option: key.to_string(),
                 value: value.to_string(),
             });
@@ -758,7 +816,74 @@ mod tests {
 
         assert_eq!(opts.warnings.len(), 1);
         assert_eq!(opts.warnings[0].code, "E7003");
-        assert!(opts.warnings[0].message.contains("only be specified once"));
+        // Wording matters here: the old text said the option "can only be
+        // specified once", which is not true -- bean-check accepts a
+        // redefinition and takes the last value, which is why #1546 asked for
+        // this to stop being an error. Saying so is the difference between a
+        // warning a reader can act on and one that looks like a rule.
+        assert!(
+            opts.warnings[0].message.contains("the last value wins"),
+            "got: {}",
+            opts.warnings[0].message,
+        );
+        // ...and last-wins is what actually happened.
+        assert_eq!(opts.title.as_deref(), Some("Second Title"));
+    }
+
+    /// An option set in an INCLUDED file does not govern the ledger.
+    ///
+    /// The value-changing cases are the point. `booking_method` decides which
+    /// lot a sale consumes and `inferred_tolerance_default` decides what
+    /// counts as balanced, so a sub-ledger setting either used to change
+    /// results for every other entity in the tree, including the master's own
+    /// transactions (#2151).
+    #[test]
+    fn included_files_do_not_govern_scoped_options() {
+        let mut opts = Options::new();
+        opts.set_scoped("title", "Master", true);
+        opts.set_scoped("booking_method", "LIFO", false);
+        opts.set_scoped("title", "Sub-ledger", false);
+
+        assert_eq!(
+            opts.title.as_deref(),
+            Some("Master"),
+            "the top-level ledger names the combined result, not whichever \
+             sub-ledger was included last",
+        );
+        assert!(
+            !opts.set_options.contains("booking_method"),
+            "an included booking_method must not reach the booker",
+        );
+        assert_eq!(opts.warnings.len(), 2, "each ignored option is reported");
+        assert!(
+            opts.warnings
+                .iter()
+                .all(|w| w.message.contains("is ignored")),
+            "the warning has to say the value was dropped, or the user cannot \
+             tell why their setting had no effect",
+        );
+    }
+
+    /// Options that describe the file declaring them still accumulate.
+    ///
+    /// A sub-ledger naming its own operating currency or document root is
+    /// describing itself rather than overriding its includer, so scoping must
+    /// not swallow these.
+    #[test]
+    fn included_files_still_contribute_accumulating_options() {
+        let mut opts = Options::new();
+        opts.set_scoped("operating_currency", "USD", true);
+        opts.set_scoped("operating_currency", "EUR", false);
+        opts.set_scoped("documents", "docs-from-include", false);
+
+        assert!(
+            opts.operating_currency.iter().any(|c| c == "EUR"),
+            "an included operating_currency must still be collected",
+        );
+        assert!(
+            opts.documents.iter().any(|d| d == "docs-from-include"),
+            "an included documents root must still be collected",
+        );
     }
 
     #[test]

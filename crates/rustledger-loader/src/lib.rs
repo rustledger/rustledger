@@ -564,9 +564,16 @@ impl Loader {
             });
         }
 
-        // Process options
+        // Process options.
+        //
+        // `include_stack` was pushed with this file just above, so a length of
+        // one means we are in the top-level ledger. Options outside
+        // `ACCUMULATE_ACROSS_INCLUDES` are taken from that file only: an
+        // included sub-ledger must not silently change how the whole tree
+        // books or what counts as balanced (#2151).
+        let top_level = self.include_stack.len() == 1;
         for (key, value, _span) in result.options {
-            options.set(&key, &value);
+            options.set_scoped(&key, &value, top_level);
         }
 
         // Process plugins

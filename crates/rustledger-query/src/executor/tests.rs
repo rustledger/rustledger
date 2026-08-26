@@ -2380,3 +2380,69 @@ fn entries_table_matches_bean_query_columns() {
     assert_eq!(run("SELECT ENTRY_META(\"k\") FROM #entries").rows.len(), 2);
     assert_eq!(run("SELECT ANY_META(\"k\") FROM #entries").rows.len(), 2);
 }
+
+/// The `#entries` metadata fallback must not disturb `#postings`.
+///
+/// `#entries` carries its metadata once, under the visible `meta`, so
+/// `ENTRY_META` falls back to that column when `_entry_meta` is absent.
+/// `#postings` is the case where that fallback would be actively wrong: there
+/// `meta` is the POSTING's metadata and `_entry_meta` is the TRANSACTION's,
+/// two different maps on the same row. Resolving `ENTRY_META` through `meta`
+/// on that table would silently answer with posting metadata.
+///
+/// Coverage is what prompted this: the branch that takes the helper column
+/// when it IS present was the untested half, which is precisely the half the
+/// safety argument rests on.
+#[test]
+fn entry_meta_fallback_does_not_disturb_postings() {
+    let mut entry_meta: Metadata = Metadata::default();
+    entry_meta.insert(
+        "shared".to_string(),
+        MetaValue::String("from-entry".to_string()),
+    );
+    let mut posting_meta: Metadata = Metadata::default();
+    posting_meta.insert(
+        "shared".to_string(),
+        MetaValue::String("from-posting".to_string()),
+    );
+
+    let mut txn = Transaction::new(date(2024, 2, 15), "t");
+    txn.flag = '*';
+    txn.meta = entry_meta;
+    let mut posting = Posting::new("Assets:A", Amount::new(dec!(1.00), "USD"));
+    posting.meta = posting_meta;
+    let directives = vec![Directive::Transaction(
+        txn.with_synthesized_posting(posting)
+            .with_synthesized_posting(Posting::new("Equity:O", Amount::new(dec!(-1.00), "USD"))),
+    )];
+
+    let run = |sql: &str| {
+        let mut executor = Executor::new(&directives);
+        let query = parse(sql).unwrap();
+        executor.execute(&query).unwrap().rows[0][0].clone()
+    };
+
+    // The key exists at BOTH levels with different values, so an accessor that
+    // reads the wrong column returns the wrong string rather than Null.
+    assert_eq!(
+        run("SELECT ENTRY_META(\"shared\") FROM #postings"),
+        Value::String("from-entry".to_string()),
+        "ENTRY_META on #postings must read the transaction's metadata, not the posting's",
+    );
+    assert_eq!(
+        run("SELECT META(\"shared\") FROM #postings"),
+        Value::String("from-posting".to_string()),
+    );
+    assert_eq!(
+        run("SELECT ANY_META(\"shared\") FROM #postings"),
+        Value::String("from-posting".to_string()),
+        "ANY_META prefers posting metadata when the key is set at both levels",
+    );
+
+    // And on #entries, where only the visible column exists, the fallback is
+    // what makes this resolve at all.
+    assert_eq!(
+        run("SELECT ENTRY_META(\"shared\") FROM #entries"),
+        Value::String("from-entry".to_string()),
+    );
+}

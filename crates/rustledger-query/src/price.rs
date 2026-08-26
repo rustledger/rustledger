@@ -460,6 +460,26 @@ impl PriceDatabase {
         (idx > 0).then(|| list[idx - 1].1)
     }
 
+    /// Most recent (date, rate) for the pair on or before `date`.
+    ///
+    /// The chained lookup needs the DATE of the rate it picked, not just the
+    /// rate, so it can value the second leg as of that same moment.
+    fn lookup_dated_at(
+        &self,
+        base: &str,
+        quote: &str,
+        date: NaiveDate,
+    ) -> Option<(NaiveDate, Decimal)> {
+        let list = self.lookup.get(base)?.get(quote)?;
+        let idx = list.partition_point(|entry| entry.0 <= date);
+        (idx > 0).then(|| list[idx - 1])
+    }
+
+    /// Latest (date, rate) for the pair.
+    fn lookup_dated_latest(&self, base: &str, quote: &str) -> Option<(NaiveDate, Decimal)> {
+        self.lookup.get(base)?.get(quote)?.last().copied()
+    }
+
     /// Latest rate for the pair, from the conversion index.
     fn lookup_rate_latest(&self, base: &str, quote: &str) -> Option<Decimal> {
         self.lookup
@@ -477,41 +497,84 @@ impl PriceDatabase {
     /// amount unconverted. One hop only; both legs read the bidirectional
     /// index, so no per-leg inverse handling is needed.
     ///
-    /// # The tie-break is lexical, not economic
+    /// # Path selection follows the evidence
     ///
-    /// Intermediates are tried in sorted order, so the result is
-    /// deterministic when several paths exist. Deterministic is not the same
-    /// as principled: with `XCOIN → AAA → USD` worth 20.00 and
-    /// `XCOIN → MMM → USD` worth 50.00, the answer is 20.00 because `AAA`
-    /// sorts first, and nothing in the output says another equally valid path
-    /// disagreed. Sorting is what makes the choice repeatable; it is not
-    /// evidence that the chosen path is the better-supported one.
+    /// A chain is only as current as its OLDEST leg: a 2010 `A → B` times a
+    /// 2024 `B → C` produces a figure that looks 2024-dated but rests on 2010
+    /// data. So when several paths exist the one whose oldest leg is most
+    /// recent wins, then the one whose legs sit closest together, then the
+    /// currency name so the order stays total and hash-order independent.
     ///
-    /// # Legs are dated independently
+    /// This replaced a purely alphabetical tie-break. On the corpus that rule
+    /// reached only two pairs, but it reached them for no reason: the real
+    /// case is BTC → CNY routed via USD or USDT, where the two answers differ
+    /// by 68% purely because one route's quotes stop 16 months earlier, and
+    /// `USD` happened to sort ahead of `USDT` (#2152).
     ///
-    /// Each leg takes its own most-recent rate on or before `date`, so the
-    /// two can be years apart: a 2010 `A → B` multiplied by a 2024 `B → C`
-    /// yields a 2024 valuation with no diagnostic. There is no staleness
-    /// policy anywhere in the crate to lean on here — the only age concept in
-    /// the tree is the price-FETCH cache, which governs quote reuse rather
-    /// than whether a rate is too old to value with (#2152).
+    /// # A stale chain is still answered
+    ///
+    /// Deliberately. A stale DIRECT price is returned without complaint, so
+    /// refusing only the chained case would be inconsistent rather than
+    /// stricter. Staleness as a general concern is #2152; it is not specific
+    /// to chaining.
     fn get_chained_price(&self, base: &str, quote: &str, date: NaiveDate) -> Option<Decimal> {
+        self.best_chain(base, quote, |b, q| self.lookup_dated_at(b, q, date))
+    }
+
+    /// Shared body of both chained lookups.
+    ///
+    /// Both legs are dated the same way the caller asks for, so a leg that is
+    /// merely NEWER than the other is fine: valuing a 07-10 stock close with
+    /// an 07-11 exchange rate is ordinary, and refusing it would be stricter
+    /// than any comparable tool.
+    ///
+    /// Paths are ranked by the evidence behind them rather than by spelling.
+    /// A chain is only as current as its OLDEST leg -- multiplying a 2010
+    /// `A -> B` by a 2024 `B -> C` yields a figure that looks 2024-dated but
+    /// rests on 2010 data -- so the path whose oldest leg is most recent wins,
+    /// then the one whose legs sit closest together, then the currency name so
+    /// the order stays total and stable.
+    ///
+    /// This does not make a stale chain unavailable, and deliberately so: a
+    /// stale DIRECT price is returned without complaint too, so refusing only
+    /// the chained case would be an inconsistent rule rather than a stricter
+    /// one. Staleness as such is #2152.
+    fn best_chain<F>(&self, base: &str, quote: &str, first_leg: F) -> Option<Decimal>
+    where
+        F: Fn(&str, &str) -> Option<(NaiveDate, Decimal)>,
+    {
         let inner = self.lookup.get(base)?;
         let mut intermediates: Vec<&rustledger_core::Currency> = inner.keys().collect();
         intermediates.sort_unstable_by_key(|c| c.as_str());
 
+        let mut best: Option<(std::cmp::Reverse<NaiveDate>, i64, &str, Decimal)> = None;
         for intermediate in intermediates {
             if intermediate.as_str() == quote {
                 continue; // Already tried direct
             }
-            let Some(rate1) = self.lookup_rate_at(base, intermediate.as_str(), date) else {
+            let Some((leg1_date, rate1)) = first_leg(base, intermediate.as_str()) else {
                 continue;
             };
-            if let Some(rate2) = self.lookup_rate_at(intermediate.as_str(), quote, date) {
-                return Some(rate1 * rate2);
+            let Some((leg2_date, rate2)) = first_leg(intermediate.as_str(), quote) else {
+                continue;
+            };
+            // The chain is only as current as its oldest leg.
+            let effective = leg1_date.min(leg2_date);
+            let gap = i64::from((leg1_date - leg2_date).get_days().abs());
+            let candidate = (
+                std::cmp::Reverse(effective),
+                gap,
+                intermediate.as_str(),
+                rate1 * rate2,
+            );
+            let better = best.as_ref().is_none_or(|current| {
+                (candidate.0, candidate.1, candidate.2) < (current.0, current.1, current.2)
+            });
+            if better {
+                best = Some(candidate);
             }
         }
-        None
+        best.map(|(_, _, _, rate)| rate)
     }
 
     /// Get the latest price of a currency (most recent date).
@@ -534,22 +597,7 @@ impl PriceDatabase {
 
     /// Latest-rate variant of [`Self::get_chained_price`].
     fn get_chained_latest_price(&self, base: &str, quote: &str) -> Option<Decimal> {
-        let inner = self.lookup.get(base)?;
-        let mut intermediates: Vec<&rustledger_core::Currency> = inner.keys().collect();
-        intermediates.sort_unstable_by_key(|c| c.as_str());
-
-        for intermediate in intermediates {
-            if intermediate.as_str() == quote {
-                continue; // Already tried direct
-            }
-            let Some(rate1) = self.lookup_rate_latest(base, intermediate.as_str()) else {
-                continue;
-            };
-            if let Some(rate2) = self.lookup_rate_latest(intermediate.as_str(), quote) {
-                return Some(rate1 * rate2);
-            }
-        }
-        None
+        self.best_chain(base, quote, |b, q| self.lookup_dated_latest(b, q))
     }
 
     /// Convert an amount to a target currency.
@@ -844,63 +892,60 @@ mod tests {
         assert!(chained > dec!(36363) && chained < dec!(36364));
     }
 
-    /// When several one-hop paths exist, the winner is the alphabetically
-    /// first intermediate, and it is the SAME one every run.
+    /// When several one-hop paths exist, the best-supported one wins, and it
+    /// is the same one every run.
     ///
     /// The three tests around this one each build a single chain, so nothing
-    /// pinned the documented "tried in sorted order so the result is
-    /// deterministic when several paths exist" -- the sort could have been
-    /// dropped in a refactor and they would all still pass (#2152).
+    /// pinned the multi-path behavior: the ranking could have been dropped in
+    /// a refactor and they would all still pass (#2152).
     ///
-    /// The two paths are deliberately worth very different amounts. A tie
-    /// between equal-valued paths would pass whichever way the iteration
-    /// went, which is exactly the property this is meant to detect.
-    ///
-    /// Note what this pins and what it does not: the answer is repeatable,
-    /// not better-supported. `AAA` wins because of its spelling, and 50.00
-    /// was equally available.
+    /// Two properties, in order of what matters. First, a chain is only as
+    /// current as its OLDEST leg, so the path resting on more recent data
+    /// wins even when the other sorts first alphabetically -- this is the case
+    /// that used to go the wrong way. Second, when the evidence is equally
+    /// good the currency name breaks the tie, which is what keeps the answer
+    /// repeatable rather than dependent on hash-map order.
     #[test]
-    fn chained_price_picks_the_first_intermediate_in_sort_order() {
-        let build = || {
+    fn chained_price_prefers_the_better_supported_path() {
+        // AAAA sorts first but its data stops in 2019; ZZZZ sorts last and is
+        // current. Modeled on ledger_prices.beancount, where the real BTC to
+        // CNY pair has exactly this shape and the two answers differ by 68%.
+        let stale_vs_fresh = || {
             let mut db = PriceDatabase::new();
-            for (cur, num, quote) in [
-                ("XCOIN", dec!(2.00), "AAA"),
-                ("AAA", dec!(10.00), "USD"),
-                ("XCOIN", dec!(5.00), "MMM"),
-                ("MMM", dec!(10.00), "USD"),
-            ] {
-                db.add_price(&PriceDirective {
-                    date: date(2024, 1, 5),
-                    currency: cur.into(),
-                    amount: Amount::new(num, quote),
-                    meta: Default::default(),
-                });
-            }
+            db.add_price(&price(date(2019, 7, 16), "XCOIN", dec!(10757.30), "AAAA"));
+            db.add_price(&price(date(2019, 7, 16), "AAAA", dec!(6.95), "CNY"));
+            db.add_price(&price(date(2020, 11, 24), "XCOIN", dec!(19107.45), "ZZZZ"));
+            db.add_price(&price(date(2020, 11, 24), "ZZZZ", dec!(6.5868), "CNY"));
             db.sort_prices();
             db
         };
-
-        // via AAA: 2.00 * 10.00 = 20.00     via MMM: 5.00 * 10.00 = 50.00
-        let db = build();
+        let db = stale_vs_fresh();
         assert_eq!(
-            db.get_price("XCOIN", "USD", date(2024, 6, 1)),
-            Some(dec!(20.00)),
-            "the alphabetically first intermediate must win, not whichever the map yields first",
+            db.get_latest_price("XCOIN", "CNY"),
+            Some(dec!(19107.45) * dec!(6.5868)),
+            "the path with the more recent oldest-leg must win, not the one that sorts first",
+        );
+        assert_eq!(
+            db.get_price("XCOIN", "CNY", date(2021, 1, 1)),
+            Some(dec!(19107.45) * dec!(6.5868)),
+            "the as-of variant must rank paths the same way the latest variant does",
         );
 
-        // The latest-rate variant carries its own copy of the sort, so it
-        // needs its own assertion rather than being assumed to agree.
-        assert_eq!(
-            db.get_latest_price("XCOIN", "USD"),
-            Some(dec!(20.00)),
-            "get_latest_price must break the tie the same way get_price does",
-        );
-
-        // Repeatable across independently constructed databases: the
-        // underlying map is a hash map, so insertion-order luck would show
-        // up here rather than in a single run.
+        // Equally-supported paths: same dates on both, so the name decides and
+        // keeps the answer stable. Rebuilt repeatedly because the underlying
+        // map is a hash map, and insertion-order luck shows up across
+        // constructions rather than within one run.
+        let equally_good = || {
+            let mut db = PriceDatabase::new();
+            db.add_price(&price(date(2024, 1, 5), "XCOIN", dec!(2.00), "AAA"));
+            db.add_price(&price(date(2024, 1, 5), "AAA", dec!(10.00), "USD"));
+            db.add_price(&price(date(2024, 1, 5), "XCOIN", dec!(5.00), "MMM"));
+            db.add_price(&price(date(2024, 1, 5), "MMM", dec!(10.00), "USD"));
+            db.sort_prices();
+            db
+        };
         for _ in 0..8 {
-            let db = build();
+            let db = equally_good();
             assert_eq!(
                 db.get_price("XCOIN", "USD", date(2024, 6, 1)),
                 Some(dec!(20.00))

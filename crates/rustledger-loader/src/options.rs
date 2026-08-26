@@ -74,10 +74,17 @@ fn deprecation_message(key: &str) -> Option<&'static str> {
 /// cross an include, which is exactly the combination that let an unbalanced
 /// transaction pass.
 ///
-/// `plugin` is absent because it never routes through here; plugins are
-/// collected separately and already accumulate. That is deliberate — bean-query
-/// discards plugins declared in included files, which leaves the user with
-/// errors about accounts a plugin they did declare would have opened.
+/// Plugins are absent for a reason that needs the two spellings kept apart.
+/// The `plugin "name"` DIRECTIVE never reaches this function: it is collected
+/// separately and already accumulates from any file, which is deliberate.
+/// bean-query discards plugins declared in included files, leaving the user
+/// with errors about accounts a plugin they did declare would have opened.
+///
+/// The deprecated `option "plugin"` form is a different thing and IS a known
+/// option, so it does route through here and is scoped out like the rest.
+/// That is why the include-scope branch re-raises E7004: the option was
+/// already an error before this list existed, and being ignored must not
+/// quietly downgrade it.
 const ACCUMULATE_ACROSS_INCLUDES: &[&str] = &[
     "operating_currency",
     "documents",

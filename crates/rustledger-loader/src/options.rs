@@ -40,7 +40,20 @@ const KNOWN_OPTIONS: &[&str] = &[
     "tolerance_multiplier", // Renamed from inferred_tolerance_multiplier
 ];
 
-/// Options that can be specified multiple times.
+/// The E7004 message for a deprecated option, if it is one.
+///
+/// One table rather than three inline strings: the include-scope check has to
+/// report deprecation as well, and a second copy of these messages would drift
+/// from the arms that raise them.
+fn deprecation_message(key: &str) -> Option<&'static str> {
+    match key {
+        "inferred_tolerance_multiplier" => Some("Renamed to 'tolerance_multiplier'."),
+        "allow_pipe_separator" => Some("Option 'allow_pipe_separator' is deprecated"),
+        "plugin" => Some("Option 'plugin' is deprecated; use the 'plugin' directive instead"),
+        _ => None,
+    }
+}
+
 /// Options that survive an `include` boundary.
 ///
 /// Everything else is taken from the TOP-LEVEL file only. The split is by what
@@ -72,6 +85,7 @@ const ACCUMULATE_ACROSS_INCLUDES: &[&str] = &[
     "display_precision",
 ];
 
+/// Options that can be specified multiple times.
 const REPEATABLE_OPTIONS: &[&str] = &[
     "operating_currency",
     "insert_pythonpath",
@@ -265,8 +279,23 @@ impl Options {
     pub fn set_scoped(&mut self, key: &str, value: &str, top_level: bool) {
         if !top_level && KNOWN_OPTIONS.contains(&key) && !ACCUMULATE_ACROSS_INCLUDES.contains(&key)
         {
+            // A deprecated option is still deprecated when it is also ignored,
+            // and E7004 is an error where the notice below is a warning. Raise
+            // it first so scoping cannot quietly downgrade the severity of a
+            // diagnostic that existed before this check did.
+            if let Some(message) = deprecation_message(key) {
+                self.warnings.push(OptionWarning {
+                    code: "E7004",
+                    message: message.to_string(),
+                    option: key.to_string(),
+                    value: value.to_string(),
+                });
+            }
+            // Its own code, not E7003. That one means "specified twice, last
+            // wins" and is mapped downstream to `ErrorCode::DuplicateOption`;
+            // this option may be the only one of its name in the tree.
             self.warnings.push(OptionWarning {
-                code: "E7003",
+                code: "E7009",
                 message: format!(
                     "Option \"{key}\" set in an included file is ignored; \
                      the top-level ledger's value governs"
@@ -401,7 +430,7 @@ impl Options {
                 // Deprecated: renamed to tolerance_multiplier in Python beancount
                 self.warnings.push(OptionWarning {
                     code: "E7004",
-                    message: "Renamed to 'tolerance_multiplier'.".to_string(),
+                    message: deprecation_message(key).unwrap_or_default().to_string(),
                     option: key.to_string(),
                     value: value.to_string(),
                 });
@@ -612,7 +641,7 @@ impl Options {
                 // This option is deprecated in Python beancount
                 self.warnings.push(OptionWarning {
                     code: "E7004",
-                    message: "Option 'allow_pipe_separator' is deprecated".to_string(),
+                    message: deprecation_message(key).unwrap_or_default().to_string(),
                     option: key.to_string(),
                     value: value.to_string(),
                 });
@@ -662,8 +691,7 @@ impl Options {
                 // Deprecated: should use `plugin` directive instead of `option "plugin"`
                 self.warnings.push(OptionWarning {
                     code: "E7004",
-                    message: "Option 'plugin' is deprecated; use the 'plugin' directive instead"
-                        .to_string(),
+                    message: deprecation_message(key).unwrap_or_default().to_string(),
                     option: key.to_string(),
                     value: value.to_string(),
                 });
@@ -856,11 +884,45 @@ mod tests {
         );
         assert_eq!(opts.warnings.len(), 2, "each ignored option is reported");
         assert!(
+            opts.warnings.iter().all(|w| w.code == "E7009"),
+            "must not reuse E7003: that one means specified-twice-last-wins and \
+             maps downstream to DuplicateOption, but an ignored option may be \
+             the only one of its name in the tree",
+        );
+        assert!(
             opts.warnings
                 .iter()
                 .all(|w| w.message.contains("is ignored")),
             "the warning has to say the value was dropped, or the user cannot \
              tell why their setting had no effect",
+        );
+    }
+
+    /// Scoping must not downgrade a diagnostic that already existed.
+    ///
+    /// `option "plugin"` is deprecated and raises E7004, which `rledger check`
+    /// treats as an error. Reporting only the E7009 notice would silently turn
+    /// that into a warning, making an included file the one place a deprecated
+    /// option stopped failing the build.
+    #[test]
+    fn scoping_out_an_option_still_reports_its_deprecation() {
+        let mut opts = Options::new();
+        opts.set_scoped("plugin", "some.module", false);
+
+        let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+        assert!(
+            codes.contains(&"E7004"),
+            "deprecation survives scoping: {codes:?}"
+        );
+        assert!(
+            codes.contains(&"E7009"),
+            "and the ignore is still reported: {codes:?}"
+        );
+        assert!(
+            opts.warnings
+                .iter()
+                .any(|w| w.code == "E7004" && w.message.contains("deprecated")),
+            "the message must come from the shared table, not an empty default",
         );
     }
 

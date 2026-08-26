@@ -489,11 +489,19 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     // that pattern and disagreed with our own loader/`validate` (issue #1546).
     // The value is already last-wins (the loader applies the latest). Pinned by
     // `cli_commands_test::test_check_duplicate_option_warns`.
+    //
+    // E7009 (option in an included file is ignored) is a warning for the same
+    // reason, and the reason is the same LEDGER: #1546's repro declares a
+    // title in the master and in each sub-ledger. Once #2151 stopped the
+    // included values from governing, that layout started reporting E7009 —
+    // so leaving this list at E7003 alone made the exact file #1546 was about
+    // exit non-zero again. The unit tests all passed; only running its repro
+    // end to end caught it.
     let main_file_str = file.display().to_string();
     let mut option_error_count = 0;
     let mut option_warning_count = 0;
     for warning in &load_result.options.warnings {
-        let is_error = warning.code != "E7003";
+        let is_error = !matches!(warning.code, "E7003" | "E7009");
         let severity = if is_error { "error" } else { "warning" };
         if json_mode {
             diagnostics.push(JsonDiagnostic {

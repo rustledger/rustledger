@@ -270,9 +270,25 @@ Only directives rledger is confident are budgets get reported. Ownership is one 
 
 ### E7003: Duplicate Option
 
-**Cause**: Non-repeatable option specified multiple times.
+**Cause**: Non-repeatable option specified multiple times. The last value wins,
+matching `bean-check`, so this is a warning rather than an error.
 
-**Fix**: Remove duplicate option directives.
+**Fix**: Remove duplicate option directives, or rely on the last one deliberately.
+
+### E7009: Option in an Included File Is Ignored
+
+**Cause**: An option was set in an `include`d file rather than the top-level
+ledger. Most options are taken from the top-level file only, so the included
+value has no effect.
+
+Options that describe the file declaring them still apply from anywhere:
+`operating_currency`, `documents`, `insert_pythonpath`, `display_precision`,
+and `plugin` directives. Everything else, notably `booking_method` and
+`inferred_tolerance_default`, comes from the top-level ledger, so a sub-ledger
+cannot change how the whole tree books or what counts as balanced.
+
+**Fix**: Move the option to the top-level ledger if it should govern, or remove
+it if the sub-ledger only needed it when loaded standalone.
 
 ### E7007: Option Accepted but Has No Effect
 

@@ -1821,6 +1821,26 @@ fn test_check_multi_entity_include_duplicate_option_ok() {
         "multi-entity include tree with per-entity `option \"title\"` must pass check; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    // Since #2151 the included titles no longer govern, which is what this
+    // ledger wanted all along: it names itself "Combined" and used to resolve
+    // to "Entity B", whichever file happened to be included last.
+    //
+    // This assertion is also the guard that caught a regression while #2151
+    // was being written. Giving the ignore-notice its own code (E7009) made it
+    // an error, because `cmd::check` treated everything except E7003 as one,
+    // and this exact ledger started exiting non-zero again -- the very thing
+    // #1546 was filed about. Every unit test still passed.
+    let options = Command::new(&rledger)
+        .args(["doctor", "print-options"])
+        .arg(&master)
+        .output()
+        .expect("Failed to run rledger doctor print-options");
+    let printed = String::from_utf8_lossy(&options.stdout);
+    assert!(
+        printed.contains("Combined"),
+        "the master ledger names the combined result; got: {printed}"
+    );
 }
 
 /// Conversely, a single non-repeatable option must NOT be flagged (no false

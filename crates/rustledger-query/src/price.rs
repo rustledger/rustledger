@@ -462,8 +462,9 @@ impl PriceDatabase {
 
     /// Most recent (date, rate) for the pair on or before `date`.
     ///
-    /// The chained lookup needs the DATE of the rate it picked, not just the
-    /// rate, so it can value the second leg as of that same moment.
+    /// Same lookup as [`Self::lookup_rate_at`], returning the date too. The
+    /// chained path ranking needs it: how good a chain is depends on when its
+    /// legs were quoted, not only on what they were quoted at.
     fn lookup_dated_at(
         &self,
         base: &str,
@@ -497,26 +498,8 @@ impl PriceDatabase {
     /// amount unconverted. One hop only; both legs read the bidirectional
     /// index, so no per-leg inverse handling is needed.
     ///
-    /// # Path selection follows the evidence
-    ///
-    /// A chain is only as current as its OLDEST leg: a 2010 `A → B` times a
-    /// 2024 `B → C` produces a figure that looks 2024-dated but rests on 2010
-    /// data. So when several paths exist the one whose oldest leg is most
-    /// recent wins, then the one whose legs sit closest together, then the
-    /// currency name so the order stays total and hash-order independent.
-    ///
-    /// This replaced a purely alphabetical tie-break. On the corpus that rule
-    /// reached only two pairs, but it reached them for no reason: the real
-    /// case is BTC → CNY routed via USD or USDT, where the two answers differ
-    /// by 68% purely because one route's quotes stop 16 months earlier, and
-    /// `USD` happened to sort ahead of `USDT` (#2152).
-    ///
-    /// # A stale chain is still answered
-    ///
-    /// Deliberately. A stale DIRECT price is returned without complaint, so
-    /// refusing only the chained case would be inconsistent rather than
-    /// stricter. Staleness as a general concern is #2152; it is not specific
-    /// to chaining.
+    /// Path selection and the stale-chain policy are described on
+    /// [`Self::best_chain`], which both chained lookups share.
     fn get_chained_price(&self, base: &str, quote: &str, date: NaiveDate) -> Option<Decimal> {
         self.best_chain(base, quote, |b, q| self.lookup_dated_at(b, q, date))
     }
@@ -534,6 +517,12 @@ impl PriceDatabase {
     /// rests on 2010 data -- so the path whose oldest leg is most recent wins,
     /// then the one whose legs sit closest together, then the currency name so
     /// the order stays total and stable.
+    ///
+    /// This replaced a purely alphabetical tie-break. That rule reached only
+    /// two pairs in the whole corpus, but it reached them for no reason: the
+    /// real case is BTC to CNY routed via USD or USDT, where the answers
+    /// differ by 68% purely because one route's quotes stop 16 months
+    /// earlier, and `USD` happened to sort ahead of `USDT`.
     ///
     /// This does not make a stale chain unavailable, and deliberately so: a
     /// stale DIRECT price is returned without complaint too, so refusing only

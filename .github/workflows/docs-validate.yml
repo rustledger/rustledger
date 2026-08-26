@@ -3,10 +3,15 @@ on:
   pull_request:
     paths:
       - 'docs/**'
+      # So a change to this workflow tests itself. Without it the job that
+      # fixes a broken docs build cannot run the docs build, and the fix
+      # merges unverified.
+      - '.github/workflows/docs-validate.yml'
   push:
     branches: [main]
     paths:
       - 'docs/**'
+      - '.github/workflows/docs-validate.yml'
 permissions:
   contents: read
 concurrency:

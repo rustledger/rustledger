@@ -2362,6 +2362,21 @@ fn entries_table_matches_bean_query_columns() {
         Value::String("Acme Corp | monthly invoice".to_string()),
     );
 
-    // The hidden spelling still resolves by explicit name.
-    assert_eq!(run("SELECT _entry_meta FROM #entries").rows.len(), 2);
+    // `#entries` carries metadata ONCE, under the visible `meta`. It used to
+    // also carry a `_entry_meta` copy; storing the same map twice per row cost
+    // a deep clone on every entry, so `ENTRY_META` now falls back to `meta`
+    // when the helper column is absent. `#postings` is unaffected: it carries
+    // `meta`, `_entry_meta` and `_posting_meta` as three DISTINCT values, so
+    // the fallback is unreachable there.
+    let mut executor = Executor::new(&directives);
+    let query = parse("SELECT _entry_meta FROM #entries").unwrap();
+    assert!(
+        executor.execute(&query).is_err(),
+        "the duplicate helper column should be gone from #entries",
+    );
+
+    // ...and the function that used to read it still resolves, which is the
+    // half that actually matters to a user.
+    assert_eq!(run("SELECT ENTRY_META(\"k\") FROM #entries").rows.len(), 2);
+    assert_eq!(run("SELECT ANY_META(\"k\") FROM #entries").rows.len(), 2);
 }

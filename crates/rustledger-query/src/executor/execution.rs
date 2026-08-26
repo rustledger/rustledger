@@ -1556,6 +1556,17 @@ impl Executor<'_> {
             _ => "_entry_meta",
         };
 
+        // A table that carries only the visible `meta` (as `#entries` does,
+        // where the entry's metadata IS the row's metadata) resolves through
+        // it. This cannot misfire on `#postings`, which carries `meta`,
+        // `_entry_meta` and `_posting_meta` as three DISTINCT values: the
+        // fallback is reached only when the requested helper column is absent.
+        let meta_col = if column_map.contains_key(meta_col) {
+            meta_col
+        } else {
+            "meta"
+        };
+
         if let Some(&idx) = column_map.get(meta_col)
             && let Some(Value::Object(meta)) = row.get(idx)
             && let Some(val) = meta.get(&key)

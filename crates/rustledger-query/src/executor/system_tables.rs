@@ -420,6 +420,19 @@ impl Executor<'_> {
         table
     }
 
+    /// `"payee | narration"`, or the narration alone when there is no payee.
+    ///
+    /// ONE implementation for the `description` column, which both `#entries`
+    /// and `#postings` expose. It was written out twice, and a divergence in
+    /// the separator or the no-payee case would have shown up as two tables
+    /// describing the same transaction differently.
+    fn transaction_description(txn: &rustledger_core::Transaction) -> String {
+        match &txn.payee {
+            Some(payee) => format!("{payee} | {}", txn.narration),
+            None => txn.narration.to_string(),
+        }
+    }
+
     /// Build the #entries table from all directives.
     ///
     /// Column order matches bean-query's `SELECT * FROM #entries` exactly, so
@@ -448,7 +461,6 @@ impl Executor<'_> {
             "links".to_string(),
             "meta".to_string(),
             "accounts".to_string(),
-            "_entry_meta".to_string(),
         ];
         let mut table = Table::new(columns);
 
@@ -513,13 +525,7 @@ impl Executor<'_> {
                     .into_iter()
                     .collect();
                 accounts.sort(); // Ensure deterministic ordering
-                // Same "payee | narration" shape the `description` column on
-                // `#postings` already produces, and the same one bean-query
-                // returns; narration alone when there is no payee.
-                let description = match &txn.payee {
-                    Some(payee) => format!("{} | {}", payee, txn.narration),
-                    None => txn.narration.to_string(),
-                };
+                let description = Self::transaction_description(txn);
                 (
                     Value::String(txn.flag.to_string()),
                     txn.payee
@@ -560,8 +566,6 @@ impl Executor<'_> {
             _ => (Value::Null, Value::Null, Value::Null),
         };
 
-        let meta = Self::metadata_to_value(directive.meta());
-
         vec![
             Value::Integer(idx as i64), // id
             Value::String(type_name.to_string()),
@@ -577,10 +581,8 @@ impl Executor<'_> {
             description,
             tags,
             links,
-            meta.clone(),
+            Self::metadata_to_value(directive.meta()),
             accounts,
-            // Hidden copy; see the note on `build_entries_table`.
-            meta,
         ]
     }
 
@@ -692,10 +694,7 @@ impl Executor<'_> {
                 .collect();
             all_accounts.sort();
 
-            let description = match &txn.payee {
-                Some(payee) => format!("{} | {}", payee, txn.narration),
-                None => txn.narration.to_string(),
-            };
+            let description = Self::transaction_description(txn);
 
             let year = Value::Integer(i64::from(txn.date.year()));
             let month = Value::Integer(i64::from(txn.date.month()));

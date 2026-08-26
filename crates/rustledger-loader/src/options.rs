@@ -277,6 +277,26 @@ impl Options {
         self.set_scoped(key, value, true);
     }
 
+    /// Raise E7004 if `key` is deprecated, reporting whether it was.
+    ///
+    /// The three arms that handle deprecated options and the include-scope
+    /// branch all need this, and all four previously spelled it out. Reaching
+    /// for `deprecation_message(key).unwrap_or_default()` in the arms was the
+    /// worst of those: an entry dropped from the table would have produced an
+    /// E7004 with an EMPTY message rather than any visible failure.
+    fn warn_if_deprecated(&mut self, key: &str, value: &str) -> bool {
+        let Some(message) = deprecation_message(key) else {
+            return false;
+        };
+        self.warnings.push(OptionWarning {
+            code: "E7004",
+            message: message.to_string(),
+            option: key.to_string(),
+            value: value.to_string(),
+        });
+        true
+    }
+
     /// Apply an option, knowing whether it came from the top-level file.
     ///
     /// See the `ACCUMULATE_ACROSS_INCLUDES` list. An option outside it, seen in
@@ -290,14 +310,7 @@ impl Options {
             // and E7004 is an error where the notice below is a warning. Raise
             // it first so scoping cannot quietly downgrade the severity of a
             // diagnostic that existed before this check did.
-            if let Some(message) = deprecation_message(key) {
-                self.warnings.push(OptionWarning {
-                    code: "E7004",
-                    message: message.to_string(),
-                    option: key.to_string(),
-                    value: value.to_string(),
-                });
-            }
+            self.warn_if_deprecated(key, value);
             // Its own code, not E7003. That one means "specified twice, last
             // wins" and is mapped downstream to `ErrorCode::DuplicateOption`;
             // this option may be the only one of its name in the tree.
@@ -435,12 +448,7 @@ impl Options {
             }
             "inferred_tolerance_multiplier" => {
                 // Deprecated: renamed to tolerance_multiplier in Python beancount
-                self.warnings.push(OptionWarning {
-                    code: "E7004",
-                    message: deprecation_message(key).unwrap_or_default().to_string(),
-                    option: key.to_string(),
-                    value: value.to_string(),
-                });
+                self.warn_if_deprecated(key, value);
                 if let Ok(d) = Decimal::from_str(value) {
                     self.inferred_tolerance_multiplier = d;
                 } else {
@@ -646,12 +654,7 @@ impl Options {
             }
             "allow_pipe_separator" => {
                 // This option is deprecated in Python beancount
-                self.warnings.push(OptionWarning {
-                    code: "E7004",
-                    message: deprecation_message(key).unwrap_or_default().to_string(),
-                    option: key.to_string(),
-                    value: value.to_string(),
-                });
+                self.warn_if_deprecated(key, value);
                 self.allow_pipe_separator = value.eq_ignore_ascii_case("true");
             }
             "long_string_maxlines" => {
@@ -696,12 +699,7 @@ impl Options {
             }
             "plugin" => {
                 // Deprecated: should use `plugin` directive instead of `option "plugin"`
-                self.warnings.push(OptionWarning {
-                    code: "E7004",
-                    message: deprecation_message(key).unwrap_or_default().to_string(),
-                    option: key.to_string(),
-                    value: value.to_string(),
-                });
+                self.warn_if_deprecated(key, value);
             }
             _ => {
                 // Unknown options go to custom map

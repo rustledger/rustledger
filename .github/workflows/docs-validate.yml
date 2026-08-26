@@ -3,10 +3,15 @@ on:
   pull_request:
     paths:
       - 'docs/**'
+      # So a change to this workflow tests itself. Without it the job that
+      # fixes a broken docs build cannot run the docs build, and the fix
+      # merges unverified.
+      - '.github/workflows/docs-validate.yml'
   push:
     branches: [main]
     paths:
       - 'docs/**'
+      - '.github/workflows/docs-validate.yml'
 permissions:
   contents: read
 concurrency:
@@ -23,7 +28,6 @@ jobs:
           path: rustledger
           sparse-checkout: |
             docs
-            .nvmrc
       - name: Checkout website repo (for VitePress config)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -32,14 +36,23 @@ jobs:
           sparse-checkout: |
             docs/.vitepress
             package.json
-            package-lock.json
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+            bun.lock
+      # The website repo moved to bun and dropped package-lock.json
+      # (rustledger.github.io#30), so `npm ci` here had nothing to install
+      # from. Match how that repo's own deploy workflow installs.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          node-version-file: 'rustledger/.nvmrc'
+          # Pinned, not `latest`. An unpinned toolchain turns an unrelated
+          # contributor's PR red the day upstream ships a change, which is
+          # exactly how the ruff formatter took out pta-standards' CI. Nothing
+          # bumps this automatically -- dependabot updates the action SHA
+          # above, not this input -- so raise it deliberately when there is a
+          # reason to.
+          bun-version: 1.4.0
       - name: Install dependencies
         working-directory: website
-        run: npm ci
+        run: bun install --frozen-lockfile
       - name: Sync docs from PR to website
         run: |
           # Use rsync to properly sync docs, deleting files that don't exist in PR
@@ -49,4 +62,4 @@ jobs:
             rustledger/docs/ website/docs/
       - name: Build docs with VitePress
         working-directory: website
-        run: npx vitepress build docs
+        run: bunx vitepress build docs

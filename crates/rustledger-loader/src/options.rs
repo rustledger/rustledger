@@ -277,16 +277,16 @@ impl Options {
         self.set_scoped(key, value, true);
     }
 
-    /// Raise E7004 if `key` is deprecated, reporting whether it was.
+    /// Raise E7004 if `key` is deprecated.
     ///
     /// The three arms that handle deprecated options and the include-scope
     /// branch all need this, and all four previously spelled it out. Reaching
     /// for `deprecation_message(key).unwrap_or_default()` in the arms was the
     /// worst of those: an entry dropped from the table would have produced an
     /// E7004 with an EMPTY message rather than any visible failure.
-    fn warn_if_deprecated(&mut self, key: &str, value: &str) -> bool {
+    fn warn_if_deprecated(&mut self, key: &str, value: &str) {
         let Some(message) = deprecation_message(key) else {
-            return false;
+            return;
         };
         self.warnings.push(OptionWarning {
             code: "E7004",
@@ -294,7 +294,6 @@ impl Options {
             option: key.to_string(),
             value: value.to_string(),
         });
-        true
     }
 
     /// Apply an option, knowing whether it came from the top-level file.

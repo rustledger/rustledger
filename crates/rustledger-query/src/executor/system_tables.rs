@@ -438,11 +438,15 @@ impl Executor<'_> {
     /// Column order matches bean-query's `SELECT * FROM #entries` exactly, so
     /// the wildcard yields the same 16 columns in the same positions.
     ///
-    /// `meta` and `_entry_meta` carry the same value. The underscore copy is
-    /// load-bearing and cannot simply be renamed: `ENTRY_META` resolves
-    /// through it (`execution.rs`), and `wildcard_hidden` uses the underscore
-    /// prefix to keep helper columns out of `SELECT *`. The visible `meta` is
-    /// what bean-query exposes and what `SELECT *` must include (#2154).
+    /// Metadata lives in ONE column here, the visible `meta` bean-query
+    /// exposes. This table briefly carried a `_entry_meta` copy of the same
+    /// map as well, which cost a deep clone per entry on every query that
+    /// touched it; `eval_meta_on_table_row` now falls back to `meta` when the
+    /// underscore column is absent, so `ENTRY_META` still resolves.
+    ///
+    /// `#postings` keeps its `_entry_meta`, and must: there `meta` is the
+    /// POSTING's metadata and `_entry_meta` the TRANSACTION's, two different
+    /// maps on one row (#2154).
     pub(super) fn build_entries_table(&self) -> Table {
         let columns = vec![
             "id".to_string(),

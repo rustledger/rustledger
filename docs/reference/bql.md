@@ -250,6 +250,7 @@ SELECT min(date), max(date)
 | `quarter(date)` | Extract quarter | `1` |
 | `weekday(date)` | Day-of-week name (`Mon`..`Sun`) | `Fri` |
 | `today()` | Current date | `2024-03-15` |
+| `yearmonth(date)` | First of that month, as a date | `2024-03-01` |
 
 ### Amount Functions
 
@@ -258,7 +259,16 @@ SELECT min(date), max(date)
 | `cost(position)` | Convert to cost basis |
 | `units(position)` | Get units (number + currency) |
 | `currency(position)` | Get currency |
+| `commodity(amount)` | Get the currency of an **amount** |
 | `number(amount)` | Extract number from amount |
+
+`commodity()` and `currency()` overlap but are not interchangeable.
+`commodity()` takes an amount, which is how `bean-query` spells it, so
+`commodity(units(position))` and `commodity(cost(position))` let you ask for
+the units currency and the cost currency separately — on `2 HOOL {10.00 USD}`
+they return `HOOL` and `USD`. `currency(position)` takes a position and always
+answers about its units; it is a rustledger extension that `bean-query`
+rejects. Prefer `commodity()` in queries you want to run under both.
 
 ### String Functions
 
@@ -270,6 +280,12 @@ SELECT min(date), max(date)
 | `root(account, n)` | First n account segments |
 | `leaf(account)` | Last account segment |
 | `parent(account)` | All but last segment |
+| `findfirst(regex, set)` | First element of a set matching a regex, else `NULL` |
+| `has_account(regex)` | True if **any** posting on the entry has a matching account |
+
+`has_account()` asks about the whole entry, not the current posting, so it is
+true on every row of a transaction that touches a matching account. It also
+works as an entry filter: `BALANCES FROM has_account('Assets')`.
 
 ### Metadata Functions
 
@@ -287,6 +303,19 @@ matters at query time:
 All three return `NULL` when the key is absent at the relevant level — so a
 `WHERE meta('foo') = 'bar'` filter quietly drops every row when `foo` was
 actually set on the transaction.
+
+Commodity metadata is separate, because it lives on a `commodity` directive
+rather than on any transaction or posting:
+
+| Function | Returns |
+|----------|---------|
+| `commodity_meta(currency)` | The whole metadata map of that currency's `commodity` directive |
+| `commodity_meta(currency, key)` | One key from it |
+| `currency_meta(...)` | Alias for `commodity_meta`, same two forms |
+
+Both return `NULL` for a currency with no `commodity` directive, and for a
+key that directive does not set. A currency declared more than once resolves
+to the **last** declaration.
 
 ```beancount
 2024-01-15 * "Grocery Store"

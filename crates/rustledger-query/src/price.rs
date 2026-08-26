@@ -473,10 +473,28 @@ impl PriceDatabase {
     /// For A→C, try to find A→B and B→C for some intermediate B.
     ///
     /// This is a rustledger extension — beancount's price map has no
-    /// transitive lookups. One hop only; both legs read the
-    /// bidirectional index, so no per-leg inverse handling is needed.
-    /// Intermediates are tried in sorted order so the result is
-    /// deterministic when several paths exist.
+    /// transitive lookups, and answers an unreachable pair by leaving the
+    /// amount unconverted. One hop only; both legs read the bidirectional
+    /// index, so no per-leg inverse handling is needed.
+    ///
+    /// # The tie-break is lexical, not economic
+    ///
+    /// Intermediates are tried in sorted order, so the result is
+    /// deterministic when several paths exist. Deterministic is not the same
+    /// as principled: with `XCOIN → AAA → USD` worth 20.00 and
+    /// `XCOIN → MMM → USD` worth 50.00, the answer is 20.00 because `AAA`
+    /// sorts first, and nothing in the output says another equally valid path
+    /// disagreed. Sorting is what makes the choice repeatable; it is not
+    /// evidence that the chosen path is the better-supported one.
+    ///
+    /// # Legs are dated independently
+    ///
+    /// Each leg takes its own most-recent rate on or before `date`, so the
+    /// two can be years apart: a 2010 `A → B` multiplied by a 2024 `B → C`
+    /// yields a 2024 valuation with no diagnostic. There is no staleness
+    /// policy anywhere in the crate to lean on here — the only age concept in
+    /// the tree is the price-FETCH cache, which governs quote reuse rather
+    /// than whether a rate is too old to value with (#2152).
     fn get_chained_price(&self, base: &str, quote: &str, date: NaiveDate) -> Option<Decimal> {
         let inner = self.lookup.get(base)?;
         let mut intermediates: Vec<&rustledger_core::Currency> = inner.keys().collect();
@@ -824,6 +842,71 @@ mod tests {
         let chained = db.get_price("BTC", "EUR", date(2024, 1, 1)).unwrap();
         // 40000 / 1.10 = 36363.636363...
         assert!(chained > dec!(36363) && chained < dec!(36364));
+    }
+
+    /// When several one-hop paths exist, the winner is the alphabetically
+    /// first intermediate, and it is the SAME one every run.
+    ///
+    /// The three tests around this one each build a single chain, so nothing
+    /// pinned the documented "tried in sorted order so the result is
+    /// deterministic when several paths exist" -- the sort could have been
+    /// dropped in a refactor and they would all still pass (#2152).
+    ///
+    /// The two paths are deliberately worth very different amounts. A tie
+    /// between equal-valued paths would pass whichever way the iteration
+    /// went, which is exactly the property this is meant to detect.
+    ///
+    /// Note what this pins and what it does not: the answer is repeatable,
+    /// not better-supported. `AAA` wins because of its spelling, and 50.00
+    /// was equally available.
+    #[test]
+    fn chained_price_picks_the_first_intermediate_in_sort_order() {
+        let build = || {
+            let mut db = PriceDatabase::new();
+            for (cur, num, quote) in [
+                ("XCOIN", dec!(2.00), "AAA"),
+                ("AAA", dec!(10.00), "USD"),
+                ("XCOIN", dec!(5.00), "MMM"),
+                ("MMM", dec!(10.00), "USD"),
+            ] {
+                db.add_price(&PriceDirective {
+                    date: date(2024, 1, 5),
+                    currency: cur.into(),
+                    amount: Amount::new(num, quote),
+                    meta: Default::default(),
+                });
+            }
+            db.sort_prices();
+            db
+        };
+
+        // via AAA: 2.00 * 10.00 = 20.00     via MMM: 5.00 * 10.00 = 50.00
+        let db = build();
+        assert_eq!(
+            db.get_price("XCOIN", "USD", date(2024, 6, 1)),
+            Some(dec!(20.00)),
+            "the alphabetically first intermediate must win, not whichever the map yields first",
+        );
+
+        // The latest-rate variant carries its own copy of the sort, so it
+        // needs its own assertion rather than being assumed to agree.
+        assert_eq!(
+            db.get_latest_price("XCOIN", "USD"),
+            Some(dec!(20.00)),
+            "get_latest_price must break the tie the same way get_price does",
+        );
+
+        // Repeatable across independently constructed databases: the
+        // underlying map is a hash map, so insertion-order luck would show
+        // up here rather than in a single run.
+        for _ in 0..8 {
+            let db = build();
+            assert_eq!(
+                db.get_price("XCOIN", "USD", date(2024, 6, 1)),
+                Some(dec!(20.00))
+            );
+            assert_eq!(db.get_latest_price("XCOIN", "USD"), Some(dec!(20.00)));
+        }
     }
 
     #[test]

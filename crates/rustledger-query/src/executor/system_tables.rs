@@ -422,8 +422,14 @@ impl Executor<'_> {
 
     /// Build the #entries table from all directives.
     ///
-    /// The table has columns: id, type, filename, lineno, date, flag, payee, narration, tags, links, accounts, `_entry_meta`
-    /// This provides access to all directives with source location information.
+    /// Column order matches bean-query's `SELECT * FROM #entries` exactly, so
+    /// the wildcard yields the same 16 columns in the same positions.
+    ///
+    /// `meta` and `_entry_meta` carry the same value. The underscore copy is
+    /// load-bearing and cannot simply be renamed: `ENTRY_META` resolves
+    /// through it (`execution.rs`), and `wildcard_hidden` uses the underscore
+    /// prefix to keep helper columns out of `SELECT *`. The visible `meta` is
+    /// what bean-query exposes and what `SELECT *` must include (#2154).
     pub(super) fn build_entries_table(&self) -> Table {
         let columns = vec![
             "id".to_string(),
@@ -431,11 +437,16 @@ impl Executor<'_> {
             "filename".to_string(),
             "lineno".to_string(),
             "date".to_string(),
+            "year".to_string(),
+            "month".to_string(),
+            "day".to_string(),
             "flag".to_string(),
             "payee".to_string(),
             "narration".to_string(),
+            "description".to_string(),
             "tags".to_string(),
             "links".to_string(),
+            "meta".to_string(),
             "accounts".to_string(),
             "_entry_meta".to_string(),
         ];
@@ -490,7 +501,7 @@ impl Executor<'_> {
             Directive::Custom(c) => Value::Date(c.date),
         };
 
-        let (flag, payee, narration, tags, links, accounts) =
+        let (flag, payee, narration, description, tags, links, accounts) =
             if let Directive::Transaction(txn) = directive {
                 let tags: Vec<String> = txn.tags.iter().map(ToString::to_string).collect();
                 let links: Vec<String> = txn.links.iter().map(ToString::to_string).collect();
@@ -502,18 +513,29 @@ impl Executor<'_> {
                     .into_iter()
                     .collect();
                 accounts.sort(); // Ensure deterministic ordering
+                // Same "payee | narration" shape the `description` column on
+                // `#postings` already produces, and the same one bean-query
+                // returns; narration alone when there is no payee.
+                let description = match &txn.payee {
+                    Some(payee) => format!("{} | {}", payee, txn.narration),
+                    None => txn.narration.to_string(),
+                };
                 (
                     Value::String(txn.flag.to_string()),
                     txn.payee
                         .as_ref()
                         .map_or(Value::Null, |p| Value::String(p.to_string())),
                     Value::String(txn.narration.to_string()),
+                    Value::String(description),
                     Value::StringSet(tags),
                     Value::StringSet(links),
                     Value::StringSet(accounts),
                 )
             } else {
+                // bean-query leaves description Null on a non-transaction, the
+                // same as payee and narration.
                 (
+                    Value::Null,
                     Value::Null,
                     Value::Null,
                     Value::Null,
@@ -526,20 +548,39 @@ impl Executor<'_> {
         let filename = Self::source_filename_value(source_loc);
         let lineno = Self::source_lineno_value(source_loc);
 
+        // Date parts come from the entry's own date, so they are populated for
+        // every directive type and not just transactions -- bean-query reports
+        // `year` on an `open` too.
+        let (year, month, day) = match &date {
+            Value::Date(d) => (
+                Value::Integer(i64::from(d.year())),
+                Value::Integer(i64::from(d.month())),
+                Value::Integer(i64::from(d.day())),
+            ),
+            _ => (Value::Null, Value::Null, Value::Null),
+        };
+
+        let meta = Self::metadata_to_value(directive.meta());
+
         vec![
             Value::Integer(idx as i64), // id
             Value::String(type_name.to_string()),
             filename,
             lineno,
             date,
+            year,
+            month,
+            day,
             flag,
             payee,
             narration,
+            description,
             tags,
             links,
+            meta.clone(),
             accounts,
-            // Hidden metadata column
-            Self::metadata_to_value(directive.meta()),
+            // Hidden copy; see the note on `build_entries_table`.
+            meta,
         ]
     }
 

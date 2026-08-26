@@ -2269,3 +2269,99 @@ fn commodity_meta_resolves_under_the_sourced_constructor() {
         Some(&MetaValue::String("US Dollar".to_string())),
     );
 }
+
+/// `SELECT * FROM #entries` must expand to bean-query's 16 columns, in order.
+///
+/// It returned 11 before #2154: `year`, `month`, `day`, `description` and
+/// `meta` were absent, though every one of those names already resolved
+/// against `#postings`. The gap was schema registration, not missing data.
+///
+/// Order is asserted, not just membership, because `SELECT *` is positional
+/// for anyone consuming rows as tuples.
+///
+/// `meta` and `_entry_meta` deliberately carry the same value. The underscore
+/// copy cannot be renamed away: `ENTRY_META` resolves through it, and the
+/// wildcard uses the underscore prefix to hide helper columns. So the pair
+/// has to coexist, and the test pins both halves of that -- the visible one
+/// present in `*`, the hidden one absent from it but still addressable.
+#[test]
+fn entries_table_matches_bean_query_columns() {
+    let directives = vec![
+        Directive::Open(rustledger_core::Open {
+            date: date(2024, 1, 1),
+            account: "Assets:A".into(),
+            currencies: vec![],
+            booking: None,
+            meta: Metadata::default(),
+        }),
+        Directive::Transaction(
+            Transaction::new(date(2024, 2, 15), "monthly invoice")
+                .with_flag('*')
+                .with_payee("Acme Corp")
+                .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(1.00), "USD")))
+                .with_synthesized_posting(Posting::new(
+                    "Equity:O",
+                    Amount::new(dec!(-1.00), "USD"),
+                )),
+        ),
+    ];
+
+    let run = |sql: &str| {
+        let mut executor = Executor::new(&directives);
+        let query = parse(sql).unwrap();
+        executor.execute(&query).unwrap()
+    };
+
+    let starred = run("SELECT * FROM #entries");
+    assert_eq!(
+        starred.columns,
+        vec![
+            "id",
+            "type",
+            "filename",
+            "lineno",
+            "date",
+            "year",
+            "month",
+            "day",
+            "flag",
+            "payee",
+            "narration",
+            "description",
+            "tags",
+            "links",
+            "meta",
+            "accounts",
+        ],
+        "wildcard must match bean-query's #entries columns and their order",
+    );
+    assert!(
+        !starred.columns.iter().any(|c| c == "_entry_meta"),
+        "the helper column must stay out of SELECT * even now that `meta` is visible",
+    );
+
+    // Date parts are populated for EVERY directive, not just transactions:
+    // bean-query reports `year` on an `open` too.
+    let parts = run("SELECT type, year, month, day FROM #entries");
+    assert_eq!(
+        parts.rows[0],
+        vec![
+            Value::String("open".to_string()),
+            Value::Integer(2024),
+            Value::Integer(1),
+            Value::Integer(1),
+        ],
+    );
+
+    // `description` is "payee | narration", and Null where there is no
+    // transaction to describe.
+    let desc = run("SELECT description FROM #entries");
+    assert_eq!(desc.rows[0][0], Value::Null, "an open has no description");
+    assert_eq!(
+        desc.rows[1][0],
+        Value::String("Acme Corp | monthly invoice".to_string()),
+    );
+
+    // The hidden spelling still resolves by explicit name.
+    assert_eq!(run("SELECT _entry_meta FROM #entries").rows.len(), 2);
+}

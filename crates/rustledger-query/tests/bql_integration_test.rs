@@ -6707,11 +6707,21 @@ fn empty_metadata_is_an_empty_map_not_null() {
     for table in ["#notes", "#events"] {
         let result = execute_query(&format!("SELECT meta FROM {table}"), &directives);
         assert_eq!(result.len(), 1, "{table} returned no row to assert on");
-        assert_ne!(
-            result.rows[0][0],
-            Value::Null,
-            "{table} returned Null for absent metadata; bean-query returns an empty map"
-        );
+        // Assert the exact value, not merely non-Null: a weaker check would
+        // also pass if per-table `meta` picked up the synthetic `filename` /
+        // `lineno` keys, which bean-query does NOT put there and which this
+        // change deliberately confines to #entries.
+        match &result.rows[0][0] {
+            Value::Object(map) => assert!(
+                map.is_empty(),
+                "{table} meta should be an EMPTY map for a directive with no \
+                 metadata; got {map:?}. Synthetic keys belong on #entries only."
+            ),
+            other => panic!(
+                "{table} meta should be an empty map, got {other:?}; \
+                 bean-query returns {{}} here"
+            ),
+        }
 
         let is_null = execute_query(&format!("SELECT meta IS NULL FROM {table}"), &directives);
         assert_eq!(
@@ -6752,15 +6762,78 @@ fn entries_meta_carries_filename_and_lineno() {
         .execute(&parse("SELECT meta FROM #entries").expect("should parse"))
         .expect("query should execute");
 
-    let rendered = format!("{:?}", result.rows[0][0]);
-    assert!(
-        rendered.contains("lineno"),
-        "#entries.meta should carry lineno, got {rendered}"
-    );
-    assert!(
-        rendered.contains("filename"),
-        "#entries.meta should carry filename, got {rendered}"
-    );
+    match &result.rows[0][0] {
+        Value::Object(map) => {
+            for key in ["filename", "lineno"] {
+                assert!(
+                    map.contains_key(key),
+                    "#entries.meta should carry `{key}`, got {map:?}"
+                );
+            }
+        }
+        other => panic!("#entries.meta should be a map, got {other:?}"),
+    }
+}
+
+#[test]
+fn source_keys_reach_entries_meta_but_not_per_table_meta() {
+    // The split this change depends on, pinned from both sides at once: the
+    // SAME directive, through the SAME executor, must carry `filename` /
+    // `lineno` in `#entries.meta` and must NOT carry them in `#notes.meta`.
+    // bean-query behaves exactly this way (measured), so putting the
+    // augmentation in the shared conversion instead would silently break the
+    // five per-table columns #2161 brought into agreement (#2162).
+    use rustledger_loader::SourceMap;
+    use rustledger_parser::{Span, Spanned};
+
+    let dirs = [Directive::Note(Note::new(
+        date(2024, 1, 3),
+        "Assets:Cash",
+        "n",
+    ))];
+    let spanned: Vec<Spanned<rustledger_core::Directive>> = dirs
+        .iter()
+        .cloned()
+        .map(|d| Spanned {
+            value: d,
+            span: Span::new(0, 50),
+            file_id: 0,
+        })
+        .collect();
+    let source_map = SourceMap::new();
+    let mut executor = Executor::new_with_sources(&spanned, &source_map);
+
+    let entries = executor
+        .execute(&parse("SELECT meta FROM #entries").expect("should parse"))
+        .expect("query should execute");
+    match &entries.rows[0][0] {
+        Value::Object(map) => {
+            for key in ["filename", "lineno"] {
+                assert!(
+                    map.contains_key(key),
+                    "#entries.meta lost `{key}`, got {map:?}"
+                );
+            }
+        }
+        other => panic!("#entries.meta should be a map, got {other:?}"),
+    }
+
+    let notes = executor
+        .execute(&parse("SELECT meta FROM #notes").expect("should parse"))
+        .expect("query should execute");
+    match &notes.rows[0][0] {
+        Value::Object(map) => {
+            for key in ["filename", "lineno"] {
+                assert!(
+                    !map.contains_key(key),
+                    "#notes.meta picked up `{key}`; bean-query keeps source keys \
+                     out of per-table meta. Did the augmentation move into the \
+                     shared conversion? got {map:?}"
+                );
+            }
+        }
+        other => panic!("#notes.meta should be a map, got {other:?}"),
+    }
 }
 
 #[test]

@@ -101,11 +101,16 @@ impl Executor<'_> {
             })
             .collect();
 
-        // Sort by date ONLY. `sort_by_key` is stable and `resolved_directives`
-        // yields source order, so rows sharing a date come back in the order
-        // they were written. A secondary key on account/type/name looked like
-        // determinism but reordered them; bean-query preserves the source
-        // order (#2163).
+        // Sort by date ONLY, and stably. The loader already hands over
+        // directives in beancount's (date, SORT_ORDER, lineno) order -- which
+        // is why `#entries`, which never sorts, still comes back ordered -- so
+        // on that path this is a no-op that must not disturb what it receives.
+        // It does real work only when an `Executor` is built directly from a
+        // caller-supplied slice, where nothing has ordered anything.
+        //
+        // The bug was therefore not a missing sort but an extra one: a
+        // secondary key on account/type/name re-ordered rows that already
+        // shared a date, away from the order bean-query returns (#2163).
         //
         // This matches beancount's `(date, lineno)` within a single file. It
         // does NOT match across an `include`: beancount compares the raw line
@@ -156,11 +161,16 @@ impl Executor<'_> {
             })
             .collect();
 
-        // Sort by date ONLY. `sort_by_key` is stable and `resolved_directives`
-        // yields source order, so rows sharing a date come back in the order
-        // they were written. A secondary key on account/type/name looked like
-        // determinism but reordered them; bean-query preserves the source
-        // order (#2163).
+        // Sort by date ONLY, and stably. The loader already hands over
+        // directives in beancount's (date, SORT_ORDER, lineno) order -- which
+        // is why `#entries`, which never sorts, still comes back ordered -- so
+        // on that path this is a no-op that must not disturb what it receives.
+        // It does real work only when an `Executor` is built directly from a
+        // caller-supplied slice, where nothing has ordered anything.
+        //
+        // The bug was therefore not a missing sort but an extra one: a
+        // secondary key on account/type/name re-ordered rows that already
+        // shared a date, away from the order bean-query returns (#2163).
         //
         // This matches beancount's `(date, lineno)` within a single file. It
         // does NOT match across an `include`: beancount compares the raw line
@@ -210,11 +220,16 @@ impl Executor<'_> {
             })
             .collect();
 
-        // Sort by date ONLY. `sort_by_key` is stable and `resolved_directives`
-        // yields source order, so rows sharing a date come back in the order
-        // they were written. A secondary key on account/type/name looked like
-        // determinism but reordered them; bean-query preserves the source
-        // order (#2163).
+        // Sort by date ONLY, and stably. The loader already hands over
+        // directives in beancount's (date, SORT_ORDER, lineno) order -- which
+        // is why `#entries`, which never sorts, still comes back ordered -- so
+        // on that path this is a no-op that must not disturb what it receives.
+        // It does real work only when an `Executor` is built directly from a
+        // caller-supplied slice, where nothing has ordered anything.
+        //
+        // The bug was therefore not a missing sort but an extra one: a
+        // secondary key on account/type/name re-ordered rows that already
+        // shared a date, away from the order bean-query returns (#2163).
         //
         // This matches beancount's `(date, lineno)` within a single file. It
         // does NOT match across an `include`: beancount compares the raw line
@@ -270,11 +285,16 @@ impl Executor<'_> {
             })
             .collect();
 
-        // Sort by date ONLY. `sort_by_key` is stable and `resolved_directives`
-        // yields source order, so rows sharing a date come back in the order
-        // they were written. A secondary key on account/type/name looked like
-        // determinism but reordered them; bean-query preserves the source
-        // order (#2163).
+        // Sort by date ONLY, and stably. The loader already hands over
+        // directives in beancount's (date, SORT_ORDER, lineno) order -- which
+        // is why `#entries`, which never sorts, still comes back ordered -- so
+        // on that path this is a no-op that must not disturb what it receives.
+        // It does real work only when an `Executor` is built directly from a
+        // caller-supplied slice, where nothing has ordered anything.
+        //
+        // The bug was therefore not a missing sort but an extra one: a
+        // secondary key on account/type/name re-ordered rows that already
+        // shared a date, away from the order bean-query returns (#2163).
         //
         // This matches beancount's `(date, lineno)` within a single file. It
         // does NOT match across an `include`: beancount compares the raw line
@@ -336,11 +356,16 @@ impl Executor<'_> {
             })
             .collect();
 
-        // Sort by date ONLY. `sort_by_key` is stable and `resolved_directives`
-        // yields source order, so rows sharing a date come back in the order
-        // they were written. A secondary key on account/type/name looked like
-        // determinism but reordered them; bean-query preserves the source
-        // order (#2163).
+        // Sort by date ONLY, and stably. The loader already hands over
+        // directives in beancount's (date, SORT_ORDER, lineno) order -- which
+        // is why `#entries`, which never sorts, still comes back ordered -- so
+        // on that path this is a no-op that must not disturb what it receives.
+        // It does real work only when an `Executor` is built directly from a
+        // caller-supplied slice, where nothing has ordered anything.
+        //
+        // The bug was therefore not a missing sort but an extra one: a
+        // secondary key on account/type/name re-ordered rows that already
+        // shared a date, away from the order bean-query returns (#2163).
         //
         // This matches beancount's `(date, lineno)` within a single file. It
         // does NOT match across an `include`: beancount compares the raw line

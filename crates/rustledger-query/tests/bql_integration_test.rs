@@ -6567,6 +6567,51 @@ fn make_all_directive_types_test_directives() -> Vec<Directive> {
 }
 
 #[test]
+fn system_tables_sort_unordered_directives_by_date() {
+    // The date sort is a no-op on the loader path, which already hands over
+    // directives in beancount's (date, SORT_ORDER, lineno) order -- `#entries`
+    // never sorts and still comes back date-ordered. It matters only when an
+    // `Executor` is built directly from a caller-supplied slice, as these
+    // tests do, where nothing has ordered anything.
+    //
+    // Without this, removing the sort entirely passed the whole suite (#2165
+    // review), leaving the one path it exists for untested.
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Note(Note::new(date(2024, 9, 1), "Assets:Cash", "september")),
+        Directive::Note(Note::new(date(2024, 3, 1), "Assets:Cash", "march")),
+        Directive::Note(Note::new(date(2024, 6, 1), "Assets:Cash", "june")),
+        Directive::Commodity(Commodity::new(date(2024, 9, 2), "ZZZ")),
+        Directive::Commodity(Commodity::new(date(2024, 3, 2), "AAA")),
+        Directive::Event(Event::new(date(2024, 9, 3), "z", "z")),
+        Directive::Event(Event::new(date(2024, 3, 3), "a", "a")),
+    ];
+
+    for (query, expected) in [
+        (
+            "SELECT comment FROM #notes",
+            vec!["march", "june", "september"],
+        ),
+        ("SELECT name FROM #commodities", vec!["AAA", "ZZZ"]),
+        ("SELECT type FROM #events", vec!["a", "z"]),
+    ] {
+        let result = execute_query(query, &directives);
+        let got: Vec<String> = result
+            .rows
+            .iter()
+            .map(|r| match &r[0] {
+                Value::String(v) => v.clone(),
+                other => panic!("{query} returned a non-string: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got, expected,
+            "{query} did not sort unordered input by date"
+        );
+    }
+}
+
+#[test]
 fn system_tables_preserve_source_order_within_a_date() {
     // beancount orders entries by (date, lineno), so bean-query returns rows
     // sharing a date in the order they were written. Each pair below is

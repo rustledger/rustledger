@@ -6520,26 +6520,43 @@ fn test_commodities_table_with_where_clause() {
     assert_eq!(result.rows[0][2], Value::String("EUR".to_string()));
 }
 
-/// One directive of every kind the per-table wildcard tests inspect.
+/// Two directives of every kind the per-table wildcard tests inspect.
 ///
 /// Each table MUST come out non-empty: a `SELECT *` against a zero-row table
 /// still reports its header, so an empty fixture would let these tests pass
 /// while proving nothing about the rows (the trap that made an earlier
 /// column census under-report by ten columns, #2154).
+///
+/// Two of each rather than one because every table here sorts its rows, and
+/// a single-row table never executes the comparison closure.
 fn make_all_directive_types_test_directives() -> Vec<Directive> {
     vec![
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
         Directive::Commodity(Commodity::new(date(2024, 1, 2), "USD")),
+        Directive::Commodity(Commodity::new(date(2024, 1, 2), "EUR")),
         Directive::Note(Note::new(date(2024, 1, 3), "Assets:Cash", "a note")),
+        Directive::Note(Note::new(date(2024, 1, 3), "Assets:Bank", "another note")),
         Directive::Document(Document::new(
             date(2024, 1, 4),
             "Assets:Cash",
             "/tmp/statement.pdf",
         )),
+        Directive::Document(Document::new(
+            date(2024, 1, 4),
+            "Assets:Bank",
+            "/tmp/other.pdf",
+        )),
         Directive::Event(Event::new(date(2024, 1, 5), "location", "Paris")),
+        Directive::Event(Event::new(date(2024, 1, 5), "employer", "Acme")),
         Directive::Balance(Balance::new(
             date(2024, 1, 6),
             "Assets:Cash",
+            Amount::new(dec!(0.00), "USD"),
+        )),
+        Directive::Balance(Balance::new(
+            date(2024, 1, 6),
+            "Assets:Bank",
             Amount::new(dec!(0.00), "USD"),
         )),
     ]
@@ -6549,25 +6566,51 @@ fn make_all_directive_types_test_directives() -> Vec<Directive> {
 fn select_star_matches_bean_query_per_table() {
     // bean-query's wildcard is NOT uniform about `meta`: it omits the column
     // on #balances/#notes/#events/#documents and includes it -- first -- on
-    // #commodities. Every set below was read off bean-query 3.x rather than
-    // reasoned about, because the split looks arbitrary and a name-based rule
-    // would silently get #commodities wrong (#2154).
+    // #commodities. That split is what this test pins, because no rule
+    // predicts it (beanquery derives #commodities' columns from the
+    // `Commodity` namedtuple, whose first field is `meta`; the other tables
+    // carry hand-written lists), so a name-based rule gets #commodities
+    // silently wrong.
+    //
+    // `gap` is the part of bean-query's set we do NOT produce yet. Where it
+    // is None the expectation IS bean-query's set, column for column. Where
+    // it is Some, closing that gap SHOULD fail this test -- the failure means
+    // the table moved toward bean-query, not away, so update the expectation
+    // rather than reverting the work (#2154).
     let directives = make_all_directive_types_test_directives();
 
-    for (table, expected) in [
-        ("#balances", vec!["date", "account", "amount", "tolerance"]),
-        ("#notes", vec!["date", "account", "comment"]),
-        ("#events", vec!["date", "type", "description"]),
+    for (table, expected, gap) in [
+        (
+            "#balances",
+            vec!["date", "account", "amount", "tolerance"],
+            Some("discrepancy, which the balance checker computes rather than stores"),
+        ),
+        (
+            "#notes",
+            vec!["date", "account", "comment"],
+            Some("tags and links, which our Note model drops at parse time (#2160)"),
+        ),
+        ("#events", vec!["date", "type", "description"], None),
         (
             "#documents",
             vec!["date", "account", "filename", "tags", "links"],
+            None,
         ),
-        ("#commodities", vec!["meta", "date", "name"]),
+        ("#commodities", vec!["meta", "date", "name"], None),
     ] {
         let result = execute_query(&format!("SELECT * FROM {table}"), &directives);
         assert_eq!(
-            result.columns, expected,
-            "SELECT * FROM {table} drifted from bean-query"
+            result.columns,
+            expected,
+            "{}",
+            gap.map_or_else(
+                || format!("SELECT * FROM {table} drifted from bean-query"),
+                |g| format!(
+                    "SELECT * FROM {table} changed. Note this is NOT full bean-query \
+                     parity: bean-query also returns {g}. If you just added it, update \
+                     this expectation."
+                ),
+            )
         );
         assert!(
             !result.rows.is_empty(),

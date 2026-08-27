@@ -436,6 +436,15 @@ pub struct Table {
     pub columns: Vec<String>,
     /// Rows of data.
     pub rows: Vec<Vec<Value>>,
+    /// Columns this table omits from `SELECT *`, though they stay
+    /// addressable by explicit name.
+    ///
+    /// Per-table because bean-query's own wildcard is per-table: `meta` is
+    /// excluded from `SELECT *` on `#balances`, `#notes`, `#events` and
+    /// `#documents`, yet included (first) on `#commodities`. A name-only
+    /// rule cannot express that split. Empty for every table that hides
+    /// nothing beyond the name-based rule in `Executor::wildcard_hidden`.
+    pub hidden: Vec<String>,
 }
 
 impl Table {
@@ -445,7 +454,19 @@ impl Table {
         Self {
             columns,
             rows: Vec::new(),
+            hidden: Vec::new(),
         }
+    }
+
+    /// Mark columns as omitted from `SELECT *` expansion.
+    ///
+    /// The columns stay selectable by explicit name -- exactly bean-query's
+    /// behavior, which answers `SELECT meta FROM #notes` while leaving
+    /// `meta` out of `SELECT *` on that table.
+    #[must_use]
+    pub fn with_hidden(mut self, hidden: &[&str]) -> Self {
+        self.hidden = hidden.iter().map(|s| (*s).to_string()).collect();
+        self
     }
 
     /// Add a row to the table.

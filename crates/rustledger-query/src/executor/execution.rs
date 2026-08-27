@@ -353,13 +353,15 @@ impl Executor<'_> {
             let table = Table {
                 columns: inner_result.columns,
                 rows: inner_result.rows,
+                // An inner result's columns are already wildcard-expanded.
+                hidden: Vec::new(),
             };
             return self.execute_aggregate_from_table(outer_query, &table, &inner_column_map);
         }
 
         // Determine outer column names
         let outer_column_names =
-            self.resolve_subquery_column_names(&outer_query.targets, &inner_result.columns)?;
+            self.resolve_subquery_column_names(&outer_query.targets, &inner_result.columns, &[])?;
         let mut result = QueryResult::new(outer_column_names);
 
         // Use FxHashSet for O(1) DISTINCT deduplication
@@ -384,6 +386,7 @@ impl Executor<'_> {
                 inner_row,
                 &inner_column_map,
                 &inner_result.columns,
+                &[],
             )?;
 
             if outer_query.distinct {
@@ -471,7 +474,8 @@ impl Executor<'_> {
         extended_targets.extend(hidden_targets);
 
         // Determine column names for the result (including hidden columns)
-        let column_names = self.resolve_subquery_column_names(&extended_targets, &table.columns)?;
+        let column_names =
+            self.resolve_subquery_column_names(&extended_targets, &table.columns, &table.hidden)?;
         let mut result = QueryResult::new(column_names);
 
         // Use FxHashSet for O(1) DISTINCT deduplication
@@ -538,8 +542,13 @@ impl Executor<'_> {
             };
 
             // Evaluate targets (including hidden columns)
-            let result_row =
-                self.evaluate_subquery_row(&extended_targets, row, &column_map, &table.columns)?;
+            let result_row = self.evaluate_subquery_row(
+                &extended_targets,
+                row,
+                &column_map,
+                &table.columns,
+                &table.hidden,
+            )?;
 
             if query.distinct {
                 // DISTINCT should only consider visible columns, not hidden sort columns.
@@ -595,7 +604,8 @@ impl Executor<'_> {
         use rustc_hash::FxHashMap as HashMap;
 
         // Determine column names for the result
-        let column_names = self.resolve_subquery_column_names(&query.targets, &table.columns)?;
+        let column_names =
+            self.resolve_subquery_column_names(&query.targets, &table.columns, &table.hidden)?;
         let mut result = QueryResult::new(column_names.clone());
 
         // Determine GROUP BY expressions.
@@ -718,6 +728,7 @@ impl Executor<'_> {
         &self,
         targets: &[Target],
         inner_columns: &[String],
+        hidden: &[String],
     ) -> Result<Vec<String>, QueryError> {
         let mut names = Vec::new();
         for (i, target) in targets.iter().enumerate() {
@@ -728,7 +739,7 @@ impl Executor<'_> {
                 names.extend(
                     inner_columns
                         .iter()
-                        .filter(|c| !Self::wildcard_hidden(c))
+                        .filter(|c| !Self::wildcard_hidden(c, hidden))
                         .cloned(),
                 );
             } else {
@@ -743,10 +754,15 @@ impl Executor<'_> {
     /// Upstream beanquery's wildcard omits the structured `entry` column,
     /// and our underscore-prefixed helper columns (`_entry_meta`,
     /// `_posting_meta`) were ALSO leaking into `SELECT *` before #1800 —
-    /// one rule now covers both. Every hidden column stays addressable by
-    /// explicit name. Pinned by `select_star_hides_structured_and_helper_columns`.
-    fn wildcard_hidden(name: &str) -> bool {
-        name.starts_with('_') || name == "entry"
+    /// one rule now covers both. The `table_hidden` list is per-table,
+    /// because bean-query's treatment of `meta` is not uniform — see
+    /// [`Table::hidden`]. Every hidden column stays addressable by explicit
+    /// name. Pinned by `select_star_hides_structured_and_helper_columns`
+    /// and `select_star_matches_bean_query_per_table`.
+    fn wildcard_hidden(name: &str, table_hidden: &[String]) -> bool {
+        name.starts_with('_')
+            || name == "entry"
+            || table_hidden.iter().any(|h| h.eq_ignore_ascii_case(name))
     }
 
     /// Evaluate a filter expression against a subquery row.
@@ -871,6 +887,7 @@ impl Executor<'_> {
         inner_row: &[Value],
         column_map: &FxHashMap<String, usize>,
         inner_columns: &[String],
+        hidden: &[String],
     ) -> Result<Row, QueryError> {
         let mut row = Vec::new();
         for target in targets {
@@ -881,7 +898,7 @@ impl Executor<'_> {
                     inner_row
                         .iter()
                         .zip(inner_columns)
-                        .filter(|(_, c)| !Self::wildcard_hidden(c))
+                        .filter(|(_, c)| !Self::wildcard_hidden(c, hidden))
                         .map(|(v, _)| v.clone()),
                 );
             } else {
@@ -1271,6 +1288,8 @@ impl Executor<'_> {
             Table {
                 columns: result.columns,
                 rows: result.rows,
+                // A CREATE TABLE ... AS SELECT result hides nothing.
+                hidden: Vec::new(),
             }
         } else {
             // CREATE TABLE ... (col1, col2, ...)

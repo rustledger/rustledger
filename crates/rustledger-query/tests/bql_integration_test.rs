@@ -6295,7 +6295,12 @@ fn test_balances_table_select_all() {
     let result = execute_query("SELECT * FROM #balances", &directives);
 
     assert_eq!(result.len(), 3);
-    assert_eq!(result.columns, vec!["date", "account", "amount"]);
+    // `tolerance` is in bean-query's wildcard here; `meta` is not. See
+    // select_star_matches_bean_query_per_table for the full per-table pinning.
+    assert_eq!(
+        result.columns,
+        vec!["date", "account", "amount", "tolerance"]
+    );
 }
 
 #[test]
@@ -6510,7 +6515,92 @@ fn test_commodities_table_with_where_clause() {
     let result = execute_query("SELECT * FROM #commodities WHERE name = 'EUR'", &directives);
 
     assert_eq!(result.len(), 1);
-    assert_eq!(result.rows[0][1], Value::String("EUR".to_string()));
+    // #commodities leads with `meta`, so `name` is the third column -- this
+    // mirrors bean-query, whose columns follow the Commodity namedtuple.
+    assert_eq!(result.rows[0][2], Value::String("EUR".to_string()));
+}
+
+/// One directive of every kind the per-table wildcard tests inspect.
+///
+/// Each table MUST come out non-empty: a `SELECT *` against a zero-row table
+/// still reports its header, so an empty fixture would let these tests pass
+/// while proving nothing about the rows (the trap that made an earlier
+/// column census under-report by ten columns, #2154).
+fn make_all_directive_types_test_directives() -> Vec<Directive> {
+    vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Commodity(Commodity::new(date(2024, 1, 2), "USD")),
+        Directive::Note(Note::new(date(2024, 1, 3), "Assets:Cash", "a note")),
+        Directive::Document(Document::new(
+            date(2024, 1, 4),
+            "Assets:Cash",
+            "/tmp/statement.pdf",
+        )),
+        Directive::Event(Event::new(date(2024, 1, 5), "location", "Paris")),
+        Directive::Balance(Balance::new(
+            date(2024, 1, 6),
+            "Assets:Cash",
+            Amount::new(dec!(0.00), "USD"),
+        )),
+    ]
+}
+
+#[test]
+fn select_star_matches_bean_query_per_table() {
+    // bean-query's wildcard is NOT uniform about `meta`: it omits the column
+    // on #balances/#notes/#events/#documents and includes it -- first -- on
+    // #commodities. Every set below was read off bean-query 3.x rather than
+    // reasoned about, because the split looks arbitrary and a name-based rule
+    // would silently get #commodities wrong (#2154).
+    let directives = make_all_directive_types_test_directives();
+
+    for (table, expected) in [
+        ("#balances", vec!["date", "account", "amount", "tolerance"]),
+        ("#notes", vec!["date", "account", "comment"]),
+        ("#events", vec!["date", "type", "description"]),
+        (
+            "#documents",
+            vec!["date", "account", "filename", "tags", "links"],
+        ),
+        ("#commodities", vec!["meta", "date", "name"]),
+    ] {
+        let result = execute_query(&format!("SELECT * FROM {table}"), &directives);
+        assert_eq!(
+            result.columns, expected,
+            "SELECT * FROM {table} drifted from bean-query"
+        );
+        assert!(
+            !result.rows.is_empty(),
+            "{table} has no rows, so this assertion proves nothing"
+        );
+    }
+}
+
+#[test]
+fn hidden_meta_is_still_selectable_by_name() {
+    // Hiding `meta` from the wildcard must not make it unreachable --
+    // bean-query answers `SELECT meta FROM #notes` even though `SELECT *`
+    // there omits the column.
+    let directives = make_all_directive_types_test_directives();
+
+    for table in [
+        "#balances",
+        "#notes",
+        "#events",
+        "#documents",
+        "#commodities",
+    ] {
+        let result = execute_query(&format!("SELECT meta FROM {table}"), &directives);
+        assert_eq!(
+            result.columns,
+            vec!["meta"],
+            "SELECT meta FROM {table} did not resolve"
+        );
+        assert!(
+            !result.rows.is_empty(),
+            "{table} has no rows, so this assertion proves nothing"
+        );
+    }
 }
 
 #[test]

@@ -57,24 +57,38 @@ impl Executor<'_> {
 
     /// Build the #balances table from balance assertion directives.
     ///
-    /// The table has columns: date, account, amount
+    /// The table has columns: date, account, amount, tolerance, meta
     /// - date: The date of the balance assertion
     /// - account: The account being balanced
     /// - amount: The expected balance amount
+    /// - tolerance: The explicit `~` tolerance, or NULL if none was given
+    /// - meta: The directive's metadata (hidden from `SELECT *`)
+    ///
+    /// bean-query also exposes `discrepancy` here. It is not a field of the
+    /// directive — the balance checker computes it — so it is tracked
+    /// separately rather than faked from the data we have (#2154).
     pub(super) fn build_balances_table(&self) -> Table {
         let columns = vec![
             "date".to_string(),
             "account".to_string(),
             "amount".to_string(),
+            "tolerance".to_string(),
+            "meta".to_string(),
         ];
-        let mut table = Table::new(columns);
+        let mut table = Table::new(columns).with_hidden(&["meta"]);
 
         // Collect balance directives from either spanned or unspanned directives
         let mut balances: Vec<_> = self
             .resolved_directives()
             .filter_map(|d| {
                 if let Directive::Balance(b) = d {
-                    Some((b.date, b.account.as_ref(), b.amount.clone()))
+                    Some((
+                        b.date,
+                        b.account.as_ref(),
+                        b.amount.clone(),
+                        b.tolerance,
+                        &b.meta,
+                    ))
                 } else {
                     None
                 }
@@ -82,15 +96,17 @@ impl Executor<'_> {
             .collect();
 
         // Sort by (date, account) for consistent, deterministic output
-        balances.sort_by(|(date_a, account_a, _), (date_b, account_b, _)| {
+        balances.sort_by(|(date_a, account_a, ..), (date_b, account_b, ..)| {
             date_a.cmp(date_b).then_with(|| account_a.cmp(account_b))
         });
 
-        for (date, account, amount) in balances {
+        for (date, account, amount, tolerance, meta) in balances {
             let row = vec![
                 Value::Date(date),
                 Value::String(account.to_string()),
                 Value::Amount(amount),
+                tolerance.map_or(Value::Null, Value::Number),
+                Self::metadata_to_value(meta),
             ];
             table.add_row(row);
         }
@@ -100,11 +116,17 @@ impl Executor<'_> {
 
     /// Build the #commodities table from commodity directives.
     ///
-    /// The table has columns: date, name
+    /// The table has columns: meta, date, name
+    /// - meta: The directive's metadata
     /// - date: The date of the commodity declaration
     /// - name: The currency/commodity code
+    ///
+    /// `meta` leads, and is the one system table where bean-query's
+    /// `SELECT *` includes it — beanquery derives this table's columns from
+    /// the `Commodity` namedtuple, whose first field is `meta`. Verified
+    /// against bean-query rather than inferred (#2154).
     pub(super) fn build_commodities_table(&self) -> Table {
-        let columns = vec!["date".to_string(), "name".to_string()];
+        let columns = vec!["meta".to_string(), "date".to_string(), "name".to_string()];
         let mut table = Table::new(columns);
 
         // Collect commodity directives from either spanned or unspanned directives
@@ -112,7 +134,7 @@ impl Executor<'_> {
             .resolved_directives()
             .filter_map(|d| {
                 if let Directive::Commodity(c) = d {
-                    Some((c.date, c.currency.as_ref()))
+                    Some((c.date, c.currency.as_ref(), &c.meta))
                 } else {
                     None
                 }
@@ -120,12 +142,16 @@ impl Executor<'_> {
             .collect();
 
         // Sort by (date, name) for consistent output
-        commodities.sort_by(|(date_a, name_a), (date_b, name_b)| {
+        commodities.sort_by(|(date_a, name_a, _), (date_b, name_b, _)| {
             date_a.cmp(date_b).then_with(|| name_a.cmp(name_b))
         });
 
-        for (date, name) in commodities {
-            let row = vec![Value::Date(date), Value::String(name.to_string())];
+        for (date, name, meta) in commodities {
+            let row = vec![
+                Self::metadata_to_value(meta),
+                Value::Date(date),
+                Value::String(name.to_string()),
+            ];
             table.add_row(row);
         }
 
@@ -134,24 +160,26 @@ impl Executor<'_> {
 
     /// Build the #events table from event directives.
     ///
-    /// The table has columns: date, type, description
+    /// The table has columns: date, type, description, meta
     /// - date: The date of the event
     /// - type: The event type
     /// - description: The event value/description
+    /// - meta: The directive's metadata (hidden from `SELECT *`)
     pub(super) fn build_events_table(&self) -> Table {
         let columns = vec![
             "date".to_string(),
             "type".to_string(),
             "description".to_string(),
+            "meta".to_string(),
         ];
-        let mut table = Table::new(columns);
+        let mut table = Table::new(columns).with_hidden(&["meta"]);
 
         // Collect event directives
         let mut events: Vec<_> = self
             .resolved_directives()
             .filter_map(|d| {
                 if let Directive::Event(e) = d {
-                    Some((e.date, e.event_type.as_str(), e.value.as_str()))
+                    Some((e.date, e.event_type.as_str(), e.value.as_str(), &e.meta))
                 } else {
                     None
                 }
@@ -159,15 +187,16 @@ impl Executor<'_> {
             .collect();
 
         // Sort by (date, type) for consistent output
-        events.sort_by(|(date_a, type_a, _), (date_b, type_b, _)| {
+        events.sort_by(|(date_a, type_a, ..), (date_b, type_b, ..)| {
             date_a.cmp(date_b).then_with(|| type_a.cmp(type_b))
         });
 
-        for (date, event_type, description) in events {
+        for (date, event_type, description, meta) in events {
             let row = vec![
                 Value::Date(date),
                 Value::String(event_type.to_string()),
                 Value::String(description.to_string()),
+                Self::metadata_to_value(meta),
             ];
             table.add_row(row);
         }
@@ -177,24 +206,31 @@ impl Executor<'_> {
 
     /// Build the #notes table from note directives.
     ///
-    /// The table has columns: date, account, comment
+    /// The table has columns: date, account, comment, meta
     /// - date: The date of the note
     /// - account: The account the note is attached to
     /// - comment: The note text
+    /// - meta: The directive's metadata (hidden from `SELECT *`)
+    ///
+    /// bean-query also exposes `tags` and `links` here. Our `Note` model
+    /// drops them at parse time, so they cannot be surfaced until #2160
+    /// lands — a column census cannot see that, since the columns are
+    /// simply absent.
     pub(super) fn build_notes_table(&self) -> Table {
         let columns = vec![
             "date".to_string(),
             "account".to_string(),
             "comment".to_string(),
+            "meta".to_string(),
         ];
-        let mut table = Table::new(columns);
+        let mut table = Table::new(columns).with_hidden(&["meta"]);
 
         // Collect note directives
         let mut notes: Vec<_> = self
             .resolved_directives()
             .filter_map(|d| {
                 if let Directive::Note(n) = d {
-                    Some((n.date, n.account.as_ref(), n.comment.as_str()))
+                    Some((n.date, n.account.as_ref(), n.comment.as_str(), &n.meta))
                 } else {
                     None
                 }
@@ -202,15 +238,16 @@ impl Executor<'_> {
             .collect();
 
         // Sort by (date, account) for consistent output
-        notes.sort_by(|(date_a, account_a, _), (date_b, account_b, _)| {
+        notes.sort_by(|(date_a, account_a, ..), (date_b, account_b, ..)| {
             date_a.cmp(date_b).then_with(|| account_a.cmp(account_b))
         });
 
-        for (date, account, comment) in notes {
+        for (date, account, comment, meta) in notes {
             let row = vec![
                 Value::Date(date),
                 Value::String(account.to_string()),
                 Value::String(comment.to_string()),
+                Self::metadata_to_value(meta),
             ];
             table.add_row(row);
         }
@@ -220,12 +257,13 @@ impl Executor<'_> {
 
     /// Build the #documents table from document directives.
     ///
-    /// The table has columns: date, account, filename, tags, links
+    /// The table has columns: date, account, filename, tags, links, meta
     /// - date: The date of the document
     /// - account: The account the document is attached to
     /// - filename: The file path to the document
     /// - tags: The document tags (as a set)
     /// - links: The document links (as a set)
+    /// - meta: The directive's metadata (hidden from `SELECT *`)
     pub(super) fn build_documents_table(&self) -> Table {
         let columns = vec![
             "date".to_string(),
@@ -233,8 +271,9 @@ impl Executor<'_> {
             "filename".to_string(),
             "tags".to_string(),
             "links".to_string(),
+            "meta".to_string(),
         ];
-        let mut table = Table::new(columns);
+        let mut table = Table::new(columns).with_hidden(&["meta"]);
 
         // Collect document directives
         let mut documents: Vec<_> = self
@@ -247,6 +286,7 @@ impl Executor<'_> {
                         doc.path.as_str(),
                         &doc.tags,
                         &doc.links,
+                        &doc.meta,
                     ))
                 } else {
                     None
@@ -256,7 +296,7 @@ impl Executor<'_> {
 
         // Sort by (date, account, filename) for consistent output
         documents.sort_by(
-            |(date_a, account_a, file_a, _, _), (date_b, account_b, file_b, _, _)| {
+            |(date_a, account_a, file_a, ..), (date_b, account_b, file_b, ..)| {
                 date_a
                     .cmp(date_b)
                     .then_with(|| account_a.cmp(account_b))
@@ -264,7 +304,7 @@ impl Executor<'_> {
             },
         );
 
-        for (date, account, filename, tags, links) in documents {
+        for (date, account, filename, tags, links, meta) in documents {
             let tags_vec: Vec<String> = tags.iter().map(ToString::to_string).collect();
             let links_vec: Vec<String> = links.iter().map(ToString::to_string).collect();
             let row = vec![
@@ -273,6 +313,7 @@ impl Executor<'_> {
                 Value::String(filename.to_string()),
                 Value::StringSet(tags_vec),
                 Value::StringSet(links_vec),
+                Self::metadata_to_value(meta),
             ];
             table.add_row(row);
         }
@@ -544,13 +585,28 @@ impl Executor<'_> {
             } else {
                 // bean-query leaves description Null on a non-transaction, the
                 // same as payee and narration.
+                //
+                // Tags and links are NOT in that group. `note` and `document`
+                // carry them in beancount v3, and a document's already survive
+                // into our model -- `SELECT tags FROM #documents` returns them.
+                // Emptying them here made `#entries` disagree with `#documents`
+                // about the same directive (#2154). A column-presence census
+                // cannot see this: `tags` IS registered on `#entries`, it was
+                // just wrong for every directive except transactions.
+                let (tags, links) = match directive {
+                    Directive::Document(doc) => (
+                        doc.tags.iter().map(ToString::to_string).collect(),
+                        doc.links.iter().map(ToString::to_string).collect(),
+                    ),
+                    _ => (Vec::new(), Vec::new()),
+                };
                 (
                     Value::Null,
                     Value::Null,
                     Value::Null,
                     Value::Null,
-                    Value::StringSet(vec![]),
-                    Value::StringSet(vec![]),
+                    Value::StringSet(tags),
+                    Value::StringSet(links),
                     Value::StringSet(vec![]),
                 )
             };

@@ -2346,6 +2346,12 @@ impl<'a> Executor<'a> {
             // function name, dropping the arguments, so `SELECT count(date)`
             // headed `count` where bean-query heads `count(date)`.
             Expr::Function(_) => expr.to_string(),
+            // Window functions keep the bare name, deliberately NOT the source
+            // text the `Function` arm above uses. They are a rustledger
+            // extension -- bean-query has no `OVER` -- so there is no rule to
+            // match, and `ROW_NUMBER() OVER (PARTITION BY account ORDER BY
+            // date)` as a column header helps nobody. Alias it if you want a
+            // different name; `AS rn` works.
             Expr::Window(wf) => wf.name.clone(),
             // Postfix accesses name themselves by their source spelling so
             // ORDER BY / PIVOT BY string resolution finds the target (a

@@ -2,10 +2,10 @@
 source: crates/rustledger/tests/cli_snapshot_test.rs
 expression: stdout.trim()
 ---
-account        SUM      
--------------  ---------
-Assets:Cash    2920 USD 
-Expenses:Food  80 USD   
-Income:Salary  -3000 USD
+account        SUM(position)
+-------------  -------------
+Assets:Cash    2920 USD     
+Expenses:Food  80 USD       
+Income:Salary  -3000 USD    
 
 3 row(s)

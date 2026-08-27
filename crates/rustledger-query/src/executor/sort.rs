@@ -8,6 +8,26 @@ use crate::error::QueryError;
 use super::Executor;
 use super::types::{QueryResult, Row, Value, hash_single_value};
 
+/// Find a result column by name, exact match first, then case-insensitively.
+///
+/// Result headers became mixed-case with #2164: a bare column or a user alias
+/// is lowercased (`SELECT DATE` heads `date`), while a function target keeps
+/// its source spelling (`SUM(number)`). Meanwhile an ORDER BY / PIVOT BY
+/// reference carries whatever the query wrote, and the synthetic hidden
+/// columns from `find_hidden_order_by_targets` are named by the expression's
+/// source text. Those three conventions disagree on case, so an exact match
+/// alone fails in every direction -- `ORDER BY DATE` against a `date` header,
+/// and `ORDER BY MIN(date)` against the `min(date)` hidden column.
+///
+/// Exact first so an exact hit always wins when two columns differ only by
+/// case.
+fn find_column(columns: &[String], name: &str) -> Option<usize> {
+    columns
+        .iter()
+        .position(|c| c == name)
+        .or_else(|| columns.iter().position(|c| c.eq_ignore_ascii_case(name)))
+}
+
 impl Executor<'_> {
     pub(super) fn sort_results(
         &self,
@@ -23,14 +43,6 @@ impl Executor<'_> {
         if order_by.is_empty() {
             return Ok(());
         }
-
-        // Build a map from column names to indices
-        let column_indices: rustc_hash::FxHashMap<&str, usize> = result
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.as_str(), i))
-            .collect();
 
         // Resolve ORDER BY expressions to column indices
         let mut sort_specs: Vec<(usize, bool)> = Vec::new();
@@ -50,18 +62,17 @@ impl Executor<'_> {
                     }
                     (n as usize) - 1
                 }
-                Expr::Column(name) => column_indices
-                    .get(name.as_str())
-                    .copied()
+                // Case-insensitive fallback: result headers are the column's
+                // own (lowercase) name since #2164, so `ORDER BY DATE` must
+                // still find the `date` column. bean-query accepts this.
+                Expr::Column(name) => find_column(&result.columns, name)
                     .ok_or_else(|| QueryError::UnknownColumn(name.clone()))?,
                 Expr::Function(func) => {
                     // First try to find a column with the function name (e.g., "sum" for sum(amount))
                     // Then try the full expression string (e.g., "account_sortkey(account)")
                     let expr_str = spec.expr.to_string();
-                    column_indices
-                        .get(func.name.as_str())
-                        .or_else(|| column_indices.get(expr_str.as_str()))
-                        .copied()
+                    find_column(&result.columns, &func.name)
+                        .or_else(|| find_column(&result.columns, &expr_str))
                         .ok_or_else(|| {
                             QueryError::Evaluation(format!(
                                 "ORDER BY expression not found in SELECT: {expr_str}"
@@ -72,14 +83,11 @@ impl Executor<'_> {
                     // For other expression kinds (binary ops, literals, etc.),
                     // look up by string representation (matches hidden column aliases).
                     let expr_str = spec.expr.to_string();
-                    column_indices
-                        .get(expr_str.as_str())
-                        .copied()
-                        .ok_or_else(|| {
-                            QueryError::Evaluation(format!(
-                                "ORDER BY expression not found in SELECT: {expr_str}"
-                            ))
-                        })?
+                    find_column(&result.columns, &expr_str).ok_or_else(|| {
+                        QueryError::Evaluation(format!(
+                            "ORDER BY expression not found in SELECT: {expr_str}"
+                        ))
+                    })?
                 }
             };
             let ascending = spec.direction != SortDirection::Desc;
@@ -375,7 +383,7 @@ impl Executor<'_> {
                     .columns
                     .iter()
                     .position(|c| c.to_uppercase() == upper_func)
-                    .or_else(|| result.columns.iter().position(|c| c == &expr_str))
+                    .or_else(|| find_column(&result.columns, &expr_str))
                     .ok_or_else(|| {
                         QueryError::Evaluation(format!(
                             "PIVOT BY expression '{expr_str}' not found in SELECT"
@@ -388,15 +396,11 @@ impl Executor<'_> {
                 // names — matches the hidden-column alias convention
                 // used by `find_hidden_order_by_targets`.
                 let expr_str = pivot_expr.to_string();
-                result
-                    .columns
-                    .iter()
-                    .position(|c| c == &expr_str)
-                    .ok_or_else(|| {
-                        QueryError::Evaluation(format!(
-                            "PIVOT BY expression '{expr_str}' not found in SELECT"
-                        ))
-                    })
+                find_column(&result.columns, &expr_str).ok_or_else(|| {
+                    QueryError::Evaluation(format!(
+                        "PIVOT BY expression '{expr_str}' not found in SELECT"
+                    ))
+                })
             }
         }
     }

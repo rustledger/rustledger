@@ -733,7 +733,9 @@ impl Executor<'_> {
         let mut names = Vec::new();
         for (i, target) in targets.iter().enumerate() {
             if let Some(alias) = &target.alias {
-                names.push(alias.clone());
+                // bean-query lowercases the alias too: `AS LatestDate`
+                // heads the result `latestdate` (#2164).
+                names.push(alias.to_lowercase());
             } else if matches!(target.expr, Expr::Wildcard) {
                 // Expand wildcard to all VISIBLE inner columns.
                 names.extend(

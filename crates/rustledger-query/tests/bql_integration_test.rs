@@ -2129,15 +2129,18 @@ fn test_pivot_by_multi_value_column_qualifies_headers() {
         "expected qualified headers in multi-value-column case; got {columns_joined}"
     );
     // The qualified format is "<value_col_name> / <pivot_value>".
-    // The aggregator names columns by the bare function name (`SUM`,
-    // `COUNT`), so qualified headers look like `SUM / USD`, `COUNT / USD`.
+    // A function target is headed by its source text since #2164, so the
+    // qualified headers are `SUM(number) / USD`, not `SUM / USD`.
     // Both value columns must survive into the output.
     assert!(
-        result.columns.iter().any(|c| c.starts_with("SUM /")),
+        result
+            .columns
+            .iter()
+            .any(|c| c.starts_with("SUM(number) /")),
         "missing SUM-qualified columns in multi-value case; got {columns_joined}"
     );
     assert!(
-        result.columns.iter().any(|c| c.starts_with("COUNT /")),
+        result.columns.iter().any(|c| c.starts_with("COUNT(*) /")),
         "missing COUNT-qualified columns in multi-value case; got {columns_joined}"
     );
 }
@@ -2441,7 +2444,9 @@ fn test_create_table_as_select() {
     let result = executor.execute(&select_query).expect("should execute");
 
     assert!(!result.is_empty());
-    assert_eq!(result.columns, vec!["account", "sum"]);
+    // `sum(number)`, not `sum`: a function target is headed by its source
+    // text, as bean-query does (#2164).
+    assert_eq!(result.columns, vec!["account", "sum(number)"]);
 }
 
 #[test]
@@ -3193,7 +3198,7 @@ fn test_order_by_group_by_expression_not_in_select() {
     // The result should only have 2 columns (account and sum), not the hidden sortkey column
     assert_eq!(result.columns.len(), 2);
     assert_eq!(result.columns[0], "account");
-    assert_eq!(result.columns[1], "sum");
+    assert_eq!(result.columns[1], "sum(number)");
 
     // Verify all rows have exactly 2 values
     for row in &result.rows {
@@ -3223,7 +3228,7 @@ fn test_order_by_multiple_hidden_columns() {
     // Should have 3 visible columns
     assert_eq!(result.columns.len(), 3);
     assert_eq!(result.columns[0], "account");
-    assert_eq!(result.columns[1], "sum");
+    assert_eq!(result.columns[1], "sum(number)");
     assert_eq!(result.columns[2], "currency");
 
     // Verify all rows have exactly 3 values
@@ -6837,6 +6842,62 @@ fn source_keys_reach_entries_meta_but_not_per_table_meta() {
 }
 
 #[test]
+fn result_headers_follow_bean_query_naming() {
+    // Three rules, each read off bean-query rather than inferred (#2164):
+    //   bare column -> the column's own name, lowercased
+    //   alias       -> lowercased, including a mixed-case one
+    //   function    -> the target's SOURCE TEXT, case intact
+    // The third is why `COUNT(date)` and `count(date)` head differently:
+    // bean-query echoes what was written rather than normalizing.
+    let directives = make_all_directive_types_test_directives();
+
+    for (query, expected) in [
+        ("SELECT DATE FROM #notes", vec!["date"]),
+        ("SELECT DaTe FROM #notes", vec!["date"]),
+        (
+            "SELECT ACCOUNT, COMMENT FROM #notes",
+            vec!["account", "comment"],
+        ),
+        ("SELECT DATE AS D FROM #notes", vec!["d"]),
+        ("SELECT date AS LatestDate FROM #notes", vec!["latestdate"]),
+        ("SELECT COUNT(date) FROM #notes", vec!["COUNT(date)"]),
+        ("SELECT count(date) FROM #notes", vec!["count(date)"]),
+    ] {
+        let result = execute_query(query, &directives);
+        assert_eq!(
+            result.columns, expected,
+            "{query} headed the result wrongly"
+        );
+    }
+}
+
+#[test]
+fn order_by_resolves_a_column_written_in_another_case() {
+    // Headers are lowercased since #2164, so an exact-match lookup would
+    // fail `ORDER BY DATE` against the `date` header -- which is a query
+    // bean-query accepts, and which this change broke before the lookup was
+    // made case-insensitive.
+    //
+    // The same applies to the synthetic hidden columns that carry an ORDER BY
+    // expression's source text: `find_hidden_order_by_targets` names one
+    // `MIN(date)` while the alias path lowercases it to `min(date)`.
+    let directives = make_all_directive_types_test_directives();
+
+    for query in [
+        "SELECT DATE FROM #notes ORDER BY DATE",
+        "SELECT ACCOUNT FROM #notes ORDER BY ACCOUNT",
+        "SELECT date FROM #notes ORDER BY date",
+        "SELECT DATE AS D FROM #notes ORDER BY D",
+    ] {
+        let result = execute_query(query, &directives);
+        assert!(
+            !result.rows.is_empty(),
+            "{query} returned no rows, so it proves nothing"
+        );
+    }
+}
+
+#[test]
 fn select_star_matches_bean_query_per_table() {
     // bean-query's wildcard is NOT uniform about `meta`: it omits the column
     // on #balances/#notes/#events/#documents and includes it -- first -- on
@@ -9240,7 +9301,9 @@ fn test_issue_586_convert_null_returns_zero() {
         2,
         "Should return both accounts with transactions"
     );
-    assert_eq!(result.columns, vec!["account", "Balance", "Converted"]);
+    // Aliases are lowercased, as bean-query does: `AS Balance` heads
+    // `balance` (#2164).
+    assert_eq!(result.columns, vec!["account", "balance", "converted"]);
 
     // First row: WithBalance account (alphabetically comes before ZeroBalance)
     match &result.rows[0][2] {

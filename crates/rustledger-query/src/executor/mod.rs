@@ -2323,7 +2323,9 @@ impl<'a> Executor<'a> {
                 // Expand wildcard using shared constant (must match evaluate_row expansion)
                 names.extend(WILDCARD_COLUMNS.iter().map(|s| (*s).to_string()));
             } else if let Some(alias) = &target.alias {
-                names.push(alias.clone());
+                // bean-query lowercases the alias too: `AS LatestDate`
+                // heads the result `latestdate` (#2164).
+                names.push(alias.to_lowercase());
             } else {
                 names.push(self.expr_to_name(&target.expr, i));
             }
@@ -2335,8 +2337,15 @@ impl<'a> Executor<'a> {
     fn expr_to_name(&self, expr: &Expr, index: usize) -> String {
         match expr {
             Expr::Wildcard => "*".to_string(),
-            Expr::Column(name) => name.clone(),
-            Expr::Function(func) => func.name.clone(),
+            // bean-query lowercases a bare column reference to the column's
+            // own name: `SELECT DATE` heads the result `date`. Scripts that
+            // read our CSV by header name otherwise miss the field (#2164).
+            Expr::Column(name) => name.to_lowercase(),
+            // ...but renders a function target from its source text, case
+            // intact: `sum(NUMBER)` stays `sum(NUMBER)`. We emitted just the
+            // function name, dropping the arguments, so `SELECT count(date)`
+            // headed `count` where bean-query heads `count(date)`.
+            Expr::Function(_) => expr.to_string(),
             Expr::Window(wf) => wf.name.clone(),
             // Postfix accesses name themselves by their source spelling so
             // ORDER BY / PIVOT BY string resolution finds the target (a

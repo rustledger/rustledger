@@ -101,11 +101,18 @@ impl Executor<'_> {
             })
             .collect();
 
-        // Sort by date ONLY. `sort_by` is stable and `resolved_directives`
-        // yields source order, so this reproduces beancount's `(date, lineno)`
-        // entry order. A secondary key on account/type/name looked like
-        // determinism but reordered rows that share a date away from the
-        // order they were written in — bean-query preserves it (#2163).
+        // Sort by date ONLY. `sort_by_key` is stable and `resolved_directives`
+        // yields source order, so rows sharing a date come back in the order
+        // they were written. A secondary key on account/type/name looked like
+        // determinism but reordered them; bean-query preserves the source
+        // order (#2163).
+        //
+        // This matches beancount's `(date, lineno)` within a single file. It
+        // does NOT match across an `include`: beancount compares the raw line
+        // number without regard to which file it came from, so line 1 of an
+        // included file sorts ahead of line 3 of its parent, while we keep
+        // each file's directives together. Pre-existing, unchanged here, and
+        // tracked separately (#2166).
         balances.sort_by_key(|(date, ..)| *date);
 
         for (date, account, amount, tolerance, meta) in balances {
@@ -149,11 +156,18 @@ impl Executor<'_> {
             })
             .collect();
 
-        // Sort by date ONLY. `sort_by` is stable and `resolved_directives`
-        // yields source order, so this reproduces beancount's `(date, lineno)`
-        // entry order. A secondary key on account/type/name looked like
-        // determinism but reordered rows that share a date away from the
-        // order they were written in — bean-query preserves it (#2163).
+        // Sort by date ONLY. `sort_by_key` is stable and `resolved_directives`
+        // yields source order, so rows sharing a date come back in the order
+        // they were written. A secondary key on account/type/name looked like
+        // determinism but reordered them; bean-query preserves the source
+        // order (#2163).
+        //
+        // This matches beancount's `(date, lineno)` within a single file. It
+        // does NOT match across an `include`: beancount compares the raw line
+        // number without regard to which file it came from, so line 1 of an
+        // included file sorts ahead of line 3 of its parent, while we keep
+        // each file's directives together. Pre-existing, unchanged here, and
+        // tracked separately (#2166).
         commodities.sort_by_key(|(date, ..)| *date);
 
         for (date, name, meta) in commodities {
@@ -196,11 +210,18 @@ impl Executor<'_> {
             })
             .collect();
 
-        // Sort by date ONLY. `sort_by` is stable and `resolved_directives`
-        // yields source order, so this reproduces beancount's `(date, lineno)`
-        // entry order. A secondary key on account/type/name looked like
-        // determinism but reordered rows that share a date away from the
-        // order they were written in — bean-query preserves it (#2163).
+        // Sort by date ONLY. `sort_by_key` is stable and `resolved_directives`
+        // yields source order, so rows sharing a date come back in the order
+        // they were written. A secondary key on account/type/name looked like
+        // determinism but reordered them; bean-query preserves the source
+        // order (#2163).
+        //
+        // This matches beancount's `(date, lineno)` within a single file. It
+        // does NOT match across an `include`: beancount compares the raw line
+        // number without regard to which file it came from, so line 1 of an
+        // included file sorts ahead of line 3 of its parent, while we keep
+        // each file's directives together. Pre-existing, unchanged here, and
+        // tracked separately (#2166).
         events.sort_by_key(|(date, ..)| *date);
 
         for (date, event_type, description, meta) in events {
@@ -249,11 +270,18 @@ impl Executor<'_> {
             })
             .collect();
 
-        // Sort by date ONLY. `sort_by` is stable and `resolved_directives`
-        // yields source order, so this reproduces beancount's `(date, lineno)`
-        // entry order. A secondary key on account/type/name looked like
-        // determinism but reordered rows that share a date away from the
-        // order they were written in — bean-query preserves it (#2163).
+        // Sort by date ONLY. `sort_by_key` is stable and `resolved_directives`
+        // yields source order, so rows sharing a date come back in the order
+        // they were written. A secondary key on account/type/name looked like
+        // determinism but reordered them; bean-query preserves the source
+        // order (#2163).
+        //
+        // This matches beancount's `(date, lineno)` within a single file. It
+        // does NOT match across an `include`: beancount compares the raw line
+        // number without regard to which file it came from, so line 1 of an
+        // included file sorts ahead of line 3 of its parent, while we keep
+        // each file's directives together. Pre-existing, unchanged here, and
+        // tracked separately (#2166).
         notes.sort_by_key(|(date, ..)| *date);
 
         for (date, account, comment, meta) in notes {
@@ -308,11 +336,18 @@ impl Executor<'_> {
             })
             .collect();
 
-        // Sort by date ONLY. `sort_by` is stable and `resolved_directives`
-        // yields source order, so this reproduces beancount's `(date, lineno)`
-        // entry order. A secondary key on account/type/name looked like
-        // determinism but reordered rows that share a date away from the
-        // order they were written in — bean-query preserves it (#2163).
+        // Sort by date ONLY. `sort_by_key` is stable and `resolved_directives`
+        // yields source order, so rows sharing a date come back in the order
+        // they were written. A secondary key on account/type/name looked like
+        // determinism but reordered them; bean-query preserves the source
+        // order (#2163).
+        //
+        // This matches beancount's `(date, lineno)` within a single file. It
+        // does NOT match across an `include`: beancount compares the raw line
+        // number without regard to which file it came from, so line 1 of an
+        // included file sorts ahead of line 3 of its parent, while we keep
+        // each file's directives together. Pre-existing, unchanged here, and
+        // tracked separately (#2166).
         documents.sort_by_key(|(date, ..)| *date);
 
         for (date, account, filename, tags, links, meta) in documents {

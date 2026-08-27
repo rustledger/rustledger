@@ -2358,6 +2358,15 @@ impl<'a> Executor<'a> {
             // bare "colN" broke `SELECT entry.narration ORDER BY
             // entry.narration`, #1800 review).
             Expr::Attribute { .. } | Expr::Subscript { .. } => expr.to_string(),
+            // Literals and binary/unary expressions still head as `colN`.
+            // bean-query names them by printing the expression with MINIMAL
+            // parentheses -- `number + 1 * 2` gains none, `(number + 1) * 2`
+            // keeps the ones precedence requires, `((number))` collapses to
+            // `number`. Our `Display` parenthesizes every binary node, so
+            // `expr.to_string()` here yields `(number + 1)` and still would
+            // not match. Matching needs a precedence-aware printer, and
+            // `Display` is shared with hidden-column naming and error
+            // messages, so it cannot simply be changed. Tracked in #2171.
             _ => format!("col{index}"),
         }
     }

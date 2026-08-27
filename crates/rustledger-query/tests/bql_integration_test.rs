@@ -6902,6 +6902,64 @@ fn order_by_resolves_a_column_written_in_another_case() {
 }
 
 #[test]
+fn user_metadata_cannot_shadow_the_lineno_column() {
+    // bean-query stores the source location in the same dict users write to,
+    // so a directive carrying `lineno: 999` makes its `lineno` COLUMN report
+    // 999 rather than the real line. We deliberately do not match that
+    // (#2168): a column named `lineno` should say where the directive is.
+    //
+    // The `meta` map is the other way round -- the user's value wins there,
+    // which DOES match bean-query, because `augmented_meta` only fills keys
+    // that are absent. Both halves are asserted so neither can drift.
+    use rustledger_loader::SourceMap;
+    use rustledger_parser::{Span, Spanned};
+
+    let mut note = Note::new(date(2024, 1, 3), "Assets:Cash", "n");
+    note.meta.insert(
+        "lineno".to_string(),
+        rustledger_core::MetaValue::String("999".to_string()),
+    );
+    let dirs = [Directive::Note(note)];
+    let spanned: Vec<Spanned<rustledger_core::Directive>> = dirs
+        .iter()
+        .cloned()
+        .map(|d| Spanned {
+            value: d,
+            span: Span::new(0, 50),
+            file_id: 0,
+        })
+        .collect();
+    let source_map = SourceMap::new();
+    let mut executor = Executor::new_with_sources(&spanned, &source_map);
+
+    let col = executor
+        .execute(&parse("SELECT lineno FROM #entries").expect("should parse"))
+        .expect("query should execute");
+    assert!(
+        matches!(col.rows[0][0], Value::Integer(_)),
+        "the lineno column must come from the source location, not metadata; got {:?}",
+        col.rows[0][0]
+    );
+    assert_ne!(
+        col.rows[0][0],
+        Value::Integer(999),
+        "user metadata shadowed the lineno column"
+    );
+
+    let meta = executor
+        .execute(&parse("SELECT meta FROM #entries").expect("should parse"))
+        .expect("query should execute");
+    match &meta.rows[0][0] {
+        Value::Object(map) => assert_eq!(
+            map.get("lineno"),
+            Some(&Value::String("999".to_string())),
+            "the user's value must win inside `meta`, as bean-query does"
+        ),
+        other => panic!("#entries.meta should be a map, got {other:?}"),
+    }
+}
+
+#[test]
 fn select_star_matches_bean_query_per_table() {
     // bean-query's wildcard is NOT uniform about `meta`: it omits the column
     // on #balances/#notes/#events/#documents and includes it -- first -- on

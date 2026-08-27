@@ -90,6 +90,16 @@ impl Executor<'_> {
     }
 
     /// The synthetic `lineno` source-location column value, as an `Integer`.
+    /// Reads the `SourceLocation`, never the directive's metadata.
+    ///
+    /// bean-query stores the location in the same dict users write to, so a
+    /// directive carrying `lineno: 999` makes its `lineno` COLUMN report 999
+    /// instead of the real line. We do not match that: a column named
+    /// `lineno` should say where the directive is, not what someone typed.
+    /// Immune by construction rather than by a guard (#2168).
+    ///
+    /// The `meta` map itself does let the user's value win, which DOES match
+    /// bean-query -- `augmented_meta` only fills keys that are absent.
     pub(crate) fn source_lineno_value(loc: Option<&SourceLocation>) -> Value {
         loc.map_or(Value::Null, |l| Value::Integer(Self::lineno_i64(l)))
     }

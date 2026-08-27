@@ -113,11 +113,11 @@ impl Executor<'_> {
         // shared a date, away from the order bean-query returns (#2163).
         //
         // This matches beancount's `(date, lineno)` within a single file. It
-        // does NOT match across an `include`: beancount compares the raw line
-        // number without regard to which file it came from, so line 1 of an
-        // included file sorts ahead of line 3 of its parent, while we keep
-        // each file's directives together. Pre-existing, unchanged here, and
-        // tracked separately (#2166).
+        // deliberately does NOT match across an `include`. beancount compares
+        // the raw line number with no record of which file it came from, so
+        // adding two comment lines to an included file reorders query results;
+        // measured, not assumed (#2166). We keep each file's directives
+        // together, which is stable under that edit. Divergence by choice.
         balances.sort_by_key(|(date, ..)| *date);
 
         for (date, account, amount, tolerance, meta) in balances {
@@ -173,11 +173,11 @@ impl Executor<'_> {
         // shared a date, away from the order bean-query returns (#2163).
         //
         // This matches beancount's `(date, lineno)` within a single file. It
-        // does NOT match across an `include`: beancount compares the raw line
-        // number without regard to which file it came from, so line 1 of an
-        // included file sorts ahead of line 3 of its parent, while we keep
-        // each file's directives together. Pre-existing, unchanged here, and
-        // tracked separately (#2166).
+        // deliberately does NOT match across an `include`. beancount compares
+        // the raw line number with no record of which file it came from, so
+        // adding two comment lines to an included file reorders query results;
+        // measured, not assumed (#2166). We keep each file's directives
+        // together, which is stable under that edit. Divergence by choice.
         commodities.sort_by_key(|(date, ..)| *date);
 
         for (date, name, meta) in commodities {
@@ -232,11 +232,11 @@ impl Executor<'_> {
         // shared a date, away from the order bean-query returns (#2163).
         //
         // This matches beancount's `(date, lineno)` within a single file. It
-        // does NOT match across an `include`: beancount compares the raw line
-        // number without regard to which file it came from, so line 1 of an
-        // included file sorts ahead of line 3 of its parent, while we keep
-        // each file's directives together. Pre-existing, unchanged here, and
-        // tracked separately (#2166).
+        // deliberately does NOT match across an `include`. beancount compares
+        // the raw line number with no record of which file it came from, so
+        // adding two comment lines to an included file reorders query results;
+        // measured, not assumed (#2166). We keep each file's directives
+        // together, which is stable under that edit. Divergence by choice.
         events.sort_by_key(|(date, ..)| *date);
 
         for (date, event_type, description, meta) in events {
@@ -297,11 +297,11 @@ impl Executor<'_> {
         // shared a date, away from the order bean-query returns (#2163).
         //
         // This matches beancount's `(date, lineno)` within a single file. It
-        // does NOT match across an `include`: beancount compares the raw line
-        // number without regard to which file it came from, so line 1 of an
-        // included file sorts ahead of line 3 of its parent, while we keep
-        // each file's directives together. Pre-existing, unchanged here, and
-        // tracked separately (#2166).
+        // deliberately does NOT match across an `include`. beancount compares
+        // the raw line number with no record of which file it came from, so
+        // adding two comment lines to an included file reorders query results;
+        // measured, not assumed (#2166). We keep each file's directives
+        // together, which is stable under that edit. Divergence by choice.
         notes.sort_by_key(|(date, ..)| *date);
 
         for (date, account, comment, meta) in notes {
@@ -368,11 +368,11 @@ impl Executor<'_> {
         // shared a date, away from the order bean-query returns (#2163).
         //
         // This matches beancount's `(date, lineno)` within a single file. It
-        // does NOT match across an `include`: beancount compares the raw line
-        // number without regard to which file it came from, so line 1 of an
-        // included file sorts ahead of line 3 of its parent, while we keep
-        // each file's directives together. Pre-existing, unchanged here, and
-        // tracked separately (#2166).
+        // deliberately does NOT match across an `include`. beancount compares
+        // the raw line number with no record of which file it came from, so
+        // adding two comment lines to an included file reorders query results;
+        // measured, not assumed (#2166). We keep each file's directives
+        // together, which is stable under that edit. Divergence by choice.
         documents.sort_by_key(|(date, ..)| *date);
 
         for (date, account, filename, tags, links, meta) in documents {

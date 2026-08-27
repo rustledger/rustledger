@@ -6585,8 +6585,23 @@ fn system_tables_sort_unordered_directives_by_date() {
         Directive::Commodity(Commodity::new(date(2024, 3, 2), "AAA")),
         Directive::Event(Event::new(date(2024, 9, 3), "z", "z")),
         Directive::Event(Event::new(date(2024, 3, 3), "a", "a")),
+        Directive::Document(Document::new(date(2024, 9, 4), "Assets:Cash", "/z.pdf")),
+        Directive::Document(Document::new(date(2024, 3, 4), "Assets:Cash", "/a.pdf")),
+        Directive::Balance(Balance::new(
+            date(2024, 9, 5),
+            "Assets:Zebra",
+            Amount::new(dec!(0.00), "USD"),
+        )),
+        Directive::Balance(Balance::new(
+            date(2024, 3, 5),
+            "Assets:Alpha",
+            Amount::new(dec!(0.00), "USD"),
+        )),
     ];
 
+    // All five tables, so that deleting any one table's sort is caught. An
+    // earlier version of this test covered only three, and removing the
+    // #balances or #documents sort still passed the whole suite.
     for (query, expected) in [
         (
             "SELECT comment FROM #notes",
@@ -6594,6 +6609,11 @@ fn system_tables_sort_unordered_directives_by_date() {
         ),
         ("SELECT name FROM #commodities", vec!["AAA", "ZZZ"]),
         ("SELECT type FROM #events", vec!["a", "z"]),
+        ("SELECT filename FROM #documents", vec!["/a.pdf", "/z.pdf"]),
+        (
+            "SELECT account FROM #balances",
+            vec!["Assets:Alpha", "Assets:Zebra"],
+        ),
     ] {
         let result = execute_query(query, &directives);
         let got: Vec<String> = result

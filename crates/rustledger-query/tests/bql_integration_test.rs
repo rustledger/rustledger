@@ -6888,6 +6888,10 @@ fn order_by_resolves_a_column_written_in_another_case() {
         "SELECT ACCOUNT FROM #notes ORDER BY ACCOUNT",
         "SELECT date FROM #notes ORDER BY date",
         "SELECT DATE AS D FROM #notes ORDER BY D",
+        // Non-ASCII: the header is produced by Unicode `to_lowercase`, so an
+        // ASCII-only comparison in the lookup disagrees with it and this
+        // query fails even though the two names are the same identifier.
+        "SELECT date AS DÄTE FROM #notes ORDER BY DÄTE",
     ] {
         let result = execute_query(query, &directives);
         assert!(

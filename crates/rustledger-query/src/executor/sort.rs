@@ -22,10 +22,16 @@ use super::types::{QueryResult, Row, Value, hash_single_value};
 /// Exact first so an exact hit always wins when two columns differ only by
 /// case.
 fn find_column(columns: &[String], name: &str) -> Option<usize> {
-    columns
-        .iter()
-        .position(|c| c == name)
-        .or_else(|| columns.iter().position(|c| c.eq_ignore_ascii_case(name)))
+    if let Some(i) = columns.iter().position(|c| c == name) {
+        return Some(i);
+    }
+    // `to_lowercase`, not `eq_ignore_ascii_case`: the headers were produced by
+    // Unicode `to_lowercase` in `expr_to_name` and the alias path, so an
+    // ASCII-only comparison here would disagree with them. `SELECT date AS
+    // DÄTE ORDER BY DÄTE` heads the result `däte` and then failed to find it
+    // (#2164 review).
+    let lower = name.to_lowercase();
+    columns.iter().position(|c| c.to_lowercase() == lower)
 }
 
 impl Executor<'_> {

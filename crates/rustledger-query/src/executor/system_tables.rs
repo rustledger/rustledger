@@ -712,7 +712,11 @@ impl Executor<'_> {
             description,
             tags,
             links,
-            Self::metadata_to_value(directive.meta()),
+            // bean-query's `#entries.meta` carries `filename` and `lineno`
+            // alongside the user's keys; its per-table `meta` columns
+            // (#notes, #balances, ...) do NOT, so this augmentation belongs
+            // here and must not move into `metadata_to_value` (#2162).
+            Self::metadata_to_value(&Self::augmented_meta(directive.meta(), source_loc)),
             accounts,
         ]
     }

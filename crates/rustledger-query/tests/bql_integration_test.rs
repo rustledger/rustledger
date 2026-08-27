@@ -6694,6 +6694,76 @@ fn system_tables_preserve_source_order_within_a_date() {
 }
 
 #[test]
+fn empty_metadata_is_an_empty_map_not_null() {
+    // bean-query returns `{}` for a directive with no metadata, and renders
+    // Null as an empty CSV field, so the two are distinguishable there:
+    // `meta IS NULL` is false. We returned Null, making it true (#2162).
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Note(Note::new(date(2024, 1, 3), "Assets:Cash", "no meta")),
+        Directive::Event(Event::new(date(2024, 1, 4), "loc", "Rome")),
+    ];
+
+    for table in ["#notes", "#events"] {
+        let result = execute_query(&format!("SELECT meta FROM {table}"), &directives);
+        assert_eq!(result.len(), 1, "{table} returned no row to assert on");
+        assert_ne!(
+            result.rows[0][0],
+            Value::Null,
+            "{table} returned Null for absent metadata; bean-query returns an empty map"
+        );
+
+        let is_null = execute_query(&format!("SELECT meta IS NULL FROM {table}"), &directives);
+        assert_eq!(
+            is_null.rows[0][0],
+            Value::Boolean(false),
+            "{table}: `meta IS NULL` must be false for absent metadata"
+        );
+    }
+}
+
+#[test]
+fn entries_meta_carries_filename_and_lineno() {
+    // bean-query's `#entries.meta` includes `filename` and `lineno` next to
+    // the user's keys. Its per-table `meta` columns (#notes, #balances, ...)
+    // do NOT -- verified against bean-query -- so this augmentation must stay
+    // on #entries rather than moving into the shared conversion, which would
+    // break the five tables #2161 brought into agreement (#2162).
+    use rustledger_loader::SourceMap;
+    use rustledger_parser::{Span, Spanned};
+
+    let dirs = [Directive::Note(Note::new(
+        date(2024, 1, 3),
+        "Assets:Cash",
+        "n",
+    ))];
+    let spanned: Vec<Spanned<rustledger_core::Directive>> = dirs
+        .iter()
+        .cloned()
+        .map(|d| Spanned {
+            value: d,
+            span: Span::new(0, 50),
+            file_id: 0,
+        })
+        .collect();
+    let source_map = SourceMap::new();
+    let mut executor = Executor::new_with_sources(&spanned, &source_map);
+    let result = executor
+        .execute(&parse("SELECT meta FROM #entries").expect("should parse"))
+        .expect("query should execute");
+
+    let rendered = format!("{:?}", result.rows[0][0]);
+    assert!(
+        rendered.contains("lineno"),
+        "#entries.meta should carry lineno, got {rendered}"
+    );
+    assert!(
+        rendered.contains("filename"),
+        "#entries.meta should carry filename, got {rendered}"
+    );
+}
+
+#[test]
 fn select_star_matches_bean_query_per_table() {
     // bean-query's wildcard is NOT uniform about `meta`: it omits the column
     // on #balances/#notes/#events/#documents and includes it -- first -- on

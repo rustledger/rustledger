@@ -2113,9 +2113,10 @@ impl<'a> Executor<'a> {
 
     /// Convert a `Metadata` map to a `Value::Object` for table storage.
     fn metadata_to_value(meta: &rustledger_core::Metadata) -> Value {
-        if meta.is_empty() {
-            return Value::Null;
-        }
+        // An empty map, NOT Null. bean-query returns `{}` for a directive
+        // with no metadata and renders Null as an empty CSV field, so the
+        // two are distinguishable there: `meta IS NULL` is false where we
+        // used to make it true (#2162).
         let map: std::collections::BTreeMap<String, Value> = meta
             .iter()
             .map(|(k, v)| (k.clone(), Self::meta_value_to_value(Some(v))))

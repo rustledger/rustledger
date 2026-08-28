@@ -2123,10 +2123,16 @@ impl<'a> Executor<'a> {
         // `FxHashMap`, so declaration order is already lost at parse time,
         // and `Value::Object` is a `BTreeMap`, so the query layer cannot
         // impose an order even if it knew one. Matching would mean an
-        // order-preserving map in `rustledger-core` -- a new dependency, rkyv
-        // support for the cache format, and a shifted `meta.hash` that
-        // rustfava pins -- to change the order keys print in. Measured and
-        // declined in #2168.
+        // order-preserving map in `rustledger-core`: a new dependency
+        // (`indexmap` is not one today) and a changed rkyv layout, since
+        // `Metadata` is part of the archived cache payload and rkyv is a
+        // default feature -- so a `CACHE_VERSION` bump too. All to change the
+        // order keys print in. Measured and declined in #2168.
+        //
+        // `meta.hash` is NOT at risk, contrary to an earlier draft of this
+        // comment: `rustledger-ffi-wasi::hash` sorts the keys itself before
+        // hashing, precisely because `Metadata` is a hash map, so the digest
+        // is already independent of iteration order.
         //
         // The sort is also what makes `SELECT meta` deterministic at all,
         // given the hash-map source. Same shape as the `#prices` ordering

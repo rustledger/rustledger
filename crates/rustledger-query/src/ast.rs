@@ -637,6 +637,87 @@ impl fmt::Display for Expr {
     }
 }
 
+/// Render an expression the way bean-query heads a result column.
+///
+/// This is NOT `Display`, deliberately. `Display` parenthesizes every binary
+/// node and double-quotes strings, which is fine for the round-tripping it is
+/// used for -- naming the synthetic hidden ORDER BY columns -- but wrong as a
+/// header: bean-query heads `number + 1` as `number + 1`, not `(number + 1)`.
+///
+/// bean-query renders the parse tree FAITHFULLY. It preserves the parentheses
+/// the query actually wrote, including ones precedence does not require
+/// (`(number > 0) AND (number < 5)` keeps both pairs), and adds none of its
+/// own (`number + 1 * 2` gains nothing). Measured, not derived from a
+/// precedence table -- an earlier attempt at minimal parenthesization
+/// disagreed with it on exactly those two cases.
+///
+/// Parentheses wrapping the whole target are dropped, matching bean-query:
+/// `SELECT ((number + 1))` heads `number + 1`.
+#[must_use]
+pub fn header_name(expr: &Expr) -> String {
+    // Strip parens that wrap the entire target; nested ones are preserved by
+    // `header_fragment`.
+    let mut top = expr;
+    while let Expr::Paren(inner) = top {
+        top = inner;
+    }
+    header_fragment(top)
+}
+
+/// Render one node of a header expression, preserving parentheses as written.
+fn header_fragment(expr: &Expr) -> String {
+    match expr {
+        Expr::Column(name) => name.clone(),
+        Expr::Wildcard => "*".to_string(),
+        // Single quotes, as bean-query writes them; `Display` uses double.
+        Expr::Literal(Literal::String(s)) => format!("'{s}'"),
+        Expr::Literal(lit) => lit.to_string(),
+        Expr::Paren(inner) => format!("({})", header_fragment(inner)),
+        Expr::Attribute { operand, name } => {
+            format!("{}.{name}", header_fragment(operand))
+        }
+        Expr::Subscript { operand, key } => {
+            format!("{}['{key}']", header_fragment(operand))
+        }
+        Expr::BinaryOp(op) => format!(
+            "{} {} {}",
+            header_fragment(&op.left),
+            op.op,
+            header_fragment(&op.right)
+        ),
+        // `UnaryOperator`'s Display bakes in its own spacing and position:
+        // `Not` is "NOT " (prefix, trailing space), `Neg` is "-" (prefix, no
+        // space), and `IsNull` / `IsNotNull` are " IS NULL" / " IS NOT NULL"
+        // -- POSTFIX, with a leading space. Formatting them all as prefix
+        // produced "NOT  x" and, worse, "IS NULL x".
+        Expr::UnaryOp(op) => match op.op {
+            UnaryOperator::IsNull | UnaryOperator::IsNotNull => {
+                format!("{}{}", header_fragment(&op.operand), op.op)
+            }
+            UnaryOperator::Not | UnaryOperator::Neg => {
+                format!("{}{}", op.op, header_fragment(&op.operand))
+            }
+        },
+        Expr::Between { value, low, high } => format!(
+            "{} BETWEEN {} AND {}",
+            header_fragment(value),
+            header_fragment(low),
+            header_fragment(high)
+        ),
+        Expr::Set(items) => {
+            let inner: Vec<String> = items.iter().map(header_fragment).collect();
+            format!("({})", inner.join(", "))
+        }
+        Expr::Function(call) => {
+            let args: Vec<String> = call.args.iter().map(header_fragment).collect();
+            format!("{}({})", call.name, args.join(", "))
+        }
+        // Window functions keep the bare name (#2164): `OVER` is a rustledger
+        // extension with no bean-query rendering to match.
+        Expr::Window(call) => call.name.clone(),
+    }
+}
+
 impl fmt::Display for Literal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

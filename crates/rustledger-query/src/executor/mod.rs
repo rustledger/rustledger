@@ -2332,7 +2332,7 @@ impl<'a> Executor<'a> {
     /// Resolve column names from targets.
     fn resolve_column_names(&self, targets: &[Target]) -> Result<Vec<String>, QueryError> {
         let mut names = Vec::new();
-        for (i, target) in targets.iter().enumerate() {
+        for target in targets {
             if matches!(target.expr, Expr::Wildcard) {
                 // Check wildcard BEFORE alias to catch `SELECT * AS alias` edge case
                 if target.alias.is_some() {
@@ -2347,14 +2347,14 @@ impl<'a> Executor<'a> {
                 // heads the result `latestdate` (#2164).
                 names.push(alias.to_lowercase());
             } else {
-                names.push(self.expr_to_name(&target.expr, i));
+                names.push(self.expr_to_name(&target.expr));
             }
         }
         Ok(names)
     }
 
     /// Convert an expression to a column name.
-    fn expr_to_name(&self, expr: &Expr, index: usize) -> String {
+    fn expr_to_name(&self, expr: &Expr) -> String {
         match expr {
             Expr::Wildcard => "*".to_string(),
             // bean-query lowercases a bare column reference to the column's
@@ -2365,7 +2365,11 @@ impl<'a> Executor<'a> {
             // intact: `sum(NUMBER)` stays `sum(NUMBER)`. We emitted just the
             // function name, dropping the arguments, so `SELECT count(date)`
             // headed `count` where bean-query heads `count(date)`.
-            Expr::Function(_) => expr.to_string(),
+            //
+            // `header_name`, not `to_string`: `Display` parenthesizes every
+            // binary node, so `sum(number + 1)` headed `sum((number + 1))`
+            // where bean-query heads `sum(number + 1)` (#2171).
+            Expr::Function(_) => crate::ast::header_name(expr),
             // Window functions keep the bare name, deliberately NOT the source
             // text the `Function` arm above uses. They are a rustledger
             // extension -- bean-query has no `OVER` -- so there is no rule to
@@ -2378,16 +2382,11 @@ impl<'a> Executor<'a> {
             // bare "colN" broke `SELECT entry.narration ORDER BY
             // entry.narration`, #1800 review).
             Expr::Attribute { .. } | Expr::Subscript { .. } => expr.to_string(),
-            // Literals and binary/unary expressions still head as `colN`.
-            // bean-query names them by printing the expression with MINIMAL
-            // parentheses -- `number + 1 * 2` gains none, `(number + 1) * 2`
-            // keeps the ones precedence requires, `((number))` collapses to
-            // `number`. Our `Display` parenthesizes every binary node, so
-            // `expr.to_string()` here yields `(number + 1)` and still would
-            // not match. Matching needs a precedence-aware printer, and
-            // `Display` is shared with hidden-column naming and error
-            // messages, so it cannot simply be changed. Tracked in #2171.
-            _ => format!("col{index}"),
+            // Literals and binary/unary expressions are headed by rendering
+            // them, as bean-query does: `SELECT number + 1` heads
+            // `number + 1`, `SELECT 'lit'` heads `'lit'`. `colN` named
+            // nothing a reader or a script could use (#2171).
+            _ => crate::ast::header_name(expr),
         }
     }
 

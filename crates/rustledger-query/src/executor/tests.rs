@@ -1725,6 +1725,68 @@ fn test_date_add_with_interval() {
     );
 }
 
+/// Verify `ast::header_name` renders the way bean-query heads a column.
+///
+/// Every expectation was read off bean-query 3.x, not derived from a
+/// precedence table. That matters: bean-query renders the parse tree
+/// FAITHFULLY -- it keeps parentheses the query wrote even where precedence
+/// does not need them, and adds none of its own -- so a minimal-parenthesizing
+/// printer disagrees with it on `(number > 0) AND (number < 5)`, which was the
+/// first thing I tried (#2171).
+#[test]
+fn test_header_name_matches_bean_query_rendering() {
+    fn assert_header(sql: &str, expected: &str) {
+        let q = match parse(sql).unwrap() {
+            Query::Select(s) => s,
+            _ => panic!("expected Select for {sql:?}"),
+        };
+        assert_eq!(
+            crate::ast::header_name(&q.targets[0].expr),
+            expected,
+            "header_name wrong for {sql:?}"
+        );
+    }
+
+    // Literals: single-quoted strings, as bean-query writes them.
+    assert_header("SELECT 1 FROM #postings", "1");
+    assert_header("SELECT 'lit' FROM #postings", "'lit'");
+
+    // No parentheses invented.
+    assert_header("SELECT number + 1 FROM #postings", "number + 1");
+    assert_header("SELECT number + 1 * 2 FROM #postings", "number + 1 * 2");
+    assert_header("SELECT number - 1 - 2 FROM #postings", "number - 1 - 2");
+
+    // Parentheses the query wrote are kept, including unnecessary ones.
+    assert_header("SELECT (number + 1) * 2 FROM #postings", "(number + 1) * 2");
+    assert_header("SELECT number - (1 - 2) FROM #postings", "number - (1 - 2)");
+    assert_header(
+        "SELECT (number > 0) AND (number < 5) FROM #postings",
+        "(number > 0) AND (number < 5)",
+    );
+    assert_header("SELECT NOT (number > 0) FROM #postings", "NOT (number > 0)");
+    assert_header("SELECT NOT number > 0 FROM #postings", "NOT number > 0");
+
+    // ...except around the whole target, which bean-query drops.
+    assert_header("SELECT (number) FROM #postings", "number");
+    assert_header("SELECT ((number)) FROM #postings", "number");
+    assert_header("SELECT ((number + 1)) FROM #postings", "number + 1");
+
+    // Unary spacing and position: `NOT ` and `-` are prefix, `IS NULL` is
+    // postfix. Formatting them uniformly produced `NOT  x` and `IS NULL x`.
+    assert_header("SELECT -number FROM #postings", "-number");
+    assert_header("SELECT number IS NULL FROM #postings", "number IS NULL");
+    assert_header(
+        "SELECT number IS NOT NULL FROM #postings",
+        "number IS NOT NULL",
+    );
+
+    // Function arguments render the same way -- `Display` parenthesized them,
+    // so `sum(number + 1)` headed `sum((number + 1))` after #2164.
+    assert_header("SELECT sum(number + 1) FROM #postings", "sum(number + 1)");
+    assert_header("SELECT length(payee) FROM #postings", "length(payee)");
+    assert_header("SELECT count(date) FROM #postings", "count(date)");
+}
+
 /// Verify `query_calls_any_function` walks every query part and every
 /// expression shape.
 ///

@@ -731,7 +731,7 @@ impl Executor<'_> {
         hidden: &[String],
     ) -> Result<Vec<String>, QueryError> {
         let mut names = Vec::new();
-        for (i, target) in targets.iter().enumerate() {
+        for target in targets {
             if let Some(alias) = &target.alias {
                 // bean-query lowercases the alias too: `AS LatestDate`
                 // heads the result `latestdate` (#2164).
@@ -745,7 +745,7 @@ impl Executor<'_> {
                         .cloned(),
                 );
             } else {
-                names.push(self.expr_to_name(&target.expr, i));
+                names.push(self.expr_to_name(&target.expr));
             }
         }
         Ok(names)

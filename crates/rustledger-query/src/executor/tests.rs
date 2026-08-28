@@ -1750,6 +1750,10 @@ fn test_header_name_matches_bean_query_rendering() {
     // Literals: single-quoted strings, as bean-query writes them.
     assert_header("SELECT 1 FROM #postings", "1");
     assert_header("SELECT 'lit' FROM #postings", "'lit'");
+    // ...but double-quoted when the value contains a single quote, so the
+    // header stays a well-formed literal rather than the ambiguous
+    // `'o'clock'`. Flagged by Copilot review on #2175.
+    assert_header("SELECT \"o'clock\" FROM #postings", "\"o'clock\"");
 
     // No parentheses invented.
     assert_header("SELECT number + 1 FROM #postings", "number + 1");

@@ -670,7 +670,22 @@ fn header_fragment(expr: &Expr) -> String {
         Expr::Column(name) => name.clone(),
         Expr::Wildcard => "*".to_string(),
         // Single quotes, as bean-query writes them; `Display` uses double.
-        Expr::Literal(Literal::String(s)) => format!("'{s}'"),
+        // Switch to double when the value contains a single quote and no
+        // double, so the header stays a well-formed literal instead of the
+        // ambiguous `'o'clock'`.
+        //
+        // Exact parity is out of reach here: bean-query echoes the quote
+        // character the query WROTE (`"dq"` heads `"dq"`, `'dq'` heads
+        // `'dq'`), and `Literal::String` does not record which was used.
+        // Reproducing that needs the parser to keep the original style
+        // (#2176).
+        Expr::Literal(Literal::String(s)) => {
+            if s.contains('\'') && !s.contains('"') {
+                format!("\"{s}\"")
+            } else {
+                format!("'{s}'")
+            }
+        }
         Expr::Literal(lit) => lit.to_string(),
         Expr::Paren(inner) => format!("({})", header_fragment(inner)),
         Expr::Attribute { operand, name } => {

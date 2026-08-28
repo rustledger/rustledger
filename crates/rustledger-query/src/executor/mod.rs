@@ -2531,11 +2531,6 @@ fn output_references_column(query: &SelectQuery, name: &str) -> bool {
             .is_some_and(|o| o.iter().any(|s| expr_references_column(&s.expr, name)))
 }
 
-/// Return `true` if any part of a `SelectQuery` references the given
-/// column. Walks SELECT targets, WHERE, GROUP BY, HAVING, PIVOT BY,
-/// ORDER BY, and the FROM filter expression. A subquery in FROM is
-/// treated as opaque — its inner references don't surface to the
-/// outer query's posting iterator.
 /// Walk an [`Expr`] tree, returning `true` if any [`Expr::Function`] call has
 /// one of `names` (compared case-insensitively).
 ///
@@ -2621,6 +2616,11 @@ fn query_calls_any_function(query: &SelectQuery, names: &[&str]) -> bool {
     false
 }
 
+/// Return `true` if any part of a `SelectQuery` references the given
+/// column. Walks SELECT targets, WHERE, GROUP BY, HAVING, PIVOT BY,
+/// ORDER BY, and the FROM filter expression. A subquery in FROM is
+/// treated as opaque — its inner references don't surface to the
+/// outer query's posting iterator.
 fn query_references_column(query: &SelectQuery, name: &str) -> bool {
     if query
         .targets

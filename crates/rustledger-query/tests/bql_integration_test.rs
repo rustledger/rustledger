@@ -7035,7 +7035,10 @@ fn postings_table_materializes_gated_columns_when_reachable() {
     // The metadata functions are the subtle case: they are dispatched by NAME
     // and then read the hidden `_entry_meta` / `_posting_meta` columns, which
     // the query never mentions. Gating on column references alone drops them.
-    for func in ["meta", "entry_meta", "any_meta"] {
+    // All FOUR dispatched names, not three: `POSTING_META` routes to
+    // `_posting_meta` like `META` does, and omitting it would let a gate that
+    // forgets it pass.
+    for func in ["meta", "posting_meta", "entry_meta", "any_meta"] {
         let r = execute_query(&format!("SELECT {func}('k') FROM #postings"), &directives);
         assert!(
             r.rows.iter().any(|row| row[0] != Value::Null),

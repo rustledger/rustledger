@@ -827,11 +827,12 @@ impl Executor<'_> {
             .expect("scan_postings(None, None, ..) evaluates no predicates, so it cannot fail")
             .postings;
 
-        // Five columns hold ~40% of this table's build time and ~47% of its
+        // Four columns hold ~40% of this table's build time and ~47% of its
         // peak RSS: the structured `entry` object and the three metadata maps
         // (`meta`, `_entry_meta`, `_posting_meta`). Skip them when the query
         // cannot observe them (#2169). Everything else is cheap enough that
-        // gating it would cost more in review surface than it saves.
+        // gating it would cost more in review surface than it saves --
+        // stubbing both `StringSet` columns moved 443ms to 437ms.
         //
         // A wildcard forces on only what it can actually SHOW. This table's
         // `SELECT *` emits `meta` but omits `entry` and the two `_`-prefixed

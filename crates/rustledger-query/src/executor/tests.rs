@@ -1789,6 +1789,22 @@ fn test_header_name_matches_bean_query_rendering() {
     assert_header("SELECT sum(number + 1) FROM #postings", "sum(number + 1)");
     assert_header("SELECT length(payee) FROM #postings", "length(payee)");
     assert_header("SELECT count(date) FROM #postings", "count(date)");
+    // Nesting in both directions, and the wildcard argument.
+    assert_header("SELECT sum(neg(number)) FROM #postings", "sum(neg(number))");
+    assert_header(
+        "SELECT length(payee) + 1 FROM #postings",
+        "length(payee) + 1",
+    );
+    assert_header("SELECT count(*) FROM #postings", "count(*)");
+
+    // Postfix targets. `expr_to_name` routes these through `Display` rather
+    // than here, for the reason in #1800 -- the ORDER BY lookup spells them
+    // the `Display` way. The two renderings agree on these shapes, checked
+    // against bean-query, so the split is not observable; pinned so it stays
+    // that way.
+    assert_header("SELECT entry.narration FROM #postings", "entry.narration");
+    assert_header("SELECT meta['k'] FROM #postings", "meta['k']");
+    assert_header("SELECT entry.meta['k'] FROM #postings", "entry.meta['k']");
 }
 
 /// Verify `query_calls_any_function` walks every query part and every

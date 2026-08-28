@@ -2545,7 +2545,10 @@ fn expr_calls_any_function(expr: &Expr, names: &[&str]) -> bool {
             names.iter().any(|n| call.name.eq_ignore_ascii_case(n)) || call.args.iter().any(hit)
         }
         // Mirrors `expr_references_column`: the OVER clause's PARTITION BY and
-        // ORDER BY are expressions too, and a call can hide in either.
+        // ORDER BY are expressions too, and a call can hide in either. Not
+        // reachable from `#postings`, whose only caller today rejects window
+        // functions outright -- kept so the two helpers stay interchangeable
+        // rather than because this call site needs it.
         Expr::Window(call) => {
             names.iter().any(|n| call.name.eq_ignore_ascii_case(n))
                 || call.args.iter().any(hit)

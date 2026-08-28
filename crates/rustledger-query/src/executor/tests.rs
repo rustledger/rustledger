@@ -1725,6 +1725,81 @@ fn test_date_add_with_interval() {
     );
 }
 
+/// Verify `query_calls_any_function` walks every query part and every
+/// expression shape.
+///
+/// The `#postings` column projection in #2169 hinges on this: the metadata
+/// functions read hidden columns the query never names, so a false negative
+/// here materializes nothing and `meta('k')` silently returns Null.
+///
+/// Several shapes below cannot be reached end-to-end through `#postings` --
+/// `meta('k') BETWEEN ...` type-errors before it matters, and window
+/// functions are rejected with an explicit `FROM #postings` -- so a direct
+/// test is the only way to cover those arms.
+#[test]
+fn test_query_calls_any_function_covers_all_shapes() {
+    const METAS: &[&str] = &["META", "ENTRY_META", "ANY_META", "POSTING_META"];
+
+    fn assert_calls(sql: &str, expected: bool) {
+        let q = match parse(sql).unwrap() {
+            Query::Select(s) => s,
+            _ => panic!("expected Select for {sql:?}"),
+        };
+        assert_eq!(
+            query_calls_any_function(&q, METAS),
+            expected,
+            "query_calls_any_function wrong for {sql:?}"
+        );
+    }
+
+    // Negative: no metadata call anywhere.
+    assert_calls("SELECT account FROM #postings", false);
+    assert_calls("SELECT count(account) FROM #postings", false);
+    assert_calls("SELECT meta FROM #postings", false);
+
+    // All four dispatched names.
+    for f in ["meta", "entry_meta", "any_meta", "posting_meta"] {
+        assert_calls(&format!("SELECT {f}('k') FROM #postings"), true);
+    }
+    // Case-insensitive, like the dispatch itself.
+    assert_calls("SELECT META('k') FROM #postings", true);
+
+    // Every clause.
+    assert_calls(
+        "SELECT account FROM #postings WHERE meta('k') IS NULL",
+        true,
+    );
+    assert_calls("SELECT account FROM #postings GROUP BY meta('k')", true);
+    assert_calls("SELECT account FROM #postings ORDER BY meta('k')", true);
+    assert_calls(
+        "SELECT account, count(account) FROM #postings GROUP BY account HAVING meta('k') IS NULL",
+        true,
+    );
+
+    // Nested expression shapes, including the ones unreachable end-to-end.
+    assert_calls("SELECT length(meta('k')) FROM #postings", true);
+    assert_calls(
+        "SELECT account FROM #postings WHERE (meta('k')) IS NULL",
+        true,
+    );
+    assert_calls(
+        "SELECT account FROM #postings WHERE NOT (meta('k') IS NULL)",
+        true,
+    );
+    assert_calls(
+        "SELECT account FROM #postings WHERE meta('k') IN ('a', 'b')",
+        true,
+    );
+    assert_calls(
+        "SELECT account FROM #postings WHERE meta('k') BETWEEN 'a' AND 'z'",
+        true,
+    );
+    assert_calls(
+        "SELECT account FROM #postings WHERE account = 'x' OR meta('k') IS NULL",
+        true,
+    );
+}
+
 /// Verify `query_references_column` walks every relevant query
 /// part. The `collect_postings` optimization in #1080 hinges on
 /// this — a false negative here would skip the cumulative-balance

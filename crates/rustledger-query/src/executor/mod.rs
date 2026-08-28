@@ -2536,6 +2536,91 @@ fn output_references_column(query: &SelectQuery, name: &str) -> bool {
 /// ORDER BY, and the FROM filter expression. A subquery in FROM is
 /// treated as opaque — its inner references don't surface to the
 /// outer query's posting iterator.
+/// Walk an [`Expr`] tree, returning `true` if any [`Expr::Function`] call has
+/// one of `names` (compared case-insensitively).
+///
+/// Needed because some functions read a column the query never names: the four
+/// metadata functions are dispatched by name and then read the hidden
+/// `_entry_meta` / `_posting_meta` columns off the row, so a projection that
+/// gated on column references alone would drop the data they need (#2169).
+fn expr_calls_any_function(expr: &Expr, names: &[&str]) -> bool {
+    let hit = |e: &Expr| expr_calls_any_function(e, names);
+    match expr {
+        Expr::Function(call) => {
+            names.iter().any(|n| call.name.eq_ignore_ascii_case(n)) || call.args.iter().any(hit)
+        }
+        // Mirrors `expr_references_column`: the OVER clause's PARTITION BY and
+        // ORDER BY are expressions too, and a call can hide in either.
+        Expr::Window(call) => {
+            names.iter().any(|n| call.name.eq_ignore_ascii_case(n))
+                || call.args.iter().any(hit)
+                || call
+                    .over
+                    .partition_by
+                    .as_ref()
+                    .is_some_and(|ps| ps.iter().any(hit))
+                || call
+                    .over
+                    .order_by
+                    .as_ref()
+                    .is_some_and(|os| os.iter().any(|o| hit(&o.expr)))
+        }
+        Expr::Attribute { operand, .. } | Expr::Subscript { operand, .. } => hit(operand),
+        Expr::BinaryOp(op) => hit(&op.left) || hit(&op.right),
+        Expr::UnaryOp(op) => hit(&op.operand),
+        Expr::Paren(inner) => hit(inner),
+        Expr::Between { value, low, high } => hit(value) || hit(low) || hit(high),
+        Expr::Set(items) => items.iter().any(hit),
+        Expr::Column(_) | Expr::Wildcard | Expr::Literal(_) => false,
+    }
+}
+
+/// Whether any clause of `query` calls one of `names`.
+///
+/// Mirrors [`query_references_column`]'s clause coverage; the two are used
+/// together to decide what a system table has to materialize.
+fn query_calls_any_function(query: &SelectQuery, names: &[&str]) -> bool {
+    if query
+        .targets
+        .iter()
+        .any(|t| expr_calls_any_function(&t.expr, names))
+    {
+        return true;
+    }
+    if let Some(w) = &query.where_clause
+        && expr_calls_any_function(w, names)
+    {
+        return true;
+    }
+    if let Some(g) = &query.group_by
+        && g.iter().any(|e| expr_calls_any_function(e, names))
+    {
+        return true;
+    }
+    if let Some(h) = &query.having
+        && expr_calls_any_function(h, names)
+    {
+        return true;
+    }
+    if let Some(p) = &query.pivot_by
+        && p.iter().any(|e| expr_calls_any_function(e, names))
+    {
+        return true;
+    }
+    if let Some(o) = &query.order_by
+        && o.iter().any(|sp| expr_calls_any_function(&sp.expr, names))
+    {
+        return true;
+    }
+    if let Some(from) = &query.from
+        && let Some(f) = &from.filter
+        && expr_calls_any_function(f, names)
+    {
+        return true;
+    }
+    false
+}
+
 fn query_references_column(query: &SelectQuery, name: &str) -> bool {
     if query
         .targets

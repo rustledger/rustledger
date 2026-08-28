@@ -7004,6 +7004,70 @@ fn postings_table_materializes_balances_when_the_query_needs_them() {
 }
 
 #[test]
+fn postings_table_materializes_gated_columns_when_reachable() {
+    // #postings skips the structured `entry` object and the three metadata
+    // maps when the query cannot observe them -- together ~40% of its build
+    // time and ~47% of its peak RSS (#2169). Each way of reaching them is
+    // pinned here, because every one of them fails SILENTLY: a gate that is
+    // too tight yields Null, not an error.
+    // Metadata at BOTH levels: `META` / `POSTING_META` read the posting's,
+    // `ENTRY_META` the transaction's, `ANY_META` falls back from one to the
+    // other. With only one level a correct Null looks like a gating failure.
+    let mut posting = Posting::new("Assets:Cash", Amount::new(dec!(10), "USD"));
+    posting.meta.insert(
+        "k".to_string(),
+        rustledger_core::MetaValue::String("posting-value".to_string()),
+    );
+    let mut txn = Transaction::new(date(2024, 1, 15), "narr")
+        .with_payee("payee")
+        .with_synthesized_posting(posting)
+        .with_synthesized_posting(Posting::new("Income:Job", Amount::new(dec!(-10), "USD")));
+    txn.meta.insert(
+        "k".to_string(),
+        rustledger_core::MetaValue::String("entry-value".to_string()),
+    );
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Income:Job")),
+        Directive::Transaction(txn),
+    ];
+
+    // The metadata functions are the subtle case: they are dispatched by NAME
+    // and then read the hidden `_entry_meta` / `_posting_meta` columns, which
+    // the query never mentions. Gating on column references alone drops them.
+    for func in ["meta", "entry_meta", "any_meta"] {
+        let r = execute_query(&format!("SELECT {func}('k') FROM #postings"), &directives);
+        assert!(
+            r.rows.iter().any(|row| row[0] != Value::Null),
+            "{func}('k') returned Null everywhere; the hidden metadata columns \
+             were not materialized"
+        );
+    }
+
+    // `entry` reached through an attribute, not as a bare column.
+    let attr = execute_query("SELECT entry.narration FROM #postings", &directives);
+    assert!(
+        attr.rows.iter().any(|row| row[0] != Value::Null),
+        "entry.narration returned Null; the entry object was not materialized"
+    );
+
+    // And the wildcard, which names nothing at all.
+    // `SELECT *` shows `meta` but NOT `entry` or the `_`-prefixed helpers --
+    // `wildcard_hidden` omits them -- so only `meta` has to be forced on for a
+    // bare wildcard. `entry` is covered by the attribute case above.
+    let star = execute_query("SELECT * FROM #postings", &directives);
+    let i = star
+        .columns
+        .iter()
+        .position(|c| c == "meta")
+        .expect("#postings wildcard must include meta");
+    assert!(
+        star.rows.iter().any(|row| row[i] != Value::Null),
+        "SELECT * left meta Null on every row; the wildcard did not force it on"
+    );
+}
+
+#[test]
 fn select_star_matches_bean_query_per_table() {
     // bean-query's wildcard is NOT uniform about `meta`: it omits the column
     // on #balances/#notes/#events/#documents and includes it -- first -- on

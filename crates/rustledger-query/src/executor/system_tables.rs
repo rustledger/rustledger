@@ -827,6 +827,41 @@ impl Executor<'_> {
             .expect("scan_postings(None, None, ..) evaluates no predicates, so it cannot fail")
             .postings;
 
+        // Five columns hold ~40% of this table's build time and ~47% of its
+        // peak RSS: the structured `entry` object and the three metadata maps
+        // (`meta`, `_entry_meta`, `_posting_meta`). Skip them when the query
+        // cannot observe them (#2169). Everything else is cheap enough that
+        // gating it would cost more in review surface than it saves.
+        //
+        // A wildcard forces on only what it can actually SHOW. This table's
+        // `SELECT *` emits `meta` but omits `entry` and the two `_`-prefixed
+        // metadata helpers -- `Executor::wildcard_hidden` drops the structured
+        // entry column to match beanquery, and underscore columns with it. So
+        // a bare `SELECT *` never observes those three, and forcing them on
+        // would be pure waste. Reaching them from a wildcard query still
+        // works, because `ORDER BY entry.narration` or `meta('k')` names or
+        // calls its way in and is picked up below.
+        let wildcard = query
+            .targets
+            .iter()
+            .any(|t| matches!(t.expr, crate::ast::Expr::Wildcard));
+        // `entry` is reachable as a bare column and as `entry.narration`;
+        // `expr_references_column` recurses into `Attribute`/`Subscript`
+        // operands, so the bare name covers both.
+        let needs_entry = super::query_references_column(query, "entry");
+        let needs_meta = wildcard || super::query_references_column(query, "meta");
+        // The hidden metadata columns are read by FUNCTION, not by name:
+        // `eval_meta_on_table_row` is dispatched for exactly these four, and
+        // reads `_posting_meta` / `_entry_meta` off the row. A query calling
+        // `meta('key')` never mentions either column, so gating on column
+        // references alone would break it silently.
+        let needs_hidden_meta = super::query_references_column(query, "_entry_meta")
+            || super::query_references_column(query, "_posting_meta")
+            || super::query_calls_any_function(
+                query,
+                &["META", "ENTRY_META", "ANY_META", "POSTING_META"],
+            );
+
         // Entry objects are per-TRANSACTION; postings of one transaction are
         // contiguous in the scan, so memoize the last built object instead of
         // rebuilding (strings, tags/links vectors, full meta conversion) for
@@ -844,13 +879,17 @@ impl Executor<'_> {
             // Transaction-level location — the per-posting fallback below.
             let source_loc = self.get_source_location(dir_idx);
 
-            let entry_val = match &last_entry {
-                Some((idx, value)) if *idx == dir_idx => value.clone(),
-                _ => {
-                    let value = Self::entry_object(txn, source_loc);
-                    last_entry = Some((dir_idx, value.clone()));
-                    value
+            let entry_val = if needs_entry {
+                match &last_entry {
+                    Some((idx, value)) if *idx == dir_idx => value.clone(),
+                    _ => {
+                        let value = Self::entry_object(txn, source_loc);
+                        last_entry = Some((dir_idx, value.clone()));
+                        value
+                    }
                 }
+            } else {
+                Value::Null
             };
 
             let tags: Vec<String> = txn.tags.iter().map(ToString::to_string).collect();
@@ -986,15 +1025,27 @@ impl Executor<'_> {
                 balance_val,
                 account_balance_val,
                 // Metadata and collection
-                Value::Metadata(Box::new(Self::augmented_meta(
-                    &posting.meta,
-                    posting_loc.as_ref(),
-                ))),
+                if needs_meta {
+                    Value::Metadata(Box::new(Self::augmented_meta(
+                        &posting.meta,
+                        posting_loc.as_ref(),
+                    )))
+                } else {
+                    Value::Null
+                },
                 Value::StringSet(all_accounts),
                 entry_val,
                 // Hidden metadata columns
-                Self::metadata_to_value(&txn.meta),
-                Self::metadata_to_value(&posting.meta),
+                if needs_hidden_meta {
+                    Self::metadata_to_value(&txn.meta)
+                } else {
+                    Value::Null
+                },
+                if needs_hidden_meta {
+                    Self::metadata_to_value(&posting.meta)
+                } else {
+                    Value::Null
+                },
             ];
             table.add_row(row);
         }

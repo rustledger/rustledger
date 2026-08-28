@@ -653,8 +653,11 @@ impl fmt::Display for Expr {
 ///
 /// Parentheses wrapping the whole target are dropped, matching bean-query:
 /// `SELECT ((number + 1))` heads `number + 1`.
+/// Crate-internal: this is how the executor names result columns, not
+/// something a consumer should reach for. `ast` is a `pub mod`, so a bare
+/// `pub` here would put a rendering helper in the crate's API.
 #[must_use]
-pub fn header_name(expr: &Expr) -> String {
+pub(crate) fn header_name(expr: &Expr) -> String {
     // Strip parens that wrap the entire target; nested ones are preserved by
     // `header_fragment`.
     let mut top = expr;

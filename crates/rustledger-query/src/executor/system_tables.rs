@@ -724,7 +724,7 @@ impl Executor<'_> {
     /// Build the #postings table from transaction postings.
     ///
     /// Column schema matches Python beancount's `postings` table for compatibility.
-    pub(super) fn build_postings_table(&self, query: Option<&crate::ast::SelectQuery>) -> Table {
+    pub(super) fn build_postings_table(&self, query: &crate::ast::SelectQuery) -> Table {
         let columns = vec![
             // Entry-level columns
             "type".to_string(),
@@ -801,30 +801,21 @@ impl Executor<'_> {
                 // source -- whose `WILDCARD_COLUMNS` excludes both -- this
                 // table's `SELECT *` includes `balance` and
                 // `account_balance`, so it must force both on.
-                query.map_or(
+                {
+                    let wildcard = query
+                        .targets
+                        .iter()
+                        .any(|t| matches!(t.expr, crate::ast::Expr::Wildcard));
+                    let account_balance =
+                        wildcard || super::query_references_column(query, "account_balance");
                     super::ScanNeeds {
-                        balance: true,
-                        account_balance: true,
+                        balance: wildcard || super::query_references_column(query, "balance"),
+                        account_balance,
                         where_reads_balance: false,
                         where_reads_account_balance: false,
-                        output_reads_account_balance: true,
-                    },
-                    |q| {
-                        let wildcard = q
-                            .targets
-                            .iter()
-                            .any(|t| matches!(t.expr, crate::ast::Expr::Wildcard));
-                        let account_balance =
-                            wildcard || super::query_references_column(q, "account_balance");
-                        super::ScanNeeds {
-                            balance: wildcard || super::query_references_column(q, "balance"),
-                            account_balance,
-                            where_reads_balance: false,
-                            where_reads_account_balance: false,
-                            output_reads_account_balance: account_balance,
-                        }
-                    },
-                ),
+                        output_reads_account_balance: account_balance,
+                    }
+                },
                 true,
             )
             .expect("scan_postings(None, None, ..) evaluates no predicates, so it cannot fail")

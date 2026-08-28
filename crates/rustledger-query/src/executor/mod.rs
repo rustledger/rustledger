@@ -2409,11 +2409,7 @@ impl<'a> Executor<'a> {
     /// compatibility (issue #632).
     ///
     /// Returns `None` if the table name is not a recognized built-in table.
-    pub(super) fn get_builtin_table(
-        &self,
-        table_name: &str,
-        query: Option<&SelectQuery>,
-    ) -> Option<Table> {
+    pub(super) fn get_builtin_table(&self, table_name: &str, query: &SelectQuery) -> Option<Table> {
         // Normalize table name: strip # prefix if present for Python beancount compatibility.
         // Both "#transactions" (rustledger) and "transactions" (beancount) work.
         // Using strip_prefix avoids allocation in the common case.

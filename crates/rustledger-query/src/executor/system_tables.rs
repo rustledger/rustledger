@@ -785,6 +785,12 @@ impl Executor<'_> {
                 // cumulative `Inventory` clones per posting -- the #1080
                 // runaway -- on every system-table query (#2169).
                 //
+                // Worth 34% of the wall clock and 55% of peak RSS on a
+                // 40k-posting ledger (517MB -> 233MB), since the snapshots are
+                // retained `Inventory` copies. Both before and after scale
+                // linearly, so this is a constant factor, not a complexity
+                // fix -- the #1080 quadratic itself was already dealt with.
+                //
                 // The flags do NOT mean what they mean in `collect_postings`,
                 // and reusing that computation verbatim was wrong twice over:
                 //

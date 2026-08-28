@@ -834,6 +834,10 @@ impl Executor<'_> {
         // gating it would cost more in review surface than it saves --
         // stubbing both `StringSet` columns moved 443ms to 437ms.
         //
+        // Callgrind on `examples/profile_query.rs` puts the whole #2169 +
+        // #2173 effect at 457.4M -> 244.2M instructions, which does not move
+        // with machine load the way the wall clock does.
+        //
         // A wildcard forces on only what it can actually SHOW. This table's
         // `SELECT *` emits `meta` but omits `entry` and the two `_`-prefixed
         // metadata helpers -- `Executor::wildcard_hidden` drops the structured

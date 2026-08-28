@@ -53,6 +53,13 @@ fn main() {
         "SELECT account, position WHERE account ~ \"Expenses\"",
         "SELECT account, sum(position) GROUP BY account",
         "SELECT date, account, position ORDER BY date DESC",
+        // The `#postings` SYSTEM TABLE, not the default source. These are
+        // separate paths -- `build_postings_table` versus `collect_postings`
+        // -- and only the default one was profiled here, which is how a 7x
+        // gap went unnoticed: `SELECT count(account) FROM #postings` took
+        // 681ms against 93ms for the same query without the FROM (#2169).
+        "SELECT account FROM #postings",
+        "SELECT count(account) FROM #postings",
     ]
     .iter()
     .map(|q| parse_query(q).expect("parse query"))

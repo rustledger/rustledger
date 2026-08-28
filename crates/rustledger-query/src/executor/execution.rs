@@ -431,7 +431,7 @@ impl Executor<'_> {
         let builtin_table;
         let table = if let Some(user_table) = self.tables.get(&table_name_upper) {
             user_table
-        } else if let Some(builtin) = self.get_builtin_table(table_name) {
+        } else if let Some(builtin) = self.get_builtin_table(table_name, Some(query)) {
             builtin_table = builtin;
             &builtin_table
         } else {

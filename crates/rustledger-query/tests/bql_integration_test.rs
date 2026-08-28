@@ -6964,6 +6964,46 @@ fn user_metadata_cannot_shadow_the_lineno_column() {
 }
 
 #[test]
+fn postings_table_materializes_balances_when_the_query_needs_them() {
+    // #postings gates the running-balance snapshots on whether the query
+    // reads them (#2169) -- they are the #1080 per-posting `Inventory`
+    // clones and cost ~34% of a `SELECT count(account) FROM #postings`.
+    //
+    // The gate is easy to get wrong in two ways, both of which produced
+    // silently EMPTY balances rather than an error, and both of which this
+    // pins:
+    //
+    //   * a WHERE that reads `account_balance` still needs it materialized,
+    //     even though the SELECT list does not mention it. Gating on the
+    //     output alone made this query return zero rows.
+    //   * `SELECT *` on this table includes `balance` and `account_balance`
+    //     -- unlike the default source, whose wildcard excludes both -- so a
+    //     wildcard must force them on. Otherwise the columns come back empty.
+    let directives = make_test_directives();
+
+    let filtered = execute_query(
+        "SELECT account FROM #postings WHERE account_balance != 0",
+        &directives,
+    );
+    assert!(
+        !filtered.rows.is_empty(),
+        "WHERE on account_balance returned nothing; the column was not materialized"
+    );
+
+    let starred = execute_query("SELECT * FROM #postings", &directives);
+    let ab = starred
+        .columns
+        .iter()
+        .position(|c| c == "account_balance")
+        .expect("#postings wildcard must include account_balance");
+    assert!(
+        starred.rows.iter().any(|r| r[ab] != Value::Null),
+        "SELECT * left account_balance empty on every row; the wildcard did not \
+         force materialization"
+    );
+}
+
+#[test]
 fn select_star_matches_bean_query_per_table() {
     // bean-query's wildcard is NOT uniform about `meta`: it omits the column
     // on #balances/#notes/#events/#documents and includes it -- first -- on

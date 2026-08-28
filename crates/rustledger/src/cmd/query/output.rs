@@ -203,8 +203,13 @@ fn write_csv<W: Write>(
     // `ctx` already has `render_commas` resolved for this surface by the
     // dispatcher, so it is used verbatim here.
 
-    // Print header
-    writeln!(writer, "{}", result.columns.join(","))?;
+    // Print header, escaped like the values below. A header can contain a
+    // comma -- `SELECT number IN (1, 2)` heads `number IN (1, 2)` since
+    // #2171 -- and an unescaped one splits into two fields, so a consumer
+    // reads more headers than there are columns. Values were already
+    // escaped; only the header row was not.
+    let headers: Vec<String> = result.columns.iter().map(|c| escape_csv(c)).collect();
+    writeln!(writer, "{}", headers.join(","))?;
 
     // Print rows
     for row in &result.rows {
@@ -1040,6 +1045,29 @@ mod tests {
     /// is about ZERO-POSITION semantic suppression. Both happen to use
     /// `format_value`, but they target different value types and
     /// different concerns.
+    #[test]
+    fn test_csv_header_with_a_comma_is_escaped() {
+        // A header can contain a comma since #2171 -- `SELECT number IN (1, 2)`
+        // heads `number IN (1, 2)`. The header row was joined without
+        // `escape_csv` while the value rows used it, so a consumer parsed two
+        // headers for one column and silently misaligned every field after it.
+        use rustledger_query::QueryResult;
+
+        let ctx = DisplayContext::new();
+        let mut result = QueryResult::new(vec!["number IN (1, 2)".into()]);
+        result.add_row(vec![Value::String("x".into())]);
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_csv(&result, &mut buf, false, &ctx).expect("csv ok");
+        let csv = String::from_utf8(buf).expect("utf8");
+        let header = csv.lines().next().expect("a header line");
+
+        assert_eq!(
+            header, "\"number IN (1, 2)\"",
+            "a header containing a comma must be quoted, or it parses as two fields"
+        );
+    }
+
     #[test]
     fn test_csv_inventory_renders_sub_precision_positions() {
         use rustledger_query::QueryResult;

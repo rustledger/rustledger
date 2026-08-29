@@ -7153,6 +7153,17 @@ fn transactions_meta_is_selectable_but_hidden_from_the_wildcard() {
         }
         other => panic!("#transactions.meta should be a map, got {other:?}"),
     }
+
+    // The source-mapped executor above is the CLI's path. wasm and the FFI
+    // build an `Executor::new` with no source map, so pin that too -- the
+    // switch to `new_with_sources` (needed to make the source-key assertion
+    // able to fail) would otherwise have left the plain path uncovered.
+    let plain = execute_query("SELECT meta FROM #transactions", &directives);
+    assert_eq!(plain.columns, vec!["meta"]);
+    assert!(
+        plain.rows.iter().any(|r| r[0] != Value::Null),
+        "meta must resolve without a source map as well"
+    );
 }
 
 #[test]

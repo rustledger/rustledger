@@ -7164,6 +7164,38 @@ fn transactions_meta_is_selectable_but_hidden_from_the_wildcard() {
         plain.rows.iter().any(|r| r[0] != Value::Null),
         "meta must resolve without a source map as well"
     );
+
+    // The same transaction is visible through three tables. They must agree
+    // on the user's keys -- `#entries` adds `filename`/`lineno` and the other
+    // two do not, which is bean-query's split, but the user data itself is one
+    // fact and must not differ by which table you ask.
+    //
+    // This is the check that caught #entries and #documents reporting
+    // different tags for one directive (#2161); a per-table census cannot see
+    // it, because every column involved is present in every table.
+    let user_key = |q: &str| -> Option<Value> {
+        let r = execute_query(q, &directives);
+        match &r.rows[0][0] {
+            Value::Object(map) => map.get("mtxn").cloned(),
+            other => panic!("{q} should yield a map, got {other:?}"),
+        }
+    };
+    let expected = Some(Value::String("tv".to_string()));
+    assert_eq!(
+        user_key("SELECT meta FROM #transactions"),
+        expected,
+        "#transactions.meta lost the user's key"
+    );
+    assert_eq!(
+        user_key("SELECT meta FROM #entries WHERE type = 'transaction'"),
+        expected,
+        "#entries.meta disagrees with #transactions.meta about the same directive"
+    );
+    assert_eq!(
+        user_key("SELECT _entry_meta FROM #postings"),
+        expected,
+        "#postings._entry_meta disagrees with #transactions.meta about the same directive"
+    );
 }
 
 #[test]

@@ -446,7 +446,25 @@ fn rendered_inventory_positions(
     sorted_positions
 }
 
+/// Render a value for a top-level result column.
+///
+/// Booleans are `TRUE` / `FALSE` here, matching bean-query, which is what a
+/// script reading our CSV compares against (#2179).
+///
+/// NOT the same as nesting: bean-query prints a boolean inside a metadata map
+/// through Python's `repr`, as `True` / `False`. `format_value_nested` keeps
+/// those lowercase rather than uppercasing them, which would move that case
+/// further from bean-query than it already is -- the `Object` arm recurses,
+/// so a single shared boolean rule cannot be right in both positions.
 pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext) -> String {
+    match value {
+        Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        other => format_value_nested(other, numberify, ctx),
+    }
+}
+
+/// Render a value that appears inside another value (a set, an object).
+fn format_value_nested(value: &Value, numberify: bool, ctx: &DisplayContext) -> String {
     match value {
         Value::String(s) => s.clone(),
         // Naked Decimals have no associated currency, so we route through
@@ -514,7 +532,7 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
         Value::Set(values) => {
             let strs: Vec<String> = values
                 .iter()
-                .map(|v| format_value(v, numberify, ctx))
+                .map(|v| format_value_nested(v, numberify, ctx))
                 .collect();
             format!("({})", strs.join(", "))
         }
@@ -537,7 +555,7 @@ pub(super) fn format_value(value: &Value, numberify: bool, ctx: &DisplayContext)
         Value::Object(obj) => {
             let pairs: Vec<String> = obj
                 .iter()
-                .map(|(k, v)| format!("{k}: {}", format_value(v, numberify, ctx)))
+                .map(|(k, v)| format!("{k}: {}", format_value_nested(v, numberify, ctx)))
                 .collect();
             format!("{{{}}}", pairs.join(", "))
         }
@@ -1045,6 +1063,67 @@ mod tests {
     /// is about ZERO-POSITION semantic suppression. Both happen to use
     /// `format_value`, but they target different value types and
     /// different concerns.
+    #[test]
+    fn test_boolean_renders_uppercase_at_top_level_only() {
+        // bean-query prints a boolean COLUMN as TRUE/FALSE, and a boolean
+        // INSIDE a metadata map through Python's `repr`, as True/False. Those
+        // are different rules, and `format_value`'s `Object` arm recurses --
+        // so uppercasing in one place would have changed both and moved the
+        // nested case further from bean-query than it already is (#2179).
+        use rustledger_query::QueryResult;
+
+        let ctx = DisplayContext::new();
+
+        // Top level: matches bean-query.
+        let mut top = QueryResult::new(vec!["b".into()]);
+        top.add_row(vec![Value::Boolean(true)]);
+        top.add_row(vec![Value::Boolean(false)]);
+        let mut buf: Vec<u8> = Vec::new();
+        write_csv(&top, &mut buf, false, &ctx).expect("csv ok");
+        let csv = String::from_utf8(buf).expect("utf8");
+        let rows: Vec<&str> = csv.lines().skip(1).collect();
+        assert_eq!(
+            rows,
+            vec!["TRUE", "FALSE"],
+            "a boolean column must be uppercase"
+        );
+
+        // Nested: unchanged. Our map format already differs from bean-query's
+        // (no quoting), so the point here is only that the top-level rule did
+        // not leak into it.
+        let mut obj = std::collections::BTreeMap::new();
+        obj.insert("flagged".to_string(), Value::Boolean(true));
+        let mut nested = QueryResult::new(vec!["meta".into()]);
+        nested.add_row(vec![Value::Object(Box::new(obj))]);
+        let mut buf2: Vec<u8> = Vec::new();
+        write_csv(&nested, &mut buf2, false, &ctx).expect("csv ok");
+        let csv2 = String::from_utf8(buf2).expect("utf8");
+        assert!(
+            csv2.contains("flagged: true"),
+            "a boolean inside a map must stay lowercase; got {csv2}"
+        );
+    }
+
+    #[test]
+    fn test_boolean_stays_a_real_json_boolean() {
+        // The JSON path must NOT pick up the TRUE/FALSE spelling: `true` is a
+        // JSON literal, and `TRUE` would make the document invalid.
+        use rustledger_query::QueryResult;
+
+        let mut result = QueryResult::new(vec!["b".into()]);
+        result.add_row(vec![Value::Boolean(true)]);
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_json(&result, &mut buf).expect("json ok");
+        let json = String::from_utf8(buf).expect("utf8");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            parsed["rows"][0]["b"],
+            serde_json::Value::Bool(true),
+            "the JSON boolean must stay a real boolean, not a TRUE/FALSE string"
+        );
+    }
+
     #[test]
     fn test_csv_header_with_a_comma_is_escaped() {
         // A header can contain a comma since #2171 -- `SELECT number IN (1, 2)`

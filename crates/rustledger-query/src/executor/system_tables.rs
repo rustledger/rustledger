@@ -535,6 +535,16 @@ impl Executor<'_> {
                 // User metadata only. bean-query's per-table `meta` columns
                 // exclude `filename` / `lineno`; only `#entries` carries them
                 // (#2162), so this must NOT use `augmented_meta`.
+                //
+                // Built unconditionally, like the other five per-table `meta`
+                // columns. Measured before leaving it that way: on a ledger
+                // with five metadata keys on every one of 20k transactions --
+                // a deliberately extreme shape -- a query that does not select
+                // `meta` costs ~30ms more, 371ms to 400ms. On a ledger without
+                // transaction metadata it is below the noise floor. That is
+                // far from the 40% that justified gating `#postings` in
+                // #2169, so the projection machinery is not worth the review
+                // surface here.
                 Self::metadata_to_value(&txn.meta),
             ];
             table.add_row(row);

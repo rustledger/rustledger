@@ -7026,7 +7026,7 @@ fn postings_table_materializes_gated_columns_when_reachable() {
         "k".to_string(),
         rustledger_core::MetaValue::String("entry-value".to_string()),
     );
-    let directives = vec![
+    let directives = [
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
         Directive::Open(Open::new(date(2024, 1, 1), "Income:Job")),
         Directive::Transaction(txn),
@@ -7068,6 +7068,91 @@ fn postings_table_materializes_gated_columns_when_reachable() {
         star.rows.iter().any(|row| row[i] != Value::Null),
         "SELECT * left meta Null on every row; the wildcard did not force it on"
     );
+}
+
+#[test]
+fn transactions_meta_is_selectable_but_hidden_from_the_wildcard() {
+    use rustledger_loader::SourceMap;
+    use rustledger_parser::{Span, Spanned};
+
+    // The last of #2154's eleven columns. bean-query answers
+    // `SELECT meta FROM #transactions` while keeping its `SELECT *` at seven
+    // columns, the same split #2161 established for the other five per-table
+    // `meta` columns.
+    //
+    // User keys only: bean-query's per-table `meta` excludes `filename` and
+    // `lineno`; only `#entries` carries them (#2162). Asserted here so a
+    // future change cannot quietly route this through `augmented_meta`.
+    let mut txn = Transaction::new(date(2024, 1, 15), "narr")
+        .with_payee("payee")
+        .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(10), "USD")))
+        .with_synthesized_posting(Posting::new("Income:Job", Amount::new(dec!(-10), "USD")));
+    txn.meta.insert(
+        "mtxn".to_string(),
+        rustledger_core::MetaValue::String("tv".to_string()),
+    );
+    let directives = [
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Income:Job")),
+        Directive::Transaction(txn),
+    ];
+
+    // A source-mapped executor, so `augmented_meta` would actually inject
+    // `filename`/`lineno` if this column were wrongly routed through it. With
+    // a plain `Executor::new` the location is None, `augmented_meta` returns
+    // its input unchanged, and the assertion below cannot fail -- that
+    // mutation passed until this fixture grew a real SourceMap.
+    let source = "; l1\n2024-01-15 * \"payee\" \"narr\"\n";
+    let mut source_map = SourceMap::new();
+    let file_id = source_map.add_file("ledger.beancount".into(), source.into());
+    let spanned: Vec<Spanned<rustledger_core::Directive>> = directives
+        .iter()
+        .cloned()
+        .map(|d| Spanned {
+            value: d,
+            span: Span::new(6, 30),
+            file_id: u16::try_from(file_id).expect("one file fits in u16"),
+        })
+        .collect();
+    let mut executor = Executor::new_with_sources(&spanned, &source_map);
+
+    let starred = executor
+        .execute(&parse("SELECT * FROM #transactions").expect("should parse"))
+        .expect("query should execute");
+    assert_eq!(
+        starred.columns,
+        vec![
+            "date",
+            "flag",
+            "payee",
+            "narration",
+            "tags",
+            "links",
+            "accounts"
+        ],
+        "#transactions wildcard must stay at bean-query's seven columns"
+    );
+
+    let meta = executor
+        .execute(&parse("SELECT meta FROM #transactions").expect("should parse"))
+        .expect("query should execute");
+    assert_eq!(meta.columns, vec!["meta"], "meta must resolve by name");
+    match &meta.rows[0][0] {
+        Value::Object(map) => {
+            assert_eq!(
+                map.get("mtxn"),
+                Some(&Value::String("tv".to_string())),
+                "the transaction's own metadata must come through"
+            );
+            for key in ["filename", "lineno"] {
+                assert!(
+                    !map.contains_key(key),
+                    "per-table meta must not carry `{key}`; only #entries does (#2162)"
+                );
+            }
+        }
+        other => panic!("#transactions.meta should be a map, got {other:?}"),
+    }
 }
 
 #[test]

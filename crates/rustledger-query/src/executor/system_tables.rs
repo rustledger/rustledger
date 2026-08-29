@@ -72,7 +72,7 @@ impl Executor<'_> {
     ///
     /// bean-query also exposes `discrepancy` here. It is not a field of the
     /// directive — the balance checker computes it — so it is tracked
-    /// separately rather than faked from the data we have (#2154).
+    /// separately rather than faked from the data we have (#2180).
     pub(super) fn build_balances_table(&self) -> Table {
         let columns = vec![
             "date".to_string(),
@@ -468,7 +468,8 @@ impl Executor<'_> {
 
     /// Build the #transactions table from transaction directives.
     ///
-    /// The table has columns: date, flag, payee, narration, tags, links, accounts
+    /// The table has columns: date, flag, payee, narration, tags, links,
+    /// accounts, meta
     /// - date: The transaction date
     /// - flag: The transaction flag (e.g., '*' or '!')
     /// - payee: The payee (NULL if not specified)
@@ -476,6 +477,7 @@ impl Executor<'_> {
     /// - tags: Transaction tags (as a set)
     /// - links: Transaction links (as a set)
     /// - accounts: Set of accounts involved in the transaction
+    /// - meta: The transaction's metadata (hidden from `SELECT *`)
     pub(super) fn build_transactions_table(&self) -> Table {
         let columns = vec![
             "date".to_string(),
@@ -485,8 +487,13 @@ impl Executor<'_> {
             "tags".to_string(),
             "links".to_string(),
             "accounts".to_string(),
+            "meta".to_string(),
         ];
-        let mut table = Table::new(columns);
+        // `meta` is hidden from `SELECT *`, which bean-query keeps at seven
+        // columns here, but selectable by name -- the last of #2154's
+        // eleven, and the same split #2161 established for the other five
+        // per-table `meta` columns.
+        let mut table = Table::new(columns).with_hidden(&["meta"]);
 
         // Collect transaction directives
         let mut transactions: Vec<_> = self
@@ -525,6 +532,10 @@ impl Executor<'_> {
                 Value::StringSet(tags),
                 Value::StringSet(links),
                 Value::StringSet(accounts),
+                // User metadata only. bean-query's per-table `meta` columns
+                // exclude `filename` / `lineno`; only `#entries` carries them
+                // (#2162), so this must NOT use `augmented_meta`.
+                Self::metadata_to_value(&txn.meta),
             ];
             table.add_row(row);
         }

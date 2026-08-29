@@ -1088,6 +1088,27 @@ mod tests {
             "a boolean column must be uppercase"
         );
 
+        // The DEFAULT text output, not just CSV. It shares `format_value`, so
+        // it was fixed by the same change -- but only CSV was pinned, which
+        // would let a later change keep CSV compatible and silently regress
+        // the format most users actually see. Flagged by Copilot on #2182.
+        let mut buf_text: Vec<u8> = Vec::new();
+        write_text(&top, &mut buf_text, false, &ctx).expect("text ok");
+        let text = String::from_utf8(buf_text).expect("utf8");
+        // Skip the header and separator, take exactly the data rows: the
+        // output also carries a blank line and a `N row(s)` footer.
+        let cells: Vec<String> = text
+            .lines()
+            .skip(2)
+            .take(2)
+            .map(|l| l.trim().to_string())
+            .collect();
+        assert_eq!(
+            cells,
+            vec!["TRUE", "FALSE"],
+            "the text output must use the same spelling as CSV; got {text}"
+        );
+
         // Nested: unchanged. Our map format already differs from bean-query's
         // (no quoting), so the point here is only that the top-level rule did
         // not leak into it.

@@ -1,0 +1,78 @@
+# Report parser-baseline drift that no pull request would otherwise carry.
+#
+# The baseline gate in `parser-baselines.yml` runs on every PR, but it cannot
+# catch this class, for two reasons that are both deliberate:
+#
+#   * A downloaded corpus file with no manifest entry is a WARNING there, not
+#     a failure. Upstream can add a file at any moment and failing would fire
+#     on unrelated PRs. The warning goes to a log nobody reads, so such a file
+#     sits with no parser-output coverage at all.
+#
+#   * That job restores `tests/compatibility/files` from a cache keyed on the
+#     FETCH SCRIPT, and skips the fetch on an exact key hit. CI's corpus is
+#     therefore frozen at whatever was fetched when that key was created,
+#     while the upstream repositories it mirrors keep moving. Every PR sees
+#     the same stale corpus and agrees there is no drift.
+#
+# So drift accumulated until somebody changed the parser, whose PR then had to
+# carry and explain churn that had nothing to do with it (#2186).
+#
+# This job exists to break that silence: it fetches the corpus FRESH -- no
+# cache, which is the whole point -- and turns any drift into an issue. It
+# reports; it does not gate, and it never fails on drift. Same shape as
+# `nightly-health.yml`, for the same reason: a result nobody sees is not a
+# result.
+
+name: Corpus Baseline Drift
+
+on:
+  schedule:
+    # Mondays 05:00 UTC. Weekly is enough for upstream corpus churn, and it
+    # avoids the nightly band (kani 06:00 Sun, nightly-health 08:00 daily).
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: corpus-baseline-drift
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  drift:
+    name: Corpus baseline drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+        with:
+          toolchain: 1.97.0 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      # Runs BEFORE the live check and IS allowed to fail the job. The live
+      # check exits 0 whatever it finds, so a logic bug in the classifier
+      # would otherwise surface as a permanently reassuring "no drift" — the
+      # same silence this workflow exists to break, wearing a green check.
+      - name: Self-test
+        run: python3 scripts/corpus-baseline-drift.py --self-test
+
+      # Deliberately NOT the `actions/cache` step the other corpus jobs use.
+      # A cached corpus is the frozen input that hides this drift; fetching
+      # fresh is the entire reason this workflow exists.
+      - name: Fetch compatibility test files (no cache)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/fetch-compat-test-files.sh
+
+      - name: Report drift
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/corpus-baseline-drift.py

@@ -461,6 +461,8 @@ mod tests {
                 date: date(2024, 1, 1),
                 account: "Assets:OldCheckingArchive".into(),
                 comment: "reconcile end of year".to_string(),
+                tags: Vec::new(),
+                links: Vec::new(),
                 meta: Default::default(),
             }),
             // Document carrying another fresh account.

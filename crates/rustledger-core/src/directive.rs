@@ -1281,6 +1281,14 @@ pub struct Note {
     pub account: crate::Account,
     /// Note text
     pub comment: String,
+    /// Tags, from `#tag` on the note header.
+    ///
+    /// beancount v3 accepts these on a `note`, and so did our parser -- it
+    /// just had nowhere to put them, so they were dropped after parsing
+    /// (#2160). `Document` has carried them all along; this mirrors it.
+    pub tags: Vec<crate::Tag>,
+    /// Links, from `^link` on the note header. See `tags`.
+    pub links: Vec<crate::Link>,
     /// Metadata
     pub meta: Metadata,
 }
@@ -1297,8 +1305,24 @@ impl Note {
             date,
             account: account.into(),
             comment: comment.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
             meta: Metadata::default(),
         }
+    }
+
+    /// Set tags.
+    #[must_use]
+    pub fn with_tags(mut self, tags: Vec<crate::Tag>) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// Set links.
+    #[must_use]
+    pub fn with_links(mut self, links: Vec<crate::Link>) -> Self {
+        self.links = links;
+        self
     }
 
     /// Set metadata.

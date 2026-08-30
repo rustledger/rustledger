@@ -7199,6 +7199,56 @@ fn transactions_meta_is_selectable_but_hidden_from_the_wildcard() {
 }
 
 #[test]
+fn notes_expose_tags_and_links_like_documents() {
+    // #2160: a note's tags and links were dropped at parse time, so both the
+    // `#notes` table and `#entries` reported nothing for them. bean-query has
+    // always exposed them, and its `#notes` wildcard is
+    // `date, account, comment, tags, links`.
+    let mut note = Note::new(date(2024, 1, 5), "Assets:A", "note text");
+    note.tags = vec![rustledger_core::Tag::new("ntag")];
+    note.links = vec![rustledger_core::Link::new("nlink")];
+    let directives = [
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:A")),
+        Directive::Note(note),
+    ];
+
+    // Visible in the wildcard, in bean-query's order -- NOT hidden like `meta`.
+    let starred = execute_query("SELECT * FROM #notes", &directives);
+    assert_eq!(
+        starred.columns,
+        vec!["date", "account", "comment", "tags", "links"],
+        "#notes wildcard must match bean-query"
+    );
+
+    let cols = execute_query("SELECT tags, links FROM #notes", &directives);
+    assert_eq!(
+        cols.rows[0][0],
+        Value::StringSet(vec!["ntag".to_string()]),
+        "#notes.tags must carry the note's tags"
+    );
+    assert_eq!(
+        cols.rows[0][1],
+        Value::StringSet(vec!["nlink".to_string()]),
+        "#notes.links must carry the note's links"
+    );
+
+    // And #entries must agree about the same directive -- it special-cased
+    // Document precisely because a note's tags did not survive parsing.
+    let entries = execute_query(
+        "SELECT tags, links FROM #entries WHERE type = 'note'",
+        &directives,
+    );
+    assert_eq!(
+        entries.rows[0][0], cols.rows[0][0],
+        "#entries disagrees with #notes about the same note's tags"
+    );
+    assert_eq!(
+        entries.rows[0][1], cols.rows[0][1],
+        "#entries disagrees with #notes about the same note's links"
+    );
+}
+
+#[test]
 fn select_star_matches_bean_query_per_table() {
     // bean-query's wildcard is NOT uniform about `meta`: it omits the column
     // on #balances/#notes/#events/#documents and includes it -- first -- on
@@ -7221,10 +7271,13 @@ fn select_star_matches_bean_query_per_table() {
             vec!["date", "account", "amount", "tolerance"],
             Some("discrepancy, which the balance checker computes rather than stores"),
         ),
+        // Full parity since #2160 gave `Note` its tags and links: this row
+        // carried a recorded gap, and closing it is what the gap message told
+        // the next reader to do.
         (
             "#notes",
-            vec!["date", "account", "comment"],
-            Some("tags and links, which our Note model drops at parse time (#2160)"),
+            vec!["date", "account", "comment", "tags", "links"],
+            None,
         ),
         ("#events", vec!["date", "type", "description"], None),
         (

@@ -333,11 +333,15 @@ impl ShiftSpans for Note {
             date,
             account,
             comment,
+            tags,
+            links,
             meta,
         } = self;
         date.shift_spans(shift);
         account.shift_spans(shift);
         comment.shift_spans(shift);
+        tags.shift_spans(shift);
+        links.shift_spans(shift);
         meta.shift_spans(shift);
     }
 }

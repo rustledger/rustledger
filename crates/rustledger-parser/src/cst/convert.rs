@@ -573,12 +573,41 @@ fn convert_note(
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     let account = Account::new(node.account()?.text());
     let comment = node.text()?.text_decoded()?;
+    // Trailing tags/links on the note header, collected the same way
+    // `convert_document` does: TAG / LINK tokens appear only in the header,
+    // never in META_ENTRY children, so a direct-child token walk that stops at
+    // the first NEWLINE captures them in source order.
+    //
+    // beancount v3 accepts these on a `note`. We parsed them and threw them
+    // away, because `Note` had nowhere to put them (#2160) -- note this
+    // directive does NOT call `reject_tags_and_links`, unlike `commodity` and
+    // `event`, so they were accepted and silently dropped rather than
+    // diagnosed.
+    let mut tags: Vec<Tag> = Vec::new();
+    let mut links: Vec<Link> = Vec::new();
+    for el in node.syntax().children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        match t.kind() {
+            crate::SyntaxKind::NEWLINE => break,
+            crate::SyntaxKind::TAG => {
+                tags.push(Tag::new(t.text().trim_start_matches('#')));
+            }
+            crate::SyntaxKind::LINK => {
+                links.push(Link::new(t.text().trim_start_matches('^')));
+            }
+            _ => {}
+        }
+    }
     let meta = convert_meta_entries(node.syntax());
 
     let note = rustledger_core::directive::Note {
         date,
         account,
         comment,
+        tags,
+        links,
         meta,
     };
     let span = node_span(node.syntax(), bom_offset);

@@ -1453,3 +1453,50 @@ fn custom_and_pushmeta_reject_taglinks_by_their_own_rules() {
         );
     }
 }
+
+#[test]
+fn note_preserves_tags_and_links() {
+    // The parser always accepted `#tag` / `^link` on a note header and threw
+    // them away, because `Note` had nowhere to hold them (#2160). It did not
+    // even diagnose them: `convert_note` does not call
+    // `reject_tags_and_links`, unlike `commodity` and `event`, so they parsed
+    // clean and vanished.
+    let src = "2024-01-01 open Assets:A USD\n\
+               2024-01-05 note Assets:A \"note text\" #ntag ^nlink\n\
+               2024-01-06 note Assets:A \"plain\"\n";
+    let result = rustledger_parser::parse(src);
+    assert!(result.errors.is_empty(), "fixture must parse clean");
+
+    let notes: Vec<&rustledger_core::Note> = result
+        .directives
+        .iter()
+        .filter_map(|d| match &d.value {
+            Directive::Note(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notes.len(), 2, "fixture must yield both notes");
+
+    let tagged = notes[0];
+    assert_eq!(
+        tagged
+            .tags
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["ntag"],
+        "a note's tags must survive parsing"
+    );
+    assert_eq!(
+        tagged
+            .links
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["nlink"],
+        "a note's links must survive parsing"
+    );
+
+    // And a note without them is empty, not defaulted to the previous note's.
+    assert!(notes[1].tags.is_empty() && notes[1].links.is_empty());
+}

@@ -666,6 +666,8 @@ mod tests {
             date: date(2024, 3, 15),
             account: "Assets:Bank".into(),
             comment: "Called the bank about fee".to_string(),
+            tags: Vec::new(),
+            links: Vec::new(),
             meta: Default::default(),
         };
         let config = FormatConfig::default();
@@ -1143,6 +1145,8 @@ mod tests {
             date: date(2024, 1, 1),
             account: "Assets:Bank".into(),
             comment: "test".to_string(),
+            tags: Vec::new(),
+            links: Vec::new(),
             meta: Default::default(),
         };
         let formatted = format_directives([&Directive::Note(note)], &config);

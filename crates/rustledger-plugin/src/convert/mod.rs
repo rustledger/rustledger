@@ -466,6 +466,8 @@ mod tests {
                 date,
                 account: "Assets:Test".into(),
                 comment: "Test note".to_string(),
+                tags: Vec::new(),
+                links: Vec::new(),
                 meta: Metadata::default(),
             }),
             Directive::Document(Document {

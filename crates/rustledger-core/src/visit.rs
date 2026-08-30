@@ -573,6 +573,8 @@ mod tests {
                 date: date(2024, 1, 5),
                 account: "Assets:X".into(),
                 comment: String::new(),
+                tags: Vec::new(),
+                links: Vec::new(),
                 meta: Default::default(),
             }),
             Directive::Document(Document {

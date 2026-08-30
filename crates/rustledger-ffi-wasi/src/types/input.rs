@@ -527,6 +527,13 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 date,
                 account: parse_account("note", account)?,
                 comment: comment.clone(),
+                // `InputEntry::Note` carries no tags or links, though
+                // `InputEntry::Document` right below does. The engine's `Note`
+                // gained the fields in #2160; widening this input shape to
+                // match is a separate, versioned decision, so a note built
+                // from the wire has none.
+                tags: Vec::new(),
+                links: Vec::new(),
                 meta: json_map_to_metadata(meta),
             }))
         }

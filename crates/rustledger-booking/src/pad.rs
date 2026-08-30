@@ -449,6 +449,13 @@ where
 {
     let mut end_of_group = 0;
     for (index, directive) in sorted.into_iter().enumerate() {
+        // Leftover from before #2150: this exists to put a synth AHEAD of a
+        // balance on the pad's own date. Such a pad no longer synthesizes at
+        // all -- the balance is checked first and the pad is unused -- so this
+        // arm now only fires for an UNRELATED same-date balance, where placing
+        // the synth ahead of it contradicts the Balance-before-Pad order.
+        // Removing it changes synth placement on the FFI path, which is its
+        // own decision; tracked in #2188 rather than ridden in here.
         if directive.date() == date && matches!(directive, Directive::Balance(_)) {
             return index;
         }

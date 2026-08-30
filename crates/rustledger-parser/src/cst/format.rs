@@ -3847,6 +3847,50 @@ mod tests {
         assert!(normalized.ends_with('\n') && !normalized.ends_with("\r\n"));
     }
 
+    /// The typed-directive emitter must not delete tags either.
+    ///
+    /// There are TWO live formatters. `format_source` is what `rledger
+    /// format` runs; `canonicalize_directives` is what `rledger add`,
+    /// `rledger extract` and the FFI `format.entry` endpoints run, and it
+    /// synthesizes its intermediate text through
+    /// `rustledger_core::format::format_directives`.
+    ///
+    /// Fixing only the first left the second deleting the same data -- and
+    /// deleting MORE of it, since the CST emitter at least kept a document's
+    /// tags while the typed one dropped those too. A round-trip through this
+    /// shim is what a caller building directives in memory actually gets.
+    #[test]
+    fn canonicalizing_typed_directives_keeps_tags_and_links() {
+        let src = "2024-01-05 note Assets:A \"n\" #ntag ^nlink\n\
+                   2024-01-06 document Assets:A \"/x.pdf\" #dtag ^dlink\n\
+                   2024-01-07 * \"t\" #ttag ^tlink\n\
+                  \x20 Assets:A  1 USD\n\
+                  \x20 Equity:O\n";
+        let parsed = crate::parse(src);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let directives: Vec<_> = parsed.directives.iter().map(|d| d.value.clone()).collect();
+
+        let out = canonicalize_directives(
+            directives.iter(),
+            &rustledger_core::format::FormatConfig::default(),
+        )
+        .expect("fixture must canonicalize");
+
+        for marker in ["#ntag", "^nlink", "#dtag", "^dlink", "#ttag", "^tlink"] {
+            assert!(
+                out.contains(marker),
+                "typed emitter dropped {marker}\n{out}"
+            );
+        }
+
+        // And the text it produced still means the same thing.
+        let after = crate::parse(&out);
+        assert!(after.errors.is_empty(), "{:?}\n{out}", after.errors);
+        let a: Vec<_> = after.directives.iter().map(|d| &d.value).collect();
+        let b: Vec<_> = directives.iter().collect();
+        assert_eq!(b, a, "canonicalizing changed the directives\n{out}");
+    }
+
     /// Formatting a note must not change what it means.
     ///
     /// The idempotence matrix next door cannot catch this class: dropping a

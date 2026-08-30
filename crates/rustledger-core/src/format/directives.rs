@@ -148,26 +148,48 @@ pub fn format_query_lines(query: &Query, config: &FormatConfig) -> Vec<FormatLin
     lines
 }
 
+/// Append a header's `#tag` / `^link` list, in the order the transaction
+/// emitter uses.
+///
+/// `note` and `document` take these exactly as a transaction does. Both
+/// emitters here omitted them, so any consumer of the typed-directive
+/// emitter -- `rledger add`, `rledger extract`, the FFI `format.entry`
+/// endpoints, all of which reach it through
+/// `rustledger_parser::format::canonicalize_directives` -- deleted them
+/// from the text it produced (#2184).
+fn write_tags_and_links(header: &mut String, tags: &[crate::Tag], links: &[crate::Link]) {
+    for tag in tags {
+        write!(header, " #{tag}").expect("write to String is infallible");
+    }
+    for link in links {
+        write!(header, " ^{link}").expect("write to String is infallible");
+    }
+}
+
 /// Render a note directive into format lines.
 pub fn format_note_lines(note: &Note, config: &FormatConfig) -> Vec<FormatLine> {
-    let mut lines = vec![FormatLine::Plain(format!(
+    let mut header = format!(
         "{} note {} \"{}\"",
         note.date,
         note.account,
         escape_string(&note.comment)
-    ))];
+    );
+    write_tags_and_links(&mut header, &note.tags, &note.links);
+    let mut lines = vec![FormatLine::Plain(header)];
     metadata_lines(&note.meta, &config.indent, config, &mut lines);
     lines
 }
 
 /// Render a document directive into format lines.
 pub fn format_document_lines(doc: &Document, config: &FormatConfig) -> Vec<FormatLine> {
-    let mut lines = vec![FormatLine::Plain(format!(
+    let mut header = format!(
         "{} document {} \"{}\"",
         doc.date,
         doc.account,
         escape_string(&doc.path)
-    ))];
+    );
+    write_tags_and_links(&mut header, &doc.tags, &doc.links);
+    let mut lines = vec![FormatLine::Plain(header)];
     metadata_lines(&doc.meta, &config.indent, config, &mut lines);
     lines
 }

@@ -178,11 +178,11 @@ def _summary(n: int) -> str:
     plural = "y" if n == 1 else "ies"
     return (
         f"A fresh fetch of the compatibility corpus moves **{n}** manifest"
-        f" entr{plural}. Nothing on a pull request would report this: the"
-        " baseline gate treats an unmanifested downloaded file as a warning,"
-        " and CI restores the corpus from a cache keyed on the fetch script"
-        " rather than on upstream state, so every PR sees the same frozen"
-        " corpus."
+        + f" entr{plural}. Nothing on a pull request would report this: the"
+        + " baseline gate treats an unmanifested downloaded file as a warning,"
+        + " and CI restores the corpus from a cache keyed on the fetch script"
+        + " rather than on upstream state, so every PR sees the same frozen"
+        + " corpus."
     )
 
 
@@ -208,19 +208,19 @@ def render(groups: dict[str, list[str]]) -> str:
     section(
         "added", "New corpus files with no baseline",
         "These have had **no parser-output coverage at all** since they "
-        "appeared upstream.",
+        + "appeared upstream.",
     )
     section(
         "unregenerated", "Parser output changed on UNCHANGED input",
         "The source hash is identical and the output hash is not: this "
-        "repository now produces different output for the same bytes than "
-        "the committed baseline records. A parser change reached main without "
-        "regenerating. **This is the group to look at first.**",
+        + "repository now produces different output for the same bytes than "
+        + "the committed baseline records. A parser change reached main without "
+        + "regenerating. **This is the group to look at first.**",
     )
     section(
         "upstream", "Upstream source changed",
         "The file's own contents moved upstream, so a different output hash "
-        "is expected. Routine churn; regenerate when convenient.",
+        + "is expected. Routine churn; regenerate when convenient.",
     )
     section(
         "removed", "Manifest entries whose file is gone",
@@ -240,7 +240,7 @@ def render(groups: dict[str, list[str]]) -> str:
         "",
         (
             "Maintained by `.github/workflows/corpus-baseline-drift.yml`."
-            " Closes itself when the manifest matches a fresh corpus again."
+            + " Closes itself when the manifest matches a fresh corpus again."
         ),
     ]
     return "\n".join(body)
@@ -264,11 +264,11 @@ def self_test() -> int:
 
     sample = (
         "--- a/tests/baselines/parser-corpus.manifest\n"
-        "+++ b/tests/baselines/parser-corpus.manifest\n"
-        "-tests/compatibility/files/a/x.beancount\tAAA\tBBB\n"
-        "+tests/compatibility/files/a/x.beancount\tAAA\tCCC\n"
-        "+tests/compatibility/files/a/new.beancount\tDDD\tEEE\n"
-        "-tests/compatibility/files/a/gone.beancount\tFFF\tGGG\n"
+        + "+++ b/tests/baselines/parser-corpus.manifest\n"
+        + "-tests/compatibility/files/a/x.beancount\tAAA\tBBB\n"
+        + "+tests/compatibility/files/a/x.beancount\tAAA\tCCC\n"
+        + "+tests/compatibility/files/a/new.beancount\tDDD\tEEE\n"
+        + "-tests/compatibility/files/a/gone.beancount\tFFF\tGGG\n"
     )
     got = classify(sample)
     want = {
@@ -294,7 +294,7 @@ def self_test() -> int:
     # and mean entirely different things.
     upstream_only = classify(
         "-tests/compatibility/files/a/y.beancount\tAAA\tBBB\n"
-        "+tests/compatibility/files/a/y.beancount\tZZZ\tCCC\n"
+        + "+tests/compatibility/files/a/y.beancount\tZZZ\tCCC\n"
     )
     if upstream_only["upstream"] != ["tests/compatibility/files/a/y.beancount"]:
         failures.append(f"changed source hash must read as upstream: {upstream_only}")
@@ -335,6 +335,9 @@ def self_test() -> int:
             gh("issue", "list")
             failures.append("gh must raise GhError when the command fails")
         except GhError:
+            # Raising IS the expected outcome, so there is nothing to record:
+            # the `except` arm reaching at all is what the check asserts, and
+            # the `failures.append` above it is what runs when it does not.
             pass
     finally:
         subprocess.run = real_run
@@ -446,9 +449,9 @@ def main() -> int:
     if not fetch_is_complete(count, expected):
         print(
             f"corpus has {count} files, manifest expects ~{expected} "
-            f"(slack {CORPUS_SLACK}): the fetch came up short, so a "
-            "regeneration here would report its own missing files as "
-            "upstream deletions. Reporting nothing this run.",
+            + f"(slack {CORPUS_SLACK}): the fetch came up short, so a "
+            + "regeneration here would report its own missing files as "
+            + "upstream deletions. Reporting nothing this run.",
             file=sys.stderr,
         )
         return 0
@@ -466,7 +469,7 @@ def main() -> int:
         if dirty_before:
             print(
                 f"note: {MANIFEST} had uncommitted changes before this ran, "
-                "so it was regenerated in place and NOT restored.",
+                + "so it was regenerated in place and NOT restored.",
                 file=sys.stderr,
             )
         else:

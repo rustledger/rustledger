@@ -1208,6 +1208,13 @@ mod tests {
         // file stop being applied. That changes which OPTIONS a load resolves,
         // not how a `CostNumber` is archived, so the byte arrays below are
         // untouched and only FIXTURE_VERSION moves.
+        // v31 (#2160) is the FIRST bump in this list that genuinely moves an
+        // archived layout: `Note` gained `tags` and `links`. The byte arrays
+        // below are still valid, but for a different reason than v25/v30 --
+        // not "no layout moved" but "the layout that moved is not this one".
+        // They pin `CostNumber` discriminants and payload encodings, which
+        // `Note` does not participate in. A future bump that touches
+        // `CostNumber` itself has to regenerate them.
         const FIXTURE_VERSION: u32 = 31;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
@@ -1311,6 +1318,10 @@ mod tests {
         // must still match — and the assertion, not this comment, proves it.
         // v30 (#2151) changes which options an included file contributes,
         // not how a `MetaValue` is archived; the hash below is unchanged.
+        // v31 (#2160) adds `tags` and `links` to `Note`. That moves `Note`'s
+        // archived layout, not `MetaValue`'s -- the two new fields are
+        // `Vec<Tag>` and `Vec<Link>`, neither of which is a `MetaValue` -- so
+        // the hash below is unchanged and the assertion proves it.
         const FIXTURE_VERSION: u32 = 31;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";

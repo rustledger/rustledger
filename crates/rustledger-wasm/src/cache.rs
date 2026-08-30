@@ -77,7 +77,22 @@ use crate::types::{Error, LedgerOptions};
 /// #2160 holds the two-field-shorter `ArchivedNote`, one written by a dev
 /// build after it holds the new shape, and both claim v15. Rejecting every
 /// v15 blob is the only reading that is safe for either.
-pub const CACHE_VERSION: u32 = 16;
+/// v17: `Pad` and `Balance` swap `DirectivePriority`, so a same-date pad and
+/// balance come out of the pipeline in the other order (#2179). Loader v32,
+/// unchanged -- and this is the first entry here that moves neither the
+/// parser's output nor an archived layout. Every directive archives to the
+/// same bytes; the LIST this cache holds is a different list. `LedgerPayload`
+/// stores the output of `process()`, which sorts by `canonical_sort_key`, and
+/// that key reads `DirectivePriority`.
+///
+/// What a stale blob costs is narrower than it first looks, and worth stating
+/// exactly: `process_pads` re-sorts its input by `booking_sort_key`, which is
+/// the same `(date, priority)`, so pad AMOUNTS computed from a v16 blob would
+/// still come out right. What differs is the order of the directives this
+/// cache hands back, which is what every order-sensitive consumer reads --
+/// journal output, `SELECT` row order, the FFI directive stream. A cache that
+/// returns a different sequence than a fresh run is stale by definition.
+pub const CACHE_VERSION: u32 = 17;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -319,16 +334,19 @@ mod tests {
 
         // Every variant, or the pin has a blind spot exactly where a new
         // variant would be added.
-        let kinds: std::collections::BTreeSet<_> = parsed
+        // `Directive::type_name`, not `Debug` on `mem::Discriminant`: that
+        // format is not a documented guarantee, and a std that printed every
+        // discriminant identically would turn this coverage check into a
+        // baffling failure. `type_name` also names the missing variant.
+        let kinds: std::collections::BTreeSet<&str> = parsed
             .directives
             .iter()
-            .map(|d| std::mem::discriminant(&d.value))
-            .map(|d| format!("{d:?}"))
+            .map(|d| d.value.type_name())
             .collect();
         assert_eq!(
             kinds.len(),
             12,
-            "fixture must cover all 12 Directive variants"
+            "fixture must cover all 12 Directive variants, got {kinds:?}"
         );
 
         // FNV-1a: a checked-in constant needs an algorithm that is stable
@@ -374,7 +392,11 @@ mod tests {
     /// and a priority swap changes nothing here.
     #[test]
     fn processed_ledger_archived_form_is_pinned() {
-        const PROCESSED_LAYOUT_HASH: u64 = 0x051d_b37b_7095_87c5;
+        // Moved once so far: swapping `Pad` and `Balance` in
+        // `DirectivePriority` (#2179) reorders the same-date pair in the
+        // fixture. That is the change this test was written to catch, and it
+        // caught it on the rebase rather than in review.
+        const PROCESSED_LAYOUT_HASH: u64 = 0xa8a8_b0cf_5355_f95d;
 
         let src = "\
 2024-01-01 open Assets:Bank USD\n\
@@ -390,6 +412,9 @@ mod tests {
 2024-01-06 balance Assets:Bank  15.00 USD\n";
 
         let processed = crate::helpers::load_and_book(src);
+        for d in &processed.directives {
+            eprintln!("PROBE {} {:?}", d.type_name(), d.date());
+        }
         assert!(
             processed.directives.len() >= 6,
             "fixture must survive the pipeline, else the digest pins an early \

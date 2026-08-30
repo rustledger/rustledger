@@ -142,7 +142,6 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
     let mut padding_transactions = Vec::with_capacity(num_directives.min(16));
     let mut errors = Vec::with_capacity(4);
 
-    // Sort directives by date for processing
     let mut sorted: Vec<&Directive> = directives.iter().collect();
     // Sort by the canonical booking key, not by date alone. Date-only left
     // same-date directives in source order, so a `pad` written above the

@@ -1575,6 +1575,9 @@ fn emit_note(d: &ast::NoteDirective, group: GroupingStyle<'_>, out: &mut String)
     out.push_str(&account);
     out.push(' ');
     out.push_str(&text);
+    // beancount v3 accepts tags and links on a note header, and dropping them
+    // here silently deleted user data on every `rledger format` run (#2184).
+    emit_header_tags_and_links(d.syntax(), out);
     out.push('\n');
     emit_meta_entries_of(d.syntax(), group, out);
 }
@@ -1627,6 +1630,43 @@ fn emit_pad(d: &ast::PadDirective, group: GroupingStyle<'_>, out: &mut String) {
     emit_meta_entries_of(d.syntax(), group, out);
 }
 
+/// Re-emit the trailing `#tag` / `^link` tokens of a directive header.
+///
+/// The typed AST has no accessor for them, so this walks direct-child tokens.
+/// Two things make that harder than it sounds, and both are bugs that have
+/// been fixed here before:
+///
+/// - Skip LEADING trivia. A blank line before a non-first directive attaches
+///   its NEWLINE inside the node, so a walk that stopped at "the first
+///   NEWLINE" would stop before the header and drop every tag (#1321 in the
+///   transaction path, and #2189 in the converter, which had the same shape).
+/// - Skip leading COMMENT lines too, not just whitespace. A comment before a
+///   non-first directive attaches inside this node (Directive-Terminator
+///   Rule); treating it as content would flip `seen_content`, break at the
+///   comment's own NEWLINE, and drop the real header tags.
+///
+/// `document` carried this walk alone while `note` had none, so formatting a
+/// note deleted its tags and links (#2184). Sharing it is what keeps the two
+/// from drifting apart again.
+fn emit_header_tags_and_links(node: &crate::SyntaxNode, out: &mut String) {
+    let mut seen_content = false;
+    for el in node.children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            break;
+        };
+        match t.kind() {
+            crate::SyntaxKind::TAG | crate::SyntaxKind::LINK => {
+                out.push(' ');
+                out.push_str(t.text());
+                seen_content = true;
+            }
+            crate::SyntaxKind::NEWLINE if seen_content => break,
+            k if k.is_trivia() => {}
+            _ => seen_content = true,
+        }
+    }
+}
+
 fn emit_document(d: &ast::DocumentDirective, group: GroupingStyle<'_>, out: &mut String) {
     let date = d.date().map(|t| t.text().to_string()).unwrap_or_default();
     let account = d
@@ -1639,35 +1679,7 @@ fn emit_document(d: &ast::DocumentDirective, group: GroupingStyle<'_>, out: &mut
     out.push_str(&account);
     out.push(' ');
     out.push_str(&path);
-    // Trailing TAG / LINK tokens — typed AST has no accessor, so
-    // walk direct-child tokens. Skip LEADING trivia (a blank line
-    // before a non-first directive attaches its NEWLINE inside the
-    // node) and stop at the first NEWLINE *after* the header content
-    // begins; otherwise the tags/links are dropped when reformatting
-    // any document past the first — the same bug as #1321 in the
-    // transaction path.
-    let mut seen_content = false;
-    for el in d.syntax().children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
-            break;
-        };
-        match t.kind() {
-            crate::SyntaxKind::TAG | crate::SyntaxKind::LINK => {
-                out.push(' ');
-                out.push_str(t.text());
-                seen_content = true;
-            }
-            crate::SyntaxKind::NEWLINE if seen_content => break,
-            // Leading trivia before the date: whitespace, blank-line
-            // NEWLINEs, AND comment lines. A comment before a non-first
-            // directive attaches inside this node (Directive-Terminator
-            // Rule); skipping only WHITESPACE/NEWLINE would let it flip
-            // `seen_content`, break at the comment's NEWLINE, and drop
-            // the real header tags/links.
-            k if k.is_trivia() => {}
-            _ => seen_content = true,
-        }
-    }
+    emit_header_tags_and_links(d.syntax(), out);
     out.push('\n');
     emit_meta_entries_of(d.syntax(), group, out);
 }
@@ -3827,6 +3839,72 @@ mod tests {
             &*normalized
         );
         assert!(normalized.ends_with('\n') && !normalized.ends_with("\r\n"));
+    }
+
+    /// Formatting a note must not change what it means.
+    ///
+    /// The idempotence matrix next door cannot catch this class: dropping a
+    /// note's tags is perfectly idempotent, and it passed for as long as
+    /// #2184 lived. Stability is not fidelity, so this parses, formats,
+    /// parses again, and compares the models.
+    ///
+    /// Scoped to note and document deliberately. The same check over the
+    /// whole matrix fails on `balance_with_arithmetic_and_tolerance`, where
+    /// the formatter emits output that no longer parses (#2191); it lands
+    /// with that fix rather than behind an allow-list here.
+    #[test]
+    fn formatting_preserves_a_notes_tags_and_links() {
+        // A note past the first, after a blank line and after a comment:
+        // both attach trivia inside the directive node, which is what broke
+        // the equivalent walk in the converter (#2189).
+        let src = "2024-01-01 open Assets:A USD\n\
+                   \n\
+                   2024-01-05 note Assets:A \"first\" #n1 ^l1\n\
+                   \n\
+                   2024-01-06 note Assets:A \"after blank\" #n2 ^l2\n\
+                   ; a comment line\n\
+                   2024-01-07 note Assets:A \"after comment\" #n3\n\
+                   2024-01-08 note Assets:A \"with meta\" #n4\n\
+                  \x20 key: \"v\"\n\
+                   \n\
+                   2024-01-09 document Assets:A \"/x.pdf\" #d1 ^l3\n";
+
+        let before = crate::parse(src);
+        assert!(before.errors.is_empty(), "{:?}", before.errors);
+        let formatted = format_source(src);
+        let after = crate::parse(&formatted);
+        assert!(
+            after.errors.is_empty(),
+            "formatted output no longer parses: {:?}\n{formatted}",
+            after.errors,
+        );
+
+        let b: Vec<_> = before.directives.iter().map(|d| &d.value).collect();
+        let a: Vec<_> = after.directives.iter().map(|d| &d.value).collect();
+        assert_eq!(
+            b, a,
+            "formatting changed the directives it parsed from\n\
+             --- source ---\n{src}\n--- formatted ---\n{formatted}",
+        );
+
+        // The model comparison above is NOT sufficient on its own, and this
+        // is not a hypothetical: run it against a tree whose CONVERTER also
+        // drops these tags (#2189) and both sides come back tagless and
+        // equal, while every tag in the file has been deleted. Assert on the
+        // formatter's own output text, which is the thing under change here
+        // and cannot be satisfied by a matching pair of empty models.
+        for tag in ["#n1", "#n2", "#n3", "#n4", "#d1"] {
+            assert!(
+                formatted.contains(tag),
+                "formatter dropped {tag}\n{formatted}"
+            );
+        }
+        for link in ["^l1", "^l2", "^l3"] {
+            assert!(
+                formatted.contains(link),
+                "formatter dropped {link}\n{formatted}"
+            );
+        }
     }
 
     #[test]

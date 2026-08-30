@@ -3896,8 +3896,12 @@ mod tests {
         }
         // A matrix that stopped yielding clean fixtures would make every
         // assertion above vacuous.
+        // 37 of 42 round-trip today; the rest are error fixtures. The floor
+        // is just under that rather than a round number a third of the way
+        // down: at `> 20` a change that made ten fixtures stop parsing would
+        // slip through, and skipping is exactly how this test goes quiet.
         assert!(
-            checked > 20,
+            checked >= 35,
             "only {checked} fixtures round-tripped; this test is not covering \
              what it claims to"
         );

@@ -471,12 +471,18 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     shape is v31's, but a v31 cache holds the empty tag lists the old
 ///     parser produced, and this build would serve them as fact.
 ///
+/// v33: `~` ends a balance's amount expression, so `0.25 + 0.75 ~ 0.01 USD`
+///     parses instead of erroring; and a `price` now refuses a tolerance it
+///     used to accept and half-read (#2191). Parser OUTPUT in BOTH
+///     directions: a v32 cache holds the error for the balance and the
+///     truncated 1.10 for the price, and this build produces neither.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 32;
+pub const CACHE_VERSION: u32 = 33;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1223,7 +1229,10 @@ mod tests {
         // v32 is a v25/v30 again: a blank line before a `note` or `document`
         // stops eating its tags. That changes which TAGS a parse yields, not
         // how a `CostNumber` is archived, so the byte arrays below hold.
-        const FIXTURE_VERSION: u32 = 32;
+        // v33 (#2191) changes which balance and price VALUES a parse yields,
+        // and which of them error at all. `CostNumber`'s discriminants and
+        // payload encodings are untouched, so the arrays below still pin them.
+        const FIXTURE_VERSION: u32 = 33;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1332,7 +1341,9 @@ mod tests {
         // the hash below is unchanged and the assertion proves it.
         // v32 keeps a note's/document's tags across a preceding blank line.
         // Tags and links are not `MetaValue`s, so the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 32;
+        // v33 (#2191) moves balance and price amounts, which are `Decimal`s on
+        // the directive, not `MetaValue`s; the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 33;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

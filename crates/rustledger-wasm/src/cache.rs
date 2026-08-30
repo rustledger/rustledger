@@ -92,7 +92,11 @@ use crate::types::{Error, LedgerOptions};
 /// cache hands back, which is what every order-sensitive consumer reads --
 /// journal output, `SELECT` row order, the FFI directive stream. A cache that
 /// returns a different sequence than a fresh run is stale by definition.
-pub const CACHE_VERSION: u32 = 17;
+/// v18: `~` ends a balance's amount expression and a `price` refuses one
+/// outright (#2191). Loader v33. Parser OUTPUT in both directions: a v17 blob
+/// holds a parse error where this build produces a balance, and a truncated
+/// 1.10 where this build produces an error.
+pub const CACHE_VERSION: u32 = 18;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -124,7 +128,7 @@ pub const CACHE_VERSION: u32 = 17;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 32;
+const LOADER_CACHE_VERSION_PIN: u32 = 33;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

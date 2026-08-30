@@ -60,6 +60,41 @@ Strict mode is what makes the gate a gate. In default mode (no env
 var), the test passes when no entries overlap; local devs without
 the corpus see the test skip, not fail.
 
+## Drift nobody would otherwise see
+
+The gate above catches a parser change. It cannot catch the manifest
+falling behind the corpus, for two reasons that are both deliberate:
+
+- A downloaded corpus file with **no manifest entry** is a warning there,
+  not a failure. Upstream can add a file at any moment and failing would
+  redden unrelated PRs. But the warning goes to a log nobody reads, so
+  such a file can sit with no parser-output coverage at all.
+- The job restores the corpus from a cache keyed on
+  `scripts/fetch-compat-test-files.sh`, and skips the fetch on an exact
+  key hit. That key changes when the *script* changes, never when
+  *upstream* does, so CI replays the corpus that existed when the key was
+  created while the repositories it mirrors keep moving. Every PR sees
+  the same frozen corpus and agrees there is no drift.
+
+So drift accumulated until somebody changed the parser, whose PR then
+carried unrelated churn it had to explain (#2186).
+
+`Corpus Baseline Drift` (`.github/workflows/corpus-baseline-drift.yml`)
+covers that gap. Weekly, it fetches the corpus **fresh — deliberately not
+from the cache, which is the whole point** — regenerates, and opens an
+issue describing any drift, separating new-file/changed-hash/removed-file
+cases because they need different responses. It reports; it never gates,
+and it closes its own issue when the manifest matches a fresh corpus
+again.
+
+It refuses to report at all when the fetch comes up more than 50 files
+short. Fetching into an empty checkout means each tolerated clone failure
+is simply missing files, and regenerating against a partial corpus would
+present them as upstream deletions.
+
+Run it yourself with `python3 scripts/corpus-baseline-drift.py --dry-run`,
+which prints what it would file and leaves the manifest as it found it.
+
 ## Regenerating the manifest
 
 When a parser change shifts output bytes intentionally:

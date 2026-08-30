@@ -258,6 +258,16 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="print, do not touch issues")
     args = ap.parse_args()
 
+    # Every path here is repo-relative, and so is the `git checkout --` that
+    # --dry-run uses to put the manifest back. Run from anywhere else and that
+    # either fails confusingly or, worse, resolves somewhere unintended.
+    if not os.path.isfile(MANIFEST):
+        print(
+            f"{MANIFEST} not found: run this from the repository root.",
+            file=sys.stderr,
+        )
+        return 2
+
     # Whether the manifest was already modified before we touched it. If it
     # was, --dry-run must NOT restore it: `git checkout --` would throw away
     # edits the caller made, and a reporting script has no business deleting
@@ -330,8 +340,13 @@ def main() -> int:
     else:
         print("no drift")
 
-    # Always 0: this reports, it does not gate. A red X here would be one more
-    # failing scheduled workflow for nobody to notice.
+    # Always 0 for what this measures: drift is reported, not gated, and a red
+    # X here would be one more failing scheduled workflow for nobody to notice.
+    #
+    # Infrastructure failure is different and is deliberately NOT swallowed:
+    # `regenerate()` runs under `check=True`, so a corpus file that panics the
+    # parser, or a build that will not compile, fails the step. That is a real
+    # problem on main, and `nightly-health.yml` picks it up from there.
     return 0
 
 

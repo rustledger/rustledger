@@ -1652,7 +1652,13 @@ fn emit_header_tags_and_links(node: &crate::SyntaxNode, out: &mut String) {
     let mut seen_content = false;
     for el in node.children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
-            break;
+            // A child NODE is header content, not a reason to stop. For today's
+            // two callers it can only be a META_ENTRY, which sits past the
+            // header newline the walk has already broken on -- but stopping
+            // here would mean a header that ever gains a child node silently
+            // loses the tags after it, and nothing would say so.
+            seen_content = true;
+            continue;
         };
         match t.kind() {
             crate::SyntaxKind::TAG | crate::SyntaxKind::LINK => {

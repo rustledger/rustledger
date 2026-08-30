@@ -107,10 +107,11 @@ fn a_price_rejects_a_tolerance_instead_of_discarding_it() {
     ] {
         let result = rustledger_parser::parse(src);
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| format!("{e:?}").contains("a price has no tolerance")),
+            result.errors.iter().any(|e| matches!(
+                &e.kind,
+                rustledger_parser::ParseErrorKind::SyntaxError(m)
+                    if m.contains("a price has no tolerance")
+            )),
             "`{src}` must be diagnosed, not silently truncated: {:?}",
             result.errors,
         );

@@ -358,6 +358,70 @@ mod tests {
         );
     }
 
+    /// Pin the archived form of a PROCESSED ledger.
+    ///
+    /// `directive_archived_form_is_pinned` covers what the parser produces,
+    /// which is what `ParsedLedgerPayload` holds. `LedgerPayload` holds
+    /// something else: the output of the shared `process()` pipeline, sorted
+    /// by `canonical_sort_key` and booked. A change to `DirectivePriority`
+    /// reorders that list without touching a single parsed directive, and a
+    /// booking change rewrites the values in it -- both invalidate a cached
+    /// blob, and neither moves the parse-side digest.
+    ///
+    /// The fixture puts a `pad` and a `balance` on the SAME DATE, because
+    /// that pair is the one whose relative order the priorities decide. With
+    /// them on different dates the date component of the sort key settles it
+    /// and a priority swap changes nothing here.
+    #[test]
+    fn processed_ledger_archived_form_is_pinned() {
+        const PROCESSED_LAYOUT_HASH: u64 = 0x051d_b37b_7095_87c5;
+
+        let src = "\
+2024-01-01 open Assets:Bank USD\n\
+2024-01-01 open Equity:Opening-Balances USD\n\
+\n\
+2024-01-04 pad Assets:Bank Equity:Opening-Balances\n\
+2024-01-04 balance Assets:Bank  10.00 USD\n\
+\n\
+2024-01-05 * \"payee\" \"narration\"\n\
+\x20\x20Assets:Bank  5.00 USD\n\
+\x20\x20Equity:Opening-Balances\n\
+\n\
+2024-01-06 balance Assets:Bank  15.00 USD\n";
+
+        let processed = crate::helpers::load_and_book(src);
+        assert!(
+            processed.directives.len() >= 6,
+            "fixture must survive the pipeline, else the digest pins an early \
+             return: {} directives",
+            processed.directives.len(),
+        );
+
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |bytes: &[u8]| {
+            for b in bytes {
+                h ^= u64::from(*b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        // Hashed in pipeline order, so a reordering moves the digest even
+        // when every directive is archived byte-identically.
+        for d in &processed.directives {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(d).unwrap();
+            eat(&(bytes.len() as u64).to_le_bytes());
+            eat(&bytes);
+        }
+
+        assert_eq!(
+            h, PROCESSED_LAYOUT_HASH,
+            "the processed ledger this cache archives changed -- directive \
+             order (a `DirectivePriority` or sort-key change) or the booked \
+             values themselves. A blob written by an older binary now \
+             deserializes into a ledger this build would not produce: bump \
+             CACHE_VERSION in this file and set PROCESSED_LAYOUT_HASH to {h:#x}",
+        );
+    }
+
     use super::*;
 
     #[test]

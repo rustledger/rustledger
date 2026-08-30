@@ -148,10 +148,25 @@ def classify(diff: str) -> dict[str, list[str]]:
             continue
         path = body.split("\t")[0]
         (added if line.startswith("+") else removed)[path] = body
-    rehashed = sorted(set(added) & set(removed))
+    # A path on both sides had a hash change, and WHICH hash moved is the
+    # whole question. A changed source hash is upstream churn and expected. A
+    # changed output hash with an UNCHANGED source hash means this repository
+    # produces different output for identical input than the committed
+    # baseline says -- a parser change that reached main without regenerating.
+    # The body used to promise "the diff says which" and then print only
+    # paths, which told the reader to go find something it already knew.
+    upstream, unregenerated = [], []
+    for path in sorted(set(added) & set(removed)):
+        before = removed[path].split("\t")
+        after = added[path].split("\t")
+        if len(before) >= 2 and len(after) >= 2 and before[1] != after[1]:
+            upstream.append(path)
+        else:
+            unregenerated.append(path)
     return {
-        "rehashed": rehashed,
+        "unregenerated": unregenerated,
         "added": sorted(set(added) - set(removed)),
+        "upstream": upstream,
         "removed": sorted(set(removed) - set(added)),
     }
 
@@ -196,11 +211,16 @@ def render(groups: dict[str, list[str]]) -> str:
         "appeared upstream.",
     )
     section(
-        "rehashed", "Changed hashes",
-        "Either the upstream source changed, or this repository's parser "
-        "output for it did. The diff says which: a changed source hash is "
-        "upstream churn; a changed output hash with an unchanged source hash "
-        "is a parser change that reached main without regenerating.",
+        "unregenerated", "Parser output changed on UNCHANGED input",
+        "The source hash is identical and the output hash is not: this "
+        "repository now produces different output for the same bytes than "
+        "the committed baseline records. A parser change reached main without "
+        "regenerating. **This is the group to look at first.**",
+    )
+    section(
+        "upstream", "Upstream source changed",
+        "The file's own contents moved upstream, so a different output hash "
+        "is expected. Routine churn; regenerate when convenient.",
     )
     section(
         "removed", "Manifest entries whose file is gone",
@@ -226,6 +246,10 @@ def render(groups: dict[str, list[str]]) -> str:
     return "\n".join(body)
 
 
+def _empty() -> dict[str, list[str]]:
+    return {"unregenerated": [], "added": [], "upstream": [], "removed": []}
+
+
 def self_test() -> int:
     """Prove the classifier can report drift, and can report its absence.
 
@@ -248,8 +272,11 @@ def self_test() -> int:
     )
     got = classify(sample)
     want = {
-        "rehashed": ["tests/compatibility/files/a/x.beancount"],
+        # x.beancount keeps source hash AAA and changes output BBB -> CCC:
+        # same input, different output, which is the serious case.
+        "unregenerated": ["tests/compatibility/files/a/x.beancount"],
         "added": ["tests/compatibility/files/a/new.beancount"],
+        "upstream": [],
         "removed": ["tests/compatibility/files/a/gone.beancount"],
     }
     if got != want:
@@ -261,6 +288,18 @@ def self_test() -> int:
             failures.append(f"rendered body omits {needle}")
     if "**3**" not in text:
         failures.append("rendered body does not count all three entries")
+
+    # The split is the point of the section: an upstream content change and a
+    # parser change that skipped regeneration look identical in a path list
+    # and mean entirely different things.
+    upstream_only = classify(
+        "-tests/compatibility/files/a/y.beancount\tAAA\tBBB\n"
+        "+tests/compatibility/files/a/y.beancount\tZZZ\tCCC\n"
+    )
+    if upstream_only["upstream"] != ["tests/compatibility/files/a/y.beancount"]:
+        failures.append(f"changed source hash must read as upstream: {upstream_only}")
+    if upstream_only["unregenerated"]:
+        failures.append("a changed source hash must NOT read as unregenerated")
 
     # A comment-only diff is not drift.
     if any(classify("+# regenerated\n").values()):
@@ -330,7 +369,7 @@ def self_test() -> int:
         return "https://github.com/x/y/issues/1\n"
 
     real_gh = globals()["gh"]
-    drift = {"rehashed": ["a"], "added": [], "removed": []}
+    drift = {"unregenerated": ["a"], "added": [], "upstream": [], "removed": []}
     # `_report` narrates to stdout. Left alone it prints "opened
     # https://github.com/x/y/issues/1" into a self-test log, which is exactly
     # the sort of line someone skims and believes.
@@ -357,13 +396,13 @@ def self_test() -> int:
             failures.append("edit must target the existing issue number")
 
         calls.clear()
-        _report(False, {"rehashed": [], "added": [], "removed": []}, [{"number": 7}])
+        _report(False, _empty(), [{"number": 7}])
         verbs = [c[1] for c in calls]
         if verbs != ["comment", "close"]:
             failures.append(f"clean with an open issue must comment then close, got {verbs}")
 
         calls.clear()
-        _report(False, {"rehashed": [], "added": [], "removed": []}, [])
+        _report(False, _empty(), [])
         if calls:
             failures.append(f"clean with no issue must touch nothing, got {calls}")
     finally:

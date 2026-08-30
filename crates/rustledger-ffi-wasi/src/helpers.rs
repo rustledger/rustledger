@@ -616,6 +616,45 @@ option \"operating_currency\" \"USD\"
 2024-01-21 balance Assets:SomeName 42 USD
 ";
 
+    /// A `pad` and the `balance` it targets on ONE date.
+    ///
+    /// `SAME_DATE_LEDGER` above shares a date between a pad and an *unrelated*
+    /// transaction, with the balance a day later, so it never exercised this.
+    /// #2150 was reported against the CLI and explicitly left the FFI path
+    /// unverified, noting that `expand_pads` runs its own date-only sort and
+    /// could diverge either way.
+    const SAME_DATE_PAD_BALANCE_LEDGER: &str = "\
+option \"operating_currency\" \"USD\"
+2024-01-01 open Assets:A USD
+2024-01-01 open Equity:Opening-balances
+2024-01-05 * \"some activity\"
+  Assets:A  40.00 USD
+  Equity:Opening-balances
+2024-06-15 pad Assets:A Equity:Opening-balances
+2024-06-15 balance Assets:A 100.00 USD
+";
+
+    #[test]
+    fn expand_pads_synthesizes_nothing_for_a_same_date_pad_balance() {
+        // beancount checks a balance at the start of its day, so a same-date
+        // pad has nothing to satisfy and is reported unused. The FFI path must
+        // agree with the CLI here: before #2150 both padded, leaving the
+        // account 60.00 richer than beancount reports.
+        let load = load_source(SAME_DATE_PAD_BALANCE_LEDGER);
+        let (expanded, _lines) = expand_pads(load.directives, load.directive_lines, &0u32);
+
+        let synths = expanded
+            .iter()
+            .filter(|d| {
+                matches!(d, Directive::Transaction(t) if rustledger_booking::is_synthesized_pad(t))
+            })
+            .count();
+        assert_eq!(
+            synths, 0,
+            "a same-date pad+balance must synthesize nothing on the FFI path too",
+        );
+    }
+
     #[test]
     fn expand_pads_does_not_displace_unrelated_same_date_directives() {
         let load = load_source(SAME_DATE_LEDGER);

@@ -872,6 +872,48 @@ mod tests {
     }
 
     #[test]
+    fn test_pad_after_a_same_date_balance_still_serves_a_later_balance() {
+        // A pad written after a balance on the same date is NOT consumed by
+        // that balance -- it stays pending and satisfies the next one. Found
+        // while reviewing #2150, and it was broken worse than the reported
+        // case: the account came back with no balance at all and `check`
+        // reported nothing, on a ledger bean-check accepts silently.
+        //
+        // Under the old Pad-before-Balance order the same-date balance ate the
+        // pad, leaving the later assertion with nothing.
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:A")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:O")),
+            Directive::Balance(Balance::new(
+                date(2024, 6, 15),
+                "Assets:A",
+                Amount::new(dec!(0), "USD"),
+            )),
+            Directive::Pad(Pad::new(date(2024, 6, 15), "Assets:A", "Equity:O")),
+            Directive::Balance(Balance::new(
+                date(2024, 7, 1),
+                "Assets:A",
+                Amount::new(dec!(50), "USD"),
+            )),
+        ];
+
+        let merged = merge_with_padding(&directives);
+
+        let synths: Vec<_> = merged
+            .iter()
+            .filter_map(|d| match d {
+                Directive::Transaction(t) if is_synthesized_pad(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            synths.len(),
+            1,
+            "the pad must satisfy the LATER balance, producing exactly one synth"
+        );
+    }
+
+    #[test]
     fn test_merge_with_padding_earlier_pad_still_synthesizes_before_balance() {
         // The day-earlier case is the one that DOES pad, and the synth still
         // has to precede the balance so a mid-stream assertion check sees the

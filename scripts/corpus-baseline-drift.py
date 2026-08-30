@@ -87,11 +87,22 @@ def fetch_is_complete(count: int, expected: int) -> bool:
     return count >= expected - CORPUS_SLACK
 
 
+class GhError(RuntimeError):
+    """A `gh` invocation failed.
+
+    Raised rather than returning an empty string, which is what the first
+    version did and is indistinguishable from a successful empty result. That
+    conflation is not cosmetic here: a failed `issue list` would look like
+    "no existing issue" and open a duplicate, and a failed `issue create`
+    would print a blank URL and leave the workflow GREEN having reported
+    nothing at all -- the exact silence this job exists to break.
+    """
+
+
 def gh(*args: str) -> str:
     proc = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
     if proc.returncode != 0:
-        print(f"gh {' '.join(args)} failed: {proc.stderr.strip()}", file=sys.stderr)
-        return ""
+        raise GhError(f"gh {' '.join(args)} failed: {proc.stderr.strip()}")
     return proc.stdout
 
 
@@ -137,17 +148,27 @@ def classify(diff: str) -> dict[str, list[str]]:
     }
 
 
+def _summary(n: int) -> str:
+    """Lead paragraph. Built here rather than as adjacent literals in the body
+    list, where two strings on consecutive lines read as a missing comma
+    (CodeQL `py/implicit-string-concatenation-in-list`)."""
+    plural = "y" if n == 1 else "ies"
+    return (
+        f"A fresh fetch of the compatibility corpus moves **{n}** manifest"
+        f" entr{plural}. Nothing on a pull request would report this: the"
+        " baseline gate treats an unmanifested downloaded file as a warning,"
+        " and CI restores the corpus from a cache keyed on the fetch script"
+        " rather than on upstream state, so every PR sees the same frozen"
+        " corpus."
+    )
+
+
 def render(groups: dict[str, list[str]]) -> str:
     n = sum(len(v) for v in groups.values())
     body = [
         MARKER,
         "",
-        f"A fresh fetch of the compatibility corpus moves **{n}** manifest "
-        f"entr{'y' if n == 1 else 'ies'}. Nothing on a pull request would "
-        "report this: the baseline gate treats an unmanifested downloaded "
-        "file as a warning, and CI restores the corpus from a cache keyed on "
-        "the fetch script rather than on upstream state, so every PR sees the "
-        "same frozen corpus.",
+        _summary(n),
         "",
     ]
 
@@ -189,8 +210,10 @@ def render(groups: dict[str, list[str]]) -> str:
         "git diff tests/baselines/              # review",
         "```",
         "",
-        "Maintained by `.github/workflows/corpus-baseline-drift.yml`. "
-        "Closes itself when the manifest matches a fresh corpus again.",
+        (
+            "Maintained by `.github/workflows/corpus-baseline-drift.yml`."
+            " Closes itself when the manifest matches a fresh corpus again."
+        ),
     ]
     return "\n".join(body)
 
@@ -246,6 +269,47 @@ def self_test() -> int:
         failures.append("a corpus short by more than the slack must be refused")
     if fetch_is_complete(0, 735):
         failures.append("an empty corpus must be refused")
+
+    # A failing `gh` must raise, not return "". The first version returned an
+    # empty string, which reads as "no issues exist" to the dedupe check and
+    # as a blank URL to the create path -- a green run that reported nothing.
+    real_run = subprocess.run
+
+    def failing_run(*a, **kw):
+        class P:
+            returncode = 1
+            stdout = ""
+            stderr = "gh: HTTP 403"
+        return P()
+
+    try:
+        subprocess.run = failing_run
+        try:
+            gh("issue", "list")
+            failures.append("gh must raise GhError when the command fails")
+        except GhError:
+            pass
+    finally:
+        subprocess.run = real_run
+
+    # ...and must NOT raise on a successful empty result, which is a real and
+    # different answer.
+    def empty_run(*a, **kw):
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return P()
+
+    try:
+        subprocess.run = empty_run
+        try:
+            if gh("issue", "list") != "":
+                failures.append("gh must pass through an empty success")
+        except GhError:
+            failures.append("gh must not raise on a successful empty result")
+    finally:
+        subprocess.run = real_run
 
     for f in failures:
         print(f"self-test FAIL: {f}", file=sys.stderr)
@@ -312,15 +376,29 @@ def main() -> int:
         print(render(groups) if drifted else "no drift")
         return 0
 
-    existing = gh(
-        "issue", "list", "--repo", REPO, "--state", "open",
-        "--search", ISSUE_TITLE, "--json", "number,body", "--limit", "20",
-    )
+    try:
+        existing = gh(
+            "issue", "list", "--repo", REPO, "--state", "open",
+            "--search", ISSUE_TITLE, "--json", "number,body", "--limit", "20",
+        )
+    except GhError as e:
+        # Cannot dedupe without this, and guessing "none exist" opens a
+        # duplicate every week. Fail the step instead.
+        print(e, file=sys.stderr)
+        return 1
     try:
         issues = [i for i in json.loads(existing or "[]") if MARKER in (i.get("body") or "")]
     except json.JSONDecodeError:
         issues = []
 
+    try:
+        return _report(drifted, groups, issues)
+    except GhError as e:
+        print(e, file=sys.stderr)
+        return 1
+
+
+def _report(drifted: bool, groups: dict[str, list[str]], issues: list) -> int:
     if drifted:
         text = render(groups)
         if issues:
@@ -340,13 +418,15 @@ def main() -> int:
     else:
         print("no drift")
 
-    # Always 0 for what this measures: drift is reported, not gated, and a red
-    # X here would be one more failing scheduled workflow for nobody to notice.
+    # 0 for what this measures: drift is reported, not gated, and a red X for
+    # finding drift would be one more failing scheduled workflow for nobody to
+    # notice.
     #
-    # Infrastructure failure is different and is deliberately NOT swallowed:
-    # `regenerate()` runs under `check=True`, so a corpus file that panics the
-    # parser, or a build that will not compile, fails the step. That is a real
-    # problem on main, and `nightly-health.yml` picks it up from there.
+    # Failing to REPORT is the opposite case and returns non-zero, as does
+    # `regenerate()` running under `check=True` when a corpus file panics the
+    # parser or the build will not compile. Those are real problems on main,
+    # and `nightly-health.yml` picks them up from there. A job that cannot say
+    # what it found must not look like a job that found nothing.
     return 0
 
 

@@ -254,16 +254,18 @@ impl Executor<'_> {
 
     /// Build the #notes table from note directives.
     ///
-    /// The table has columns: date, account, comment, meta
+    /// The table has columns: date, account, comment, tags, links, meta
     /// - date: The date of the note
     /// - account: The account the note is attached to
     /// - comment: The note text
+    /// - tags: The note's tags (as a set)
+    /// - links: The note's links (as a set)
     /// - meta: The directive's metadata (hidden from `SELECT *`)
     ///
-    /// bean-query also exposes `tags` and `links` here. Our `Note` model
-    /// drops them at parse time, so they cannot be surfaced until #2160
-    /// lands — a column census cannot see that, since the columns are
-    /// simply absent.
+    /// `tags` and `links` are VISIBLE, matching bean-query's wildcard here.
+    /// They could not be surfaced at all until #2160, because `Note` had no
+    /// fields to hold them and the parser discarded them -- a column census
+    /// could not see that, since the columns were simply absent.
     pub(super) fn build_notes_table(&self) -> Table {
         let columns = vec![
             "date".to_string(),

@@ -575,6 +575,10 @@ fn convert_commodity(
 /// between directives -- silently lost its tags long before `note` gained any
 /// (#2160 review).
 ///
+/// The formatter already had this right: its header walks guard on a
+/// `seen_content` flag for the same reason (`cst/format.rs`). The converter
+/// was the outlier.
+///
 /// The header is deemed started once the directive's STRING has been seen:
 /// the comment for a `note`, the path for a `document`. Tags and links follow
 /// it on the same line, and metadata lines live in `META_ENTRY` child nodes
@@ -611,9 +615,8 @@ fn convert_note(
     let account = Account::new(node.account()?.text());
     let comment = node.text()?.text_decoded()?;
     // Trailing tags/links on the note header, collected the same way
-    // `convert_document` does: TAG / LINK tokens appear only in the header,
-    // never in META_ENTRY children, so a direct-child token walk that stops at
-    // the first NEWLINE captures them in source order.
+    // `convert_document` does -- see `header_tags_and_links` for why "the
+    // first NEWLINE" is the wrong place to stop.
     //
     // beancount v3 accepts these on a `note`. We parsed them and threw them
     // away, because `Note` had nowhere to put them (#2160) -- note this
@@ -646,9 +649,9 @@ fn convert_document(
     // Trailing tags/links on the document header (legacy
     // `parse_document_directive` collects them in a loop after
     // the path STRING). TAG / LINK tokens only appear in the
-    // header (not in META_ENTRY children, which are walked
-    // separately below), so a direct-child token walk that
-    // stops at the first NEWLINE captures them in source order.
+    // header, not in the META_ENTRY children walked separately
+    // below -- see `header_tags_and_links` for where the walk
+    // has to start and stop.
     let (tags, links) = header_tags_and_links(node.syntax());
     let meta = convert_meta_entries(node.syntax());
 

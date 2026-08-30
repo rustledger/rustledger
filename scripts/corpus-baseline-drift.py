@@ -48,6 +48,45 @@ REGEN = [
 ]
 
 
+CORPUS_ROOT = "tests/compatibility/files"
+
+# Same slack as the "Verify corpus is populated" step in
+# `parser-baselines.yml`, and for the same reason: the fetch tolerates up to
+# 15 best-effort clone failures, so a legitimately complete run can still come
+# up a little short.
+CORPUS_SLACK = 50
+
+
+def corpus_size() -> int:
+    """Count `.beancount` files the way the baseline test discovers them."""
+    n = 0
+    for _, _, files in os.walk(CORPUS_ROOT):
+        n += sum(1 for f in files if f.endswith(".beancount"))
+    return n
+
+
+def manifest_entries() -> int:
+    with open(MANIFEST, encoding="utf-8") as fh:
+        return sum(1 for line in fh if line.strip() and not line.startswith("#"))
+
+
+def fetch_is_complete(count: int, expected: int) -> bool:
+    """Is this corpus whole enough to trust a "file disappeared" verdict?
+
+    This matters here in a way it does not for the PR gate. That job restores
+    a cached corpus, so it always has a complete one; this one fetches fresh
+    into an empty checkout, so every tolerated clone failure is simply missing
+    files. Regenerating against a partial corpus drops their manifest entries,
+    and reporting that as "upstream deleted these" would be a confident lie --
+    the more repositories failed, the longer and more alarming the list.
+
+    A short corpus cannot manufacture a false "added" or "rehashed" either,
+    but it does mean the run saw an unrepresentative corpus, so the honest
+    answer is to report nothing and say why.
+    """
+    return count >= expected - CORPUS_SLACK
+
+
 def gh(*args: str) -> str:
     proc = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
     if proc.returncode != 0:
@@ -196,6 +235,18 @@ def self_test() -> int:
     if any(classify("+# regenerated\n").values()):
         failures.append("comment lines must not count as drift")
 
+    # The partial-fetch guard, which is the difference between reporting
+    # drift and inventing it. Fresh-fetching into an empty checkout means a
+    # tolerated clone failure looks exactly like an upstream deletion.
+    if not fetch_is_complete(735, 735):
+        failures.append("a complete corpus must be accepted")
+    if not fetch_is_complete(735 - CORPUS_SLACK, 735):
+        failures.append("a corpus short by exactly the slack must be accepted")
+    if fetch_is_complete(735 - CORPUS_SLACK - 1, 735):
+        failures.append("a corpus short by more than the slack must be refused")
+    if fetch_is_complete(0, 735):
+        failures.append("an empty corpus must be refused")
+
     for f in failures:
         print(f"self-test FAIL: {f}", file=sys.stderr)
     print("self-test: ok" if not failures else f"self-test: {len(failures)} failure(s)")
@@ -207,11 +258,47 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="print, do not touch issues")
     args = ap.parse_args()
 
+    # Whether the manifest was already modified before we touched it. If it
+    # was, --dry-run must NOT restore it: `git checkout --` would throw away
+    # edits the caller made, and a reporting script has no business deleting
+    # someone's work to keep its own promise about not leaving a diff.
+    dirty_before = bool(
+        subprocess.run(
+            ["git", "diff", "--name-only", "--", MANIFEST],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    )
+
+    expected = manifest_entries()
+    count = corpus_size()
+    if not fetch_is_complete(count, expected):
+        print(
+            f"corpus has {count} files, manifest expects ~{expected} "
+            f"(slack {CORPUS_SLACK}): the fetch came up short, so a "
+            "regeneration here would report its own missing files as "
+            "upstream deletions. Reporting nothing this run.",
+            file=sys.stderr,
+        )
+        return 0
+
     regenerate()
     groups = classify(manifest_diff())
     drifted = any(groups.values())
 
     if args.dry_run:
+        # Regenerating rewrote the manifest in the working tree. On CI that is
+        # a throwaway checkout, but --dry-run is for humans, and a flag named
+        # dry-run must not leave a modified file behind for someone to commit
+        # by accident. Unless it was already modified when we arrived, in
+        # which case restoring it would delete their edits instead.
+        if dirty_before:
+            print(
+                f"note: {MANIFEST} had uncommitted changes before this ran, "
+                "so it was regenerated in place and NOT restored.",
+                file=sys.stderr,
+            )
+        else:
+            subprocess.run(["git", "checkout", "--", MANIFEST], check=True)
         print(render(groups) if drifted else "no drift")
         return 0
 

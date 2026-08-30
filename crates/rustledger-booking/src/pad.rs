@@ -899,16 +899,12 @@ mod tests {
 
         let merged = merge_with_padding(&directives);
 
-        let synths: Vec<_> = merged
+        let synths = merged
             .iter()
-            .filter_map(|d| match d {
-                Directive::Transaction(t) if is_synthesized_pad(t) => Some(t),
-                _ => None,
-            })
-            .collect();
+            .filter(|d| matches!(d, Directive::Transaction(t) if is_synthesized_pad(t)))
+            .count();
         assert_eq!(
-            synths.len(),
-            1,
+            synths, 1,
             "the pad must satisfy the LATER balance, producing exactly one synth"
         );
     }

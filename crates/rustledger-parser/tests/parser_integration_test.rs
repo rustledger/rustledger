@@ -143,6 +143,91 @@ fn a_price_rejects_a_tolerance_instead_of_discarding_it() {
     }
 }
 
+#[test]
+fn every_directive_either_keeps_tags_or_refuses_them() {
+    // The failure mode this session kept finding is a third state: accept the
+    // tag, then drop it because the model has nowhere to put it. `query` was
+    // in it -- absent from both the accepting set and the refusing set --
+    // while the refusal message names the rule its omission broke.
+    //
+    // A census rather than one case, so a directive added later that forgets
+    // to pick a side is caught here instead of by a user.
+    let refuses = [
+        ("open", "2024-01-01 open Assets:A USD"),
+        ("close", "2024-01-01 close Assets:A"),
+        ("commodity", "2024-01-01 commodity USD"),
+        ("event", "2024-01-01 event \"location\" \"NYC\""),
+        ("price", "2024-01-01 price USD 1.10 EUR"),
+        ("balance", "2024-01-01 balance Assets:A 0 USD"),
+        ("pad", "2024-01-01 pad Assets:A Equity:O"),
+    ];
+    for (name, header) in refuses {
+        for sigil in ["#atag", "^alink"] {
+            let src = format!("{header} {sigil}\n");
+            let result = rustledger_parser::parse(&src);
+            assert!(
+                !result.errors.is_empty(),
+                "`{name}` accepted {sigil} it has no field to hold",
+            );
+        }
+        // And the tag-free form is still fine -- a rejection that also
+        // rejected valid input would pass the assertion above.
+        let result = rustledger_parser::parse(&format!("{header}\n"));
+        assert!(
+            result.errors.is_empty(),
+            "`{name}` broke without a tag: {:?}",
+            result.errors,
+        );
+    }
+
+    // `query` is in NEITHER set: it accepts a tag and drops it, because
+    // `Query` has no field to hold one. Pinned here as the current behavior
+    // rather than asserted as correct -- whether it should refuse (matching
+    // beancount's `Query`, which has no tags field) or keep them (as `note`
+    // now does) needs bean-check, which this test cannot run. See #2194.
+    //
+    // Written as an assertion so the day it changes, this fails and the
+    // census gets updated instead of quietly going stale.
+    for sigil in ["#atag", "^alink"] {
+        let src = format!("2024-01-01 query \"n\" \"SELECT date\" {sigil}\n");
+        let result = rustledger_parser::parse(&src);
+        assert!(
+            result.errors.is_empty(),
+            "`query` now diagnoses {sigil} -- good, but update this census \
+             and #2194: {:?}",
+            result.errors,
+        );
+    }
+
+    // The three that DO keep them.
+    let keeps = [
+        ("note", "2024-01-01 note Assets:A \"n\" #atag ^alink\n"),
+        (
+            "document",
+            "2024-01-01 document Assets:A \"/x.pdf\" #atag ^alink\n",
+        ),
+        (
+            "transaction",
+            "2024-01-01 * \"t\" #atag ^alink\n  Assets:A  1 USD\n  Equity:O\n",
+        ),
+    ];
+    for (name, src) in keeps {
+        let result = rustledger_parser::parse(src);
+        assert!(result.errors.is_empty(), "`{name}`: {:?}", result.errors);
+        let (tags, links) = result
+            .directives
+            .iter()
+            .find_map(|d| match &d.value {
+                Directive::Note(n) => Some((n.tags.len(), n.links.len())),
+                Directive::Document(x) => Some((x.tags.len(), x.links.len())),
+                Directive::Transaction(t) => Some((t.tags.len(), t.links.len())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("`{name}` produced no directive"));
+        assert_eq!((tags, links), (1, 1), "`{name}` did not keep both");
+    }
+}
+
 fn dec_str(s: &str) -> rustledger_core::Decimal {
     s.parse().expect("test decimal")
 }

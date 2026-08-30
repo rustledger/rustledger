@@ -311,6 +311,57 @@ def self_test() -> int:
     finally:
         subprocess.run = real_run
 
+    # `_report` is the only code that does anything: it decides between
+    # opening, updating and closing. `--dry-run` returns before reaching it,
+    # and a scheduled run exercises exactly one branch per week, so without
+    # this the working part of the script ships unexecuted.
+    calls: list[tuple[str, ...]] = []
+
+    def recording_gh(*args: str) -> str:
+        calls.append(args)
+        return "https://github.com/x/y/issues/1\n"
+
+    real_gh = globals()["gh"]
+    drift = {"rehashed": ["a"], "added": [], "removed": []}
+    # `_report` narrates to stdout. Left alone it prints "opened
+    # https://github.com/x/y/issues/1" into a self-test log, which is exactly
+    # the sort of line someone skims and believes.
+    import contextlib
+    import io
+
+    try:
+        globals()["gh"] = recording_gh
+        sink = contextlib.redirect_stdout(io.StringIO())
+        sink.__enter__()
+
+        calls.clear()
+        _report(True, drift, [])
+        verbs = [c[1] for c in calls]
+        if verbs != ["create"]:
+            failures.append(f"drift with no open issue must create one, got {verbs}")
+
+        calls.clear()
+        _report(True, drift, [{"number": 7}])
+        verbs = [c[1] for c in calls]
+        if verbs != ["edit"]:
+            failures.append(f"drift with an open issue must edit it, got {verbs}")
+        if calls and "7" not in calls[0]:
+            failures.append("edit must target the existing issue number")
+
+        calls.clear()
+        _report(False, {"rehashed": [], "added": [], "removed": []}, [{"number": 7}])
+        verbs = [c[1] for c in calls]
+        if verbs != ["comment", "close"]:
+            failures.append(f"clean with an open issue must comment then close, got {verbs}")
+
+        calls.clear()
+        _report(False, {"rehashed": [], "added": [], "removed": []}, [])
+        if calls:
+            failures.append(f"clean with no issue must touch nothing, got {calls}")
+    finally:
+        sink.__exit__(None, None, None)
+        globals()["gh"] = real_gh
+
     for f in failures:
         print(f"self-test FAIL: {f}", file=sys.stderr)
     print("self-test: ok" if not failures else f"self-test: {len(failures)} failure(s)")

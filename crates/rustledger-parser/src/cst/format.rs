@@ -3727,7 +3727,14 @@ mod tests {
         // ---- per-variant coverage ---------------------------------
         ("close_directive", "2024-12-31 close Assets:Cash\n"),
         ("commodity_directive", "2024-01-01 commodity HOOL\n"),
-        ("note_directive", "2024-01-15 note Assets:Cash \"a note\"\n"),
+        // Tagged and linked on purpose. Untagged, this fixture could not see
+        // a note losing its tags -- which is exactly what happened: the
+        // emitters dropped them and every harness in this file passed
+        // (#2184).
+        (
+            "note_directive",
+            "2024-01-15 note Assets:Cash \"a note\" #n1 ^l1\n",
+        ),
         ("event_directive", "2024-01-15 event \"location\" \"NYC\"\n"),
         (
             "query_directive",
@@ -3736,7 +3743,7 @@ mod tests {
         ("pad_directive", "2024-01-15 pad Assets:A Equity:Opening\n"),
         (
             "document_directive",
-            "2024-06-01 document Assets:Bank \"stmt.pdf\" #q1\n",
+            "2024-06-01 document Assets:Bank \"stmt.pdf\" #q1 ^d1\n",
         ),
         // Note: `#!` and `#+` anywhere on a line, not just at
         // line start, open the lexer's SHEBANG / EMACS_DIRECTIVE
@@ -3845,6 +3852,56 @@ mod tests {
             &*normalized
         );
         assert!(normalized.ends_with('\n') && !normalized.ends_with("\r\n"));
+    }
+
+    /// Every fixture must survive the TYPED emitter, not just `format_source`.
+    ///
+    /// `canonicalize_directives` is the path `rledger add`, `rledger extract`
+    /// and the FFI `format.entry` endpoints take, and it renders through
+    /// `rustledger_core::format::format_directives` -- a different emitter
+    /// with its own set of fields it might forget. It forgot a note's and a
+    /// document's tags and links, and the fidelity test next door could not
+    /// see it because that one exercises `format_source`.
+    ///
+    /// Same shape as that test, aimed at the other emitter: parse, render,
+    /// parse, compare models.
+    #[test]
+    fn canonicalizing_every_fixture_preserves_the_model() {
+        let cfg = rustledger_core::format::FormatConfig::default();
+        let mut checked = 0;
+        for (name, src) in IDEMPOTENCE_MATRIX {
+            let before = crate::parse(src);
+            if !before.errors.is_empty() || before.directives.is_empty() {
+                continue;
+            }
+            let ds: Vec<_> = before.directives.iter().map(|d| d.value.clone()).collect();
+            let out = match canonicalize_directives(ds.iter(), &cfg) {
+                Ok(out) => out,
+                // The shim reports a re-parse failure rather than emitting a
+                // recoverable subset; that is its contract, not a silent loss.
+                Err(e) => panic!("{name}: canonicalize failed: {e:?}"),
+            };
+            let after = crate::parse(&out);
+            assert!(
+                after.errors.is_empty(),
+                "{name}: typed emitter produced unparsable text: {:?}\n{out}",
+                after.errors,
+            );
+            let a: Vec<_> = after.directives.iter().map(|d| &d.value).collect();
+            let b: Vec<_> = ds.iter().collect();
+            assert_eq!(
+                b, a,
+                "{name}: the typed emitter changed the directives\n\
+                 --- source ---\n{src}\n--- rendered ---\n{out}",
+            );
+            checked += 1;
+        }
+        // Fixtures that parse to no directive at all (comments, options) are
+        // skipped above; the floor keeps that from quietly becoming all of them.
+        assert!(
+            checked >= 30,
+            "only {checked} fixtures reached the typed emitter"
+        );
     }
 
     /// The typed-directive emitter must not delete tags either.

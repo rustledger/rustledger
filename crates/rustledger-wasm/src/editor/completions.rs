@@ -369,6 +369,52 @@ mod tests {
         assert!(labels.contains(&"Savings"));
     }
 
+    /// A tag used ONLY on a `note` reaches completion too.
+    ///
+    /// It could not before #2160: a note's tags were discarded at parse time,
+    /// so `extract_tags` -- which is what feeds this list -- never saw them.
+    /// Fixing the model was not enough on its own; `visit_tags` enumerated
+    /// only `Transaction` and `Document`, so the data existed and the
+    /// collector still did not know.
+    ///
+    /// The blank line before the note is deliberate: with the note written
+    /// directly under the transaction this passed even while the parser was
+    /// still dropping the tag, because the bug only fired on a directive
+    /// preceded by trivia.
+    #[test]
+    fn test_tag_completion_includes_a_note_only_tag() {
+        let source = "\
+2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Expenses:Stuff USD
+
+2024-01-15 * \"Central Perk\" #coffee
+  Assets:Bank:Checking  -5 USD
+  Expenses:Stuff
+
+2024-01-20 note Assets:Bank:Checking \"called them\" #followup
+";
+        let result = parse(source);
+        let header = "2024-02-01 * \"x\" #";
+        let mut doc = String::from(source);
+        doc.push_str(header);
+        let line = doc.lines().count() as u32 - 1;
+        let character = header.chars().count() as u32;
+        let completions = get_completions(&doc, line, character, &result);
+
+        let labels: Vec<_> = completions
+            .completions
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        assert!(
+            labels.contains(&"#followup"),
+            "a tag that appears only on a note must be offered; labels = {labels:?}"
+        );
+        // The transaction tag still comes through, so this is an addition
+        // rather than a swap.
+        assert!(labels.contains(&"#coffee"), "labels = {labels:?}");
+    }
+
     /// WASM now offers tag completion (issue #1319): typing `#` on a
     /// transaction header yields the known tags, with the sigil kept in
     /// the label but dropped from the inserted text.

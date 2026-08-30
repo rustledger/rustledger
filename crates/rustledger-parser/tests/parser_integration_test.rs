@@ -1455,6 +1455,60 @@ fn custom_and_pushmeta_reject_taglinks_by_their_own_rules() {
 }
 
 #[test]
+fn note_and_document_keep_tags_after_a_blank_line() {
+    // A directive node begins with the trivia that precedes it, so a blank
+    // line puts a NEWLINE token before the header. The collection loop broke
+    // on the first NEWLINE and dropped everything -- which is the way ledgers
+    // are normally written, so this was the common case, not the corner.
+    //
+    // `document` had it too, long before `note` had any tags to lose: it
+    // predates #2160 and nothing caught it, because every fixture put the
+    // directive immediately after another one.
+    let src = "2024-01-01 open Assets:A USD\n\
+               2024-01-05 * \"t\"\n\
+              \x20 Assets:A  1.00 USD\n\
+              \x20 Equity:O\n\
+               \n\
+               2024-01-20 note Assets:A \"n\" #ntag ^nlink\n\
+               \n\
+               2024-01-21 document Assets:A \"/tmp/x.pdf\" #dtag ^dlink\n";
+    let result = rustledger_parser::parse(src);
+
+    let note = result
+        .directives
+        .iter()
+        .find_map(|d| match &d.value {
+            Directive::Note(n) => Some(n),
+            _ => None,
+        })
+        .expect("fixture must yield a note");
+    assert_eq!(
+        note.tags
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["ntag"],
+        "a blank line before the note must not eat its tags"
+    );
+    assert_eq!(note.links.len(), 1, "nor its links");
+
+    let doc = result
+        .directives
+        .iter()
+        .find_map(|d| match &d.value {
+            Directive::Document(x) => Some(x),
+            _ => None,
+        })
+        .expect("fixture must yield a document");
+    assert_eq!(
+        doc.tags.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        vec!["dtag"],
+        "same for a document, which had this bug before notes existed"
+    );
+    assert_eq!(doc.links.len(), 1, "nor its links");
+}
+
+#[test]
 fn note_preserves_tags_and_links() {
     // The parser always accepted `#tag` / `^link` on a note header and threw
     // them away, because `Note` had nowhere to hold them (#2160). It did not

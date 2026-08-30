@@ -69,7 +69,15 @@ use crate::types::{Error, LedgerOptions};
 /// loader-internal: the archived VALUES are identical, but `ArchivedPosting`
 /// changed SHAPE, and a v14 blob read by this build would interpret an inline
 /// `CostSpec` as a relative pointer.
-pub const CACHE_VERSION: u32 = 15;
+/// v16: `Note` gained `tags` and `links` (#2160), then a blank line before a
+/// `note`/`document` stopped eating them (#2160 review). Loader v31 and v32 --
+/// this one bump answers both, and it is overdue: #2160 moved the loader
+/// version and the pin below but left this constant at 15, the exact miss the
+/// pin exists to catch. That leaves v15 AMBIGUOUS -- a blob written before
+/// #2160 holds the two-field-shorter `ArchivedNote`, one written by a dev
+/// build after it holds the new shape, and both claim v15. Rejecting every
+/// v15 blob is the only reading that is safe for either.
+pub const CACHE_VERSION: u32 = 16;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -101,7 +109,7 @@ pub const CACHE_VERSION: u32 = 15;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 31;
+const LOADER_CACHE_VERSION_PIN: u32 = 32;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";
@@ -253,6 +261,100 @@ mod tests {
              archived directives are unaffected, update the pin alone. See \
              #1942, where only the loader moved and a stale blob would have \
              kept serving a truncated cost basis.",
+        );
+    }
+
+    /// Pin the archived form of every `Directive` variant.
+    ///
+    /// The pin above only forces a QUESTION, and on #2160 the question got the
+    /// wrong answer: `Note` gained `tags` and `links`, the loader version and
+    /// the pin both moved, `CACHE_VERSION` did not, and every test still
+    /// passed. A pin cannot tell a loader-internal change from one that moves
+    /// our archived directives -- only a person can, and that person was me.
+    ///
+    /// This can tell. It parses one of every directive kind and hashes the
+    /// archived bytes, so ANY change to how a directive is archived -- a new
+    /// field (layout) or a different value in an existing one (output) --
+    /// moves the digest and fails here. Both are exactly the cases that
+    /// require `CACHE_VERSION` to move, which is what the message says to do.
+    ///
+    /// The blank lines before `note` and `document` are load-bearing: without
+    /// them this test cannot see a directive's tags being dropped, because a
+    /// directive that follows another one directly never hit that bug. Written
+    /// without them, it passed while the defect was reintroduced.
+    ///
+    /// No metadata in the fixture: `Metadata` is an `FxHashMap`, and a hash
+    /// over its archived bytes would pin an iteration order rather than a
+    /// layout. Directives are archived one at a time for the same reason a
+    /// `Vec` is not used -- nothing here depends on the collection encoding.
+    #[test]
+    fn directive_archived_form_is_pinned() {
+        const DIRECTIVE_LAYOUT_HASH: u64 = 0xd1ec_e901_a2ce_2542;
+
+        // One of every `Directive` variant, in declaration order.
+        let src = "\
+2024-01-05 * \"payee\" \"narration\" #t ^l\n\
+\x20\x20Assets:Bank  10.00 USD {2.00 USD} @ 3.00 USD\n\
+\x20\x20Equity:Opening-Balances\n\
+2024-01-06 balance Assets:Bank  10.00 ~ 0.01 USD\n\
+2024-01-01 open Assets:Bank USD,EUR \"STRICT\"\n\
+2024-01-31 close Assets:Bank\n\
+2024-01-01 commodity USD\n\
+2024-01-04 pad Assets:Bank Equity:Opening-Balances\n\
+2024-01-07 event \"location\" \"Paris\"\n\
+2024-01-08 query \"q\" \"SELECT date\"\n\
+\n\
+2024-01-09 note Assets:Bank \"n\" #nt ^nl\n\
+\n\
+2024-01-10 document Assets:Bank \"/x.pdf\" #dt ^dl\n\
+2024-01-11 price USD 1.10 EUR\n\
+2024-01-12 custom \"budget\" Assets:Bank 10.00 USD\n";
+
+        let parsed = rustledger_parser::parse(src);
+        assert!(
+            parsed.errors.is_empty(),
+            "fixture must parse cleanly, else the digest pins an error path: {:?}",
+            parsed.errors,
+        );
+
+        // Every variant, or the pin has a blind spot exactly where a new
+        // variant would be added.
+        let kinds: std::collections::BTreeSet<_> = parsed
+            .directives
+            .iter()
+            .map(|d| std::mem::discriminant(&d.value))
+            .map(|d| format!("{d:?}"))
+            .collect();
+        assert_eq!(
+            kinds.len(),
+            12,
+            "fixture must cover all 12 Directive variants"
+        );
+
+        // FNV-1a: a checked-in constant needs an algorithm that is stable
+        // across toolchains, which `DefaultHasher` is not promised to be.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |bytes: &[u8]| {
+            for b in bytes {
+                h ^= u64::from(*b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        for d in &parsed.directives {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&d.value).unwrap();
+            // Length-prefixed so a byte crossing a directive boundary cannot be
+            // masked by a compensating change in its neighbor.
+            eat(&(bytes.len() as u64).to_le_bytes());
+            eat(&bytes);
+        }
+
+        assert_eq!(
+            h, DIRECTIVE_LAYOUT_HASH,
+            "the archived form of a directive changed -- a field was added or \
+             removed (layout), or the parser now produces a different value \
+             (output). Either way a cache written by an older binary is no \
+             longer safe to read: bump CACHE_VERSION in this file, reconcile \
+             LOADER_CACHE_VERSION_PIN, and set DIRECTIVE_LAYOUT_HASH to {h:#x}",
         );
     }
 

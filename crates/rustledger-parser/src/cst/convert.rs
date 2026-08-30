@@ -565,6 +565,43 @@ fn convert_commodity(
     Some(Spanned::new(Directive::Commodity(commodity), span))
 }
 
+/// Collect the `#tag` / `^link` tokens on a directive's HEADER line.
+///
+/// Stops at the newline that ends the header -- but only after the header has
+/// actually started. A directive node can begin with leading trivia: when a
+/// blank line precedes it, the node's first token is a NEWLINE, and breaking
+/// on that dropped every tag. Both `note` and `document` did this, so a
+/// `document` written the way ledgers are normally formatted -- a blank line
+/// between directives -- silently lost its tags long before `note` gained any
+/// (#2160 review).
+///
+/// The header is deemed started once the directive's STRING has been seen:
+/// the comment for a `note`, the path for a `document`. Tags and links follow
+/// it on the same line, and metadata lines live in `META_ENTRY` child nodes
+/// rather than as direct tokens, so they cannot leak in.
+fn header_tags_and_links(node: &crate::SyntaxNode) -> (Vec<Tag>, Vec<Link>) {
+    let mut tags: Vec<Tag> = Vec::new();
+    let mut links: Vec<Link> = Vec::new();
+    let mut header_started = false;
+    for el in node.children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            continue;
+        };
+        match t.kind() {
+            crate::SyntaxKind::STRING => header_started = true,
+            crate::SyntaxKind::NEWLINE if header_started => break,
+            crate::SyntaxKind::TAG => {
+                tags.push(Tag::new(t.text().trim_start_matches('#')));
+            }
+            crate::SyntaxKind::LINK => {
+                links.push(Link::new(t.text().trim_start_matches('^')));
+            }
+            _ => {}
+        }
+    }
+    (tags, links)
+}
+
 fn convert_note(
     node: &NoteDirective,
     bom_offset: u32,
@@ -583,23 +620,7 @@ fn convert_note(
     // directive does NOT call `reject_tags_and_links`, unlike `commodity` and
     // `event`, so they were accepted and silently dropped rather than
     // diagnosed.
-    let mut tags: Vec<Tag> = Vec::new();
-    let mut links: Vec<Link> = Vec::new();
-    for el in node.syntax().children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
-            continue;
-        };
-        match t.kind() {
-            crate::SyntaxKind::NEWLINE => break,
-            crate::SyntaxKind::TAG => {
-                tags.push(Tag::new(t.text().trim_start_matches('#')));
-            }
-            crate::SyntaxKind::LINK => {
-                links.push(Link::new(t.text().trim_start_matches('^')));
-            }
-            _ => {}
-        }
-    }
+    let (tags, links) = header_tags_and_links(node.syntax());
     let meta = convert_meta_entries(node.syntax());
 
     let note = rustledger_core::directive::Note {
@@ -628,23 +649,7 @@ fn convert_document(
     // header (not in META_ENTRY children, which are walked
     // separately below), so a direct-child token walk that
     // stops at the first NEWLINE captures them in source order.
-    let mut tags: Vec<Tag> = Vec::new();
-    let mut links: Vec<Link> = Vec::new();
-    for el in node.syntax().children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
-            continue;
-        };
-        match t.kind() {
-            crate::SyntaxKind::NEWLINE => break,
-            crate::SyntaxKind::TAG => {
-                tags.push(Tag::new(t.text().trim_start_matches('#')));
-            }
-            crate::SyntaxKind::LINK => {
-                links.push(Link::new(t.text().trim_start_matches('^')));
-            }
-            _ => {}
-        }
-    }
+    let (tags, links) = header_tags_and_links(node.syntax());
     let meta = convert_meta_entries(node.syntax());
 
     let document = rustledger_core::directive::Document {

@@ -768,35 +768,49 @@ fn convert_price(
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
     reject_tags_and_links(node.syntax(), "price", bom_offset, errors);
     let base_currency = Currency::new(node.base_currency()?.text());
+    if let Some(range) = has_top_level_tilde(node.syntax()) {
+        let start: u32 = range.start().into();
+        let end: u32 = range.end().into();
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(
+                "a price has no tolerance: `~` is only valid on a balance \
+                 assertion"
+                    .to_string(),
+            ),
+            Span::new((start + bom_offset) as usize, (end + bom_offset) as usize),
+        ));
+        return None;
+    }
     // Same arithmetic support as `convert_balance`: a price
     // directive's value can use `+`, `-`, `*`, `/`, and parens.
-    let number = directive_arithmetic_value(node.syntax()).or_else(|| {
-        // The fallback keeps only the first NUMBER, so refuse a value that
-        // carries more than one — see `malformed_directive_value`.
-        if let Some(range) = malformed_directive_value(node.syntax()) {
-            let start: u32 = range.start().into();
-            let end: u32 = range.end().into();
-            let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
-            errors.push(crate::ParseError::new(
-                crate::ParseErrorKind::SyntaxError(
-                    "malformed amount: expected one number, optionally signed, \
+    let number =
+        directive_arithmetic_value(node.syntax(), ToleranceForm::Forbidden).or_else(|| {
+            // The fallback keeps only the first NUMBER, so refuse a value that
+            // carries more than one — see `malformed_directive_value`.
+            if let Some(range) = malformed_directive_value(node.syntax()) {
+                let start: u32 = range.start().into();
+                let end: u32 = range.end().into();
+                let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+                errors.push(crate::ParseError::new(
+                    crate::ParseErrorKind::SyntaxError(
+                        "malformed amount: expected one number, optionally signed, \
                      or an arithmetic expression. A thousands separator must be \
                      inside the number, as in `-1,234.00`"
-                        .to_string(),
-                ),
-                span,
-            ));
-            return None;
-        }
-        let mut n = parse_decimal_token(node.number()?.text())?;
-        if node_has_minus_before_number(node.syntax()) {
-            // Python's rule: negating a zero yields a POSITIVE zero, so a
-            // literal `-0.00` loads as `0.00` exactly as beancount parses it.
-            // A bare `-n` would keep the sign bit and render `-0.00`.
-            n = rustledger_core::negate_python(n);
-        }
-        Some(n)
-    })?;
+                            .to_string(),
+                    ),
+                    span,
+                ));
+                return None;
+            }
+            let mut n = parse_decimal_token(node.number()?.text())?;
+            if node_has_minus_before_number(node.syntax()) {
+                // Python's rule: negating a zero yields a POSITIVE zero, so a
+                // literal `-0.00` loads as `0.00` exactly as beancount parses it.
+                // A bare `-n` would keep the sign bit and render `-0.00`.
+                n = rustledger_core::negate_python(n);
+            }
+            Some(n)
+        })?;
     let quote_currency = Currency::new(node.quote_currency()?.text());
     let amount = Amount::new(number, quote_currency);
     let meta = convert_meta_entries(node.syntax());
@@ -823,33 +837,34 @@ fn convert_balance(
     // value (`balance Assets:X 0.25 + 0.75 GBP` ≡ 1.00 GBP).
     // Falls back to the first NUMBER token if the expression
     // can't be evaluated, with the legacy sign-flip behavior.
-    let number = directive_arithmetic_value(node.syntax()).or_else(|| {
-        // The fallback keeps only the first NUMBER, so refuse a value that
-        // carries more than one — see `malformed_directive_value`.
-        if let Some(range) = malformed_directive_value(node.syntax()) {
-            let start: u32 = range.start().into();
-            let end: u32 = range.end().into();
-            let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
-            errors.push(crate::ParseError::new(
-                crate::ParseErrorKind::SyntaxError(
-                    "malformed amount: expected one number, optionally signed, \
+    let number =
+        directive_arithmetic_value(node.syntax(), ToleranceForm::Allowed).or_else(|| {
+            // The fallback keeps only the first NUMBER, so refuse a value that
+            // carries more than one — see `malformed_directive_value`.
+            if let Some(range) = malformed_directive_value(node.syntax()) {
+                let start: u32 = range.start().into();
+                let end: u32 = range.end().into();
+                let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
+                errors.push(crate::ParseError::new(
+                    crate::ParseErrorKind::SyntaxError(
+                        "malformed amount: expected one number, optionally signed, \
                      or an arithmetic expression. A thousands separator must be \
                      inside the number, as in `-1,234.00`"
-                        .to_string(),
-                ),
-                span,
-            ));
-            return None;
-        }
-        let mut n = parse_decimal_token(node.number()?.text())?;
-        if node_has_minus_before_number(node.syntax()) {
-            // Python's rule: negating a zero yields a POSITIVE zero, so a
-            // literal `-0.00` loads as `0.00` exactly as beancount parses it.
-            // A bare `-n` would keep the sign bit and render `-0.00`.
-            n = rustledger_core::negate_python(n);
-        }
-        Some(n)
-    })?;
+                            .to_string(),
+                    ),
+                    span,
+                ));
+                return None;
+            }
+            let mut n = parse_decimal_token(node.number()?.text())?;
+            if node_has_minus_before_number(node.syntax()) {
+                // Python's rule: negating a zero yields a POSITIVE zero, so a
+                // literal `-0.00` loads as `0.00` exactly as beancount parses it.
+                // A bare `-n` would keep the sign bit and render `-0.00`.
+                n = rustledger_core::negate_python(n);
+            }
+            Some(n)
+        })?;
     let currency = Currency::new(node.currency()?.text());
     let amount = Amount::new(number, currency);
     let tolerance = extract_balance_tolerance(node.syntax());
@@ -1551,7 +1566,48 @@ fn evaluate_amount_expression(amt: &ast::Amount) -> Option<Decimal> {
 /// bare single `NUMBER`, returns `None` so the caller can use
 /// the existing fast path (which preserves the legacy sign-flip
 /// behavior).
-fn directive_arithmetic_value(node: &crate::SyntaxNode) -> Option<Decimal> {
+/// Does this directive's header carry a top-level `~`?
+///
+/// Only `balance` has a tolerance. A `price` with one used to be accepted
+/// silently -- `price USD 1.10 ~ 0.01 EUR` evaluated to 1.10 and dropped the
+/// rest on the floor, because `~` is not an arithmetic operator, so the
+/// expression scan took the fast path and fell back to the first NUMBER. A
+/// value the author wrote and the parser discarded without a word is worse
+/// than a diagnosed error.
+fn has_top_level_tilde(node: &crate::SyntaxNode) -> Option<crate::TextRange> {
+    let mut depth: i32 = 0;
+    for el in node.children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            break;
+        };
+        match t.kind() {
+            crate::SyntaxKind::L_PAREN => depth += 1,
+            crate::SyntaxKind::R_PAREN => depth -= 1,
+            crate::SyntaxKind::TILDE if depth == 0 => return Some(t.text_range()),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether a `~` may end this directive's amount expression.
+///
+/// `balance` takes a tolerance; `price` does not. The distinction matters
+/// because stopping at `~` unconditionally makes a price with a tolerance
+/// evaluate its amount and DISCARD the tolerance silently, which is worse
+/// than the malformed-value error it used to get.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToleranceForm {
+    /// `balance ACCOUNT AMOUNT ~ TOLERANCE CURRENCY`
+    Allowed,
+    /// No tolerance in this directive's grammar.
+    Forbidden,
+}
+
+fn directive_arithmetic_value(
+    node: &crate::SyntaxNode,
+    tolerance: ToleranceForm,
+) -> Option<Decimal> {
     let raw: Vec<crate::SyntaxToken> = node
         .children_with_tokens()
         .filter_map(rowan::NodeOrToken::into_token)
@@ -1593,7 +1649,9 @@ fn directive_arithmetic_value(node: &crate::SyntaxNode) -> Option<Decimal> {
             // `0.25 + 0.75 USD ~ 0.01 USD` stopped at the first CURRENCY and
             // parsed -- which is why the plain-number form (`100.00 ~ 0.01
             // USD`) worked and only its arithmetic sibling did not (#2191).
-            crate::SyntaxKind::TILDE if depth == 0 && tilde_idx.is_none() => {
+            crate::SyntaxKind::TILDE
+                if tolerance == ToleranceForm::Allowed && depth == 0 && tilde_idx.is_none() =>
+            {
                 tilde_idx = Some(i);
             }
             _ => {}

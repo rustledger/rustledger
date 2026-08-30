@@ -89,6 +89,60 @@ fn balance_tolerance_follows_an_arithmetic_amount() {
     }
 }
 
+#[test]
+fn a_price_rejects_a_tolerance_instead_of_discarding_it() {
+    // `~` ends the amount expression on a `balance`, which is what makes
+    // `0.25 + 0.75 ~ 0.01 USD` parse. Applying that to `price` as well would
+    // be a regression, not a fix: a price has no tolerance, so the amount
+    // would evaluate and the tolerance would vanish without a word.
+    //
+    // The plain form was already accepted that way before any of this --
+    // `~` is not an arithmetic operator, so the scan took the fast path and
+    // fell back to the first NUMBER, yielding 1.10 and dropping the rest.
+    // A value the author wrote and the parser discarded in silence is worse
+    // than a diagnosed error, so both forms are now diagnosed.
+    for src in [
+        "2024-01-01 price USD 1.10 ~ 0.01 EUR\n",
+        "2024-01-01 price USD 1.10 + 0.05 ~ 0.01 EUR\n",
+    ] {
+        let result = rustledger_parser::parse(src);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| format!("{e:?}").contains("a price has no tolerance")),
+            "`{src}` must be diagnosed, not silently truncated: {:?}",
+            result.errors,
+        );
+        assert!(
+            !result
+                .directives
+                .iter()
+                .any(|d| matches!(d.value, Directive::Price(_))),
+            "`{src}` must not also yield a price directive",
+        );
+    }
+
+    // The tolerance-free forms still parse, and to the right value.
+    for (src, want) in [
+        ("2024-01-01 price USD 1.10 EUR\n", dec_str("1.10")),
+        ("2024-01-01 price USD 1.10 + 0.05 EUR\n", dec_str("1.15")),
+        ("2024-01-01 price USD (1.10 + 0.05) EUR\n", dec_str("1.15")),
+    ] {
+        let result = rustledger_parser::parse(src);
+        assert!(result.errors.is_empty(), "`{src}`: {:?}", result.errors);
+        let price = result
+            .directives
+            .iter()
+            .find_map(|d| match &d.value {
+                Directive::Price(p) => Some(p),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("`{src}` produced no price"));
+        assert_eq!(price.amount.number, want, "`{src}`");
+    }
+}
+
 fn dec_str(s: &str) -> rustledger_core::Decimal {
     s.parse().expect("test decimal")
 }

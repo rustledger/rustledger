@@ -1578,7 +1578,12 @@ fn has_top_level_tilde(node: &crate::SyntaxNode) -> Option<crate::TextRange> {
     let mut depth: i32 = 0;
     for el in node.children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
-            break;
+            // Skip child nodes rather than stopping at one. A price's only
+            // child node is a META_ENTRY, whose own tokens are not direct
+            // children of this node, so nothing here can see a `~` written
+            // inside metadata -- but bailing out at the first node would mean
+            // a header that ever gains one stops being checked at all.
+            continue;
         };
         match t.kind() {
             crate::SyntaxKind::L_PAREN => depth += 1,

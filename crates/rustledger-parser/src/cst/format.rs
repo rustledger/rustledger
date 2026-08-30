@@ -3864,6 +3864,14 @@ mod tests {
     /// So: parse, format, parse again, and compare the directive models. Spans
     /// move and are not compared; everything the model holds must survive.
     ///
+    /// Known blind spot, worth stating so a future reader does not over-trust
+    /// this: a model comparison cannot see data the model never held. When the
+    /// PARSER drops something, both sides are equally lossy and compare equal.
+    /// `balance X 1.00 USD ~ 0.01 EUR` formats to `1.00 ~ 0.01 USD` -- the EUR
+    /// is erased from the file -- and this test passes, because the parser
+    /// discarded it before either comparison (#2193). That is why the
+    /// note-tag test next door also asserts on output TEXT.
+    ///
     /// This could not land with #2184: it failed on
     /// `balance_with_arithmetic_and_tolerance`, where the formatter emitted a
     /// balance that no longer parsed. That was a parser inconsistency (#2191),

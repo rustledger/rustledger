@@ -83,6 +83,14 @@ def fetch_is_complete(count: int, expected: int) -> bool:
     A short corpus cannot manufacture a false "added" or "rehashed" either,
     but it does mean the run saw an unrepresentative corpus, so the honest
     answer is to report nothing and say why.
+
+    This is deliberately stricter than the backstop inside the test itself,
+    which refuses to write a manifest below `MIN_FULL_CORPUS_SIZE` (100). That
+    one exists to stop a catastrophic fetch truncating the committed manifest
+    to the three in-tree fixtures, and it fires as a panic. At a corpus of
+    ~735 this check trips at ~685, so a merely partial fetch gets a sentence
+    explaining itself rather than a cargo stack trace, and the test's assert
+    stays what it was written to be: a last resort.
     """
     return count >= expected - CORPUS_SLACK
 

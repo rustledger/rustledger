@@ -1577,6 +1577,7 @@ fn directive_arithmetic_value(node: &crate::SyntaxNode) -> Option<Decimal> {
         .collect();
     let mut depth: i32 = 0;
     let mut first_currency_idx: Option<usize> = None;
+    let mut tilde_idx: Option<usize> = None;
     for (i, t) in raw.iter().enumerate() {
         match t.kind() {
             crate::SyntaxKind::L_PAREN => depth += 1,
@@ -1584,10 +1585,25 @@ fn directive_arithmetic_value(node: &crate::SyntaxNode) -> Option<Decimal> {
             crate::SyntaxKind::CURRENCY if depth == 0 && first_currency_idx.is_none() => {
                 first_currency_idx = Some(i);
             }
+            // `~` ends the amount and begins the tolerance, which is read
+            // separately. Without this the tolerance was swallowed INTO the
+            // expression: `0.25 + 0.75 ~ 0.01 USD` became `0.25 + 0.75 ~ 0.01`,
+            // which is not arithmetic, so the whole value was reported
+            // malformed. Only a currency-less amount reached that state --
+            // `0.25 + 0.75 USD ~ 0.01 USD` stopped at the first CURRENCY and
+            // parsed -- which is why the plain-number form (`100.00 ~ 0.01
+            // USD`) worked and only its arithmetic sibling did not (#2191).
+            crate::SyntaxKind::TILDE if depth == 0 && tilde_idx.is_none() => {
+                tilde_idx = Some(i);
+            }
             _ => {}
         }
     }
-    let end = first_currency_idx.unwrap_or(raw.len());
+    let end = match (first_currency_idx, tilde_idx) {
+        (Some(c), Some(t)) => c.min(t),
+        (Some(i), None) | (None, Some(i)) => i,
+        (None, None) => raw.len(),
+    };
     let tokens: Vec<crate::SyntaxToken> = raw.into_iter().take(end).collect();
     // Fast-path: zero or one token = no arithmetic.
     let has_op = tokens.iter().any(|t| {

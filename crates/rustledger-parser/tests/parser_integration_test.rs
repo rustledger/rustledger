@@ -45,6 +45,55 @@ fn count_directive_type(result: &ParseResult, type_name: &str) -> usize {
 // ============================================================================
 
 #[test]
+fn balance_tolerance_follows_an_arithmetic_amount() {
+    // The tolerance was being swallowed INTO the amount expression, so
+    // `0.25 + 0.75 ~ 0.01 USD` parsed as the non-expression
+    // `0.25 + 0.75 ~ 0.01` and was reported malformed. Only the
+    // currency-less arithmetic form hit it: with a currency after the
+    // expression the scan stopped there and parsed fine, which is why the
+    // plain-number form worked and its arithmetic sibling did not (#2191).
+    let forms = [
+        ("100.00 USD", dec_str("100.00")),
+        ("100.00 ~ 0.01 USD", dec_str("100.00")),
+        ("100.00 USD ~ 0.01 USD", dec_str("100.00")),
+        ("0.25 + 0.75 USD", dec_str("1.00")),
+        ("0.25 + 0.75 ~ 0.01 USD", dec_str("1.00")),
+        ("0.25 + 0.75 USD ~ 0.01 USD", dec_str("1.00")),
+        ("(0.25 + 0.75) ~ 0.01 USD", dec_str("1.00")),
+    ];
+
+    for (form, want) in forms {
+        let src = format!("2024-01-15 balance Assets:Cash {form}\n");
+        let result = rustledger_parser::parse(&src);
+        assert!(
+            result.errors.is_empty(),
+            "`{form}` must parse: {:?}",
+            result.errors,
+        );
+        let balance = result
+            .directives
+            .iter()
+            .find_map(|d| match &d.value {
+                Directive::Balance(b) => Some(b),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("`{form}` produced no balance directive"));
+        // The VALUE matters more than the parse. An earlier bug in this same
+        // scan fell back to "take the first NUMBER", which turned
+        // `(1 + 5) / 2.1` into a silent assertion against 1 -- parsed
+        // cleanly, asserted the wrong thing.
+        assert_eq!(
+            balance.amount.number, want,
+            "`{form}` evaluated to the wrong amount",
+        );
+    }
+}
+
+fn dec_str(s: &str) -> rustledger_core::Decimal {
+    s.parse().expect("test decimal")
+}
+
+#[test]
 fn test_parse_open_directive() {
     let source = r"2024-01-01 open Assets:Bank:Checking USD, EUR";
     let result = parse_ok(source);

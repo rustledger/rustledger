@@ -3854,6 +3854,55 @@ mod tests {
         assert!(normalized.ends_with('\n') && !normalized.ends_with("\r\n"));
     }
 
+    /// Formatting must not change what the file MEANS.
+    ///
+    /// The idempotence matrix next door checks that formatting twice equals
+    /// formatting once. That property cannot see data loss: dropping a note's
+    /// tags is perfectly idempotent, and it passed for as long as the bug
+    /// lived (#2184). Stability is not fidelity.
+    ///
+    /// So: parse, format, parse again, and compare the directive models. Spans
+    /// move and are not compared; everything the model holds must survive.
+    ///
+    /// This could not land with #2184: it failed on
+    /// `balance_with_arithmetic_and_tolerance`, where the formatter emitted a
+    /// balance that no longer parsed. That was a parser inconsistency (#2191),
+    /// fixed in the commit this test arrives with -- the harness found it, and
+    /// waited for it rather than hiding it behind an allow-list.
+    #[test]
+    fn formatting_preserves_the_parsed_directives() {
+        let mut checked = 0;
+        for (name, src) in IDEMPOTENCE_MATRIX {
+            let before = crate::parse(src);
+            if !before.errors.is_empty() {
+                continue; // error fixtures pin diagnostics, not round-trips
+            }
+            let formatted = format_source(src);
+            let after = crate::parse(&formatted);
+
+            assert!(
+                after.errors.is_empty(),
+                "{name}: formatter produced output that no longer parses: {:?}\n{formatted}",
+                after.errors,
+            );
+            let b: Vec<_> = before.directives.iter().map(|d| &d.value).collect();
+            let a: Vec<_> = after.directives.iter().map(|d| &d.value).collect();
+            assert_eq!(
+                b, a,
+                "{name}: formatting changed the directives it parsed from\n\
+                 --- source ---\n{src}\n--- formatted ---\n{formatted}",
+            );
+            checked += 1;
+        }
+        // A matrix that stopped yielding clean fixtures would make every
+        // assertion above vacuous.
+        assert!(
+            checked > 20,
+            "only {checked} fixtures round-tripped; this test is not covering \
+             what it claims to"
+        );
+    }
+
     /// Every fixture must survive the TYPED emitter, not just `format_source`.
     ///
     /// `canonicalize_directives` is the path `rledger add`, `rledger extract`
@@ -3955,10 +4004,9 @@ mod tests {
     /// #2184 lived. Stability is not fidelity, so this parses, formats,
     /// parses again, and compares the models.
     ///
-    /// Scoped to note and document deliberately. The same check over the
-    /// whole matrix fails on `balance_with_arithmetic_and_tolerance`, where
-    /// the formatter emits output that no longer parses (#2191); it lands
-    /// with that fix rather than behind an allow-list here.
+    /// Narrower than the matrix tests above on purpose: those compare models,
+    /// and a model comparison is satisfied by two equally-empty sides. This
+    /// one names the tags it expects in the output TEXT.
     #[test]
     fn formatting_preserves_a_notes_tags_and_links() {
         // A note past the first, after a blank line and after a comment:

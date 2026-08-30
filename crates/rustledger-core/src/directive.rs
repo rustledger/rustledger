@@ -487,10 +487,19 @@ pub enum DirectivePriority {
     Open = 0,
     /// Commodities declared before use
     Commodity = 1,
-    /// Padding before balance assertions
-    Pad = 2,
-    /// Balance assertions checked at start of day
-    Balance = 3,
+    /// Balance assertions are checked at the START of the day, so they
+    /// precede a same-date pad -- which is what makes such a pad UNUSED
+    /// rather than applied (#2150).
+    ///
+    /// beancount's `entry_sortkey` gives Balance `-1` and Pad the default
+    /// `0`. Ours had Pad first, with a comment asserting "padding before
+    /// balance assertions"; the effect was that a `pad` and the `balance`
+    /// it targets on the same date synthesized a padding transaction
+    /// beancount does not, leaving the account richer by the difference
+    /// while our own validator reported the pad as unused in the same run.
+    Balance = 2,
+    /// Padding, after the same-date balance that would have consumed it.
+    Pad = 3,
     /// Main entries
     Transaction = 4,
     /// Annotations after transactions
@@ -1744,7 +1753,10 @@ mod tests {
     fn test_directive_priority() {
         // Test that priorities are ordered correctly
         assert!(DirectivePriority::Open < DirectivePriority::Transaction);
-        assert!(DirectivePriority::Pad < DirectivePriority::Balance);
+        // Balance BEFORE Pad: a balance is checked at the start of the day,
+        // so a same-date pad has nothing left to satisfy and is unused
+        // (#2150). This assertion previously ran the other way.
+        assert!(DirectivePriority::Balance < DirectivePriority::Pad);
         assert!(DirectivePriority::Balance < DirectivePriority::Transaction);
         assert!(DirectivePriority::Transaction < DirectivePriority::Close);
         assert!(DirectivePriority::Price < DirectivePriority::Close);
@@ -1788,8 +1800,15 @@ mod tests {
     }
 
     #[test]
-    fn test_sort_directives_pad_before_balance() {
-        // Pad must come before balance assertion on the same day
+    fn test_sort_directives_balance_before_pad() {
+        // A balance is checked at the START of its day, so it precedes a
+        // same-date pad -- and that is exactly why such a pad has nothing left
+        // to satisfy and is reported unused (#2150).
+        //
+        // This test asserted the reverse, down to its name. Under that order a
+        // pad and the balance it targets on one date synthesized a padding
+        // transaction beancount does not: on the issue's fixture beancount
+        // reports 40.00 USD for the account and we reported 100.00.
         let mut directives = vec![
             Directive::Balance(Balance::new(
                 date(2024, 1, 1),
@@ -1805,8 +1824,8 @@ mod tests {
 
         sort_directives(&mut directives);
 
-        assert_eq!(directives[0].type_name(), "pad");
-        assert_eq!(directives[1].type_name(), "balance");
+        assert_eq!(directives[0].type_name(), "balance");
+        assert_eq!(directives[1].type_name(), "pad");
     }
 
     #[test]

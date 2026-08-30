@@ -144,7 +144,13 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
 
     // Sort directives by date for processing
     let mut sorted: Vec<&Directive> = directives.iter().collect();
-    sorted.sort_by_key(|d| d.date());
+    // Sort by the canonical booking key, not by date alone. Date-only left
+    // same-date directives in source order, so a `pad` written above the
+    // `balance` it targets was processed first and the balance consumed it --
+    // synthesizing a padding transaction beancount does not (#2150). The key
+    // puts Balance before Pad, so that balance is seen first and the pad ends
+    // up with nothing to satisfy.
+    sorted.sort_by_key(|d| rustledger_core::booking_sort_key(d));
 
     for directive in sorted {
         match directive {
@@ -339,12 +345,20 @@ fn create_padding_transaction(
 ///
 /// # Sort ordering on date ties
 ///
-/// Synth transactions carry the pad's date, not the balance's date.
-/// On a same-date pad+balance pair (legal in beancount), the synth must
-/// appear BEFORE the balance so any consumer that checks balance assertions
-/// mid-stream sees the correct inventory. This is achieved by prepending
-/// the synth list to the original directives before the stable sort:
-/// synths land at the front of their date-group, originals follow.
+/// Synth transactions carry the pad's date, not the balance's date. When a
+/// pad precedes its balance by at least a day, the synth must appear BEFORE
+/// that balance so any consumer checking assertions mid-stream sees the
+/// padded inventory. This is achieved by prepending the synth list to the
+/// original directives before the stable sort: synths land at the front of
+/// their date-group, originals follow.
+///
+/// A pad and the balance it targets on the SAME date produce no synth at
+/// all. beancount checks a balance at the start of the day, so it is ordered
+/// ahead of a same-date pad and consumes nothing; the pad is reported unused.
+/// This doc previously called that pairing "legal in beancount" and required
+/// the synth to precede the balance -- which is what produced a padding
+/// transaction beancount does not, leaving the account richer by the
+/// difference while our own validator called the pad unused (#2150).
 ///
 /// # Errors are discarded
 ///
@@ -822,11 +836,17 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_with_padding_same_date_pad_balance_synth_comes_first() {
-        // Pad and balance share the same date. The synth (which carries
-        // the pad's date) must appear BEFORE the Balance in the merged
-        // view so any mid-stream balance-assertion check sees the
-        // correct inventory.
+    fn test_merge_with_padding_same_date_pad_balance_synthesizes_nothing() {
+        // A pad and the balance it targets on the SAME date produce NO synth.
+        // beancount checks a balance at the start of the day, so it is ordered
+        // ahead of a same-date pad and consumes nothing; the pad is reported
+        // "Unused Pad entry" and the account keeps its real figure (#2150).
+        //
+        // This test previously asserted the opposite -- that a synth exists and
+        // precedes the Balance -- which is what let the bug through. On the
+        // fixture below beancount reports 40.00 for the account where we
+        // reported 100.00, and our own validator called the pad unused in the
+        // same run that booked it.
         let directives = vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
@@ -840,18 +860,47 @@ mod tests {
 
         let merged = merge_with_padding(&directives);
 
-        // Find indices of the synth and the Balance.
+        assert!(
+            !merged
+                .iter()
+                .any(|d| matches!(d, Directive::Transaction(t) if is_synthesized_pad(t))),
+            "a same-date pad+balance must synthesize nothing; beancount leaves \
+             the pad unused"
+        );
+        // The Pad itself survives, so `WHERE type = 'pad'` audits still see it.
+        assert!(merged.iter().any(|d| matches!(d, Directive::Pad(_))));
+    }
+
+    #[test]
+    fn test_merge_with_padding_earlier_pad_still_synthesizes_before_balance() {
+        // The day-earlier case is the one that DOES pad, and the synth still
+        // has to precede the balance so a mid-stream assertion check sees the
+        // padded inventory. That ordering guarantee is what the old same-date
+        // test was really protecting; it belongs here, where a synth exists.
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Pad(Pad::new(date(2024, 1, 2), "Assets:Bank", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 3),
+                "Assets:Bank",
+                Amount::new(dec!(1000), "USD"),
+            )),
+        ];
+
+        let merged = merge_with_padding(&directives);
+
         let synth_idx = merged
             .iter()
             .position(|d| matches!(d, Directive::Transaction(t) if is_synthesized_pad(t)))
-            .expect("synth present");
+            .expect("an earlier pad must still synthesize");
         let balance_idx = merged
             .iter()
             .position(|d| matches!(d, Directive::Balance(_)))
             .expect("balance present");
         assert!(
             synth_idx < balance_idx,
-            "synth pad (idx {synth_idx}) must appear before Balance (idx {balance_idx}) on same date",
+            "synth (idx {synth_idx}) must precede the Balance (idx {balance_idx})",
         );
     }
 

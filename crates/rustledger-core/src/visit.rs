@@ -180,6 +180,8 @@ pub fn visit_accounts<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a s
 /// Positions covered:
 /// - `Transaction.tags` (including tags folded in from `pushtag`)
 /// - `Document.tags`
+/// - `Note.tags` (since #2160; before that a note's tags never reached the
+///   model, so this list was complete without it)
 /// - `MetaValue::Tag` in any directive's or posting's metadata
 /// - `Custom.values` entries that are `MetaValue::Tag`
 ///
@@ -213,7 +215,12 @@ pub fn visit_tags<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a str))
         Directive::Commodity(comm) => visit_meta_tags(&comm.meta, visit),
         Directive::Balance(bal) => visit_meta_tags(&bal.meta, visit),
         Directive::Pad(pad) => visit_meta_tags(&pad.meta, visit),
-        Directive::Note(note) => visit_meta_tags(&note.meta, visit),
+        Directive::Note(note) => {
+            for tag in &note.tags {
+                visit(tag.as_str());
+            }
+            visit_meta_tags(&note.meta, visit);
+        }
         Directive::Price(price) => visit_meta_tags(&price.meta, visit),
         Directive::Event(event) => visit_meta_tags(&event.meta, visit),
         Directive::Query(query) => visit_meta_tags(&query.meta, visit),
@@ -224,8 +231,8 @@ pub fn visit_tags<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a str))
 /// `visit` once per occurrence (link text without the `^` sigil).
 ///
 /// Positions covered mirror [`visit_tags`], with `Link` in place of
-/// `Tag`: `Transaction.links`, `Document.links`, `MetaValue::Link` in
-/// metadata, and `Custom.values` link entries.
+/// `Tag`: `Transaction.links`, `Document.links`, `Note.links` (since
+/// #2160), `MetaValue::Link` in metadata, and `Custom.values` link entries.
 pub fn visit_links<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a str)) {
     match directive {
         Directive::Transaction(txn) => {
@@ -254,7 +261,12 @@ pub fn visit_links<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a str)
         Directive::Commodity(comm) => visit_meta_links(&comm.meta, visit),
         Directive::Balance(bal) => visit_meta_links(&bal.meta, visit),
         Directive::Pad(pad) => visit_meta_links(&pad.meta, visit),
-        Directive::Note(note) => visit_meta_links(&note.meta, visit),
+        Directive::Note(note) => {
+            for link in &note.links {
+                visit(link.as_str());
+            }
+            visit_meta_links(&note.meta, visit);
+        }
         Directive::Price(price) => visit_meta_links(&price.meta, visit),
         Directive::Event(event) => visit_meta_links(&event.meta, visit),
         Directive::Query(query) => visit_meta_links(&query.meta, visit),

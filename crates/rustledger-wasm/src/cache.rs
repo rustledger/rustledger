@@ -96,9 +96,13 @@ use crate::types::{Error, LedgerOptions};
 /// outright (#2191). Loader v33. Parser OUTPUT in both directions: a v17 blob
 /// holds a parse error where this build produces a balance, and a truncated
 /// 1.10 where this build produces an error.
-/// v19: a `query` carrying a tag or link is diagnosed instead of parsed with
-/// the tag silently discarded (#2194). Loader v34. Parser OUTPUT: a v18 blob
-/// holds a `Query` directive for input this build refuses.
+/// v19: a `query` carrying a tag or link is diagnosed (#2194). Loader v34.
+/// The archived DIRECTIVE is identical -- `reject_tags_and_links` records an
+/// error and conversion still emits the `Query` -- so what a stale blob costs
+/// is the diagnostic, not the data: such a file used to parse clean and was
+/// therefore cacheable, and replaying its blob skips the parse that now
+/// complains. Verified against a pre-#2194 binary's cache: 0 errors without
+/// this bump, 2 with it.
 pub const CACHE_VERSION: u32 = 19;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

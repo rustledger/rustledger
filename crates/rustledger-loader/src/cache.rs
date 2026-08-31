@@ -477,9 +477,17 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     directions: a v32 cache holds the error for the balance and the
 ///     truncated 1.10 for the price, and this build produces neither.
 ///
-/// v34: a `query` carrying a tag or link is now diagnosed rather than parsed
-///     with the tag discarded (#2194). Parser OUTPUT: a v33 cache holds a
-///     `Query` directive for input this build refuses outright.
+/// v34: a `query` carrying a tag or link is now diagnosed (#2194). The
+///     DIRECTIVE is unchanged -- `reject_tags_and_links` records an error and
+///     conversion still emits the `Query`, as it does for the other seven
+///     directives that refuse tags. What moves is the error list, and that is
+///     enough: a file with a tagged query used to parse clean and was
+///     therefore cacheable, so a v33 blob exists for it, and replaying that
+///     blob skips the parse that would now complain. Measured rather than
+///     assumed: a pre-#2194 binary run on a tagged query reports 0 errors and
+///     writes a cache, and this build reading that same blob reports 0 errors
+///     WITHOUT this bump and 2 WITH it. The bump is what surfaces the
+///     diagnostic.
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
@@ -1236,9 +1244,10 @@ mod tests {
         // v33 (#2191) changes which balance and price VALUES a parse yields,
         // and which of them error at all. `CostNumber`'s discriminants and
         // payload encodings are untouched, so the arrays below still pin them.
-        // v34 (#2194) changes which DIRECTIVES a parse yields -- a tagged
-        // `query` produces none -- not how a `CostNumber` is archived, so the
-        // byte arrays below still hold.
+        // v34 (#2194) changes which ERRORS a parse yields, not which
+        // directives -- the tagged `query` is still emitted, alongside a new
+        // diagnostic. Either way it is not how a `CostNumber` is archived, so
+        // the byte arrays below still hold.
         const FIXTURE_VERSION: u32 = 34;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
@@ -1350,8 +1359,9 @@ mod tests {
         // Tags and links are not `MetaValue`s, so the hash below is unchanged.
         // v33 (#2191) moves balance and price amounts, which are `Decimal`s on
         // the directive, not `MetaValue`s; the hash below is unchanged.
-        // v34 (#2194) drops a directive rather than changing a `MetaValue`;
-        // the hash below is unchanged.
+        // v34 (#2194) adds a syntax error to a tagged `query` and keeps the
+        // directive; no `MetaValue` is involved either way, so the hash below
+        // is unchanged.
         const FIXTURE_VERSION: u32 = 34;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";

@@ -2527,8 +2527,15 @@ fn balance_tolerance(
             .collect();
         group.groups(run_currency(&toks))
     };
+    // The tolerance is an EXPRESSION, not a number: `~ 0.005 + 0.005 USD` and
+    // `~ 0.005 * 2 USD` are both legal and both mean 0.010. Keeping only the
+    // first NUMBER -- which this did -- rewrote them as `~ 0.005 USD`, halving
+    // the tolerance. That reparsed cleanly and asserted something else, so
+    // `rledger format` could turn a passing ledger into a failing one with no
+    // diagnostic on either side. Same bug as #1944 in the parser's
+    // `extract_balance_tolerance`, which was fixed there and left here.
     let mut past_tilde = false;
-    let mut number: Option<String> = None;
+    let mut expr: Vec<String> = Vec::new();
     let mut currency: Option<String> = None;
     for el in node.children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
@@ -2541,16 +2548,36 @@ fn balance_tolerance(
             continue;
         }
         match t.kind() {
-            crate::SyntaxKind::NUMBER if number.is_none() => {
-                number = Some(canonical_number(t.text(), run_group).into_owned());
+            crate::SyntaxKind::NUMBER => {
+                expr.push(canonical_number(t.text(), run_group).into_owned());
             }
-            crate::SyntaxKind::CURRENCY if number.is_some() && currency.is_none() => {
+            crate::SyntaxKind::PLUS
+            | crate::SyntaxKind::MINUS
+            | crate::SyntaxKind::STAR
+            | crate::SyntaxKind::SLASH => expr.push(t.text().to_string()),
+            // Parens bind to their neighbors rather than taking spaces, so
+            // they are joined below rather than pushed as operands.
+            crate::SyntaxKind::L_PAREN => expr.push("(".to_string()),
+            crate::SyntaxKind::R_PAREN => expr.push(")".to_string()),
+            crate::SyntaxKind::CURRENCY if !expr.is_empty() && currency.is_none() => {
                 currency = Some(t.text().to_string());
             }
             _ => {}
         }
     }
-    number.map(|n| (n, currency))
+    if expr.is_empty() {
+        return None;
+    }
+    let mut rendered = String::new();
+    for (i, tok) in expr.iter().enumerate() {
+        let prev = i.checked_sub(1).and_then(|j| expr.get(j));
+        let needs_space = i > 0 && tok != ")" && prev.is_none_or(|p| p != "(");
+        if needs_space {
+            rendered.push(' ');
+        }
+        rendered.push_str(tok);
+    }
+    Some((rendered, currency))
 }
 
 // ---- Metadata --------------------------------------------------
@@ -5457,6 +5484,61 @@ mod tests {
             format_source(src),
             "no declared grouping must be byte-identical to the default path"
         );
+    }
+
+    /// Formatting must not change what a balance ASSERTS.
+    ///
+    /// The tolerance is an expression: `~ 0.005 + 0.005 USD` and
+    /// `~ 0.005 * 2 USD` both mean 0.010. `balance_tolerance` kept only the
+    /// first NUMBER and rewrote them as `~ 0.005 USD`, halving the tolerance.
+    /// The output reparsed cleanly and asserted something else, so `rledger
+    /// format` could turn a passing ledger into a failing one with nothing to
+    /// show for it -- the same truncation #1944 fixed in the parser and left
+    /// standing here.
+    ///
+    /// Asserted on the parsed TOLERANCE VALUE rather than the text, because a
+    /// text comparison would pass on any spelling that happens to round-trip
+    /// while still meaning something new.
+    #[test]
+    fn formatting_preserves_the_tolerance_value() {
+        for (src, want) in [
+            ("2024-01-15 balance Assets:C 1.00 ~ 0.01 USD\n", "0.01"),
+            (
+                "2024-01-15 balance Assets:C 1.00 ~ 0.005 + 0.005 USD\n",
+                "0.010",
+            ),
+            (
+                "2024-01-15 balance Assets:C 1.00 ~ (0.005 + 0.005) USD\n",
+                "0.010",
+            ),
+            (
+                "2024-01-15 balance Assets:C 1.00 ~ 0.005 * 2 USD\n",
+                "0.010",
+            ),
+        ] {
+            let tolerance = |text: &str| {
+                crate::parse(text)
+                    .directives
+                    .iter()
+                    .find_map(|d| match &d.value {
+                        rustledger_core::Directive::Balance(b) => Some(b.tolerance),
+                        _ => None,
+                    })
+                    .flatten()
+                    .map(|t| t.to_string())
+            };
+            assert_eq!(
+                tolerance(src).as_deref(),
+                Some(want),
+                "fixture itself must parse to {want}: {src}"
+            );
+            let formatted = format_source(src);
+            assert_eq!(
+                tolerance(&formatted).as_deref(),
+                Some(want),
+                "formatting changed the asserted tolerance\n  {src}  -> {formatted}"
+            );
+        }
     }
 
     /// `format` must not duplicate a balance tolerance.

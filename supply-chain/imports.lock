@@ -332,8 +332,8 @@ user-login = "philipc"
 user-name = "Philip Craig"
 
 [[publisher.flate2]]
-version = "1.1.9"
-when = "2026-02-03"
+version = "1.1.10"
+when = "2026-08-28"
 user-id = 980
 user-login = "Byron"
 user-name = "Sebastian Thiel"
@@ -1097,8 +1097,8 @@ when = "2026-07-20"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-encoder]]
-version = "0.257.1"
-when = "2026-08-19"
+version = "0.258.0"
+when = "2026-08-24"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasm-metadata]]
@@ -1123,8 +1123,8 @@ when = "2026-07-20"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmparser]]
-version = "0.257.1"
-when = "2026-08-19"
+version = "0.258.0"
+when = "2026-08-24"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmprinter]]
@@ -1208,13 +1208,13 @@ when = "2026-08-20"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wast]]
-version = "257.0.1"
-when = "2026-08-19"
+version = "258.0.0"
+when = "2026-08-24"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wat]]
-version = "1.257.1"
-when = "2026-08-19"
+version = "1.258.0"
+when = "2026-08-24"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wiggle]]

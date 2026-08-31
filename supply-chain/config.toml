@@ -463,6 +463,10 @@ criteria = "safe-to-deploy"
 version = "0.1.52"
 criteria = "safe-to-deploy"
 
+[[exemptions.miniz_oxide]]
+version = "0.9.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.mintex]]
 version = "0.1.4"
 criteria = "safe-to-deploy"

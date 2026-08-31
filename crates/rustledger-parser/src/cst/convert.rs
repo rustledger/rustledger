@@ -694,6 +694,17 @@ fn convert_query(
     errors: &mut Vec<crate::ParseError>,
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
+    // `query` was in neither camp: it did not keep tags and links the way a
+    // transaction, note or document does, and it did not refuse them the way
+    // the other seven directives do. So it took them and dropped them --
+    // `Query` has no field to put them in -- while the message the refusal
+    // arm emits states the very rule this omission broke.
+    //
+    // beancount rejects them: `2024-01-01 query "n" "SELECT date" #qtag`
+    // gives `syntax error, unexpected TAG, expecting end of file or EOL`
+    // (3.2.3), and its `Query` namedtuple is `(meta, date, name,
+    // query_string)` with nowhere to keep one either (#2194).
+    reject_tags_and_links(node.syntax(), "query", bom_offset, errors);
     let name = node.name()?.text_decoded()?;
     let query = node.query()?.text_decoded()?;
     let meta = convert_meta_entries(node.syntax());

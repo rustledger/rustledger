@@ -96,7 +96,10 @@ use crate::types::{Error, LedgerOptions};
 /// outright (#2191). Loader v33. Parser OUTPUT in both directions: a v17 blob
 /// holds a parse error where this build produces a balance, and a truncated
 /// 1.10 where this build produces an error.
-pub const CACHE_VERSION: u32 = 18;
+/// v19: a `query` carrying a tag or link is diagnosed instead of parsed with
+/// the tag silently discarded (#2194). Loader v34. Parser OUTPUT: a v18 blob
+/// holds a `Query` directive for input this build refuses.
+pub const CACHE_VERSION: u32 = 19;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -128,7 +131,7 @@ pub const CACHE_VERSION: u32 = 18;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 33;
+const LOADER_CACHE_VERSION_PIN: u32 = 34;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

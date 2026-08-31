@@ -161,6 +161,11 @@ fn every_directive_either_keeps_tags_or_refuses_them() {
         ("price", "2024-01-01 price USD 1.10 EUR"),
         ("balance", "2024-01-01 balance Assets:A 0 USD"),
         ("pad", "2024-01-01 pad Assets:A Equity:O"),
+        // Joined this set once beancount settled it: 3.2.3 answers
+        // `2024-01-01 query "n" "SELECT date" #qtag` with `syntax error,
+        // unexpected TAG`, and its `Query` namedtuple has no field for one
+        // either. It used to accept the tag and discard it (#2194).
+        ("query", "2024-01-01 query \"n\" \"SELECT date\""),
     ];
     for (name, header) in refuses {
         for sigil in ["#atag", "^alink"] {
@@ -177,25 +182,6 @@ fn every_directive_either_keeps_tags_or_refuses_them() {
         assert!(
             result.errors.is_empty(),
             "`{name}` broke without a tag: {:?}",
-            result.errors,
-        );
-    }
-
-    // `query` is in NEITHER set: it accepts a tag and drops it, because
-    // `Query` has no field to hold one. Pinned here as the current behavior
-    // rather than asserted as correct -- whether it should refuse (matching
-    // beancount's `Query`, which has no tags field) or keep them (as `note`
-    // now does) needs bean-check, which this test cannot run. See #2194.
-    //
-    // Written as an assertion so the day it changes, this fails and the
-    // census gets updated instead of quietly going stale.
-    for sigil in ["#atag", "^alink"] {
-        let src = format!("2024-01-01 query \"n\" \"SELECT date\" {sigil}\n");
-        let result = rustledger_parser::parse(&src);
-        assert!(
-            result.errors.is_empty(),
-            "`query` now diagnoses {sigil} -- good, but update this census \
-             and #2194: {:?}",
             result.errors,
         );
     }

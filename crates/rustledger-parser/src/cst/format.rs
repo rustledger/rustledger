@@ -2568,14 +2568,22 @@ fn balance_tolerance(
     if expr.is_empty() {
         return None;
     }
+    // A `+`/`-` is UNARY when nothing that can end an operand precedes it, and
+    // a unary sign binds to its number: `~ -0.01`, not `~ - 0.01`. The amount
+    // on the same line already renders `-1.00` tight, so spacing it here made
+    // one directive disagree with itself (`-1.00 ~ - 0.01 USD`).
+    let ends_operand = |t: &str| t == ")" || t.starts_with(|c: char| c.is_ascii_digit());
     let mut rendered = String::new();
+    let mut tight_next = false;
     for (i, tok) in expr.iter().enumerate() {
         let prev = i.checked_sub(1).and_then(|j| expr.get(j));
-        let needs_space = i > 0 && tok != ")" && prev.is_none_or(|p| p != "(");
+        let unary = matches!(tok.as_str(), "+" | "-") && prev.is_none_or(|p| !ends_operand(p));
+        let needs_space = i > 0 && tok != ")" && !tight_next && prev.is_none_or(|p| p != "(");
         if needs_space {
             rendered.push(' ');
         }
         rendered.push_str(tok);
+        tight_next = unary;
     }
     Some((rendered, currency))
 }
@@ -4098,7 +4106,23 @@ mod tests {
                 formatted.contains(link),
                 "formatter dropped {link}\n{formatted}"
             );
+            // Every one of these is already canonical, so formatting must be a
+            // no-op on the text too. Without this the value assertion above
+            // would accept any spelling that happens to evaluate the same.
+            assert_eq!(formatted, src, "already-canonical input was rewritten");
         }
+
+        // A unary sign binds to its number; a binary one keeps its spaces.
+        // Rendering `~ - 0.01` evaluates the same but makes one directive
+        // disagree with itself, since the amount renders `-1.00` tight.
+        assert_eq!(
+            format_source("2024-01-15 balance Assets:C -1.00 ~ -0.01 USD\n"),
+            "2024-01-15 balance Assets:C -1.00 ~ -0.01 USD\n",
+        );
+        assert_eq!(
+            format_source("2024-01-15 balance Assets:C 1.00 ~ (-0.005 + 0.015) USD\n"),
+            "2024-01-15 balance Assets:C 1.00 ~ (-0.005 + 0.015) USD\n",
+        );
     }
 
     #[test]
@@ -5515,6 +5539,17 @@ mod tests {
                 "2024-01-15 balance Assets:C 1.00 ~ 0.005 * 2 USD\n",
                 "0.010",
             ),
+            // main dropped this MINUS entirely, so `~ -0.01` formatted to
+            // `~ 0.01` -- a second changed value in the same function.
+            ("2024-01-15 balance Assets:C 1.00 ~ -0.01 USD\n", "-0.01"),
+            (
+                "2024-01-15 balance Assets:C 1.00 ~ 0.02 - 0.01 USD\n",
+                "0.01",
+            ),
+            (
+                "2024-01-15 balance Assets:C 1.00 ~ -0.005 + 0.015 USD\n",
+                "0.010",
+            ),
         ] {
             let tolerance = |text: &str| {
                 crate::parse(text)
@@ -5538,6 +5573,13 @@ mod tests {
                 Some(want),
                 "formatting changed the asserted tolerance\n  {src}  -> {formatted}"
             );
+            // Every one of these is already canonical, so formatting must be a
+            // no-op on the TEXT too. Without this the value assertions accept
+            // any spelling that happens to evaluate the same -- and one did:
+            // rendering a unary minus as `~ - 0.01` keeps the value and makes
+            // the directive disagree with itself, since the amount on the same
+            // line renders `-1.00` tight.
+            assert_eq!(formatted, src, "already-canonical input was rewritten");
         }
     }
 

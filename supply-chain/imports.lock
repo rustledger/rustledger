@@ -1101,6 +1101,11 @@ version = "0.257.1"
 when = "2026-08-19"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
+[[publisher.wasm-encoder]]
+version = "0.258.0"
+when = "2026-08-24"
+trusted-publisher = "github:bytecodealliance/wasm-tools"
+
 [[publisher.wasm-metadata]]
 version = "0.236.0"
 when = "2025-07-28"
@@ -1110,6 +1115,11 @@ user-login = "wasmtime-publish"
 [[publisher.wasm-metadata]]
 version = "0.254.0"
 when = "2026-07-20"
+trusted-publisher = "github:bytecodealliance/wasm-tools"
+
+[[publisher.wasm-metadata]]
+version = "0.258.0"
+when = "2026-08-24"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmparser]]
@@ -1125,6 +1135,11 @@ trusted-publisher = "github:bytecodealliance/wasm-tools"
 [[publisher.wasmparser]]
 version = "0.257.1"
 when = "2026-08-19"
+trusted-publisher = "github:bytecodealliance/wasm-tools"
+
+[[publisher.wasmparser]]
+version = "0.258.0"
+when = "2026-08-24"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmprinter]]
@@ -1348,8 +1363,8 @@ when = "2026-04-17"
 trusted-publisher = "github:bytecodealliance/wit-bindgen"
 
 [[publisher.wit-bindgen]]
-version = "0.60.0"
-when = "2026-07-22"
+version = "0.61.1"
+when = "2026-08-25"
 trusted-publisher = "github:bytecodealliance/wit-bindgen"
 
 [[publisher.wit-bindgen-core]]
@@ -1358,8 +1373,8 @@ when = "2026-01-12"
 trusted-publisher = "github:bytecodealliance/wit-bindgen"
 
 [[publisher.wit-bindgen-core]]
-version = "0.60.0"
-when = "2026-07-22"
+version = "0.61.1"
+when = "2026-08-25"
 trusted-publisher = "github:bytecodealliance/wit-bindgen"
 
 [[publisher.wit-bindgen-rust]]
@@ -1368,8 +1383,8 @@ when = "2026-01-12"
 trusted-publisher = "github:bytecodealliance/wit-bindgen"
 
 [[publisher.wit-bindgen-rust]]
-version = "0.60.0"
-when = "2026-07-22"
+version = "0.61.1"
+when = "2026-08-25"
 trusted-publisher = "github:bytecodealliance/wit-bindgen"
 
 [[publisher.wit-bindgen-rust-macro]]
@@ -1378,8 +1393,8 @@ when = "2026-01-12"
 trusted-publisher = "github:bytecodealliance/wit-bindgen"
 
 [[publisher.wit-bindgen-rust-macro]]
-version = "0.60.0"
-when = "2026-07-22"
+version = "0.61.1"
+when = "2026-08-25"
 trusted-publisher = "github:bytecodealliance/wit-bindgen"
 
 [[publisher.wit-component]]
@@ -1392,6 +1407,11 @@ version = "0.254.0"
 when = "2026-07-20"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
+[[publisher.wit-component]]
+version = "0.258.0"
+when = "2026-08-24"
+trusted-publisher = "github:bytecodealliance/wasm-tools"
+
 [[publisher.wit-parser]]
 version = "0.244.0"
 when = "2026-01-06"
@@ -1400,6 +1420,11 @@ trusted-publisher = "github:bytecodealliance/wasm-tools"
 [[publisher.wit-parser]]
 version = "0.254.0"
 when = "2026-07-20"
+trusted-publisher = "github:bytecodealliance/wasm-tools"
+
+[[publisher.wit-parser]]
+version = "0.258.0"
+when = "2026-08-24"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.witx]]

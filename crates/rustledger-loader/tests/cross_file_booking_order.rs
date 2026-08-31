@@ -19,7 +19,7 @@
 //! | second, first | -10.00 | -10.00 |
 //!
 //! beancount is invariant because it re-sorts by line number; ours tracks how
-//! the ledger was assembled. Neither errors or warns.
+//! the ledger was assembled. Neither errors nor warns.
 //!
 //! We keep include order deliberately. Comparing a line number from one file
 //! against a line number from a different file is not a fact about the ledger:

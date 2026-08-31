@@ -124,7 +124,7 @@ Selling one unit at 30.00:
 
 Swapping the two `include` lines pins each rule down: beancount is invariant
 and reports -10.00 either way; rustledger tracks include order and reports
--20.00 in one arrangement, -10.00 in the other. Neither errors or warns.
+-20.00 in one arrangement, -10.00 in the other. Neither errors nor warns.
 
 This one is deliberate. Ordering two directives by comparing a line number from
 one file against a line number from a different file is not a fact about the

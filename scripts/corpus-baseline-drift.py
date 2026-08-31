@@ -57,6 +57,20 @@ CORPUS_ROOT = "tests/compatibility/files"
 CORPUS_SLACK = 50
 
 
+def fetch_failures() -> int | None:
+    """How many repository clones failed during the last fetch.
+
+    `None` when the marker is absent, which means the corpus on disk did not
+    come from a run of `fetch-compat-test-files.sh` that knows how to record
+    it -- an older script, or a corpus assembled some other way.
+    """
+    try:
+        with open(f"{CORPUS_ROOT}/.fetch-failures", encoding="utf-8") as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def corpus_size() -> int:
     """Count `.beancount` files the way the baseline test discovers them."""
     n = 0
@@ -305,6 +319,38 @@ def self_test() -> int:
     if any(classify("+# regenerated\n").values()):
         failures.append("comment lines must not count as drift")
 
+    # The fetch-failure marker, which decides whether "this file is gone" is
+    # a fact or a guess.
+    import tempfile
+
+    real_root = globals()["CORPUS_ROOT"]
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            globals()["CORPUS_ROOT"] = d
+            if fetch_failures() is not None:
+                failures.append("a missing marker must read as None, not 0")
+            with open(f"{d}/.fetch-failures", "w", encoding="utf-8") as fh:
+                fh.write("0\n")
+            if fetch_failures() != 0:
+                failures.append("a clean fetch must read as 0")
+            with open(f"{d}/.fetch-failures", "w", encoding="utf-8") as fh:
+                fh.write("4\n")
+            if fetch_failures() != 4:
+                failures.append("a failed fetch must read its count back")
+            with open(f"{d}/.fetch-failures", "w", encoding="utf-8") as fh:
+                fh.write("not a number\n")
+            if fetch_failures() is not None:
+                failures.append("garbage in the marker must read as None")
+    finally:
+        globals()["CORPUS_ROOT"] = real_root
+
+    # None and 0 must behave the same at the use site (report everything), and
+    # both differ from a non-zero count. `if failures:` is what does that, so
+    # pin it: `None` is falsy and 0 is falsy, 4 is not.
+    for value, suppress in ((None, False), (0, False), (1, True), (4, True)):
+        if bool(value) != suppress:
+            failures.append(f"marker {value!r} must {'' if suppress else 'not '}suppress")
+
     # The partial-fetch guard, which is the difference between reporting
     # drift and inventing it. Fresh-fetching into an empty checkout means a
     # tolerated clone failure looks exactly like an upstream deletion.
@@ -458,6 +504,36 @@ def main() -> int:
 
     regenerate()
     groups = classify(manifest_diff())
+
+    # A failed clone leaves files missing that still exist upstream, and they
+    # are indistinguishable here from files upstream actually deleted. It can
+    # only produce a false "removed" -- a clone that did not happen cannot
+    # invent a new file or change a hash -- so drop exactly that group rather
+    # than the whole report.
+    #
+    # The file-count slack cannot substitute for this. The first live run
+    # fetched 734 of 735 with 4 clone failures -- one file short, nowhere near
+    # the 50-file floor -- and reported three deletions. A later complete
+    # fetch found all three present, and also lacked the two files that run
+    # called new, so upstream moved in between and the report cannot be
+    # adjudicated either way now.
+    #
+    # That is the argument, not a caveat to it: after the fact there is no way
+    # to tell a clone that failed from a file that was deleted. The marker is
+    # the only moment the difference is knowable, so it is recorded there and
+    # read here.
+    failures = fetch_failures()
+    if failures:
+        dropped = len(groups["removed"])
+        groups["removed"] = []
+        if dropped:
+            print(
+                f"{failures} clone(s) failed during the fetch; suppressing "
+                f"{dropped} 'file is gone' entr"
+                f"{'y' if dropped == 1 else 'ies'} that may just be missing.",
+                file=sys.stderr,
+            )
+
     drifted = any(groups.values())
 
     if args.dry_run:

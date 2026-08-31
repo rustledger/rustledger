@@ -367,6 +367,12 @@ fi
 
 echo ""
 echo "Total: $total beancount files"
+# Record the count where a later step can read it. A consumer that regenerates
+# the baseline needs to know the corpus is incomplete: files missing because a
+# clone failed are indistinguishable, by inspection alone, from files deleted
+# upstream, and reporting the first as the second is a confident lie.
+echo "$FETCH_FAILURES" > "$DEST/.fetch-failures"
+
 if [ "$FETCH_FAILURES" -gt 0 ]; then
   echo "Note: $FETCH_FAILURES repository clone(s) failed (under the abort threshold of $MAX_FETCH_FAILURES). The corpus may be slightly smaller than usual."
 fi

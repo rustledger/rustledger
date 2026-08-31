@@ -489,12 +489,20 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     WITHOUT this bump and 2 WITH it. The bump is what surfaces the
 ///     diagnostic.
 ///
+/// v35: a balance tolerance whose currency disagrees with the amount's, or
+///     which carries a second juxtaposed number, is diagnosed instead of
+///     read in part and discarded in part (#2193). Like v34 the DIRECTIVE is
+///     unchanged and the error list is what moves — and like v34 that is
+///     enough, because such a file used to parse clean and was therefore
+///     cacheable, so replaying its v34 blob skips the parse that now
+///     complains.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 34;
+pub const CACHE_VERSION: u32 = 35;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1248,7 +1256,9 @@ mod tests {
         // directives -- the tagged `query` is still emitted, alongside a new
         // diagnostic. Either way it is not how a `CostNumber` is archived, so
         // the byte arrays below still hold.
-        const FIXTURE_VERSION: u32 = 34;
+        // v35 (#2193) is the same shape for balance tolerances: new errors,
+        // same archived `CostNumber` encoding.
+        const FIXTURE_VERSION: u32 = 35;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1362,7 +1372,9 @@ mod tests {
         // v34 (#2194) adds a syntax error to a tagged `query` and keeps the
         // directive; no `MetaValue` is involved either way, so the hash below
         // is unchanged.
-        const FIXTURE_VERSION: u32 = 34;
+        // v35 (#2193) likewise adds errors on a balance tolerance and touches
+        // no `MetaValue`; the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 35;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

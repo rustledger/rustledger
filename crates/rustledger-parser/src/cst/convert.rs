@@ -878,6 +878,7 @@ fn convert_balance(
         })?;
     let currency = Currency::new(node.currency()?.text());
     let amount = Amount::new(number, currency);
+    check_balance_tolerance(node.syntax(), bom_offset, errors);
     let tolerance = extract_balance_tolerance(node.syntax());
     let meta = convert_meta_entries(node.syntax());
 
@@ -890,6 +891,101 @@ fn convert_balance(
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Balance(balance), span))
+}
+
+/// Diagnose a tolerance clause that says something the model cannot keep.
+///
+/// beancount's grammar is `NUMBER ~ NUMBER CURRENCY` — one currency, trailing —
+/// and rejects any currency before the `~`. We are deliberately laxer in one
+/// direction and stricter in another, on a single rule: **accept what has
+/// exactly one meaning, diagnose what has none or contradicts itself.**
+///
+/// - `1.00 USD ~ 0.01 USD` is ACCEPTED, though beancount calls it a syntax
+///   error. The currency is stated twice and agrees, so there is one reading;
+///   it canonicalizes to `1.00 ~ 0.01 USD` losslessly. Rejecting it would
+///   refuse a file whose meaning is not in doubt.
+/// - `1.00 USD ~ 0.01 EUR` is DIAGNOSED. A tolerance denominated in a
+///   different currency than the amount is not redundancy, it is an
+///   assertion the model has no field for — and `rledger format` used to
+///   erase the EUR from the file on its way past.
+/// - `1.00 ~ 0.001 0.02 USD` is DIAGNOSED. Two juxtaposed numbers with no
+///   operator have no reading at all; this took the first and dropped the
+///   rest silently. (`~ 0.005 + 0.005` is arithmetic and still evaluates.)
+///
+/// Recorded as a deliberate divergence in `docs/reference/compatibility.md`
+/// (#2193).
+fn check_balance_tolerance(
+    node: &crate::SyntaxNode,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) {
+    let toks: Vec<crate::SyntaxToken> = node
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .filter(|t| !is_trivia_kind(t.kind()))
+        .collect();
+    let Some(tilde) = toks
+        .iter()
+        .position(|t| t.kind() == crate::SyntaxKind::TILDE)
+    else {
+        return;
+    };
+    let (head, tail) = toks.split_at(tilde);
+    let tail = &tail[1..];
+
+    let currency_of = |ts: &[crate::SyntaxToken]| {
+        ts.iter()
+            .find(|t| t.kind() == crate::SyntaxKind::CURRENCY)
+            .cloned()
+    };
+    if let (Some(before), Some(after)) = (currency_of(head), currency_of(tail))
+        && before.text() != after.text()
+    {
+        let range = after.text_range();
+        let start: u32 = range.start().into();
+        let end: u32 = range.end().into();
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(format!(
+                "a balance tolerance must be in the same currency as the amount: \
+                 the amount is {} and the tolerance is {}. Drop the second \
+                 currency, or correct it",
+                before.text(),
+                after.text(),
+            )),
+            Span::new((start + bom_offset) as usize, (end + bom_offset) as usize),
+        ));
+    }
+
+    // Numbers in the tolerance region, i.e. before its trailing CURRENCY.
+    let region: Vec<&crate::SyntaxToken> = tail
+        .iter()
+        .take_while(|t| t.kind() != crate::SyntaxKind::CURRENCY)
+        .collect();
+    let numbers = region
+        .iter()
+        .filter(|t| t.kind() == crate::SyntaxKind::NUMBER)
+        .count();
+    let owned: Vec<crate::SyntaxToken> = region.iter().map(|t| (*t).clone()).collect();
+    if numbers > 1
+        && cost_region_value(&owned).is_none()
+        && let Some(second) = region
+            .iter()
+            .filter(|t| t.kind() == crate::SyntaxKind::NUMBER)
+            .nth(1)
+    {
+        let range = second.text_range();
+        let start: u32 = range.start().into();
+        let end: u32 = range.end().into();
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(
+                "a balance tolerance takes one number, or an arithmetic \
+                 expression. Two numbers side by side have no reading, and the \
+                 second was being discarded"
+                    .to_string(),
+            ),
+            Span::new((start + bom_offset) as usize, (end + bom_offset) as usize),
+        ));
+    }
 }
 
 /// Balance directives may include an explicit tolerance via a

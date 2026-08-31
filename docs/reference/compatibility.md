@@ -89,7 +89,43 @@ Rustledger shows:        111.11 USD
 
 This is a display-only difference - actual values are identical. Rustledger preserves the original precision, which is technically more accurate.
 
-### 6. Cross-File Booking Order
+### 6. Balance Tolerance Grammar
+
+Beancount's tolerance grammar is `NUMBER ~ NUMBER CURRENCY` — one currency,
+trailing — and it rejects any currency written before the `~`. Rustledger
+differs in both directions, on one rule: **accept what has exactly one meaning,
+diagnose what has none or contradicts itself.**
+
+| form | beancount 3.2.3 | rustledger |
+|---|---|---|
+| `1.00 ~ 0.01 USD` | ok | ok |
+| `0.25 + 0.75 ~ 0.01 USD` | ok | ok |
+| `1.00 ~ 0.005 + 0.005 USD` | ok | ok |
+| `1.00 USD ~ 0.01 USD` | syntax error | **accepted** |
+| `0.25 + 0.75 USD ~ 0.01 USD` | syntax error | **accepted** |
+| `1.00 USD ~ 0.01 EUR` | syntax error | **diagnosed** |
+| `1.00 ~ 0.001 0.02 USD` | syntax error | **diagnosed** |
+
+**Laxer, deliberately.** `1.00 USD ~ 0.01 USD` states the currency twice and
+agrees with itself. There is one reading, and `rledger format` canonicalizes it
+to `1.00 ~ 0.01 USD` losslessly, so refusing it would reject a file whose
+meaning is not in doubt.
+
+**Stricter, deliberately.** The other two are not redundancy. A tolerance
+denominated in a currency the amount does not use asserts something the model
+has no field for, and a second juxtaposed number has no reading at all. Both
+used to be accepted, read in part, and the remainder discarded without a word —
+and `rledger format` then wrote that loss back to the file, turning
+`1.00 USD ~ 0.01 EUR` into `1.00 ~ 0.01 USD`.
+
+**Portability note.** A file using the accepted-but-non-standard spelling loads
+in rustledger and is a syntax error in beancount and tools built on it. Prefer
+the single trailing currency if the file needs to load elsewhere.
+
+Pinned by `balance_tolerance_accepts_one_reading_and_diagnoses_none`, whose
+table records what beancount does for each row (issue #2193).
+
+### 7. Cross-File Booking Order
 
 Directives sharing a date and type keep the order they were parsed in. Within
 one file that matches Python's `(date, type_priority, lineno)`. Across

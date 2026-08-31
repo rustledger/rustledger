@@ -103,7 +103,11 @@ use crate::types::{Error, LedgerOptions};
 /// therefore cacheable, and replaying its blob skips the parse that now
 /// complains. Verified against a pre-#2194 binary's cache: 0 errors without
 /// this bump, 2 with it.
-pub const CACHE_VERSION: u32 = 19;
+/// v20: a balance tolerance in a currency the amount does not use, or
+/// carrying a second juxtaposed number, is diagnosed rather than partly read
+/// and partly discarded (#2193). Loader v35. Same shape as v19: the archived
+/// directive is identical and the diagnostic is what a stale blob would hide.
+pub const CACHE_VERSION: u32 = 20;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -135,7 +139,7 @@ pub const CACHE_VERSION: u32 = 19;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 34;
+const LOADER_CACHE_VERSION_PIN: u32 = 35;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

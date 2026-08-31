@@ -215,6 +215,75 @@ fn every_directive_either_keeps_tags_or_refuses_them() {
     }
 }
 
+#[test]
+fn balance_tolerance_accepts_one_reading_and_diagnoses_none() {
+    // beancount's grammar is `NUMBER ~ NUMBER CURRENCY` -- one currency,
+    // trailing -- and it rejects any currency before the `~`. We differ in
+    // both directions on one rule: accept what has exactly one meaning,
+    // diagnose what has none or contradicts itself (#2193).
+    //
+    // Every row below was checked against beancount 3.2.3; the `bc` column
+    // records what it does, so a future reader can see which way each row
+    // diverges and why.
+    let cases: &[(&str, bool, &str)] = &[
+        // form, accepted by us, what beancount does
+        ("1.00 USD", true, "ok"),
+        ("1.00 ~ 0.01 USD", true, "ok"),
+        ("0.25 + 0.75 ~ 0.01 USD", true, "ok"),
+        ("(0.25 + 0.75) ~ 0.01 USD", true, "ok"),
+        ("1.00 ~ 0.005 + 0.005 USD", true, "ok"),
+        ("1.00 ~ 0.005 * 2 USD", true, "ok"),
+        // Laxer than beancount ON PURPOSE: the currency is stated twice and
+        // agrees, so there is one reading, and it canonicalizes to
+        // `1.00 ~ 0.01 USD` losslessly.
+        ("1.00 USD ~ 0.01 USD", true, "syntax error"),
+        ("0.25 + 0.75 USD ~ 0.01 USD", true, "syntax error"),
+        // Stricter than we used to be: these say something unkeepable and
+        // were being read in part and discarded in part.
+        ("1.00 USD ~ 0.01 EUR", false, "syntax error"),
+        ("1.00 ~ 0.001 0.02 USD", false, "syntax error"),
+    ];
+
+    for (form, accepted, bc) in cases {
+        let src = format!("2024-01-15 balance Assets:C {form}\n");
+        let result = rustledger_parser::parse(&src);
+        assert_eq!(
+            result.errors.is_empty(),
+            *accepted,
+            "`{form}` (beancount: {bc}) -- errors were {:?}",
+            result.errors,
+        );
+    }
+
+    // The accepted redundant form must mean exactly what the canonical one
+    // means, or "one reading" is not true.
+    let redundant = rustledger_parser::parse("2024-01-15 balance Assets:C 1.00 USD ~ 0.01 USD\n");
+    let canonical = rustledger_parser::parse("2024-01-15 balance Assets:C 1.00 ~ 0.01 USD\n");
+    let bal = |r: &rustledger_parser::ParseResult| {
+        r.directives
+            .iter()
+            .find_map(|d| match &d.value {
+                Directive::Balance(b) => Some((b.amount.clone(), b.tolerance)),
+                _ => None,
+            })
+            .expect("a balance")
+    };
+    assert_eq!(
+        bal(&redundant),
+        bal(&canonical),
+        "the redundant spelling must parse to the same amount and tolerance",
+    );
+
+    // And a tolerance that is arithmetic still evaluates, so the new check
+    // does not catch the multi-number case it is supposed to allow.
+    let arith = rustledger_parser::parse("2024-01-15 balance Assets:C 1.00 ~ 0.005 + 0.005 USD\n");
+    assert_eq!(
+        bal(&arith).1,
+        Some(dec_str("0.010")),
+        "`~ 0.005 + 0.005` must evaluate, not be rejected as two numbers",
+    );
+}
+
 fn dec_str(s: &str) -> rustledger_core::Decimal {
     s.parse().expect("test decimal")
 }

@@ -956,6 +956,23 @@ fn check_balance_tolerance(
         ));
     }
 
+    // A second `~` is its own mistake and deserves its own sentence. Without
+    // this it fell into the juxtaposed-numbers arm below, whose message says
+    // the numbers are "side by side" when a tilde sits between them --
+    // a diagnostic describing input the author did not write.
+    if let Some(extra) = tail.iter().find(|t| t.kind() == crate::SyntaxKind::TILDE) {
+        let range = extra.text_range();
+        let start: u32 = range.start().into();
+        let end: u32 = range.end().into();
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(
+                "a balance takes one tolerance: `AMOUNT ~ TOLERANCE CURRENCY`".to_string(),
+            ),
+            Span::new((start + bom_offset) as usize, (end + bom_offset) as usize),
+        ));
+        return;
+    }
+
     // Numbers in the tolerance region, i.e. before its trailing CURRENCY.
     let region: Vec<&crate::SyntaxToken> = tail
         .iter()

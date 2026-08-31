@@ -105,6 +105,8 @@ diagnose what has none or contradicts itself.**
 | `0.25 + 0.75 USD ~ 0.01 USD` | syntax error | **accepted** |
 | `1.00 USD ~ 0.01 EUR` | syntax error | **diagnosed** |
 | `1.00 ~ 0.001 0.02 USD` | syntax error | **diagnosed** |
+| `1.00 ~ 0.01 ~ 0.02 USD` | syntax error | **diagnosed** |
+| `1.00 USD ~ 0.01` | syntax error | **accepted** |
 
 **Laxer, deliberately.** `1.00 USD ~ 0.01 USD` states the currency twice and
 agrees with itself. There is one reading, and `rledger format` canonicalizes it
@@ -117,6 +119,11 @@ has no field for, and a second juxtaposed number has no reading at all. Both
 used to be accepted, read in part, and the remainder discarded without a word —
 and `rledger format` then wrote that loss back to the file, turning
 `1.00 USD ~ 0.01 EUR` into `1.00 ~ 0.01 USD`.
+
+`1.00 USD ~ 0.01` follows from the same rule: the currency is stated once and
+the tolerance inherits it, so there is one reading. Each rejection is diagnosed
+for its own reason rather than a generic one — a second `~` is reported as a
+second tolerance, not as juxtaposed numbers.
 
 **Portability note.** A file using the accepted-but-non-standard spelling loads
 in rustledger and is a syntax error in beancount and tools built on it. Prefer

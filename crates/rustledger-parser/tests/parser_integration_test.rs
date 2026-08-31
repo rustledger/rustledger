@@ -242,6 +242,7 @@ fn balance_tolerance_accepts_one_reading_and_diagnoses_none() {
         // were being read in part and discarded in part.
         ("1.00 USD ~ 0.01 EUR", false, "syntax error"),
         ("1.00 ~ 0.001 0.02 USD", false, "syntax error"),
+        ("1.00 ~ 0.01 ~ 0.02 USD", false, "syntax error"),
     ];
 
     for (form, accepted, bc) in cases {
@@ -272,6 +273,35 @@ fn balance_tolerance_accepts_one_reading_and_diagnoses_none() {
         bal(&redundant),
         bal(&canonical),
         "the redundant spelling must parse to the same amount and tolerance",
+    );
+
+    // Each rejection must be diagnosed for the RIGHT reason. The second
+    // tilde used to fall into the juxtaposed-numbers arm, whose message
+    // says the numbers are "side by side" when a `~` sits between them.
+    let msg_for = |form: &str| {
+        rustledger_parser::parse(&format!("2024-01-15 balance Assets:C {form}\n"))
+            .errors
+            .iter()
+            .find_map(|e| match &e.kind {
+                rustledger_parser::ParseErrorKind::SyntaxError(m) => Some(m.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    assert!(
+        msg_for("1.00 USD ~ 0.01 EUR").contains("same currency as the amount"),
+        "currency mismatch must say so: {}",
+        msg_for("1.00 USD ~ 0.01 EUR"),
+    );
+    assert!(
+        msg_for("1.00 ~ 0.001 0.02 USD").contains("Two numbers side by side"),
+        "juxtaposed numbers must say so: {}",
+        msg_for("1.00 ~ 0.001 0.02 USD"),
+    );
+    assert!(
+        msg_for("1.00 ~ 0.01 ~ 0.02 USD").contains("one tolerance"),
+        "a second tilde must say so, not blame juxtaposed numbers: {}",
+        msg_for("1.00 ~ 0.01 ~ 0.02 USD"),
     );
 
     // And a tolerance that is arithmetic still evaluates, so the new check

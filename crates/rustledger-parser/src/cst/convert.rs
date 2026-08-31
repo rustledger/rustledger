@@ -1000,6 +1000,23 @@ fn check_balance_tolerance(
         .iter()
         .filter(|t| t.kind() == crate::SyntaxKind::NUMBER)
         .count();
+
+    // A `~` with nothing after it announces a tolerance that is not there.
+    // It was accepted as though unwritten, and `rledger format` then deleted
+    // the tilde -- the same erase-the-difference behavior as the mismatched
+    // currency. beancount calls it a syntax error.
+    if numbers == 0 {
+        let range = toks[tilde].text_range();
+        let start: u32 = range.start().into();
+        let end: u32 = range.end().into();
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(
+                "a `~` must be followed by a tolerance: `AMOUNT ~ TOLERANCE CURRENCY`".to_string(),
+            ),
+            Span::new((start + bom_offset) as usize, (end + bom_offset) as usize),
+        ));
+        return None;
+    }
     // Stay quiet unless the region is made only of things an expression can
     // contain. On `~ .005 + .005` the lexer already reports the real problem
     // (a number with no integer part, which we reject and beancount accepts)

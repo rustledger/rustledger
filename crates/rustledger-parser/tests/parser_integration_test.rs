@@ -305,6 +305,10 @@ fn balance_tolerance_accepts_one_reading_and_diagnoses_none() {
         ("1.00 USD ~ 0.01 EUR", false, "syntax error"),
         ("1.00 ~ 0.001 0.02 USD", false, "syntax error"),
         ("1.00 ~ 0.01 ~ 0.02 USD", false, "syntax error"),
+        // A `~` announcing a tolerance that is not there. Accepted as though
+        // unwritten, and `rledger format` then deleted the tilde.
+        ("1.00 USD ~", false, "syntax error"),
+        ("1.00 ~ USD", false, "syntax error"),
     ];
 
     for (form, accepted, bc) in cases {
@@ -359,6 +363,11 @@ fn balance_tolerance_accepts_one_reading_and_diagnoses_none() {
         msg_for("1.00 ~ 0.001 0.02 USD").contains("Two numbers side by side"),
         "juxtaposed numbers must say so: {}",
         msg_for("1.00 ~ 0.001 0.02 USD"),
+    );
+    assert!(
+        msg_for("1.00 USD ~").contains("must be followed by a tolerance"),
+        "a dangling tilde must say so: {}",
+        msg_for("1.00 USD ~"),
     );
     assert!(
         msg_for("1.00 ~ 0.01 ~ 0.02 USD").contains("one tolerance"),

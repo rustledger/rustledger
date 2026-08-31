@@ -107,6 +107,7 @@ diagnose what has none or contradicts itself.**
 | `1.00 ~ 0.001 0.02 USD` | syntax error | **diagnosed** |
 | `1.00 ~ 0.01 ~ 0.02 USD` | syntax error | **diagnosed** |
 | `1.00 USD ~ 0.01` | syntax error | **accepted** |
+| `1.00 USD ~` | syntax error | **diagnosed** |
 
 **Laxer, deliberately.** `1.00 USD ~ 0.01 USD` states the currency twice and
 agrees with itself. There is one reading, and `rledger format` canonicalizes it

@@ -89,6 +89,57 @@ Rustledger shows:        111.11 USD
 
 This is a display-only difference - actual values are identical. Rustledger preserves the original precision, which is technically more accurate.
 
+### 6. Cross-File Booking Order
+
+Directives sharing a date and type keep the order they were parsed in. Within
+one file that matches Python's `(date, type_priority, lineno)`. Across
+`include`s it does not, and the difference shows up in reported gains.
+
+Python compares `lineno` values taken from different files, so a directive on
+line 1 of a file included second sorts ahead of one on line 5 of a file
+included first. Rustledger keeps include order: everything from the first
+included file, in its own order, then the second.
+
+Two same-date lots therefore enter the inventory in different orders, and a
+FIFO sale whose lot-date comparison ties falls through to that order:
+
+```beancount
+; first.beancount, included FIRST, buy on line 5
+2024-06-01 * "buy-at-10"
+  Assets:S      1 HOOL {10.00 USD}
+  Assets:Cash            -10.00 USD
+
+; second.beancount, included SECOND, buy on line 1
+2024-06-01 * "buy-at-20"
+  Assets:S      1 HOOL {20.00 USD}
+  Assets:Cash            -20.00 USD
+```
+
+Selling one unit at 30.00:
+
+| | lot consumed | `Income:Gains` |
+|---|---|---|
+| beancount 3.2.3 | 20.00 | -10.00 USD |
+| rustledger | 10.00 | -20.00 USD |
+
+Swapping the two `include` lines pins each rule down: beancount is invariant
+and reports -10.00 either way; rustledger tracks include order and reports
+-20.00 in one arrangement, -10.00 in the other. Neither errors or warns.
+
+This one is deliberate. Ordering two directives by comparing a line number from
+one file against a line number from a different file is not a fact about the
+ledger -- adding a comment to one file silently changes which lot a sale in
+another file consumes. Include order at least reflects how the author assembled
+the ledger. Beancount's rule is not purely line-number driven either:
+directives sharing a line number across files fall back to include order
+through its own stable sort.
+
+Ledgers that need a specific lot should name it (`{10.00 USD, 2024-06-01}`, or
+a label) rather than relying on either tiebreak.
+
+Fixture: `tests/fixtures/cross-file-order/`. Pinned by
+`cross_file_same_date_directives_keep_include_order` (issue #2149).
+
 ## BQL Query Compatibility
 
 BQL (Beancount Query Language) compatibility was tested with 11 standard queries on 50 files:

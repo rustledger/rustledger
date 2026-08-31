@@ -648,9 +648,35 @@ impl Directive {
 
 /// Sort directives by date, then type priority.
 ///
-/// This is a stable sort, so directives sharing a date and type keep their
-/// file order — which is the order they are booked in, matching Python's
-/// `(date, type_priority, lineno)`.
+/// This is a stable sort, so directives sharing a date and type keep the
+/// order they were parsed in, which is the order they are booked in.
+///
+/// **Within one file that matches Python's `(date, type_priority, lineno)`.
+/// Across `include`s it deliberately does not**, and the difference is
+/// observable in reported gains rather than merely cosmetic.
+///
+/// Python compares `lineno` values taken from different files, so a directive
+/// on line 1 of a file included second sorts ahead of one on line 5 of a file
+/// included first. This sort keeps include order: everything from the first
+/// included file, in its own order, then the second.
+///
+/// Two same-date lots therefore enter the inventory in different orders under
+/// the two rules, and a FIFO sale whose lot-date comparison ties falls through
+/// to that order. Measured against beancount 3.2.3 on the fixture in
+/// `tests/fixtures/cross-file-order/` — one buy at 10.00 on line 5 of the
+/// first included file, one at 20.00 on line 1 of the second — selling one
+/// unit reports a 2x difference in realized gain, with no error either side.
+///
+/// Include order is kept on purpose. Ordering two directives by comparing a
+/// line number from one file against a line number from a different file is
+/// not a fact about the ledger: adding a comment to one file silently changes
+/// which lot a sale in another file consumes. Include order at least reflects
+/// how the author assembled the ledger. Beancount's own rule is not purely
+/// `lineno` driven either — directives sharing a line number across files
+/// fall back to include order through its stable sort.
+///
+/// Pinned by `cross_file_same_date_directives_keep_include_order` and recorded
+/// in `docs/reference/compatibility.md` (#2149).
 pub fn sort_directives(directives: &mut [Directive]) {
     directives.sort_by_cached_key(booking_sort_key);
 }
@@ -658,9 +684,12 @@ pub fn sort_directives(directives: &mut [Directive]) {
 /// The canonical booking-order sort key: `(date, priority)`.
 ///
 /// Deliberately WITHOUT a reduction tiebreak. Same-date directives book in
-/// file order (the sorts through this key are stable), which is what Python
-/// does — its `entry_sortkey` is `(date, type_priority, lineno)` and has no
-/// notion of augmentations going first.
+/// parse order (the sorts through this key are stable), and Python likewise
+/// has no notion of augmentations going first — its `entry_sortkey` is
+/// `(date, type_priority, lineno)`.
+///
+/// That equivalence holds within a file and NOT across `include`s; see
+/// [`sort_directives`] for what differs and why include order is kept.
 ///
 /// This key used to carry a third component, `has_cost_reduction`, which
 /// floated cost augmentations ahead of the reductions matching against them

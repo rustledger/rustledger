@@ -1,0 +1,24 @@
+; Cross-file booking order (#2149).
+;
+; Two same-date buys in two included files, at differing line numbers. A FIFO
+; sale ties on lot date and falls through to the order they entered the
+; inventory, so this fixture reports which ordering rule is in force:
+;
+;   include order (rustledger) -> consumes the 10.00 lot -> gains -20.00 USD
+;   lineno order  (beancount)  -> consumes the 20.00 lot -> gains -10.00 USD
+;
+; The difference is deliberate. See `sort_directives` in rustledger-core and
+; docs/reference/compatibility.md.
+option "booking_method" "FIFO"
+
+2024-01-01 open Assets:S HOOL
+2024-01-01 open Assets:Cash USD
+2024-01-01 open Income:Gains USD
+
+include "first.beancount"
+include "second.beancount"
+
+2024-09-01 * "sell one unit"
+  Assets:S     -1 HOOL {}
+  Assets:Cash   30.00 USD
+  Income:Gains

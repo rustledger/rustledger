@@ -215,6 +215,68 @@ fn every_directive_either_keeps_tags_or_refuses_them() {
     }
 }
 
+/// The divergence table in the docs must describe what actually ships.
+///
+/// `docs/reference/compatibility.md` is where a user goes to find out why
+/// their file loads here and not in beancount, and it restates the same rows
+/// the test below pins. Two copies of one table drift, and the copy that goes
+/// stale is the prose one, because nothing runs it.
+///
+/// So this runs it: every row of the markdown table is parsed and checked
+/// against the behavior it claims. It does NOT re-check beancount -- that
+/// column is a recorded measurement, not something reproducible without the
+/// container -- only our own half, which is the half that can change under
+/// the document.
+#[test]
+fn the_documented_tolerance_table_matches_behavior() {
+    let doc = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/reference/compatibility.md"),
+    )
+    .expect("compatibility.md must be readable from the parser crate");
+
+    let section = doc
+        .split("### 6. Balance Tolerance Grammar")
+        .nth(1)
+        .and_then(|s| s.split("### 7.").next())
+        .expect("the tolerance section must exist under that heading");
+
+    let mut rows = 0;
+    for line in section.lines() {
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        // `| form | beancount | rustledger |` -> ["", form, bc, rl, ""]
+        if cells.len() != 5 || !cells[1].starts_with('`') {
+            continue;
+        }
+        let form = cells[1].trim_matches('`');
+        let claim = cells[3].replace('*', "");
+        let claim = claim.trim();
+        let expect_ok = match claim {
+            "ok" | "accepted" | "ok (kept)" | "accepted (kept)" => true,
+            "diagnosed" => false,
+            other => panic!("unrecognized claim {other:?} for `{form}` -- add it here"),
+        };
+
+        let src = format!("2024-01-15 balance Assets:C {form}\n");
+        let result = rustledger_parser::parse(&src);
+        assert_eq!(
+            result.errors.is_empty(),
+            expect_ok,
+            "docs say `{form}` is {claim}, but parsing gave {:?}",
+            result.errors,
+        );
+        rows += 1;
+    }
+
+    // A table that stopped being found, or whose format changed, would make
+    // every assertion above vacuous.
+    assert!(
+        rows >= 8,
+        "only {rows} rows recognized in the documented table; the format \
+         probably changed and this test stopped checking anything",
+    );
+}
+
 #[test]
 fn balance_tolerance_accepts_one_reading_and_diagnoses_none() {
     // beancount's grammar is `NUMBER ~ NUMBER CURRENCY` -- one currency,

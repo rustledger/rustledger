@@ -304,6 +304,26 @@ fn balance_tolerance_accepts_one_reading_and_diagnoses_none() {
         msg_for("1.00 ~ 0.01 ~ 0.02 USD"),
     );
 
+    // A malformed tolerance gets the diagnostic that explains it, and not
+    // ours on top. `.005` is a number beancount accepts and our lexer does
+    // not (filed separately); on that input the region is not
+    // expression-shaped, so the juxtaposed-numbers check stays quiet rather
+    // than claiming a second number "was being discarded" from something that
+    // never parsed.
+    let dotted = rustledger_parser::parse("2024-01-15 balance Assets:C 1.00 ~ .005 + .005 USD\n");
+    assert!(
+        !dotted.errors.is_empty(),
+        "fixture must still be rejected for the real reason",
+    );
+    assert!(
+        !dotted.errors.iter().any(|e| matches!(
+            &e.kind,
+            rustledger_parser::ParseErrorKind::SyntaxError(m) if m.contains("Two numbers side by side")
+        )),
+        "must not add a tolerance complaint to input the lexer already refused: {:?}",
+        dotted.errors,
+    );
+
     // And a tolerance that is arithmetic still evaluates, so the new check
     // does not catch the multi-number case it is supposed to allow.
     let arith = rustledger_parser::parse("2024-01-15 balance Assets:C 1.00 ~ 0.005 + 0.005 USD\n");

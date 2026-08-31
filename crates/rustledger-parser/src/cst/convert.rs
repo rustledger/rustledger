@@ -919,6 +919,15 @@ fn check_balance_tolerance(
     bom_offset: u32,
     errors: &mut Vec<crate::ParseError>,
 ) {
+    // Most balance directives carry no tolerance at all, so answer that with
+    // an iterator rather than a Vec: this runs on every `balance` in every
+    // ledger, and the allocation is pure waste on the common path.
+    if !node
+        .children_with_tokens()
+        .any(|el| el.kind() == crate::SyntaxKind::TILDE)
+    {
+        return;
+    }
     let toks: Vec<crate::SyntaxToken> = node
         .children_with_tokens()
         .filter_map(rowan::NodeOrToken::into_token)
@@ -974,17 +983,38 @@ fn check_balance_tolerance(
     }
 
     // Numbers in the tolerance region, i.e. before its trailing CURRENCY.
-    let region: Vec<&crate::SyntaxToken> = tail
+    // Sliced out of `tail` rather than collected: `cost_region_value` takes
+    // the same `&[SyntaxToken]`, so the two Vecs this used to build (one of
+    // references, one cloning every token back out) bought nothing.
+    let end = tail
         .iter()
-        .take_while(|t| t.kind() != crate::SyntaxKind::CURRENCY)
-        .collect();
+        .position(|t| t.kind() == crate::SyntaxKind::CURRENCY)
+        .unwrap_or(tail.len());
+    let region = &tail[..end];
     let numbers = region
         .iter()
         .filter(|t| t.kind() == crate::SyntaxKind::NUMBER)
         .count();
-    let owned: Vec<crate::SyntaxToken> = region.iter().map(|t| (*t).clone()).collect();
-    if numbers > 1
-        && cost_region_value(&owned).is_none()
+    // Stay quiet unless the region is made only of things an expression can
+    // contain. On `~ .005 + .005` the lexer already reports the real problem
+    // (a number with no integer part, which we reject and beancount accepts)
+    // and this would add "the second was being discarded" on top -- a claim
+    // about input that never parsed, next to the diagnostic that explains it.
+    let expression_shaped = region.iter().all(|t| {
+        matches!(
+            t.kind(),
+            crate::SyntaxKind::NUMBER
+                | crate::SyntaxKind::PLUS
+                | crate::SyntaxKind::MINUS
+                | crate::SyntaxKind::STAR
+                | crate::SyntaxKind::SLASH
+                | crate::SyntaxKind::L_PAREN
+                | crate::SyntaxKind::R_PAREN
+        )
+    });
+    if expression_shaped
+        && numbers > 1
+        && cost_region_value(region).is_none()
         && let Some(second) = region
             .iter()
             .filter(|t| t.kind() == crate::SyntaxKind::NUMBER)

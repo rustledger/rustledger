@@ -31,9 +31,9 @@ impl Executor<'_> {
     ) -> Result<Value, QueryError> {
         let left = self.evaluate_expr(&op.left, ctx)?;
         let right = self.evaluate_expr(&op.right, ctx)?;
-        // `binary_op_on_values` owns the operator semantics — including the SQL
-        // three-valued-logic NULL short-circuit (a comparison involving NULL is
-        // UNKNOWN → false, so WHERE drops rows with a missing optional field).
+        // `binary_op_on_values` owns the operator semantics — including the
+        // NULL-comparison rule (a comparison involving NULL yields NULL, which
+        // is falsy, so WHERE still drops rows with a missing optional field).
         self.binary_op_on_values(op.op, &left, &right)
     }
 
@@ -258,9 +258,13 @@ impl Executor<'_> {
         left: &Value,
         right: &Value,
     ) -> Result<Value, QueryError> {
-        // Same NULL-comparison rule as `evaluate_binary_op` (see there).
+        // A comparison with a NULL operand is NULL, not FALSE (#2213). The two
+        // are not interchangeable: `COUNT` skips NULLs but counts every FALSE,
+        // so `count(payee != '')` over payee-less rows answered 4 where it
+        // should answer 0. Filtering is unaffected -- `to_bool(NULL)` is false,
+        // so `WHERE` still drops the row.
         if is_comparison(op) && (matches!(left, Value::Null) || matches!(right, Value::Null)) {
-            return Ok(Value::Boolean(false));
+            return Ok(Value::Null);
         }
         match op {
             BinaryOperator::Eq => Ok(Value::Boolean(self.values_equal(left, right))),

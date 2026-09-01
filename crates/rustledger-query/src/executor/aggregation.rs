@@ -313,6 +313,7 @@ impl<'a> Executor<'a> {
                         let mut total_number = Decimal::ZERO;
                         let mut has_positions = false;
                         let mut has_numbers = false;
+                        let mut has_booleans = false;
 
                         for ctx in group {
                             let val = self.evaluate_expr(&func.args[0], ctx)?;
@@ -348,6 +349,19 @@ impl<'a> Executor<'a> {
                                     );
                                     has_numbers = true;
                                 }
+                                // Python sums booleans as integers, so
+                                // `sum(number > 0)` is a count of the rows
+                                // where the comparison holds (#2214). Tracked
+                                // apart from `has_numbers` so
+                                // an all-boolean sum can come back as an
+                                // Integer rather than a Decimal.
+                                Value::Boolean(b) => {
+                                    total_number = rustledger_core::add_python_scale(
+                                        total_number,
+                                        Decimal::from(u8::from(b)),
+                                    );
+                                    has_booleans = true;
+                                }
                                 Value::Null => {}
                                 _ => {
                                     return Err(QueryError::Type(
@@ -382,6 +396,17 @@ impl<'a> Executor<'a> {
                         } else if has_numbers {
                             // Pure number sum - return as Number
                             Ok(Value::Number(total_number))
+                        } else if has_booleans {
+                            // An all-boolean sum is a count, so it is an
+                            // Integer. bean-query computes the same number but
+                            // PRINTS it as `TRUE`: its result column is typed
+                            // from the argument, so the integer goes through
+                            // the boolean formatter. We match the value and not
+                            // the rendering (#2214).
+                            use rust_decimal::prelude::ToPrimitive;
+                            Ok(total_number
+                                .to_i64()
+                                .map_or(Value::Number(total_number), Value::Integer))
                         } else {
                             // No values summed (all nulls)
                             Ok(Value::Null)
@@ -832,6 +857,7 @@ impl<'a> Executor<'a> {
                         let mut total_number = Decimal::ZERO;
                         let mut has_positions = false;
                         let mut has_numbers = false;
+                        let mut has_booleans = false;
 
                         for row in group {
                             let val =
@@ -867,6 +893,19 @@ impl<'a> Executor<'a> {
                                     );
                                     has_numbers = true;
                                 }
+                                // Python sums booleans as integers, so
+                                // `sum(number > 0)` is a count of the rows
+                                // where the comparison holds (#2214). Tracked
+                                // apart from `has_numbers` so
+                                // an all-boolean sum can come back as an
+                                // Integer rather than a Decimal.
+                                Value::Boolean(b) => {
+                                    total_number = rustledger_core::add_python_scale(
+                                        total_number,
+                                        Decimal::from(u8::from(b)),
+                                    );
+                                    has_booleans = true;
+                                }
                                 Value::Null => {}
                                 _ => {
                                     return Err(QueryError::Type(
@@ -888,6 +927,17 @@ impl<'a> Executor<'a> {
                             Ok(Value::Inventory(std::sync::Arc::new(total_inventory)))
                         } else if has_numbers {
                             Ok(Value::Number(total_number))
+                        } else if has_booleans {
+                            // An all-boolean sum is a count, so it is an
+                            // Integer. bean-query computes the same number but
+                            // PRINTS it as `TRUE`: its result column is typed
+                            // from the argument, so the integer goes through
+                            // the boolean formatter. We match the value and not
+                            // the rendering (#2214).
+                            use rust_decimal::prelude::ToPrimitive;
+                            Ok(total_number
+                                .to_i64()
+                                .map_or(Value::Number(total_number), Value::Integer))
                         } else {
                             Ok(Value::Null)
                         }

@@ -184,6 +184,56 @@ a label) rather than relying on either tiebreak.
 Fixture: `tests/fixtures/cross-file-order/`. Pinned by
 `cross_file_same_date_directives_keep_include_order` (issue #2149).
 
+### 8. SUM Over a Boolean
+
+`sum(number > 0)` counts the rows where the comparison is true. Python sums
+booleans as integers, so bean-query computes the same number -- but prints it
+as `TRUE`:
+
+```
+$ bean-query -f csv f.bean "SELECT sum(number > 0) FROM #postings"
+TRUE
+
+$ rledger query -f csv f.bean "SELECT sum(number > 0) FROM #postings"
+2
+```
+
+The values agree; only the rendering differs. bean-query types the result
+column from its argument, so the integer it computed is formatted through the
+boolean formatter. Through its API the number is visible:
+
+```python
+conn.execute("SELECT sum(number > 0) FROM #postings").fetchall()
+# [(2,)]
+```
+
+We print the value. Reproducing `TRUE` would mean reproducing a display bug,
+and `2` is what a user asking "how many postings are positive" means.
+
+`count(number > 0)` answers a different question -- it counts non-NULL
+comparisons, so on the same data it is 4, in both tools.
+
+Pinned by `crates/rustledger-query/tests/sum_over_booleans_test.rs` (issue
+#2214).
+
+### 9. Comparisons Against a Missing Value
+
+A comparison with a NULL operand is NULL, in both tools. On a posting whose
+transaction has no payee, `payee != ''`, `payee ~ 'x'` and `payee IN ('a')` are
+each NULL rather than a boolean, so `count(payee != '')` is 0 and not the row
+count.
+
+This is agreement, not divergence, and is listed here because it is easy to
+assume the opposite: `WHERE payee != ''` still filters those rows out, since
+NULL is falsy. Only projecting or counting a comparison shows the difference.
+
+`NOT (NULL)` is `TRUE` -- Python's rule, which beanquery follows, rather than
+SQL three-valued logic. An empty collection is not NULL: `'food' IN tags` on an
+untagged posting is `FALSE`, again in both tools.
+
+Pinned by `crates/rustledger-query/tests/null_comparison_test.rs` (issue
+#2213).
+
 ## BQL Query Compatibility
 
 BQL (Beancount Query Language) compatibility was tested with 11 standard queries on 50 files:

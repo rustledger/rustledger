@@ -85,6 +85,69 @@ fn every_comparison_with_a_null_operand_is_null() {
     }
 }
 
+/// Regex matching and set membership propagate NULL too. These were missed by
+/// the first pass at #2213 and had comments explicitly claiming the old
+/// FALSE/TRUE answers "matched Python beancount behavior" -- they did not.
+/// Checked against beanquery 0.2.0: all four are NULL on a payee-less posting.
+#[test]
+fn regex_and_set_membership_propagate_null() {
+    let dirs = mixed_payees();
+    for expr in [
+        "payee ~ 'Cafe'",
+        "payee !~ 'Cafe'",
+        "payee IN ('Cafe')",
+        "payee NOT IN ('Cafe')",
+    ] {
+        let values = column(&format!("SELECT {expr}"), &dirs);
+        let nulls = values.iter().filter(|v| **v == Value::Null).count();
+        assert_eq!(
+            nulls, 2,
+            "`{expr}` must be NULL on the two payee-less postings, got {values:?}",
+        );
+        let booleans = values
+            .iter()
+            .filter(|v| matches!(v, Value::Boolean(_)))
+            .count();
+        assert_eq!(
+            booleans, 2,
+            "`{expr}` must stay boolean where the payee is present, got {values:?}",
+        );
+    }
+}
+
+/// An EMPTY collection is not NULL, so set membership against it is still a
+/// plain boolean. Without this, propagating NULL from an empty `tags` would
+/// silently break the common `'x' IN tags` query -- and it would look like a
+/// fix, since `tags` on an untagged posting reads as "missing".
+#[test]
+fn membership_in_an_empty_set_is_false_not_null() {
+    let dirs = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 2), "untagged")
+                .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-5), "USD")))
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(5), "USD"),
+                )),
+        ),
+    ];
+
+    let inside = column("SELECT 'food' IN tags", &dirs);
+    assert_eq!(
+        inside,
+        vec![Value::Boolean(false), Value::Boolean(false)],
+        "an untagged posting has an EMPTY tag set, not a NULL one",
+    );
+    let outside = column("SELECT 'food' NOT IN tags", &dirs);
+    assert_eq!(
+        outside,
+        vec![Value::Boolean(true), Value::Boolean(true)],
+        "and NOT IN over it is TRUE, not NULL",
+    );
+}
+
 /// The reason the distinction matters: `COUNT` skips NULL and counts FALSE.
 #[test]
 fn count_over_a_null_comparison_skips_the_null_rows() {

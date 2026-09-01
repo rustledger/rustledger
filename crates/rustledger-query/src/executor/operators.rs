@@ -10,7 +10,21 @@ use super::types::{Interval, PostingContext, Value};
 
 /// Whether `op` is an equality or ordering comparison — the operators for which
 /// a NULL operand yields SQL "UNKNOWN" (treated as not-matched).
-const fn is_comparison(op: BinaryOperator) -> bool {
+/// Operators for which a NULL operand makes the whole expression NULL (#2213).
+///
+/// The equality and ordering operators, plus regex matching and set
+/// membership. Verified against beanquery 0.2.0: on a payee-less posting,
+/// `payee ~ 'x'`, `payee !~ 'x'` and `payee IN ('a')` are each NULL there, not
+/// the FALSE/TRUE/FALSE this returned.
+///
+/// `IS NULL` / `IS NOT NULL` are excluded on purpose -- they are null TESTS,
+/// and must answer TRUE/FALSE precisely when the operand is NULL. `AND` and
+/// `OR` are excluded too: they coerce, as `NOT` does.
+///
+/// Note this fires only on a genuine NULL. An empty `tags` is an empty SET,
+/// not NULL, so `'food' IN tags` on an untagged posting is still FALSE --
+/// which is what bean-query answers.
+const fn propagates_null(op: BinaryOperator) -> bool {
     matches!(
         op,
         BinaryOperator::Eq
@@ -19,6 +33,10 @@ const fn is_comparison(op: BinaryOperator) -> bool {
             | BinaryOperator::Le
             | BinaryOperator::Gt
             | BinaryOperator::Ge
+            | BinaryOperator::Regex
+            | BinaryOperator::NotRegex
+            | BinaryOperator::In
+            | BinaryOperator::NotIn
     )
 }
 
@@ -262,8 +280,9 @@ impl Executor<'_> {
         // are not interchangeable: `COUNT` skips NULLs but counts every FALSE,
         // so `count(payee != '')` over payee-less rows answered 4 where it
         // should answer 0. Filtering is unaffected -- `to_bool(NULL)` is false,
-        // so `WHERE` still drops the row.
-        if is_comparison(op) && (matches!(left, Value::Null) || matches!(right, Value::Null)) {
+        // so `WHERE` still drops the row. See `propagates_null` for which
+        // operators this covers and which deliberately coerce instead.
+        if propagates_null(op) && (matches!(left, Value::Null) || matches!(right, Value::Null)) {
             return Ok(Value::Null);
         }
         match op {
@@ -284,11 +303,12 @@ impl Executor<'_> {
                 Ok(Value::Boolean(l || r))
             }
             BinaryOperator::Regex => {
-                // ~ operator: string matches regex pattern
-                // NULL ~ pattern returns false (matches Python beancount behavior)
+                // ~ operator: string matches regex pattern. A NULL operand
+                // never reaches here -- `propagates_null` short-circuits it to
+                // NULL above, which is what bean-query answers. This arm used
+                // to return FALSE and claim that matched beancount; it did not.
                 let s = match left {
                     Value::String(s) => s,
-                    Value::Null => return Ok(Value::Boolean(false)),
                     _ => {
                         return Err(QueryError::Type(
                             "regex requires string left operand".to_string(),
@@ -333,11 +353,11 @@ impl Executor<'_> {
                 }
             }
             BinaryOperator::NotRegex => {
-                // !~ operator: string does not match regex pattern
-                // NULL !~ pattern returns true (matches Python beancount behavior)
+                // !~ operator: string does not match regex pattern. As with
+                // `~`, a NULL operand is short-circuited to NULL above and
+                // never reaches this arm.
                 let s = match left {
                     Value::String(s) => s,
-                    Value::Null => return Ok(Value::Boolean(true)),
                     _ => {
                         return Err(QueryError::Type(
                             "!~ requires string left operand".to_string(),

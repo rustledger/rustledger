@@ -110,8 +110,24 @@ impl Executor<'_> {
 
     /// Check if left value is less than right value.
     ///
-    /// Ordering used by the `MIN`/`MAX` aggregates, and only by them -- see the
-    /// `Boolean` arm.
+    /// One of THREE comparison paths in this file, which deliberately disagree
+    /// about booleans. Anyone tempted to unify them should read this first:
+    ///
+    /// | function | used by | booleans |
+    /// |---|---|---|
+    /// | `compare_values` | the `<` `>` `<=` `>=` operators | rejected |
+    /// | `value_less_than` | the `MIN`/`MAX` aggregates | ordered, `false < true` |
+    /// | `compare_values_for_sort` | `ORDER BY` | ordered, and total |
+    ///
+    /// That is not drift, it is bean-query's shape. It answers
+    /// `max(number > 0)` and sorts a boolean column, and refuses
+    /// `(number > 0) < (number > 5)` with `operator "less(bool, bool)" not
+    /// supported`. Collapsing the three would either accept a query it rejects
+    /// or reject two it answers.
+    ///
+    /// `compare_values_for_sort` is also total where the other two are
+    /// fallible: sorting cannot fail partway through a result set, so it
+    /// orders NULL rather than erroring on it.
     pub(super) fn value_less_than(&self, left: &Value, right: &Value) -> Result<bool, QueryError> {
         let ord = match (left, right) {
             (Value::Number(a), Value::Number(b)) => a.cmp(b),

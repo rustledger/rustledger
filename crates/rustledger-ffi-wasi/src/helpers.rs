@@ -616,6 +616,20 @@ option \"operating_currency\" \"USD\"
 2024-01-21 balance Assets:SomeName 42 USD
 ";
 
+    /// A pad sharing its date with an UNRELATED balance, the pad's own target
+    /// balance landing later. The shape #2188 was filed for: the placement
+    /// rule used to return the index of the first same-date `Balance`, which
+    /// put the synth at the FRONT of the whole date group.
+    const UNRELATED_SAME_DATE_BALANCE_LEDGER: &str = "\
+option \"operating_currency\" \"USD\"
+2020-01-01 open Assets:A USD
+2020-01-01 open Assets:B USD
+2020-01-01 open Equity:Opening-balances
+2024-06-10 pad Assets:A Equity:Opening-balances
+2024-06-10 balance Assets:B 0 USD
+2024-06-15 balance Assets:A 100 USD
+";
+
     /// A `pad` and the `balance` it targets on ONE date.
     ///
     /// `SAME_DATE_LEDGER` above shares a date between a pad and an *unrelated*
@@ -653,6 +667,44 @@ option \"operating_currency\" \"USD\"
             synths, 0,
             "a same-date pad+balance must synthesize nothing on the FFI path too",
         );
+    }
+
+    #[test]
+    fn expand_pads_puts_the_synth_after_an_unrelated_same_date_balance() {
+        // The FFI copy of the placement rule (#2188). `expand_pads` shares
+        // `pad_insertion_index` with the CLI merge, but reaches it by a
+        // different route -- it carries parallel provenance tags and so cannot
+        // call either merge -- and two of the three consumers were still
+        // prepending the last time this rule changed. Pinned per consumer for
+        // that reason.
+        //
+        // bean-query reports this date group as `balance pad transaction`.
+        let load = load_source(UNRELATED_SAME_DATE_BALANCE_LEDGER);
+        let (expanded, lines) = expand_pads(load.directives, load.directive_lines, &0u32);
+
+        let group: Vec<&str> = expanded
+            .iter()
+            .filter(|d| d.date() == rustledger_core::naive_date(2024, 6, 10).unwrap())
+            .map(|d| match d {
+                Directive::Balance(_) => "balance",
+                Directive::Pad(_) => "pad",
+                Directive::Transaction(_) => "transaction",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            group,
+            vec!["balance", "pad", "transaction"],
+            "the synth belongs at the END of its date group; returning the \
+             index of the unrelated same-date balance put it at the front",
+        );
+
+        // Tags must still line up after the insert moved.
+        let synth_at = expanded
+            .iter()
+            .position(|d| matches!(d, Directive::Transaction(t) if rustledger_booking::is_synthesized_pad(t)))
+            .expect("fixture must synthesize a Padding txn");
+        assert_eq!(lines[synth_at], 0, "a synth carries the synthesized tag");
     }
 
     #[test]

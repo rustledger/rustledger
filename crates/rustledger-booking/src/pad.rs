@@ -411,20 +411,53 @@ pub fn merge_with_padding_owned(directives: Vec<Directive>) -> Vec<Directive> {
 /// Where a synthesized padding transaction dated `date` belongs in an
 /// already date-sorted directive stream.
 ///
-/// The rule: immediately BEFORE the first `Balance` sharing its date, and
-/// otherwise at the END of its date group.
+/// The rule: at the END of its date group.
 ///
-/// The "before a same-date Balance" half is load-bearing: a `pad` and the
-/// `balance` it satisfies can share a date, and any consumer checking
-/// assertions mid-stream must see the padding first.
+/// That is what stops the synth displacing UNRELATED same-date directives.
+/// Prepending it to the whole date group did that: on
+/// `ledger2beancount/tests_balance-assertion.beancount` a 2019-01-29 pad for
+/// `Assets:Test6` jumped ahead of an unrelated 2019-01-29 transaction for
+/// `Assets:Test5`, and every running balance from that row on was 500.00 USD
+/// out relative to bean-query.
 ///
-/// The "otherwise at the end" half is what stops the synth displacing
-/// UNRELATED same-date directives. Prepending it to the whole date group did
-/// that: on `ledger2beancount/tests_balance-assertion.beancount` a 2019-01-29
-/// pad for `Assets:Test6` jumped ahead of an unrelated 2019-01-29 transaction
-/// for `Assets:Test5`, and every running balance from that row on was
-/// 500.00 USD out relative to bean-query, which orders the padding at the
-/// `pad` directive's own position.
+/// # No same-date-Balance special case
+///
+/// This used to return the index of the first same-date `Balance`, to put a
+/// synth ahead of a balance sharing the pad's date. Such a pad no longer
+/// synthesizes at all -- the balance is checked first, so the pad is unused
+/// (#2150) -- which left the arm firing only for an UNRELATED same-date
+/// balance, where it put the synth ahead of the whole date group and
+/// contradicted the Balance-before-Pad order the same change established
+/// (#2188).
+///
+/// A pad serving a LATER balance still precedes it, by date alone; no special
+/// case is needed for that, which
+/// `test_merge_with_padding_earlier_pad_still_synthesizes_before_balance`
+/// pins.
+///
+/// # Where this still differs from bean-query
+///
+/// Verified against beancount 3.2.3. With a pad, an unrelated same-date
+/// balance, and the target balance later, both tools now order the date group
+/// `balance, pad, transaction`.
+///
+/// They part company when the pad's date also carries a `note`, `price` or
+/// `close`. beancount sorts by `(date, type_priority, lineno)` with
+/// Transaction, Pad, Note and Price sharing priority 0, so the synth lands
+/// next to its `pad` by line number:
+///
+/// ```text
+/// bean-query   balance pad transaction note price close
+/// rustledger   balance pad note price close transaction
+/// ```
+///
+/// This is the general type-grouping difference of #2149, not a pad-specific
+/// rule, and it is cosmetic: notes, prices and closes carry no postings, so
+/// no balance moves. Placing the synth next to its pad instead would fix the
+/// cosmetic case and break the load-bearing one -- our type sort puts Pad
+/// before Transaction, so the synth would jump ahead of an unrelated same-date
+/// transaction and shift every running balance after it, which is exactly the
+/// regression described above.
 ///
 /// This is the single source of truth for pad placement. It is `pub` because
 /// the rule has three consumers with three different element types —
@@ -448,16 +481,6 @@ where
 {
     let mut end_of_group = 0;
     for (index, directive) in sorted.into_iter().enumerate() {
-        // Leftover from before #2150: this exists to put a synth AHEAD of a
-        // balance on the pad's own date. Such a pad no longer synthesizes at
-        // all -- the balance is checked first and the pad is unused -- so this
-        // arm now only fires for an UNRELATED same-date balance, where placing
-        // the synth ahead of it contradicts the Balance-before-Pad order.
-        // Removing it changes synth placement on the FFI path, which is its
-        // own decision; tracked in #2188 rather than ridden in here.
-        if directive.date() == date && matches!(directive, Directive::Balance(_)) {
-            return index;
-        }
         if directive.date() <= date {
             end_of_group = index + 1;
         }
@@ -794,10 +817,8 @@ mod tests {
         // the whole date group did exactly that, and every running balance
         // from that row on was off by the padding amount.
         //
-        // This is the other half of the placement rule from
-        // `test_merge_with_padding_same_date_pad_balance_synth_comes_first`:
-        // with no same-date Balance to sit in front of, the synth belongs at
-        // the END of its date group, which is where bean-query puts it.
+        // The synth belongs at the END of its date group, which is where
+        // bean-query puts it relative to same-date transactions.
         let directives = vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Other")),
@@ -838,6 +859,132 @@ mod tests {
         assert!(
             unrelated_idx < synth_idx,
             "unrelated same-date txn (idx {unrelated_idx}) must precede the synth (idx {synth_idx})",
+        );
+    }
+
+    #[test]
+    fn test_merge_with_padding_synth_follows_an_unrelated_same_date_balance() {
+        // The case #2188 was filed for. `pad_insertion_index` used to return
+        // the index of the first same-date `Balance`, which put the synth at
+        // the FRONT of the date group whenever any unrelated balance shared
+        // the pad's date -- ahead of the balance, the pad, and everything
+        // else.
+        //
+        // Verified against beancount 3.2.3 on this exact shape: bean-query
+        // reports the 2024-06-10 group as `balance pad transaction`. Before
+        // the fix we reported `transaction balance pad`.
+        //
+        // The balance is on an account the pad does not touch, so it neither
+        // consumes the pad nor is affected by it; only the ordering moved.
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:A")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:B")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Pad(Pad::new(date(2024, 6, 10), "Assets:A", "Equity:Opening")),
+            // UNRELATED account, sharing the pad's date.
+            Directive::Balance(Balance::new(
+                date(2024, 6, 10),
+                "Assets:B",
+                Amount::new(dec!(0), "USD"),
+            )),
+            // The pad's own target, on a later date.
+            Directive::Balance(Balance::new(
+                date(2024, 6, 15),
+                "Assets:A",
+                Amount::new(dec!(100), "USD"),
+            )),
+        ];
+
+        // Sorted the way the loader sorts before merging: `merge_with_padding`
+        // only stable-sorts by DATE, so feeding it parse order would leave the
+        // group as `pad, balance` and test a stream the pipeline never
+        // produces. The type priority (Balance 2 before Pad 3) comes from
+        // here.
+        let mut directives = directives;
+        rustledger_core::sort_directives(&mut directives);
+        let merged = merge_with_padding(&directives);
+
+        let group: Vec<&Directive> = merged
+            .iter()
+            .filter(|d| d.date() == date(2024, 6, 10))
+            .collect();
+        let shape: Vec<&str> = group
+            .iter()
+            .map(|d| match d {
+                Directive::Balance(_) => "balance",
+                Directive::Pad(_) => "pad",
+                Directive::Transaction(_) => "transaction",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec!["balance", "pad", "transaction"],
+            "the synth belongs at the END of its date group, after an \
+             unrelated same-date balance (bean-query agrees)",
+        );
+    }
+
+    #[test]
+    fn test_merge_with_padding_spanned_places_the_synth_like_the_plain_merge() {
+        // The THIRD consumer of `pad_insertion_index`, and the one with no
+        // test of its own until #2188. The rule's own docs record that two of
+        // its three copies were still prepending the last time it changed, so
+        // each consumer is pinned separately rather than trusting that they
+        // share a function today.
+        //
+        // Asserted against the plain merge rather than a hardcoded shape: the
+        // point is that the two agree, so a future change to one is caught
+        // even if it moves both tests' expected order.
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:A")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:B")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            Directive::Pad(Pad::new(date(2024, 6, 10), "Assets:A", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2024, 6, 10),
+                "Assets:B",
+                Amount::new(dec!(0), "USD"),
+            )),
+            Directive::Balance(Balance::new(
+                date(2024, 6, 15),
+                "Assets:A",
+                Amount::new(dec!(100), "USD"),
+            )),
+        ];
+        let mut directives = directives;
+        rustledger_core::sort_directives(&mut directives);
+
+        let spanned: Vec<Spanned<Directive>> = directives
+            .iter()
+            .cloned()
+            .map(|d| Spanned::new(d, rustledger_core::Span::new(0, 1)))
+            .collect();
+
+        let plain = merge_with_padding(&directives);
+        let merged = merge_with_padding_spanned(&spanned);
+
+        let shape = |ds: &[Directive]| -> Vec<&'static str> {
+            ds.iter()
+                .filter(|d| d.date() == date(2024, 6, 10))
+                .map(|d| match d {
+                    Directive::Balance(_) => "balance",
+                    Directive::Pad(_) => "pad",
+                    Directive::Transaction(_) => "transaction",
+                    _ => "other",
+                })
+                .collect()
+        };
+        let spanned_plain: Vec<Directive> = merged.iter().map(|s| s.value.clone()).collect();
+        assert_eq!(
+            shape(&spanned_plain),
+            shape(&plain),
+            "the spanned merge must place a synth exactly where the plain one does",
+        );
+        assert_eq!(
+            shape(&spanned_plain),
+            vec!["balance", "pad", "transaction"],
+            "and that placement is the end of the date group",
         );
     }
 

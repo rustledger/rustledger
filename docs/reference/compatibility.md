@@ -184,7 +184,30 @@ a label) rather than relying on either tiebreak.
 Fixture: `tests/fixtures/cross-file-order/`. Pinned by
 `cross_file_same_date_directives_keep_include_order` (issue #2149).
 
-### 8. SUM Over a Boolean
+### 8. Same-Date Directive Ordering in `#entries`
+
+beancount sorts entries by `(date, type_priority, lineno)`, and its priorities
+put Transaction, Pad, Note, Price, Event, Query, Commodity and Custom in ONE
+bucket, tie-broken by line number. We give each type its own priority, so
+same-date directives group by type rather than interleaving by line.
+
+Visible when a `pad` shares its date with a `note`, `price` or `close`:
+
+```text
+bean-query   balance pad transaction note price close
+rustledger   balance pad note price close transaction
+```
+
+Cosmetic: notes, prices and closes carry no postings, so no balance moves. The
+balance-affecting case -- a pad sharing its date with an unrelated transaction
+-- agrees, and a synthesized padding transaction sits at the end of its date
+group in both tools rather than displacing entries ahead of it.
+
+This is the same type-grouping-versus-`lineno` difference as issue #2149,
+which also covers the cross-file half described in section 7. Pad placement
+specifically is pinned by `pad_insertion_index` and its tests (issue #2188).
+
+### 9. SUM Over a Boolean
 
 `sum(number > 0)` counts the rows where the comparison is true. Python sums
 booleans as integers, so bean-query computes the same number -- but prints it
@@ -216,7 +239,7 @@ comparisons, so on the same data it is 4, in both tools.
 Pinned by `crates/rustledger-query/tests/sum_over_booleans_test.rs` (issue
 #2214).
 
-### 9. Comparisons Against a Missing Value
+### 10. Comparisons Against a Missing Value
 
 A comparison with a NULL operand is NULL, in both tools. On a posting whose
 transaction has no payee, `payee != ''`, `payee ~ 'x'` and `payee IN ('a')` are

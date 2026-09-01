@@ -305,7 +305,11 @@ impl Executor<'_> {
             // output column is named by the alias, so `sort_results` would fail
             // a literal name lookup for the raw column (#1627). In that case we
             // still append a hidden column carrying the raw name.
-            let expr_str = spec.expr.to_string();
+            // Same spelling the header uses, and the same one `sort_results`
+            // now looks up. These two have to agree: a hidden column named by
+            // `Display` would be invisible to a lookup by `header_name`, so
+            // changing one alone trades one miss for another (#2177).
+            let expr_str = crate::ast::header_name(&spec.expr);
             let in_select = query.targets.iter().any(|t| {
                 (t.expr == spec.expr && t.alias.is_none())
                     || t.alias.as_deref() == Some(expr_str.as_str())

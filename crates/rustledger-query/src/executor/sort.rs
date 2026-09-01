@@ -87,8 +87,18 @@ impl Executor<'_> {
                 }
                 _ => {
                     // For other expression kinds (binary ops, literals, etc.),
-                    // look up by string representation (matches hidden column aliases).
-                    let expr_str = spec.expr.to_string();
+                    // look up by the name the HEADER uses.
+                    //
+                    // `Display` is not that name and never was: it parenthesizes,
+                    // so `ORDER BY number + 1` looked for `(number + 1)` while the
+                    // header said `number + 1`, and the sort failed on a query
+                    // bean-query answers. Before #2175 the header was `col0`, so
+                    // the lookup missed for a different reason -- the query has
+                    // never worked (#2177).
+                    //
+                    // `find_column`'s case-insensitive fallback cannot bridge it:
+                    // the two spellings differ by punctuation, not case.
+                    let expr_str = crate::ast::header_name(&spec.expr);
                     find_column(&result.columns, &expr_str).ok_or_else(|| {
                         QueryError::Evaluation(format!(
                             "ORDER BY expression not found in SELECT: {expr_str}"

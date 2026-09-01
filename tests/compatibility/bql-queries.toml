@@ -194,3 +194,8 @@ preserve_order = true
 name = "minmax-over-boolean"
 query = "SELECT MAX(number > 0), MIN(number > 0)"
 notes = "false < true, so MAX is `any` and MIN is `all` (#2183). Python orders bools that way and bean-query inherits it; we had to define the order explicitly, and only for the aggregates."
+[[query]]
+name = "order-by-expression"
+query = "SELECT number + 1 ORDER BY number + 1 LIMIT 20"
+preserve_order = true
+notes = "The header and the ORDER BY lookup must spell the expression the same way (#2177). `Display` parenthesizes and `header_name` does not, so this failed with `ORDER BY expression not found in SELECT: (number + 1)`."

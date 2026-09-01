@@ -587,6 +587,15 @@ impl Executor<'_> {
             }
         }
 
+        // Apply PIVOT BY, in the same pipeline slot `execute_select` uses:
+        // after ORDER BY and the hidden-column strip, before LIMIT. Omitting
+        // it here meant a query with a FROM clause parsed its PIVOT BY, built
+        // the transformation's validated inputs, and then returned the
+        // un-pivoted result with no error (#2216).
+        if let Some(pivot_exprs) = &query.pivot_by {
+            result = self.apply_pivot(&result, pivot_exprs, &query.group_by)?;
+        }
+
         // Apply LIMIT
         if let Some(limit) = query.limit {
             result.truncate(limit as usize);
@@ -717,6 +726,15 @@ impl Executor<'_> {
         if let Some(order_by) = &query.order_by {
             let visible_cols = result.columns.len();
             self.sort_results(&mut result, order_by, visible_cols)?;
+        }
+
+        // Apply PIVOT BY, in the same pipeline slot `execute_select` uses:
+        // after ORDER BY and the hidden-column strip, before LIMIT. Omitting
+        // it here meant a query with a FROM clause parsed its PIVOT BY, built
+        // the transformation's validated inputs, and then returned the
+        // un-pivoted result with no error (#2216).
+        if let Some(pivot_exprs) = &query.pivot_by {
+            result = self.apply_pivot(&result, pivot_exprs, &query.group_by)?;
         }
 
         // Apply LIMIT

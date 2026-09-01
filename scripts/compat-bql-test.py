@@ -26,12 +26,15 @@ Usage (local, with paths and tools auto-detected):
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import multiprocessing
 import os
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -386,9 +389,10 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
 # absorbed by the same allowlist. Reported separately in the per-CI
 # summary so the count of Rust-side divergences is visible at a glance.
 #
-# Both lists are stale-checked at runtime (`stale_divergence_entries`): an entry
-# whose pair now MATCHES bean-query fails the run, so a mask can't outlive the
-# divergence it documents and then absorb a real regression on the same pair.
+# Every registry here is stale-checked at runtime (`stale_divergence_entries`):
+# an entry whose pair now MATCHES bean-query fails the run, so a mask can't
+# outlive the divergence it documents and then absorb a real regression on the
+# same pair.
 #
 # Keyed by `(repo_relative_path, query_name)` with the same surgical-pin
 # semantics as `KNOWN_PYTHON_DIVERGENCES`. Counted as "known" for the effective
@@ -540,6 +544,36 @@ KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
 }
 
 
+# Known COLUMN-NAME divergences (#2220).
+#
+# Deliberately separate from the two registries above, and consulted ONLY when
+# scoring the header comparison. An entry here excuses a differing header and
+# nothing else: the row comparison for the same run still gates. Parking these
+# in `KNOWN_RUST_DIVERGENCES` instead would have masked the whole run, so a
+# future DATA regression in `JOURNAL` on any of the 735 corpus files would have
+# been absorbed by a mask that was only ever meant to cover a column's name.
+#
+# Same `(file, query)` keying and the same wildcard rules as the registries
+# above, and stale/dangling-checked the same way -- against `header_match`
+# rather than the run's overall verdict.
+KNOWN_HEADER_DIVERGENCES: set[tuple[str, str]] = {
+    # bean-query names a shorthand command's columns after the expression it
+    # desugars to -- `BALANCES` heads `SUM((position))`, `JOURNAL` exposes its
+    # `MAXWIDTH(payee, 48)` wrapping -- where ours are the plain names a reader
+    # expects. The rows agree; only the headers differ. This is a property of
+    # the QUERY, not of any ledger: it holds on every corpus file, so it is
+    # keyed `("*", query)` rather than enumerated per file, which would be
+    # mass-masking wearing a list. Whether to keep our names is an open
+    # question, not a bug to fix here: #2221.
+    ("*", "balances-by-account"),
+    ("*", "journal-assets"),
+    ("*", "journal-assets-at-units"),
+    ("*", "journal-assets-at-cost"),
+}
+
+
+
+
 # Queries whose "empty source" case is divergent because beanquery
 # returns 0 rows for `SELECT COUNT(*) FROM <empty_source>` (and
 # similar pure-aggregate, no-GROUP-BY shapes) where standard SQL —
@@ -606,14 +640,34 @@ def _is_known_python_divergence(run: "QueryRun") -> bool:
 def _is_known_rust_divergence(run: "QueryRun") -> bool:
     """True if this mismatch is on the rledger-side allowlist.
 
-    See `KNOWN_RUST_DIVERGENCES` for context. Wildcard `"*"` is honored
-    for symmetry with the Python allowlist, though no entry currently
-    uses it.
+    See `KNOWN_RUST_DIVERGENCES` for context. Both wildcard directions are
+    honored, for symmetry with the other registries and so the lookup agrees
+    with what the stale check resolves. No entry currently uses either.
     """
-    return (run.file, run.query_name) in KNOWN_RUST_DIVERGENCES or (
-        run.file,
-        "*",
-    ) in KNOWN_RUST_DIVERGENCES
+    return (
+        (run.file, run.query_name) in KNOWN_RUST_DIVERGENCES
+        # Every query on one file.
+        or (run.file, "*") in KNOWN_RUST_DIVERGENCES
+        # One query on every file. Needed for a divergence that is a property
+        # of the QUERY rather than of any ledger -- a column-naming difference
+        # holds on all 735 corpus files, and enumerating them would be
+        # mass-masking wearing a list (#2220).
+        or ("*", run.query_name) in KNOWN_RUST_DIVERGENCES
+    )
+
+
+def _is_known_header_divergence(file: str, query_name: str) -> bool:
+    """True if this pair's COLUMN NAMES are allowed to differ.
+
+    Takes the identifying strings rather than a `QueryRun` because it is called
+    while one is being built. Honors both wildcard directions, like the
+    registries it sits beside.
+    """
+    return (
+        (file, query_name) in KNOWN_HEADER_DIVERGENCES
+        or (file, "*") in KNOWN_HEADER_DIVERGENCES
+        or ("*", query_name) in KNOWN_HEADER_DIVERGENCES
+    )
 
 
 def _is_known_divergence(run: "QueryRun") -> bool:
@@ -627,14 +681,20 @@ def _is_known_divergence(run: "QueryRun") -> bool:
 
 def _index_runs(
     results: "list[QueryRun]",
-) -> "tuple[dict[tuple[str, str], list[QueryRun]], dict[str, list[QueryRun]]]":
-    """Index runs by `(file, query)` and by `file` for the stale-mask check."""
+) -> "tuple[dict[tuple[str, str], list[QueryRun]], dict[str, list[QueryRun]], dict[str, list[QueryRun]]]":
+    """Index runs by `(file, query)`, by `file`, and by `query`.
+
+    All three are needed by the stale-mask check because a registry key may
+    wildcard either side: `(file, "*")` is every query on one file and
+    `("*", query)` is one query across every file."""
     by_pair: dict[tuple[str, str], list] = {}
     by_file: dict[str, list] = {}
+    by_query: dict[str, list] = {}
     for r in results:
         by_pair.setdefault((r.file, r.query_name), []).append(r)
         by_file.setdefault(r.file, []).append(r)
-    return by_pair, by_file
+        by_query.setdefault(r.query_name, []).append(r)
+    return by_pair, by_file, by_query
 
 
 def _stale_registry_entries(
@@ -642,11 +702,15 @@ def _stale_registry_entries(
     registry_name: str,
     by_pair: "dict[tuple[str, str], list[QueryRun]]",
     by_file: "dict[str, list[QueryRun]]",
+    by_query: "dict[str, list[QueryRun]]",
+    still_diverges: "Callable[[QueryRun], bool] | None" = None,
 ) -> "tuple[list[tuple[str, tuple[str, str]]], list[tuple[str, tuple[str, str]]]]":
     """Split one registry's entries into (stale, dangling).
 
-    * STALE: the masked pair (or, for `(file, "*")`, every query on the file)
-      now MATCHES bean-query, so the divergence is gone.
+    * STALE: every run the entry covers now MATCHES bean-query, so the
+      divergence is gone. An entry covers one pair, or -- when either side is
+      the wildcard `"*"` -- every query on one file, every file for one query,
+      or every run in the corpus.
     * DANGLING: no run exercises the entry — the fixture or query was renamed
       or removed.
 
@@ -656,7 +720,17 @@ def _stale_registry_entries(
     stale: list = []
     dangling: list = []
     for file, query in registry:
-        runs = (by_file.get(file) if query == "*" else by_pair.get((file, query))) or []
+        # Resolve BOTH wildcard directions. Handling only `query == "*"` left
+        # every `("*", query)` entry permanently dangling: never stale-checked,
+        # so it could outlive its divergence, and warned about on every run.
+        if file == "*" and query == "*":
+            runs = [r for rs in by_file.values() for r in rs]
+        elif file == "*":
+            runs = by_query.get(query) or []
+        elif query == "*":
+            runs = by_file.get(file) or []
+        else:
+            runs = by_pair.get((file, query)) or []
         if not runs:
             dangling.append((registry_name, (file, query)))
             continue
@@ -665,8 +739,13 @@ def _stale_registry_entries(
         # divergence, so a failed run must NOT keep a stale mask alive (nor count
         # as still-diverging). If every run for the entry was a tool failure the
         # result is inconclusive — leave the mask in place rather than guess.
+        # `still_diverges` reads the verdict this registry actually governs.
+        # The default is the run's overall match; the header registry passes
+        # `header_match`, because a header entry is stale when the NAMES agree
+        # again, whatever the rows are doing.
+        agrees = still_diverges or (lambda r: r.match)
         conclusive = [r for r in runs if not r.py_failed and not r.rs_failed]
-        if conclusive and all(r.match for r in conclusive):
+        if conclusive and all(agrees(r) for r in conclusive):
             stale.append((registry_name, (file, query)))
     return stale, dangling
 
@@ -692,24 +771,63 @@ def bare_name_registry_entries(
     could never match one either, and flagging it here is the correct outcome —
     treating `\` as a separator would make this guard go SILENT on exactly the
     kind of unmatchable key it exists to catch.
+    `"*"` alone is exempt: it is the file wildcard, matching every run rather
+    than naming a fixture, so it cannot be an unmatchable key. It is the right
+    shape for a divergence that is a property of the QUERY -- a column-naming
+    difference holds on every corpus file, and spelling that as 735 paths would
+    be mass-masking wearing a list.
     """
     if registries is None:
-        registries = [
-            ("KNOWN_PYTHON_DIVERGENCES", KNOWN_PYTHON_DIVERGENCES),
-            ("KNOWN_RUST_DIVERGENCES", KNOWN_RUST_DIVERGENCES),
-        ]
+        # Derived from `_DIVERGENCE_REGISTRIES` rather than restated, so a
+        # registry added later cannot silently escape this guard -- which is
+        # what happened when `KNOWN_HEADER_DIVERGENCES` was first added.
+        registries = [(name, registry) for name, registry, _ in _DIVERGENCE_REGISTRIES]
     bare: list[tuple[str, str]] = []
     for name, registry in registries:
         for file, _query in registry:
-            if "/" not in file:
+            if file != "*" and "/" not in file:
                 bare.append((name, file))
     return sorted(bare)
+
+
+def _header_agrees(run: "QueryRun") -> bool:
+    """Whether this run's column NAMES agreed.
+
+    A run whose header pass was skipped is not evidence either way, so it must
+    not be able to declare a header entry stale on its own. `header_match` is
+    vacuously True there, hence the explicit `not header_skipped`.
+    """
+    return run.header_match and not run.header_skipped
+
+
+# Which verdict each registry is scored against, as DATA. Pairing a registry
+# with its predicate here (rather than inline at the call site) is what lets
+# `--self-test` resolve the header registry's predicate instead of restating
+# it: a test that hardcoded `_header_agrees` would keep passing if this table
+# were changed to score headers on the run verdict, which is precisely the
+# wiring error the separate registry exists to prevent.
+_DIVERGENCE_REGISTRIES: "tuple[tuple[str, set[tuple[str, str]], Callable[[QueryRun], bool] | None], ...]" = (
+    ("KNOWN_PYTHON_DIVERGENCES", KNOWN_PYTHON_DIVERGENCES, None),
+    ("KNOWN_RUST_DIVERGENCES", KNOWN_RUST_DIVERGENCES, None),
+    # Scored against the header verdict, not the run's. A header entry is
+    # stale once the NAMES agree, even if the rows still diverge for an
+    # unrelated reason that a different registry covers.
+    ("KNOWN_HEADER_DIVERGENCES", KNOWN_HEADER_DIVERGENCES, _header_agrees),
+)
+
+
+def _registry_predicate(name: str) -> "Callable[[QueryRun], bool] | None":
+    """The verdict predicate `name` is scored against, from the table above."""
+    for registry_name, _, predicate in _DIVERGENCE_REGISTRIES:
+        if registry_name == name:
+            return predicate
+    raise KeyError(name)
 
 
 def stale_divergence_entries(
     results: "list[QueryRun]",
 ) -> "tuple[list[tuple[str, tuple[str, str]]], list[tuple[str, tuple[str, str]]]]":
-    """Stale and dangling entries across both static deliberate-divergence lists.
+    """Stale and dangling entries across the static deliberate-divergence lists.
 
     The `KNOWN_*_DIVERGENCES` allowlists have no runtime check that the pair they
     mask still actually diverges — a stale mask silently absorbs a future
@@ -717,14 +835,13 @@ def stale_divergence_entries(
     divergence-fingerprint defense that `_is_beanquery_empty_aggregate_quirk`
     gives the one empty-aggregate quirk to the static lists too.
     """
-    by_pair, by_file = _index_runs(results)
+    by_pair, by_file, by_query = _index_runs(results)
     stale: list = []
     dangling: list = []
-    for name, registry in (
-        ("KNOWN_PYTHON_DIVERGENCES", KNOWN_PYTHON_DIVERGENCES),
-        ("KNOWN_RUST_DIVERGENCES", KNOWN_RUST_DIVERGENCES),
-    ):
-        s, d = _stale_registry_entries(registry, name, by_pair, by_file)
+    for name, registry, predicate in _DIVERGENCE_REGISTRIES:
+        s, d = _stale_registry_entries(
+            registry, name, by_pair, by_file, by_query, predicate
+        )
         stale += s
         dangling += d
     return stale, dangling
@@ -751,6 +868,8 @@ def _run_self_test() -> int:
         match: bool,
         py_failed: bool = False,
         rs_failed: bool = False,
+        header_match: bool = True,
+        header_skipped: bool = False,
     ) -> "QueryRun":
         return QueryRun(
             file=file,
@@ -759,6 +878,8 @@ def _run_self_test() -> int:
             match=match,
             py_failed=py_failed,
             rs_failed=rs_failed,
+            header_match=header_match,
+            header_skipped=header_skipped,
         )
 
     runs = [
@@ -772,7 +893,7 @@ def _run_self_test() -> int:
         # treated as stale (its match==False is a timeout, not a real divergence).
         run("d.beancount", "q1", match=False, rs_failed=True),
     ]
-    by_pair, by_file = _index_runs(runs)
+    by_pair, by_file, by_query = _index_runs(runs)
 
     surgical = {
         ("a.beancount", "q1"),
@@ -780,7 +901,9 @@ def _run_self_test() -> int:
         ("gone.beancount", "q9"),
         ("d.beancount", "q1"),
     }
-    stale, dangling = _stale_registry_entries(surgical, "T", by_pair, by_file)
+    stale, dangling = _stale_registry_entries(
+        surgical, "T", by_pair, by_file, by_query
+    )
     check(("T", ("a.beancount", "q1")) in stale, "matching pair must be flagged stale")
     check(
         ("T", ("a.beancount", "q2")) not in stale,
@@ -800,7 +923,7 @@ def _run_self_test() -> int:
     )
 
     wildcard = {("b.beancount", "*"), ("c.beancount", "*")}
-    stale_w, _ = _stale_registry_entries(wildcard, "T", by_pair, by_file)
+    stale_w, _ = _stale_registry_entries(wildcard, "T", by_pair, by_file, by_query)
     check(
         ("T", ("b.beancount", "*")) in stale_w,
         "all-matching file must make its wildcard stale",
@@ -810,6 +933,86 @@ def _run_self_test() -> int:
         "a file with one diverging query keeps its wildcard live",
     )
 
+    # The OTHER wildcard direction, `("*", query)`. Only `(file, "*")` was
+    # resolved originally, so these entries matched no index, were reported
+    # dangling on every run, and were never stale-checked -- a mask that could
+    # outlive its divergence indefinitely. `q2` diverges only on `a.beancount`;
+    # every other file matches, so `("*", "q2")` must stay live while
+    # `("*", "q1")` -- diverging on `c.beancount` -- must too, and a query that
+    # matches everywhere must go stale.
+    runs_q = runs + [run("e.beancount", "q3", match=True)]
+    qp, qf, qq = _index_runs(runs_q)
+    q_wild = {("*", "q1"), ("*", "q2"), ("*", "q3"), ("*", "q404")}
+    stale_q, dangling_q = _stale_registry_entries(q_wild, "T", qp, qf, qq)
+    check(
+        ("T", ("*", "q3")) in stale_q,
+        "a query matching on every file must make its wildcard stale",
+    )
+    check(
+        ("T", ("*", "q1")) not in stale_q,
+        "a query diverging on any file keeps its wildcard live",
+    )
+    check(
+        ("T", ("*", "q2")) not in stale_q,
+        "a query diverging on any file keeps its wildcard live",
+    )
+    check(
+        not [e for e in dangling_q if e[1] in {("*", "q1"), ("*", "q2"), ("*", "q3")}],
+        "an exercised ('*', query) entry must NOT be reported dangling",
+    )
+    check(
+        ("T", ("*", "q404")) in dangling_q,
+        "a ('*', query) entry no run exercises must still be dangling",
+    )
+
+    # --- header registry is scored on the HEADER verdict, not the run's ---
+    # The two must be independent in both directions, because the whole reason
+    # the registry is separate is that a header mask must not speak for the
+    # rows and vice versa.
+    hdr_runs = [
+        # Rows diverge, names agree -> the header entry IS stale, even though
+        # the run is a mismatch. Scoring this registry on `r.match` would keep
+        # a dead header mask alive forever behind an unrelated row divergence.
+        run("h.beancount", "q1", match=False, header_match=True),
+        # Rows agree, names diverge -> the header entry is LIVE, even though
+        # the run matches (the mask is what made it match).
+        run("h.beancount", "q2", match=True, header_match=False),
+        # Header pass skipped: no evidence, must not declare the entry stale.
+        run("h.beancount", "q3", match=True, header_match=True, header_skipped=True),
+    ]
+    hp, hf, hq = _index_runs(hdr_runs)
+    hdr_reg = {
+        ("h.beancount", "q1"),
+        ("h.beancount", "q2"),
+        ("h.beancount", "q3"),
+    }
+    # Resolved from `_DIVERGENCE_REGISTRIES`, not restated: this is what makes
+    # the three checks below fail if the header registry is ever wired to the
+    # run verdict instead of the header verdict.
+    hdr_predicate = _registry_predicate("KNOWN_HEADER_DIVERGENCES")
+    stale_h, _ = _stale_registry_entries(hdr_reg, "H", hp, hf, hq, hdr_predicate)
+    check(
+        ("H", ("h.beancount", "q1")) in stale_h,
+        "agreeing NAMES must make a header entry stale even when rows diverge",
+    )
+    check(
+        ("H", ("h.beancount", "q2")) not in stale_h,
+        "diverging NAMES must keep a header entry live even when the run matches",
+    )
+    check(
+        ("H", ("h.beancount", "q3")) not in stale_h,
+        "a skipped header pass is not evidence that the names agree",
+    )
+    # And the lookup honors both wildcard directions.
+    check(
+        _is_known_header_divergence("any/file.beancount", "journal-assets"),
+        "('*', query) header entry must match on any file",
+    )
+    check(
+        not _is_known_header_divergence("any/file.beancount", "not-registered"),
+        "an unregistered pair must NOT be excused",
+    )
+
     # --- bare-name registry guard (#2016) ---
     # Both directions, because a guard only ever shown reporting "clean" is
     # indistinguishable from one that is wired up wrong and always says clean.
@@ -817,6 +1020,22 @@ def _run_self_test() -> int:
         [("T", {("bare.beancount", "q1"), ("tests/x/ok.beancount", "q2")})]
     )
     check(dirty == [("T", "bare.beancount")], f"bare-name key must be flagged, got {dirty}")
+    # EVERY registry the stale check knows about must also be bare-name
+    # guarded. Checked by planting a bare key in each one in turn and demanding
+    # the no-argument guard report it: asserting the list of registry names
+    # instead would still pass if the guard's default were hardcoded, which is
+    # exactly how `KNOWN_HEADER_DIVERGENCES` escaped it when first added.
+    for registry_name, registry, _ in _DIVERGENCE_REGISTRIES:
+        planted = ("planted-bare-name.beancount", "q-planted")
+        registry.add(planted)
+        try:
+            flagged = bare_name_registry_entries()
+        finally:
+            registry.discard(planted)
+        check(
+            (registry_name, planted[0]) in flagged,
+            f"{registry_name} is not covered by the bare-name guard",
+        )
     clean = bare_name_registry_entries([("T", {("tests/x/ok.beancount", "q2")})])
     check(clean == [], f"path-keyed registry must be clean, got {clean}")
     # A `\`-separated key can't match a POSIX run key either, so it must be
@@ -888,6 +1107,18 @@ class QueryRun:
     # true. Use these in any new known-divergence fingerprint check.
     py_failed: bool = False
     rs_failed: bool = False
+    # Column names as a LIST, read from a separate `-f csv` pass and
+    # whitespace-normalized per field. `None` when that pass produced no
+    # table -- an error banner, or the pass being skipped because the text
+    # pass had already failed.
+    py_header: list[str] | None = None
+    rs_header: list[str] | None = None
+    header_match: bool = True
+    # True when the header pass did not produce a comparable pair. `header_match`
+    # is then vacuously True, so these runs are COUNTED and reported rather than
+    # quietly scored as agreement -- a skipped check that looks like a pass is
+    # how a mask goes stale without anyone noticing.
+    header_skipped: bool = False
     # First row of rledger's output, normalized via `extract_data` (so
     # whitespace is collapsed). Used by quirk fingerprints that need to
     # distinguish "rs returned the aggregate identity (e.g. `0`)" from
@@ -952,6 +1183,54 @@ def load_corpus(path: Path) -> list[Query]:
 _SEPARATOR_RE = re.compile(r"^[-\s]+$")
 
 
+def _csv_rows(output: str) -> list[list[str]]:
+    """Parse tool output as CSV, with each field stripped.
+
+    bean-query right-aligns numbers even in CSV (`, 7.00`) and terminates lines
+    with CRLF; we do neither. Stripping per FIELD -- rather than collapsing
+    whitespace across the whole line, as the tabular reader had to -- keeps a
+    value that legitimately contains a comma intact, because the CSV reader has
+    already split on the right ones.
+    """
+    if not output or not output.strip():
+        return []
+    text = output.replace("\r\n", "\n").replace("\r", "\n")
+    rows: list[list[str]] = []
+    for row in csv.reader(io.StringIO(text)):
+        if not row or all(not c.strip() for c in row):
+            continue
+        # Collapse whitespace INSIDE each field as well as around it. The
+        # tabular reader did this for the whole line, and dropping it here
+        # would report bean-query's inventory alignment as a divergence: a
+        # multi-currency `SUM(position)` comes back as one quoted field padded
+        # to align currencies across rows (`" 100 CORP { 1 USD},        "`).
+        rows.append([" ".join(c.split()) for c in row])
+    return rows
+
+
+def extract_header(output: str) -> list[str] | None:
+    """The column-name row, or `None` when the tool produced no table.
+
+    Returns the names as a LIST. Joining them into one string would let
+    distinct shapes compare equal -- a single column literally named `a,b`
+    against two columns `a` and `b` -- which is exactly the splitting bug the
+    CSV reader exists to avoid.
+
+    Column names are user-visible output, and nothing compared them before
+    (#2220): `extract_data` drops everything above the tabular separator, so a
+    run whose headers differed reported a clean match. The pivot-header
+    divergence in #2217 sat in the corpus and passed.
+
+    Reads CSV, not the default table, because bean-query TRUNCATES a tabular
+    header to its data column width (`sum(number)` over 5-char values prints
+    `sum(n`). Truncation is bean-query's rendering, not a naming difference, so
+    tabular headers would disagree for reasons that say nothing about either
+    tool's column naming.
+    """
+    rows = _csv_rows(output)
+    return rows[0] if rows else None
+
+
 def extract_data(output: str, preserve_order: bool) -> list[str]:
     """Pull data rows out of bean-query / rledger tabular output.
 
@@ -961,9 +1240,16 @@ def extract_data(output: str, preserve_order: bool) -> list[str]:
     first column happens to be a negative number doesn't get mistaken
     for a separator.
 
+    Reads the TEXT surface, not CSV. The two are not interchangeable: CSV is a
+    machine surface, so `DisplayContext::for_surface` suppresses thousands
+    separators on it absolutely (#1892). Comparing values as CSV would stop
+    exercising every `render_commas` divergence in the registry below -- the
+    masks would go stale not because rledger and bean-query agreed, but
+    because the harness had stopped looking.
+
     For ``preserve_order=False``, sort the result so the comparison is
     order-independent (correct when the query has no ``ORDER BY``). For
-    ``preserve_order=True``, leave rows in iteration order — the
+    ``preserve_order=True``, leave rows in iteration order -- the
     ordering is part of what's being tested.
     """
     if not output or not output.strip():
@@ -1090,18 +1376,46 @@ def test_one(
     query: Query,
     bean_query_bin: list[str],
     rledger_bin: list[str],
+    bean_query_csv_bin: list[str] | None = None,
+    rledger_csv_bin: list[str] | None = None,
 ) -> QueryRun:
     py_out = run_query(bean_query_bin, file_path, query.query)
     rs_out = run_query(rledger_bin, file_path, query.query)
     py = extract_data(py_out.stdout, query.preserve_order)
     rs = extract_data(rs_out.stdout, query.preserve_order)
+
+    # Column names are user-visible output, so a difference in them is a
+    # divergence (#2220). They come from a second, CSV-formatted invocation
+    # because the tabular header is truncated to its column width; see the
+    # binary setup in `main`.
+    #
+    # Run only when both tools already succeeded on the text pass. A tool that
+    # errors has no header to compare, its failure is reported by the flags
+    # below, and skipping keeps the extra invocation off the failure paths.
+    py_header = rs_header = None
+    tools_ran = not py_out.failed and not rs_out.failed
+    if tools_ran and bean_query_csv_bin and rledger_csv_bin:
+        py_csv = run_query(bean_query_csv_bin, file_path, query.query)
+        rs_csv = run_query(rledger_csv_bin, file_path, query.query)
+        if not py_csv.failed and not rs_csv.failed:
+            py_header = extract_header(py_csv.stdout)
+            rs_header = extract_header(rs_csv.stdout)
+
+    # Compared only when BOTH passes produced a header. A `None` on either side
+    # means the comparison did not happen -- the CSV pass was skipped, errored,
+    # or returned nothing -- and must NOT be scored as agreement. Requiring a
+    # zero-row query to still emit its header row would make this strict, but
+    # both tools print one, so `None` here really is "we did not look".
+    header_compared = py_header is not None and rs_header is not None
+    header_match = (not header_compared) or py_header == rs_header
+    header_skipped = tools_ran and not header_compared
+    # A registered header divergence excuses the NAMES only. `header_match`
+    # keeps the raw fact so the stale check still notices when the divergence
+    # goes away; the row comparison below is untouched by the mask.
+    header_ok = header_match or _is_known_header_divergence(filename, query.name)
     # If either tool failed (non-zero exit, timeout, etc.) we never want
     # to claim a match, even if both happen to produce zero rows.
-    match = (
-        py == rs
-        and not py_out.failed
-        and not rs_out.failed
-    )
+    match = py == rs and header_ok and tools_ran
     return QueryRun(
         file=filename,
         query_name=query.name,
@@ -1115,6 +1429,10 @@ def test_one(
         py_failed=py_out.failed,
         rs_failed=rs_out.failed,
         rs_first_row=rs[0] if rs else None,
+        py_header=py_header,
+        rs_header=rs_header,
+        header_match=header_match,
+        header_skipped=header_skipped,
     )
 
 
@@ -1313,8 +1631,26 @@ def main() -> int:
     else:
         print(f"Testing against {len(selected_pairs)} files")
 
+    # Values are compared on the TEXT surface and column names on CSV, so each
+    # is read where it is meaningful (#2220):
+    #
+    #   * Headers need CSV. The default table truncates a header to its data
+    #     column width -- `sum(number)` over five-character values prints
+    #     `sum(n` -- so tabular headers disagree for reasons that say nothing
+    #     about either tool's column naming.
+    #   * Values need text. CSV is a machine surface, and
+    #     `DisplayContext::for_surface` suppresses thousands separators there
+    #     absolutely (#1892). Comparing values as CSV would stop exercising
+    #     every `render_commas` divergence registered below: those masks would
+    #     go stale because the harness had stopped looking, not because the
+    #     tools agreed.
+    #
+    # The header pass is a second invocation, and is skipped unless both tools
+    # already succeeded on the text pass -- see `test_one`.
     rledger_bin = [args.rledger, "query"]
     bean_query_bin = [args.bean_query]
+    rledger_csv_bin = [*rledger_bin, "-f", "csv"]
+    bean_query_csv_bin = [*bean_query_bin, "-f", "csv"]
 
     # Build (file, filename, query) cases
     cases = []
@@ -1339,7 +1675,16 @@ def main() -> int:
     results: list[QueryRun] = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [
-            ex.submit(test_one, p, fn, q, bean_query_bin, rledger_bin)
+            ex.submit(
+                test_one,
+                p,
+                fn,
+                q,
+                bean_query_bin,
+                rledger_bin,
+                bean_query_csv_bin,
+                rledger_csv_bin,
+            )
             for (p, fn, q) in cases
         ]
         for fut in as_completed(futures):
@@ -1446,6 +1791,14 @@ def main() -> int:
     print(f"Known Python diffs:  {known_py}")
     print(f"Known Rust diffs:    {known_rs}")
     print(f"Real mismatches:     {real_mismatches}")
+    # Report the header comparisons that did NOT happen. A skipped check scores
+    # as a match, so leaving the count silent is how coverage quietly erodes.
+    skipped_headers = sum(1 for r in results if r.header_skipped)
+    if skipped_headers:
+        print(
+            f"Header checks skipped: {skipped_headers} "
+            "(the -f csv pass failed or produced no table)"
+        )
     print(
         f"Effective match:     {effective_match}/{total} ({pct}%)"
         f"  [+{known_div} masked, {pct - raw_pct} pts over raw]"
@@ -1514,6 +1867,14 @@ def main() -> int:
                 "rs_rows": r.rs_rows,
                 "diff_samples": r.diff_samples,
             }
+            if not r.header_match:
+                # Only when they differ: recording every header would bloat the
+                # log, and a matching pair says nothing a reader needs.
+                row["py_header"] = r.py_header
+                row["rs_header"] = r.rs_header
+                row["header_match"] = False
+            if r.header_skipped:
+                row["header_skipped"] = True
             if r.py_failure:
                 row["py_failure"] = r.py_failure
             if r.rs_failure:

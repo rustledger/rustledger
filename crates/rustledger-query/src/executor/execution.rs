@@ -592,6 +592,11 @@ impl Executor<'_> {
         // it here meant a query with a FROM clause parsed its PIVOT BY, built
         // the transformation's validated inputs, and then returned the
         // un-pivoted result with no error (#2216).
+        //
+        // PIVOT BY requires GROUP BY, and a query with GROUP BY is routed to
+        // `execute_aggregate_from_table`, so reaching `apply_pivot` from here
+        // always ends in `PivotWithoutGroupBy`. That is the point: the clause
+        // is refused out loud rather than dropped.
         if let Some(pivot_exprs) = &query.pivot_by {
             result = self.apply_pivot(&result, pivot_exprs, &query.group_by)?;
         }
@@ -728,11 +733,16 @@ impl Executor<'_> {
             self.sort_results(&mut result, order_by, visible_cols)?;
         }
 
-        // Apply PIVOT BY, in the same pipeline slot `execute_select` uses:
-        // after ORDER BY and the hidden-column strip, before LIMIT. Omitting
-        // it here meant a query with a FROM clause parsed its PIVOT BY, built
-        // the transformation's validated inputs, and then returned the
-        // un-pivoted result with no error (#2216).
+        // Apply PIVOT BY, in the pipeline slot `execute_select` uses: after
+        // ORDER BY, before LIMIT. Omitting it here meant a query with a FROM
+        // clause parsed its PIVOT BY, built the transformation's validated
+        // inputs, and then returned the un-pivoted result with no error
+        // (#2216).
+        //
+        // No hidden-column strip to sit after, unlike the other two paths:
+        // `find_hidden_order_by_targets` materializes nothing for an aggregate
+        // query, because an ORDER BY target there must already be in GROUP BY
+        // or be an aggregate, so it is projected already.
         if let Some(pivot_exprs) = &query.pivot_by {
             result = self.apply_pivot(&result, pivot_exprs, &query.group_by)?;
         }

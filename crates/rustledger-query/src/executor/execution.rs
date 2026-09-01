@@ -676,7 +676,13 @@ impl Executor<'_> {
             group_map.insert(empty_key.clone(), (vec![], vec![]));
             key_order.push(empty_key);
         } else if group_map.is_empty() {
-            return Ok(result);
+            // No groups, so no rows -- but do NOT return here. ORDER BY and
+            // LIMIT are no-ops on an empty result, PIVOT is not: it reshapes
+            // the COLUMNS, and skipping it left `WHERE <no match> ... PIVOT BY`
+            // reporting the un-pivoted header while the same query emptied by
+            // HAVING reported the pivoted one. bean-query gives the pivoted
+            // shape for both (#2216).
+            return self.finish_aggregate_result(result, query);
         }
 
         // Build alias map once (used by HAVING evaluation).
@@ -727,27 +733,36 @@ impl Executor<'_> {
             result.add_row(row);
         }
 
-        // Apply ORDER BY
+        self.finish_aggregate_result(result, query)
+    }
+
+    /// ORDER BY, then PIVOT BY, then LIMIT -- the tail every aggregate result
+    /// goes through, including an empty one.
+    ///
+    /// Shared so the no-groups case cannot skip it. It used to `return` early,
+    /// which was harmless for ORDER BY and LIMIT (no-ops on zero rows) and not
+    /// for PIVOT, which reshapes the COLUMNS: `WHERE <no match> ... PIVOT BY`
+    /// reported the un-pivoted header while the same query emptied by HAVING
+    /// reported the pivoted one. bean-query gives the pivoted shape for both.
+    ///
+    /// No hidden-column strip here, unlike the other two execution paths:
+    /// `find_hidden_order_by_targets` materializes nothing for an aggregate
+    /// query, because an ORDER BY target there must already be in GROUP BY or
+    /// be an aggregate, so it is projected already.
+    fn finish_aggregate_result(
+        &self,
+        mut result: QueryResult,
+        query: &SelectQuery,
+    ) -> Result<QueryResult, QueryError> {
         if let Some(order_by) = &query.order_by {
             let visible_cols = result.columns.len();
             self.sort_results(&mut result, order_by, visible_cols)?;
         }
 
-        // Apply PIVOT BY, in the pipeline slot `execute_select` uses: after
-        // ORDER BY, before LIMIT. Omitting it here meant a query with a FROM
-        // clause parsed its PIVOT BY, built the transformation's validated
-        // inputs, and then returned the un-pivoted result with no error
-        // (#2216).
-        //
-        // No hidden-column strip to sit after, unlike the other two paths:
-        // `find_hidden_order_by_targets` materializes nothing for an aggregate
-        // query, because an ORDER BY target there must already be in GROUP BY
-        // or be an aggregate, so it is projected already.
         if let Some(pivot_exprs) = &query.pivot_by {
             result = self.apply_pivot(&result, pivot_exprs, &query.group_by)?;
         }
 
-        // Apply LIMIT
         if let Some(limit) = query.limit {
             result.truncate(limit as usize);
         }

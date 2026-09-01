@@ -98,3 +98,51 @@ fn pivot_without_group_by_errors_with_a_from_clause_too() {
         .expect_err("the no-FROM form errors too");
     assert_eq!(err, without, "both paths must give the same diagnostic");
 }
+
+/// An empty result must still be pivoted, and both ways of emptying it must
+/// agree.
+///
+/// The aggregate path returned early when GROUP BY produced no groups, which
+/// skipped ORDER BY, PIVOT and LIMIT. The first and last are no-ops on zero
+/// rows; PIVOT is not, because it reshapes the COLUMNS. So a query emptied by
+/// WHERE reported the un-pivoted header while the same query emptied by HAVING
+/// reported the pivoted one. bean-query gives the pivoted shape for both.
+#[test]
+fn an_empty_result_is_pivoted_the_same_way_however_it_emptied() {
+    let by_where = columns_of(
+        "SELECT account, year, sum(number) FROM #postings WHERE account = 'nope' \
+         GROUP BY account, year PIVOT BY account, year",
+    )
+    .expect("empty by WHERE");
+    let by_having = columns_of(
+        "SELECT account, year, sum(number) FROM #postings \
+         GROUP BY account, year HAVING sum(number) > 100 PIVOT BY account, year",
+    )
+    .expect("empty by HAVING");
+
+    assert_eq!(
+        by_where, by_having,
+        "how a result became empty must not change its shape",
+    );
+    assert_eq!(
+        by_where,
+        vec!["account".to_string()],
+        "the pivoted shape: the row key, with no spread values to add",
+    );
+
+    // Without a pivot the same empty query keeps its projected columns, so
+    // the change above did not simply drop columns from every empty result.
+    let no_pivot = columns_of(
+        "SELECT account, year, sum(number) FROM #postings WHERE account = 'nope' \
+         GROUP BY account, year",
+    )
+    .expect("empty, no pivot");
+    assert_eq!(
+        no_pivot,
+        vec![
+            "account".to_string(),
+            "year".to_string(),
+            "sum(number)".to_string()
+        ],
+    );
+}

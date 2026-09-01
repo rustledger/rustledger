@@ -76,7 +76,14 @@ impl Executor<'_> {
                 Expr::Function(func) => {
                     // First try to find a column with the function name (e.g., "sum" for sum(amount))
                     // Then try the full expression string (e.g., "account_sortkey(account)")
-                    let expr_str = spec.expr.to_string();
+                    //
+                    // `header_name`, not `Display`, for the same reason as the
+                    // arm below: `Display` parenthesizes a binary argument, so
+                    // `abs(number + 1)` looked for `abs((number + 1))` against
+                    // an `abs(number + 1)` header. `abs(number)` worked, which
+                    // is why the bug hid here -- an argument has to be compound
+                    // before the two spellings part company (#2177 review).
+                    let expr_str = crate::ast::header_name(&spec.expr);
                     find_column(&result.columns, &func.name)
                         .or_else(|| find_column(&result.columns, &expr_str))
                         .ok_or_else(|| {

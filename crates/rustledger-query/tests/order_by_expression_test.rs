@@ -112,6 +112,39 @@ fn order_by_an_expression_not_in_select_uses_a_hidden_column() {
     assert_eq!(rows.len(), 4);
 }
 
+/// A FUNCTION whose argument is compound. The `Expr::Function` arm had its own
+/// `Display` lookup, so this stayed broken after the binary-expression arm was
+/// fixed: `abs(number + 1)` looked for `abs((number + 1))`.
+///
+/// `abs(number)` resolves either way, which is why the gap hid -- an argument
+/// has to be compound before the two spellings part company. Flagged in review
+/// on #2177.
+#[test]
+fn order_by_a_function_over_an_expression_finds_its_column() {
+    let (columns, rows) = run("SELECT abs(number + 1) ORDER BY abs(number + 1)")
+        .expect("ORDER BY on a function over an expression must resolve");
+    assert_eq!(columns, vec!["abs(number + 1)".to_string()]);
+    let got: Vec<String> = rows
+        .iter()
+        .map(|r| match &r[0] {
+            Value::Number(n) => n.to_string(),
+            other => panic!("expected a number, got {other:?}"),
+        })
+        .collect();
+    // bean-query answers 2.00, 4.00, 9.00, 11.00 for the same query.
+    assert_eq!(got, vec!["2", "4", "9", "11"]);
+}
+
+/// The simple-argument form, which resolved before this change too. Here so a
+/// regression that breaks it is distinguishable from one that only breaks the
+/// compound case above.
+#[test]
+fn order_by_a_function_over_a_bare_column_still_resolves() {
+    let (columns, _) =
+        run("SELECT abs(number) ORDER BY abs(number)").expect("ORDER BY abs(number)");
+    assert_eq!(columns, vec!["abs(number)".to_string()]);
+}
+
 /// Ordinals resolve by position and must not be turned into a hidden constant
 /// column; regression cover for the path this change walks past.
 #[test]

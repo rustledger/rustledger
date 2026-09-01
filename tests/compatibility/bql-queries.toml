@@ -190,3 +190,7 @@ preserve_order = true
 # any PIVOT query, so a row-by-row diff would be permanently red.
 # Tracking the semantic reconciliation separately — see #1034.
 # ----------------------------------------------------------------------
+[[query]]
+name = "minmax-over-boolean"
+query = "SELECT MAX(number > 0), MIN(number > 0)"
+notes = "false < true, so MAX is `any` and MIN is `all` (#2183). Python orders bools that way and bean-query inherits it; we had to define the order explicitly, and only for the aggregates."

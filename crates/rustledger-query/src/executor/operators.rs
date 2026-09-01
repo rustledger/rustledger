@@ -109,6 +109,9 @@ impl Executor<'_> {
     }
 
     /// Check if left value is less than right value.
+    ///
+    /// Ordering used by the `MIN`/`MAX` aggregates, and only by them -- see the
+    /// `Boolean` arm.
     pub(super) fn value_less_than(&self, left: &Value, right: &Value) -> Result<bool, QueryError> {
         let ord = match (left, right) {
             (Value::Number(a), Value::Number(b)) => a.cmp(b),
@@ -117,6 +120,20 @@ impl Executor<'_> {
             (Value::Integer(a), Value::Number(b)) => Decimal::from(*a).cmp(b),
             (Value::String(a), Value::String(b)) => a.cmp(b),
             (Value::Date(a), Value::Date(b)) => a.cmp(b),
+            // `false < true`, so `MAX` over booleans is `any` and `MIN` is
+            // `all` -- which is what bean-query gives, because Python's
+            // `max`/`min` order bools that way and it does not special-case
+            // them (#2183).
+            //
+            // Deliberately NOT added to `compare_values`, which backs the `<`
+            // and `>` operators. bean-query REFUSES those on booleans:
+            //
+            //     SELECT (number > 0) < (number > 5) FROM #postings
+            //     -> operator "less(bool, bool)" not supported
+            //
+            // so defining the order there would accept a query it rejects.
+            // The order exists for the aggregates and stops there.
+            (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
             _ => return Err(QueryError::Type("cannot compare values".to_string())),
         };
         Ok(ord.is_lt())

@@ -286,23 +286,32 @@ pub fn validate_balance_late(
     let expected = bal.amount.number;
     let difference = (actual - expected).abs();
 
-    // Record the computed result so consumers can render per-assertion pass/fail
-    // without re-deriving the balance (#1663). `diff` is signed (`computed −
-    // asserted`); this is the validator's own `actual`, so the load/validate
-    // surfaces can't diverge from the check.
-    state.balance_actuals.push(crate::BalanceActual {
-        date: bal.date,
-        account: bal.account.clone(),
-        currency: bal.amount.currency.clone(),
-        diff: actual - expected,
-    });
-
     // Determine tolerance via the shared helper so out-of-pipeline
     // consumers (LSP code lens) and the validator stay in lockstep.
     let is_explicit = bal.tolerance.is_some();
     let tolerance = balance_tolerance(expected, bal.tolerance, state.options.tolerance_multiplier);
+    let exceeds_tolerance = difference > tolerance;
 
-    if difference > tolerance {
+    // Record the computed result so consumers can render per-assertion pass/fail
+    // without re-deriving the balance (#1663). `diff` is signed (`computed −
+    // asserted`); this is the validator's own `actual`, so the load/validate
+    // surfaces can't diverge from the check.
+    //
+    // Recorded AFTER the tolerance is resolved so `exceeds_tolerance` comes
+    // from the same comparison that raises the error below. A consumer that
+    // re-derived "did this fail" from `diff` alone would be a second
+    // implementation of the tolerance rule, and would disagree the moment
+    // either changed (#2180).
+    state.balance_actuals.push(crate::BalanceActual {
+        date: bal.date,
+        account: bal.account.clone(),
+        currency: bal.amount.currency.clone(),
+        asserted: expected,
+        diff: actual - expected,
+        exceeds_tolerance,
+    });
+
+    if exceeds_tolerance {
         // Use E2002 for explicit tolerance, E2001 for inferred
         let error_code = if is_explicit {
             ErrorCode::BalanceToleranceExceeded

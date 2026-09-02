@@ -153,8 +153,14 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     }
 
     // Load and fully process the file (parse → book → plugins).
+    // Validation is ON. It is what computes `#balances.discrepancy` -- the
+    // balance checker's difference per failing assertion, which cannot be
+    // derived from the directive (#2180). Measured at load-dominated cost:
+    // on the largest corpus file a full query runs in the same ~0.1s either
+    // way. Diagnostics go to stderr, so stdout is byte-identical, and
+    // bean-query likewise reports a failing assertion before its results.
     let options = LoadOptions {
-        validate: false, // Query doesn't need validation
+        validate: true,
         ..Default::default()
     };
 
@@ -230,6 +236,29 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     }
 
     // Determine query source
+    // Flatten the loader's failing-assertion list into the executor's key
+    // shape once. Computed here rather than per query so the REPL, which
+    // reuses one ledger across prompts, does not redo it at every prompt.
+    let balance_discrepancies: Vec<(
+        rustledger_core::NaiveDate,
+        String,
+        String,
+        rustledger_core::Decimal,
+        rustledger_core::Amount,
+    )> = ledger
+        .balance_discrepancies
+        .iter()
+        .map(|d| {
+            (
+                d.date,
+                d.account.to_string(),
+                d.amount.currency.to_string(),
+                d.asserted,
+                d.amount.clone(),
+            )
+        })
+        .collect();
+
     let query_str = if !args.query.is_empty() {
         args.query.join(" ")
     } else if let Some(ref query_file) = args.query_file {
@@ -243,14 +272,19 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
             &source_map,
             &display_context,
             &ledger.options.to_account_types(),
+            &balance_discrepancies,
             args,
         );
     };
 
     // Batch query: no pager (matching Python bean-query behavior).
     // Pager is only used in interactive REPL mode.
-    let settings =
-        ShellSettings::from_args(args, display_context, ledger.options.to_account_types());
+    let settings = ShellSettings::from_args(
+        args,
+        display_context,
+        ledger.options.to_account_types(),
+        balance_discrepancies,
+    );
     if let Some(ref output_path) = settings.output_file {
         let mut file = fs::File::create(output_path)
             .with_context(|| format!("failed to create output file {}", output_path.display()))?;
@@ -270,6 +304,15 @@ struct ShellSettings {
     /// Config-aware account types from the loaded ledger (L5: `POSSIGN` /
     /// `ACCOUNT_SORTKEY` must honor `name_*` renames like beanquery).
     account_types: rustledger_core::AccountTypes,
+    /// The balance checker's computed difference per FAILING assertion,
+    /// keyed by `(date, account, currency)`. Backs `#balances.discrepancy`.
+    balance_discrepancies: Vec<(
+        rustledger_core::NaiveDate,
+        String,
+        String,
+        rustledger_core::Decimal,
+        rustledger_core::Amount,
+    )>,
 }
 
 impl ShellSettings {
@@ -277,6 +320,13 @@ impl ShellSettings {
         args: &Args,
         display_context: DisplayContext,
         account_types: rustledger_core::AccountTypes,
+        balance_discrepancies: Vec<(
+            rustledger_core::NaiveDate,
+            String,
+            String,
+            rustledger_core::Decimal,
+            rustledger_core::Amount,
+        )>,
     ) -> Self {
         Self {
             format: args.format.unwrap_or(OutputFormat::Text),
@@ -285,6 +335,7 @@ impl ShellSettings {
             output_file: args.output.clone(),
             display_context,
             account_types,
+            balance_discrepancies,
         }
     }
 }

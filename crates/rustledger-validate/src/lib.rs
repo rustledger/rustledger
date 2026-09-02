@@ -309,8 +309,25 @@ pub struct BalanceActual {
     pub account: Account,
     /// The asserted currency.
     pub currency: rustledger_core::Currency,
+    /// The asserted number, i.e. the `balance` directive's own amount.
+    ///
+    /// Recorded so a consumer can tell two assertions apart. `(date, account,
+    /// currency)` is NOT unique -- a ledger may assert the same account and
+    /// currency twice on one date, with different amounts and therefore
+    /// different differences (#2180).
+    pub asserted: rustledger_core::Decimal,
     /// `computed − asserted` in `currency` (zero = exact match).
     pub diff: rustledger_core::Decimal,
+    /// Whether `diff` was outside the assertion's tolerance, i.e. whether
+    /// this assertion FAILED.
+    ///
+    /// Not derivable from `diff`: a small non-zero difference is a pass when
+    /// it falls within the tolerance, explicit or inferred. Recorded from the
+    /// same comparison that raises the error, so a consumer never re-derives
+    /// the tolerance rule (#2180). `#balances.discrepancy` reports `diff`
+    /// only where this is true, matching beancount's `diff_amount`, which its
+    /// checker sets only on a failing entry.
+    pub exceeds_tolerance: bool,
 }
 
 /// Ledger state for validation.

@@ -63,22 +63,31 @@ impl Executor<'_> {
 
     /// Build the #balances table from balance assertion directives.
     ///
-    /// The table has columns: date, account, amount, tolerance, meta
+    /// The table has columns: date, account, amount, tolerance, discrepancy, meta
     /// - date: The date of the balance assertion
     /// - account: The account being balanced
     /// - amount: The expected balance amount
     /// - tolerance: The explicit `~` tolerance, or NULL if none was given
+    /// - discrepancy: `computed − asserted` for a FAILING assertion, else NULL
     /// - meta: The directive's metadata (hidden from `SELECT *`)
     ///
-    /// bean-query also exposes `discrepancy` here. It is not a field of the
-    /// directive — the balance checker computes it — so it is tracked
-    /// separately rather than faked from the data we have (#2180).
+    /// `discrepancy` is not a field of the directive — the balance checker
+    /// computes it — so it comes from the host via
+    /// [`Executor::set_balance_discrepancies`](super::Executor::set_balance_discrepancies)
+    /// rather than being re-derived here (#2180). A host that did not validate
+    /// supplies nothing and every row reports NULL, which keeps the SCHEMA
+    /// matching bean-query's even where the values are unavailable.
+    ///
+    /// NULL on a passing assertion, matching beancount: its checker sets
+    /// `diff_amount` only on a failing entry, so an assertion that is off by
+    /// less than its tolerance reports nothing rather than a small number.
     pub(super) fn build_balances_table(&self) -> Table {
         let columns = vec![
             "date".to_string(),
             "account".to_string(),
             "amount".to_string(),
             "tolerance".to_string(),
+            "discrepancy".to_string(),
             "meta".to_string(),
         ];
         let mut table = Table::new(columns).with_hidden(&["meta"]);
@@ -121,11 +130,22 @@ impl Executor<'_> {
         balances.sort_by_key(|(date, ..)| *date);
 
         for (date, account, amount, tolerance, meta) in balances {
+            let discrepancy = self
+                .balance_discrepancies
+                .get(&(
+                    date,
+                    account.to_string(),
+                    amount.currency.to_string(),
+                    amount.number,
+                ))
+                .cloned()
+                .map_or(Value::Null, Value::Amount);
             let row = vec![
                 Value::Date(date),
                 Value::String(account.to_string()),
                 Value::Amount(amount),
                 tolerance.map_or(Value::Null, Value::Number),
+                discrepancy,
                 Self::metadata_to_value(meta),
             ];
             table.add_row(row);

@@ -53,6 +53,16 @@ pub(super) fn run_interactive(
     source_map: &SourceMap,
     display_context: &DisplayContext,
     account_types: &rustledger_core::AccountTypes,
+    // The balance checker's difference per FAILING assertion, backing
+    // `#balances.discrepancy` (#2180). Computed once for the session, since
+    // the ledger does not change between prompts.
+    balance_discrepancies: &[(
+        rustledger_core::NaiveDate,
+        String,
+        String,
+        rustledger_core::Decimal,
+        rustledger_core::Amount,
+    )],
     args: &Args,
 ) -> Result<()> {
     let mut rl: Editor<(), DefaultHistory> = DefaultEditor::new()?;
@@ -86,8 +96,12 @@ pub(super) fn run_interactive(
     );
     println!();
 
-    let mut settings =
-        ShellSettings::from_args(args, display_context.clone(), account_types.clone());
+    let mut settings = ShellSettings::from_args(
+        args,
+        display_context.clone(),
+        account_types.clone(),
+        balance_discrepancies.to_vec(),
+    );
 
     loop {
         let readline = rl.readline("beanquery> ");

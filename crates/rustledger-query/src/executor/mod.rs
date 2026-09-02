@@ -139,6 +139,30 @@ pub struct Executor<'a> {
     source_map: Option<&'a SourceMap>,
     /// In-memory tables created by CREATE TABLE.
     tables: FxHashMap<String, Table>,
+    /// The difference the balance checker computed for each FAILING assertion,
+    /// keyed by `(date, account, currency, asserted)`. Backs
+    /// `#balances.discrepancy`.
+    ///
+    /// The asserted amount is part of the key because the other three do not
+    /// identify an assertion: a ledger may assert the same account and
+    /// currency twice on one date, and those rows can fail differently.
+    /// Keying without it made both rows report the second one's difference.
+    ///
+    /// Supplied by the host rather than computed here: the value belongs to
+    /// the checker, and re-deriving it in the query layer would be a second
+    /// implementation of balance accumulation AND of the tolerance rule that
+    /// decides whether an assertion failed at all. A host that did not
+    /// validate supplies nothing, and the column reports NULL rather than a
+    /// wrong number (#2180).
+    balance_discrepancies: FxHashMap<
+        (
+            rustledger_core::NaiveDate,
+            String,
+            String,
+            rustledger_core::Decimal,
+        ),
+        Amount,
+    >,
 }
 
 // Sub-modules for focused functionality
@@ -211,6 +235,7 @@ impl<'a> Executor<'a> {
             source_locations: None,
             source_map: None,
             tables: FxHashMap::default(),
+            balance_discrepancies: FxHashMap::default(),
         }
     }
 
@@ -219,6 +244,34 @@ impl<'a> Executor<'a> {
     /// roots the way beanquery does.
     pub fn set_account_types(&mut self, account_types: rustledger_core::AccountTypes) {
         self.account_types = account_types;
+    }
+
+    /// Supply the balance checker's computed differences, one per FAILING
+    /// assertion, keyed by `(date, account, currency, asserted_number)`.
+    ///
+    /// Backs `#balances.discrepancy`. Pass only failures: a passing assertion
+    /// has no discrepancy, and beancount likewise leaves `diff_amount` unset
+    /// there rather than reporting zero. Without this the column is still
+    /// present and reports NULL, so a host that skips validation gets a
+    /// schema matching bean-query's rather than a missing column (#2180).
+    pub fn set_balance_discrepancies(
+        &mut self,
+        discrepancies: impl IntoIterator<
+            Item = (
+                rustledger_core::NaiveDate,
+                String,
+                String,
+                rustledger_core::Decimal,
+                Amount,
+            ),
+        >,
+    ) {
+        self.balance_discrepancies = discrepancies
+            .into_iter()
+            .map(|(date, account, currency, asserted, amount)| {
+                ((date, account, currency, asserted), amount)
+            })
+            .collect();
     }
 
     /// Create a new executor with source location support.
@@ -305,6 +358,7 @@ impl<'a> Executor<'a> {
             source_locations: Some(source_locations),
             source_map: Some(source_map),
             tables: FxHashMap::default(),
+            balance_discrepancies: FxHashMap::default(),
         }
     }
 

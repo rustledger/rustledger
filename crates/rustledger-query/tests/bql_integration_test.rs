@@ -6313,12 +6313,24 @@ fn test_balances_table_select_all() {
     let result = execute_query("SELECT * FROM #balances", &directives);
 
     assert_eq!(result.len(), 3);
-    // `tolerance` is in bean-query's wildcard here; `meta` is not. See
-    // select_star_matches_bean_query_per_table for the full per-table pinning.
+    // `tolerance` and `discrepancy` are in bean-query's wildcard here; `meta`
+    // is not. See select_star_matches_bean_query_per_table for the full
+    // per-table pinning.
+    //
+    // `discrepancy` is present even though this executor was built straight
+    // from directives with no checker attached -- it reports NULL. The SCHEMA
+    // does not depend on whether the host validated (#2180).
     assert_eq!(
         result.columns,
-        vec!["date", "account", "amount", "tolerance"]
+        vec!["date", "account", "amount", "tolerance", "discrepancy"]
     );
+    for row in &result.rows {
+        assert_eq!(
+            row[4],
+            rustledger_query::Value::Null,
+            "no checker attached, so every discrepancy is NULL",
+        );
+    }
 }
 
 #[test]
@@ -7271,48 +7283,37 @@ fn select_star_matches_bean_query_per_table() {
     // carry hand-written lists), so a name-based rule gets #commodities
     // silently wrong.
     //
-    // `gap` is the part of bean-query's set we do NOT produce yet. Where it
-    // is None the expectation IS bean-query's set, column for column. Where
-    // it is Some, closing that gap SHOULD fail this test -- the failure means
-    // the table moved toward bean-query, not away, so update the expectation
-    // rather than reverting the work (#2154).
+    // Every expectation here IS bean-query's set, column for column. The list
+    // used to carry a per-table `gap` -- the part of bean-query's set we did
+    // not produce yet -- because a census of all 55 columns across its ten
+    // tables (#2154) found three we could not register. All three are closed:
+    // `#notes.tags`/`.links` needed `Note` to keep them through parsing
+    // (#2160), and `#balances.discrepancy` needed the balance checker's
+    // computed difference plumbed through to the query layer (#2180). With no
+    // gaps left the mechanism is gone; a divergence now means drift, and a
+    // failure here is a regression rather than progress.
     let directives = make_all_directive_types_test_directives();
 
-    for (table, expected, gap) in [
+    for (table, expected) in [
         (
             "#balances",
-            vec!["date", "account", "amount", "tolerance"],
-            Some("discrepancy, which the balance checker computes rather than stores"),
+            vec!["date", "account", "amount", "tolerance", "discrepancy"],
         ),
-        // Full parity since #2160 gave `Note` its tags and links: this row
-        // carried a recorded gap, and closing it is what the gap message told
-        // the next reader to do.
         (
             "#notes",
             vec!["date", "account", "comment", "tags", "links"],
-            None,
         ),
-        ("#events", vec!["date", "type", "description"], None),
+        ("#events", vec!["date", "type", "description"]),
         (
             "#documents",
             vec!["date", "account", "filename", "tags", "links"],
-            None,
         ),
-        ("#commodities", vec!["meta", "date", "name"], None),
+        ("#commodities", vec!["meta", "date", "name"]),
     ] {
         let result = execute_query(&format!("SELECT * FROM {table}"), &directives);
         assert_eq!(
-            result.columns,
-            expected,
-            "{}",
-            gap.map_or_else(
-                || format!("SELECT * FROM {table} drifted from bean-query"),
-                |g| format!(
-                    "SELECT * FROM {table} changed. Note this is NOT full bean-query \
-                     parity: bean-query also returns {g}. If you just added it, update \
-                     this expectation."
-                ),
-            )
+            result.columns, expected,
+            "SELECT * FROM {table} drifted from bean-query"
         );
         assert!(
             !result.rows.is_empty(),

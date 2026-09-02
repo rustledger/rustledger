@@ -8,8 +8,8 @@ use std::str::FromStr;
 
 use crate::ast::{
     BalancesQuery, BinaryOperator, ColumnDef, CreateTableStmt, Expr, FromClause, FunctionCall,
-    InsertSource, InsertStmt, JournalQuery, Literal, OrderSpec, PrintQuery, Query, SelectQuery,
-    SortDirection, Target, UnaryOperator, WindowFunction, WindowSpec,
+    InsertSource, InsertStmt, JournalQuery, Literal, OrderSpec, PrintQuery, Query, QuoteStyle,
+    QuotedString, SelectQuery, SortDirection, Target, UnaryOperator, WindowFunction, WindowSpec,
 };
 use crate::error::{ParseError, ParseErrorKind};
 use rustledger_core::NaiveDate;
@@ -1067,7 +1067,7 @@ fn literal<'a>() -> impl Parser<'a, ParserInput<'a>, Literal, ParserExtra<'a>> +
         // Number — Integer if no decimal point, Number otherwise
         number_literal(),
         // String
-        string_literal().map(Literal::String),
+        quoted_string_literal().map(Literal::String),
     ))
 }
 
@@ -1104,9 +1104,12 @@ fn table_identifier<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtr
 /// string continue past a quote but is kept VERBATIM — upstream's own
 /// `parser_test.py` pins `'rainy''day'` -> `rainy''day`. Double-quoted
 /// strings have no escapes at all and end at the first `"`.
-fn string_literal<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>> + Clone {
-    // Double-quoted string: body is everything up to the first `"`,
-    // captured as one input slice like the single-quoted arm.
+/// [`string_literal`] keeping the quote character the source used.
+///
+/// Only the literal-expression site needs the style -- headers echo it
+/// (#2176) -- so the other callers stay on the plain-`String` wrapper below.
+fn quoted_string_literal<'a>()
+-> impl Parser<'a, ParserInput<'a>, QuotedString, ParserExtra<'a>> + Clone {
     let double_quoted = just('"')
         .ignore_then(
             none_of("\"")
@@ -1115,12 +1118,9 @@ fn string_literal<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<
                 .to_slice()
                 .map(ToString::to_string),
         )
-        .then_ignore(just('"'));
+        .then_ignore(just('"'))
+        .map(|v| QuotedString::parsed(v, QuoteStyle::Double));
 
-    // Single-quoted string (SQL-style): `''` continues the string (and
-    // stays as-is in the value); anything else ends at the first `'`.
-    // The body is captured as one input slice (`to_slice`) — the value
-    // is verbatim anyway, so no per-piece assembly is needed.
     let single_quoted = just('\'')
         .ignore_then(
             just("''")
@@ -1130,9 +1130,22 @@ fn string_literal<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<
                 .to_slice()
                 .map(ToString::to_string),
         )
-        .then_ignore(just('\''));
+        .then_ignore(just('\''))
+        .map(|v| QuotedString::parsed(v, QuoteStyle::Single));
 
     choice((double_quoted, single_quoted))
+}
+
+fn string_literal<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>> + Clone {
+    // Delegates so there is ONE grammar for a string literal. The two arms
+    // were duplicated here and in `quoted_string_literal`; a fix applied to
+    // one and not the other would make a literal parse differently depending
+    // on which caller reached it.
+    //
+    // Double-quoted: body is everything up to the first `"`. Single-quoted
+    // (SQL-style): `''` continues the string and stays as-is in the value;
+    // anything else ends at the first `'`.
+    quoted_string_literal().map(|q| q.value().to_string())
 }
 
 /// Parse a date literal (YYYY-MM-DD).
@@ -1895,7 +1908,9 @@ mod tests {
             Query::Select(sel) => match &sel.targets[0].expr {
                 Expr::Function(f) => {
                     assert_eq!(f.name, "foo");
-                    assert!(matches!(&f.args[0], Expr::Literal(Literal::String(s)) if s == "bar"));
+                    assert!(
+                        matches!(&f.args[0], Expr::Literal(Literal::String(s)) if s.value() == "bar")
+                    );
                 }
                 _ => panic!("Expected function"),
             },
@@ -1912,7 +1927,7 @@ mod tests {
                     assert_eq!(f.name.to_uppercase(), "META");
                     assert_eq!(f.args.len(), 1);
                     assert!(
-                        matches!(&f.args[0], Expr::Literal(Literal::String(s)) if s == "category")
+                        matches!(&f.args[0], Expr::Literal(Literal::String(s)) if s.value() == "category")
                     );
                 }
                 _ => panic!("Expected function"),

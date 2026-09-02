@@ -17,7 +17,7 @@
 
 use super::Executor;
 use super::types::{PostingContext, Value};
-use crate::ast::{Expr, FunctionCall, Literal};
+use crate::ast::{Expr, FunctionCall, Literal, QuotedString};
 use crate::error::QueryError;
 use rust_decimal_macros::dec;
 use rustledger_core::{Amount, Directive, Posting, Transaction, naive_date};
@@ -40,7 +40,7 @@ fn scratch_txn() -> Transaction {
 /// …) — those functions are out of scope for this literal-driven harness.
 fn value_as_literal(v: &Value) -> Option<Expr> {
     Some(match v {
-        Value::String(s) => Expr::Literal(Literal::String(s.clone())),
+        Value::String(s) => Expr::Literal(Literal::String(QuotedString::synthetic(s.clone()))),
         Value::Number(n) => Expr::Literal(Literal::Number(*n)),
         Value::Integer(i) => Expr::Literal(Literal::Integer(*i)),
         Value::Date(d) => Expr::Literal(Literal::Date(*d)),

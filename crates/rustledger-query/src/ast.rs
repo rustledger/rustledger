@@ -215,11 +215,99 @@ pub enum Expr {
     },
 }
 
+/// Which quote character a string literal was written with.
+///
+/// bean-query echoes the quote the query wrote -- `"dq"` heads `"dq"` and
+/// `'dq'` heads `'dq'` -- so reproducing its headers means carrying the style
+/// from the source (#2176).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QuoteStyle {
+    /// `'single'`.
+    Single,
+    /// `"double"`.
+    Double,
+}
+
+impl QuoteStyle {
+    /// The character itself.
+    #[must_use]
+    pub const fn char(self) -> char {
+        match self {
+            Self::Single => '\'',
+            Self::Double => '"',
+        }
+    }
+}
+
+/// A string literal, and the quote character its source used if it came from
+/// one.
+///
+/// # Provenance is not part of the value
+///
+/// `PartialEq` and `Hash` consider only [`Self::value`]. `'x'` and `"x"` are
+/// the same string, and an AST comparison that said otherwise would make
+/// query equality depend on typing style. The quote is carried solely so
+/// headers and [`Display`](std::fmt::Display) can echo what was written --
+/// the same reason [`Spanned`](rustledger_core::Spanned) keeps equality on
+/// its value rather than its span.
+///
+/// `quote` is `None` for a literal built programmatically rather than parsed
+/// (see [`Expr::string`]), which has no source style to echo. Those render by
+/// the fallback rule in `header_fragment`.
+#[derive(Debug, Clone, Eq)]
+pub struct QuotedString {
+    value: String,
+    quote: Option<QuoteStyle>,
+}
+
+impl QuotedString {
+    /// A literal read from source, carrying the quote it was written with.
+    #[must_use]
+    pub const fn parsed(value: String, quote: QuoteStyle) -> Self {
+        Self {
+            value,
+            quote: Some(quote),
+        }
+    }
+
+    /// A literal with no source style, built programmatically.
+    pub fn synthetic(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            quote: None,
+        }
+    }
+
+    /// The string itself, without quotes.
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// The quote the source used, if this literal was parsed.
+    #[must_use]
+    pub const fn quote(&self) -> Option<QuoteStyle> {
+        self.quote
+    }
+}
+
+impl PartialEq for QuotedString {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl std::hash::Hash for QuotedString {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.value.hash(state);
+    }
+}
+
 /// A literal value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Literal {
     /// String literal.
-    String(String),
+    String(QuotedString),
     /// Numeric literal.
     Number(Decimal),
     /// Integer literal.
@@ -506,9 +594,13 @@ impl Expr {
         Self::Column(name.into())
     }
 
-    /// Create a string literal.
+    /// Create a string literal with no source quote style.
+    ///
+    /// For literals built in code rather than parsed. A header for one falls
+    /// back to the heuristic in `header_fragment` rather than echoing a quote
+    /// it never had.
     pub fn string(s: impl Into<String>) -> Self {
-        Self::Literal(Literal::String(s.into()))
+        Self::Literal(Literal::String(QuotedString::synthetic(s)))
     }
 
     /// Create a number literal.
@@ -672,21 +764,26 @@ fn header_fragment(expr: &Expr) -> String {
     match expr {
         Expr::Column(name) => name.clone(),
         Expr::Wildcard => "*".to_string(),
-        // Single quotes, as bean-query writes them; `Display` uses double.
-        // Switch to double when the value contains a single quote and no
-        // double, so the header stays a well-formed literal instead of the
-        // ambiguous `'o'clock'`.
-        //
-        // Exact parity is out of reach here: bean-query echoes the quote
-        // character the query WROTE (`"dq"` heads `"dq"`, `'dq'` heads
-        // `'dq'`), and `Literal::String` does not record which was used.
-        // Reproducing that needs the parser to keep the original style
-        // (#2176).
+        // Echo the quote the query wrote, which is what bean-query does:
+        // `"dq"` heads `"dq"` and `'dq'` heads `'dq'` (#2176). The body is
+        // reproduced verbatim, again matching bean-query -- `'it''s'` heads
+        // `'it''s'`, with the doubled quote left as written rather than
+        // re-escaped.
         Expr::Literal(Literal::String(s)) => {
-            if s.contains('\'') && !s.contains('"') {
-                format!("\"{s}\"")
+            if let Some(q) = s.quote() {
+                format!("{}{}{}", q.char(), s.value(), q.char())
             } else {
-                format!("'{s}'")
+                // No source style: this literal was built in code. Single
+                // quotes, as bean-query writes them, switching to double when
+                // the value contains a single quote and no double so the
+                // header stays a well-formed literal rather than the
+                // ambiguous `'o'clock'` (#2175).
+                let v = s.value();
+                if v.contains('\'') && !v.contains('"') {
+                    format!("\"{v}\"")
+                } else {
+                    format!("'{v}'")
+                }
             }
         }
         Expr::Literal(lit) => lit.to_string(),
@@ -739,7 +836,12 @@ fn header_fragment(expr: &Expr) -> String {
 impl fmt::Display for Literal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::String(s) => write!(f, "\"{s}\""),
+            // Echoes the source quote so a parsed literal round-trips as
+            // written; falls back to double quotes when there was none.
+            Self::String(s) => {
+                let q = s.quote().unwrap_or(QuoteStyle::Double).char();
+                write!(f, "{q}{}{q}", s.value())
+            }
             Self::Number(n) => write!(f, "{n}"),
             Self::Integer(n) => write!(f, "{n}"),
             Self::Date(d) => write!(f, "{d}"),
@@ -948,9 +1050,46 @@ mod tests {
         assert_eq!(UnaryOperator::IsNotNull.to_string(), " IS NOT NULL");
     }
 
+    /// A literal built in code has no source quote to echo, so the header
+    /// keeps the #2175 fallback: single quotes, switching to double only when
+    /// the value contains a single quote and no double, so the header stays a
+    /// well-formed literal rather than the ambiguous `'o'clock'`.
+    ///
+    /// A unit test because `header_name` is `pub(crate)` and a synthetic
+    /// literal cannot be reached through `parse` -- everything parsed carries
+    /// a style. The parsed cases live in
+    /// `tests/literal_quote_style_test.rs`.
+    #[test]
+    fn a_synthetic_literal_header_uses_the_fallback_rule() {
+        let name = |s: &str| header_name(&Expr::string(s));
+        assert_eq!(name("plain"), "'plain'");
+        assert_eq!(name("o'clock"), "\"o'clock\"");
+        // Both kinds present: single quotes, as before #2176.
+        assert_eq!(name("both'and\""), "'both'and\"'");
+    }
+
+    /// The parsed counterpart, so the two rules are visible side by side.
+    #[test]
+    fn a_parsed_literal_header_echoes_its_quote() {
+        let single = Expr::Literal(Literal::String(QuotedString::parsed(
+            "x".to_string(),
+            QuoteStyle::Single,
+        )));
+        let double = Expr::Literal(Literal::String(QuotedString::parsed(
+            "x".to_string(),
+            QuoteStyle::Double,
+        )));
+        assert_eq!(header_name(&single), "'x'");
+        assert_eq!(header_name(&double), "\"x\"");
+    }
+
     #[test]
     fn test_literal_display() {
-        assert_eq!(Literal::String("test".to_string()).to_string(), "\"test\"");
+        assert_eq!(
+            Literal::String(QuotedString::synthetic("test")).to_string(),
+            "\"test\"",
+            "a literal with no source style falls back to double quotes"
+        );
         assert_eq!(Literal::Number(dec!(1.5)).to_string(), "1.5");
         assert_eq!(Literal::Integer(42).to_string(), "42");
         assert_eq!(Literal::Boolean(false).to_string(), "false");

@@ -28,7 +28,7 @@ impl Executor<'_> {
                         ));
                     }
                     let pattern = match &func.args[0] {
-                        Expr::Literal(Literal::String(s)) => s.clone(),
+                        Expr::Literal(Literal::String(s)) => s.value().to_string(),
                         Expr::Column(s) => s.clone(),
                         _ => {
                             return Err(QueryError::Type(
@@ -525,7 +525,7 @@ impl Executor<'_> {
     /// Evaluate a literal.
     pub(super) fn evaluate_literal(&self, lit: &Literal) -> Result<Value, QueryError> {
         Ok(match lit {
-            Literal::String(s) => Value::String(s.clone()),
+            Literal::String(s) => Value::String(s.value().to_string()),
             Literal::Number(n) => Value::Number(*n),
             Literal::Integer(i) => Value::Integer(*i),
             Literal::Date(d) => Value::Date(*d),

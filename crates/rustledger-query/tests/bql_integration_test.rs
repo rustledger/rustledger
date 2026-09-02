@@ -2128,7 +2128,10 @@ fn test_pivot_by_multi_value_column_qualifies_headers() {
         &directives,
     );
 
-    // Expected layout: key + (<ccy>/SUM, <ccy>/COUNT) per pivot value.
+    // `PIVOT BY currency, account`, so `currency` is the KEY and `account` is
+    // the spread -- the pivot values are account names, not currencies.
+    // Expected layout: a `currency/account` key column, then
+    // (<account>/SUM(number), <account>/COUNT(*)) per account.
     let columns_joined = result.columns.join(",");
     assert!(
         result.columns.iter().any(|c| c.contains('/')),

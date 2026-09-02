@@ -309,6 +309,13 @@ pub struct BalanceActual {
     pub account: Account,
     /// The asserted currency.
     pub currency: rustledger_core::Currency,
+    /// The asserted number, i.e. the `balance` directive's own amount.
+    ///
+    /// Recorded so a consumer can tell two assertions apart. `(date, account,
+    /// currency)` is NOT unique -- a ledger may assert the same account and
+    /// currency twice on one date, with different amounts and therefore
+    /// different differences (#2180).
+    pub asserted: rustledger_core::Decimal,
     /// `computed − asserted` in `currency` (zero = exact match).
     pub diff: rustledger_core::Decimal,
     /// Whether `diff` was outside the assertion's tolerance, i.e. whether

@@ -136,6 +136,12 @@ pub struct BalanceDiscrepancy {
     pub account: rustledger_core::Account,
     /// `computed - asserted`, in the asserted currency.
     pub amount: rustledger_core::Amount,
+    /// The asserted number, i.e. the directive's own amount.
+    ///
+    /// Part of the identity, not payload: `(date, account, currency)` does not
+    /// distinguish two assertions on the same account and currency on one
+    /// date, and those can assert different amounts and so fail differently.
+    pub asserted: rustledger_core::Decimal,
 }
 
 /// A fully processed ledger.
@@ -772,6 +778,7 @@ impl crate::Directives<crate::RegularPluginsApplied> {
                     date: a.date,
                     account: a.account.clone(),
                     amount: rustledger_core::Amount::new(a.diff, a.currency.clone()),
+                    asserted: a.asserted,
                 })
                 .collect();
             let finalize_errors = session.finalize();

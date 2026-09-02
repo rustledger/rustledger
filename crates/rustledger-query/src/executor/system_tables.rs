@@ -132,7 +132,12 @@ impl Executor<'_> {
         for (date, account, amount, tolerance, meta) in balances {
             let discrepancy = self
                 .balance_discrepancies
-                .get(&(date, account.to_string(), amount.currency.to_string()))
+                .get(&(
+                    date,
+                    account.to_string(),
+                    amount.currency.to_string(),
+                    amount.number,
+                ))
                 .cloned()
                 .map_or(Value::Null, Value::Amount);
             let row = vec![

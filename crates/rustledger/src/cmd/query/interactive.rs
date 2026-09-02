@@ -60,6 +60,7 @@ pub(super) fn run_interactive(
         rustledger_core::NaiveDate,
         String,
         String,
+        rustledger_core::Decimal,
         rustledger_core::Amount,
     )],
     args: &Args,

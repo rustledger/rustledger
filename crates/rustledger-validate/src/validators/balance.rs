@@ -306,6 +306,7 @@ pub fn validate_balance_late(
         date: bal.date,
         account: bal.account.clone(),
         currency: bal.amount.currency.clone(),
+        asserted: expected,
         diff: actual - expected,
         exceeds_tolerance,
     });

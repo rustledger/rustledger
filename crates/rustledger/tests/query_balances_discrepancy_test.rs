@@ -169,3 +169,37 @@ fn validation_diagnostics_do_not_reach_stdout() {
         "a failing assertion must not fail the query, matching bean-query",
     );
 }
+
+/// Two assertions on the SAME date, account and currency get their own
+/// discrepancies. `(date, account, currency)` does not identify an assertion,
+/// and keying on it alone made both rows report the second one's difference.
+///
+/// bean-query returns `10.00 USD` and `-20.00 USD` here, one per row.
+#[test]
+fn same_date_assertions_do_not_share_a_discrepancy() {
+    let bin = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("ledger.beancount");
+    std::fs::write(
+        &file,
+        r#"2024-01-01 open Assets:Cash
+2024-01-01 open Equity:O
+
+2024-01-02 * "fund"
+  Assets:Cash    100.00 USD
+  Equity:O      -100.00 USD
+
+2024-03-01 balance Assets:Cash   90.00 USD
+2024-03-01 balance Assets:Cash  120.00 USD
+"#,
+    )
+    .expect("write ledger");
+
+    let out = query(&bin, &file, "SELECT amount, discrepancy FROM #balances");
+    let rows: Vec<&str> = out.lines().skip(1).collect();
+    assert_eq!(
+        rows,
+        vec!["90.00 USD,10.00 USD", "120.00 USD,-20.00 USD"],
+        "each assertion reports its OWN difference; got {out}",
+    );
+}

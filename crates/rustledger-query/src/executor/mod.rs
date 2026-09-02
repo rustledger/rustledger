@@ -140,7 +140,13 @@ pub struct Executor<'a> {
     /// In-memory tables created by CREATE TABLE.
     tables: FxHashMap<String, Table>,
     /// The difference the balance checker computed for each FAILING assertion,
-    /// keyed by `(date, account, currency)`. Backs `#balances.discrepancy`.
+    /// keyed by `(date, account, currency, asserted)`. Backs
+    /// `#balances.discrepancy`.
+    ///
+    /// The asserted amount is part of the key because the other three do not
+    /// identify an assertion: a ledger may assert the same account and
+    /// currency twice on one date, and those rows can fail differently.
+    /// Keying without it made both rows report the second one's difference.
     ///
     /// Supplied by the host rather than computed here: the value belongs to
     /// the checker, and re-deriving it in the query layer would be a second
@@ -148,7 +154,15 @@ pub struct Executor<'a> {
     /// decides whether an assertion failed at all. A host that did not
     /// validate supplies nothing, and the column reports NULL rather than a
     /// wrong number (#2180).
-    balance_discrepancies: FxHashMap<(rustledger_core::NaiveDate, String, String), Amount>,
+    balance_discrepancies: FxHashMap<
+        (
+            rustledger_core::NaiveDate,
+            String,
+            String,
+            rustledger_core::Decimal,
+        ),
+        Amount,
+    >,
 }
 
 // Sub-modules for focused functionality
@@ -233,7 +247,7 @@ impl<'a> Executor<'a> {
     }
 
     /// Supply the balance checker's computed differences, one per FAILING
-    /// assertion, keyed by `(date, account, currency)`.
+    /// assertion, keyed by `(date, account, currency, asserted_number)`.
     ///
     /// Backs `#balances.discrepancy`. Pass only failures: a passing assertion
     /// has no discrepancy, and beancount likewise leaves `diff_amount` unset
@@ -242,11 +256,21 @@ impl<'a> Executor<'a> {
     /// schema matching bean-query's rather than a missing column (#2180).
     pub fn set_balance_discrepancies(
         &mut self,
-        discrepancies: impl IntoIterator<Item = (rustledger_core::NaiveDate, String, String, Amount)>,
+        discrepancies: impl IntoIterator<
+            Item = (
+                rustledger_core::NaiveDate,
+                String,
+                String,
+                rustledger_core::Decimal,
+                Amount,
+            ),
+        >,
     ) {
         self.balance_discrepancies = discrepancies
             .into_iter()
-            .map(|(date, account, currency, amount)| ((date, account, currency), amount))
+            .map(|(date, account, currency, asserted, amount)| {
+                ((date, account, currency, asserted), amount)
+            })
             .collect();
     }
 

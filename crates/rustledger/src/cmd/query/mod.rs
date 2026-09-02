@@ -243,6 +243,7 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
         rustledger_core::NaiveDate,
         String,
         String,
+        rustledger_core::Decimal,
         rustledger_core::Amount,
     )> = ledger
         .balance_discrepancies
@@ -252,6 +253,7 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
                 d.date,
                 d.account.to_string(),
                 d.amount.currency.to_string(),
+                d.asserted,
                 d.amount.clone(),
             )
         })
@@ -308,6 +310,7 @@ struct ShellSettings {
         rustledger_core::NaiveDate,
         String,
         String,
+        rustledger_core::Decimal,
         rustledger_core::Amount,
     )>,
 }
@@ -321,6 +324,7 @@ impl ShellSettings {
             rustledger_core::NaiveDate,
             String,
             String,
+            rustledger_core::Decimal,
             rustledger_core::Amount,
         )>,
     ) -> Self {

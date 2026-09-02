@@ -467,24 +467,48 @@ impl PluginError {
 ///
 /// This wrapper provides a uniform interface for all directive types,
 /// with source location tracking for error reporting.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// # Equality and Hashing Note
+/// The custom [`PartialEq`] implementation skips `directive_type`, `filename`, and `lineno`
+/// (location metadata and derived fields). If [`std::hash::Hash`] is ever implemented for
+/// `DirectiveWrapper`, those fields must also be excluded to satisfy the `Hash`/`Eq` invariant
+/// (`a == b => hash(a) == hash(b)`).
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct DirectiveWrapper {
     /// The type of directive (derived from data, not serialized to avoid duplicate keys).
+    /// Will not be compared during equality check.
     #[serde(skip_serializing, default)]
     pub directive_type: String,
     /// The directive date (YYYY-MM-DD format).
     pub date: String,
     /// Source filename (for tracking through plugin processing).
     /// If None, the directive was created by a plugin.
+    /// Will not be compared during equality check.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub filename: Option<String>,
     /// Source line number (1-based).
     /// If None, the directive was created by a plugin.
+    /// Will not be compared during equality check.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub lineno: Option<u32>,
     /// Directive-specific data as a nested structure.
     #[serde(flatten)]
     pub data: DirectiveData,
+}
+
+impl PartialEq for DirectiveWrapper {
+    fn eq(
+        &self,
+        Self {
+            directive_type: _,
+            date,
+            filename: _,
+            lineno: _,
+            data,
+        }: &Self,
+    ) -> bool {
+        self.date == *date && self.data == *data
+    }
 }
 
 impl DirectiveWrapper {
@@ -523,7 +547,7 @@ impl DirectiveWrapper {
 /// Directive-specific data.
 ///
 /// Each variant corresponds to a Beancount directive type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DirectiveData {
     /// Transaction data.
@@ -569,7 +593,7 @@ pub enum DirectiveData {
 // ============================================================================
 
 /// Transaction data for serialization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionData {
     /// Transaction flag (`*` for complete, `!` for incomplete/pending).
     pub flag: String,
@@ -612,7 +636,12 @@ pub struct SourceSpan {
 }
 
 /// Posting data for serialization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// # Equality and Hashing Note
+/// The custom [`PartialEq`] implementation skips `span` (location metadata).
+/// If [`std::hash::Hash`] is ever implemented for `PostingData`, `span` must also be
+/// excluded to satisfy the `Hash`/`Eq` invariant (`a == b => hash(a) == hash(b)`).
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct PostingData {
     /// Account name (e.g., `Assets:Bank:Checking`).
     pub account: String,
@@ -630,12 +659,35 @@ pub struct PostingData {
     /// from, if any. Plugins **must preserve** this unchanged when
     /// modifying an existing posting; set to `None` only for postings
     /// the plugin itself synthesizes. See [`SourceSpan`] for details.
+    /// Will not be compared during equality check.
     #[serde(default)]
     pub span: Option<SourceSpan>,
 }
 
+impl PartialEq for PostingData {
+    fn eq(
+        &self,
+        Self {
+            account,
+            units,
+            cost,
+            price,
+            flag,
+            metadata,
+            span: _,
+        }: &Self,
+    ) -> bool {
+        self.account == *account
+            && self.units == *units
+            && self.cost == *cost
+            && self.price == *price
+            && self.flag == *flag
+            && self.metadata == *metadata
+    }
+}
+
 /// Amount data for serialization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AmountData {
     /// Number as string (preserves precision).
     pub number: String,
@@ -665,7 +717,7 @@ pub struct AmountData {
 /// "per_unit_from_total", "per_unit": "150", "total": "300"}` — the
 /// `kind`-tagged shape is shared with FFI-WASI, WASM, and Python so
 /// every client language sees one wire contract.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CostNumberData {
     /// Per-unit cost: `{150.00 USD}`.
@@ -734,7 +786,7 @@ impl CostNumberData {
 /// Cost data for serialization.
 ///
 /// Represents cost specifications like `{100 USD}` or `{100 USD, 2024-01-01, "lot1"}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostData {
     /// The numeric component: per-unit, total, or absent (e.g. `{}`).
     ///
@@ -776,7 +828,7 @@ pub struct CostData {
 /// originally because nothing forced consumers to read the bool. The
 /// `view()` enum closes that loop: a missing match arm is a compile
 /// error.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriceAnnotationData {
     /// Whether this is a total price (`@@`) vs per-unit (`@`).
     ///
@@ -863,7 +915,7 @@ impl PriceAnnotationData {
 ///
 /// Metadata can hold various types of values, preserving type information
 /// for accurate round-tripping.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum MetaValueData {
     /// String value.
@@ -900,7 +952,7 @@ pub enum MetaValueData {
 // ============================================================================
 
 /// Balance assertion data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BalanceData {
     /// Account name.
     pub account: String,
@@ -914,7 +966,7 @@ pub struct BalanceData {
 }
 
 /// Open account data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenData {
     /// Account name.
     pub account: String,
@@ -928,7 +980,7 @@ pub struct OpenData {
 }
 
 /// Close account data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloseData {
     /// Account name.
     pub account: String,
@@ -938,7 +990,7 @@ pub struct CloseData {
 }
 
 /// Commodity declaration data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommodityData {
     /// Currency code.
     pub currency: String,
@@ -948,7 +1000,7 @@ pub struct CommodityData {
 }
 
 /// Pad directive data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PadData {
     /// Account to pad.
     pub account: String,
@@ -960,7 +1012,7 @@ pub struct PadData {
 }
 
 /// Event data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventData {
     /// Event type.
     pub event_type: String,
@@ -972,7 +1024,7 @@ pub struct EventData {
 }
 
 /// Note data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteData {
     /// Account name.
     pub account: String,
@@ -984,7 +1036,7 @@ pub struct NoteData {
 }
 
 /// Document data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentData {
     /// Account name.
     pub account: String,
@@ -1004,7 +1056,7 @@ pub struct DocumentData {
 }
 
 /// Price directive data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriceData {
     /// Currency being priced.
     pub currency: String,
@@ -1016,7 +1068,7 @@ pub struct PriceData {
 }
 
 /// Query directive data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryData {
     /// Query name.
     pub name: String,
@@ -1028,7 +1080,7 @@ pub struct QueryData {
 }
 
 /// Custom directive data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomData {
     /// Custom type (first value after `custom` keyword).
     pub custom_type: String,
@@ -1276,6 +1328,173 @@ mod tests {
                 .unwrap_err()
                 .contains("omitted")
         );
+    }
+
+    #[test]
+    fn test_directive_wrapper_ignores_directive_type_filename_and_lineno_in_partial_eq() {
+        let dir_a = DirectiveWrapper {
+            directive_type: "transaction".to_string(),
+            date: "2024-01-01".to_string(),
+            filename: Some("file_a.beancount".to_string()),
+            lineno: Some(10),
+            data: DirectiveData::Open(OpenData {
+                account: "Assets:Bank".to_string(),
+                currencies: vec!["USD".to_string()],
+                booking: None,
+                metadata: vec![],
+            }),
+        };
+
+        let dir_b = DirectiveWrapper {
+            directive_type: "open".to_string(),
+            date: "2024-01-01".to_string(),
+            filename: Some("file_b.beancount".to_string()),
+            lineno: Some(999),
+            data: DirectiveData::Open(OpenData {
+                account: "Assets:Bank".to_string(),
+                currencies: vec!["USD".to_string()],
+                booking: None,
+                metadata: vec![],
+            }),
+        };
+
+        let dir_none = DirectiveWrapper {
+            directive_type: "transaction".to_string(),
+            date: "2024-01-01".to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Open(OpenData {
+                account: "Assets:Bank".to_string(),
+                currencies: vec!["USD".to_string()],
+                booking: None,
+                metadata: vec![],
+            }),
+        };
+
+        assert_eq!(dir_a, dir_b);
+        assert_eq!(dir_a, dir_none);
+    }
+
+    #[test]
+    fn test_posting_data_ignores_span_in_partial_eq() {
+        let span_a = SourceSpan {
+            start: 10,
+            end: 50,
+            file_id: 1,
+        };
+        let span_b = SourceSpan {
+            start: 100,
+            end: 200,
+            file_id: 2,
+        };
+
+        let posting_a = PostingData {
+            account: "Expenses:Food".to_string(),
+            units: Some(AmountData {
+                number: "12.50".to_string(),
+                currency: "USD".to_string(),
+            }),
+            cost: None,
+            price: None,
+            flag: None,
+            metadata: vec![],
+            span: Some(span_a),
+        };
+
+        let posting_b = PostingData {
+            account: "Expenses:Food".to_string(),
+            units: Some(AmountData {
+                number: "12.50".to_string(),
+                currency: "USD".to_string(),
+            }),
+            cost: None,
+            price: None,
+            flag: None,
+            metadata: vec![],
+            span: Some(span_b),
+        };
+
+        let posting_none = PostingData {
+            account: "Expenses:Food".to_string(),
+            units: Some(AmountData {
+                number: "12.50".to_string(),
+                currency: "USD".to_string(),
+            }),
+            cost: None,
+            price: None,
+            flag: None,
+            metadata: vec![],
+            span: None,
+        };
+
+        // Postings with different or missing spans must compare equal
+        assert_eq!(posting_a, posting_b, "different spans must compare equal");
+        assert_eq!(
+            posting_a, posting_none,
+            "Some vs None span must compare equal"
+        );
+
+        // Differing in an actual field (e.g. account) must compare not equal
+        let posting_diff = PostingData {
+            account: "Expenses:Groceries".to_string(),
+            units: Some(AmountData {
+                number: "12.50".to_string(),
+                currency: "USD".to_string(),
+            }),
+            cost: None,
+            price: None,
+            flag: None,
+            metadata: vec![],
+            span: Some(span_a),
+        };
+        assert_ne!(
+            posting_a, posting_diff,
+            "differing in account must compare not equal"
+        );
+    }
+
+    #[test]
+    fn test_partial_eq_both_directions() {
+        let dir1 = DirectiveWrapper {
+            directive_type: "open".to_string(),
+            date: "2024-01-01".to_string(),
+            filename: Some("main.beancount".to_string()),
+            lineno: Some(10),
+            data: DirectiveData::Open(OpenData {
+                account: "Assets:Bank".to_string(),
+                currencies: vec!["USD".to_string()],
+                booking: None,
+                metadata: vec![],
+            }),
+        };
+        let dir2 = DirectiveWrapper {
+            // Incorrect, to verify the PartialEq behavior.
+            directive_type: "transaction".to_string(),
+            date: "2024-01-01".to_string(),
+            filename: Some("other.beancount".to_string()),
+            lineno: Some(20),
+            data: DirectiveData::Open(OpenData {
+                account: "Assets:Bank".to_string(),
+                currencies: vec!["USD".to_string()],
+                booking: None,
+                metadata: vec![],
+            }),
+        };
+        let dir3 = DirectiveWrapper {
+            directive_type: "open".to_string(),
+            date: "2024-01-01".to_string(),
+            filename: Some("main.beancount".to_string()),
+            lineno: Some(10),
+            data: DirectiveData::Open(OpenData {
+                account: "Assets:Bank".to_string(),
+                currencies: vec!["EUR".to_string()],
+                booking: None,
+                metadata: vec![],
+            }),
+        };
+
+        assert_eq!(dir1, dir2);
+        assert_ne!(dir1, dir3);
     }
 
     #[test]

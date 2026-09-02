@@ -256,7 +256,38 @@ The values agree. Reproducing the slots would mean carrying a column-alignment
 artifact into a machine-readable format, where the padding has nothing to align
 (issue #2222).
 
-### 11. SUM Over a Boolean
+### 11. PIVOT BY, ORDER BY and LIMIT
+
+`ORDER BY` and `LIMIT` apply to the PIVOTED rows here; bean-query applies them
+to the rows going IN to the pivot, and its pivot then re-sorts by the key.
+
+```text
+... GROUP BY account, year ORDER BY account DESC PIVOT BY account, year LIMIT 2
+
+bean-query   Equity:O                  <- one row; DESC not visible
+rustledger   Equity:O, Assets:B        <- two rows, in the requested order
+```
+
+Two consequences of bean-query's order: an explicit `ORDER BY` never reaches
+the output, and `LIMIT` can change the result's SHAPE — limiting the rows going
+in can leave a pivot value unrepresented, so a column disappears. `LIMIT 2` on
+the query above with no `ORDER BY` drops the 2025 column entirely.
+
+These are one decision, not two. bean-query's `ORDER BY` loss is an artifact
+rather than a policy: `EvalPivot.__call__` sorts rows by the key column
+immediately before `itertools.groupby`, which only groups ADJACENT equal keys,
+so the sort is a precondition of grouping and discards the requested order as a
+side effect. Nothing upstream tests `PIVOT BY` with either clause. Its `LIMIT`
+behavior is coherent under its own model — pivot as a display reshape over a
+finished query — but that model is what discards `ORDER BY`. Once the requested
+order is honored on the pivoted rows, `LIMIT` has to count those same rows:
+ordering one row set and limiting a different one would be incoherent.
+
+So matching bean-query here is a package deal that includes silently ignoring
+an explicit clause. Pinned by
+`crates/rustledger-query/tests/pivot_pipeline_order_test.rs` (issue #2219).
+
+### 12. SUM Over a Boolean
 
 `sum(number > 0)` counts the rows where the comparison is true. Python sums
 booleans as integers, so bean-query computes the same number -- but prints it
@@ -288,7 +319,7 @@ comparisons, so on the same data it is 4, in both tools.
 Pinned by `crates/rustledger-query/tests/sum_over_booleans_test.rs` (issue
 #2214).
 
-### 12. Comparisons Against a Missing Value
+### 13. Comparisons Against a Missing Value
 
 A comparison with a NULL operand is NULL, in both tools. On a posting whose
 transaction has no payee, `payee != ''`, `payee ~ 'x'` and `payee IN ('a')` are

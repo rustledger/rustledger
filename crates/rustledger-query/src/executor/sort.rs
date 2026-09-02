@@ -254,23 +254,47 @@ impl Executor<'_> {
 
         // Build new column names. Layout: [key_col, <value_col × pivot_value>...].
         //
-        // Single-value-column case (the typical SUM(number) shape) gets
-        // just the pivot value as the header — matches bean-query
-        // exactly. Multi-value-column case qualifies with the value
-        // column name (`<value_col> / <pivot_value>`) so the headers
-        // stay unambiguous when there's more than one aggregate. The
-        // asymmetry is deliberate: a single-aggregate header like
-        // `USD` is what users expect from the typical pivot.
+        // Naming follows bean-query's `EvalPivot` (`query_compile.py`), which
+        // sets these names in the EVALUATOR and exposes them through its API —
+        // they are part of the result's structure, not something its renderer
+        // decorates. That is why this one is matched where the `BALANCES` /
+        // `JOURNAL` names (#2221) and the inventory slot layout (#2222) are
+        // deliberately not: those are a name-less query template and a column
+        // renderer respectively, so reproducing them would mean reproducing an
+        // artifact.
+        //
+        // Each of the three parts is also the better answer on its own terms
+        // (#2217):
+        //
+        // * The key column is `<key>/<spread>`, e.g. `account/year`. The
+        //   pivot key genuinely spans two source columns; naming it after
+        //   only the first drops the spread column's name.
+        // * A value column is `<pivot_value>/<value_col>`, e.g.
+        //   `2024/sum(number)`. Columns are emitted grouped by pivot value
+        //   (the loop below is pivot-value-outer, matching bean-query's
+        //   `product(keys, other(columns))`), so leading with the pivot value
+        //   is what the column ORDER already does. Naming it the other way
+        //   round described the layout backwards.
+        // * No spaces around the separator.
+        //
+        // Single-value-column case (the typical SUM(number) shape) keeps just
+        // the pivot value as the header, which bean-query also does — its
+        // `nother > 1` branch is the only one that qualifies with a column
+        // name. A single-aggregate header like `USD` is what users expect
+        // from the typical pivot, and both tools agree on it.
         let mut new_columns: Vec<String> =
             Vec::with_capacity(1 + value_col_idxs.len() * pivot_values.len());
-        new_columns.push(result.columns[key_col_idx].clone());
+        new_columns.push(format!(
+            "{}/{}",
+            result.columns[key_col_idx], result.columns[pivot_value_col_idx]
+        ));
         for pv in &pivot_values {
             let pv_str = Self::value_to_string(pv);
             if value_col_idxs.len() == 1 {
                 new_columns.push(pv_str);
             } else {
                 for &vci in &value_col_idxs {
-                    new_columns.push(format!("{} / {pv_str}", result.columns[vci]));
+                    new_columns.push(format!("{pv_str}/{}", result.columns[vci]));
                 }
             }
         }

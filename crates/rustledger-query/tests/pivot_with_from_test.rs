@@ -62,8 +62,9 @@ fn pivot_applies_with_a_from_clause() {
     .expect("pivot with FROM must execute");
     assert_eq!(
         with_from,
-        vec!["account".to_string(), "2024".to_string()],
-        "the spread column's values must become the headers",
+        vec!["account/year".to_string(), "2024".to_string()],
+        "the spread column's values must become the headers, and the key \
+         column is named `<key>/<spread>` (#2217)",
     );
 }
 
@@ -126,8 +127,9 @@ fn an_empty_result_is_pivoted_the_same_way_however_it_emptied() {
     );
     assert_eq!(
         by_where,
-        vec!["account".to_string()],
-        "the pivoted shape: the row key, with no spread values to add",
+        vec!["account/year".to_string()],
+        "the pivoted shape: the row key named `<key>/<spread>` (#2217), with \
+         no spread values to add",
     );
 
     // Without a pivot the same empty query keeps its projected columns, so

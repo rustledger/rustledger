@@ -2056,7 +2056,8 @@ fn test_pivot_by_with_order_by_works() {
     // the test would have passed even if PIVOT didn't run at all).
     //
     // Post-PIVOT shape proof:
-    //   1. The `account` key column survives.
+    //   1. The `account` key column survives, named `account/currency`
+    //      since #2217.
     //   2. At least one pivoted currency column appears (USD per
     //      the test fixture). If PIVOT didn't run, the column list
     //      would be `[account, currency, SUM(number)]` — no USD.
@@ -2065,9 +2066,10 @@ fn test_pivot_by_with_order_by_works() {
     //      column would still be there.
     //   4. The original `SUM(number)` value column is also gone —
     //      its values moved into the pivoted cells. (Same logic.)
-    assert!(
-        result.columns.iter().any(|c| c == "account"),
-        "account column should survive; got: {:?}",
+    assert_eq!(
+        result.columns.first().map(String::as_str),
+        Some("account/currency"),
+        "the account key column should survive as `<key>/<spread>`; got: {:?}",
         result.columns
     );
     assert!(
@@ -2112,9 +2114,13 @@ fn test_pivot_by_without_group_by_clause_rejected() {
 fn test_pivot_by_multi_value_column_qualifies_headers() {
     // When the SELECT has more than one non-pivot non-key column —
     // e.g. SUM and COUNT side-by-side — apply_pivot generalizes by
-    // qualifying the new column headers as `<value_col_name> / <pivot_value>`.
+    // qualifying the new column headers as `<pivot_value>/<value_col_name>`.
     // The single-value-column case (every other PIVOT test) just uses
     // the pivot value alone. This test pins the multi-value branch.
+    //
+    // The pivot value leads, matching both bean-query and our own column
+    // ORDER, which groups by pivot value (#2217). No spaces around the
+    // separator.
     let directives = make_test_directives();
     let result = execute_query(
         "SELECT account, currency, SUM(number), COUNT(*) GROUP BY 1, 2 \
@@ -2122,26 +2128,28 @@ fn test_pivot_by_multi_value_column_qualifies_headers() {
         &directives,
     );
 
-    // Expected layout: account-key + (SUM/<ccy>, COUNT/<ccy>) per pivot value.
+    // Expected layout: key + (<ccy>/SUM, <ccy>/COUNT) per pivot value.
     let columns_joined = result.columns.join(",");
     assert!(
-        result.columns.iter().any(|c| c.contains(" / ")),
+        result.columns.iter().any(|c| c.contains('/')),
         "expected qualified headers in multi-value-column case; got {columns_joined}"
     );
-    // The qualified format is "<value_col_name> / <pivot_value>".
+    // The qualified format is "<pivot_value>/<value_col_name>".
     // A function target is headed by its source text since #2164, so the
-    // qualified headers are `SUM(number) / USD`, not `SUM / USD`.
+    // qualified headers end `/SUM(number)`, not `/SUM`.
     // Both value columns must survive into the output.
     assert!(
-        result
-            .columns
-            .iter()
-            .any(|c| c.starts_with("SUM(number) /")),
+        result.columns.iter().any(|c| c.ends_with("/SUM(number)")),
         "missing SUM-qualified columns in multi-value case; got {columns_joined}"
     );
     assert!(
-        result.columns.iter().any(|c| c.starts_with("COUNT(*) /")),
+        result.columns.iter().any(|c| c.ends_with("/COUNT(*)")),
         "missing COUNT-qualified columns in multi-value case; got {columns_joined}"
+    );
+    // The separator carries no spaces, and the value column never leads.
+    assert!(
+        !columns_joined.contains(" / ") && !columns_joined.contains("SUM(number)/"),
+        "value column must not lead, and no spaces around `/`; got {columns_joined}"
     );
 }
 
@@ -2161,10 +2169,12 @@ fn test_pivot_by_empty_result_yields_key_column_no_rows() {
     );
     assert!(result.rows.is_empty(), "expected no data rows");
     // The key column is the only one preserved when pivot_values is
-    // empty (no rows → no distinct pivot values).
+    // empty (no rows → no distinct pivot values). It still carries the
+    // `<key>/<spread>` name (#2217): the spread column's name is known from
+    // the query even when no values were found to spread.
     assert_eq!(
         result.columns,
-        vec!["account".to_string()],
+        vec!["account/currency".to_string()],
         "empty PIVOT should yield only the key column header"
     );
 }
@@ -11236,7 +11246,9 @@ fn test_pivot_by_first_column_is_the_row_key() {
         &directives,
     );
     // First column is the `account` row key; currency values became columns.
-    assert_eq!(result.columns[0], "account");
+    // Named `<key>/<spread>` since #2217 -- the key spans both source columns
+    // and bean-query names it accordingly.
+    assert_eq!(result.columns[0], "account/currency");
     assert!(
         result.columns.iter().any(|c| c == "USD"),
         "currency value should be a column header; got {:?}",

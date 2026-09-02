@@ -207,7 +207,56 @@ This is the same type-grouping-versus-`lineno` difference as issue #2149,
 which also covers the cross-file half described in section 7. Pad placement
 specifically is pinned by `pad_insertion_index` and its tests (issue #2188).
 
-### 9. SUM Over a Boolean
+### 9. Shorthand Command Column Names
+
+`BALANCES` and `JOURNAL` name their columns differently:
+
+| query | bean-query | rustledger |
+|---|---|---|
+| `BALANCES` | `account, SUM((position))` | `account, balance` |
+| `JOURNAL` | `date, flag, MAXWIDTH(payee, 48), MAXWIDTH(narration, 80), ...` | `date, flag, payee, narration, ...` |
+| `JOURNAL ... AT COST` | `..., cost(position), cost(balance)` | `..., position, balance` |
+
+The rows agree in every case; only the labels differ.
+
+bean-query's names are not chosen. `transform_journal` builds the query by
+parsing a SQL string template whose targets carry no `AS` aliases, so the names
+fall through to the generic "render the expression as its name" path --
+`MAXWIDTH(payee, 48)` is a display-truncation call leaking into a column name,
+and `SUM((position))` carries the doubled parens of its desugared expression.
+Ours are what the template meant.
+
+Keeping ours on purpose: matching would mean printing an implementation detail
+of bean-query's query compiler as a user-facing column name. Recorded in
+`KNOWN_HEADER_DIVERGENCES` in `scripts/compat-bql-test.py`, scoped to headers
+so a data regression on the same query is still caught (issue #2221).
+
+Contrast `PIVOT BY`, whose column names bean-query sets in its evaluator and
+exposes through its API -- those are part of the result's structure and we do
+match them (issue #2217).
+
+### 10. Multi-Currency Inventory Rendering
+
+`SELECT account, SUM(position) GROUP BY account` over a multi-currency result:
+
+```text
+bean-query   Assets:CORP," 100 CORP { 1 USD},        "
+             Assets:Cash,"                  ,-100 USD"
+
+rustledger   Assets:CORP,100 CORP { 1 USD}
+             Assets:Cash,-100 USD
+```
+
+bean-query renders one field holding a slot per currency seen anywhere in the
+result, empty slots padded so currencies line up vertically. That is its
+`InventoryRenderer` doing table layout -- its API returns a plain `Inventory`
+(`(100 CORP {1 USD})`), with no slots and no padding, which is what we emit.
+
+The values agree. Reproducing the slots would mean carrying a column-alignment
+artifact into a machine-readable format, where the padding has nothing to align
+(issue #2222).
+
+### 11. SUM Over a Boolean
 
 `sum(number > 0)` counts the rows where the comparison is true. Python sums
 booleans as integers, so bean-query computes the same number -- but prints it
@@ -239,7 +288,7 @@ comparisons, so on the same data it is 4, in both tools.
 Pinned by `crates/rustledger-query/tests/sum_over_booleans_test.rs` (issue
 #2214).
 
-### 10. Comparisons Against a Missing Value
+### 12. Comparisons Against a Missing Value
 
 A comparison with a NULL operand is NULL, in both tools. On a posting whose
 transaction has no payee, `payee != ''`, `payee ~ 'x'` and `payee IN ('a')` are

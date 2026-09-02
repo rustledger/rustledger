@@ -163,6 +163,12 @@ fn the_no_from_pipeline_orders_and_limits_the_same_way() {
         ("ORDER BY account DESC", ""),
         ("ORDER BY account DESC", "LIMIT 2"),
         ("ORDER BY account ASC", "LIMIT 2"),
+        // No ORDER BY. This case was excluded when the file was written --
+        // the two paths kept DIFFERENT rows under the same limit, because
+        // only one applied a fallback sort by the first column. Fixed in
+        // #2235 by removing that sort, which bean-query does not do either.
+        ("", "LIMIT 2"),
+        ("", ""),
     ] {
         let with_from = run(&query(order_by, limit));
         let without = run(&query_without_from(order_by, limit));
@@ -177,18 +183,11 @@ fn the_no_from_pipeline_orders_and_limits_the_same_way() {
         );
     }
 
-    // Every case above names an ORDER BY on purpose. WITHOUT one the two
-    // paths return DIFFERENT rows for the same LIMIT -- `Assets:A, Equity:O`
-    // with `FROM`, `Assets:A, Assets:B` without -- because they order groups
-    // differently and the limit then keeps different ones. That is a real
-    // inconsistency, pre-existing on main and unrelated to the pipeline
-    // ORDER this file pins, so it is tracked separately rather than asserted
-    // here (#2235); asserting today's answer would pin a bug. The column set does
-    // agree, which is what #2216 pinned, so only the row identity differs.
-    let with_from = run(&query("", "LIMIT 2"));
-    let without = run(&query_without_from("", "LIMIT 2"));
+    // With no ORDER BY at all, grouped rows come back in first-appearance
+    // order -- which is what bean-query returns, and what BOTH paths now do.
     assert_eq!(
-        without.columns, with_from.columns,
-        "the column set must agree even where row identity does not",
+        keys(&run(&query("", ""))),
+        vec!["Assets:A", "Equity:O", "Assets:B"],
+        "grouped rows keep first-appearance order, as bean-query does",
     );
 }

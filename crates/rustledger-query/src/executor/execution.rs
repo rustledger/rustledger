@@ -9,8 +9,7 @@ use rustledger_core::{Amount, Directive, Inventory, NaiveDate, Position};
 const PARALLEL_THRESHOLD: usize = 1000;
 
 use crate::ast::{
-    CreateTableStmt, Expr, InsertSource, InsertStmt, OrderSpec, SelectQuery, SortDirection, Target,
-    UnaryOperator,
+    CreateTableStmt, Expr, InsertSource, InsertStmt, SelectQuery, Target, UnaryOperator,
 };
 use crate::error::QueryError;
 
@@ -89,7 +88,6 @@ impl Executor<'_> {
             || query.having.is_some();
 
         // Track whether grouping is applied (explicit or implicit) for fallback sort
-        let mut has_grouping = false;
 
         if is_aggregate {
             // Determine GROUP BY expressions:
@@ -106,9 +104,6 @@ impl Executor<'_> {
                     Some(implicit)
                 }
             };
-
-            // Track if grouping is applied for deterministic fallback sort
-            has_grouping = group_by_exprs.is_some();
 
             // Group and aggregate
             let grouped = self.group_postings(&postings, group_by_exprs.as_ref())?;
@@ -217,23 +212,25 @@ impl Executor<'_> {
         if let Some(order_by) = &query.order_by {
             let visible_cols = result.columns.len() - num_hidden;
             self.sort_results(&mut result, order_by, visible_cols)?;
-        } else if has_grouping && !result.rows.is_empty() && !result.columns.is_empty() {
-            // When there's GROUP BY (explicit or implicit) but no ORDER BY, sort by
-            // the first column for deterministic output (matches Python beancount behavior).
-            //
-            // `result.columns[0]` is the first VISIBLE select target.
-            // `find_hidden_order_by_targets` appends hidden cols at
-            // positions `targets.len()..`, so position 0 is always
-            // visible. A future refactor that reorders `extended_targets`
-            // would need to revisit this default.
-            let first_col = result.columns[0].clone();
-            let default_order = vec![OrderSpec {
-                expr: Expr::Column(first_col),
-                direction: SortDirection::Asc,
-            }];
-            let visible_cols = result.columns.len() - num_hidden;
-            self.sort_results(&mut result, &default_order, visible_cols)?;
         }
+        // NO fallback sort. Grouped output keeps the order the groups were
+        // first seen in, which is what `group_postings` preserves and what
+        // bean-query does.
+        //
+        // This branch used to sort by the first column when a query grouped
+        // without an ORDER BY, claiming to match Python beancount. It does
+        // not -- verified against beanquery 0.2.0, which returns groups in
+        // first-appearance order for both explicit and implicit GROUP BY:
+        //
+        //   SELECT account, year, sum(number) GROUP BY account, year
+        //     bean-query  Assets:A/2024, Equity:O/2024, Assets:B/2025, ...
+        //     sorted      Assets:A/2024, Assets:B/2025, Equity:O/2024, ...
+        //
+        // The sort also applied HERE and not in the aggregate `FROM` path,
+        // so the same query returned differently-ordered rows depending on
+        // whether the user wrote `FROM #postings` -- and with a LIMIT, that
+        // meant different ROWS (#2235). Insertion order is deterministic on
+        // its own, so nothing is lost by dropping it.
 
         // Remove hidden columns after sorting (BEFORE PIVOT). With this
         // order, PIVOT operates on the visible-only shape and doesn't

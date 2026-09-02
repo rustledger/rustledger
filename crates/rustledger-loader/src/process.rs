@@ -114,6 +114,30 @@ pub enum ProcessError {
     PluginConversion(String),
 }
 
+/// A balance assertion that FAILED, with the difference the checker computed.
+///
+/// One per failing assertion; a passing one produces no entry. That mirrors
+/// beancount, whose checker sets `diff_amount` only on a failing entry and
+/// leaves it `None` otherwise -- and it is why this cannot be derived from the
+/// directive: a small non-zero difference inside the tolerance is a pass.
+///
+/// Captured during the loader's validation pass for the same reason
+/// [`Ledger::capital_gains`] is: consumers read it rather than re-deriving the
+/// balance, so `rledger check` and `#balances.discrepancy` cannot disagree
+/// (#2180).
+///
+/// Empty when the loader ran without validation, in which case the column
+/// reports NULL rather than a wrong number.
+#[derive(Debug, Clone)]
+pub struct BalanceDiscrepancy {
+    /// The `balance` directive's date.
+    pub date: rustledger_core::NaiveDate,
+    /// The asserted account.
+    pub account: rustledger_core::Account,
+    /// `computed - asserted`, in the asserted currency.
+    pub amount: rustledger_core::Amount,
+}
+
 /// A fully processed ledger.
 ///
 /// This is the result of loading and processing a beancount file,
@@ -158,6 +182,11 @@ pub struct Ledger {
     /// capgains report — read these directly rather than re-booking the stream
     /// and re-deriving them, so they cannot drift from `rledger check`.
     pub capital_gains: Vec<rustledger_booking::CapitalGain>,
+    /// Failing balance assertions and the difference the checker computed,
+    /// one per failure. Empty when the loader ran without validation.
+    ///
+    /// Feeds `#balances.discrepancy` (#2180).
+    pub balance_discrepancies: Vec<BalanceDiscrepancy>,
 }
 
 impl Ledger {
@@ -447,10 +476,11 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     )?;
 
     #[cfg(feature = "validation")]
-    let late_validated =
+    let (late_validated, balance_discrepancies) =
         regular_applied.late_validate(validation_session, today, &raw.source_map, &mut errors);
     #[cfg(not(feature = "validation"))]
-    let late_validated = regular_applied.late_validate(&raw.source_map, &mut errors);
+    let (late_validated, balance_discrepancies) =
+        regular_applied.late_validate(&raw.source_map, &mut errors);
 
     let finalized = late_validated.finalize(failed);
 
@@ -462,6 +492,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         errors,
         display_context: raw.display_context,
         capital_gains,
+        balance_discrepancies,
     })
 }
 
@@ -716,20 +747,40 @@ impl crate::Directives<crate::RegularPluginsApplied> {
         today: rustledger_core::NaiveDate,
         source_map: &SourceMap,
         errors: &mut Vec<LedgerError>,
-    ) -> crate::Directives<crate::LateValidated> {
+    ) -> (
+        crate::Directives<crate::LateValidated>,
+        Vec<BalanceDiscrepancy>,
+    ) {
         // Typestate move: consume `EarlyDone`, drive through `LateDone`
         // to `finalize()`. The compile-time enforcement here is that
         // we cannot call `late_validate` with a fresh `Pending` session
         // (no `From<Pending>` to `EarlyDone`), so the loader caller
         // must have routed the session through `early_validate` first
         // (#1236).
+        let mut discrepancies = Vec::new();
         if let Some(session) = validation_session {
             let (session, phase_errors) = session.run_late_spanned(self.as_slice(), today);
             ledger_errors_extend(errors, phase_errors, source_map);
+            // Harvested BEFORE `finalize()` consumes the session. Only the
+            // failing assertions: a passing one has no discrepancy to report,
+            // which is what beancount's `diff_amount` does too (#2180).
+            discrepancies = session
+                .balance_actuals()
+                .iter()
+                .filter(|a| a.exceeds_tolerance)
+                .map(|a| BalanceDiscrepancy {
+                    date: a.date,
+                    account: a.account.clone(),
+                    amount: rustledger_core::Amount::new(a.diff, a.currency.clone()),
+                })
+                .collect();
             let finalize_errors = session.finalize();
             ledger_errors_extend(errors, finalize_errors, source_map);
         }
-        crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut()))
+        (
+            crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut())),
+            discrepancies,
+        )
     }
 
     #[cfg(not(feature = "validation"))]
@@ -737,9 +788,17 @@ impl crate::Directives<crate::RegularPluginsApplied> {
         mut self,
         source_map: &SourceMap,
         errors: &mut Vec<LedgerError>,
-    ) -> crate::Directives<crate::LateValidated> {
+    ) -> (
+        crate::Directives<crate::LateValidated>,
+        Vec<BalanceDiscrepancy>,
+    ) {
         let _ = (source_map, errors);
-        crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut()))
+        // No validator, so nothing computed the differences. Empty rather
+        // than wrong: `#balances.discrepancy` reports NULL.
+        (
+            crate::Directives::new_unchecked(std::mem::take(self.as_vec_mut())),
+            Vec::new(),
+        )
     }
 }
 

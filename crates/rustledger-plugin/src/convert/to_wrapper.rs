@@ -12,6 +12,30 @@ use crate::types::{
     PriceData, QueryData, SourceSpan, TransactionData,
 };
 
+/// A directive's metadata as the wire's ordered `Vec`, sorted by key.
+///
+/// [`Metadata`](rustledger_core::Metadata) is an `FxHashMap`, so iterating it
+/// yields no particular order -- while the wire type is a `Vec`, whose
+/// equality and encoding ARE ordered. Collecting the map directly therefore
+/// made the wire representation depend on the order keys happened to be
+/// inserted in: two directives with identical metadata could serialize to
+/// different bytes and compare unequal.
+///
+/// Sorting by key costs nothing that could be preserved -- a hash map holds no
+/// authored ordering to begin with -- and buys a deterministic encoding, so
+/// equal metadata is equal on the wire.
+///
+/// Keys are unique (map keys), so `sort_by` on the key alone is a total order
+/// and the sort is not merely stable-by-luck.
+fn meta_to_data(meta: &rustledger_core::Metadata) -> Vec<(String, MetaValueData)> {
+    let mut pairs: Vec<(String, MetaValueData)> = meta
+        .iter()
+        .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
+        .collect();
+    pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+    pairs
+}
+
 pub(super) fn transaction_to_data(txn: &Transaction) -> TransactionData {
     TransactionData {
         flag: txn.flag.to_string(),
@@ -19,11 +43,7 @@ pub(super) fn transaction_to_data(txn: &Transaction) -> TransactionData {
         narration: txn.narration.to_string(),
         tags: txn.tags.iter().map(ToString::to_string).collect(),
         links: txn.links.iter().map(ToString::to_string).collect(),
-        metadata: txn
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&txn.meta),
         postings: txn.postings.iter().map(spanned_posting_to_data).collect(),
     }
 }
@@ -53,11 +73,7 @@ pub(super) fn posting_to_data(posting: &Posting) -> PostingData {
         cost: posting.cost.as_deref().map(cost_to_data),
         price: posting.price.as_deref().map(price_annotation_to_data),
         flag: posting.flag.map(|c| c.to_string()),
-        metadata: posting
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&posting.meta),
         span: None,
     }
 }
@@ -161,11 +177,7 @@ pub(super) fn balance_to_data(bal: &Balance) -> BalanceData {
         account: bal.account.to_string(),
         amount: amount_to_data(&bal.amount),
         tolerance: bal.tolerance.map(|t| t.to_string()),
-        metadata: bal
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&bal.meta),
     }
 }
 
@@ -174,33 +186,21 @@ pub(super) fn open_to_data(open: &Open) -> OpenData {
         account: open.account.to_string(),
         currencies: open.currencies.iter().map(ToString::to_string).collect(),
         booking: open.booking.clone(),
-        metadata: open
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&open.meta),
     }
 }
 
 pub(super) fn close_to_data(close: &Close) -> CloseData {
     CloseData {
         account: close.account.to_string(),
-        metadata: close
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&close.meta),
     }
 }
 
 pub(super) fn commodity_to_data(comm: &Commodity) -> CommodityData {
     CommodityData {
         currency: comm.currency.to_string(),
-        metadata: comm
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&comm.meta),
     }
 }
 
@@ -208,11 +208,7 @@ pub(super) fn pad_to_data(pad: &Pad) -> PadData {
     PadData {
         account: pad.account.to_string(),
         source_account: pad.source_account.to_string(),
-        metadata: pad
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&pad.meta),
     }
 }
 
@@ -220,11 +216,7 @@ pub(super) fn event_to_data(event: &Event) -> EventData {
     EventData {
         event_type: event.event_type.clone(),
         value: event.value.clone(),
-        metadata: event
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&event.meta),
     }
 }
 
@@ -232,11 +224,7 @@ pub(super) fn note_to_data(note: &Note) -> NoteData {
     NoteData {
         account: note.account.to_string(),
         comment: note.comment.clone(),
-        metadata: note
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&note.meta),
     }
 }
 
@@ -246,11 +234,7 @@ pub(super) fn document_to_data(doc: &Document) -> DocumentData {
         path: doc.path.clone(),
         tags: doc.tags.iter().map(ToString::to_string).collect(),
         links: doc.links.iter().map(ToString::to_string).collect(),
-        metadata: doc
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&doc.meta),
     }
 }
 
@@ -258,11 +242,7 @@ pub(super) fn price_to_data(price: &Price) -> PriceData {
     PriceData {
         currency: price.currency.to_string(),
         amount: amount_to_data(&price.amount),
-        metadata: price
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&price.meta),
     }
 }
 
@@ -270,11 +250,7 @@ pub(super) fn query_to_data(query: &Query) -> QueryData {
     QueryData {
         name: query.name.clone(),
         query: query.query.clone(),
-        metadata: query
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&query.meta),
     }
 }
 
@@ -282,10 +258,6 @@ pub(super) fn custom_to_data(custom: &Custom) -> CustomData {
     CustomData {
         custom_type: custom.custom_type.clone(),
         values: custom.values.iter().map(meta_value_to_data).collect(),
-        metadata: custom
-            .meta
-            .iter()
-            .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
-            .collect(),
+        metadata: meta_to_data(&custom.meta),
     }
 }

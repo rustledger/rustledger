@@ -87,8 +87,6 @@ impl Executor<'_> {
             || query.group_by.is_some()
             || query.having.is_some();
 
-        // Track whether grouping is applied (explicit or implicit) for fallback sort
-
         if is_aggregate {
             // Determine GROUP BY expressions:
             // - If explicit GROUP BY is provided, use it

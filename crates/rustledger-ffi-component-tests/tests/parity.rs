@@ -1041,6 +1041,69 @@ fn load_reports_balance_assertion_failure() -> Result<()> {
     Ok(())
 }
 
+/// #2239: two `balance` assertions sharing a date, account and currency each
+/// carry their OWN diff.
+///
+/// `attach_balance_diffs` keyed the validator's results by
+/// `(date, account, currency)`. Those three do not identify an assertion --
+/// a ledger may assert the same account and currency twice on one date with
+/// different amounts -- so building a map collapsed them and one directive
+/// received the other's difference.
+///
+/// A WIT-level test on purpose: the collision is in the map the component
+/// builds, so a unit test on the validator would not see it. Verified against
+/// bean-query, which reports `10.00 USD` and `-20.00 USD` here (the query
+/// layer had the same bug, fixed in #2238).
+#[test]
+fn same_date_balance_assertions_carry_their_own_diffs() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    // Accumulates 100.00. Asserting 90 is +10 too much; asserting 120 is -20.
+    let src = "\
+2024-01-01 open Assets:Cash USD
+2024-01-01 open Equity:O USD
+2024-01-02 * \"fund\"
+  Assets:Cash   100.00 USD
+  Equity:O
+2024-03-01 balance Assets:Cash    90.00 USD
+2024-03-01 balance Assets:Cash   120.00 USD
+";
+    let loaded = inst
+        .rustledger_ledger_ledger()
+        .call_load(&mut store, src, "<stdin>", false)?;
+
+    let diffs: Vec<(String, Option<String>)> = loaded
+        .entries
+        .iter()
+        .filter_map(|d| match d {
+            rustledger::ledger::types::Directive::Balance(b) => Some((
+                b.amount.number.clone(),
+                b.diff.as_ref().map(|a| a.number.clone()),
+            )),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(diffs.len(), 2, "both assertions must be present: {diffs:?}");
+    for (asserted, diff) in &diffs {
+        let diff = diff.as_deref().expect("each assertion carries a diff");
+        let expected = if asserted.starts_with("90") {
+            "10"
+        } else {
+            "-20"
+        };
+        assert!(
+            diff.starts_with(expected),
+            "the assertion of {asserted} should carry a diff of {expected}, \
+             got {diff}; all: {diffs:?}",
+        );
+    }
+    Ok(())
+}
+
 /// #1668: an oversell reports the "Not enough units" error exactly ONCE via
 /// `load`. Booking (run inside `load_source`) already reports it with
 /// transaction context; the validation session's context-free reduce-check

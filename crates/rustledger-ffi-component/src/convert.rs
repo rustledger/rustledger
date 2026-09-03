@@ -376,9 +376,31 @@ fn semantic_validation_errors(
     (errors, actuals)
 }
 
-/// Attach the computed `diff` (`computed − asserted`) to each `balance` directive
-/// entry from the validator's recorded results (#1663), keyed by
-/// `(date, account, currency)`.
+/// Attach the computed `diff` (`computed − asserted`) to each `balance`
+/// directive entry from the validator's recorded results (#1663), keyed by
+/// `(date, account, currency, asserted)`.
+///
+/// The asserted amount is part of the key because the other three do not
+/// identify an assertion: a ledger may assert the same account and currency
+/// twice on one date, with different amounts and so different differences.
+/// Keying without it collapsed them, and one directive received the other's
+/// diff (#2239; the query layer had the same bug, fixed in #2238).
+///
+/// The asserted number is compared as the STRING the WIT directive carries.
+/// Both sides come from `Decimal::to_string()` on the same value --
+/// `amount_from_core` for the directive, `BalanceActual::asserted` for the
+/// validator's record -- so they agree by construction. Two assertions
+/// matching on all four are the same assertion and share a difference, so
+/// collapsing those is harmless.
+///
+/// Unlike `#balances.discrepancy`, this attaches a diff for EVERY assertion,
+/// passing ones included, and the value is the RAW signed difference rather
+/// than a pass/fail verdict. It is zero only on an exact match: an assertion
+/// that passes *within tolerance* carries its real difference, e.g. `-0.01`
+/// for `100.01` asserted against an accumulated `100.00` under a `0.05`
+/// tolerance. That is this surface's contract (#1663) -- a consumer renders
+/// per-assertion detail from it -- and it is why the query column, which
+/// reports only failures, could not simply reuse this.
 fn attach_balance_diffs(
     entries: &mut [wit::Directive],
     actuals: &[rustledger_validate::BalanceActual],
@@ -386,7 +408,7 @@ fn attach_balance_diffs(
     if actuals.is_empty() {
         return;
     }
-    let map: std::collections::HashMap<(String, String, String), rustledger_core::Decimal> =
+    let map: std::collections::HashMap<(String, String, String, String), rustledger_core::Decimal> =
         actuals
             .iter()
             .map(|a| {
@@ -395,6 +417,7 @@ fn attach_balance_diffs(
                         a.date.to_string(),
                         a.account.to_string(),
                         a.currency.to_string(),
+                        a.asserted.to_string(),
                     ),
                     a.diff,
                 )
@@ -402,7 +425,12 @@ fn attach_balance_diffs(
             .collect();
     for entry in entries.iter_mut() {
         if let wit::Directive::Balance(b) = entry {
-            let key = (b.date.clone(), b.account.clone(), b.amount.currency.clone());
+            let key = (
+                b.date.clone(),
+                b.account.clone(),
+                b.amount.currency.clone(),
+                b.amount.number.clone(),
+            );
             if let Some(diff) = map.get(&key) {
                 b.diff = Some(wit::Amount {
                     number: diff.to_string(),

@@ -207,7 +207,60 @@ fn find_amount_range(
         }
     }
 
+    // Nothing matched literally. The line may spell the number with THOUSANDS
+    // SEPARATORS -- `-1,999.00` where `amount_str` is always `-1999.00`,
+    // because it comes from `Decimal::to_string()` and that never groups.
+    //
+    // This is not a rare spelling: `option "render_commas" "TRUE"` makes it
+    // the canonical form, and `rledger format` writes it. So the provider was
+    // declining to color exactly the text the formatter produces, coloring
+    // only the amounts too small to carry a separator -- which in an aligned
+    // block makes the column ragged, since an editor draws each color as a
+    // swatch occupying a character cell (#2230).
+    //
+    // Compare whitespace-delimited tokens with separators removed, and return
+    // the range over the WHOLE token as written so the swatch lands in the
+    // same place for both spellings. Tokenising on whitespace keeps the
+    // account-name guard above: `Assets:US-100:Bank` is one token and does not
+    // compare equal to a bare number.
+    for pattern in &search_patterns {
+        for (pos, token) in whitespace_tokens(line) {
+            if !token.contains(',') {
+                continue;
+            }
+            let ungrouped: String = token.chars().filter(|c| *c != ',').collect();
+            if ungrouped == *pattern {
+                let after_pos = pos + token.len();
+                let (sl, sc) = line_index.offset_to_position(line_start_byte + pos);
+                let (el, ec) = line_index.offset_to_position(line_start_byte + after_pos);
+                return Some(Range {
+                    start: Position::new(sl, sc),
+                    end: Position::new(el, ec),
+                });
+            }
+        }
+    }
+
     None
+}
+
+/// Whitespace-delimited tokens of `line`, each with its byte offset.
+///
+/// `str::split_whitespace` discards positions, and the color range needs
+/// them. ASCII-only classification, matching the boundary check above --
+/// BOTH ends, so a non-ASCII space cannot start a token by one rule and
+/// terminate it by another.
+fn whitespace_tokens(line: &str) -> impl Iterator<Item = (usize, &str)> {
+    line.char_indices()
+        .filter(|&(i, c)| {
+            !c.is_ascii_whitespace() && (i == 0 || line.as_bytes()[i - 1].is_ascii_whitespace())
+        })
+        .map(move |(start, _)| {
+            let end = line[start..]
+                .find(|c: char| c.is_ascii_whitespace())
+                .map_or(line.len(), |off| start + off);
+            (start, &line[start..end])
+        })
 }
 
 #[cfg(test)]
@@ -243,6 +296,100 @@ mod tests {
         // Second posting is positive (green)
         assert!(colors[1].color.green > 0.5);
         assert!(colors[1].color.red < 0.5);
+    }
+
+    /// The reporter's ledger from #2230: `render_commas` is on, so `format`
+    /// writes `-1,999.00` -- and the color provider skipped exactly those,
+    /// coloring only the amounts small enough to have no separator.
+    ///
+    /// VS Code renders each color as an inline swatch occupying a character
+    /// cell, so coloring some amounts on a line-aligned block and not others
+    /// makes the column ragged. The provider was declining to color text the
+    /// formatter itself produces.
+    #[test]
+    fn test_document_color_covers_amounts_with_thousands_separators() {
+        let source = "2026-01-05 * \"P\" \"grouped and plain on purpose\"\n  \
+                      Assets:Cash    -1,999.00 USD\n  \
+                      Expenses:Fees   1,999.00 USD\n\
+                      \n2026-01-06 * \"P\" \"plain only\"\n  \
+                      Assets:Cash       -14.62 USD\n  \
+                      Expenses:Fees      14.62 USD\n";
+        let result = parse(source);
+        let params = DocumentColorParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let colors = handle_document_color(&params, source, &result, PositionEncoding::Utf16)
+            .expect("colors");
+        assert_eq!(
+            colors.len(),
+            4,
+            "every posting amount gets a color, grouped or not; got {colors:?}",
+        );
+
+        // The grouped amounts are on lines 1 and 2, and their ranges must
+        // cover the WHOLE token including the separator -- a range that
+        // stopped at the comma would put the swatch mid-number.
+        let grouped: Vec<&ColorInformation> = colors
+            .iter()
+            .filter(|c| c.range.start.line == 1 || c.range.start.line == 2)
+            .collect();
+        assert_eq!(grouped.len(), 2, "both grouped amounts are colored");
+        for c in &grouped {
+            let width = c.range.end.character - c.range.start.character;
+            assert_eq!(
+                width,
+                "-1,999.00".len() as u32 - u32::from(c.range.start.line == 2),
+                "the range spans the full token, separators included: {:?}",
+                c.range,
+            );
+        }
+
+        // Sign still drives the color: first of each pair negative, second
+        // positive. Without this the test would pass on a provider that
+        // colored everything one color.
+        assert!(colors[0].color.red > 0.5 && colors[0].color.green < 0.5);
+        assert!(colors[1].color.green > 0.5 && colors[1].color.red < 0.5);
+    }
+
+    /// `balance` and `price` amounts go through the same `find_amount_range`,
+    /// so they get separators too. Asserted separately because they are
+    /// different arms of the directive match, and a fix applied to the posting
+    /// arm alone would leave these two behind.
+    #[test]
+    fn test_document_color_covers_grouped_balance_and_price() {
+        let source = "2026-01-01 open Assets:Cash USD\n\
+                      2026-02-01 balance Assets:Cash  1,234.00 USD\n\
+                      2026-02-02 price HOOL  2,500.00 USD\n";
+        let result = parse(source);
+        let params = DocumentColorParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let colors = handle_document_color(&params, source, &result, PositionEncoding::Utf16)
+            .expect("colors");
+        let lines: Vec<u32> = colors.iter().map(|c| c.range.start.line).collect();
+        assert!(
+            lines.contains(&1) && lines.contains(&2),
+            "the grouped balance and price amounts must both be colored; got {colors:?}",
+        );
+        for c in &colors {
+            let width = c.range.end.character - c.range.start.character;
+            assert_eq!(
+                width,
+                "1,234.00".len() as u32,
+                "the range spans the full grouped token: {:?}",
+                c.range,
+            );
+        }
     }
 
     #[test]

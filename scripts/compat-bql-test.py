@@ -1180,6 +1180,27 @@ def load_corpus(path: Path) -> list[Query]:
 # ends and data begins, instead of slicing a fixed-size header off — the
 # old approach broke whenever a tool emitted a deprecation banner ahead
 # of the table.
+# How many files per query get their column NAMES compared.
+#
+# A header is the rendered target expression, so it depends on the query and
+# not the ledger; the corpus confirms it, every query producing exactly one
+# distinct header pair across all files. Comparing it on all 735 is redundant
+# and cost the nightly its time budget (#2232), so a handful per query carries
+# the same signal.
+#
+# Raise this if a query is ever added whose header depends on DATA -- a
+# `PIVOT BY` names its columns after the pivot values, and the corpus excludes
+# pivots today for unrelated reasons. The run errors if the sampled files ever
+# disagree about a query's headers, so that change cannot pass unnoticed.
+#
+# Generous on purpose. The cost is `queries x N` REGARDLESS of corpus size --
+# 19 x 20 header passes against 735 files, not 735 x 19 -- so a bigger sample
+# is nearly free while a small one is fragile: about 28% of corpus runs end in
+# a tool failure and yield no header at all, so a sample of 4 left some queries
+# with only a handful of usable comparisons and risked zero. The run errors if
+# any query ends up with none.
+HEADER_SAMPLE_PER_QUERY = 20
+
 _SEPARATOR_RE = re.compile(r"^[-\s]+$")
 
 
@@ -1378,6 +1399,7 @@ def test_one(
     rledger_bin: list[str],
     bean_query_csv_bin: list[str] | None = None,
     rledger_csv_bin: list[str] | None = None,
+    compare_headers: bool = True,
 ) -> QueryRun:
     py_out = run_query(bean_query_bin, file_path, query.query)
     rs_out = run_query(rledger_bin, file_path, query.query)
@@ -1394,7 +1416,7 @@ def test_one(
     # below, and skipping keeps the extra invocation off the failure paths.
     py_header = rs_header = None
     tools_ran = not py_out.failed and not rs_out.failed
-    if tools_ran and bean_query_csv_bin and rledger_csv_bin:
+    if tools_ran and compare_headers and bean_query_csv_bin and rledger_csv_bin:
         py_csv = run_query(bean_query_csv_bin, file_path, query.query)
         rs_csv = run_query(rledger_csv_bin, file_path, query.query)
         if not py_csv.failed and not rs_csv.failed:
@@ -1408,7 +1430,10 @@ def test_one(
     # both tools print one, so `None` here really is "we did not look".
     header_compared = py_header is not None and rs_header is not None
     header_match = (not header_compared) or py_header == rs_header
-    header_skipped = tools_ran and not header_compared
+    # A pair outside the header SAMPLE is not a blind spot -- it was not meant
+    # to be compared. Only a pair we tried and failed to compare counts, which
+    # is what the reported "header checks skipped" number is for.
+    header_skipped = tools_ran and compare_headers and not header_compared
     # A registered header divergence excuses the NAMES only. `header_match`
     # keeps the raw fact so the stale check still notices when the divergence
     # goes away; the row comparison below is untouched by the mask.
@@ -1652,11 +1677,34 @@ def main() -> int:
     rledger_csv_bin = [*rledger_bin, "-f", "csv"]
     bean_query_csv_bin = [*bean_query_bin, "-f", "csv"]
 
-    # Build (file, filename, query) cases
+    # Build (file, filename, query, compare_headers) cases.
+    #
+    # Headers are compared on only the first `HEADER_SAMPLE_PER_QUERY` files
+    # per query, because a header is a property of the QUERY and not of the
+    # ledger: it is the rendered target expression. Measured across the corpus,
+    # every query yields exactly ONE distinct header pair however many files it
+    # runs on -- which is also why the divergence registry keys these
+    # `("*", query)` rather than enumerating files.
+    #
+    # The full cross product cost real time. The header pass is a second
+    # subprocess per run, and comparing it on all 735 files took the nightly's
+    # BQL step from ~19 to ~35 minutes, past the job's 45-minute cap: the
+    # 2026-09-02 and 09-03 nightlies were killed after BQL and never reached
+    # "Commit results to compatibility branch", so the trend lost two days
+    # (#2232). Sampling restores the runtime and keeps the signal.
+    #
+    # `queries` and `selected_pairs` are both ordered, so the sample is the
+    # same set run to run -- a regression cannot hide by landing on a file that
+    # happened not to be sampled today.
     cases = []
+    header_budget: dict[str, int] = {}
     for filename, path in selected_pairs:
         for q in queries:
-            cases.append((path, filename, q))
+            used = header_budget.get(q.name, 0)
+            compare_headers = used < HEADER_SAMPLE_PER_QUERY
+            if compare_headers:
+                header_budget[q.name] = used + 1
+            cases.append((path, filename, q, compare_headers))
 
     if not cases:
         # An empty case list used to silently produce a 0-runs/0-mismatches
@@ -1684,8 +1732,9 @@ def main() -> int:
                 rledger_bin,
                 bean_query_csv_bin,
                 rledger_csv_bin,
+                ch,
             )
-            for (p, fn, q) in cases
+            for (p, fn, q, ch) in cases
         ]
         for fut in as_completed(futures):
             try:
@@ -1793,6 +1842,42 @@ def main() -> int:
     print(f"Real mismatches:     {real_mismatches}")
     # Report the header comparisons that did NOT happen. A skipped check scores
     # as a match, so leaving the count silent is how coverage quietly erodes.
+    # The sample is only sound while a query's header does not depend on the
+    # DATA. Verified rather than assumed: if the sampled files disagree with
+    # each other about a query's headers, the property the cap rests on is
+    # false and the cap is hiding divergences on the files it skipped.
+    by_query: dict[str, set] = {}
+    for r in results:
+        if r.py_header is not None and r.rs_header is not None:
+            by_query.setdefault(r.query_name, set()).add(
+                (tuple(r.py_header), tuple(r.rs_header))
+            )
+    varying = sorted(q for q, seen in by_query.items() if len(seen) > 1)
+    for q in varying:
+        print(
+            f"::error::query {q!r} produced different headers on different "
+            "files, so comparing only "
+            f"{HEADER_SAMPLE_PER_QUERY} of them is not representative. Raise "
+            "HEADER_SAMPLE_PER_QUERY or compare this query on every file."
+        )
+
+    compared_headers = sum(1 for r in results if r.py_header is not None)
+    print(
+        f"Header checks:       {compared_headers} of {len(results)} runs "
+        f"(sampling {HEADER_SAMPLE_PER_QUERY} file(s) per query)"
+    )
+
+    # A query with NO usable comparison is not being header-checked at all --
+    # the sample landed entirely on files where a tool failed. Silent zero
+    # coverage is exactly what sampling must not buy, so it is an error.
+    all_queries = {r.query_name for r in results}
+    unchecked = sorted(all_queries - set(by_query))
+    for q in unchecked:
+        print(
+            f"::error::query {q!r} got NO header comparison -- every sampled "
+            "file failed in one of the tools. Its column names are unchecked."
+        )
+
     skipped_headers = sum(1 for r in results if r.header_skipped)
     if skipped_headers:
         print(

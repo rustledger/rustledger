@@ -103,10 +103,32 @@ def scheduled_workflows() -> dict[str, str]:
     return out
 
 
+# How many recent scheduled runs to fetch before picking the newest.
+#
+# More than one because the newest is chosen by comparing timestamps rather
+# than by trusting list order (see `latest_scheduled_run`).
+_RUN_PAGE = 10
+
+
 def latest_scheduled_run(workflow: str) -> dict | None:
+    """The most recent scheduled run of `workflow`, by `createdAt`.
+
+    Fetches a page and takes the MAXIMUM rather than the first element. On
+    2026-09-03 this reported `bench.yml` as ten days stale while it had in fact
+    run six hours earlier, and the run it linked was a real but old one -- so
+    the lookup returned a stale entry rather than failing. The cause was not
+    reproducible afterwards (the same `gh run list --limit 1` returned the
+    correct run by hand), so this does not claim to fix a diagnosed bug: it
+    removes the dependence on list ORDER, which is the only assumption that
+    could have produced that output.
+
+    That matters more here than the code size suggests. A health reporter
+    exists to be believed; one that cries wolf gets muted, which is the failure
+    it was written to prevent.
+    """
     raw = gh(
         "run", "list", "--repo", REPO, "--workflow", workflow,
-        "--event", "schedule", "--limit", "1",
+        "--event", "schedule", "--limit", str(_RUN_PAGE),
         "--json", "conclusion,status,createdAt,databaseId,url",
         tolerate_missing=True,
     )
@@ -114,7 +136,9 @@ def latest_scheduled_run(workflow: str) -> dict | None:
         runs = json.loads(raw)
     except json.JSONDecodeError:
         return None
-    return runs[0] if runs else None
+    if not runs:
+        return None
+    return max(runs, key=lambda r: r["createdAt"])
 
 
 def later_successful_manual_run(workflow: str, after: datetime) -> dict | None:
@@ -215,6 +239,29 @@ def self_test() -> int:
         ok = flag in argv and argv[argv.index(flag) + 1] == value
         failures += not ok
         print(f"  {'ok  ' if ok else 'FAIL'} query passes {flag} {value}")
+
+    # `latest_scheduled_run` must pick by TIMESTAMP, not by position. The
+    # 2026-09-03 report called `bench.yml` ten days stale while it had run six
+    # hours earlier, linking a real but older run -- consistent with taking
+    # element zero of a list that was not newest-first. Fed deliberately
+    # out-of-order here, since a correctly-ordered fixture cannot tell the two
+    # implementations apart.
+    out_of_order = (
+        '[{"conclusion":"success","status":"completed",'
+        '"createdAt":"2026-08-24T02:52:42Z","databaseId":1,"url":"old"},'
+        '{"conclusion":"success","status":"completed",'
+        '"createdAt":"2026-09-03T06:34:44Z","databaseId":2,"url":"new"}]'
+    )
+    gh = stub(out_of_order)
+    picked = latest_scheduled_run("bench.yml")
+    ok = picked is not None and picked["url"] == "new"
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} newest scheduled run wins regardless of list order")
+
+    gh = stub("[]")
+    ok = latest_scheduled_run("bench.yml") is None
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} no scheduled runs reports None")
 
     gh = real_gh
     if failures:

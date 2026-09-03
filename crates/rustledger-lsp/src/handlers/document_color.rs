@@ -247,15 +247,17 @@ fn find_amount_range(
 /// Whitespace-delimited tokens of `line`, each with its byte offset.
 ///
 /// `str::split_whitespace` discards positions, and the color range needs
-/// them. ASCII-only classification, matching the boundary check above.
+/// them. ASCII-only classification, matching the boundary check above --
+/// BOTH ends, so a non-ASCII space cannot start a token by one rule and
+/// terminate it by another.
 fn whitespace_tokens(line: &str) -> impl Iterator<Item = (usize, &str)> {
     line.char_indices()
-        .filter(|(i, c)| {
-            !c.is_ascii_whitespace() && (*i == 0 || line.as_bytes()[i - 1].is_ascii_whitespace())
+        .filter(|&(i, c)| {
+            !c.is_ascii_whitespace() && (i == 0 || line.as_bytes()[i - 1].is_ascii_whitespace())
         })
         .map(move |(start, _)| {
             let end = line[start..]
-                .find(char::is_whitespace)
+                .find(|c: char| c.is_ascii_whitespace())
                 .map_or(line.len(), |off| start + off);
             (start, &line[start..end])
         })

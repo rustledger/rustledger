@@ -86,7 +86,25 @@
           "description": "Automatically check for extension updates on startup"
         }
       }
-    }
+    },
+    "semanticTokenModifiers": [
+      {
+        "id": "negative",
+        "description": "A negative amount. Custom: LSP defines no standard modifier for sign."
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "beancount",
+        "scopes": {
+          "number.negative": [
+            "constant.numeric.negative.beancount",
+            "markup.deleted",
+            "constant.numeric"
+          ]
+        }
+      }
+    ]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

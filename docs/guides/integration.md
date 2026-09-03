@@ -56,9 +56,34 @@ def get_balances(ledger_path):
     return json.loads(result.stdout)
 
 balances = get_balances("ledger.beancount")
+
+# `rows` are ARRAYS of values, positional against `columns`. Zip the two to
+# read by name:
+columns = balances["columns"]
 for row in balances["rows"]:
-    print(f"{row['account']}: {row['balance']}")
+    r = dict(zip(columns, row))
+    print(f"{r['account']}: {r['balance']}")
 ```
+
+The JSON shape is:
+
+```json
+{
+  "columns": ["account", "balance"],
+  "rows": [["Assets:Cash", "100.00 USD"]],
+  "row_count": 1
+}
+```
+
+Rows are positional rather than objects keyed by column name because a query
+may return **duplicate column names** — `SELECT date AS a, account AS a`, the
+same expression twice, or a column colliding with an alias — and a JSON object
+cannot hold duplicate keys. Keyed rows silently dropped all but the last of
+each collision. The `zip` above is safe under duplicates too, if you index by
+position rather than building a dict.
+
+This matches the other query surfaces: the WASM API and the WIT component both
+return `rows` as lists of value lists.
 
 ## Rust Crates
 

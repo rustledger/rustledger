@@ -223,19 +223,31 @@ fn write_csv<W: Write>(
     Ok(())
 }
 
+/// Rows are ARRAYS of values, positional against `columns` -- not objects
+/// keyed by column name.
+///
+/// A JSON object cannot hold duplicate keys, and BQL legitimately produces
+/// duplicate column names: `SELECT date AS a, account AS a`, two aliases
+/// differing only in case (since #2164 lowercases them), the same expression
+/// twice (#2171), or a column colliding with an alias. Keyed rows silently
+/// dropped all but the last of each collision while `columns` still listed
+/// them all, so a consumer that trusted `columns` read fewer fields than it
+/// was told to expect (#2178).
+///
+/// The names themselves are correct -- bean-query produces the same duplicate
+/// headers, verified in #2164 -- so the fix belongs in the shape, not the
+/// naming. Disambiguating (`a`, `a_2`) would invent names a consumer cannot
+/// predict AND make these keys disagree with the CSV/text headers.
+///
+/// This matches the other query surfaces, which were always positional: the
+/// component's `rows: list<list<query-value>>` and wasm's
+/// `rows: Vec<Vec<CellValue>>`. `-f csv` emits both fields positionally too.
+/// The CLI's JSON was the only shape that could not represent its own results.
 fn write_json<W: Write>(result: &rustledger_query::QueryResult, writer: &mut W) -> Result<()> {
     let rows: Vec<serde_json::Value> = result
         .rows
         .iter()
-        .map(|row| {
-            let obj: serde_json::Map<String, serde_json::Value> = result
-                .columns
-                .iter()
-                .zip(row.iter())
-                .map(|(col, val)| (col.clone(), value_to_json(val)))
-                .collect();
-            serde_json::Value::Object(obj)
-        })
+        .map(|row| serde_json::Value::Array(row.iter().map(value_to_json).collect()))
         .collect();
 
     let output = serde_json::json!({
@@ -1140,10 +1152,72 @@ mod tests {
         let json = String::from_utf8(buf).expect("utf8");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(
-            parsed["rows"][0]["b"],
+            parsed["rows"][0][0],
             serde_json::Value::Bool(true),
             "the JSON boolean must stay a real boolean, not a TRUE/FALSE string"
         );
+    }
+
+    /// Rows are positional, so duplicate column names keep every value.
+    ///
+    /// Keyed rows could not represent this: a JSON object cannot hold two
+    /// `"a"` keys, so the first value was dropped while `columns` still
+    /// listed both (#2178). BQL produces such names legitimately -- and
+    /// bean-query produces the same duplicate headers -- so the shape had to
+    /// give, not the naming.
+    #[test]
+    fn duplicate_column_names_keep_every_value() {
+        use rustledger_query::QueryResult;
+
+        let mut result = QueryResult::new(vec!["a".into(), "a".into()]);
+        result.add_row(vec![
+            Value::String("first".into()),
+            Value::String("second".into()),
+        ]);
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_json(&result, &mut buf).expect("json ok");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(buf).expect("utf8")).expect("valid JSON");
+
+        assert_eq!(
+            parsed["columns"],
+            serde_json::json!(["a", "a"]),
+            "both column names are reported",
+        );
+        assert_eq!(
+            parsed["rows"][0],
+            serde_json::json!(["first", "second"]),
+            "and both values survive, in column order",
+        );
+    }
+
+    /// A row has exactly as many entries as `columns` says, so a consumer can
+    /// zip the two. The keyed shape broke this invariant precisely when it
+    /// mattered.
+    #[test]
+    fn each_row_has_one_entry_per_column() {
+        use rustledger_query::QueryResult;
+
+        for columns in [
+            vec!["a".to_string(), "b".to_string()],
+            vec!["a".to_string(), "a".to_string()],
+        ] {
+            let n = columns.len();
+            let mut result = QueryResult::new(columns.clone());
+            result.add_row(vec![Value::Integer(1), Value::Integer(2)]);
+
+            let mut buf: Vec<u8> = Vec::new();
+            write_json(&result, &mut buf).expect("json ok");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&String::from_utf8(buf).expect("utf8")).expect("valid JSON");
+
+            assert_eq!(
+                parsed["rows"][0].as_array().expect("row is an array").len(),
+                n,
+                "row width must equal column count for {columns:?}",
+            );
+        }
     }
 
     #[test]

@@ -39,6 +39,17 @@ pub const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[
     SemanticTokenModifier::DEFINITION, // 0: where something is defined
     SemanticTokenModifier::DEPRECATED, // 1: closed accounts
     SemanticTokenModifier::READONLY,   // 2: balance assertions
+    // 3: a NEGATIVE amount. Custom (LSP has no standard modifier for sign),
+    // so a client only styles it if it knows the name -- which is why the
+    // VS Code extension contributes a `semanticTokenScopes` mapping for it.
+    //
+    // This is the non-invasive way to convey sign. `documentColor` also
+    // reports it and stays, because it reaches clients that do not implement
+    // semantic tokens (#2245) -- but its swatch occupies a character cell and
+    // so perturbs the alignment `rledger format` establishes. With both, a
+    // user who turns decorations off (`editor.colorDecorators: false`) keeps
+    // the signal instead of losing it.
+    SemanticTokenModifier::new("negative"), // 3: negative amounts
 ];
 
 /// Get the semantic tokens legend for capability registration.
@@ -84,6 +95,12 @@ mod token_type {
 mod token_modifier {
     pub const DEFINITION: u32 = 1 << 0;
     pub const DEPRECATED: u32 = 1 << 1;
+    /// Index 2 in `TOKEN_MODIFIERS`. Declared but not yet applied anywhere --
+    /// present so the bit indices here line up with the legend and the next
+    /// modifier added cannot be off by one.
+    #[expect(dead_code, reason = "keeps bit indices aligned with TOKEN_MODIFIERS")]
+    pub const READONLY: u32 = 1 << 2;
+    pub const NEGATIVE: u32 = 1 << 3;
 }
 
 /// A raw token before delta encoding.
@@ -95,6 +112,77 @@ struct RawToken {
     modifiers: u32,
     /// Byte offset in source (used for modifier overlay matching).
     byte_offset: usize,
+}
+
+/// Build the `RawToken` for one lexer token.
+///
+/// Shared by the full-document and range collectors. They had separate copies
+/// of this arithmetic, and the negated-number span landed in only one of them
+/// -- so `semanticTokens/range` reported a different span and no modifier for
+/// the same text `semanticTokens/full` got right. One function, so a client
+/// cannot see two answers depending on which request it made.
+fn raw_token(
+    source: &str,
+    line_starts: &[usize],
+    negatives: &std::collections::HashMap<usize, usize>,
+    token_type: u32,
+    span: &rustledger_parser::logos_lexer::Span,
+    encoding: PositionEncoding,
+) -> RawToken {
+    // A negated number reports from the MINUS, so the token covers the sign
+    // and matches the range `documentColor` returns.
+    let (begin, modifiers) = match negatives.get(&span.start) {
+        Some(&minus_at) => (minus_at, token_modifier::NEGATIVE),
+        None => (span.start, 0),
+    };
+    let line_idx = line_starts.partition_point(|&start| start <= begin) - 1;
+    let line_start = line_starts[line_idx];
+    RawToken {
+        line: line_idx as u32,
+        start: encoded_len(&source[line_start..begin], encoding),
+        length: encoded_len(&source[begin..span.end], encoding),
+        token_type,
+        modifiers,
+        byte_offset: begin,
+    }
+}
+
+/// Byte offsets of `Number` tokens that a UNARY minus makes negative, mapped
+/// to the offset of that minus.
+///
+/// The lexer emits `-1,999.00` as `Minus` + `Number` so that subtraction
+/// expressions work, which means sign is not visible on the number token
+/// alone. A minus is unary when the token before it does not END an operand:
+/// after a number or a closing paren it is subtraction (`5 - 3`), otherwise it
+/// negates what follows.
+///
+/// The minus offset is returned so the emitted token can cover the sign, the
+/// way `documentColor` does -- the two features report the same span, rather
+/// than one coloring `1,999.00` and the other `-1,999.00`. Only when the minus
+/// is ADJACENT to the number; `- 5` keeps the sign outside the token rather
+/// than swallowing the space.
+fn negative_number_offsets(
+    lexer_tokens: &[(Token<'_>, rustledger_parser::logos_lexer::Span)],
+) -> std::collections::HashMap<usize, usize> {
+    let mut out = std::collections::HashMap::new();
+    for (i, (token, span)) in lexer_tokens.iter().enumerate() {
+        if !matches!(token, Token::Minus) {
+            continue;
+        }
+        let ends_operand = matches!(
+            lexer_tokens[..i].iter().next_back().map(|(t, _)| t),
+            Some(Token::Number(_) | Token::RParen)
+        );
+        if ends_operand {
+            continue;
+        }
+        if let Some((Token::Number(_), num_span)) = lexer_tokens.get(i + 1)
+            && num_span.start == span.end
+        {
+            out.insert(num_span.start, span.start);
+        }
+    }
+    out
 }
 
 /// Map a lexer token to a semantic token type, if applicable.
@@ -158,6 +246,7 @@ fn encoded_len(s: &str, encoding: PositionEncoding) -> u32 {
 /// Collect raw tokens from the lexer output for a source string.
 fn collect_lexer_tokens(source: &str, encoding: PositionEncoding) -> Vec<RawToken> {
     let lexer_tokens = tokenize(source);
+    let negatives = negative_number_offsets(&lexer_tokens);
     let mut raw_tokens = Vec::with_capacity(lexer_tokens.len());
 
     // Build line start offsets for O(1) byte-to-line/col conversion.
@@ -167,23 +256,14 @@ fn collect_lexer_tokens(source: &str, encoding: PositionEncoding) -> Vec<RawToke
 
     for (token, span) in &lexer_tokens {
         if let Some(tt) = lexer_token_type(token) {
-            // Binary search for the line containing this byte offset.
-            let line_idx = line_starts.partition_point(|&start| start <= span.start) - 1;
-            let line = line_idx as u32;
-            // Convert byte offset within line to the negotiated wire
-            // encoding (UTF-16 by default; UTF-8 byte offsets if the
-            // client negotiated UTF-8 at initialization).
-            let line_start = line_starts[line_idx];
-            let col = encoded_len(&source[line_start..span.start], encoding);
-            let length = encoded_len(&source[span.start..span.end], encoding);
-            raw_tokens.push(RawToken {
-                line,
-                start: col,
-                length,
-                token_type: tt,
-                modifiers: 0,
-                byte_offset: span.start,
-            });
+            raw_tokens.push(raw_token(
+                source,
+                &line_starts,
+                &negatives,
+                tt,
+                span,
+                encoding,
+            ));
         }
     }
 
@@ -216,6 +296,7 @@ fn collect_lexer_tokens_in_range(
         .copied()
         .unwrap_or(source.len());
 
+    let negatives = negative_number_offsets(&lexer_tokens);
     let mut raw_tokens = Vec::new();
 
     for (token, span) in &lexer_tokens {
@@ -225,21 +306,7 @@ fn collect_lexer_tokens_in_range(
         }
 
         if let Some(tt) = lexer_token_type(token) {
-            let line_idx = line_starts.partition_point(|&start| start <= span.start) - 1;
-            let line = line_idx as u32;
-            let line_start = line_starts[line_idx];
-            let col = encoded_len(&source[line_start..span.start], encoding);
-            let length = encoded_len(&source[span.start..span.end], encoding);
-
-            let raw = RawToken {
-                line,
-                start: col,
-                length,
-                token_type: tt,
-                modifiers: 0,
-                byte_offset: span.start,
-            };
-
+            let raw = raw_token(source, &line_starts, &negatives, tt, span, encoding);
             if is_token_in_range(&raw, range) {
                 raw_tokens.push(raw);
             }
@@ -472,6 +539,92 @@ fn is_token_in_range(token: &RawToken, range: &Range) -> bool {
 mod tests {
     use super::*;
     use rustledger_parser::parse;
+
+    /// A negated amount carries the `negative` modifier, and the token covers
+    /// the SIGN -- the lexer emits `-1,999.00` as `Minus` + `Number`, so
+    /// without this the modifier would land on `1,999.00` and the `-` would
+    /// stay unstyled.
+    ///
+    /// Reported alongside `documentColor`, which conveys the same thing at the
+    /// cost of a character cell (#2245); the two must agree on the span.
+    #[test]
+    fn negative_amounts_carry_the_negative_modifier_over_the_sign() {
+        let source = "2026-01-05 * \"P\"\n  Assets:Cash    -1,999.00 USD\n  \
+                      Expenses:Fees   1,999.00 USD\n";
+        let toks = negative_number_offsets(&tokenize(source));
+        assert_eq!(toks.len(), 1, "exactly one amount is negated; got {toks:?}",);
+
+        // The recorded minus is immediately before the number it negates.
+        let (&num_at, &minus_at) = toks.iter().next().expect("one entry");
+        assert_eq!(&source[minus_at..num_at], "-", "the sign is adjacent");
+        assert!(
+            source[num_at..].starts_with("1,999.00"),
+            "and it negates the grouped amount",
+        );
+    }
+
+    /// `semanticTokens/range` must report the same span and modifiers as
+    /// `semanticTokens/full` for the same text.
+    ///
+    /// The two collectors held separate copies of the token arithmetic, and
+    /// the negated-number span landed in only one of them -- so a client that
+    /// asked for a range (which editors do on large files) saw `1,999.00`
+    /// with no modifier where a full request gave `-1,999.00` with one.
+    /// Asserted against each other rather than against a literal, so the two
+    /// stay equal even if the expected span later changes.
+    #[test]
+    fn range_and_full_collectors_agree_on_negative_amounts() {
+        let source = "2026-01-05 * \"P\"\n  Assets:Cash    -1,999.00 USD\n  \
+                      Expenses:Fees   1,999.00 USD\n";
+        let full = collect_lexer_tokens(source, PositionEncoding::Utf16);
+        let whole = Range {
+            start: lsp_types::Position::new(0, 0),
+            end: lsp_types::Position::new(3, 0),
+        };
+        let ranged = collect_lexer_tokens_in_range(source, &whole, PositionEncoding::Utf16);
+
+        let shape = |ts: &[RawToken]| -> Vec<(u32, u32, u32, u32, u32)> {
+            ts.iter()
+                .map(|t| (t.line, t.start, t.length, t.token_type, t.modifiers))
+                .collect()
+        };
+        assert_eq!(
+            shape(&ranged),
+            shape(&full),
+            "a range covering the whole document must match a full request",
+        );
+        assert!(
+            full.iter()
+                .any(|t| t.modifiers & token_modifier::NEGATIVE != 0),
+            "and the fixture must actually contain a negative, or this proves nothing",
+        );
+    }
+
+    /// Subtraction is NOT negation. `5 - 3` has a minus whose left operand is
+    /// a number, so the `3` must not be marked negative -- the distinction the
+    /// lexer deliberately gave up when it split `Minus` from `Number`.
+    #[test]
+    fn subtraction_is_not_a_negative_amount() {
+        // A metadata value expression, where arithmetic is allowed.
+        let source = "2026-01-05 * \"P\"\n  Assets:Cash    (5 - 3) USD\n";
+        let toks = negative_number_offsets(&tokenize(source));
+        assert!(
+            toks.is_empty(),
+            "a binary minus negates nothing; got {toks:?}",
+        );
+    }
+
+    /// A minus separated from its number keeps the sign outside the token
+    /// rather than swallowing the space into it.
+    #[test]
+    fn a_detached_minus_does_not_extend_the_token() {
+        let source = "2026-01-05 * \"P\"\n  Assets:Cash    - 5.00 USD\n";
+        let toks = negative_number_offsets(&tokenize(source));
+        assert!(
+            toks.is_empty(),
+            "only an adjacent sign is absorbed; got {toks:?}",
+        );
+    }
 
     #[test]
     fn test_semantic_tokens_basic() {

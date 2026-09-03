@@ -1846,6 +1846,7 @@ def main() -> int:
     # DATA. Verified rather than assumed: if the sampled files disagree with
     # each other about a query's headers, the property the cap rests on is
     # false and the cap is hiding divergences on the files it skipped.
+    header_sampling_broken = False
     by_query: dict[str, set] = {}
     for r in results:
         if r.py_header is not None and r.rs_header is not None:
@@ -1860,6 +1861,7 @@ def main() -> int:
             f"{HEADER_SAMPLE_PER_QUERY} of them is not representative. Raise "
             "HEADER_SAMPLE_PER_QUERY or compare this query on every file."
         )
+        header_sampling_broken = True
 
     compared_headers = sum(1 for r in results if r.py_header is not None)
     print(
@@ -1877,6 +1879,7 @@ def main() -> int:
             f"::error::query {q!r} got NO header comparison -- every sampled "
             "file failed in one of the tools. Its column names are unchecked."
         )
+        header_sampling_broken = True
 
     skipped_headers = sum(1 for r in results if r.header_skipped)
     if skipped_headers:
@@ -2080,6 +2083,13 @@ def main() -> int:
             f"\nNo BQL regressions vs baseline "
             f"({len(baseline_passing)} baseline-passing pairs checked)."
         )
+
+    # An annotation alone does not fail a GitHub Actions step, so a guard that
+    # only printed would let a run whose header sampling is unsound report
+    # SUCCESS -- the check-that-cannot-fail this file exists to avoid.
+    # Deliberately last, so every other diagnostic is printed first.
+    if header_sampling_broken:
+        return 1
 
     return 0
 

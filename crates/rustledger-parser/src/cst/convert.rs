@@ -1176,7 +1176,29 @@ fn extract_custom_values(node: &crate::SyntaxNode) -> Vec<MetaValue> {
         // the assert is the contract and the clamp is the belt: in release a
         // violation costs one wasted token rather than the process.
         let next = if let Some((value, consumed)) = value_tokens_to_meta(&raw, i) {
-            values.push(value);
+            // Drop the values the directive is simultaneously being REJECTED
+            // for. `value_tokens_to_meta` is shared with metadata, where a
+            // `#tag` is legal, but a custom directive accepts none of these --
+            // matching beancount, measured across all eight value types.
+            //
+            // Emitting them anyway made `Custom.values` contain entries the
+            // parser had already errored on, so a consumer reading `values`
+            // without also reading `errors` saw data the parser had declared
+            // invalid (#2190). The errors themselves are raised by
+            // `custom_value_check` (bare currency) and
+            // `extract_custom_pushmeta_taglink_errors` (tag/link); this keeps
+            // the emitted values in step with them.
+            //
+            // A CURRENCY that pairs with a preceding NUMBER has already become
+            // an `Amount` by here, so a surviving `Currency` is exactly the
+            // bare one those checks reject. Valid values on the same line are
+            // unaffected: `custom "b" "ok" #atag 42` keeps `"ok"` and `42`.
+            if !matches!(
+                value,
+                MetaValue::Tag(_) | MetaValue::Link(_) | MetaValue::Currency(_)
+            ) {
+                values.push(value);
+            }
             consumed
         } else {
             i + 1
@@ -6064,21 +6086,25 @@ mod tests {
             "NUMBER + CURRENCY consumes TWO tokens and the next value still lands"
         );
 
+        // A lone CURRENCY is its own token, not an amount fragment -- it
+        // consumes exactly one, so `TRUE` still lands. It is no longer
+        // EMITTED, because a bare currency is rejected as a custom value by
+        // both tools and a rejected value must not reach `values` (#2190).
+        // The advance is what this test is about, and the surviving `TRUE`
+        // is what proves it.
         assert_eq!(
             custom_values("2024-01-15 custom \"b\" USD TRUE\n"),
-            vec![
-                MetaValue::Currency(Currency::new("USD")),
-                MetaValue::Bool(true)
-            ],
-            "a lone CURRENCY is a value in its own right, not an amount fragment"
+            vec![MetaValue::Bool(true)],
+            "a lone CURRENCY consumes one token, so the next value still lands"
         );
 
+        // The tag and link are rejected here and so are not emitted, but they
+        // still consume one token each -- which is exactly what the date and
+        // account landing afterwards proves.
         assert_eq!(
             custom_values("2024-01-15 custom \"b\" -42 #tag ^link 2024-06-01 Assets:B\n"),
             vec![
                 MetaValue::Int(-42),
-                MetaValue::Tag(Tag::new("tag")),
-                MetaValue::Link(Link::new("link")),
                 MetaValue::Date(naive_date(2024, 6, 1).unwrap()),
                 MetaValue::Account(Account::new("Assets:B")),
             ],
@@ -6121,9 +6147,14 @@ mod tests {
         let values = custom_values(
             "2024-01-15 custom \"b\" 1 USD 2 EUR TRUE FALSE #a ^b 2024-06-01 Assets:X \"s\"\n",
         );
+        // Nine values are READ; the tag and the link are rejected and dropped,
+        // leaving seven. `1 USD` and `2 EUR` each PAIR into an Amount, so
+        // neither currency is bare and neither is dropped. The point of the
+        // test is that the run terminates and stays in order, which the
+        // surviving sequence still shows.
         assert_eq!(
             values.len(),
-            9,
+            7,
             "every value consumed exactly once, got {values:?}"
         );
         assert_eq!(
@@ -6165,6 +6196,95 @@ mod tests {
             custom_values("2024-01-15 custom \"b\" 42 * 7\n"),
             vec![MetaValue::Int(42), MetaValue::Int(7)],
             "and between two values"
+        );
+    }
+}
+
+#[cfg(test)]
+mod custom_rejected_values {
+    use super::*;
+
+    /// A `custom` directive must not report a value it has just rejected.
+    ///
+    /// `Custom.values` used to carry the tag, link or bare currency that the
+    /// same parse had raised an error for, so a consumer reading `values`
+    /// without also reading `errors` saw data the parser had declared invalid
+    /// (#2190).
+    ///
+    /// All three types are rejected by beancount too, measured across its
+    /// eight custom value types -- so this is not a stricter grammar, only an
+    /// honest one.
+    #[test]
+    fn a_rejected_custom_value_is_not_emitted() {
+        for (src, what) in [
+            ("2024-01-05 custom \"b\" #atag\n", "tag"),
+            ("2024-01-05 custom \"b\" ^alink\n", "link"),
+            ("2024-01-05 custom \"b\" USD\n", "bare currency"),
+        ] {
+            let res = crate::parse(src);
+            assert_eq!(res.errors.len(), 1, "{what} must be rejected: {src:?}");
+            let values = res
+                .directives
+                .iter()
+                .find_map(|d| match &d.value {
+                    Directive::Custom(c) => Some(c.values.clone()),
+                    _ => None,
+                })
+                .expect("the directive still parses, minus the bad value");
+            assert!(
+                values.is_empty(),
+                "the rejected {what} must not survive into values; got {values:?}",
+            );
+        }
+    }
+
+    /// Only the rejected value is dropped. A directive mixing good and bad
+    /// values keeps the good ones, so this is not "discard the whole line".
+    #[test]
+    fn valid_custom_values_survive_alongside_a_rejected_one() {
+        let res = crate::parse("2024-01-05 custom \"b\" \"ok\" #atag 42\n");
+        assert_eq!(res.errors.len(), 1, "the tag is rejected");
+        let values = res
+            .directives
+            .iter()
+            .find_map(|d| match &d.value {
+                Directive::Custom(c) => Some(c.values.clone()),
+                _ => None,
+            })
+            .expect("custom directive");
+        assert_eq!(
+            values,
+            vec![MetaValue::String("ok".to_string()), MetaValue::Int(42)],
+            "the string and the integer survive; only the tag is dropped",
+        );
+    }
+
+    /// A `#tag` is still a legal METADATA value -- beancount accepts one there
+    /// and stores it, so the shared `value_tokens_to_meta` must keep producing
+    /// `MetaValue::Tag`. Only the custom-directive path filters it.
+    ///
+    /// Pinned because the fix above filters a value the two paths share, and
+    /// filtering it one level lower would silently break metadata.
+    #[test]
+    fn a_tag_is_still_a_valid_metadata_value() {
+        let res = crate::parse("2024-01-20 note Assets:A \"n\"\n  mytag: #kept\n");
+        assert!(
+            res.errors.is_empty(),
+            "tag metadata parses: {:?}",
+            res.errors
+        );
+        let meta = res
+            .directives
+            .iter()
+            .find_map(|d| match &d.value {
+                Directive::Note(n) => Some(n.meta.clone()),
+                _ => None,
+            })
+            .expect("note directive");
+        assert_eq!(
+            meta.get("mytag"),
+            Some(&MetaValue::Tag(Tag::new("kept"))),
+            "the tag survives as a Tag in metadata; got {meta:?}",
         );
     }
 }

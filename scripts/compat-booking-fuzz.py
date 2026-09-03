@@ -247,6 +247,19 @@ Booked = dict[tuple[str, str, str, str, str, str], Decimal]
 ERROR = "ERROR"
 
 
+def _keyed_rows(payload):
+    """`rows` as dicts, zipped against `columns`.
+
+    `query --format json` emits rows POSITIONALLY -- arrays of values indexed
+    by `columns` -- because a JSON object cannot hold the duplicate column
+    names BQL can produce (#2178). These queries name every column distinctly,
+    so re-keying is lossless here; do not copy this into a context where the
+    column names may collide.
+    """
+    columns = payload.get("columns") or []
+    return [dict(zip(columns, row)) for row in payload.get("rows", [])]
+
+
 def booked_rledger(rledger: str, path: str) -> Booked | str:
     """Lots as rledger books them, or ERROR if it refuses the ledger."""
     check = subprocess.run(
@@ -276,7 +289,7 @@ def booked_rledger(rledger: str, path: str) -> Booked | str:
     if out.returncode != 0:
         return ERROR
     try:
-        rows = json.loads(out.stdout).get("rows", [])
+        rows = _keyed_rows(json.loads(out.stdout))
     except json.JSONDecodeError:
         # A banner or log line on stdout is a failure to read the booking, not
         # a reason to abort the campaign — the beancount side already treats

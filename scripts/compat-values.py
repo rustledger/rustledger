@@ -386,6 +386,19 @@ KNOWN_POSTING_DIVERGENCES: dict[tuple[str, str], str] = {
 }
 
 
+def _keyed_rows(payload):
+    """`rows` as dicts, zipped against `columns`.
+
+    `query --format json` emits rows POSITIONALLY -- arrays of values indexed
+    by `columns` -- because a JSON object cannot hold the duplicate column
+    names BQL can produce (#2178). These queries name every column distinctly,
+    so re-keying is lossless here; do not copy this into a context where the
+    column names may collide.
+    """
+    columns = payload.get("columns") or []
+    return [dict(zip(columns, row)) for row in payload.get("rows", [])]
+
+
 def _dec(text):
     """Numeric field -> Decimal, or None if absent or unparsable.
 
@@ -484,7 +497,7 @@ def rledger_postings(binary: str, path: Path):
         return _dec(v.get("number")), v.get("currency") or None
 
     rows = []
-    for r in payload.get("rows", []):
+    for r in _keyed_rows(payload):
         price_n, price_c = amount(r.get("price"))
         rows.append((
             r.get("date") or "",
@@ -544,7 +557,7 @@ def rledger_prices(binary: str, path: Path):
         return None
 
     rows = []
-    for r in payload.get("rows", []):
+    for r in _keyed_rows(payload):
         amount = r.get("amount")
         if not isinstance(amount, dict):
             return None

@@ -109,8 +109,12 @@ rledger query ledger.beancount "
 # Filter output with grep
 rledger query ledger.beancount "BALANCES" | grep Expenses
 
-# Process JSON with jq. `rows` are arrays, positional against `columns`,
-# so zip them for access by name:
+# Process JSON with jq. `rows` are arrays, positional against `columns`.
+# Index by position when you want one field:
+rledger query ledger.beancount "BALANCES" -f json | jq -r '.rows[][0]'
+
+# Or pair them up for access by name. `from_entries` collapses duplicate
+# column names, so use this only when the query's names are unique:
 rledger query ledger.beancount "BALANCES" -f json \
   | jq -c '.columns as $c | .rows[] | [$c, .] | transpose
            | map({key: .[0], value: .[1]}) | from_entries'

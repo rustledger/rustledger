@@ -393,9 +393,14 @@ fn semantic_validation_errors(
 /// matching on all four are the same assertion and share a difference, so
 /// collapsing those is harmless.
 ///
-/// Unlike `#balances.discrepancy`, this attaches a diff for EVERY assertion
-/// including passing ones, where it is zero. That is this surface's contract
-/// (#1663): a consumer renders per-assertion pass/fail from it.
+/// Unlike `#balances.discrepancy`, this attaches a diff for EVERY assertion,
+/// passing ones included, and the value is the RAW signed difference rather
+/// than a pass/fail verdict. It is zero only on an exact match: an assertion
+/// that passes *within tolerance* carries its real difference, e.g. `-0.01`
+/// for `100.01` asserted against an accumulated `100.00` under a `0.05`
+/// tolerance. That is this surface's contract (#1663) -- a consumer renders
+/// per-assertion detail from it -- and it is why the query column, which
+/// reports only failures, could not simply reuse this.
 fn attach_balance_diffs(
     entries: &mut [wit::Directive],
     actuals: &[rustledger_validate::BalanceActual],

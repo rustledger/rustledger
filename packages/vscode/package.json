@@ -84,6 +84,11 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically check for extension updates on startup"
+        },
+        "rustledger.amountColors": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a color swatch beside each amount indicating its sign. The swatch occupies a character cell, so it shifts colored lines relative to uncolored ones and can disturb the alignment `rledger format` produces. Turning this off keeps the sign indication, which is also carried by the `negative` semantic-token modifier."
         }
       }
     },

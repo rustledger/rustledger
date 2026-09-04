@@ -230,6 +230,13 @@ pub fn start_stdio() -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
     let handler_encoding =
         crate::handlers::utils::PositionEncoding::from_negotiated(position_encoding.as_ref());
 
+    // Honor the amount-color opt-out before advertising the capability: a
+    // client that declines the swatch should not be told the server offers
+    // one. Sign still reaches it through the `negative` semantic-token
+    // modifier, which costs no layout (#2245).
+    let amount_colors =
+        LspConfig::from_init_options(init_params.initialization_options.as_ref()).amount_colors;
+
     // Build server capabilities
     let capabilities = lsp_types::ServerCapabilities {
         position_encoding,
@@ -297,7 +304,7 @@ pub fn start_stdio() -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
         code_lens_provider: Some(lsp_types::CodeLensOptions {
             resolve_provider: Some(true), // Enable resolve for lazy-loading balance verification
         }),
-        color_provider: Some(lsp_types::ColorProviderCapability::Simple(true)),
+        color_provider: amount_colors.then_some(lsp_types::ColorProviderCapability::Simple(true)),
         declaration_provider: Some(lsp_types::DeclarationCapability::Simple(true)),
         call_hierarchy_provider: Some(lsp_types::CallHierarchyServerCapability::Simple(true)),
         signature_help_provider: Some(lsp_types::SignatureHelpOptions {

@@ -26,14 +26,16 @@ pub struct Server {
 
 impl Server {
     /// Create a new LSP server from a connection.
+    /// `config` is parsed by the caller rather than here, because
+    /// `start_stdio` already needs it to decide which capabilities to
+    /// advertise. Parsing twice invited the two copies to disagree the moment
+    /// an option gained validation or a default.
     pub fn new(
         connection: Connection,
         init_params: InitializeParams,
         position_encoding: crate::handlers::utils::PositionEncoding,
+        config: LspConfig,
     ) -> Self {
-        // Parse configuration from initialization options
-        let config = LspConfig::from_init_options(init_params.initialization_options.as_ref());
-
         if let Some(ref journal) = config.journal_file {
             tracing::info!("Journal file configured: {}", journal.display());
         }
@@ -230,12 +232,13 @@ pub fn start_stdio() -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
     let handler_encoding =
         crate::handlers::utils::PositionEncoding::from_negotiated(position_encoding.as_ref());
 
-    // Honor the amount-color opt-out before advertising the capability: a
-    // client that declines the swatch should not be told the server offers
-    // one. Sign still reaches it through the `negative` semantic-token
-    // modifier, which costs no layout (#2245).
-    let amount_colors =
-        LspConfig::from_init_options(init_params.initialization_options.as_ref()).amount_colors;
+    // Parsed ONCE, here, and handed to `Server::new` below. Capability
+    // advertisement needs it (a client that declines the amount swatch should
+    // not be told the server offers one -- sign still reaches it through the
+    // `negative` semantic-token modifier, which costs no layout, #2245) and so
+    // does the running server, and two parses could drift.
+    let config = LspConfig::from_init_options(init_params.initialization_options.as_ref());
+    let amount_colors = config.amount_colors;
 
     // Build server capabilities
     let capabilities = lsp_types::ServerCapabilities {
@@ -353,7 +356,7 @@ pub fn start_stdio() -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
 
     // Create and run server with the handler-facing position encoding
     // (derived above at the negotiation site).
-    let server = Server::new(connection, init_params, handler_encoding);
+    let server = Server::new(connection, init_params, handler_encoding, config);
     let exit_code = server.run();
 
     // Drain the writer thread BEFORE returning. The main loop has

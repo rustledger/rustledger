@@ -1486,11 +1486,11 @@ ______________________________________________________________________
 
 ## Implementation Phases
 
-### Phase 1: Foundation (v0.7.x) - COMPLETE
+### Phase 1: Foundation (v0.7.x) - PARTIAL
 
 **Goal**: Basic import with balance validation
 
-#### 1.1 Transaction Schema ✅
+#### 1.1 Transaction Schema (design sketch, NOT implemented)
 
 ```rust
 pub struct ImportedTransaction {
@@ -1516,6 +1516,10 @@ pub struct TransactionFingerprint {
     pub desc_tokens: Vec<String>,  // normalized tokens
 }
 ```
+
+> **Status: not implemented.** This struct does not exist in the codebase. `rustledger_importer::ImportResult` is `directives: Vec<Directive>` plus `warnings: Vec<String>`; there is no `ImportedTransaction`, no `source_id`, no `raw_data`, and no per-transaction `confidence`. Dedup instead derives its key on the fly in `rustledger-ops::dedup` from date, first-posting amount, and fuzzy payee/narration text.
+>
+> The `source_id` field above is the design the [stable source IDs roadmap item](../roadmap/importing.md#now--in-progress) would implement (OFX `<FITID>`). Treat this block as a target, not a description of what ships today.
 
 #### 1.2 CSV Parser Framework
 

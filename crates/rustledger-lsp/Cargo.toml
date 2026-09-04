@@ -2,16 +2,16 @@
 name = "rustledger-lsp"
 # Lockstep with the workspace, like every other crate.
 #
-# This release DOES carry a breaking change to this crate's public API —
-# `uri_to_path`/`path_to_uri` went from `Option<PathBuf>` to
-# `Result<AbsPathBuf, PathUriError>` — and an earlier version of this line said
-# 0.22.0 to signal it. That does not work here: the release cut runs
-# `cargo set-version` over the whole workspace, so a hand-written version is
-# overwritten with whatever the tag says. The only effect was to invite a
-# downstream `rustledger-lsp = "0.22"` pin that no published crate would ever
-# satisfy. The break belongs in the release notes, which is where this repo's
-# consumers actually learn about one.
-version = "0.22.0"
+# Do not hand-set this to signal a breaking change. v0.22.0 carried one to this
+# crate's public API — `uri_to_path`/`path_to_uri` went from `Option<PathBuf>`
+# to `Result<AbsPathBuf, PathUriError>` — and an earlier version of this line
+# was edited by hand to advertise it. That does not work here: the release cut
+# runs `cargo set-version` over the whole workspace, so a hand-written version
+# is overwritten with whatever the tag says. The only effect was to invite a
+# downstream pin that no published crate would ever satisfy. A break belongs in
+# the release notes, which is where this repo's consumers actually learn about
+# one.
+version = "0.23.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

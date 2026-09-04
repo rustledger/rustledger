@@ -40,12 +40,36 @@ fn extract_price_currency(price: &PriceAnnotation) -> Option<String> {
 }
 
 /// Configuration for the LSP server, parsed from initialization options.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LspConfig {
     /// Path to the root journal file (e.g., "main.bean").
     /// When set, the LSP loads this file and all its includes for
     /// complete diagnostics and completions across the entire ledger.
     pub journal_file: Option<PathBuf>,
+    /// Whether to advertise `textDocument/documentColor` for amount signs.
+    ///
+    /// On by default. Turning it off suppresses the color swatch an editor
+    /// draws beside each amount, which occupies a character cell and so shifts
+    /// colored lines relative to uncolored ones -- perturbing the alignment
+    /// `rledger format` establishes (#2230, #2245).
+    ///
+    /// This is the SERVER-side switch, and it exists because the client-side
+    /// one is not portable: VS Code offers `editor.colorDecorators`, but an
+    /// editor without that setting has no way to decline the decoration. Sign
+    /// is still conveyed by the `negative` semantic-token modifier, which
+    /// costs no layout, so turning this off loses nothing but the swatch.
+    pub amount_colors: bool,
+}
+
+impl Default for LspConfig {
+    fn default() -> Self {
+        Self {
+            journal_file: None,
+            // On by default: this preserves the behavior every existing
+            // client already sees, so the setting is an opt-OUT.
+            amount_colors: true,
+        }
+    }
 }
 
 impl LspConfig {
@@ -62,9 +86,67 @@ impl LspConfig {
             {
                 config.journal_file = Some(PathBuf::from(path));
             }
+
+            // Only an explicit `false` turns it off. A missing key, or a
+            // non-boolean, leaves the default alone rather than silently
+            // disabling a feature the client did not ask to disable.
+            if let Some(on) = opts
+                .get("amountColors")
+                .or_else(|| opts.get("amount_colors"))
+                .and_then(serde_json::Value::as_bool)
+            {
+                config.amount_colors = on;
+            }
         }
 
         config
+    }
+}
+
+#[cfg(test)]
+mod amount_colors_config {
+    use super::LspConfig;
+
+    fn cfg(json: &str) -> LspConfig {
+        let v: serde_json::Value = serde_json::from_str(json).expect("valid json");
+        LspConfig::from_init_options(Some(&v))
+    }
+
+    /// The swatch stays on unless a client explicitly declines it, so every
+    /// existing client keeps the behavior it has today (#2245).
+    #[test]
+    fn amount_colors_default_on_and_opt_out_only() {
+        assert!(LspConfig::default().amount_colors, "default is on");
+        assert!(cfg("{}").amount_colors, "absent key leaves it on");
+        assert!(
+            cfg(r#"{"journalFile": "main.beancount"}"#).amount_colors,
+            "an unrelated option does not disturb it",
+        );
+        assert!(
+            !cfg(r#"{"amountColors": false}"#).amount_colors,
+            "false turns it off"
+        );
+        assert!(
+            cfg(r#"{"amountColors": true}"#).amount_colors,
+            "true keeps it on"
+        );
+        assert!(
+            !cfg(r#"{"amount_colors": false}"#).amount_colors,
+            "snake_case is accepted too, matching journalFile",
+        );
+    }
+
+    /// A non-boolean must not be read as "off". Silently disabling a feature
+    /// because a client sent the wrong type is worse than ignoring the value.
+    #[test]
+    fn a_non_boolean_leaves_the_default_alone() {
+        for bad in [
+            r#"{"amountColors": "false"}"#,
+            r#"{"amountColors": 0}"#,
+            r#"{"amountColors": null}"#,
+        ] {
+            assert!(cfg(bad).amount_colors, "{bad} must not disable the feature",);
+        }
     }
 }
 

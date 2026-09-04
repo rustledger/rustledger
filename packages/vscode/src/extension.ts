@@ -266,6 +266,7 @@ async function startClientForRootUncontended(
   const command = config.get<string>("server.path", "rledger-lsp");
   const extraArgs = config.get<string[]>("server.extraArgs", []);
   const journalFile = config.get<string>("journalFile", "");
+  const amountColors = config.get<boolean>("amountColors", true);
 
   if (!(await ensureBinary(command))) {
     return;
@@ -273,7 +274,7 @@ async function startClientForRootUncontended(
 
   const serverOptions: ServerOptions = { command, args: extraArgs };
 
-  const initializationOptions: Record<string, string> = {};
+  const initializationOptions: Record<string, string | boolean> = {};
   if (journalFile) {
     // Left RELATIVE on purpose when the user wrote it that way. The server
     // resolves a relative journal against its workspace root
@@ -281,6 +282,18 @@ async function startClientForRootUncontended(
     // folders' settings resolves to two different files — which is the whole
     // point of the request.
     initializationOptions.journalFile = journalFile;
+  }
+
+  // Only sent when turned OFF. The server defaults it on, so staying silent
+  // keeps every existing client's behavior and makes this a pure opt-out.
+  //
+  // Turning it off stops the server advertising `documentColor`, which
+  // removes the swatch that occupies a character cell beside each amount and
+  // shifts colored lines out of the alignment `rledger format` produces.
+  // Sign is still conveyed, by the `negative` semantic-token modifier, so
+  // nothing is lost but the decoration (#2245).
+  if (!amountColors) {
+    initializationOptions.amountColors = false;
   }
 
   // Scope the selector to this root so exactly one client claims each file.

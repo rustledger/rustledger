@@ -182,8 +182,16 @@ pub fn visit_accounts<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a s
 /// - `Document.tags`
 /// - `Note.tags` (since #2160; before that a note's tags never reached the
 ///   model, so this list was complete without it)
-/// - `MetaValue::Tag` in any directive's or posting's metadata
-/// - `Custom.values` entries that are `MetaValue::Tag`
+/// - `MetaValue::Tag` in any directive's or posting's metadata. Reachable
+///   from source: `mytag: #foo` parses, matching beancount, which accepts a
+///   tag as a metadata value (and stores it as a bare string). A key of one
+///   character is rejected whatever follows it, so `t: #foo` fails on the
+///   KEY -- which once led to this branch being reported as dead (#2190).
+/// - `Custom.values` entries that are `MetaValue::Tag`. NOT reachable from
+///   source: a tag is not a valid custom value in either tool, and since
+///   #2190 the parser no longer emits the value it rejected. Kept because a
+///   plugin can supply one -- `from_wrapper` maps `MetaValueData::Tag` onto
+///   this variant -- so the arm collects plugin output, not parser output.
 ///
 /// Visit order matches the source order of the parser-generated AST,
 /// except for metadata (unspecified iteration order).
@@ -233,6 +241,13 @@ pub fn visit_tags<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a str))
 /// Positions covered mirror [`visit_tags`], with `Link` in place of
 /// `Tag`: `Transaction.links`, `Document.links`, `Note.links` (since
 /// #2160), `MetaValue::Link` in metadata, and `Custom.values` link entries.
+///
+/// The last two differ from their tag counterparts in where they can come
+/// from. A `^link` is NOT a valid metadata value in either tool, and is not a
+/// valid custom value either, so neither reaches this function from parsed
+/// source. Both remain live because `from_wrapper` maps
+/// `MetaValueData::Link` onto `MetaValue::Link`: a plugin can put a link in
+/// metadata, and this is what collects it (#2190).
 pub fn visit_links<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a str)) {
     match directive {
         Directive::Transaction(txn) => {

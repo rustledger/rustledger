@@ -1517,9 +1517,24 @@ pub struct TransactionFingerprint {
 }
 ```
 
-> **Status: not implemented.** This struct does not exist in the codebase. `rustledger_importer::ImportResult` is `directives: Vec<Directive>` plus `warnings: Vec<String>`; there is no `ImportedTransaction`, no `source_id`, no `raw_data`, and no per-transaction `confidence`. Dedup instead derives its key on the fly in `rustledger-ops::dedup` from date, first-posting amount, and fuzzy payee/narration text.
+> **Status: not implemented as specified.** `ImportedTransaction` does not
+> exist, and neither `source_id` nor `raw_data` exists anywhere in the codebase.
+> The importer trait returns `rustledger_importer::ImportResult`
+> (`directives: Vec<Directive>` plus `warnings: Vec<String>`), which is what the
+> `rledger extract` path uses.
 >
-> The `source_id` field above is the design the [stable source IDs roadmap item](../roadmap/importing.md#now--in-progress) would implement (OFX `<FITID>`). Treat this block as a target, not a description of what ships today.
+> Confidence and fingerprints *do* exist, but on a parallel type rather than as
+> fields on a transaction struct: `EnrichedImportResult` pairs each directive
+> with a `rustledger_ops::enrichment::Enrichment` (`directive_index`,
+> `confidence`, `method`, `alternatives`, `fingerprint`), produced via
+> `extract_enriched`. Extract's duplicate filtering does not use those
+> fingerprints; it derives its own key in `rustledger-ops::dedup` from date,
+> first-posting amount, and fuzzy payee/narration text.
+>
+> The `source_id` field above is the design the
+> [stable source IDs roadmap item](../roadmap/importing.md#now--in-progress)
+> would implement (OFX `<FITID>`). Treat this block as a target, not a
+> description of what ships today.
 
 #### 1.2 CSV Parser Framework
 

@@ -194,6 +194,13 @@ pub struct Args {
     #[arg(short, long, value_name = "FILE")]
     pub output: Option<PathBuf>,
 
+    /// Overwrite `--output` even when it already has content. Without this,
+    /// extract refuses to truncate a non-empty file, because doing so destroys
+    /// whatever is already there (previous imports, hand-written narrations,
+    /// metadata, manual categorization).
+    #[arg(long)]
+    pub force: bool,
+
     /// Existing ledger file for duplicate detection
     #[arg(long, value_name = "FILE")]
     pub existing: Option<PathBuf>,
@@ -758,6 +765,73 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
 // canonical config-schema module, shared with the WASI component).
 use rustledger_importer::toml_entry::parse_amount_locale;
 
+/// Refuse output configurations that would destroy an existing ledger.
+///
+/// `--output` opens the target with `File::create`, which truncates. That is
+/// fine for a fresh file and catastrophic for one the user has been editing:
+/// a second `extract` into the same path replaces prior imports, hand-written
+/// narrations, metadata, and manual categorization with only the newly
+/// extracted directives (#2251).
+///
+/// Two configurations are rejected here, before any extraction work happens,
+/// so the user is not told "extracted N transactions" by a run that then fails:
+///
+/// - `--existing` and `--output` naming the same file. There is no correct
+///   outcome: the file is read for dedup and then overwritten with only the
+///   *non*-duplicate remainder, so the better the dedup works the more it
+///   deletes. In the all-duplicates case the ledger is emptied outright.
+///   `--force` does NOT override this, because it cannot express anything the
+///   user could plausibly want; merging into an existing ledger is future work.
+/// - A non-empty `--output` target without `--force`.
+fn validate_output_target(args: &Args) -> Result<()> {
+    let Some(ref output) = args.output else {
+        return Ok(());
+    };
+
+    if let Some(ref existing) = args.existing {
+        // Compare canonicalized paths so `./l.beancount` and `l.beancount`
+        // are recognized as the same file. canonicalize() requires the path
+        // to exist; if either side does not resolve, fall back to comparing
+        // as given rather than silently skipping the check.
+        let same = match (existing.canonicalize(), output.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => existing == output,
+        };
+        if same {
+            anyhow::bail!(
+                "--existing and --output name the same file ({})\n  \
+                 this would read it for duplicate detection and then overwrite it \
+                 with only the non-duplicate transactions, deleting everything else\n  \
+                 try: --output to a different file, or append with `rledger extract … >> {}`",
+                output.display(),
+                output.display()
+            );
+        }
+    }
+
+    if !args.force {
+        // Treat only a non-empty regular file as content worth protecting;
+        // a 0-byte file is indistinguishable from "not started yet".
+        if let Ok(meta) = fs::metadata(output)
+            && meta.is_file()
+            && meta.len() > 0
+        {
+            anyhow::bail!(
+                "refusing to overwrite {} ({} bytes)\n  \
+                 --output truncates the target, which would destroy its current \
+                 contents (previous imports, narrations, metadata)\n  \
+                 try: append with `rledger extract … >> {}`, write elsewhere, \
+                 or pass --force to overwrite deliberately",
+                output.display(),
+                meta.len(),
+                output.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Run the extract command with the given arguments, writing extracted
 /// directives to stdout.
 ///
@@ -776,6 +850,10 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
 /// default stdout sink for the formatted directives is redirected to the
 /// injected writer.
 pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Result<()> {
+    // Validate the output target BEFORE any extraction work, so a run that
+    // cannot safely write never reports having extracted anything (#2251).
+    validate_output_target(args)?;
+
     // External preprocessing (PDF etc.): if the resolved config entry
     // declares `preprocess`, run it FIRST and hand the rest of the
     // pipeline a temp .csv holding its stdout — so `--auto` inference,
@@ -1137,6 +1215,25 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     } else {
         directives
     };
+
+    // Nothing survived (typically: every transaction was already present in
+    // `--existing`). Writing here would truncate the target to an empty file
+    // while reporting a successful no-op — the #2251 all-duplicates case.
+    // Leaving it untouched is the correct outcome, and is not an error.
+    if directives.is_empty() {
+        eprintln!(
+            "Nothing to write from {} (every extracted transaction was already present)",
+            file.display()
+        );
+        // Only claim the file was left alone if it actually exists; saying
+        // "left unchanged" about a path that was never created is misleading.
+        if let Some(ref output_path) = args.output
+            && output_path.exists()
+        {
+            eprintln!("{} left unchanged", output_path.display());
+        }
+        return Ok(());
+    }
 
     // Render every directive in the canonical form `rledger format`
     // would write. canonicalize_directives is the single source of
@@ -2270,6 +2367,167 @@ default_expense = "Expenses:Uncategorized"
         let output = std::fs::read_to_string(&output_path).unwrap();
         assert!(output.contains("2024-01-15"));
         assert!(output.contains("Coffee"));
+    }
+
+    /// #2251: `--output` truncates, so a second extract into a file the user
+    /// has been editing destroys it. Refuse unless `--force`.
+    #[test]
+    fn refuses_to_overwrite_nonempty_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("feb.csv");
+        std::fs::write(&csv, "Date,Description,Amount\n2024-02-01,Books,18.00\n").unwrap();
+
+        let output = dir.path().join("ledger.beancount");
+        let curated = "2024-01-15 * \"Blue Bottle\" \"Morning coffee\"\n  \
+                       Assets:Bank:Checking  -4.50 USD\n  Expenses:Food:Coffee\n";
+        std::fs::write(&output, curated).unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            csv.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ]);
+        let err = run(&args, &csv).expect_err("must refuse to truncate a non-empty file");
+
+        assert!(
+            err.to_string().contains("--force"),
+            "the error should name the escape hatch, got: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap(),
+            curated,
+            "the curated ledger must be byte-identical after a refused run"
+        );
+    }
+
+    /// The refusal is a guard, not a prohibition: `--force` still overwrites.
+    #[test]
+    fn force_permits_overwriting_nonempty_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("feb.csv");
+        std::fs::write(&csv, "Date,Description,Amount\n2024-02-01,Books,18.00\n").unwrap();
+
+        let output = dir.path().join("ledger.beancount");
+        std::fs::write(
+            &output,
+            "2024-01-15 * \"Old\"\n  Assets:A  1.00 USD\n  Expenses:B\n",
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            csv.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--force",
+        ]);
+        run(&args, &csv).expect("--force overwrites deliberately");
+
+        let written = std::fs::read_to_string(&output).unwrap();
+        assert!(written.contains("Books"), "got: {written}");
+        assert!(!written.contains("Old"), "force replaces, got: {written}");
+    }
+
+    /// A zero-byte file is indistinguishable from "not started yet", so it is
+    /// not content worth protecting and needs no `--force`.
+    #[test]
+    fn empty_output_file_needs_no_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("jan.csv");
+        std::fs::write(&csv, "Date,Description,Amount\n2024-01-15,Coffee,5.00\n").unwrap();
+
+        let output = dir.path().join("ledger.beancount");
+        std::fs::write(&output, "").unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            csv.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ]);
+        run(&args, &csv).expect("a 0-byte target is not protected");
+        assert!(std::fs::read_to_string(&output).unwrap().contains("Coffee"));
+    }
+
+    /// #2251: `--existing` sounds protective but is not — the file is read for
+    /// dedup and then overwritten with only the non-duplicate remainder, so the
+    /// better dedup works the more it deletes. `--force` must not unlock this.
+    #[test]
+    fn refuses_existing_and_output_naming_the_same_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("jan.csv");
+        std::fs::write(&csv, "Date,Description,Amount\n2024-01-15,Coffee,5.00\n").unwrap();
+
+        let ledger = dir.path().join("ledger.beancount");
+        let contents = "2024-01-15 * \"Coffee\"\n  Assets:Bank:Checking  -5.00 USD\n  \
+                        Expenses:Food\n";
+        std::fs::write(&ledger, contents).unwrap();
+
+        for extra in [vec![], vec!["--force"]] {
+            let mut argv = vec![
+                "extract",
+                csv.to_str().unwrap(),
+                "-o",
+                ledger.to_str().unwrap(),
+                "--existing",
+                ledger.to_str().unwrap(),
+            ];
+            argv.extend(extra.iter().copied());
+
+            let args = Args::parse_from(argv);
+            let err =
+                run(&args, &csv).expect_err("--existing and --output on one file is never correct");
+            assert!(err.to_string().contains("same file"), "got: {err}");
+            assert_eq!(
+                std::fs::read_to_string(&ledger).unwrap(),
+                contents,
+                "the ledger must survive regardless of --force"
+            );
+        }
+    }
+
+    /// #2251, worst case: when every extracted transaction is already present,
+    /// the old code wrote an empty file and reported a successful no-op,
+    /// emptying the ledger. Nothing to write must mean nothing is written.
+    #[test]
+    fn all_duplicates_leaves_output_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("jan.csv");
+        std::fs::write(&csv, "Date,Description,Amount\n2024-01-15,Coffee,5.00\n").unwrap();
+
+        // Extract once to a fresh file, then reuse it as both the dedup source
+        // and (with --force, to bypass the overwrite guard) the output target.
+        let output = dir.path().join("out.beancount");
+        let first = Args::parse_from([
+            "extract",
+            csv.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+        ]);
+        run(&first, &csv).unwrap();
+        let after_first = std::fs::read_to_string(&output).unwrap();
+        assert!(!after_first.is_empty(), "precondition: first run wrote");
+
+        let existing = dir.path().join("existing.beancount");
+        std::fs::copy(&output, &existing).unwrap();
+
+        let second = Args::parse_from([
+            "extract",
+            csv.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--existing",
+            existing.to_str().unwrap(),
+            "--force",
+        ]);
+        run(&second, &csv).expect("all-duplicates is a no-op, not an error");
+
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap(),
+            after_first,
+            "an all-duplicates run must not truncate the target"
+        );
     }
 
     #[test]

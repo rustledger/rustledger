@@ -795,6 +795,7 @@ fn build_extract_args(
         no_header: bool_flag(req, "no-header", None),
         use_merchant_dict: bool_flag(req, "use-merchant-dict", None),
         output: path_flag(req, "output", Some("o")),
+        force: bool_flag(req, "force", None),
         existing: path_flag(req, "existing", None),
         suggest_categories: bool_flag(req, "suggest-categories", None),
         balance: string_flag(req, "balance", None),

@@ -59,7 +59,8 @@ rledger extract [OPTIONS] [FILE]
 
 | Option                  | Description                                                                                                                                     |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-o, --output <FILE>`   | Write output to file instead of stdout                                                                                                          |
+| `-o, --output <FILE>`   | Write output to file instead of stdout. Refuses to overwrite a file that already has content (use `--force`, or append with `>>`)               |
+| `--force`               | Allow `--output` to overwrite a non-empty file, replacing its contents                                                                         |
 | `--existing <FILE>`     | Existing ledger file for duplicate detection                                                                                                    |
 | `--suggest-categories`  | Use ML (Naive Bayes on the `--existing` ledger) to suggest accounts for transactions the rules engine didn't categorize. Requires `--existing`. |
 | `--balance <AMOUNT>`    | Append a balance assertion directive with the given amount (e.g., `1234.56`)                                                                    |
@@ -127,6 +128,22 @@ rledger extract statement.ofx -a Assets:Bank:Checking
 ```bash
 rledger extract statement.csv -a Assets:Bank >> ledger.beancount
 ```
+
+`>>` is the right way to add to a ledger you are keeping. `--output` **replaces**
+the file rather than appending, so it is for writing a fresh file. Pointing it at
+a ledger that already has content is refused:
+
+```console
+$ rledger extract feb.csv --output ledger.beancount
+error: refusing to overwrite ledger.beancount (163 bytes)
+  --output truncates the target, which would destroy its current contents
+  try: append with `rledger extract … >> ledger.beancount`, write elsewhere,
+  or pass --force to overwrite deliberately
+```
+
+`--existing` is for duplicate detection only and does not protect a file from
+being overwritten, so naming the same file for both `--existing` and `--output`
+is refused outright.
 
 ### Duplicate Detection
 

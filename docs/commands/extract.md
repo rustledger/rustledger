@@ -186,8 +186,16 @@ Rules worth knowing:
   is something you wrote on purpose, so it is not read as "no profile here".
 - **Two accounts claiming one file is an error.** Picking one would make the
   result depend on directive order.
-- **`--importer` outranks a profile.** The flag is this invocation; the ledger
-  is standing configuration.
+- **`--importer` outranks a profile.** The flag names the entry to use, which
+  settles both the parser and the account, so a profile matched by filename is
+  dropped rather than merged — and a warning says so, since a silently ignored
+  `--ledger` would be worse than a noisy one.
+- **A ledger that does not parse is an error.** `--ledger` is an explicit
+  request to read a file, so being unable to read it is not a reason to carry
+  on with defaults.
+- **Patterns match the filename, not the path.** `importer-pattern:
+  "statements/*.qfx"` never matches, the same as `filename_pattern` in
+  `importers.toml`.
 - **A profile outranks `importers.toml` for the account and currency.** The
   `open` directive *is* the account's declaration; a config file disagreeing
   with it is the bug.

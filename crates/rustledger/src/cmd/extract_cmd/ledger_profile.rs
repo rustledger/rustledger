@@ -54,7 +54,7 @@ pub(super) struct LedgerProfile {
 /// is an error rather than a silent skip: it can never match a file, so it is
 /// a typo or an unfinished edit, and staying quiet about it is how a user ends
 /// up believing their profile works.
-pub(super) fn load_profiles(path: &Path) -> Result<Vec<(String, LedgerProfile)>> {
+pub(super) fn load_profiles(path: &Path) -> Result<Vec<(glob::Pattern, LedgerProfile)>> {
     let options = rustledger_loader::LoadOptions {
         run_plugins: false,
         validate: false,
@@ -62,6 +62,29 @@ pub(super) fn load_profiles(path: &Path) -> Result<Vec<(String, LedgerProfile)>>
     };
     let ledger = rustledger_loader::load(path, &options)
         .map_err(|e| anyhow!("failed to load ledger {}: {e}", path.display()))?;
+
+    // `load` reports parse failures through `Ledger::errors` rather than an
+    // `Err`, so a ledger that does not parse arrives here looking like a
+    // ledger with no `open` directives. Ignoring that meant
+    // `--ledger broken.beancount` silently applied no profile and imported to
+    // the `--account` default: the user pointed at a file and was told
+    // nothing. `--ledger` is an explicit request to read it, so a file that
+    // cannot be read is an error here.
+    let fatal: Vec<&rustledger_loader::LedgerError> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.severity == rustledger_loader::ErrorSeverity::Error)
+        .collect();
+    if let Some(first) = fatal.first() {
+        return Err(anyhow!(
+            "ledger {} has {} error(s) and cannot be read for importer \
+             profiles; first: [{}] {}",
+            path.display(),
+            fatal.len(),
+            first.code,
+            first.message
+        ));
+    }
 
     let mut out = Vec::new();
     for spanned in &ledger.directives {
@@ -81,14 +104,26 @@ pub(super) fn load_profiles(path: &Path) -> Result<Vec<(String, LedgerProfile)>>
         match (importer, pattern) {
             // Neither key: an ordinary account, not a profile.
             (None, None) => {}
-            (Some(importer), Some(pattern)) => out.push((
-                pattern,
-                LedgerProfile {
-                    account,
-                    importer,
-                    currency: sole_currency(open),
-                },
-            )),
+            (Some(importer), Some(pattern)) => {
+                // Compile here, not at match time. `Pattern::new(..).is_ok_and(..)`
+                // turns an invalid glob into "did not match", so a typo like
+                // `[unclosed` silently disabled the profile and the import
+                // landed on the `--account` default.
+                let compiled = glob::Pattern::new(&pattern).map_err(|e| {
+                    anyhow!(
+                        "account {account}: `{KEY_PATTERN}: \"{pattern}\"` is not a \
+                         valid glob: {e}"
+                    )
+                })?;
+                out.push((
+                    compiled,
+                    LedgerProfile {
+                        account,
+                        importer,
+                        currency: sole_currency(open),
+                    },
+                ));
+            }
             (Some(importer), None) => {
                 return Err(anyhow!(
                     "account {account} declares `{KEY_IMPORTER}: \"{importer}\"` but no \
@@ -112,12 +147,12 @@ pub(super) fn load_profiles(path: &Path) -> Result<Vec<(String, LedgerProfile)>>
 /// several entries claim: picking one silently would make which profile you
 /// got depend on directive order in the ledger.
 pub(super) fn match_profile(
-    profiles: &[(String, LedgerProfile)],
+    profiles: &[(glob::Pattern, LedgerProfile)],
     filename: &str,
 ) -> Result<Option<LedgerProfile>> {
     let matches: Vec<&LedgerProfile> = profiles
         .iter()
-        .filter(|(pattern, _)| glob::Pattern::new(pattern).is_ok_and(|p| p.matches(filename)))
+        .filter(|(pattern, _)| pattern.matches(filename))
         .map(|(_, profile)| profile)
         .collect();
 
@@ -192,7 +227,7 @@ mod tests {
         let profiles = load_profiles(f.path()).unwrap();
         assert_eq!(profiles.len(), 1);
         let (pattern, p) = &profiles[0];
-        assert_eq!(pattern, "*.qfx");
+        assert_eq!(pattern.as_str(), "*.qfx");
         assert_eq!(p.account, "Liabilities:CreditCard");
         assert_eq!(p.importer, "ofx");
         assert_eq!(p.currency.as_deref(), Some("USD"));
@@ -217,6 +252,42 @@ mod tests {
         let err = load_profiles(f.path()).unwrap_err().to_string();
         assert!(err.contains("Liabilities:Card"), "got: {err}");
         assert!(err.contains("importer-pattern"), "got: {err}");
+    }
+
+    /// Copilot review on #2262: an invalid glob was compiled at match time
+    /// with `is_ok_and`, so a typo became "did not match" and silently
+    /// disabled the profile.
+    #[test]
+    fn an_invalid_glob_is_an_error() {
+        let f = ledger(
+            "2024-01-01 open Liabilities:Card USD\n  importer: \"ofx\"\n  \
+             importer-pattern: \"[unclosed\"\n",
+        );
+        let err = load_profiles(f.path()).unwrap_err().to_string();
+        assert!(err.contains("not a"), "got: {err}");
+        assert!(err.contains("Liabilities:Card"), "got: {err}");
+    }
+
+    /// Third review pass on #2262: `load` reports parse failures through
+    /// `Ledger::errors`, not `Err`, so a ledger that does not parse arrived
+    /// looking like one with no `open` directives. `--ledger broken.beancount`
+    /// silently applied no profile and imported to the `--account` default.
+    #[test]
+    fn a_ledger_that_does_not_parse_is_an_error() {
+        let f = ledger("this is not valid beancount ~~~\n");
+        let err = load_profiles(f.path()).unwrap_err().to_string();
+        assert!(err.contains("cannot be read"), "got: {err}");
+    }
+
+    /// The complement: a ledger with no profiles at all is not an error, so
+    /// pointing `--ledger` at an ordinary file stays harmless.
+    #[test]
+    fn a_valid_ledger_without_profiles_is_not_an_error() {
+        let f = ledger(
+            "2024-01-01 open Assets:Bank USD\n\
+             2024-01-02 * \"Lunch\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n",
+        );
+        assert!(load_profiles(f.path()).unwrap().is_empty());
     }
 
     /// Second review pass on #2262: the two halves of a profile were treated
@@ -269,7 +340,7 @@ mod tests {
     fn match_profile_selects_by_glob() {
         let profiles = vec![
             (
-                "*.qfx".to_string(),
+                glob::Pattern::new("*.qfx").unwrap(),
                 LedgerProfile {
                     account: "Liabilities:Card".into(),
                     importer: "ofx".into(),
@@ -277,7 +348,7 @@ mod tests {
                 },
             ),
             (
-                "acme-*.csv".to_string(),
+                glob::Pattern::new("acme-*.csv").unwrap(),
                 LedgerProfile {
                     account: "Assets:Acme".into(),
                     importer: "acme".into(),
@@ -300,7 +371,7 @@ mod tests {
     fn two_matching_profiles_are_an_error() {
         let profiles = vec![
             (
-                "*.qfx".to_string(),
+                glob::Pattern::new("*.qfx").unwrap(),
                 LedgerProfile {
                     account: "Liabilities:A".into(),
                     importer: "ofx".into(),
@@ -308,7 +379,7 @@ mod tests {
                 },
             ),
             (
-                "card*".to_string(),
+                glob::Pattern::new("card*").unwrap(),
                 LedgerProfile {
                     account: "Liabilities:B".into(),
                     importer: "ofx".into(),

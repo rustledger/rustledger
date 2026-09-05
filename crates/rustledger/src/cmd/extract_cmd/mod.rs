@@ -1011,12 +1011,32 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     // the user asked us to look at.
     let profile = match args.ledger.as_deref() {
         Some(ledger_path) => {
+            // Loaded even when it will not be applied, so a broken ledger is
+            // still reported: `--ledger` is an explicit request to read it.
             let profiles = ledger_profile::load_profiles(ledger_path)?;
             let filename = source_file
                 .file_name()
                 .and_then(std::ffi::OsStr::to_str)
                 .unwrap_or_default();
-            ledger_profile::match_profile(&profiles, filename)?
+            let matched = ledger_profile::match_profile(&profiles, filename)?;
+
+            // An explicit `--importer` names the entry to use, which settles
+            // both the parser and the account; a profile matched by filename
+            // is then a second opinion nobody asked for. Dropped rather than
+            // merged — merging is how the account came from one source and
+            // the column mappings from another. Said out loud, because a
+            // silently ignored `--ledger` is the failure this feature keeps
+            // reproducing.
+            if matched.is_some() && args.importer.is_some() {
+                eprintln!(
+                    "warning: --importer was given, so the --ledger profile for \
+                     {} is not applied",
+                    matched.as_ref().map_or("", |p| p.account.as_str())
+                );
+                None
+            } else {
+                matched
+            }
         }
         None => None,
     };
@@ -2864,6 +2884,53 @@ default_expense = "Expenses:Uncategorized"
         assert!(
             text.contains("Liabilities:FromLedger"),
             "the ledger account must win; got:\n{text}"
+        );
+    }
+
+    /// Third review pass on #2262: the fix that made a profile outrank
+    /// `importers.toml` applied unconditionally, so it also overrode an
+    /// explicit `--importer` — contradicting the documented precedence, and
+    /// introduced by the previous fix.
+    #[test]
+    fn an_explicit_importer_flag_outranks_a_ledger_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("bank.csv");
+        std::fs::write(&csv, "Date,Description,Amount\n2024-01-15,COFFEE,-4.50\n").unwrap();
+        std::fs::write(
+            dir.path().join("importers.toml"),
+            "[[importers]]\nname = \"flagentry\"\naccount = \"Assets:FromFlag\"\n\
+             currency = \"USD\"\ndate_column = \"Date\"\n\
+             narration_column = \"Description\"\namount_column = \"Amount\"\n\
+             filename_pattern = \"*.NOMATCH\"\n\n\
+             [[importers]]\nname = \"b\"\nfilename_pattern = \"*.NOMATCH2\"\n",
+        )
+        .unwrap();
+        let ledger = dir.path().join("main.beancount");
+        std::fs::write(
+            &ledger,
+            "2024-01-01 open Assets:FromLedger USD\n  \
+             importer: \"flagentry\"\n  importer-pattern: \"*.csv\"\n",
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            csv.to_str().unwrap(),
+            "--ledger",
+            ledger.to_str().unwrap(),
+            "--importer",
+            "flagentry",
+        ]);
+        let mut out = Vec::new();
+        with_cwd(dir.path(), || run_with_writer(&args, &csv, &mut out)).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("Assets:FromFlag"),
+            "the explicit flag must win; got:\n{text}"
+        );
+        assert!(
+            !text.contains("Assets:FromLedger"),
+            "the profile must not override an explicit --importer; got:\n{text}"
         );
     }
 

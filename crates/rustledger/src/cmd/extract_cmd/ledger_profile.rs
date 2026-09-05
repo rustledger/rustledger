@@ -68,24 +68,40 @@ pub(super) fn load_profiles(path: &Path) -> Result<Vec<(String, LedgerProfile)>>
         let Directive::Open(open) = &spanned.value else {
             continue;
         };
-        let Some(importer) = meta_string(&open.meta, KEY_IMPORTER) else {
-            continue;
-        };
         let account = open.account.to_string();
-        let Some(pattern) = meta_string(&open.meta, KEY_PATTERN) else {
-            return Err(anyhow!(
-                "account {account} declares `{KEY_IMPORTER}: \"{importer}\"` but no \
-                 `{KEY_PATTERN}`, so it can never match a file"
-            ));
-        };
-        out.push((
-            pattern,
-            LedgerProfile {
-                account,
-                importer,
-                currency: sole_currency(open),
-            },
-        ));
+        let importer = meta_string(&open.meta, KEY_IMPORTER, &account)?;
+        let pattern = meta_string(&open.meta, KEY_PATTERN, &account)?;
+
+        // Both keys or neither. Half a profile is always a mistake, and the
+        // two halves are equally wrong: an `importer` with no pattern can
+        // never match a file, and a pattern with no `importer` says which
+        // files an account claims without saying how to read them. Skipping
+        // either silently is how someone ends up believing their profile
+        // works.
+        match (importer, pattern) {
+            // Neither key: an ordinary account, not a profile.
+            (None, None) => {}
+            (Some(importer), Some(pattern)) => out.push((
+                pattern,
+                LedgerProfile {
+                    account,
+                    importer,
+                    currency: sole_currency(open),
+                },
+            )),
+            (Some(importer), None) => {
+                return Err(anyhow!(
+                    "account {account} declares `{KEY_IMPORTER}: \"{importer}\"` but no \
+                     `{KEY_PATTERN}`, so it can never match a file"
+                ));
+            }
+            (None, Some(pattern)) => {
+                return Err(anyhow!(
+                    "account {account} declares `{KEY_PATTERN}: \"{pattern}\"` but no \
+                     `{KEY_IMPORTER}`, so nothing says how to read the files it claims"
+                ));
+            }
+        }
     }
     Ok(out)
 }
@@ -120,13 +136,27 @@ pub(super) fn match_profile(
     }
 }
 
-fn meta_string(meta: &Metadata, key: &str) -> Option<String> {
+/// Read a profile key as a string.
+///
+/// A key present with a non-string value is an error, not an absence. Both of
+/// these are things a user wrote on purpose, and treating them as "no profile
+/// here" is the silent-misconfiguration failure this whole feature keeps
+/// running into:
+///
+/// ```beancount
+/// importer: 42          ; not a string
+/// importer: Assets:Foo  ; an account, not a name
+/// ```
+fn meta_string(meta: &Metadata, key: &str, account: &str) -> Result<Option<String>> {
     match meta.get(key) {
-        Some(MetaValue::String(s)) => Some(s.clone()),
-        // A bare `ofx` parses as a currency, and `importer: USD` is not a
-        // thing anyone means, so accept it as the string it looks like.
-        Some(MetaValue::Currency(c)) => Some(c.to_string()),
-        _ => None,
+        None => Ok(None),
+        Some(MetaValue::String(s)) => Ok(Some(s.clone())),
+        // A bare `ofx` lexes as a currency, and `importer: USD` is not a thing
+        // anyone means, so accept it as the word it looks like.
+        Some(MetaValue::Currency(c)) => Ok(Some(c.to_string())),
+        Some(other) => Err(anyhow!(
+            "account {account}: `{key}` must be a quoted string, got {other:?}"
+        )),
     }
 }
 
@@ -187,6 +217,36 @@ mod tests {
         let err = load_profiles(f.path()).unwrap_err().to_string();
         assert!(err.contains("Liabilities:Card"), "got: {err}");
         assert!(err.contains("importer-pattern"), "got: {err}");
+    }
+
+    /// Second review pass on #2262: the two halves of a profile were treated
+    /// asymmetrically — `importer` without a pattern errored, but a pattern
+    /// without `importer` was skipped in silence.
+    #[test]
+    fn a_pattern_without_an_importer_is_an_error() {
+        let f = ledger("2024-01-01 open Liabilities:Card USD\n  importer-pattern: \"*.qfx\"\n");
+        let err = load_profiles(f.path()).unwrap_err().to_string();
+        assert!(err.contains("Liabilities:Card"), "got: {err}");
+        assert!(err.contains("importer"), "got: {err}");
+    }
+
+    /// Second review pass on #2262: a key present with a non-string value was
+    /// read as absent, so `importer: 42` silently meant "no profile here".
+    #[test]
+    fn a_non_string_key_is_an_error_not_an_absence() {
+        for src in [
+            "2024-01-01 open Liabilities:Card USD\n  importer: 42\n  \
+             importer-pattern: \"*.qfx\"\n",
+            "2024-01-01 open Liabilities:Card USD\n  importer: \"ofx\"\n  \
+             importer-pattern: 42\n",
+        ] {
+            let f = ledger(src);
+            let err = load_profiles(f.path()).unwrap_err().to_string();
+            assert!(
+                err.contains("must be a quoted string"),
+                "expected a type error, got: {err}"
+            );
+        }
     }
 
     /// Two currencies cannot be narrowed to one, and guessing which a

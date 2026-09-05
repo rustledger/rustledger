@@ -178,8 +178,12 @@ Rules worth knowing:
 - **The currency is only taken when the account opens with exactly one.**
   `open Assets:X USD,EUR` cannot be narrowed to one, and guessing which a
   statement uses would be a silent wrong answer, so the CLI value applies.
-- **`importer` without `importer-pattern` is an error.** Such a profile can
-  never match a file, so it is a typo rather than a preference.
+- **Both keys or neither.** `importer` without `importer-pattern` can never
+  match a file; `importer-pattern` without `importer` says which files an
+  account claims without saying how to read them. Either half alone is an
+  error, not a preference.
+- **A key with a non-string value is an error**, not an absence. `importer: 42`
+  is something you wrote on purpose, so it is not read as "no profile here".
 - **Two accounts claiming one file is an error.** Picking one would make the
   result depend on directive order.
 - **`--importer` outranks a profile.** The flag is this invocation; the ledger

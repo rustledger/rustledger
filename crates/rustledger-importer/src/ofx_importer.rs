@@ -272,10 +272,14 @@ fn detect_statement_kind(content: &str) -> Option<StatementKind> {
 /// balance sheet, and getting that wrong inverts the sign of every imported
 /// transaction, which is worth saying out loud (#2256).
 ///
-/// Returns `None` when the account's root is not one of the configured
-/// Assets/Liabilities names. A ledger using localized roots (`Actifs`,
-/// `Passif`) is not misconfigured, and warning at it would be noise, so an
-/// unrecognized root means "no opinion" rather than "mismatch".
+/// Returns `None` when the account's root is not one of the DEFAULT English
+/// Assets/Liabilities names. This deliberately does not consult the ledger's
+/// `name_assets` / `name_liabilities` options: the importer has no access to
+/// ledger options, and plumbing them here for a warning is not worth the
+/// coupling. The consequence is that a ledger using localized roots
+/// (`Actifs`, `Passif`) gets no opinion either way — which is the right
+/// outcome, since such a ledger is not misconfigured and warning at it would
+/// be noise.
 fn account_kind_mismatch(account: &str, statement: StatementKind) -> Option<String> {
     let types = rustledger_core::AccountTypes::default();
     let root = account.split(':').next().unwrap_or("");

@@ -47,7 +47,9 @@ pub struct ImporterEntry {
     /// Name used to select this importer via --importer flag.
     pub name: String,
 
-    /// Which built-in parser this entry configures: `csv` (default) or `ofx`.
+    /// Which built-in parser this entry configures: `csv` (the default) or
+    /// `ofx`. `qfx` is accepted as a spelling of `ofx`, since Quicken exports
+    /// carry that extension and users reach for it.
     #[serde(rename = "type")]
     pub format: Option<String>,
     /// Optional glob pattern to auto-identify this importer by filename.
@@ -231,6 +233,17 @@ impl ImporterEntry {
 /// Returns an error when a field fails to validate (e.g. an unknown
 /// `amount_locale`) or the assembled config is incomplete.
 pub fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterConfig> {
+    // Validate `type` here as well as at dispatch. This is the other consumer
+    // of an entry — the WASI component's importer interface calls it without
+    // going through the CLI's dispatcher — so validating only at dispatch left
+    // `type = "nonsense"` accepted and ignored on this path, which is the
+    // silent-misconfiguration failure the field was added to end (#2260).
+    //
+    // An `ofx` entry is NOT rejected: `account` and `currency` are meaningful
+    // to it, and the column fields it does not use are simply absent from the
+    // built config. Only an unrecognized value is an error.
+    entry.entry_format()?;
+
     let mut builder = ImporterConfig::csv();
 
     if let Some(ref account) = entry.account {
@@ -463,6 +476,28 @@ mod tests {
                 toml::from_str(&format!("name = \"a\"\ntype = \"{t}\"")).unwrap();
             assert_eq!(e.entry_format().unwrap(), EntryFormat::Ofx, "type = {t}");
         }
+    }
+
+    /// Copilot review on #2261: validating only at dispatch left the other
+    /// consumer — the component's importer interface, which calls
+    /// `build_config_from_entry` directly — accepting and ignoring a bad type.
+    #[test]
+    fn build_config_from_entry_also_rejects_an_unknown_type() {
+        let entry: ImporterEntry = toml::from_str("name = \"a\"\ntype = \"nonsense\"").unwrap();
+        let err = build_config_from_entry(&entry).unwrap_err().to_string();
+        assert!(err.contains("unknown type 'nonsense'"), "got: {err}");
+    }
+
+    /// An `ofx` entry is not rejected there: account/currency still apply.
+    #[test]
+    fn build_config_from_entry_accepts_an_ofx_entry() {
+        let entry: ImporterEntry = toml::from_str(
+            "name = \"a\"\ntype = \"ofx\"\naccount = \"Liabilities:Card\"\ncurrency = \"EUR\"",
+        )
+        .unwrap();
+        let cfg = build_config_from_entry(&entry).expect("ofx entries build a config");
+        assert_eq!(cfg.account, "Liabilities:Card");
+        assert_eq!(cfg.currency.as_deref(), Some("EUR"));
     }
 
     /// An unrecognized `type` must not quietly mean CSV — that is the failure

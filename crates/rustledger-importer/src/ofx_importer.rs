@@ -63,6 +63,15 @@ impl OfxImporter {
         let mut directives = Vec::new();
         let mut warnings = Vec::new();
 
+        // Statement-level sanity check before any transaction is built: the
+        // file states which side of the balance sheet it describes, and a
+        // mismatch against `config.account` silently inverts every sign.
+        if let Some(kind) = detect_statement_kind(content)
+            && let Some(warning) = account_kind_mismatch(&config.account, kind)
+        {
+            warnings.push(warning);
+        }
+
         // Bank and credit-card transactions are imported identically: every
         // transaction posts to `config.account`.
         for txn in &transactions {
@@ -207,6 +216,88 @@ struct OfxTransaction {
     memo: Option<String>,
     currency: Option<String>,
     statement_currency: Option<String>,
+}
+
+/// Which side of the balance sheet an OFX statement describes.
+///
+/// OFX states this twice over: the message set wrapping the statement
+/// (`CREDITCARDMSGSRSV1` vs `BANKMSGSRSV1`) and, for bank statements, the
+/// `ACCTTYPE` leaf. We read both because either can be absent in the wild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatementKind {
+    Asset,
+    Liability,
+}
+
+impl StatementKind {
+    const fn describe(self) -> &'static str {
+        match self {
+            Self::Asset => "an asset account",
+            Self::Liability => "a liability account",
+        }
+    }
+}
+
+/// Infer the statement's account kind, or `None` when the file does not say
+/// or contradicts itself.
+///
+/// Deliberately conservative. A file carrying BOTH message sets describes more
+/// than one account, and this returns a single answer, so it declines rather
+/// than pick one — the caller only uses this to warn, and a warning naming the
+/// wrong statement is worse than no warning.
+fn detect_statement_kind(content: &str) -> Option<StatementKind> {
+    // `<CCSTMTRS` does not contain `<STMTRS`, so the bank probe cannot match a
+    // credit-card statement by accident.
+    let credit_card = content.contains("<CREDITCARDMSGSRSV1") || content.contains("<CCSTMTRS");
+    let bank = content.contains("<BANKMSGSRSV1") || content.contains("<STMTRS");
+
+    match (credit_card, bank) {
+        (true, true) | (false, false) => None,
+        (true, false) => Some(StatementKind::Liability),
+        (false, true) => match leaf(content, "ACCTTYPE").as_deref() {
+            // A line of credit is a liability even though it arrives in the
+            // bank message set.
+            Some("CREDITLINE") => Some(StatementKind::Liability),
+            _ => Some(StatementKind::Asset),
+        },
+    }
+}
+
+/// Warn when the configured account contradicts what the statement says it is.
+///
+/// This only ever warns. Inferring the account *name* is not possible from an
+/// OFX file — `Liabilities:CreditCard` is a guess about someone's chart of
+/// accounts, not a fact in the document — and this module already refuses to
+/// guess a currency for the same reason. What IS a fact is the side of the
+/// balance sheet, and getting that wrong inverts the sign of every imported
+/// transaction, which is worth saying out loud (#2256).
+///
+/// Returns `None` when the account's root is not one of the configured
+/// Assets/Liabilities names. A ledger using localized roots (`Actifs`,
+/// `Passif`) is not misconfigured, and warning at it would be noise, so an
+/// unrecognized root means "no opinion" rather than "mismatch".
+fn account_kind_mismatch(account: &str, statement: StatementKind) -> Option<String> {
+    let types = rustledger_core::AccountTypes::default();
+    let root = account.split(':').next().unwrap_or("");
+
+    let configured = if root == types.assets {
+        StatementKind::Asset
+    } else if root == types.liabilities {
+        StatementKind::Liability
+    } else {
+        return None;
+    };
+
+    if configured == statement {
+        return None;
+    }
+
+    Some(format!(
+        "statement describes {} but --account is `{account}`; \
+         every imported amount will carry the opposite sign of what you expect. \
+         Check the account, or ignore this if the mapping is deliberate.",
+        statement.describe()
+    ))
 }
 
 /// Parse OFX content (1.x SGML or 2.x XML) into transactions. Errors only if the
@@ -381,6 +472,150 @@ impl Importer for OfxImporter {
 mod tests {
     use super::*;
     use crate::config::{CsvConfig, ImporterType};
+
+    // ---- #2256: statement-kind vs configured account -----------------------
+
+    /// Minimal statements carrying one transaction, in each message set.
+    fn cc_statement() -> String {
+        "OFXHEADER:100\n<OFX><CREDITCARDMSGSRSV1><CCSTMTTRNRS><CCSTMTRS><CURDEF>USD\n\
+         <BANKTRANLIST><STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-50.00\
+         <FITID>t1<NAME>COFFEE SHOP</STMTTRN></BANKTRANLIST>\n\
+         </CCSTMTRS></CCSTMTTRNRS></CREDITCARDMSGSRSV1></OFX>"
+            .to_string()
+    }
+
+    fn bank_statement(acct_type: &str) -> String {
+        format!(
+            "OFXHEADER:100\n<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD\n\
+             <BANKACCTFROM><ACCTID>1<ACCTTYPE>{acct_type}</BANKACCTFROM>\n\
+             <BANKTRANLIST><STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-50.00\
+             <FITID>t1<NAME>COFFEE SHOP</STMTTRN></BANKTRANLIST>\n\
+             </STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>"
+        )
+    }
+
+    fn warnings_for(content: &str, account: &str) -> Vec<String> {
+        OfxImporter
+            .extract_from_string(content, &ofx_cfg(account, "USD"))
+            .expect("import succeeds")
+            .warnings
+    }
+
+    #[test]
+    fn credit_card_statement_into_an_asset_account_warns() {
+        let w = warnings_for(&cc_statement(), "Assets:Bank:Checking");
+        assert_eq!(w.len(), 1, "expected one warning, got {w:?}");
+        assert!(w[0].contains("liability account"), "got: {}", w[0]);
+        assert!(w[0].contains("opposite sign"), "got: {}", w[0]);
+    }
+
+    #[test]
+    fn bank_statement_into_a_liability_account_warns() {
+        let w = warnings_for(&bank_statement("CHECKING"), "Liabilities:CreditCard");
+        assert_eq!(w.len(), 1, "expected one warning, got {w:?}");
+        assert!(w[0].contains("asset account"), "got: {}", w[0]);
+    }
+
+    /// A line of credit arrives in the BANK message set but is still a liability.
+    #[test]
+    fn creditline_acct_type_is_a_liability() {
+        let w = warnings_for(&bank_statement("CREDITLINE"), "Assets:Bank:Checking");
+        assert_eq!(
+            w.len(),
+            1,
+            "CREDITLINE should warn against an asset account"
+        );
+        assert!(w[0].contains("liability account"), "got: {}", w[0]);
+    }
+
+    // Direct unit tests of the two decisions. The end-to-end silence tests
+    // below cannot distinguish "correctly quiet" from "feature deleted", so
+    // these assert the logic positively instead.
+
+    #[test]
+    fn detect_statement_kind_reads_both_signals() {
+        assert_eq!(
+            detect_statement_kind(&cc_statement()),
+            Some(StatementKind::Liability)
+        );
+        assert_eq!(
+            detect_statement_kind(&bank_statement("CHECKING")),
+            Some(StatementKind::Asset)
+        );
+        assert_eq!(
+            detect_statement_kind(&bank_statement("CREDITLINE")),
+            Some(StatementKind::Liability),
+            "CREDITLINE is a liability inside the bank message set"
+        );
+        // Ambiguous and silent inputs both decline.
+        let mixed = format!("{}\n{}", cc_statement(), bank_statement("CHECKING"));
+        assert_eq!(detect_statement_kind(&mixed), None, "two message sets");
+        assert_eq!(detect_statement_kind("<OFX></OFX>"), None, "neither");
+    }
+
+    #[test]
+    fn account_kind_mismatch_only_fires_on_a_recognized_contradiction() {
+        use StatementKind::{Asset, Liability};
+        assert!(account_kind_mismatch("Assets:Bank", Liability).is_some());
+        assert!(account_kind_mismatch("Liabilities:Card", Asset).is_some());
+        assert!(account_kind_mismatch("Assets:Bank", Asset).is_none());
+        assert!(account_kind_mismatch("Liabilities:Card", Liability).is_none());
+        // Unrecognized roots yield no opinion, in either direction.
+        assert!(account_kind_mismatch("Actifs:Banque", Liability).is_none());
+        assert!(account_kind_mismatch("Passif:Carte", Asset).is_none());
+        assert!(account_kind_mismatch("", Asset).is_none());
+    }
+
+    // ---- negative controls: the check must be able to stay silent ----------
+
+    #[test]
+    fn matching_accounts_do_not_warn() {
+        assert!(warnings_for(&cc_statement(), "Liabilities:CreditCard").is_empty());
+        assert!(warnings_for(&bank_statement("CHECKING"), "Assets:Bank:Checking").is_empty());
+        assert!(warnings_for(&bank_statement("SAVINGS"), "Assets:Bank:Savings").is_empty());
+    }
+
+    /// Localized account roots are not misconfiguration. An unrecognized root
+    /// means "no opinion", not "mismatch" — warning at a French ledger for
+    /// using `Passif` would be noise.
+    #[test]
+    fn unrecognized_account_root_does_not_warn() {
+        assert!(warnings_for(&cc_statement(), "Actifs:Banque").is_empty());
+        assert!(warnings_for(&bank_statement("CHECKING"), "Passif:Carte").is_empty());
+    }
+
+    /// A file carrying both message sets describes more than one account, and
+    /// the check returns a single answer, so it must decline.
+    #[test]
+    fn a_mixed_file_does_not_warn() {
+        let mixed = format!("{}\n{}", cc_statement(), bank_statement("CHECKING"));
+        assert!(
+            warnings_for(&mixed, "Assets:Bank:Checking").is_empty(),
+            "an ambiguous file must not produce a confident warning"
+        );
+    }
+
+    #[test]
+    fn a_statement_with_neither_message_set_does_not_warn() {
+        let bare = "OFXHEADER:100\n<OFX><CURDEF>USD\n\
+                    <BANKTRANLIST><STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115\
+                    <TRNAMT>-50.00<FITID>t1<NAME>COFFEE</STMTTRN></BANKTRANLIST></OFX>";
+        assert!(warnings_for(bare, "Assets:Bank:Checking").is_empty());
+    }
+
+    /// The warning is advisory: a mismatch must not cost the user their import.
+    #[test]
+    fn the_warning_does_not_suppress_transactions() {
+        let result = OfxImporter
+            .extract_from_string(&cc_statement(), &ofx_cfg("Assets:Bank:Checking", "USD"))
+            .expect("import succeeds despite the mismatch");
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(
+            result.directives.len(),
+            1,
+            "the transaction must still be imported"
+        );
+    }
 
     /// Build an `ImporterConfig` for OFX tests. OFX only needs
     /// `account` + `currency`; the `importer_type` Csv variant is

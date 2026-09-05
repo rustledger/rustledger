@@ -19,11 +19,37 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::str::FromStr;
 
+/// Which built-in parser an entry configures.
+///
+/// `importers.toml` was CSV-only by construction until #2260: every entry
+/// built a `CsvConfig`, and `--importer <name>` forced `CsvImporter`, so an
+/// OFX statement named through the config was parsed as CSV while one
+/// dispatched by extension ignored the entry entirely. Declaring the format
+/// makes an entry reachable by the parser it was written for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EntryFormat {
+    /// Delimited text. The default, and what every field below configures.
+    #[default]
+    Csv,
+    /// OFX/QFX. Only `account`, `currency` and `filename_pattern` apply; the
+    /// column-mapping fields have no meaning for a self-describing format.
+    Ofx,
+}
+
 /// A single importer entry in `importers.toml`.
+///
+/// Unknown keys are rejected. A silently-ignored key is indistinguishable
+/// from a working one, and `type = "ofx"` was accepted-and-ignored before
+/// this field existed (#2260).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImporterEntry {
     /// Name used to select this importer via --importer flag.
     pub name: String,
+
+    /// Which built-in parser this entry configures: `csv` (default) or `ofx`.
+    #[serde(rename = "type")]
+    pub format: Option<String>,
     /// Optional glob pattern to auto-identify this importer by filename.
     pub filename_pattern: Option<String>,
     /// Target account for imported transactions.
@@ -179,6 +205,24 @@ fn require_column_value(field: &str, value: &toml::Value) -> Result<String> {
 /// Returns an error when `name` is not a recognized locale.
 pub fn parse_amount_locale(name: &str) -> Result<Locale> {
     Locale::from_str(name).map_err(|_| anyhow!("{name} is not a valid locale"))
+}
+
+impl ImporterEntry {
+    /// The declared format, defaulting to CSV.
+    ///
+    /// # Errors
+    /// Returns an error for an unrecognized `type`, rather than silently
+    /// treating it as CSV — the failure mode this field exists to end.
+    pub fn entry_format(&self) -> Result<EntryFormat> {
+        match self.format.as_deref() {
+            None | Some("csv") => Ok(EntryFormat::Csv),
+            Some("ofx" | "qfx") => Ok(EntryFormat::Ofx),
+            Some(other) => Err(anyhow::anyhow!(
+                "importer '{}': unknown type '{other}' (expected \"csv\" or \"ofx\")",
+                self.name
+            )),
+        }
+    }
 }
 
 /// Build an [`ImporterConfig`] from a named importer entry.
@@ -406,6 +450,41 @@ mod tests {
     /// Regression for #1133: `amount_locale` / `amount_format` set in
     /// `importers.toml` were silently ignored — only the matching CLI flags
     /// (`--amount-locale` / `--amount-format`) applied them.
+    #[test]
+    fn entry_format_defaults_to_csv_and_reads_ofx() {
+        let csv: ImporterEntry = toml::from_str("name = \"a\"").unwrap();
+        assert_eq!(csv.entry_format().unwrap(), EntryFormat::Csv);
+
+        let explicit: ImporterEntry = toml::from_str("name = \"a\"\ntype = \"csv\"").unwrap();
+        assert_eq!(explicit.entry_format().unwrap(), EntryFormat::Csv);
+
+        for t in ["ofx", "qfx"] {
+            let e: ImporterEntry =
+                toml::from_str(&format!("name = \"a\"\ntype = \"{t}\"")).unwrap();
+            assert_eq!(e.entry_format().unwrap(), EntryFormat::Ofx, "type = {t}");
+        }
+    }
+
+    /// An unrecognized `type` must not quietly mean CSV — that is the failure
+    /// this field exists to end (#2260).
+    #[test]
+    fn entry_format_rejects_an_unknown_type() {
+        let e: ImporterEntry = toml::from_str("name = \"a\"\ntype = \"nonsense\"").unwrap();
+        let err = e.entry_format().unwrap_err().to_string();
+        assert!(err.contains("unknown type 'nonsense'"), "got: {err}");
+        assert!(err.contains('a'), "the error should name the entry: {err}");
+    }
+
+    /// Before #2260 `type = "ofx"` parsed fine and did nothing, and so did any
+    /// typo. Unknown keys are now an error.
+    #[test]
+    fn unknown_keys_are_rejected() {
+        let err = toml::from_str::<ImporterEntry>("name = \"a\"\ntotally_bogus = 1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("totally_bogus"), "got: {err}");
+    }
+
     #[test]
     fn build_config_from_entry_applies_amount_locale_and_format() {
         let src = r##"

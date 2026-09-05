@@ -72,7 +72,11 @@ use config::expand_tilde;
 use duplicate::load_existing_transactions;
 use rustledger_core::{Directive, FormatConfig};
 use rustledger_importer::config::CsvConfigBuilder;
-use rustledger_importer::{Importer, ImporterConfig, ImporterRegistry, csv_importer::CsvImporter};
+use rustledger_importer::toml_entry::EntryFormat;
+use rustledger_importer::{
+    Importer, ImporterConfig, ImporterRegistry, csv_importer::CsvImporter,
+    ofx_importer::OfxImporter,
+};
 use rustledger_parser::format::canonicalize_directives;
 use std::fs;
 use std::io::{self, Write};
@@ -593,6 +597,69 @@ fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTe
     Ok(Some(tmp))
 }
 
+/// The fields a non-CSV dispatcher can take from an `importers.toml` entry.
+///
+/// Deliberately not the whole `ImporterEntry`: the column-mapping fields
+/// describe delimited text and mean nothing to a self-describing format, so
+/// carrying them here would invite using them.
+struct MinimalEntry {
+    format: Option<String>,
+    account: Option<String>,
+    currency: Option<String>,
+}
+
+/// Resolve the entry that applies to this file, if a config exists at all.
+///
+/// `Ok(None)` covers the ordinary "no config, or nothing in it applies" case.
+/// An `Err` means the config exists and is broken or ambiguous.
+fn load_minimal_entry(args: &Args, file: &Path) -> Result<Option<MinimalEntry>> {
+    let Some(config_path) = find_importers_config(args.config.as_deref())? else {
+        return Ok(None);
+    };
+    let importers_file = load_importers_config(&config_path)?;
+    let filename = file
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or_default();
+    let Some(entry) = resolve_config_entry(args, &importers_file, filename)? else {
+        return Ok(None);
+    };
+    // Surface an unrecognized `type` here rather than treating it as CSV.
+    entry.entry_format()?;
+    Ok(Some(MinimalEntry {
+        format: entry.format.clone(),
+        account: entry.account.clone(),
+        currency: entry.currency.clone(),
+    }))
+}
+
+/// Entry lookup for the dispatch decision. Silent on failure by design: this
+/// runs before we know whether the config will be used at all, and a path that
+/// would never read one must not be failed by it.
+fn resolve_entry_for_dispatch(args: &Args, file: &Path) -> Option<MinimalEntry> {
+    load_minimal_entry(args, file).ok().flatten()
+}
+
+/// Entry lookup for the non-CSV config branch.
+///
+/// Warns rather than fails. WASM importers share this branch, and erroring
+/// would fail a `--wasm-importer` run whose config simply has no entry
+/// matching the file — something that worked before #2260. Falling back to
+/// the CLI arguments keeps that working, and the warning means the fallback
+/// is visible instead of silent, which was the actual complaint.
+fn entry_for_minimal_config(args: &Args, file: &Path) -> Option<MinimalEntry> {
+    match load_minimal_entry(args, file) {
+        Ok(entry) => entry,
+        Err(e) => {
+            eprintln!(
+                "warning: could not apply importers.toml ({e}); \
+                 using --account/--currency instead"
+            );
+            None
+        }
+    }
+}
+
 /// Pick the importer for a given file + CLI args.
 ///
 /// - If the user explicitly chose a TOML entry (`--importer <name>`),
@@ -612,14 +679,25 @@ fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTe
 /// - Fall back to [`CsvImporter`] for unknown extensions (e.g. `.qbo`
 ///   Quicken exports) so users with custom-extension TOML entries
 ///   keep working.
-fn select_importer(registry: &ImporterRegistry, file: &Path, args: &Args) -> Arc<dyn Importer> {
+fn select_importer(
+    registry: &ImporterRegistry,
+    file: &Path,
+    args: &Args,
+    entry_format: Option<EntryFormat>,
+) -> Arc<dyn Importer> {
     if args.importer.is_some() {
-        Arc::new(CsvImporter)
-    } else {
-        registry
-            .identify(file)
-            .unwrap_or_else(|| Arc::new(CsvImporter) as Arc<dyn Importer>)
+        // `--importer` used to force CSV unconditionally, so naming an OFX
+        // statement's entry parsed it as CSV (#2260). An entry that declares
+        // its format is dispatched to that parser; one that declares nothing
+        // keeps the old CSV default.
+        return match entry_format {
+            Some(EntryFormat::Ofx) => Arc::new(OfxImporter),
+            _ => Arc::new(CsvImporter),
+        };
     }
+    registry
+        .identify(file)
+        .unwrap_or_else(|| Arc::new(CsvImporter) as Arc<dyn Importer>)
 }
 
 fn importers_config_not_found_message() -> anyhow::Error {
@@ -882,7 +960,21 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     // CSV config eagerly would error on "No importers defined" when a
     // user runs e.g. `--config x.toml --wasm-importer my.wasm` with
     // an x.toml that only sets `wasm_importer_dir`.
-    let importer = select_importer(&registry, file, args);
+    // Resolve the config entry BEFORE dispatch so an entry can say which
+    // parser it configures. Tolerant on purpose: discovery must not fail a
+    // path that would never have read a config (`--auto`, raw arguments) —
+    // the same rule `maybe_preprocess` documents. Every branch that goes on
+    // to USE the config re-resolves it below and reports the error there.
+    let resolved_entry = resolve_entry_for_dispatch(args, source_file);
+    let entry_format = resolved_entry
+        .as_ref()
+        .and_then(|e| e.format.as_deref())
+        .and_then(|f| match f {
+            "ofx" | "qfx" => Some(EntryFormat::Ofx),
+            _ => None,
+        });
+
+    let importer = select_importer(&registry, file, args, entry_format);
 
     // Stringly-typed dispatcher check: `CsvImporter::name()` returns
     // the literal "CSV". Acceptable coupling for a CLI-internal
@@ -898,9 +990,24 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     // - CSV dispatcher: builds the full CsvConfig from
     //   --importer/--config/--auto/raw-args sources.
     let (config, fallback_accounts) = if dispatcher_needs_minimal_config {
+        // An entry's values are authoritative when one applies, matching
+        // `build_config_from_entry` on the CSV path — which builds purely
+        // from the entry and does not merge CLI arguments. Before #2260 this
+        // branch read CLI arguments only, so a configured OFX account was
+        // silently discarded and every posting landed on the `--account`
+        // default.
+        let entry = entry_for_minimal_config(args, source_file);
         let cfg = rustledger_importer::ImporterConfig {
-            account: args.account.clone(),
-            currency: Some(args.currency.clone()),
+            account: entry
+                .as_ref()
+                .and_then(|e| e.account.clone())
+                .unwrap_or_else(|| args.account.clone()),
+            currency: Some(
+                entry
+                    .as_ref()
+                    .and_then(|e| e.currency.clone())
+                    .unwrap_or_else(|| args.currency.clone()),
+            ),
             importer_type: rustledger_importer::config::ImporterType::Csv(
                 rustledger_importer::config::CsvConfig::default(),
             ),
@@ -1821,6 +1928,7 @@ preprocess = ["cat", "{input}"]
     #[test]
     fn test_build_config_from_entry_basic() {
         let entry = ImporterEntry {
+            format: None,
             name: "test".to_string(),
             account: Some("Assets:Bank:Test".to_string()),
             currency: Some("EUR".to_string()),
@@ -1861,6 +1969,7 @@ preprocess = ["cat", "{input}"]
         mappings.insert("WHOLE FOODS".to_string(), "Expenses:Groceries".to_string());
 
         let entry = ImporterEntry {
+            format: None,
             name: "test".to_string(),
             account: Some("Assets:Bank".to_string()),
             currency: None,
@@ -1900,6 +2009,7 @@ preprocess = ["cat", "{input}"]
     #[test]
     fn test_build_config_from_entry_with_default_expense() {
         let entry = ImporterEntry {
+            format: None,
             name: "test".to_string(),
             account: Some("Assets:Bank".to_string()),
             currency: None,
@@ -1940,6 +2050,7 @@ preprocess = ["cat", "{input}"]
     #[test]
     fn test_build_config_from_entry_all_options() {
         let entry = ImporterEntry {
+            format: None,
             name: "full".to_string(),
             account: Some("Assets:Bank".to_string()),
             currency: Some("GBP".to_string()),
@@ -2088,11 +2199,39 @@ default_expense = "Expenses:Uncategorized"
     // `.ofx`-named file would silently dispatch to `OfxImporter` and drop
     // the user's column mappings.
 
+    /// #2260: `--importer` forced `CsvImporter` unconditionally, so naming an
+    /// OFX statement's entry parsed it as CSV. An entry that declares its
+    /// format now reaches the parser it was written for.
+    #[test]
+    fn select_importer_honors_an_ofx_entry_type() {
+        let registry = ImporterRegistry::with_builtins();
+        let args = Args::parse_from(["extract", "--importer", "card", "s.qfx"]);
+        let imp = select_importer(&registry, Path::new("s.qfx"), &args, Some(EntryFormat::Ofx));
+        assert_eq!(imp.name(), "OFX/QFX");
+    }
+
+    /// The complement, and the older guard this must not undo: an entry that
+    /// declares nothing keeps forcing CSV even on an `.ofx`-named file, so a
+    /// CSV entry's column mappings are not silently dropped.
+    #[test]
+    fn select_importer_still_forces_csv_for_an_untyped_entry() {
+        let registry = ImporterRegistry::with_builtins();
+        let args = Args::parse_from(["extract", "--importer", "mapped", "s.ofx"]);
+        assert_eq!(
+            select_importer(&registry, Path::new("s.ofx"), &args, None).name(),
+            "CSV"
+        );
+        assert_eq!(
+            select_importer(&registry, Path::new("s.ofx"), &args, Some(EntryFormat::Csv)).name(),
+            "CSV"
+        );
+    }
+
     #[test]
     fn test_select_importer_csv_extension_picks_csv() {
         let registry = ImporterRegistry::with_builtins();
         let args = Args::parse_from(["extract", "ignored.csv"]);
-        let imp = select_importer(&registry, Path::new("foo.csv"), &args);
+        let imp = select_importer(&registry, Path::new("foo.csv"), &args, None);
         assert_eq!(imp.name(), "CSV");
     }
 
@@ -2100,7 +2239,7 @@ default_expense = "Expenses:Uncategorized"
     fn test_select_importer_ofx_extension_picks_ofx() {
         let registry = ImporterRegistry::with_builtins();
         let args = Args::parse_from(["extract", "ignored.ofx"]);
-        let imp = select_importer(&registry, Path::new("foo.ofx"), &args);
+        let imp = select_importer(&registry, Path::new("foo.ofx"), &args, None);
         assert_eq!(imp.name(), "OFX/QFX");
     }
 
@@ -2113,7 +2252,7 @@ default_expense = "Expenses:Uncategorized"
         // must override this case.
         let registry = ImporterRegistry::with_builtins();
         let args = Args::parse_from(["extract", "ignored.ofx", "--importer", "chase"]);
-        let imp = select_importer(&registry, Path::new("foo.ofx"), &args);
+        let imp = select_importer(&registry, Path::new("foo.ofx"), &args, None);
         assert_eq!(
             imp.name(),
             "CSV",
@@ -2128,7 +2267,7 @@ default_expense = "Expenses:Uncategorized"
         // path should choose CSV rather than erroring.
         let registry = ImporterRegistry::with_builtins();
         let args = Args::parse_from(["extract", "ignored.qbo"]);
-        let imp = select_importer(&registry, Path::new("foo.qbo"), &args);
+        let imp = select_importer(&registry, Path::new("foo.qbo"), &args, None);
         assert_eq!(imp.name(), "CSV");
     }
 
@@ -2162,7 +2301,7 @@ default_expense = "Expenses:Uncategorized"
             wasm_path.to_str().unwrap(),
         ]);
         let registry = build_registry(&args).expect("builds");
-        let imp = select_importer(&registry, Path::new("foo.mt940"), &args);
+        let imp = select_importer(&registry, Path::new("foo.mt940"), &args, None);
         assert_eq!(
             imp.name(),
             "mt9",

@@ -665,8 +665,14 @@ fn load_minimal_entry(
 /// Entry lookup for the dispatch decision. Silent on failure by design: this
 /// runs before we know whether the config will be used at all, and a path that
 /// would never read one must not be failed by it.
-fn resolve_entry_for_dispatch(args: &Args, file: &Path) -> Option<MinimalEntry> {
-    load_minimal_entry(args, file, None).ok().flatten()
+fn resolve_entry_for_dispatch(
+    args: &Args,
+    file: &Path,
+    profile_entry_name: Option<&str>,
+) -> Option<MinimalEntry> {
+    load_minimal_entry(args, file, profile_entry_name)
+        .ok()
+        .flatten()
 }
 
 /// Entry lookup for the non-CSV config branch.
@@ -680,14 +686,19 @@ fn entry_for_minimal_config(
     args: &Args,
     file: &Path,
     importer_name: Option<&str>,
+    warn_on_failure: bool,
 ) -> Option<MinimalEntry> {
     match load_minimal_entry(args, file, importer_name) {
         Ok(entry) => entry,
         Err(e) => {
-            eprintln!(
-                "warning: could not apply importers.toml ({e}); \
-                 using --account/--currency instead"
-            );
+            // Silent when a `--ledger` profile already supplied the account:
+            // saying we fell back to `--account` would simply be untrue.
+            if warn_on_failure {
+                eprintln!(
+                    "warning: could not apply importers.toml ({e}); \
+                     using --account/--currency instead"
+                );
+            }
             None
         }
     }
@@ -1032,7 +1043,8 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     // path that would never have read a config (`--auto`, raw arguments) —
     // the same rule `maybe_preprocess` documents. Every branch that goes on
     // to USE the config re-resolves it below and reports the error there.
-    let resolved_entry = resolve_entry_for_dispatch(args, source_file);
+    let resolved_entry =
+        resolve_entry_for_dispatch(args, source_file, profile_entry_name.as_deref());
     let entry_format = resolved_entry
         .as_ref()
         .and_then(|e| e.format.as_deref())
@@ -1069,7 +1081,14 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
         // branch read CLI arguments only, so a configured OFX account was
         // silently discarded and every posting landed on the `--account`
         // default.
-        let entry = entry_for_minimal_config(args, source_file, effective_entry_name.as_deref());
+        // Suppressed when a profile applies: it already supplied the account,
+        // so warning that we fell back to `--account` would be false.
+        let entry = entry_for_minimal_config(
+            args,
+            source_file,
+            effective_entry_name.as_deref(),
+            profile.is_none(),
+        );
         let cfg = rustledger_importer::ImporterConfig {
             // A `--ledger` profile wins over a TOML entry for these two:
             // the `open` directive IS the account's declaration, so repeating
@@ -1301,6 +1320,19 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 .clone()
                 .unwrap_or_else(|| "Income:Unknown".to_string()),
         ];
+        // A `--ledger` profile outranks whatever the entry said, on this path
+        // as much as the minimal one: the `open` directive IS the account's
+        // declaration. Applied after the chain so every arm above is covered,
+        // including `--auto` and raw CLI arguments.
+        let config = match profile.as_ref() {
+            Some(p) => ImporterConfig {
+                account: p.account.clone(),
+                currency: p.currency.clone().or(config.currency),
+                ..config
+            },
+            None => config,
+        };
+
         (config, fallbacks)
     };
 
@@ -2781,6 +2813,101 @@ default_expense = "Expenses:Uncategorized"
             std::fs::read_to_string(&output).unwrap(),
             after_first,
             "an all-duplicates run must not truncate the target"
+        );
+    }
+
+    /// Deep-review finding on #2262: a profile naming a TOML entry did not
+    /// reach the dispatcher, so an entry declaring `type = "ofx"` was parsed
+    /// as CSV — the #2260 failure, reintroduced through the profile path. It
+    /// passed a first test only because a single-entry config falls back to
+    /// "the only entry"; three entries remove that accident.
+    #[test]
+    fn a_profile_naming_an_ofx_entry_dispatches_to_ofx() {
+        let dir = tempfile::tempdir().unwrap();
+        let qfx = dir.path().join("card.qfx");
+        std::fs::write(
+            &qfx,
+            "OFXHEADER:100\n<OFX><CREDITCARDMSGSRSV1><CCSTMTTRNRS><CCSTMTRS><CURDEF>USD\n\
+             <BANKTRANLIST><STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-50.00\
+             <FITID>t1<NAME>COFFEE</STMTTRN></BANKTRANLIST>\n\
+             </CCSTMTRS></CCSTMTTRNRS></CREDITCARDMSGSRSV1></OFX>",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("importers.toml"),
+            "[[importers]]\nname = \"card\"\ntype = \"ofx\"\n\
+             account = \"Liabilities:FromToml\"\ncurrency = \"USD\"\n\
+             filename_pattern = \"*.NOMATCH\"\n\n\
+             [[importers]]\nname = \"b\"\nfilename_pattern = \"*.NOMATCH2\"\n\n\
+             [[importers]]\nname = \"c\"\nfilename_pattern = \"*.NOMATCH3\"\n",
+        )
+        .unwrap();
+        let ledger = dir.path().join("main.beancount");
+        std::fs::write(
+            &ledger,
+            "2024-01-01 open Liabilities:FromLedger USD\n  \
+             importer: \"card\"\n  importer-pattern: \"*.qfx\"\n",
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            qfx.to_str().unwrap(),
+            "--ledger",
+            ledger.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        with_cwd(dir.path(), || run_with_writer(&args, &qfx, &mut out))
+            .expect("the ofx entry must be parsed as OFX, not CSV");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("COFFEE"), "OFX did not parse; got:\n{text}");
+        assert!(
+            text.contains("Liabilities:FromLedger"),
+            "the ledger account must win; got:\n{text}"
+        );
+    }
+
+    /// Deep-review finding on #2262: the docs said a profile outranks
+    /// `importers.toml` for the account, and it did on the minimal-config path
+    /// but not the CSV one, where the entry's account still won.
+    #[test]
+    fn a_profile_account_outranks_the_toml_entry_on_the_csv_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("bank.csv");
+        std::fs::write(&csv, "Date,Description,Amount\n2024-01-15,COFFEE,-4.50\n").unwrap();
+        std::fs::write(
+            dir.path().join("importers.toml"),
+            "[[importers]]\nname = \"bank\"\naccount = \"Assets:FromToml\"\n\
+             currency = \"USD\"\ndate_column = \"Date\"\n\
+             narration_column = \"Description\"\namount_column = \"Amount\"\n\
+             filename_pattern = \"*.NOMATCH\"\n\n\
+             [[importers]]\nname = \"b\"\nfilename_pattern = \"*.NOMATCH2\"\n",
+        )
+        .unwrap();
+        let ledger = dir.path().join("main.beancount");
+        std::fs::write(
+            &ledger,
+            "2024-01-01 open Assets:FromLedger USD\n  \
+             importer: \"bank\"\n  importer-pattern: \"*.csv\"\n",
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            csv.to_str().unwrap(),
+            "--ledger",
+            ledger.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        with_cwd(dir.path(), || run_with_writer(&args, &csv, &mut out)).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("Assets:FromLedger"),
+            "the open directive is the account's declaration; got:\n{text}"
+        );
+        assert!(
+            !text.contains("Assets:FromToml"),
+            "the TOML account must not win; got:\n{text}"
         );
     }
 

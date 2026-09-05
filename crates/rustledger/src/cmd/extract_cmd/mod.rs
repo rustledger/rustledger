@@ -57,6 +57,7 @@
 
 mod config;
 mod duplicate;
+mod ledger_profile;
 mod suggest;
 
 use crate::cmd::completions::ShellType;
@@ -209,6 +210,15 @@ pub struct Args {
     #[arg(long, value_name = "FILE")]
     pub existing: Option<PathBuf>,
 
+    /// Read importer profiles from a ledger's `open` directives (#2257).
+    ///
+    /// An account that declares `importer:` and `importer-pattern:` supplies
+    /// the target account — and its currency, when it opens with exactly one —
+    /// so they need not be repeated in `importers.toml`. Separate from
+    /// `--existing`, which is only about duplicate detection.
+    #[arg(long, value_name = "FILE")]
+    pub ledger: Option<PathBuf>,
+
     /// Use ML to suggest accounts for transactions the rules engine didn't
     /// categorize. Trains a Naive Bayes model on the `--existing` ledger and
     /// replaces the configured fallback contra-accounts (the importer's
@@ -329,8 +339,18 @@ fn resolve_config_entry<'a>(
     importers_file: &'a ImportersFile,
     filename: &str,
 ) -> Result<Option<&'a rustledger_importer::toml_entry::ImporterEntry>> {
-    if let Some(ref name) = args.importer {
-        return Ok(importers_file.importers.iter().find(|e| e.name == *name));
+    resolve_config_entry_named(args.importer.as_deref(), importers_file, filename)
+}
+
+/// As [`resolve_config_entry`], but with the entry name supplied explicitly so
+/// a `--ledger` profile can name one (#2257) without forging an `Args`.
+fn resolve_config_entry_named<'a>(
+    importer_name: Option<&str>,
+    importers_file: &'a ImportersFile,
+    filename: &str,
+) -> Result<Option<&'a rustledger_importer::toml_entry::ImporterEntry>> {
+    if let Some(name) = importer_name {
+        return Ok(importers_file.importers.iter().find(|e| e.name == name));
     }
     if importers_file.importers.is_empty() {
         return Ok(None);
@@ -612,7 +632,11 @@ struct MinimalEntry {
 ///
 /// `Ok(None)` covers the ordinary "no config, or nothing in it applies" case.
 /// An `Err` means the config exists and is broken or ambiguous.
-fn load_minimal_entry(args: &Args, file: &Path) -> Result<Option<MinimalEntry>> {
+fn load_minimal_entry(
+    args: &Args,
+    file: &Path,
+    importer_name: Option<&str>,
+) -> Result<Option<MinimalEntry>> {
     let Some(config_path) = find_importers_config(args.config.as_deref())? else {
         return Ok(None);
     };
@@ -621,7 +645,12 @@ fn load_minimal_entry(args: &Args, file: &Path) -> Result<Option<MinimalEntry>> 
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .unwrap_or_default();
-    let Some(entry) = resolve_config_entry(args, &importers_file, filename)? else {
+    let Some(entry) = resolve_config_entry_named(
+        importer_name.or(args.importer.as_deref()),
+        &importers_file,
+        filename,
+    )?
+    else {
         return Ok(None);
     };
     // Surface an unrecognized `type` here rather than treating it as CSV.
@@ -637,7 +666,7 @@ fn load_minimal_entry(args: &Args, file: &Path) -> Result<Option<MinimalEntry>> 
 /// runs before we know whether the config will be used at all, and a path that
 /// would never read one must not be failed by it.
 fn resolve_entry_for_dispatch(args: &Args, file: &Path) -> Option<MinimalEntry> {
-    load_minimal_entry(args, file).ok().flatten()
+    load_minimal_entry(args, file, None).ok().flatten()
 }
 
 /// Entry lookup for the non-CSV config branch.
@@ -647,8 +676,12 @@ fn resolve_entry_for_dispatch(args: &Args, file: &Path) -> Option<MinimalEntry> 
 /// matching the file — something that worked before #2260. Falling back to
 /// the CLI arguments keeps that working, and the warning means the fallback
 /// is visible instead of silent, which was the actual complaint.
-fn entry_for_minimal_config(args: &Args, file: &Path) -> Option<MinimalEntry> {
-    match load_minimal_entry(args, file) {
+fn entry_for_minimal_config(
+    args: &Args,
+    file: &Path,
+    importer_name: Option<&str>,
+) -> Option<MinimalEntry> {
+    match load_minimal_entry(args, file, importer_name) {
         Ok(entry) => entry,
         Err(e) => {
             eprintln!(
@@ -682,10 +715,10 @@ fn entry_for_minimal_config(args: &Args, file: &Path) -> Option<MinimalEntry> {
 fn select_importer(
     registry: &ImporterRegistry,
     file: &Path,
-    args: &Args,
+    entry_named: bool,
     entry_format: Option<EntryFormat>,
 ) -> Arc<dyn Importer> {
-    if args.importer.is_some() {
+    if entry_named {
         // `--importer` used to force CSV unconditionally, so naming an OFX
         // statement's entry parsed it as CSV (#2260). An entry that declares
         // its format is dispatched to that parser; one that declares nothing
@@ -960,6 +993,40 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     // CSV config eagerly would error on "No importers defined" when a
     // user runs e.g. `--config x.toml --wasm-importer my.wasm` with
     // an x.toml that only sets `wasm_importer_dir`.
+    // A `--ledger` profile, if one applies. Read before dispatch because it
+    // can name the parser as well as supply the account (#2257). Errors here
+    // are reported, not swallowed: `--ledger` is explicit opt-in, so a ledger
+    // that cannot be read or whose profiles are ambiguous is a real problem
+    // the user asked us to look at.
+    let profile = match args.ledger.as_deref() {
+        Some(ledger_path) => {
+            let profiles = ledger_profile::load_profiles(ledger_path)?;
+            let filename = source_file
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or_default();
+            ledger_profile::match_profile(&profiles, filename)?
+        }
+        None => None,
+    };
+
+    // `importer:` names either a built-in parser or an `importers.toml` entry.
+    // Splitting them here keeps the rest of the flow unaware of the source.
+    let profile_builtin = profile.as_ref().and_then(|p| match p.importer.as_str() {
+        "ofx" | "qfx" => Some(EntryFormat::Ofx),
+        "csv" => Some(EntryFormat::Csv),
+        _ => None,
+    });
+    let profile_entry_name = profile
+        .as_ref()
+        .filter(|_| profile_builtin.is_none())
+        .map(|p| p.importer.clone());
+
+    // An explicit `--importer` outranks a profile: the flag is this
+    // invocation, the ledger is standing configuration.
+    let effective_entry_name: Option<String> =
+        args.importer.clone().or_else(|| profile_entry_name.clone());
+
     // Resolve the config entry BEFORE dispatch so an entry can say which
     // parser it configures. Tolerant on purpose: discovery must not fail a
     // path that would never have read a config (`--auto`, raw arguments) —
@@ -974,7 +1041,13 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             _ => None,
         });
 
-    let importer = select_importer(&registry, file, args, entry_format);
+    let entry_format = entry_format.or(profile_builtin);
+    let importer = select_importer(
+        &registry,
+        file,
+        effective_entry_name.is_some(),
+        entry_format,
+    );
 
     // Stringly-typed dispatcher check: `CsvImporter::name()` returns
     // the literal "CSV". Acceptable coupling for a CLI-internal
@@ -996,16 +1069,21 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
         // branch read CLI arguments only, so a configured OFX account was
         // silently discarded and every posting landed on the `--account`
         // default.
-        let entry = entry_for_minimal_config(args, source_file);
+        let entry = entry_for_minimal_config(args, source_file, effective_entry_name.as_deref());
         let cfg = rustledger_importer::ImporterConfig {
-            account: entry
+            // A `--ledger` profile wins over a TOML entry for these two:
+            // the `open` directive IS the account's declaration, so repeating
+            // it in config and disagreeing would be the bug, not the config.
+            account: profile
                 .as_ref()
-                .and_then(|e| e.account.clone())
+                .map(|p| p.account.clone())
+                .or_else(|| entry.as_ref().and_then(|e| e.account.clone()))
                 .unwrap_or_else(|| args.account.clone()),
             currency: Some(
-                entry
+                profile
                     .as_ref()
-                    .and_then(|e| e.currency.clone())
+                    .and_then(|p| p.currency.clone())
+                    .or_else(|| entry.as_ref().and_then(|e| e.currency.clone()))
                     .unwrap_or_else(|| args.currency.clone()),
             ),
             importer_type: rustledger_importer::config::ImporterType::Csv(
@@ -1025,8 +1103,9 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     } else {
         // CSV branch: determine import config from --importer flag,
         // explicit --config, --auto, or raw CLI args.
-        let config = if let Some(ref importer_name) = args.importer {
-            // Explicit --importer: require config file, find named entry
+        let config = if let Some(ref importer_name) = effective_entry_name {
+            // A named entry, from `--importer` or from a `--ledger` profile's
+            // `importer:` key: require a config file and find that entry.
             let config_path = find_importers_config(args.config.as_deref())?
                 .ok_or_else(importers_config_not_found_message)?;
 
@@ -2206,7 +2285,12 @@ default_expense = "Expenses:Uncategorized"
     fn select_importer_honors_an_ofx_entry_type() {
         let registry = ImporterRegistry::with_builtins();
         let args = Args::parse_from(["extract", "--importer", "card", "s.qfx"]);
-        let imp = select_importer(&registry, Path::new("s.qfx"), &args, Some(EntryFormat::Ofx));
+        let imp = select_importer(
+            &registry,
+            Path::new("s.qfx"),
+            args.importer.is_some(),
+            Some(EntryFormat::Ofx),
+        );
         assert_eq!(imp.name(), "OFX/QFX");
     }
 
@@ -2218,11 +2302,17 @@ default_expense = "Expenses:Uncategorized"
         let registry = ImporterRegistry::with_builtins();
         let args = Args::parse_from(["extract", "--importer", "mapped", "s.ofx"]);
         assert_eq!(
-            select_importer(&registry, Path::new("s.ofx"), &args, None).name(),
+            select_importer(&registry, Path::new("s.ofx"), args.importer.is_some(), None).name(),
             "CSV"
         );
         assert_eq!(
-            select_importer(&registry, Path::new("s.ofx"), &args, Some(EntryFormat::Csv)).name(),
+            select_importer(
+                &registry,
+                Path::new("s.ofx"),
+                args.importer.is_some(),
+                Some(EntryFormat::Csv)
+            )
+            .name(),
             "CSV"
         );
     }
@@ -2231,7 +2321,12 @@ default_expense = "Expenses:Uncategorized"
     fn test_select_importer_csv_extension_picks_csv() {
         let registry = ImporterRegistry::with_builtins();
         let args = Args::parse_from(["extract", "ignored.csv"]);
-        let imp = select_importer(&registry, Path::new("foo.csv"), &args, None);
+        let imp = select_importer(
+            &registry,
+            Path::new("foo.csv"),
+            args.importer.is_some(),
+            None,
+        );
         assert_eq!(imp.name(), "CSV");
     }
 
@@ -2239,7 +2334,12 @@ default_expense = "Expenses:Uncategorized"
     fn test_select_importer_ofx_extension_picks_ofx() {
         let registry = ImporterRegistry::with_builtins();
         let args = Args::parse_from(["extract", "ignored.ofx"]);
-        let imp = select_importer(&registry, Path::new("foo.ofx"), &args, None);
+        let imp = select_importer(
+            &registry,
+            Path::new("foo.ofx"),
+            args.importer.is_some(),
+            None,
+        );
         assert_eq!(imp.name(), "OFX/QFX");
     }
 
@@ -2252,7 +2352,12 @@ default_expense = "Expenses:Uncategorized"
         // must override this case.
         let registry = ImporterRegistry::with_builtins();
         let args = Args::parse_from(["extract", "ignored.ofx", "--importer", "chase"]);
-        let imp = select_importer(&registry, Path::new("foo.ofx"), &args, None);
+        let imp = select_importer(
+            &registry,
+            Path::new("foo.ofx"),
+            args.importer.is_some(),
+            None,
+        );
         assert_eq!(
             imp.name(),
             "CSV",
@@ -2267,7 +2372,12 @@ default_expense = "Expenses:Uncategorized"
         // path should choose CSV rather than erroring.
         let registry = ImporterRegistry::with_builtins();
         let args = Args::parse_from(["extract", "ignored.qbo"]);
-        let imp = select_importer(&registry, Path::new("foo.qbo"), &args, None);
+        let imp = select_importer(
+            &registry,
+            Path::new("foo.qbo"),
+            args.importer.is_some(),
+            None,
+        );
         assert_eq!(imp.name(), "CSV");
     }
 
@@ -2301,7 +2411,12 @@ default_expense = "Expenses:Uncategorized"
             wasm_path.to_str().unwrap(),
         ]);
         let registry = build_registry(&args).expect("builds");
-        let imp = select_importer(&registry, Path::new("foo.mt940"), &args, None);
+        let imp = select_importer(
+            &registry,
+            Path::new("foo.mt940"),
+            args.importer.is_some(),
+            None,
+        );
         assert_eq!(
             imp.name(),
             "mt9",

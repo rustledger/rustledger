@@ -61,6 +61,7 @@ rledger extract [OPTIONS] [FILE]
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `-o, --output <FILE>`   | Write output to file instead of stdout. Refuses to overwrite a file that already has content (use `--force`, or append with `>>`)               |
 | `--force`               | Allow `--output` to overwrite a non-empty file, replacing its contents                                                                         |
+| `--ledger <FILE>`       | Read importer profiles from a ledger's `open` directives (see below)                                                                           |
 | `--existing <FILE>`     | Existing ledger file for duplicate detection                                                                                                    |
 | `--suggest-categories`  | Use ML (Naive Bayes on the `--existing` ledger) to suggest accounts for transactions the rules engine didn't categorize. Requires `--existing`. |
 | `--balance <AMOUNT>`    | Append a balance assertion directive with the given amount (e.g., `1234.56`)                                                                    |
@@ -144,6 +145,62 @@ error: refusing to overwrite ledger.beancount (163 bytes)
 `--existing` is for duplicate detection only and does not protect a file from
 being overwritten, so naming the same file for both `--existing` and `--output`
 is refused outright.
+
+### Importer Profiles in the Ledger
+
+An account's `open` directive already declares the account and its currency,
+which are two of the three things an importer needs. `--ledger` lets it declare
+the third, so they need not be repeated in `importers.toml`:
+
+```beancount
+2024-01-01 open Liabilities:CreditCard USD
+  importer: "ofx"
+  importer-pattern: "*.qfx"
+```
+
+```bash
+rledger extract card.qfx --ledger main.beancount
+```
+
+The transactions post to `Liabilities:CreditCard` in `USD`, both taken from the
+directive. No `importers.toml` is needed for a format like OFX that describes
+its own columns.
+
+| key | meaning |
+|-----|---------|
+| `importer` | A built-in parser (`csv`, `ofx`; `qfx` is accepted for `ofx`) **or** the `name` of an `importers.toml` entry whose column mappings to use |
+| `importer-pattern` | Filename glob selecting which files this account claims |
+
+Rules worth knowing:
+
+- **Opt-in.** Without `--ledger` nothing changes. Accounts with no `importer`
+  key are ignored, so pointing it at an ordinary ledger is harmless.
+- **The currency is only taken when the account opens with exactly one.**
+  `open Assets:X USD,EUR` cannot be narrowed to one, and guessing which a
+  statement uses would be a silent wrong answer, so the CLI value applies.
+- **Both keys or neither.** `importer` without `importer-pattern` can never
+  match a file; `importer-pattern` without `importer` says which files an
+  account claims without saying how to read them. Either half alone is an
+  error, not a preference.
+- **A key with a non-string value is an error**, not an absence. `importer: 42`
+  is something you wrote on purpose, so it is not read as "no profile here".
+- **Two accounts claiming one file is an error.** Picking one would make the
+  result depend on directive order.
+- **`--importer` outranks a profile.** The flag names the entry to use, which
+  settles both the parser and the account, so a profile matched by filename is
+  dropped rather than merged — and a warning says so, since a silently ignored
+  `--ledger` would be worse than a noisy one.
+- **A ledger that does not parse is an error.** `--ledger` is an explicit
+  request to read a file, so being unable to read it is not a reason to carry
+  on with defaults.
+- **Patterns match the filename, not the path.** `importer-pattern:
+  "statements/*.qfx"` never matches, the same as `filename_pattern` in
+  `importers.toml`.
+- **A profile outranks `importers.toml` for the account and currency.** The
+  `open` directive *is* the account's declaration; a config file disagreeing
+  with it is the bug.
+- **`--ledger` is separate from `--existing`.** The latter is only about
+  duplicate detection. Passing both is fine, and they may name the same file.
 
 ### Duplicate Detection
 

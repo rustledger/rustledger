@@ -797,6 +797,7 @@ fn build_extract_args(
         output: path_flag(req, "output", Some("o")),
         force: bool_flag(req, "force", None),
         existing: path_flag(req, "existing", None),
+        ledger: path_flag(req, "ledger", None),
         suggest_categories: bool_flag(req, "suggest-categories", None),
         balance: string_flag(req, "balance", None),
         balance_date: string_flag(req, "balance-date", None),

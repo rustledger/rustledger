@@ -224,13 +224,17 @@ struct OfxTransaction {
 /// (`CREDITCARDMSGSRSV1` vs `BANKMSGSRSV1`) and, for bank statements, the
 /// `ACCTTYPE` leaf. We read both because either can be absent in the wild.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StatementKind {
+pub enum StatementKind {
+    /// A bank statement: the account holds value.
     Asset,
+    /// A credit card or line of credit: the account owes it.
     Liability,
 }
 
 impl StatementKind {
-    const fn describe(self) -> &'static str {
+    /// A phrase naming this side of the balance sheet, for messages.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
         match self {
             Self::Asset => "an asset account",
             Self::Liability => "a liability account",
@@ -245,7 +249,8 @@ impl StatementKind {
 /// than one account, and this returns a single answer, so it declines rather
 /// than pick one — the caller only uses this to warn, and a warning naming the
 /// wrong statement is worse than no warning.
-fn detect_statement_kind(content: &str) -> Option<StatementKind> {
+#[must_use]
+pub fn detect_statement_kind(content: &str) -> Option<StatementKind> {
     // `<CCSTMTRS` does not contain `<STMTRS`, so the bank probe cannot match a
     // credit-card statement by accident.
     let credit_card = content.contains("<CREDITCARDMSGSRSV1") || content.contains("<CCSTMTRS");

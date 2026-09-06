@@ -771,8 +771,9 @@ fn build_extract_args(
         importer: string_flag(req, "importer", Some("i")),
         config: path_flag(req, "config", None).or_else(|| path_flag(req, "importers-config", None)),
         list_importers: bool_flag(req, "list-importers", None),
-        account: string_flag(req, "account", Some("a"))
-            .unwrap_or_else(|| "Assets:Bank:Checking".to_string()),
+        // Left as `None` when unset: extract distinguishes "not named" from
+        // "named as the default" to refuse an unconfigured OFX import (#2256).
+        account: string_flag(req, "account", Some("a")),
         currency: string_flag(req, "currency", Some("c")).unwrap_or_else(|| "USD".to_string()),
         date_column: string_flag(req, "date-column", None).unwrap_or_else(|| "Date".to_string()),
         date_format: string_flag(req, "date-format", None)

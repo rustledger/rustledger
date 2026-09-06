@@ -55,6 +55,13 @@ rledger extract [OPTIONS] [FILE]
 | `--no-header`               | CSV has no header row                                                                      |
 | `--include-zero-amounts`    | Preserve rows whose amount is exactly zero (default drops them; bank "status filler" rows) |
 
+If you name no account at all, `extract` refuses an OFX statement that
+describes a **liability** (a credit card or line of credit) rather than posting
+it to the `Assets:Bank:Checking` default, since that would invert the sign of
+every transaction and use an account you never chose. Naming one — with
+`--account`, an `importers.toml` entry, or an `open` directive plus `--ledger` —
+is always enough.
+
 ### Output Options
 
 | Option                  | Description                                                                                                                                     |

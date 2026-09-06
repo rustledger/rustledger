@@ -110,8 +110,16 @@ pub struct Args {
     pub list_importers: bool,
 
     /// Target account for imported transactions
-    #[arg(short, long, default_value = "Assets:Bank:Checking")]
-    pub account: String,
+    ///
+    /// `None` means the user did not name one, which is genuinely different
+    /// from naming the default account string: only the former lets extract
+    /// refuse an unconfigured credit-card import (#2256). Read it through
+    /// `Args::account_or_default`, which applies the default.
+    ///
+    /// (Both of those are private, so they are named in prose rather than
+    /// linked: a public item cannot intra-doc-link a private one.)
+    #[arg(short, long)]
+    pub account: Option<String>,
 
     /// Currency for amounts (default: USD)
     #[arg(short, long, default_value = "USD")]
@@ -617,6 +625,23 @@ fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTe
     Ok(Some(tmp))
 }
 
+/// The account used when nothing else supplies one.
+///
+/// Applied by `Args::account_or_default` rather than by clap, so that an
+/// unset `--account` stays `None` and is distinguishable from one set to this
+/// same string. It is an `Assets:` account, which is what makes an
+/// unconfigured credit-card import wrong (#2256).
+const DEFAULT_ACCOUNT: &str = "Assets:Bank:Checking";
+
+impl Args {
+    /// The account to post to when nothing else supplies one.
+    fn account_or_default(&self) -> String {
+        self.account
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ACCOUNT.to_string())
+    }
+}
+
 /// The fields a non-CSV dispatcher can take from an `importers.toml` entry.
 ///
 /// Deliberately not the whole `ImporterEntry`: the column-mapping fields
@@ -1109,15 +1134,23 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             effective_entry_name.as_deref(),
             profile.is_none(),
         );
+        // Every source that can name an account, in precedence order. Kept
+        // as one binding so the refusal below cannot disagree with the value
+        // actually used — checking only `args.account` meant an entry or
+        // profile naming `Assets:Bank:Checking` was treated as unnamed.
+        let named_account = profile
+            .as_ref()
+            .map(|p| p.account.clone())
+            .or_else(|| entry.as_ref().and_then(|e| e.account.clone()))
+            .or_else(|| args.account.clone());
+
         let cfg = rustledger_importer::ImporterConfig {
             // A `--ledger` profile wins over a TOML entry for these two:
             // the `open` directive IS the account's declaration, so repeating
             // it in config and disagreeing would be the bug, not the config.
-            account: profile
-                .as_ref()
-                .map(|p| p.account.clone())
-                .or_else(|| entry.as_ref().and_then(|e| e.account.clone()))
-                .unwrap_or_else(|| args.account.clone()),
+            account: named_account
+                .clone()
+                .unwrap_or_else(|| args.account_or_default()),
             currency: Some(
                 profile
                     .as_ref()
@@ -1129,6 +1162,29 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 rustledger_importer::config::CsvConfig::default(),
             ),
         };
+        // Nothing chose this account: no `--account`, no `importers.toml`
+        // entry, no `--ledger` profile. Importing a credit-card statement
+        // into the `Assets:` default inverts the sign of every transaction
+        // and posts them to an account the user never named, so refuse
+        // rather than warn (#2256). Only for a statement that says which
+        // side it is; silence from the file means no opinion.
+        if named_account.is_none()
+            && importer.name() == "OFX/QFX"
+            && let Ok(content) = fs::read_to_string(file)
+            && rustledger_importer::ofx_importer::detect_statement_kind(&content)
+                == Some(rustledger_importer::ofx_importer::StatementKind::Liability)
+        {
+            anyhow::bail!(
+                "this statement describes a liability account, but no account was \
+                 configured so the default `{DEFAULT_ACCOUNT}` would be used — every \
+                 amount would carry the opposite sign\n  \
+                 name the account with one of:\n    \
+                 --account Liabilities:...\n    \
+                 an `importers.toml` entry with `account = \"Liabilities:...\"`\n    \
+                 an `open` directive plus --ledger (see `rledger extract --help`)"
+            );
+        }
+
         // OFX importer routes negative amounts to `Expenses:Unknown`
         // and positive amounts to `Income:Unknown` (ofx_importer.rs's
         // `parse_transaction`). Both must be in the fallback list so
@@ -1243,14 +1299,14 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 csv_config.amount_format = Some(format.clone());
             }
             ImporterConfig {
-                account: args.account.clone(),
+                account: args.account_or_default(),
                 currency: Some(args.currency.clone()),
                 importer_type: rustledger_importer::config::ImporterType::Csv(csv_config),
             }
         } else {
             // No config file: build from CLI arguments
             let mut builder = ImporterConfig::csv()
-                .account(&args.account)
+                .account(args.account_or_default())
                 .currency(&args.currency)
                 .date_format(&args.date_format)
                 .delimiter(args.delimiter)
@@ -1439,7 +1495,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
 
         let balance = rustledger_ops::reconcile::StatementBalance {
             date,
-            account: args.account.clone(),
+            account: args.account_or_default(),
             number: amount,
             currency: args.currency.clone(),
         };
@@ -2885,6 +2941,114 @@ default_expense = "Expenses:Uncategorized"
             text.contains("Liabilities:FromLedger"),
             "the ledger account must win; got:\n{text}"
         );
+    }
+
+    fn cc_qfx(dir: &Path) -> PathBuf {
+        let p = dir.join("card.qfx");
+        std::fs::write(
+            &p,
+            "OFXHEADER:100\n<OFX><CREDITCARDMSGSRSV1><CCSTMTTRNRS><CCSTMTRS><CURDEF>USD\n\
+             <BANKTRANLIST><STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-50.00\
+             <FITID>t1<NAME>COFFEE</STMTTRN></BANKTRANLIST>\n\
+             </CCSTMTRS></CCSTMTTRNRS></CREDITCARDMSGSRSV1></OFX>",
+        )
+        .unwrap();
+        p
+    }
+
+    /// #2256: with nothing naming an account, a credit-card statement would
+    /// post to the `Assets:` default — an account the user never chose, with
+    /// every sign inverted. Refuse rather than warn.
+    #[test]
+    fn an_unconfigured_credit_card_import_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let qfx = cc_qfx(dir.path());
+        let args = Args::parse_from(["extract", qfx.to_str().unwrap()]);
+        let mut out = Vec::new();
+        let err = with_cwd(dir.path(), || run_with_writer(&args, &qfx, &mut out))
+            .expect_err("an unnamed account must not silently become the default");
+        let msg = err.to_string();
+        assert!(msg.contains("liability"), "got: {msg}");
+        assert!(
+            msg.contains("--account"),
+            "the error must say how to fix it: {msg}"
+        );
+    }
+
+    /// Naming the account is enough, even when it is the same string as the
+    /// default: "not named" and "named as the default" are different, and only
+    /// the first is refused. The mismatch warning still applies.
+    #[test]
+    fn naming_the_account_explicitly_is_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let qfx = cc_qfx(dir.path());
+        for account in ["Liabilities:CreditCard", DEFAULT_ACCOUNT] {
+            let args = Args::parse_from(["extract", qfx.to_str().unwrap(), "--account", account]);
+            let mut out = Vec::new();
+            with_cwd(dir.path(), || run_with_writer(&args, &qfx, &mut out))
+                .unwrap_or_else(|e| panic!("--account {account} must be honored, got: {e}"));
+            assert!(String::from_utf8(out).unwrap().contains(account));
+        }
+    }
+
+    /// Copilot review on #2263: the guard checked only `args.account`, so an
+    /// `importers.toml` entry or `--ledger` profile naming the same string as
+    /// the default was treated as "nobody named an account" and refused.
+    #[test]
+    fn an_account_named_by_config_is_not_treated_as_unnamed() {
+        let dir = tempfile::tempdir().unwrap();
+        let qfx = cc_qfx(dir.path());
+        // The entry names the DEFAULT string deliberately: that is the case
+        // that distinguishes "named" from "not named".
+        std::fs::write(
+            dir.path().join("importers.toml"),
+            format!(
+                "[[importers]]\nname = \"card\"\ntype = \"ofx\"\n\
+                 account = \"{DEFAULT_ACCOUNT}\"\ncurrency = \"USD\"\n\
+                 filename_pattern = \"*.qfx\"\n"
+            ),
+        )
+        .unwrap();
+
+        let args = Args::parse_from(["extract", qfx.to_str().unwrap()]);
+        let mut out = Vec::new();
+        with_cwd(dir.path(), || run_with_writer(&args, &qfx, &mut out))
+            .expect("an account named by config is named, even if it is the default");
+        assert!(String::from_utf8(out).unwrap().contains(DEFAULT_ACCOUNT));
+    }
+
+    /// The refusal is specific to a contradiction: a bank statement with no
+    /// configured account still imports to the default.
+    #[test]
+    fn an_unconfigured_bank_import_still_uses_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let qfx = dir.path().join("bank.qfx");
+        std::fs::write(
+            &qfx,
+            "OFXHEADER:100\n<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD\n\
+             <BANKACCTFROM><ACCTID>1<ACCTTYPE>CHECKING</BANKACCTFROM>\n\
+             <BANKTRANLIST><STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-50.00\
+             <FITID>t1<NAME>COFFEE</STMTTRN></BANKTRANLIST>\n\
+             </STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>",
+        )
+        .unwrap();
+        let args = Args::parse_from(["extract", qfx.to_str().unwrap()]);
+        let mut out = Vec::new();
+        with_cwd(dir.path(), || run_with_writer(&args, &qfx, &mut out)).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains(DEFAULT_ACCOUNT));
+    }
+
+    /// The guard reasons about `DEFAULT_ACCOUNT` being an asset account, and
+    /// clap fills the same constant in. Pin both so they cannot drift apart.
+    #[test]
+    fn the_default_account_is_what_the_guard_assumes() {
+        assert!(
+            DEFAULT_ACCOUNT.starts_with("Assets:"),
+            "the refusal logic assumes the default is an asset account"
+        );
+        let args = Args::parse_from(["extract", "f.qfx"]);
+        assert_eq!(args.account, None, "an unnamed account must stay None");
+        assert_eq!(args.account_or_default(), DEFAULT_ACCOUNT);
     }
 
     /// Third review pass on #2262: the fix that made a profile outrank

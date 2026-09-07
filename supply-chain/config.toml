@@ -76,10 +76,6 @@ version = "0.17.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ahash]]
-version = "0.7.8"
-criteria = "safe-to-deploy"
-
-[[exemptions.ahash]]
 version = "0.8.12"
 criteria = "safe-to-deploy"
 
@@ -115,10 +111,6 @@ criteria = "safe-to-deploy"
 version = "3.2.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.bitvec]]
-version = "1.0.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.blake3]]
 version = "1.8.7"
 criteria = "safe-to-deploy"
@@ -136,15 +128,7 @@ version = "1.6.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.bytecheck]]
-version = "0.6.12"
-criteria = "safe-to-deploy"
-
-[[exemptions.bytecheck]]
 version = "0.8.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.bytecheck_derive]]
-version = "0.6.12"
 criteria = "safe-to-deploy"
 
 [[exemptions.bytecheck_derive]]
@@ -317,10 +301,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.format_num_pattern]]
 version = "0.9.5"
-criteria = "safe-to-deploy"
-
-[[exemptions.funty]]
-version = "2.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.generic-array]]
@@ -564,15 +544,7 @@ version = "0.1.31"
 criteria = "safe-to-deploy"
 
 [[exemptions.ptr_meta]]
-version = "0.1.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.ptr_meta]]
 version = "0.3.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.ptr_meta_derive]]
-version = "0.1.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.ptr_meta_derive]]
@@ -593,10 +565,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.r-efi]]
 version = "6.0.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.radium]]
-version = "0.7.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.radix_trie]]
@@ -628,10 +596,6 @@ version = "0.5.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.rend]]
-version = "0.4.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.rend]]
 version = "0.5.3"
 criteria = "safe-to-deploy"
 
@@ -644,15 +608,7 @@ version = "0.17.14"
 criteria = "safe-to-deploy"
 
 [[exemptions.rkyv]]
-version = "0.7.46"
-criteria = "safe-to-deploy"
-
-[[exemptions.rkyv]]
 version = "0.8.18"
-criteria = "safe-to-deploy"
-
-[[exemptions.rkyv_derive]]
-version = "0.7.46"
 criteria = "safe-to-deploy"
 
 [[exemptions.rkyv_derive]]
@@ -668,7 +624,7 @@ version = "0.17.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rust_decimal]]
-version = "1.42.1"
+version = "1.43.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rust_decimal_macros]]
@@ -753,6 +709,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.similar]]
 version = "3.2.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.smallvec]]
+version = "1.16.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.spin]]
@@ -937,10 +897,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.winapi-x86_64-pc-windows-gnu]]
 version = "0.4.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.wyz]]
-version = "0.5.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.zerocopy]]

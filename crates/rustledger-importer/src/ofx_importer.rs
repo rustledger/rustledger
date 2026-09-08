@@ -90,11 +90,25 @@ impl OfxImporter {
         // The statement's own closing balance, as an assertion. This is what
         // turns an import from "hope it is complete" into "proven complete":
         // if a transaction were dropped, the assertion fails.
+        // Ambiguous: several statements, one configured account. Taking the
+        // first would emit an assertion describing only part of what was
+        // imported, and a wrong assertion is worse than none — but declining
+        // in silence would be its own bug, so say so.
+        if ledgerbal_count(content) > 1 {
+            warnings.push(format!(
+                "{} statements carry a LEDGERBAL; no balance assertion was emitted \
+                 because they cannot be attributed to one account. Split the file \
+                 per account to get assertions.",
+                ledgerbal_count(content)
+            ));
+        }
+
         // Only alongside transactions. The assertion's job is to prove the
         // transaction set is complete; with nothing extracted there is nothing
         // to prove, and a lone balance from an empty statement reads as an
         // import that did something when it did not.
-        if !directives.is_empty()
+        if ledgerbal_count(content) == 1
+            && !directives.is_empty()
             && let Some(balance) = parse_statement_balance(content)
         {
             let currency = transactions
@@ -254,6 +268,15 @@ struct OfxTransaction {
     /// amount, payee text) is either shared by legitimate duplicates or
     /// changed by the user editing their ledger.
     fitid: Option<String>,
+}
+
+/// How many statements in this file state a closing balance.
+///
+/// More than one means more than one statement, and every transaction here is
+/// posted to a single configured account, so there is no way to say which
+/// balance that account should assert.
+fn ledgerbal_count(content: &str) -> usize {
+    content.matches("<LEDGERBAL").count()
 }
 
 /// The statement's closing balance, from `LEDGERBAL`.
@@ -655,6 +678,56 @@ mod tests {
             "DTASOF 2024-01-31 must assert on 2024-02-01"
         );
         assert_eq!(balances[0].account.as_str(), "Assets:Bank");
+    }
+
+    /// Deep-review finding on #2279: a file with two statements carries two
+    /// closing balances, and every transaction is posted to one configured
+    /// account. Taking the first silently dropped the second and emitted an
+    /// assertion describing only part of the import.
+    #[test]
+    fn several_statements_emit_no_assertion_but_do_warn() {
+        let src = "OFXHEADER:100\n<OFX><BANKMSGSRSV1>\n\
+             <STMTTRNRS><STMTRS><CURDEF>USD\n\
+             <BANKTRANLIST><STMTTRN><DTPOSTED>20240115<TRNAMT>-50.00<FITID>a1\
+             <NAME>US</STMTTRN></BANKTRANLIST>\n\
+             <LEDGERBAL><BALAMT>100.00</BALAMT><DTASOF>20240131</DTASOF></LEDGERBAL>\n\
+             </STMTRS></STMTTRNRS>\n\
+             <STMTTRNRS><STMTRS><CURDEF>EUR\n\
+             <BANKTRANLIST><STMTTRN><DTPOSTED>20240116<TRNAMT>-20.00<FITID>b1\
+             <NAME>EUR</STMTTRN></BANKTRANLIST>\n\
+             <LEDGERBAL><BALAMT>777.00</BALAMT><DTASOF>20240228</DTASOF></LEDGERBAL>\n\
+             </STMTRS></STMTTRNRS>\n</BANKMSGSRSV1></OFX>";
+
+        let result = OfxImporter
+            .extract_from_string(src, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("import succeeds");
+
+        assert_eq!(
+            txn_count(&result),
+            2,
+            "both statements' transactions import"
+        );
+        assert_eq!(
+            balance_count(&result),
+            0,
+            "an unattributable balance must not be guessed at"
+        );
+        assert!(
+            result.warnings.iter().any(|w| w.contains("LEDGERBAL")),
+            "declining must not be silent; got {:?}",
+            result.warnings
+        );
+    }
+
+    /// `DTASOF + 1` has to survive the end of the representable range rather
+    /// than panicking on it.
+    #[test]
+    fn a_dtasof_at_the_end_of_time_yields_no_assertion() {
+        let src = statement_with_ledgerbal("1.00", "99991231");
+        let result = OfxImporter
+            .extract_from_string(&src, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("import succeeds rather than panicking");
+        assert_eq!(balance_count(&result), 0);
     }
 
     /// A partial LEDGERBAL is a statement we do not understand. Guessing at

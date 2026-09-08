@@ -119,7 +119,7 @@
     "package": "npm run build && vsce package --no-dependencies -o rustledger-vscode.vsix"
   },
   "dependencies": {
-    "vscode-languageclient": "^10.1.0"
+    "vscode-languageclient": "^10.1.1"
   },
   "devDependencies": {
     "@types/node": "^26.4.0",

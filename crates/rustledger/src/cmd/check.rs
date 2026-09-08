@@ -216,11 +216,11 @@ impl RuleFilter {
                 .collect()
         };
         Self {
-            include: if args.include_rules.is_empty() {
-                None
-            } else {
-                Some(norm(&args.include_rules))
-            },
+            // An all-blank list (`--include-rules ,,`) normalizes to an empty
+            // set, and `Some(empty)` would match nothing and hide every
+            // diagnostic. Treat it as no filter: the user asked for nothing in
+            // particular, not for nothing at all.
+            include: Some(norm(&args.include_rules)).filter(|s| !s.is_empty()),
             exclude: norm(&args.exclude_rules),
             seen: std::collections::BTreeMap::new(),
             shown_any: false,
@@ -1144,31 +1144,29 @@ mod tests {
     #[test]
     fn filtering_hides_diagnostics_without_changing_the_exit_code() {
         let f = ledger_with_mixed_errors();
-        let failure = format!("{:?}", ExitCode::from(1));
+        let failure = ExitCode::from(1);
 
         let (unfiltered, text) = check_exit(f.path(), &[]);
-        assert_eq!(format!("{unfiltered:?}"), failure, "the ledger has errors");
+        assert_eq!(unfiltered, failure, "the ledger has errors");
         assert!(text.contains("E2001") && text.contains("E1001"));
 
         let (excluded, text) = check_exit(f.path(), &["--exclude-rules", "E2001"]);
         assert!(!text.contains("E2001"), "excluded code must not be shown");
         assert!(text.contains("E1001"), "other codes must survive");
         assert_eq!(
-            format!("{excluded:?}"),
-            failure,
+            excluded, failure,
             "hiding a diagnostic must not turn a failing check into a pass"
         );
 
         let (all_hidden, _) = check_exit(f.path(), &["--exclude-rules", "E2001,E1001"]);
         assert_eq!(
-            format!("{all_hidden:?}"),
-            failure,
+            all_hidden, failure,
             "hiding EVERY diagnostic must still fail"
         );
 
         let (included, text) = check_exit(f.path(), &["--include-rules", "E2001"]);
         assert!(text.contains("E2001") && !text.contains("E1001"));
-        assert_eq!(format!("{included:?}"), failure);
+        assert_eq!(included, failure);
     }
 
     /// Deep-review finding on #2286: the parse path counted the FILTERED
@@ -1186,16 +1184,15 @@ mod tests {
             .unwrap();
         f.flush().unwrap();
 
-        let failure = format!("{:?}", ExitCode::from(1));
+        let failure = ExitCode::from(1);
         let (unfiltered, text) = check_exit(f.path(), &[]);
-        assert_eq!(format!("{unfiltered:?}"), failure);
+        assert_eq!(unfiltered, failure);
         assert!(text.contains("P0012"), "precondition: got\n{text}");
 
         let (excluded, text) = check_exit(f.path(), &["--exclude-rules", "P0012"]);
         assert!(!text.contains("P0012"), "the code must be hidden");
         assert_eq!(
-            format!("{excluded:?}"),
-            failure,
+            excluded, failure,
             "a file that does not parse must never report success"
         );
     }
@@ -1283,12 +1280,11 @@ mod tests {
             "summary must not contradict the error count; got:\n{text}"
         );
 
-        let failure = format!("{:?}", ExitCode::from(1));
+        let failure = ExitCode::from(1);
         let (code, text) = check_exit(&a, &["--exclude-rules", "E0002"]);
         assert!(!text.contains("Duplicate filename"), "excluded code shown");
         assert_eq!(
-            format!("{code:?}"),
-            failure,
+            code, failure,
             "an unreadable ledger must not report success"
         );
     }
@@ -1411,6 +1407,20 @@ mod tests {
         let mut f = RuleFilter::new(&args);
         assert!(f.keep("E2001"));
         assert!(!f.keep("E1001"));
+    }
+
+    /// Copilot review on #2286: an ALL-blank list normalized to an empty set,
+    /// and `Some(empty)` matches nothing, so `--include-rules ,,` hid every
+    /// diagnostic. The user asked for nothing in particular, not for nothing.
+    #[test]
+    fn an_all_blank_include_list_is_not_a_filter() {
+        for raw in [",,", "   ", " , , "] {
+            let args = Args::parse_from(["check", "f.beancount", "--include-rules", raw]);
+            let mut f = RuleFilter::new(&args);
+            assert!(!f.is_filtering(), "input {raw:?} should not filter");
+            assert!(f.keep("E2001"), "input {raw:?} hid a diagnostic");
+            assert!(f.keep("E1001"), "input {raw:?} hid a diagnostic");
+        }
     }
 
     #[test]

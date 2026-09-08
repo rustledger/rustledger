@@ -476,8 +476,8 @@ fn build_check_args(
         lints,
         lint_min_confidence: parse_flag(req, "lint-min-confidence", None, 0.8)?,
         show_summary: bool_flag(req, "show-summary", None),
-        include_rules: list_flag(req, "include-rules"),
-        exclude_rules: list_flag(req, "exclude-rules"),
+        include_rules: flag_values(req, "include-rules", None),
+        exclude_rules: flag_values(req, "exclude-rules", None),
     })
 }
 
@@ -1129,22 +1129,6 @@ fn flag<'a>(
     short: Option<&str>,
 ) -> Option<&'a str> {
     req.flag(long).or_else(|| short.and_then(|s| req.flag(s)))
-}
-
-/// A comma-separated flag, as a list.
-///
-/// Mirrors clap's `value_delimiter = ','` on the same flags, so
-/// `--include-rules E2001,E1001` means the same thing through either front
-/// end. Empty entries are dropped rather than becoming a rule that matches
-/// nothing.
-fn list_flag(req: &agcli::CommandRequest<'_>, long: &str) -> Vec<String> {
-    string_flag(req, long, None).map_or_else(Vec::new, |v| {
-        v.split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string)
-            .collect()
-    })
 }
 
 fn string_flag(req: &agcli::CommandRequest<'_>, long: &str, short: Option<&str>) -> Option<String> {

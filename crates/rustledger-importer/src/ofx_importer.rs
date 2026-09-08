@@ -701,6 +701,35 @@ mod tests {
         assert_eq!(balances[0].account.as_str(), "Assets:Bank");
     }
 
+    /// OFX 1.x omits closing tags, so the element bound cannot rely on
+    /// `</LEDGERBAL>`; the next sibling has to end it. Without this the SGML
+    /// dialect would still read AVAILBAL's amount.
+    #[test]
+    fn the_ledgerbal_bound_works_without_closing_tags() {
+        let sgml = "OFXHEADER:100\n<OFX>\n<BANKMSGSRSV1><STMTTRNRS><STMTRS>\n\
+             <CURDEF>USD\n<BANKTRANLIST>\n\
+             <STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-50.00<FITID>t1<NAME>C\n\
+             </BANKTRANLIST>\n<LEDGERBAL>\n<BALAMT>1000.00\n<DTASOF>20240131\n\
+             <AVAILBAL>\n<BALAMT>250.00\n<DTASOF>20240131\n\
+             </STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+
+        let result = OfxImporter
+            .extract_from_string(sgml, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("import succeeds");
+        let Some(Directive::Balance(b)) = result
+            .directives
+            .iter()
+            .find(|d| matches!(d, Directive::Balance(_)))
+        else {
+            panic!("expected an assertion");
+        };
+        assert_eq!(
+            b.amount.number.to_string(),
+            "1000.00",
+            "took AVAILBAL's amount in the SGML dialect"
+        );
+    }
+
     /// Second review pass on #2279. The `LEDGERBAL` block ran to end-of-input,
     /// so its fields could be filled from whatever followed — and what follows
     /// is nearly always `<AVAILBAL>`, a different balance. A `LEDGERBAL`

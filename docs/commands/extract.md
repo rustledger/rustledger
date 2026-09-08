@@ -131,6 +131,48 @@ file content. It cannot be combined with manual column options like
 rledger extract statement.ofx -a Assets:Bank:Checking
 ```
 
+OFX statements carry two things beyond the transactions themselves, and both
+are used.
+
+**`FITID` becomes a link.** Every transaction gets `^ofx-<id>` from the bank's
+own transaction id, sanitized to the characters a link may contain:
+
+```beancount
+2024-01-15 * "COFFEE SHOP" ^ofx-202401150001
+  Assets:Bank:Checking  -50.00 USD
+  Expenses:Unknown
+```
+
+A link rather than a tag because it is identity, not a category. It is stable
+across re-imports even if you rewrite the payee or narration.
+
+**`LEDGERBAL` becomes a balance assertion**, dated the day after the
+statement's `DTASOF`, because a beancount `balance` asserts the balance at the
+*start* of its date while a bank states the close of business:
+
+```beancount
+2024-02-01 balance Assets:Bank:Checking  1234.56 USD
+```
+
+> **Expect this to fail on a first import, and that is the point.** The
+> assertion says "after these transactions, the account holds exactly this".
+> A ledger containing only one imported statement has no opening balance, so
+> it will not add up:
+>
+> ```
+> Balance failed for Assets:Bank:Checking: expected 1234.56 USD, got -50.00 USD
+> ```
+>
+> Give the account its opening balance (the usual `Equity:Opening-Balances`
+> pattern), or import the earlier statements, and it passes. That is the
+> assertion doing its job: it fails until the account's history is complete,
+> which is the difference between hoping an import is complete and knowing it.
+
+No assertion is emitted when the statement does not state a balance, when the
+`LEDGERBAL` is missing either its amount or its date, or when one file holds
+several statements — their balances cannot be attributed to a single account,
+and a warning says so.
+
 ### Append to Ledger
 
 ```bash

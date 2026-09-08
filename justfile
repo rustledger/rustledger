@@ -355,17 +355,29 @@ nix-refresh-vscode-hash:
     # `nix build .#vscode-extension` with a fixed-output mismatch. CI does this
     # automatically on pull requests (.github/workflows/vscode-npm-deps-hash.yml);
     # this is the same repair by hand.
+    # stderr is kept, not discarded: without it a network or parse failure
+    # reads only as "produced no hash", which does not say why.
+    err=$(mktemp)
+    trap 'rm -f "$err"' EXIT
     computed=$(nix shell nixpkgs#prefetch-npm-deps \
-        -c prefetch-npm-deps packages/vscode/package-lock.json 2>/dev/null | tail -1)
+        -c prefetch-npm-deps packages/vscode/package-lock.json 2>"$err" | tail -1) || true
     case "$computed" in
         sha256-*) ;;
-        *) echo "prefetch-npm-deps produced no hash: '$computed'" >&2; exit 1 ;;
+        *)
+            echo "prefetch-npm-deps produced no hash. Its output follows." >&2
+            sed 's/^/  /' "$err" >&2
+            exit 1
+            ;;
     esac
     pinned=$(grep -oE 'npmDepsHash = "[^"]+"' flake.nix | head -1 | sed 's/.*"\(.*\)"/\1/')
     if [ "$computed" = "$pinned" ]; then
         echo "✓ npmDepsHash is already correct ($pinned)"
         exit 0
     fi
-    sed -i "s|npmDepsHash = \"[^\"]*\"|npmDepsHash = \"$computed\"|" flake.nix
+    # Not `sed -i`: that takes a mandatory suffix argument on BSD/macOS sed and
+    # none on GNU, so there is no spelling that works on both. Write and move.
+    tmp=$(mktemp)
+    sed "s|npmDepsHash = \"[^\"]*\"|npmDepsHash = \"$computed\"|" flake.nix > "$tmp"
+    mv "$tmp" flake.nix
     grep -q "npmDepsHash = \"$computed\"" flake.nix
     echo "✓ npmDepsHash $pinned -> $computed"

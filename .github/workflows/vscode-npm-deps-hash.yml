@@ -50,13 +50,18 @@ jobs:
         id: hash
         run: |
           set -euo pipefail
-          # prefetch-npm-deps writes progress to stderr and the hash to stdout.
+          # prefetch-npm-deps writes progress to stderr and the hash to stdout,
+          # so stderr is captured rather than discarded: a network, auth or
+          # parse failure would otherwise surface only as "produced no hash",
+          # which says nothing about why.
+          err=$(mktemp)
           computed=$(nix shell nixpkgs#prefetch-npm-deps \
-            -c prefetch-npm-deps packages/vscode/package-lock.json 2>/dev/null | tail -1)
+            -c prefetch-npm-deps packages/vscode/package-lock.json 2>"$err" | tail -1) || true
           case "$computed" in
             sha256-*) ;;
             *)
-              echo "::error::prefetch-npm-deps produced no hash: '$computed'"
+              echo "::error::prefetch-npm-deps produced no hash. Its output follows."
+              sed 's/^/  /' "$err" >&2
               exit 1
               ;;
           esac

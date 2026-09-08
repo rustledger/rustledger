@@ -91,7 +91,15 @@ rledger check main.beancount --exclude-rules E2001
 ```
 
 Codes are case-insensitive, and `--exclude-rules` wins over `--include-rules`
-for a code named in both.
+for a code named in both. If `--include-rules` matches none of the diagnostics
+found — usually a mistyped code — `check` says so and lists the codes that were
+present, rather than leaving an error count with nothing under it:
+
+```
+✗ 3 errors
+
+note: --include-rules matched none of the diagnostics found. Present: E1001, E2001
+```
 
 **Filtering changes only what is displayed.** The exit code still reflects
 every error found, so a `--exclude-rules` run that prints nothing still fails

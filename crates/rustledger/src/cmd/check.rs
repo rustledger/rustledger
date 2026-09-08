@@ -203,6 +203,8 @@ struct RuleFilter {
     exclude: std::collections::HashSet<String>,
     /// Every code seen, before filtering. Counted per code for `--show-summary`.
     seen: std::collections::BTreeMap<String, usize>,
+    /// Whether any diagnostic survived the filter.
+    shown_any: bool,
 }
 
 impl RuleFilter {
@@ -221,6 +223,7 @@ impl RuleFilter {
             },
             exclude: norm(&args.exclude_rules),
             seen: std::collections::BTreeMap::new(),
+            shown_any: false,
         }
     }
 
@@ -234,7 +237,23 @@ impl RuleFilter {
         if self.exclude.contains(&code) {
             return false;
         }
-        self.include.as_ref().is_none_or(|inc| inc.contains(&code))
+        let keep = self.include.as_ref().is_none_or(|inc| inc.contains(&code));
+        self.shown_any |= keep;
+        keep
+    }
+
+    /// The codes actually present, for when a filter matched none of them.
+    fn present_codes(&self) -> String {
+        self.seen.keys().cloned().collect::<Vec<_>>().join(", ")
+    }
+
+    /// True when `--include-rules` hid everything there was to see.
+    ///
+    /// Distinguishable from a clean ledger, and worth saying: the usual cause
+    /// is a mistyped code, and the output otherwise shows an error count with
+    /// nothing under it and no clue why.
+    fn include_matched_nothing(&self) -> bool {
+        self.include.is_some() && !self.shown_any && !self.seen.is_empty()
     }
 
     fn is_filtering(&self) -> bool {
@@ -1034,6 +1053,17 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     // Suppressed in JSON mode: a consumer there has the codes already and can
     // count them itself, and a second shape in the same document would be a
     // schema change for no gain.
+    // A filter that hid everything looks identical to a ledger with nothing
+    // to say, except for an error count with no errors under it. Name the
+    // codes that were actually there so a typo is obvious.
+    if rules.include_matched_nothing() && !json_mode && !args.quiet {
+        writeln!(
+            stdout,
+            "\nnote: --include-rules matched none of the diagnostics found. Present: {}",
+            rules.present_codes()
+        )?;
+    }
+
     // JSON carries the same tally in `rule_summary`, so this is the text form
     // only rather than a second shape in the same document.
     if args.show_summary && !json_mode && !args.quiet {
@@ -1168,6 +1198,66 @@ mod tests {
             failure,
             "a file that does not parse must never report success"
         );
+    }
+
+    /// Third review pass on #2286: a mistyped code silently hid everything.
+    /// The output was an error count with nothing under it, which reads as
+    /// "that code is not among these errors" rather than "that is not a code".
+    #[test]
+    fn an_include_filter_that_matches_nothing_says_so() {
+        let f = ledger_with_mixed_errors();
+
+        let (_, text) = check_exit(f.path(), &["--include-rules", "E20001"]);
+        assert!(
+            text.contains("matched none"),
+            "a filter hiding everything must say so; got:\n{text}"
+        );
+        assert!(
+            text.contains("E2001") && text.contains("E1001"),
+            "and must name what WAS present, so the typo is obvious; got:\n{text}"
+        );
+
+        // The note must not fire when the filter is working.
+        let (_, text) = check_exit(f.path(), &["--include-rules", "E2001"]);
+        assert!(!text.contains("matched none"), "spurious note:\n{text}");
+
+        // Nor when there was simply nothing to find.
+        let dir = tempfile::tempdir().unwrap();
+        let clean = dir.path().join("clean.beancount");
+        std::fs::write(&clean, "2020-01-01 open Assets:B USD\n").unwrap();
+        let (_, text) = check_exit(&clean, &["--include-rules", "E2001"]);
+        assert!(!text.contains("matched none"), "spurious note:\n{text}");
+
+        // Nor for --exclude-rules, where hiding everything is a deliberate ask.
+        let (_, text) = check_exit(f.path(), &["--exclude-rules", "E2001,E1001"]);
+        assert!(!text.contains("matched none"), "spurious note:\n{text}");
+    }
+
+    /// Filtering must not change the warning count either, for the same reason
+    /// it must not change the error count.
+    #[test]
+    fn filtering_does_not_change_the_warning_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("w.beancount");
+        std::fs::write(
+            &p,
+            "2020-01-01 open Assets:Bank USD\n\
+             2020-01-01 open Expenses:X USD\n\
+             2024-01-15 * \"single posting\"\n  Assets:Bank  -10.00 USD\n",
+        )
+        .unwrap();
+
+        let count = |extra: &[&str]| -> u64 {
+            let mut argv = vec!["check", p.to_str().unwrap(), "--format", "json"];
+            argv.extend_from_slice(extra);
+            let args = Args::parse_from(argv);
+            let mut out = Vec::new();
+            run_with_writer(&args, &mut out).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+            v["warning_count"].as_u64().unwrap()
+        };
+
+        assert_eq!(count(&[]), count(&["--exclude-rules", "E3004"]));
     }
 
     /// Second review pass on #2286: only the parse and validation loops were

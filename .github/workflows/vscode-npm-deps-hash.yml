@@ -8,10 +8,18 @@
 # package landed red until somebody recomputed the hash by hand (#2109, #2202,
 # #2243). `build` requires that job, so those PRs could never merge unattended.
 #
-# This recomputes the hash and commits it to the pull request. It is separate
-# from the `VS Code Extension (Nix)` job on purpose: that job verifies, this one
-# repairs, and a verifier that silently rewrites what it is checking is worse
+# This recomputes the hash and reports the value to fix. It is separate from the
+# `VS Code Extension (Nix)` job on purpose: that job verifies, this one
+# diagnoses, and a verifier that silently rewrites what it is checking is worse
 # than one that fails.
+#
+# It deliberately does NOT push the fix. Doing that needs `contents: write` in a
+# workflow that checks out pull-request code and runs a tool over an
+# attacker-controllable lockfile, which is the unsafe-checkout pattern CodeQL
+# flags and is worth avoiding for a one-line repair. Committing automatically
+# would need the two-stage `workflow_run` split, where the privileged half never
+# checks out untrusted code — worth doing only if this proves to be a real
+# nuisance in practice. `just nix-refresh-vscode-hash` is the one-command fix.
 name: VS Code npmDepsHash
 
 on:
@@ -29,18 +37,12 @@ concurrency:
 
 jobs:
   refresh:
-    name: Refresh npmDepsHash
+    name: Check npmDepsHash
     runs-on: ubuntu-latest
-    permissions:
-      # Needed to push the corrected hash back to the pull request branch.
-      contents: write
     steps:
+      # The default merge-commit checkout, with no token to push with: this job
+      # only reads the lockfile and reports.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Check out the PR branch itself rather than the merge commit, so a
-          # push goes back to the contributor's branch.
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.ref }}
 
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
@@ -80,7 +82,7 @@ jobs:
       # Always report the correct value, so a pull request this job cannot push
       # to (a fork) still says exactly what to change rather than leaving the
       # contributor with a bare Nix hash mismatch.
-      - name: Report
+      - name: Report the value to set
         if: steps.hash.outputs.matches == 'false'
         run: |
           {
@@ -92,28 +94,7 @@ jobs:
             echo 'npmDepsHash = "${{ steps.hash.outputs.computed }}";'
             echo '```'
             echo
-            echo 'Locally: `nix shell nixpkgs#prefetch-npm-deps -c prefetch-npm-deps packages/vscode/package-lock.json`'
+            echo 'Or run `just nix-refresh-vscode-hash`, which edits flake.nix in place.'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Commit the refreshed hash
-        # Only a branch in this repository can be pushed to. A fork PR gets the
-        # summary above instead.
-        if: >-
-          steps.hash.outputs.matches == 'false' &&
-          github.event.pull_request.head.repo.full_name == github.repository
-        run: |
-          set -euo pipefail
-          sed -i 's|npmDepsHash = "[^"]*"|npmDepsHash = "${{ steps.hash.outputs.computed }}"|' flake.nix
-
-          # Belt and braces: a sed that matched nothing would otherwise commit
-          # an empty change and report success.
-          grep -q 'npmDepsHash = "${{ steps.hash.outputs.computed }}"' flake.nix
-
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add flake.nix
-          git commit \
-            -m "chore(nix): refresh vscode npmDepsHash for the updated lockfile" \
-            -m "packages/vscode/package-lock.json changed, which invalidates the fixed-output hash flake.nix pins over it. Recomputed automatically." \
-            -m "${{ steps.hash.outputs.pinned }} -> ${{ steps.hash.outputs.computed }}"
-          git push
+          echo "::error::flake.nix npmDepsHash is stale; set it to ${{ steps.hash.outputs.computed }}"
+          exit 1

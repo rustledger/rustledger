@@ -35,10 +35,11 @@ npm install && npm run build
 invalidates it and `nix build .#vscode-extension` fails with a fixed-output
 mismatch, which is what the `VS Code Extension (Nix)` job reports.
 
-On a pull request this is repaired automatically by
-`.github/workflows/vscode-npm-deps-hash.yml`, which recomputes the hash and
-commits it to the branch. For a fork PR it cannot push, so it writes the correct
-value to the job summary instead.
+On a pull request, `.github/workflows/vscode-npm-deps-hash.yml` recomputes the
+hash and fails with the exact value to set, in the error and in the job summary.
+It reports rather than commits: pushing a fix would need write permission in a
+workflow that checks out pull-request code and runs a tool over its lockfile,
+which is a pattern worth avoiding for a one-line repair.
 
 To fix it by hand:
 

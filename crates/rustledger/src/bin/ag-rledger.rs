@@ -189,13 +189,122 @@ fn format_command(name: &'static str, description: &'static str) -> Command {
         })
 }
 
+/// Which report-specific flags each report actually reads.
+///
+/// One table, used both to build the usage string and to reject a flag that
+/// does not apply. They disagreed before: the usage string advertised the
+/// UNION for every report, `allow_unknown_flags` removed the safety net, and
+/// `build_report` read only the flags its variant had a field for — so
+/// `report income --from 2015-01-01` returned the whole-history figure with
+/// `"ok": true` (#2280). Deriving both from one list is what stops that
+/// recurring.
+///
+/// Flags handled for every report — `--file`, `--format`, `--verbose`,
+/// `--select`, `--compact`, `--profile` — are deliberately absent here.
+const REPORT_FLAGS: &[(&str, &[&str])] = &[
+    ("balances", &["account"]),
+    ("balsheet", &[]),
+    ("income", &[]),
+    ("journal", &["account", "limit"]),
+    ("holdings", &["account"]),
+    ("networth", &["period", "currency", "account", "no-zero"]),
+    ("accounts", &[]),
+    ("commodities", &[]),
+    ("stats", &[]),
+    ("prices", &["commodity"]),
+    ("budget", &["account", "from", "to", "children"]),
+];
+
+/// The report-specific flags, grouped by report, for the usage string.
+///
+/// Built from [`REPORT_FLAGS`] so the usage text cannot promise a flag the
+/// handler ignores.
+fn report_flag_usage() -> String {
+    REPORT_FLAGS
+        .iter()
+        .filter(|(_, flags)| !flags.is_empty())
+        .map(|(report, flags)| {
+            let rendered: Vec<String> = flags.iter().map(|f| format!("--{f}")).collect();
+            format!("{report}: {}", rendered.join(" "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Reject a report-specific flag that the named report does not read.
+///
+/// Native `rledger` already rejects these (`error: unexpected argument
+/// '--from' found`). The agent surface accepted them and returned an
+/// unfiltered figure with a success envelope, which is the worse of the two
+/// failures: nothing downstream can notice (#2280).
+fn reject_inapplicable_flags(
+    report_name: &str,
+    req: &agcli::CommandRequest<'_>,
+) -> Result<(), CommandError> {
+    let Some(canonical) = parse_report_name(report_name) else {
+        // An unknown report name is reported by `build_report`, with the list
+        // of valid ones. Saying it twice, differently, would be worse.
+        return Ok(());
+    };
+    let Some((_, applicable)) = REPORT_FLAGS.iter().find(|(r, _)| *r == canonical) else {
+        return Ok(());
+    };
+
+    // Every report-specific flag known to any report; anything outside this set
+    // is a global flag or a genuine unknown, neither of which is ours to judge.
+    let supplied: Vec<&str> = REPORT_FLAGS
+        .iter()
+        .flat_map(|(_, flags)| flags.iter().copied())
+        .filter(|flag| !applicable.contains(flag))
+        .filter(|flag| flag_was_supplied(req, flag))
+        .collect();
+
+    if supplied.is_empty() {
+        return Ok(());
+    }
+
+    let named: Vec<String> = supplied.iter().map(|f| format!("--{f}")).collect();
+    let hint = if applicable.is_empty() {
+        format!("`{canonical}` takes no report-specific flags.")
+    } else {
+        let ok: Vec<String> = applicable.iter().map(|f| format!("--{f}")).collect();
+        format!("`{canonical}` accepts: {}.", ok.join(", "))
+    };
+    // A distinct code, not a generic usage error: an agent that asked for a
+    // date window needs to tell "the window was refused" apart from "the file
+    // was wrong", and act on it.
+    Err(CommandError::new(
+        format!("report `{canonical}` does not accept {}", named.join(", ")),
+        "INAPPLICABLE_FLAG",
+        hint,
+    )
+    .exit_code(agcli::ExitCode::USAGE))
+}
+
+/// Whether `--flag` (or `--flag=value`) appears in the raw invocation.
+///
+/// Read from the raw args rather than the parsed flags because a flag the
+/// handler never reads leaves no other trace — which is precisely how these
+/// went unnoticed.
+fn flag_was_supplied(req: &agcli::CommandRequest<'_>, long: &str) -> bool {
+    let exact = format!("--{long}");
+    let prefixed = format!("--{long}=");
+    req.invocation()
+        .raw_args()
+        .iter()
+        .any(|arg| arg == &exact || arg.starts_with(&prefixed))
+}
+
 fn report_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
-        .usage(
-            "ag-rledger report [<file>] <report> [--file <file>] [--format <format>] [--verbose] \
-             [-v] [--account <account>] [--limit <n>] [--period <period>] [--currency <currency>] \
-             [--no-zero] [--from <YYYY-MM-DD>] [--to <YYYY-MM-DD>] [--children]",
-        )
+        .usage(Box::leak(
+            format!(
+                "ag-rledger report [<file>] <report> [--file <file>] [--format <format>] \
+                 [--verbose] [-v]  |  report-specific flags — {}",
+                report_flag_usage()
+            )
+            .into_boxed_str(),
+        ))
         .allow_unknown_flags()
         .allow_extra_args()
         .default_next_action(NextAction::new(
@@ -597,6 +706,9 @@ fn build_report(
     req: &agcli::CommandRequest<'_>,
 ) -> Result<rustledger::cmd::report_cmd::Report, CommandError> {
     use rustledger::cmd::report_cmd::Report;
+    // Before building: a flag this report cannot read must not be silently
+    // dropped, which is what returned an unfiltered figure as a success (#2280).
+    reject_inapplicable_flags(report_name, req)?;
     match parse_report_name(report_name).as_deref() {
         Some("balances") => Ok(Report::Balances {
             account: string_flag(req, "account", Some("a")),
@@ -628,22 +740,13 @@ fn build_report(
             to: string_flag(req, "to", None),
             children: bool_flag(req, "children", None),
         }),
+        // Valid names come from REPORT_FLAGS rather than a third hand-kept
+        // list. Two lists that must agree is how the usage string came to
+        // advertise flags the handler ignored (#2280); three would be worse.
         _ => Err(invalid_enum(
             "report",
             report_name,
-            &[
-                "balances",
-                "balsheet",
-                "income",
-                "journal",
-                "holdings",
-                "networth",
-                "accounts",
-                "commodities",
-                "stats",
-                "prices",
-                "budget",
-            ],
+            &REPORT_FLAGS.iter().map(|(r, _)| *r).collect::<Vec<_>>(),
         )),
     }
 }
@@ -1302,4 +1405,88 @@ fn parse_alias_expansion(expansion: &str) -> Vec<String> {
         parts.push(current);
     }
     parts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every report in the flag table must be a report `build_report` handles.
+    ///
+    /// The table drives the usage string, the rejection, and the list of valid
+    /// names, so an entry `build_report` does not know about would advertise a
+    /// report that cannot run.
+    #[test]
+    fn every_tabled_report_is_buildable() {
+        for (report, _) in REPORT_FLAGS {
+            assert!(
+                parse_report_name(report).is_some(),
+                "`{report}` is in REPORT_FLAGS but is not a recognized report name"
+            );
+        }
+    }
+
+    /// #2280: the usage string advertised the union of every report's flags,
+    /// so `report income` promised `--from`/`--to`/`--period`/`--children` and
+    /// then discarded them. It is now derived from the table, so a report that
+    /// reads nothing cannot appear as accepting something.
+    #[test]
+    fn the_usage_string_does_not_promise_flags_a_report_ignores() {
+        let usage = report_flag_usage();
+        for (report, flags) in REPORT_FLAGS {
+            if flags.is_empty() {
+                assert!(
+                    !usage.contains(&format!("{report}:")),
+                    "`{report}` reads no report-specific flags but appears in the usage string"
+                );
+            } else {
+                assert!(
+                    usage.contains(&format!("{report}:")),
+                    "`{report}` reads flags but is missing from the usage string"
+                );
+                for flag in *flags {
+                    assert!(
+                        usage.contains(&format!("--{flag}")),
+                        "`{report}` reads --{flag} but the usage string omits it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The reports from #2280 read no report-specific flags at all.
+    ///
+    /// Pinned by name rather than derived, so adding a flag to one of these
+    /// table entries fails here unless `build_report` is wired to read it —
+    /// which is the drift that caused the bug. (An earlier draft of this test
+    /// asserted `flags.contains(flag)` while iterating `flags`, which cannot
+    /// fail and proved nothing.)
+    #[test]
+    fn the_reports_that_take_no_flags_still_take_none() {
+        for report in ["income", "balsheet", "accounts", "commodities", "stats"] {
+            let (_, flags) = REPORT_FLAGS
+                .iter()
+                .find(|(r, _)| *r == report)
+                .unwrap_or_else(|| panic!("`{report}` missing from REPORT_FLAGS"));
+            assert!(
+                flags.is_empty(),
+                "`{report}` now lists {flags:?}; wire them in build_report before adding them here"
+            );
+        }
+    }
+
+    /// `--from` and `--to` belong to `budget` alone. This is the specific
+    /// claim #2280 made and the one most likely to regress, since a date
+    /// window reads as globally applicable.
+    #[test]
+    fn date_window_flags_belong_to_budget_only() {
+        for (report, flags) in REPORT_FLAGS {
+            let has_dates = flags.contains(&"from") || flags.contains(&"to");
+            assert_eq!(
+                has_dates,
+                *report == "budget",
+                "`{report}` date-flag ownership changed: {flags:?}"
+            );
+        }
+    }
 }

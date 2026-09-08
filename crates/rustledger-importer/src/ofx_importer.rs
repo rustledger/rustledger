@@ -87,6 +87,46 @@ impl OfxImporter {
             }
         }
 
+        // The statement's own closing balance, as an assertion. This is what
+        // turns an import from "hope it is complete" into "proven complete":
+        // if a transaction were dropped, the assertion fails.
+        // Ambiguous: several statements, one configured account. Taking the
+        // first would emit an assertion describing only part of what was
+        // imported, and a wrong assertion is worse than none — but declining
+        // in silence would be its own bug, so say so.
+        if ledgerbal_count(content) > 1 {
+            warnings.push(format!(
+                "{} statements carry a LEDGERBAL; no balance assertion was emitted \
+                 because they cannot be attributed to one account. Split the file \
+                 per account to get assertions.",
+                ledgerbal_count(content)
+            ));
+        }
+
+        // Only alongside transactions. The assertion's job is to prove the
+        // transaction set is complete; with nothing extracted there is nothing
+        // to prove, and a lone balance from an empty statement reads as an
+        // import that did something when it did not.
+        if ledgerbal_count(content) == 1
+            && !directives.is_empty()
+            && let Some(balance) = parse_statement_balance(content)
+        {
+            // An empty `<CURDEF>` is `Some("")`, not `None`, so it has to be
+            // filtered rather than left to `unwrap_or`: otherwise the
+            // assertion carries an empty currency, which is not a currency.
+            // `build_transaction` rejects the same value for the same reason.
+            let currency = transactions
+                .first()
+                .and_then(|t| t.statement_currency.as_deref())
+                .filter(|c| !c.trim().is_empty())
+                .unwrap_or(default_currency);
+            directives.push(Directive::Balance(rustledger_core::Balance::new(
+                balance.assert_on,
+                config.account.as_str(),
+                Amount::new(balance.amount, currency),
+            )));
+        }
+
         let mut result = ImportResult::new(directives);
         for warning in warnings {
             result = result.with_warning(warning);
@@ -183,6 +223,16 @@ impl OfxImporter {
             txn_builder = txn_builder.with_payee(name);
         }
 
+        // The bank's own transaction id, as a link.
+        //
+        // A link rather than a tag because this is identity, not a category:
+        // tags group many entries under one label, links connect specific
+        // related ones. It also keeps thousands of unique ids out of the tag
+        // namespace, where they would swamp autocomplete and tag queries.
+        if let Some(link) = txn.fitid.as_deref().and_then(fitid_link) {
+            txn_builder = txn_builder.with_link(link);
+        }
+
         Ok(txn_builder)
     }
 }
@@ -216,6 +266,123 @@ struct OfxTransaction {
     memo: Option<String>,
     currency: Option<String>,
     statement_currency: Option<String>,
+    /// The bank's own `FITID` for this transaction, if it gave one.
+    ///
+    /// Financial Institution Transaction ID: unique and stable per account,
+    /// which is the property dedup wants. Everything else we match on (date,
+    /// amount, payee text) is either shared by legitimate duplicates or
+    /// changed by the user editing their ledger.
+    fitid: Option<String>,
+}
+
+/// How many statements in this file state a closing balance.
+///
+/// More than one means more than one statement, and every transaction here is
+/// posted to a single configured account, so there is no way to say which
+/// balance that account should assert.
+fn ledgerbal_count(content: &str) -> usize {
+    content.matches("<LEDGERBAL").count()
+}
+
+/// The statement's closing balance, from `LEDGERBAL`.
+///
+/// `DTASOF` is the moment the bank states the balance held, so it is the
+/// closing balance for that day.
+struct StatementBalance {
+    amount: rust_decimal::Decimal,
+    /// The date the balance is asserted for, already adjusted (see below).
+    assert_on: NaiveDate,
+}
+
+/// Parse `LEDGERBAL` into a balance assertion.
+///
+/// **The date is deliberately DTASOF + 1 day.** A beancount `balance`
+/// directive asserts the balance at the *beginning* of its date, before that
+/// day's own transactions; a bank's `DTASOF` balance is the closing figure
+/// *after* them. Emitting it verbatim would assert yesterday's balance against
+/// today's date and fail on any statement whose last day has activity.
+/// Verified against the validator: an assertion dated the same day as a
+/// transaction sees the pre-transaction balance.
+///
+/// Returns `None` when either field is missing or unparsable, since a balance
+/// without a date cannot be placed and a date without an amount asserts
+/// nothing. A partial `LEDGERBAL` is a statement we do not understand, and
+/// guessing at one is how a wrong assertion gets into someone's ledger.
+fn parse_statement_balance(content: &str) -> Option<StatementBalance> {
+    let block_start = content.find("<LEDGERBAL")?;
+    let rest = &content[block_start..];
+
+    // Bound the element, the same way `STMTTRN` is bounded above. Reading to
+    // end-of-input let the fields be filled from whatever came next, and what
+    // comes next is nearly always `<AVAILBAL>` — a DIFFERENT balance. A
+    // `LEDGERBAL` missing its `BALAMT` then asserted the *available* balance
+    // as the ledger balance: a silently wrong number, which is the exact
+    // outcome the "a partial LEDGERBAL yields nothing" rule below exists to
+    // prevent. OFX 1.x may omit the close tag, so a sibling or a parent close
+    // ends the element too.
+    let end = [
+        "</LEDGERBAL>",
+        "<AVAILBAL",
+        "</STMTRS>",
+        "</CCSTMTRS>",
+        "</OFX>",
+    ]
+    .iter()
+    .filter_map(|marker| rest.find(marker))
+    .min()
+    .unwrap_or(rest.len());
+    let block = &rest[..end];
+
+    let amount: rust_decimal::Decimal = leaf(block, "BALAMT")?.trim().parse().ok()?;
+    let as_of = ofx_date_to_naive(&leaf(block, "DTASOF")?).ok()?;
+
+    Some(StatementBalance {
+        amount,
+        assert_on: as_of.tomorrow().ok()?,
+    })
+}
+
+/// Prefix marking a link as a bank-assigned OFX transaction id.
+///
+/// Namespaced so it cannot collide with a link the user wrote, and so dedup
+/// can tell "this is an id I can trust" from "this is someone's invoice tag".
+const FITID_LINK_PREFIX: &str = "ofx-";
+
+/// Render a `FITID` as a beancount link, or `None` if nothing usable survives.
+///
+/// Links lex as `\^[a-zA-Z0-9-_/.]+`, and a `FITID` is an opaque bank string
+/// that need not respect that. Anything outside the set becomes `-`, so the
+/// emitted ledger re-parses; without this an id containing a space or a colon
+/// would produce a file rustledger itself could not read.
+///
+/// Distinctness is preserved for the ids this matters for: two different ids
+/// only collide after sanitizing if they differ *only* in characters that all
+/// map to `-`, which no real FITID scheme does. Dedup treats a link as strong
+/// evidence, not proof, so a pathological collision degrades to the fuzzy
+/// match rather than silently dropping a transaction.
+fn fitid_link(fitid: &str) -> Option<String> {
+    let cleaned: String = fitid
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    // An id that sanitizes to only separators carries no information, and the
+    // resulting link would be one every such transaction shares — worse than
+    // no link at all. `-` is not the only separator that survives: `.`, `_`
+    // and `/` are all in the link charset, so `...` and `__/__` pass a
+    // `trim_matches('-')` check while meaning exactly as little. Require a
+    // character that actually identifies something.
+    if !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(format!("{FITID_LINK_PREFIX}{cleaned}"))
 }
 
 /// Which side of the balance sheet an OFX statement describes.
@@ -360,6 +527,7 @@ fn parse_ofx(content: &str) -> Result<Vec<OfxTransaction>> {
             .unwrap_or(rest.len());
         let block = &rest[..end];
         transactions.push(OfxTransaction {
+            fitid: leaf(block, "FITID"),
             date_posted: leaf(block, "DTPOSTED").unwrap_or_default(),
             amount: leaf(block, "TRNAMT").unwrap_or_default(),
             name: leaf(block, "NAME"),
@@ -481,6 +649,329 @@ impl Importer for OfxImporter {
 mod tests {
     use super::*;
     use crate::config::{CsvConfig, ImporterType};
+
+    /// Count directives by kind.
+    ///
+    /// These used to assert a bare `directives.len()`. Now that a statement
+    /// with `LEDGERBAL` also yields a balance assertion, a total count no
+    /// longer says what the test means, so they say it directly.
+    fn txn_count(r: &ImportResult) -> usize {
+        r.directives
+            .iter()
+            .filter(|d| matches!(d, Directive::Transaction(_)))
+            .count()
+    }
+
+    fn balance_count(r: &ImportResult) -> usize {
+        r.directives
+            .iter()
+            .filter(|d| matches!(d, Directive::Balance(_)))
+            .count()
+    }
+
+    /// Copilot review on #2279: an empty `<CURDEF>` is `Some("")`, not `None`,
+    /// so it slipped past `unwrap_or` and produced an assertion whose currency
+    /// was the empty string.
+    #[test]
+    fn an_empty_curdef_falls_back_to_the_configured_currency() {
+        let src = "OFXHEADER:100\n<OFX><BANKMSGSRSV1><STMTRS><CURDEF>\n\
+             <BANKTRANLIST><STMTTRN><DTPOSTED>20240115<TRNAMT>-50.00<FITID>t1\
+             <NAME>C</STMTTRN></BANKTRANLIST>\n\
+             <LEDGERBAL><BALAMT>10.00</BALAMT><DTASOF>20240131</DTASOF></LEDGERBAL>\n\
+             </STMTRS></BANKMSGSRSV1></OFX>";
+
+        let result = OfxImporter
+            .extract_from_string(src, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("import succeeds");
+        let Some(Directive::Balance(b)) = result
+            .directives
+            .iter()
+            .find(|d| matches!(d, Directive::Balance(_)))
+        else {
+            panic!("expected an assertion");
+        };
+        assert_eq!(
+            b.amount.currency.as_str(),
+            "USD",
+            "an empty CURDEF must not become an empty currency"
+        );
+    }
+
+    // ---- LEDGERBAL -> balance assertion --------------------------------------
+
+    fn statement_with_ledgerbal(balamt: &str, dtasof: &str) -> String {
+        format!(
+            "OFXHEADER:100\n<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD\n\
+             <BANKTRANLIST><STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-50.00\
+             <FITID>t1<NAME>COFFEE</STMTTRN></BANKTRANLIST>\n\
+             <LEDGERBAL><BALAMT>{balamt}</BALAMT><DTASOF>{dtasof}</DTASOF></LEDGERBAL>\n\
+             </STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>"
+        )
+    }
+
+    /// A beancount `balance` asserts the balance at the START of its date,
+    /// before that day's transactions. A bank's DTASOF figure is the CLOSING
+    /// balance, after them. So the assertion must be dated the following day,
+    /// or every statement whose last day has activity would fail.
+    #[test]
+    fn ledgerbal_is_asserted_the_day_after_dtasof() {
+        let src = statement_with_ledgerbal("1234.56", "20240131");
+        let result = OfxImporter
+            .extract_from_string(&src, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("import succeeds");
+
+        let balances: Vec<_> = result
+            .directives
+            .iter()
+            .filter_map(|d| match d {
+                Directive::Balance(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(balances.len(), 1, "expected exactly one assertion");
+        assert_eq!(
+            balances[0].date.to_string(),
+            "2024-02-01",
+            "DTASOF 2024-01-31 must assert on 2024-02-01"
+        );
+        assert_eq!(balances[0].account.as_str(), "Assets:Bank");
+    }
+
+    /// OFX 1.x omits closing tags, so the element bound cannot rely on
+    /// `</LEDGERBAL>`; the next sibling has to end it. Without this the SGML
+    /// dialect would still read AVAILBAL's amount.
+    #[test]
+    fn the_ledgerbal_bound_works_without_closing_tags() {
+        let sgml = "OFXHEADER:100\n<OFX>\n<BANKMSGSRSV1><STMTTRNRS><STMTRS>\n\
+             <CURDEF>USD\n<BANKTRANLIST>\n\
+             <STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-50.00<FITID>t1<NAME>C\n\
+             </BANKTRANLIST>\n<LEDGERBAL>\n<BALAMT>1000.00\n<DTASOF>20240131\n\
+             <AVAILBAL>\n<BALAMT>250.00\n<DTASOF>20240131\n\
+             </STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+
+        let result = OfxImporter
+            .extract_from_string(sgml, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("import succeeds");
+        let Some(Directive::Balance(b)) = result
+            .directives
+            .iter()
+            .find(|d| matches!(d, Directive::Balance(_)))
+        else {
+            panic!("expected an assertion");
+        };
+        assert_eq!(
+            b.amount.number.to_string(),
+            "1000.00",
+            "took AVAILBAL's amount in the SGML dialect"
+        );
+    }
+
+    /// Second review pass on #2279. The `LEDGERBAL` block ran to end-of-input,
+    /// so its fields could be filled from whatever followed — and what follows
+    /// is nearly always `<AVAILBAL>`, a different balance. A `LEDGERBAL`
+    /// missing its `BALAMT` asserted the AVAILABLE balance as the ledger
+    /// balance: a silently wrong number in the user's ledger.
+    #[test]
+    fn ledgerbal_fields_are_not_taken_from_availbal() {
+        let stmt = |ledgerbal: &str| {
+            format!(
+                "OFXHEADER:100\n<OFX><BANKMSGSRSV1><STMTRS><CURDEF>USD\n\
+                 <BANKTRANLIST><STMTTRN><DTPOSTED>20240115<TRNAMT>-50.00<FITID>t1\
+                 <NAME>C</STMTTRN></BANKTRANLIST>\n{ledgerbal}\n\
+                 <AVAILBAL><BALAMT>250.00</BALAMT><DTASOF>20240131</DTASOF></AVAILBAL>\n\
+                 </STMTRS></BANKMSGSRSV1></OFX>"
+            )
+        };
+
+        for (case, ledgerbal) in [
+            (
+                "no DTASOF",
+                "<LEDGERBAL><BALAMT>1000.00</BALAMT></LEDGERBAL>",
+            ),
+            (
+                "no BALAMT",
+                "<LEDGERBAL><DTASOF>20240131</DTASOF></LEDGERBAL>",
+            ),
+            ("empty", "<LEDGERBAL></LEDGERBAL>"),
+        ] {
+            let result = OfxImporter
+                .extract_from_string(&stmt(ledgerbal), &ofx_cfg("Assets:Bank", "USD"))
+                .expect("import succeeds");
+            assert_eq!(
+                balance_count(&result),
+                0,
+                "{case}: a partial LEDGERBAL must not borrow from AVAILBAL"
+            );
+        }
+
+        // The complement: a complete LEDGERBAL still works with AVAILBAL after it.
+        let result = OfxImporter
+            .extract_from_string(
+                &stmt("<LEDGERBAL><BALAMT>1000.00</BALAMT><DTASOF>20240131</DTASOF></LEDGERBAL>"),
+                &ofx_cfg("Assets:Bank", "USD"),
+            )
+            .expect("import succeeds");
+        assert_eq!(balance_count(&result), 1);
+        let Some(Directive::Balance(b)) = result
+            .directives
+            .iter()
+            .find(|d| matches!(d, Directive::Balance(_)))
+        else {
+            panic!("expected an assertion");
+        };
+        assert_eq!(
+            b.amount.number.to_string(),
+            "1000.00",
+            "the LEDGERBAL amount, not AVAILBAL's"
+        );
+    }
+
+    /// Deep-review finding on #2279: a file with two statements carries two
+    /// closing balances, and every transaction is posted to one configured
+    /// account. Taking the first silently dropped the second and emitted an
+    /// assertion describing only part of the import.
+    #[test]
+    fn several_statements_emit_no_assertion_but_do_warn() {
+        let src = "OFXHEADER:100\n<OFX><BANKMSGSRSV1>\n\
+             <STMTTRNRS><STMTRS><CURDEF>USD\n\
+             <BANKTRANLIST><STMTTRN><DTPOSTED>20240115<TRNAMT>-50.00<FITID>a1\
+             <NAME>US</STMTTRN></BANKTRANLIST>\n\
+             <LEDGERBAL><BALAMT>100.00</BALAMT><DTASOF>20240131</DTASOF></LEDGERBAL>\n\
+             </STMTRS></STMTTRNRS>\n\
+             <STMTTRNRS><STMTRS><CURDEF>EUR\n\
+             <BANKTRANLIST><STMTTRN><DTPOSTED>20240116<TRNAMT>-20.00<FITID>b1\
+             <NAME>EUR</STMTTRN></BANKTRANLIST>\n\
+             <LEDGERBAL><BALAMT>777.00</BALAMT><DTASOF>20240228</DTASOF></LEDGERBAL>\n\
+             </STMTRS></STMTTRNRS>\n</BANKMSGSRSV1></OFX>";
+
+        let result = OfxImporter
+            .extract_from_string(src, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("import succeeds");
+
+        assert_eq!(
+            txn_count(&result),
+            2,
+            "both statements' transactions import"
+        );
+        assert_eq!(
+            balance_count(&result),
+            0,
+            "an unattributable balance must not be guessed at"
+        );
+        assert!(
+            result.warnings.iter().any(|w| w.contains("LEDGERBAL")),
+            "declining must not be silent; got {:?}",
+            result.warnings
+        );
+    }
+
+    /// `DTASOF + 1` has to survive the end of the representable range rather
+    /// than panicking on it.
+    #[test]
+    fn a_dtasof_at_the_end_of_time_yields_no_assertion() {
+        let src = statement_with_ledgerbal("1.00", "99991231");
+        let result = OfxImporter
+            .extract_from_string(&src, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("import succeeds rather than panicking");
+        assert_eq!(balance_count(&result), 0);
+    }
+
+    /// A partial LEDGERBAL is a statement we do not understand. Guessing at
+    /// one is how a wrong assertion reaches someone's ledger.
+    #[test]
+    fn an_incomplete_ledgerbal_produces_no_assertion() {
+        let cases = [
+            // no DTASOF
+            "OFXHEADER:100\n<OFX><BANKMSGSRSV1><STMTRS><CURDEF>USD\n\
+             <BANKTRANLIST><STMTTRN><DTPOSTED>20240115<TRNAMT>-1.00<FITID>t1\
+             </STMTTRN></BANKTRANLIST>\n<LEDGERBAL><BALAMT>5.00</BALAMT></LEDGERBAL>\n\
+             </STMTRS></BANKMSGSRSV1></OFX>"
+                .to_string(),
+            // no BALAMT
+            "OFXHEADER:100\n<OFX><BANKMSGSRSV1><STMTRS><CURDEF>USD\n\
+             <BANKTRANLIST><STMTTRN><DTPOSTED>20240115<TRNAMT>-1.00<FITID>t1\
+             </STMTTRN></BANKTRANLIST>\n<LEDGERBAL><DTASOF>20240131</DTASOF></LEDGERBAL>\n\
+             </STMTRS></BANKMSGSRSV1></OFX>"
+                .to_string(),
+            // unparsable amount
+            statement_with_ledgerbal("not-a-number", "20240131"),
+            // no LEDGERBAL at all
+            cc_statement(),
+        ];
+        for (i, src) in cases.iter().enumerate() {
+            let result = OfxImporter
+                .extract_from_string(src, &ofx_cfg("Assets:Bank", "USD"))
+                .expect("import still succeeds");
+            assert!(
+                !result
+                    .directives
+                    .iter()
+                    .any(|d| matches!(d, Directive::Balance(_))),
+                "case {i} should produce no assertion"
+            );
+        }
+    }
+
+    // ---- FITID -> link ------------------------------------------------------
+
+    #[test]
+    fn fitid_becomes_a_namespaced_link() {
+        assert_eq!(fitid_link("202401150001"), Some("ofx-202401150001".into()));
+        assert_eq!(fitid_link("  t1  "), Some("ofx-t1".into()));
+    }
+
+    /// Links lex as `^[a-zA-Z0-9-_/.]+`. A FITID is an opaque bank string, so
+    /// anything else has to be replaced or the emitted ledger would not parse.
+    #[test]
+    fn fitid_characters_outside_the_link_charset_are_replaced() {
+        assert_eq!(fitid_link("a b:c"), Some("ofx-a-b-c".into()));
+        assert_eq!(
+            fitid_link("2024-01-15/001.x_y"),
+            Some("ofx-2024-01-15/001.x_y".into())
+        );
+        assert_eq!(fitid_link("ünïcode"), Some("ofx--n-code".into()));
+
+        // Whatever comes out must match the lexer's link rule.
+        for raw in ["a b:c", "ünïcode", "x@y#z", "2024-01-15/001.x_y", "t1"] {
+            let link = fitid_link(raw).expect("produces a link");
+            assert!(
+                link.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.')),
+                "{link:?} would not lex as a link"
+            );
+        }
+    }
+
+    /// An id that sanitizes to nothing would give every such transaction the
+    /// same link, which is worse than none.
+    #[test]
+    fn a_fitid_with_no_usable_characters_yields_no_link() {
+        // `.`, `_` and `/` are also in the link charset, so they survive
+        // sanitizing and a `-`-only check would let them through (Copilot
+        // review on #2279).
+        for empty in [
+            "", "   ", "***", "--", " - - ", "...", "__/__", "._-/", "///",
+        ] {
+            assert_eq!(fitid_link(empty), None, "input {empty:?}");
+        }
+    }
+
+    #[test]
+    fn extracted_transactions_carry_the_fitid_link() {
+        let result = OfxImporter
+            .extract_from_string(&cc_statement(), &ofx_cfg("Liabilities:Card", "USD"))
+            .expect("import succeeds");
+        let Directive::Transaction(txn) = &result.directives[0] else {
+            panic!("expected a transaction");
+        };
+        assert_eq!(
+            txn.links
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["ofx-t1".to_string()]
+        );
+    }
 
     // ---- #2256: statement-kind vs configured account -----------------------
 
@@ -741,7 +1232,12 @@ NEWFILEUID:NONE
             OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
         let import_result = result.expect("OFX content should parse");
-        assert_eq!(import_result.directives.len(), 2);
+        assert_eq!(txn_count(&import_result), 2);
+        assert_eq!(
+            balance_count(&import_result),
+            1,
+            "LEDGERBAL yields one assertion"
+        );
         assert!(import_result.warnings.is_empty());
     }
 
@@ -805,7 +1301,12 @@ NEWFILEUID:NONE
             OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Liabilities:CreditCard", "USD"));
 
         let import_result = result.expect("OFX content should parse");
-        assert_eq!(import_result.directives.len(), 1);
+        assert_eq!(txn_count(&import_result), 1);
+        assert_eq!(
+            balance_count(&import_result),
+            1,
+            "LEDGERBAL yields one assertion"
+        );
     }
 
     #[test]
@@ -944,7 +1445,12 @@ NEWFILEUID:NONE
             OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
         let import_result = result.expect("OFX content should parse");
-        assert_eq!(import_result.directives.len(), 1);
+        assert_eq!(txn_count(&import_result), 1);
+        assert_eq!(
+            balance_count(&import_result),
+            1,
+            "LEDGERBAL yields one assertion"
+        );
     }
 
     #[test]
@@ -1009,7 +1515,12 @@ NEWFILEUID:NONE
             OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
         let import_result = result.expect("OFX content should parse");
-        assert_eq!(import_result.directives.len(), 1);
+        assert_eq!(txn_count(&import_result), 1);
+        assert_eq!(
+            balance_count(&import_result),
+            1,
+            "LEDGERBAL yields one assertion"
+        );
     }
 
     #[test]
@@ -1074,7 +1585,12 @@ NEWFILEUID:NONE
             OfxImporter.extract_from_string(ofx_content, &ofx_cfg("Assets:Bank:Checking", "USD"));
 
         let import_result = result.expect("OFX content should parse");
-        assert_eq!(import_result.directives.len(), 1);
+        assert_eq!(txn_count(&import_result), 1);
+        assert_eq!(
+            balance_count(&import_result),
+            1,
+            "LEDGERBAL yields one assertion"
+        );
     }
 
     #[test]

@@ -6,11 +6,24 @@
 //! corruption in amount parsing would surface here, the same way #972 surfaced for CSV.
 
 use rust_decimal::Decimal;
+use rustledger_core::Directive;
 use rustledger_importer::{
-    OfxImporter,
+    ImportResult, OfxImporter,
     config::{CsvConfig, ImporterConfig, ImporterType},
 };
 use std::str::FromStr;
+
+/// Count transactions, not directives.
+///
+/// These fixtures carry a `LEDGERBAL`, so the result also contains a balance
+/// assertion; a bare `directives.len()` no longer says "one per input row",
+/// which is what every assertion here means.
+fn txn_count(r: &ImportResult) -> usize {
+    r.directives
+        .iter()
+        .filter(|d| matches!(d, Directive::Transaction(_)))
+        .count()
+}
 
 fn ofx_cfg(account: &str, currency: &str) -> ImporterConfig {
     ImporterConfig {
@@ -60,7 +73,7 @@ fn assert_ofx_amounts(amounts: &[&str]) {
         result.warnings
     );
     assert_eq!(
-        result.directives.len(),
+        txn_count(&result),
         amounts.len(),
         "every input row must produce a transaction"
     );
@@ -110,7 +123,7 @@ fn ofx_preserves_zero_amount() {
         "warnings: {:?}",
         result.warnings
     );
-    assert_eq!(result.directives.len(), 1);
+    assert_eq!(txn_count(&result), 1);
     let posting = result.directives[0]
         .as_transaction()
         .unwrap()
@@ -137,7 +150,7 @@ fn ofx_negative_routes_to_expenses_positive_to_income() {
         "warnings: {:?}",
         result.warnings
     );
-    assert_eq!(result.directives.len(), 2);
+    assert_eq!(txn_count(&result), 2);
 
     let txn0 = result.directives[0].as_transaction().unwrap();
     let contra0 = txn0

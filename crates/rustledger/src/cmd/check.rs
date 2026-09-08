@@ -81,6 +81,14 @@ pub struct JsonOutput {
     pub parse_error_count: usize,
     /// Number of validate-phase errors
     pub validate_error_count: usize,
+    /// Diagnostics per rule code, present only with `--show-summary`.
+    ///
+    /// Emitted rather than dropped because a flag that silently does nothing
+    /// in one output format is worse than a slightly larger document. Counts
+    /// what was found, so it matches the text summary and is unaffected by
+    /// `--include-rules` / `--exclude-rules`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_summary: Option<std::collections::BTreeMap<String, usize>>,
 }
 
 /// Convert a byte offset to (line, column) in 1-based indexing.
@@ -161,6 +169,96 @@ pub struct Args {
     /// reported. Default 0.8 silences the noisy 0.7 floor.
     #[arg(long, default_value_t = 0.8)]
     pub lint_min_confidence: f64,
+
+    /// Print a count of diagnostics per rule code, most frequent first.
+    ///
+    /// Triage aid for a ledger with many findings: it says what to work on
+    /// without scrolling through every occurrence (#2282).
+    #[arg(long)]
+    pub show_summary: bool,
+
+    /// Report only these rule codes (comma-separated, e.g. `E2001,E1001`).
+    ///
+    /// Named `--include-rules` rather than `--rules` so later filters can be
+    /// `--include-<x>` without the first one having claimed the bare name.
+    #[arg(long, value_delimiter = ',', value_name = "CODES")]
+    pub include_rules: Vec<String>,
+
+    /// Report everything except these rule codes (comma-separated).
+    ///
+    /// Applied after `--include-rules`, so excluding a code that was also
+    /// included drops it: the narrower instruction wins.
+    #[arg(long, value_delimiter = ',', value_name = "CODES")]
+    pub exclude_rules: Vec<String>,
+}
+
+/// Which rule codes to report, and a tally of what was seen.
+///
+/// Filtering changes only what is *shown*: the exit code still reflects
+/// everything found, because `check` succeeding on a ledger with errors the
+/// user chose not to look at would be a lie (#2282).
+#[derive(Debug, Default)]
+struct RuleFilter {
+    include: Option<std::collections::HashSet<String>>,
+    exclude: std::collections::HashSet<String>,
+    /// Every code seen, before filtering. Counted per code for `--show-summary`.
+    seen: std::collections::BTreeMap<String, usize>,
+    /// Whether any diagnostic survived the filter.
+    shown_any: bool,
+}
+
+impl RuleFilter {
+    fn new(args: &Args) -> Self {
+        let norm = |v: &[String]| -> std::collections::HashSet<String> {
+            v.iter()
+                .map(|c| c.trim().to_ascii_uppercase())
+                .filter(|c| !c.is_empty())
+                .collect()
+        };
+        Self {
+            // An all-blank list (`--include-rules ,,`) normalizes to an empty
+            // set, and `Some(empty)` would match nothing and hide every
+            // diagnostic. Treat it as no filter: the user asked for nothing in
+            // particular, not for nothing at all.
+            include: Some(norm(&args.include_rules)).filter(|s| !s.is_empty()),
+            exclude: norm(&args.exclude_rules),
+            seen: std::collections::BTreeMap::new(),
+            shown_any: false,
+        }
+    }
+
+    /// Record a diagnostic and say whether it should be reported.
+    ///
+    /// The tally counts everything, filtered or not, so the summary can say
+    /// how much was hidden rather than only what survived.
+    fn keep(&mut self, code: &str) -> bool {
+        let code = code.to_ascii_uppercase();
+        *self.seen.entry(code.clone()).or_insert(0) += 1;
+        if self.exclude.contains(&code) {
+            return false;
+        }
+        let keep = self.include.as_ref().is_none_or(|inc| inc.contains(&code));
+        self.shown_any |= keep;
+        keep
+    }
+
+    /// The codes actually present, for when a filter matched none of them.
+    fn present_codes(&self) -> String {
+        self.seen.keys().cloned().collect::<Vec<_>>().join(", ")
+    }
+
+    /// True when `--include-rules` hid everything there was to see.
+    ///
+    /// Distinguishable from a clean ledger, and worth saying: the usual cause
+    /// is a mistyped code, and the output otherwise shows an error count with
+    /// nothing under it and no clue why.
+    fn include_matched_nothing(&self) -> bool {
+        self.include.is_some() && !self.shown_any && !self.seen.is_empty()
+    }
+
+    fn is_filtering(&self) -> bool {
+        self.include.is_some() || !self.exclude.is_empty()
+    }
 }
 
 /// Run the check command, writing all output to stdout.
@@ -197,6 +295,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     // Collect diagnostics for JSON output
     let json_mode = matches!(args.format, OutputFormat::Json);
     let mut diagnostics: Vec<JsonDiagnostic> = Vec::new();
+    let mut rules = RuleFilter::new(args);
 
     // Determine if colors should be used (TTY detection + NO_COLOR)
     let use_color = !json_mode && report::should_use_color();
@@ -225,6 +324,20 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 let source = std::fs::read_to_string(path).unwrap_or_default();
                 let path_str = path.display().to_string();
 
+                // Filter for DISPLAY only, and keep the original count. The
+                // text path hands the whole batch to `report_parse_errors`,
+                // which cannot skip individual entries, so the filtered set is
+                // built here — but counting it would mean `--exclude-rules`
+                // exited 0 on a file that does not parse, which is the worst
+                // form of a check reporting success it has not earned.
+                let found = errors.len();
+                let errors: Vec<_> = errors
+                    .iter()
+                    .filter(|e| rules.keep(&format!("P{:04}", e.kind_code())))
+                    .cloned()
+                    .collect();
+                let errors = &errors[..];
+
                 if json_mode {
                     for error in errors {
                         let (start_line, start_col) =
@@ -244,18 +357,25 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                             context: error.context.clone(),
                         });
                     }
-                    error_count += errors.len();
-                    parse_error_count += errors.len();
+                    error_count += found;
+                    parse_error_count += found;
                 } else if args.quiet {
-                    error_count += errors.len();
+                    error_count += found;
                 } else {
-                    error_count +=
-                        report::report_parse_errors(errors, path, &source, stdout, use_color)?;
+                    // The reporter returns how many it printed, which is the
+                    // filtered count; the ledger's error total is `found`.
+                    report::report_parse_errors(errors, path, &source, stdout, use_color)?;
+                    error_count += found;
                 }
             }
             LoadError::Io { path, source } => {
                 let path_str = path.display().to_string();
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0001");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: path_str,
                         line: 1,
@@ -270,7 +390,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(stdout, "error: failed to read {path_str}: {source}")?;
                 }
                 error_count += 1;
@@ -285,7 +405,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 // string prevents it from drifting out of sync with the
                 // library-level error.
                 let message = load_error.to_string();
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0002");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: cycle.first().cloned().unwrap_or_default(),
                         line: 1,
@@ -300,7 +425,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(stdout, "error: {message}")?;
                 }
                 error_count += 1;
@@ -311,7 +436,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 // filename"` substring the pta-standards conformance test
                 // asserts on cannot drift between the two.
                 let message = load_error.to_string();
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0004");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: path.clone(),
                         line: 1,
@@ -330,7 +460,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(stdout, "error: {message}")?;
                 }
                 error_count += 1;
@@ -339,7 +469,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 include_path,
                 base_dir,
             } => {
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0003");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: base_dir.display().to_string(),
                         line: 1,
@@ -358,7 +493,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(
                         stdout,
                         "error: path traversal not allowed: {} escapes {}",
@@ -370,7 +505,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             }
             LoadError::Decryption { path, message } => {
                 let path_str = path.display().to_string();
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0004");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: path_str,
                         line: 1,
@@ -385,7 +525,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(
                         stdout,
                         "error: failed to decrypt {}: {}",
@@ -396,7 +536,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 error_count += 1;
             }
             LoadError::GlobNoMatch { pattern } => {
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0005");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: file.display().to_string(),
                         line: 1,
@@ -413,7 +558,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(
                         stdout,
                         "error: include pattern \"{pattern}\" does not match any files"
@@ -422,7 +567,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 error_count += 1;
             }
             LoadError::GlobError { pattern, message } => {
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0006");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: file.display().to_string(),
                         line: 1,
@@ -439,7 +589,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(
                         stdout,
                         "error: failed to expand include pattern \"{pattern}\": {message}"
@@ -450,7 +600,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             LoadError::TooManyFiles { .. } => {
                 // Message lives once, on the variant's `#[error(...)]`.
                 let message = load_error.to_string();
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0007");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: file.display().to_string(),
                         line: 1,
@@ -465,7 +620,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(stdout, "error: {message}")?;
                 }
                 error_count += 1;
@@ -503,7 +658,10 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     for warning in &load_result.options.warnings {
         let is_error = !matches!(warning.code, "E7003" | "E7009");
         let severity = if is_error { "error" } else { "warning" };
-        if json_mode {
+        // Same treatment as the literal-code sites; this one's code is
+        // dynamic, so it needs saying explicitly.
+        let shown = rules.keep(warning.code);
+        if json_mode && shown {
             diagnostics.push(JsonDiagnostic {
                 file: main_file_str.clone(),
                 line: 1,
@@ -520,7 +678,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             if is_error {
                 parse_error_count += 1;
             }
-        } else if !args.quiet {
+        } else if !args.quiet && shown {
             writeln!(stdout, "{severity}[{}]: {}", warning.code, warning.message)?;
         }
         if is_error {
@@ -582,12 +740,19 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         if is_advisory_only_code(&err.code) {
             continue;
         }
+        // `keep` also tallies, so this must run for every non-advisory
+        // diagnostic even when no filter is active. It decides DISPLAY only:
+        // `error_count` below still counts a hidden error, because exiting 0
+        // on a ledger whose errors the user chose not to look at would report
+        // success for a broken file — and `--exclude-rules` in CI would then
+        // hide exactly what CI is for.
+        let shown = rules.keep(&err.code);
         let severity_str = match err.severity {
             rustledger_loader::ErrorSeverity::Error => "error",
             rustledger_loader::ErrorSeverity::Warning => "warning",
         };
 
-        if json_mode {
+        if json_mode && shown {
             // Compute end line/column from the error's byte span when
             // available, so multi-line directives (e.g. an unbalanced
             // transaction covering 3 lines) report a real end position
@@ -625,7 +790,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 }
                 _ => {}
             }
-        } else if !args.quiet {
+        } else if !args.quiet && shown {
             // When the error carries span+file_id and we can resolve the
             // source, render via miette so the user gets a snippet of the
             // offending directive (issue #901). Fall back to a one-line
@@ -683,7 +848,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         for plugin_path in &args.plugins {
             if let Err(e) = wasm_mgr.load(plugin_path) {
                 let msg = format!("failed to load WASM plugin {}: {e}", plugin_path.display());
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("PLUGIN");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: main_file_str.clone(),
                         line: 1,
@@ -697,7 +867,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         hint: None,
                         context: None,
                     });
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(stdout, "error: {msg}")?;
                 }
                 error_count += 1;
@@ -711,7 +881,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                             rustledger_plugin::PluginErrorSeverity::Error => "error",
                             rustledger_plugin::PluginErrorSeverity::Warning => "warning",
                         };
-                        if json_mode {
+                        // Tally and filter like every other diagnostic, so
+                        // --show-summary counts this and --exclude-rules can hide it.
+                        // The count below is deliberately outside: hiding a
+                        // diagnostic must not change the exit code.
+                        let shown = rules.keep("PLUGIN");
+                        if json_mode && shown {
                             diagnostics.push(JsonDiagnostic {
                                 file: main_file_str.clone(),
                                 line: 1,
@@ -725,7 +900,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                                 hint: None,
                                 context: None,
                             });
-                        } else if !args.quiet {
+                        } else if !args.quiet && shown {
                             writeln!(stdout, "{sev}: {}", err.message)?;
                         }
                         match err.severity {
@@ -740,7 +915,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 }
                 Err(e) => {
                     let msg = format!("WASM plugin execution failed: {e}");
-                    if json_mode {
+                    // Tally and filter like every other diagnostic, so
+                    // --show-summary counts this and --exclude-rules can hide it.
+                    // The count below is deliberately outside: hiding a
+                    // diagnostic must not change the exit code.
+                    let shown = rules.keep("PLUGIN");
+                    if json_mode && shown {
                         diagnostics.push(JsonDiagnostic {
                             file: main_file_str.clone(),
                             line: 1,
@@ -754,7 +934,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                             hint: None,
                             context: None,
                         });
-                    } else if !args.quiet {
+                    } else if !args.quiet && shown {
                         writeln!(stdout, "error: {msg}")?;
                     }
                     error_count += 1;
@@ -806,7 +986,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 m.to_account.as_deref().unwrap_or("?"),
                 m.confidence,
             );
-            if json_mode {
+            // Tally and filter like every other diagnostic, so
+            // --show-summary counts this and --exclude-rules can hide it.
+            // The count below is deliberately outside: hiding a
+            // diagnostic must not change the exit code.
+            let shown = rules.keep("LINT-XFER");
+            if json_mode && shown {
                 diagnostics.push(JsonDiagnostic {
                     file: m
                         .from_filename
@@ -825,7 +1010,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                     ),
                     context: None,
                 });
-            } else if !args.quiet {
+            } else if !args.quiet && shown {
                 let loc = format!(
                     "{}:{}",
                     m.from_filename.as_deref().unwrap_or("?"),
@@ -847,6 +1032,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             warning_count,
             parse_error_count,
             validate_error_count,
+            rule_summary: args.show_summary.then(|| rules.seen.clone()),
         };
         writeln!(stdout, "{}", serde_json::to_string_pretty(&output)?)?;
     } else if !args.quiet {
@@ -862,6 +1048,54 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         report::print_summary(error_count, warning_count, stdout, use_color)?;
     }
 
+    // Rule tally, most frequent first. Printed after the diagnostics so it is
+    // the last thing on screen, which is where a reader lands after scrolling.
+    // Suppressed in JSON mode: a consumer there has the codes already and can
+    // count them itself, and a second shape in the same document would be a
+    // schema change for no gain.
+    // A filter that hid everything looks identical to a ledger with nothing
+    // to say, except for an error count with no errors under it. Name the
+    // codes that were actually there so a typo is obvious.
+    if rules.include_matched_nothing() && !json_mode && !args.quiet {
+        writeln!(
+            stdout,
+            "\nnote: --include-rules matched none of the diagnostics found. Present: {}",
+            rules.present_codes()
+        )?;
+    }
+
+    // JSON carries the same tally in `rule_summary`, so this is the text form
+    // only rather than a second shape in the same document.
+    if args.show_summary && !json_mode && !args.quiet {
+        let mut rows: Vec<(&String, &usize)> = rules.seen.iter().collect();
+        // Count descending, then code ascending, so the order is stable rather
+        // than dependent on map iteration for equal counts.
+        rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+
+        if rows.is_empty() {
+            writeln!(stdout, "\nNo diagnostics.")?;
+        } else {
+            let total: usize = rows.iter().map(|(_, n)| **n).sum();
+            writeln!(stdout, "\nSummary ({total} total):")?;
+            let width = rows
+                .iter()
+                .map(|(_, n)| n.to_string().len())
+                .max()
+                .unwrap_or(1);
+            for (code, count) in rows {
+                writeln!(stdout, "  {count:>width$}  {code}")?;
+            }
+            // The tally counts what was found, not what was shown, so a filtered
+            // run would otherwise look like the filter had changed the ledger.
+            if rules.is_filtering() {
+                writeln!(
+                    stdout,
+                    "  (counts are before --include-rules/--exclude-rules)"
+                )?;
+            }
+        }
+    }
+
     if error_count > 0 {
         Ok(ExitCode::from(1))
     } else {
@@ -872,6 +1106,322 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ledger with one E1001 (unopened account) and two E2001s.
+    fn ledger_with_mixed_errors() -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        let mut f = tempfile::Builder::new()
+            .suffix(".beancount")
+            .tempfile()
+            .unwrap();
+        f.write_all(
+            b"2020-01-01 open Assets:Bank USD\n\
+              2020-01-01 open Expenses:X USD\n\n\
+              2024-01-15 * \"a\"\n  Assets:Bank  -10.00 USD\n  Expenses:X\n\n\
+              2024-02-01 balance Assets:Bank  999.00 USD\n\
+              2024-03-01 balance Assets:Bank  888.00 USD\n\n\
+              2024-04-01 * \"unopened\"\n  Assets:Nope  1.00 USD\n  Expenses:X\n",
+        )
+        .unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    fn check_exit(path: &std::path::Path, extra: &[&str]) -> (ExitCode, String) {
+        let mut argv = vec!["check", path.to_str().unwrap()];
+        argv.extend_from_slice(extra);
+        let args = Args::parse_from(argv);
+        let mut out = Vec::new();
+        let code = run_with_writer(&args, &mut out).expect("check runs");
+        (code, String::from_utf8(out).unwrap())
+    }
+
+    /// #2282, the property that matters most: hiding a diagnostic must not
+    /// make the run succeed. `--exclude-rules` in CI would otherwise mask
+    /// exactly what CI is for. My first cut of this got it wrong — the filter
+    /// skipped the counting as well as the display, so excluding everything
+    /// exited 0 on a broken ledger.
+    #[test]
+    fn filtering_hides_diagnostics_without_changing_the_exit_code() {
+        let f = ledger_with_mixed_errors();
+        let failure = ExitCode::from(1);
+
+        let (unfiltered, text) = check_exit(f.path(), &[]);
+        assert_eq!(unfiltered, failure, "the ledger has errors");
+        assert!(text.contains("E2001") && text.contains("E1001"));
+
+        let (excluded, text) = check_exit(f.path(), &["--exclude-rules", "E2001"]);
+        assert!(!text.contains("E2001"), "excluded code must not be shown");
+        assert!(text.contains("E1001"), "other codes must survive");
+        assert_eq!(
+            excluded, failure,
+            "hiding a diagnostic must not turn a failing check into a pass"
+        );
+
+        let (all_hidden, _) = check_exit(f.path(), &["--exclude-rules", "E2001,E1001"]);
+        assert_eq!(
+            all_hidden, failure,
+            "hiding EVERY diagnostic must still fail"
+        );
+
+        let (included, text) = check_exit(f.path(), &["--include-rules", "E2001"]);
+        assert!(text.contains("E2001") && !text.contains("E1001"));
+        assert_eq!(included, failure);
+    }
+
+    /// Deep-review finding on #2286: the parse path counted the FILTERED
+    /// slice, so `--exclude-rules P0012` exited 0 on a file that does not
+    /// parse. Same bug as the validation path, and my earlier test only
+    /// covered E-codes so it missed this.
+    #[test]
+    fn excluding_a_parse_error_does_not_make_the_check_pass() {
+        use std::io::Write as _;
+        let mut f = tempfile::Builder::new()
+            .suffix(".beancount")
+            .tempfile()
+            .unwrap();
+        f.write_all(b"2020-01-01 open Assets:Bank USD\nthis does not parse ~~~\n")
+            .unwrap();
+        f.flush().unwrap();
+
+        let failure = ExitCode::from(1);
+        let (unfiltered, text) = check_exit(f.path(), &[]);
+        assert_eq!(unfiltered, failure);
+        assert!(text.contains("P0012"), "precondition: got\n{text}");
+
+        let (excluded, text) = check_exit(f.path(), &["--exclude-rules", "P0012"]);
+        assert!(!text.contains("P0012"), "the code must be hidden");
+        assert_eq!(
+            excluded, failure,
+            "a file that does not parse must never report success"
+        );
+    }
+
+    /// Third review pass on #2286: a mistyped code silently hid everything.
+    /// The output was an error count with nothing under it, which reads as
+    /// "that code is not among these errors" rather than "that is not a code".
+    #[test]
+    fn an_include_filter_that_matches_nothing_says_so() {
+        let f = ledger_with_mixed_errors();
+
+        let (_, text) = check_exit(f.path(), &["--include-rules", "E20001"]);
+        assert!(
+            text.contains("matched none"),
+            "a filter hiding everything must say so; got:\n{text}"
+        );
+        assert!(
+            text.contains("E2001") && text.contains("E1001"),
+            "and must name what WAS present, so the typo is obvious; got:\n{text}"
+        );
+
+        // The note must not fire when the filter is working.
+        let (_, text) = check_exit(f.path(), &["--include-rules", "E2001"]);
+        assert!(!text.contains("matched none"), "spurious note:\n{text}");
+
+        // Nor when there was simply nothing to find.
+        let dir = tempfile::tempdir().unwrap();
+        let clean = dir.path().join("clean.beancount");
+        std::fs::write(&clean, "2020-01-01 open Assets:B USD\n").unwrap();
+        let (_, text) = check_exit(&clean, &["--include-rules", "E2001"]);
+        assert!(!text.contains("matched none"), "spurious note:\n{text}");
+
+        // Nor for --exclude-rules, where hiding everything is a deliberate ask.
+        let (_, text) = check_exit(f.path(), &["--exclude-rules", "E2001,E1001"]);
+        assert!(!text.contains("matched none"), "spurious note:\n{text}");
+    }
+
+    /// Filtering must not change the warning count either, for the same reason
+    /// it must not change the error count.
+    #[test]
+    fn filtering_does_not_change_the_warning_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("w.beancount");
+        std::fs::write(
+            &p,
+            "2020-01-01 open Assets:Bank USD\n\
+             2020-01-01 open Expenses:X USD\n\
+             2024-01-15 * \"single posting\"\n  Assets:Bank  -10.00 USD\n",
+        )
+        .unwrap();
+
+        let count = |extra: &[&str]| -> u64 {
+            let mut argv = vec!["check", p.to_str().unwrap(), "--format", "json"];
+            argv.extend_from_slice(extra);
+            let args = Args::parse_from(argv);
+            let mut out = Vec::new();
+            run_with_writer(&args, &mut out).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+            v["warning_count"].as_u64().unwrap()
+        };
+
+        assert_eq!(count(&[]), count(&["--exclude-rules", "E3004"]));
+    }
+
+    /// Second review pass on #2286: only the parse and validation loops were
+    /// tallied, so a load-level failure produced the contradiction
+    /// "✗ 1 error" followed by "No diagnostics.", and `--exclude-rules` could
+    /// not touch it. Partial filtering was the thing I had already refused to
+    /// ship for parse errors.
+    #[test]
+    fn load_level_errors_are_tallied_and_filterable() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.beancount");
+        let b = dir.path().join("b.beancount");
+        std::fs::write(&a, "include \"b.beancount\"\n").unwrap();
+        std::fs::write(&b, "include \"a.beancount\"\n").unwrap();
+
+        let (_, text) = check_exit(&a, &["--show-summary"]);
+        assert!(
+            text.contains("E0002"),
+            "an include cycle must reach the summary; got:\n{text}"
+        );
+        assert!(
+            !text.contains("No diagnostics"),
+            "summary must not contradict the error count; got:\n{text}"
+        );
+
+        let failure = ExitCode::from(1);
+        let (code, text) = check_exit(&a, &["--exclude-rules", "E0002"]);
+        assert!(!text.contains("Duplicate filename"), "excluded code shown");
+        assert_eq!(
+            code, failure,
+            "an unreadable ledger must not report success"
+        );
+    }
+
+    /// A flag that silently does nothing in one output format is worse than a
+    /// slightly larger document, so JSON carries the same tally.
+    #[test]
+    fn json_carries_the_rule_summary_only_when_asked() {
+        let f = ledger_with_mixed_errors();
+
+        let (_, text) = check_exit(f.path(), &["--format", "json", "--show-summary"]);
+        let v: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        assert_eq!(v["rule_summary"]["E2001"], 2);
+        assert_eq!(v["rule_summary"]["E1001"], 1);
+
+        let (_, text) = check_exit(f.path(), &["--format", "json"]);
+        let v: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        assert!(
+            v.get("rule_summary").is_none(),
+            "the field must be absent unless asked for"
+        );
+    }
+
+    /// The summary counts what was found, in descending order.
+    #[test]
+    fn show_summary_reports_counts_per_code() {
+        let f = ledger_with_mixed_errors();
+        let (_, text) = check_exit(f.path(), &["--show-summary"]);
+        let summary = text.split("Summary").nth(1).expect("a summary section");
+        let e2001 = summary.find("E2001").expect("E2001 counted");
+        let e1001 = summary.find("E1001").expect("E1001 counted");
+        assert!(
+            e2001 < e1001,
+            "two E2001s must sort above one E1001:\n{summary}"
+        );
+        assert!(summary.contains("3 total"), "got:\n{summary}");
+    }
+
+    /// Build `Args` with only the rule flags set, for the filter tests.
+    fn rule_args(include: &[&str], exclude: &[&str]) -> Args {
+        let mut argv = vec!["check", "f.beancount"];
+        let inc = include.join(",");
+        let exc = exclude.join(",");
+        if !include.is_empty() {
+            argv.push("--include-rules");
+            argv.push(&inc);
+        }
+        if !exclude.is_empty() {
+            argv.push("--exclude-rules");
+            argv.push(&exc);
+        }
+        Args::parse_from(argv)
+    }
+
+    /// #2282: no flags means report everything, and the tally still counts.
+    #[test]
+    fn no_rule_flags_keeps_everything() {
+        let mut f = RuleFilter::new(&rule_args(&[], &[]));
+        assert!(f.keep("E2001"));
+        assert!(f.keep("P0012"));
+        assert!(!f.is_filtering());
+        assert_eq!(f.seen.get("E2001"), Some(&1));
+    }
+
+    #[test]
+    fn include_rules_keeps_only_those_codes() {
+        let mut f = RuleFilter::new(&rule_args(&["E2001"], &[]));
+        assert!(f.keep("E2001"));
+        assert!(!f.keep("E1001"));
+        assert!(f.is_filtering());
+    }
+
+    #[test]
+    fn exclude_rules_drops_those_codes() {
+        let mut f = RuleFilter::new(&rule_args(&[], &["E2001"]));
+        assert!(!f.keep("E2001"));
+        assert!(f.keep("E1001"));
+    }
+
+    /// Excluding a code that was also included drops it: the narrower
+    /// instruction wins, rather than the order of the flags deciding.
+    #[test]
+    fn exclude_beats_include_for_the_same_code() {
+        let mut f = RuleFilter::new(&rule_args(&["E2001", "E1001"], &["E2001"]));
+        assert!(!f.keep("E2001"));
+        assert!(f.keep("E1001"));
+    }
+
+    /// Codes are written uppercase everywhere, but nobody should have to know
+    /// that when typing a flag.
+    #[test]
+    fn rule_codes_are_case_insensitive() {
+        let mut f = RuleFilter::new(&rule_args(&["e2001"], &[]));
+        assert!(f.keep("E2001"));
+        assert!(f.keep("e2001"));
+        assert!(!f.keep("E1001"));
+    }
+
+    /// The tally counts what was FOUND, not what was shown, so `--show-summary`
+    /// with a filter still says how much exists.
+    #[test]
+    fn the_tally_counts_filtered_out_diagnostics() {
+        let mut f = RuleFilter::new(&rule_args(&[], &["E2001"]));
+        assert!(!f.keep("E2001"));
+        assert!(!f.keep("E2001"));
+        assert!(f.keep("E1001"));
+        assert_eq!(
+            f.seen.get("E2001"),
+            Some(&2),
+            "hidden diagnostics still count"
+        );
+        assert_eq!(f.seen.get("E1001"), Some(&1));
+    }
+
+    /// Whitespace and empty entries in a comma list must not become a rule
+    /// nobody can match, which would silently drop every diagnostic.
+    #[test]
+    fn blank_and_padded_entries_are_ignored() {
+        let args = Args::parse_from(["check", "f.beancount", "--include-rules", " E2001 ,, "]);
+        let mut f = RuleFilter::new(&args);
+        assert!(f.keep("E2001"));
+        assert!(!f.keep("E1001"));
+    }
+
+    /// Copilot review on #2286: an ALL-blank list normalized to an empty set,
+    /// and `Some(empty)` matches nothing, so `--include-rules ,,` hid every
+    /// diagnostic. The user asked for nothing in particular, not for nothing.
+    #[test]
+    fn an_all_blank_include_list_is_not_a_filter() {
+        for raw in [",,", "   ", " , , "] {
+            let args = Args::parse_from(["check", "f.beancount", "--include-rules", raw]);
+            let mut f = RuleFilter::new(&args);
+            assert!(!f.is_filtering(), "input {raw:?} should not filter");
+            assert!(f.keep("E2001"), "input {raw:?} hid a diagnostic");
+            assert!(f.keep("E1001"), "input {raw:?} hid a diagnostic");
+        }
+    }
 
     #[test]
     fn test_json_diagnostic_phase_field_serializes() {
@@ -907,6 +1457,7 @@ mod tests {
             warning_count: 0,
             parse_error_count: 1,
             validate_error_count: 2,
+            rule_summary: None,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["parse_error_count"], 1);

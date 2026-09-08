@@ -475,6 +475,9 @@ fn build_check_args(
         format,
         lints,
         lint_min_confidence: parse_flag(req, "lint-min-confidence", None, 0.8)?,
+        show_summary: bool_flag(req, "show-summary", None),
+        include_rules: flag_values(req, "include-rules", None),
+        exclude_rules: flag_values(req, "exclude-rules", None),
     })
 }
 

@@ -32,6 +32,9 @@ rledger check [OPTIONS] [FILE]
 | `-f, --format <FORMAT>` | Output format: `text`, `json` |
 | `--lint <NAME>` | Run non-fatal advisory lints alongside validation (can be repeated). Available: `transfers` |
 | `--lint-min-confidence <VALUE>` | Minimum confidence (0.0 - 1.0) for `--lint transfers` matches to be reported (default: 0.8) |
+| `--show-summary` | Print a count of diagnostics per rule code, most frequent first |
+| `--include-rules <CODES>` | Report only these rule codes (comma-separated, e.g. `E2001,E1001`) |
+| `--exclude-rules <CODES>` | Report everything except these rule codes (comma-separated) |
 
 ## Examples
 
@@ -60,6 +63,60 @@ error[E3001]: Transaction does not balance
 
 ✗ 1 error
 ```
+
+### Triaging a Long List
+
+A ledger part-way through an import can produce a lot of findings at once.
+`--show-summary` says what they are before you start scrolling:
+
+```bash
+rledger check main.beancount --show-summary
+```
+
+```
+Summary (37 total):
+  31  E2001
+   4  E1001
+   2  E3001
+```
+
+Then work one rule at a time:
+
+```bash
+# just the balance assertions
+rledger check main.beancount --include-rules E2001
+
+# everything except them, when the history is not imported yet
+rledger check main.beancount --exclude-rules E2001
+```
+
+Codes are case-insensitive, and `--exclude-rules` wins over `--include-rules`
+for a code named in both. If `--include-rules` matches none of the diagnostics
+found — usually a mistyped code — `check` says so and lists the codes that were
+present, rather than leaving an error count with nothing under it:
+
+```
+✗ 3 errors
+
+note: --include-rules matched none of the diagnostics found. Present: E1001, E2001
+```
+
+**Filtering changes only what is displayed.** The exit code still reflects
+every error found, so a `--exclude-rules` run that prints nothing still fails
+if the ledger has errors — hiding a diagnostic must not turn a failing check
+into a passing one in CI. That holds for parse errors too: excluding a `P`
+code does not make a file that cannot be parsed report success. For the same
+reason, `--show-summary` counts what was *found*, not what survived the filter,
+and says so when a filter is active.
+
+With `--format json`, `--show-summary` adds a `rule_summary` object instead of
+printing a table:
+
+```json
+{ "diagnostics": [ ... ], "error_count": 3, "rule_summary": { "E2001": 2, "E1001": 1 } }
+```
+
+The field is absent unless the flag is given.
 
 ### With Plugins
 

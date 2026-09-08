@@ -96,8 +96,19 @@ for a code named in both.
 **Filtering changes only what is displayed.** The exit code still reflects
 every error found, so a `--exclude-rules` run that prints nothing still fails
 if the ledger has errors — hiding a diagnostic must not turn a failing check
-into a passing one in CI. For the same reason, `--show-summary` counts what was
-*found*, not what survived the filter, and says so when a filter is active.
+into a passing one in CI. That holds for parse errors too: excluding a `P`
+code does not make a file that cannot be parsed report success. For the same
+reason, `--show-summary` counts what was *found*, not what survived the filter,
+and says so when a filter is active.
+
+With `--format json`, `--show-summary` adds a `rule_summary` object instead of
+printing a table:
+
+```json
+{ "diagnostics": [ ... ], "error_count": 3, "rule_summary": { "E2001": 2, "E1001": 1 } }
+```
+
+The field is absent unless the flag is given.
 
 ### With Plugins
 

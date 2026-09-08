@@ -81,6 +81,14 @@ pub struct JsonOutput {
     pub parse_error_count: usize,
     /// Number of validate-phase errors
     pub validate_error_count: usize,
+    /// Diagnostics per rule code, present only with `--show-summary`.
+    ///
+    /// Emitted rather than dropped because a flag that silently does nothing
+    /// in one output format is worse than a slightly larger document. Counts
+    /// what was found, so it matches the text summary and is unaffected by
+    /// `--include-rules` / `--exclude-rules`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_summary: Option<std::collections::BTreeMap<String, usize>>,
 }
 
 /// Convert a byte offset to (line, column) in 1-based indexing.
@@ -297,9 +305,13 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 let source = std::fs::read_to_string(path).unwrap_or_default();
                 let path_str = path.display().to_string();
 
-                // Filter before rendering rather than after: the text path
-                // hands the whole batch to `report_parse_errors`, which has no
-                // way to skip individual entries.
+                // Filter for DISPLAY only, and keep the original count. The
+                // text path hands the whole batch to `report_parse_errors`,
+                // which cannot skip individual entries, so the filtered set is
+                // built here — but counting it would mean `--exclude-rules`
+                // exited 0 on a file that does not parse, which is the worst
+                // form of a check reporting success it has not earned.
+                let found = errors.len();
                 let errors: Vec<_> = errors
                     .iter()
                     .filter(|e| rules.keep(&format!("P{:04}", e.kind_code())))
@@ -326,13 +338,15 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                             context: error.context.clone(),
                         });
                     }
-                    error_count += errors.len();
-                    parse_error_count += errors.len();
+                    error_count += found;
+                    parse_error_count += found;
                 } else if args.quiet {
-                    error_count += errors.len();
+                    error_count += found;
                 } else {
-                    error_count +=
-                        report::report_parse_errors(errors, path, &source, stdout, use_color)?;
+                    // The reporter returns how many it printed, which is the
+                    // filtered count; the ledger's error total is `found`.
+                    report::report_parse_errors(errors, path, &source, stdout, use_color)?;
+                    error_count += found;
                 }
             }
             LoadError::Io { path, source } => {
@@ -936,6 +950,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             warning_count,
             parse_error_count,
             validate_error_count,
+            rule_summary: args.show_summary.then(|| rules.seen.clone()),
         };
         writeln!(stdout, "{}", serde_json::to_string_pretty(&output)?)?;
     } else if !args.quiet {
@@ -956,6 +971,8 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     // Suppressed in JSON mode: a consumer there has the codes already and can
     // count them itself, and a second shape in the same document would be a
     // schema change for no gain.
+    // JSON carries the same tally in `rule_summary`, so this is the text form
+    // only rather than a second shape in the same document.
     if args.show_summary && !json_mode && !args.quiet {
         let mut rows: Vec<(&String, &usize)> = rules.seen.iter().collect();
         // Count descending, then code ascending, so the order is stable rather
@@ -1059,6 +1076,54 @@ mod tests {
         let (included, text) = check_exit(f.path(), &["--include-rules", "E2001"]);
         assert!(text.contains("E2001") && !text.contains("E1001"));
         assert_eq!(format!("{included:?}"), failure);
+    }
+
+    /// Deep-review finding on #2286: the parse path counted the FILTERED
+    /// slice, so `--exclude-rules P0012` exited 0 on a file that does not
+    /// parse. Same bug as the validation path, and my earlier test only
+    /// covered E-codes so it missed this.
+    #[test]
+    fn excluding_a_parse_error_does_not_make_the_check_pass() {
+        use std::io::Write as _;
+        let mut f = tempfile::Builder::new()
+            .suffix(".beancount")
+            .tempfile()
+            .unwrap();
+        f.write_all(b"2020-01-01 open Assets:Bank USD\nthis does not parse ~~~\n")
+            .unwrap();
+        f.flush().unwrap();
+
+        let failure = format!("{:?}", ExitCode::from(1));
+        let (unfiltered, text) = check_exit(f.path(), &[]);
+        assert_eq!(format!("{unfiltered:?}"), failure);
+        assert!(text.contains("P0012"), "precondition: got\n{text}");
+
+        let (excluded, text) = check_exit(f.path(), &["--exclude-rules", "P0012"]);
+        assert!(!text.contains("P0012"), "the code must be hidden");
+        assert_eq!(
+            format!("{excluded:?}"),
+            failure,
+            "a file that does not parse must never report success"
+        );
+    }
+
+    /// A flag that silently does nothing in one output format is worse than a
+    /// slightly larger document, so JSON carries the same tally.
+    #[test]
+    fn json_carries_the_rule_summary_only_when_asked() {
+        let f = ledger_with_mixed_errors();
+
+        let (_, text) = check_exit(f.path(), &["--format", "json", "--show-summary"]);
+        let v: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        assert_eq!(v["rule_summary"]["E2001"], 2);
+        assert_eq!(v["rule_summary"]["E1001"], 1);
+
+        let (_, text) = check_exit(f.path(), &["--format", "json"]);
+        let v: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        assert!(
+            v.get("rule_summary").is_none(),
+            "the field must be absent unless asked for"
+        );
     }
 
     /// The summary counts what was found, in descending order.
@@ -1196,6 +1261,7 @@ mod tests {
             warning_count: 0,
             parse_error_count: 1,
             validate_error_count: 2,
+            rule_summary: None,
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["parse_error_count"], 1);

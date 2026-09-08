@@ -78,17 +78,25 @@ fn detect_signature_context(text: &str) -> Option<SignatureHelp> {
 }
 
 /// Extract text after a date pattern.
+///
+/// `text.len()` is a byte count, so guarding with it and then slicing `..10`
+/// panicked whenever byte 10 fell inside a multi-byte character: typing
+/// Cyrillic after a date crashed the server, and vscode gave up restarting it
+/// after five (#2266).
+///
+/// `get(..10)` returns `None` both for a short string and for a non-boundary,
+/// which is the right answer either way: a `YYYY-MM-DD` date is ASCII, so a
+/// character straddling byte 10 means this is not a date. `rustledger-completion`
+/// spells the same guard as an explicit `is_char_boundary` check.
 fn extract_after_date(text: &str) -> Option<&str> {
-    // Match YYYY-MM-DD pattern
-    if text.len() >= 10 {
-        let potential_date = &text[..10];
-        if potential_date.chars().enumerate().all(|(i, c)| match i {
-            0..=3 | 5..=6 | 8..=9 => c.is_ascii_digit(),
-            4 | 7 => c == '-',
-            _ => false,
-        }) {
-            return Some(text[10..].trim_start());
-        }
+    let potential_date = text.get(..10)?;
+    if potential_date.chars().enumerate().all(|(i, c)| match i {
+        0..=3 | 5..=6 | 8..=9 => c.is_ascii_digit(),
+        4 | 7 => c == '-',
+        _ => false,
+    }) {
+        // Safe: the check above passed, so the first ten bytes are ASCII.
+        return Some(text[10..].trim_start());
     }
     None
 }
@@ -592,6 +600,85 @@ fn commodity_signature() -> SignatureInformation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2266: `extract_after_date` checked `text.len() >= 10` (bytes) and then
+    /// sliced `&text[..10]`, which panics when byte 10 falls inside a
+    /// multi-byte character. Reported from a Cyrillic snippet trigger, which
+    /// crashed the server until vscode stopped restarting it.
+    #[test]
+    fn extract_after_date_does_not_panic_on_multibyte_text() {
+        // Byte 10 lands inside the final `д` (bytes 9..11), the alignment in
+        // the report. Anything that does not panic is a pass here.
+        assert_eq!(extract_after_date("aдоход"), None);
+
+        // A spread of alignments, so this does not pin one lucky offset.
+        for prefix in ["", "a", "ab", "abc", "abcd", "abcde"] {
+            for body in ["доход", "расход", "кот", "日本語テキスト", "🧾🧾🧾"]
+            {
+                let s = format!("{prefix}{body}");
+                let _ = extract_after_date(&s);
+            }
+        }
+    }
+
+    /// The guard must not break the thing the function is for.
+    #[test]
+    fn extract_after_date_still_reads_ascii_dates() {
+        assert_eq!(
+            extract_after_date("2024-01-15 * \"Payee\""),
+            Some("* \"Payee\"")
+        );
+        assert_eq!(extract_after_date("2024-01-15"), Some(""));
+        assert_eq!(extract_after_date("not-a-date here"), None);
+        assert_eq!(extract_after_date("2024-01-15доход"), Some("доход"));
+    }
+
+    /// #2266 end to end. The helper tests above exercise the function that
+    /// panicked; this drives the public entry point the editor actually calls,
+    /// at every cursor position and in both position encodings, which is the
+    /// only thing that shows the crash is gone from a user's point of view.
+    #[test]
+    fn handle_signature_help_survives_multibyte_lines_at_any_cursor() {
+        let sources = [
+            "2026-09-07 доход", // the report
+            "2026-09-07 доход и расход",
+            "aдоход", // byte 10 inside a character
+            "доход",
+            "2026-09-07 日本語のテキスト",
+            "2026-09-07 🧾 receipt",
+            "🧾🧾🧾🧾🧾",
+            "2026-09-07 * \"Кофе\" \"Утро\"",
+            "option \"тайтл\" \"значение\"",
+            "plugin \"плагин\"",
+            "include \"путь/файл.beancount\"",
+        ];
+
+        for source in sources {
+            for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+                let units = match encoding {
+                    PositionEncoding::Utf8 => source.len(),
+                    PositionEncoding::Utf16 => source.chars().map(char::len_utf16).sum(),
+                };
+                // Past the end too: editors send a column past the last
+                // character more often than one might hope.
+                for col in 0..=(units + 2) {
+                    let params = SignatureHelpParams {
+                        context: None,
+                        text_document_position_params: lsp_types::TextDocumentPositionParams {
+                            text_document: lsp_types::TextDocumentIdentifier {
+                                uri: "file:///test.beancount".parse().unwrap(),
+                            },
+                            position: lsp_types::Position::new(0, col as u32),
+                        },
+                        work_done_progress_params: Default::default(),
+                    };
+                    // The assertion is "does not panic". A returned None is a
+                    // perfectly good answer for most of these positions.
+                    let _ = handle_signature_help(&params, source, encoding);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_after_date_shows_directives() {

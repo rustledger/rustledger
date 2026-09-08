@@ -633,6 +633,53 @@ mod tests {
         assert_eq!(extract_after_date("2024-01-15доход"), Some("доход"));
     }
 
+    /// #2266 end to end. The helper tests above exercise the function that
+    /// panicked; this drives the public entry point the editor actually calls,
+    /// at every cursor position and in both position encodings, which is the
+    /// only thing that shows the crash is gone from a user's point of view.
+    #[test]
+    fn handle_signature_help_survives_multibyte_lines_at_any_cursor() {
+        let sources = [
+            "2026-09-07 доход", // the report
+            "2026-09-07 доход и расход",
+            "aдоход", // byte 10 inside a character
+            "доход",
+            "2026-09-07 日本語のテキスト",
+            "2026-09-07 🧾 receipt",
+            "🧾🧾🧾🧾🧾",
+            "2026-09-07 * \"Кофе\" \"Утро\"",
+            "option \"тайтл\" \"значение\"",
+            "plugin \"плагин\"",
+            "include \"путь/файл.beancount\"",
+        ];
+
+        for source in sources {
+            for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+                let units = match encoding {
+                    PositionEncoding::Utf8 => source.len(),
+                    PositionEncoding::Utf16 => source.chars().map(char::len_utf16).sum(),
+                };
+                // Past the end too: editors send a column past the last
+                // character more often than one might hope.
+                for col in 0..=(units + 2) {
+                    let params = SignatureHelpParams {
+                        context: None,
+                        text_document_position_params: lsp_types::TextDocumentPositionParams {
+                            text_document: lsp_types::TextDocumentIdentifier {
+                                uri: "file:///test.beancount".parse().unwrap(),
+                            },
+                            position: lsp_types::Position::new(0, col as u32),
+                        },
+                        work_done_progress_params: Default::default(),
+                    };
+                    // The assertion is "does not panic". A returned None is a
+                    // perfectly good answer for most of these positions.
+                    let _ = handle_signature_help(&params, source, encoding);
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_after_date_shows_directives() {
         let source = "2024-01-15 ";

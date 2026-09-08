@@ -305,7 +305,28 @@ struct StatementBalance {
 /// guessing at one is how a wrong assertion gets into someone's ledger.
 fn parse_statement_balance(content: &str) -> Option<StatementBalance> {
     let block_start = content.find("<LEDGERBAL")?;
-    let block = &content[block_start..];
+    let rest = &content[block_start..];
+
+    // Bound the element, the same way `STMTTRN` is bounded above. Reading to
+    // end-of-input let the fields be filled from whatever came next, and what
+    // comes next is nearly always `<AVAILBAL>` — a DIFFERENT balance. A
+    // `LEDGERBAL` missing its `BALAMT` then asserted the *available* balance
+    // as the ledger balance: a silently wrong number, which is the exact
+    // outcome the "a partial LEDGERBAL yields nothing" rule below exists to
+    // prevent. OFX 1.x may omit the close tag, so a sibling or a parent close
+    // ends the element too.
+    let end = [
+        "</LEDGERBAL>",
+        "<AVAILBAL",
+        "</STMTRS>",
+        "</CCSTMTRS>",
+        "</OFX>",
+    ]
+    .iter()
+    .filter_map(|marker| rest.find(marker))
+    .min()
+    .unwrap_or(rest.len());
+    let block = &rest[..end];
 
     let amount: rust_decimal::Decimal = leaf(block, "BALAMT")?.trim().parse().ok()?;
     let as_of = ofx_date_to_naive(&leaf(block, "DTASOF")?).ok()?;
@@ -678,6 +699,66 @@ mod tests {
             "DTASOF 2024-01-31 must assert on 2024-02-01"
         );
         assert_eq!(balances[0].account.as_str(), "Assets:Bank");
+    }
+
+    /// Second review pass on #2279. The `LEDGERBAL` block ran to end-of-input,
+    /// so its fields could be filled from whatever followed — and what follows
+    /// is nearly always `<AVAILBAL>`, a different balance. A `LEDGERBAL`
+    /// missing its `BALAMT` asserted the AVAILABLE balance as the ledger
+    /// balance: a silently wrong number in the user's ledger.
+    #[test]
+    fn ledgerbal_fields_are_not_taken_from_availbal() {
+        let stmt = |ledgerbal: &str| {
+            format!(
+                "OFXHEADER:100\n<OFX><BANKMSGSRSV1><STMTRS><CURDEF>USD\n\
+                 <BANKTRANLIST><STMTTRN><DTPOSTED>20240115<TRNAMT>-50.00<FITID>t1\
+                 <NAME>C</STMTTRN></BANKTRANLIST>\n{ledgerbal}\n\
+                 <AVAILBAL><BALAMT>250.00</BALAMT><DTASOF>20240131</DTASOF></AVAILBAL>\n\
+                 </STMTRS></BANKMSGSRSV1></OFX>"
+            )
+        };
+
+        for (case, ledgerbal) in [
+            (
+                "no DTASOF",
+                "<LEDGERBAL><BALAMT>1000.00</BALAMT></LEDGERBAL>",
+            ),
+            (
+                "no BALAMT",
+                "<LEDGERBAL><DTASOF>20240131</DTASOF></LEDGERBAL>",
+            ),
+            ("empty", "<LEDGERBAL></LEDGERBAL>"),
+        ] {
+            let result = OfxImporter
+                .extract_from_string(&stmt(ledgerbal), &ofx_cfg("Assets:Bank", "USD"))
+                .expect("import succeeds");
+            assert_eq!(
+                balance_count(&result),
+                0,
+                "{case}: a partial LEDGERBAL must not borrow from AVAILBAL"
+            );
+        }
+
+        // The complement: a complete LEDGERBAL still works with AVAILBAL after it.
+        let result = OfxImporter
+            .extract_from_string(
+                &stmt("<LEDGERBAL><BALAMT>1000.00</BALAMT><DTASOF>20240131</DTASOF></LEDGERBAL>"),
+                &ofx_cfg("Assets:Bank", "USD"),
+            )
+            .expect("import succeeds");
+        assert_eq!(balance_count(&result), 1);
+        let Some(Directive::Balance(b)) = result
+            .directives
+            .iter()
+            .find(|d| matches!(d, Directive::Balance(_)))
+        else {
+            panic!("expected an assertion");
+        };
+        assert_eq!(
+            b.amount.number.to_string(),
+            "1000.00",
+            "the LEDGERBAL amount, not AVAILBAL's"
+        );
     }
 
     /// Deep-review finding on #2279: a file with two statements carries two

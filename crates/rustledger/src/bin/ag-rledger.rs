@@ -215,6 +215,27 @@ const REPORT_FLAGS: &[(&str, &[&str])] = &[
     ("budget", &["account", "from", "to", "children"]),
 ];
 
+/// The short form of each report-specific flag, where one exists.
+///
+/// Taken from the `string_flag(req, "x", Some("y"))` calls in `build_report`:
+/// a check that knows only the long spelling lets `-a` through, which is the
+/// same silent drop one keystroke away. `currency` and `commodity` share `-c`
+/// but belong to different reports, so they never compete.
+const FLAG_SHORTS: &[(&str, &str)] = &[
+    ("account", "a"),
+    ("limit", "l"),
+    ("period", "p"),
+    ("currency", "c"),
+    ("commodity", "c"),
+];
+
+fn short_for(long: &str) -> Option<&'static str> {
+    FLAG_SHORTS
+        .iter()
+        .find(|(l, _)| *l == long)
+        .map(|(_, short)| *short)
+}
+
 /// The report-specific flags, grouped by report, for the usage string.
 ///
 /// Built from [`REPORT_FLAGS`] so the usage text cannot promise a flag the
@@ -252,18 +273,28 @@ fn reject_inapplicable_flags(
 
     // Every report-specific flag known to any report; anything outside this set
     // is a global flag or a genuine unknown, neither of which is ours to judge.
-    let supplied: Vec<&str> = REPORT_FLAGS
+    // Deduplicated: `account` appears in five entries, and listing it five
+    // times in the error would be its own small confusion.
+    let mut supplied: Vec<&str> = REPORT_FLAGS
         .iter()
         .flat_map(|(_, flags)| flags.iter().copied())
         .filter(|flag| !applicable.contains(flag))
         .filter(|flag| flag_was_supplied(req, flag))
         .collect();
+    supplied.sort_unstable();
+    supplied.dedup();
 
     if supplied.is_empty() {
         return Ok(());
     }
 
-    let named: Vec<String> = supplied.iter().map(|f| format!("--{f}")).collect();
+    let named: Vec<String> = supplied
+        .iter()
+        .map(|f| match short_for(f) {
+            Some(short) => format!("--{f}/-{short}"),
+            None => format!("--{f}"),
+        })
+        .collect();
     let hint = if applicable.is_empty() {
         format!("`{canonical}` takes no report-specific flags.")
     } else {
@@ -287,12 +318,20 @@ fn reject_inapplicable_flags(
 /// handler never reads leaves no other trace — which is precisely how these
 /// went unnoticed.
 fn flag_was_supplied(req: &agcli::CommandRequest<'_>, long: &str) -> bool {
-    let exact = format!("--{long}");
-    let prefixed = format!("--{long}=");
-    req.invocation()
-        .raw_args()
-        .iter()
-        .any(|arg| arg == &exact || arg.starts_with(&prefixed))
+    let mut spellings = vec![format!("--{long}"), format!("--{long}=")];
+    if let Some(short) = short_for(long) {
+        spellings.push(format!("-{short}"));
+        spellings.push(format!("-{short}="));
+    }
+    req.invocation().raw_args().iter().any(|arg| {
+        spellings.iter().any(|s| {
+            if s.ends_with('=') {
+                arg.starts_with(s)
+            } else {
+                arg == s
+            }
+        })
+    })
 }
 
 fn report_command(name: &'static str, description: &'static str) -> Command {
@@ -1472,6 +1511,50 @@ mod tests {
                 flags.is_empty(),
                 "`{report}` now lists {flags:?}; wire them in build_report before adding them here"
             );
+        }
+    }
+
+    /// Deep-review finding on #2289: the check knew only long spellings, so
+    /// `report income -a Foo` was still silently accepted. Half a fix is the
+    /// failure this whole change is about.
+    #[test]
+    fn every_flag_with_a_short_form_declares_it() {
+        // Mirrors the `string_flag(req, "x", Some("y"))` calls in
+        // `build_report`. If one gains or loses a short form there, this list
+        // has to move with it, and the assertion below is what says so.
+        let expected: &[(&str, &str)] = &[
+            ("account", "a"),
+            ("limit", "l"),
+            ("period", "p"),
+            ("currency", "c"),
+            ("commodity", "c"),
+        ];
+        assert_eq!(
+            FLAG_SHORTS, expected,
+            "FLAG_SHORTS drifted from build_report's short flags"
+        );
+
+        for (long, short) in expected {
+            assert_eq!(short_for(long), Some(*short), "--{long}");
+        }
+
+        // The assertion above only catches an edit to FLAG_SHORTS that skips
+        // this test. This one is a real cross-check: a short form declared for
+        // a flag no report reads is dead, and would mean the two tables have
+        // parted company.
+        for (long, _) in FLAG_SHORTS {
+            assert!(
+                REPORT_FLAGS.iter().any(|(_, flags)| flags.contains(long)),
+                "--{long} has a short form but no report reads it"
+            );
+        }
+    }
+
+    /// A flag with no short form must not invent one.
+    #[test]
+    fn flags_without_a_short_form_have_none() {
+        for long in ["from", "to", "children", "no-zero"] {
+            assert_eq!(short_for(long), None, "--{long} gained a short form");
         }
     }
 

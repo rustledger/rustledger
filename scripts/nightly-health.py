@@ -26,6 +26,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -48,6 +49,10 @@ STALENESS = {"daily": timedelta(days=3), "weekly": timedelta(days=17), "monthly"
 _GH_FAILED: list[str] = []
 
 
+class GhError(RuntimeError):
+    """A `gh` invocation failed for a reason other than a missing workflow."""
+
+
 def gh(*args: str, tolerate_missing: bool = False) -> str:
     proc = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
     if proc.returncode != 0:
@@ -62,6 +67,11 @@ def gh(*args: str, tolerate_missing: bool = False) -> str:
             return ""
         _GH_FAILED.append(f"gh {' '.join(args[:3])}: {summary}")
         print(f"::error::gh {' '.join(args[:3])} failed: {summary}")
+        # Raise rather than fall through. A failed call's stdout is empty, and
+        # callers read empty as "no runs", which this reporter renders as
+        # "stale" -- the exact claim it exists to make trustworthy. A transient
+        # API error was therefore indistinguishable from a dead cron.
+        raise GhError(summary)
     return proc.stdout
 
 
@@ -109,6 +119,10 @@ def scheduled_workflows() -> dict[str, str]:
 # than by trusting list order (see `latest_scheduled_run`).
 _RUN_PAGE = 10
 
+# Pause before re-asking whether a workflow has run. Long enough to outlast a
+# momentary blip, short enough not to matter in a nightly job.
+_REQUERY_DELAY_S = 5
+
 
 def latest_scheduled_run(workflow: str) -> dict | None:
     """The most recent scheduled run of `workflow`, by `createdAt`.
@@ -126,16 +140,28 @@ def latest_scheduled_run(workflow: str) -> dict | None:
     exists to be believed; one that cries wolf gets muted, which is the failure
     it was written to prevent.
     """
-    raw = gh(
-        "run", "list", "--repo", REPO, "--workflow", workflow,
-        "--event", "schedule", "--limit", str(_RUN_PAGE),
-        "--json", "conclusion,status,createdAt,databaseId,url",
-        tolerate_missing=True,
-    )
-    try:
-        runs = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
+    def query() -> list[dict]:
+        raw = gh(
+            "run", "list", "--repo", REPO, "--workflow", workflow,
+            "--event", "schedule", "--limit", str(_RUN_PAGE),
+            "--json", "conclusion,status,createdAt,databaseId,url",
+            tolerate_missing=True,
+        )
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+
+    runs = query()
+    if not runs:
+        # Ask twice before concluding a cron has stopped. An empty first answer
+        # is the input to the report's most serious claim, and on 2026-09-03 and
+        # 2026-09-08 that claim was wrong both times: `bench.yml` had run hours
+        # earlier and the same query returned it correctly by hand afterwards.
+        # A second call costs one API round trip; a false alarm costs the
+        # report its credibility.
+        time.sleep(_REQUERY_DELAY_S)
+        runs = query()
     if not runs:
         return None
     return max(runs, key=lambda r: r["createdAt"])
@@ -263,6 +289,52 @@ def self_test() -> int:
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} no scheduled runs reports None")
 
+    # An empty first answer must be re-asked before concluding a cron stopped.
+    # This is the 2026-09-03 and 2026-09-08 `bench.yml` false alarm: the run
+    # existed, the first query did not show it.
+    calls = {"n": 0}
+
+    def flaky(*_args: str, **_kw: object) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "[]"
+        return (
+            '[{"conclusion":"success","status":"completed",'
+            '"createdAt":"2026-09-08T06:37:00Z","databaseId":9,"url":"real"}]'
+        )
+
+    gh = flaky
+    picked = latest_scheduled_run("bench.yml")
+    ok = calls["n"] == 2 and picked is not None and picked["url"] == "real"
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} an empty answer is re-queried before reporting stale")
+
+    # A failed query must not masquerade as "no runs", which the report renders
+    # as stale -- the claim this whole script exists to make trustworthy.
+    #
+    # This drives the REAL `gh` through a failing subprocess rather than a stub
+    # that raises. A stub raising GhError would only prove the exception
+    # propagates, which is true whether or not `gh` raises it: the first draft
+    # of this case passed with the fix reverted.
+    gh = real_gh
+    real_run = subprocess.run
+
+    def failing_run(*_a: object, **_k: object) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=["gh"], returncode=1, stdout="", stderr="HTTP 503: upstream is sad"
+        )
+
+    subprocess.run = failing_run  # type: ignore[assignment]
+    try:
+        gh("run", "list", "--repo", "x/y")
+        ok = False
+    except GhError:
+        ok = True
+    finally:
+        subprocess.run = real_run  # type: ignore[assignment]
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} a failed gh call raises rather than returning empty")
+
     gh = real_gh
     if failures:
         print(f"::error::nightly-health self-test: {failures} case(s) failed")
@@ -275,6 +347,7 @@ def main() -> int:
     now = datetime.now(timezone.utc)
     failing: list[str] = []
     stale: list[str] = []
+    unchecked: list[str] = []
     ok: list[str] = []
 
     workflows = scheduled_workflows()
@@ -294,7 +367,16 @@ def main() -> int:
         )
 
     for wf, period in sorted(workflows.items()):
-        run = latest_scheduled_run(wf)
+        try:
+            run = latest_scheduled_run(wf)
+        except GhError as e:
+            # An unanswered query is not evidence that a cron stopped. Say the
+            # check did not happen rather than assert something about the
+            # workflow, and keep going so one bad call does not cost the whole
+            # report.
+            print(f"::error::could not check {wf}: {e}")
+            unchecked.append(f"- `{wf}` ({period}) — could not be checked: {e}")
+            continue
         if run is None:
             stale.append(f"- `{wf}` ({period}) — no scheduled run found at all")
             continue
@@ -334,7 +416,7 @@ def main() -> int:
             ok.append(f"`{wf}`")
         print(f"{wf:24} {period:8} {concl:12} {age.days}d ago")
 
-    problems = broken + failing + stale + [f"- tooling: {e}" for e in _GH_FAILED]
+    problems = broken + failing + stale + unchecked
     body = [MARKER, ""]
     if problems:
         body.append(f"{len(problems)} scheduled workflow(s) need attention, as of {now:%Y-%m-%d %H:%M} UTC.")
@@ -346,6 +428,18 @@ def main() -> int:
                 "",
                 "A cron that stops firing produces no failure, so these are the ones that hide.",
                 *stale,
+            ]
+        if unchecked:
+            # Previously these were counted in the total but had no section, so
+            # the headline claimed more workflows needed attention than the body
+            # listed, with nothing to explain the gap.
+            body += [
+                "", "### Could not be checked",
+                "",
+                "The query failed, so nothing is claimed about these either way. "
+                "An unanswered query looks exactly like a cron that stopped, and "
+                "reporting it as stale is how this report loses its credibility.",
+                *unchecked,
             ]
         body += ["", "### Healthy", "", ", ".join(ok) if ok else "_none_"]
     body += [

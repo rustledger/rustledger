@@ -339,7 +339,16 @@ while IFS= read -r -d '' file; do
   else
     seen_hashes[$hash]="$file"
   fi
-done < <(find "$DEST" -name "*.beancount" -type f -print0 | sort -z)
+# LC_ALL=C is load-bearing, not tidiness. The survivor of a duplicate pair is
+# whichever name sorts first, so collation decides which files the corpus
+# contains. Under en_US.UTF-8 punctuation is weak-weighted, so
+# `...Repeated2.beancount` sorts before `...Repeated.beancount`; under C the
+# byte order reverses it. The manifest was generated on a UTF-8 machine and the
+# drift workflow fetches on a C one, so the two disagreed about which member of
+# an identical-content pair exists, and it reported phantom "new files with no
+# baseline" on every run (#2267). Byte order is identical everywhere; UTF-8
+# collation varies with locale and libc version.
+done < <(find "$DEST" -name "*.beancount" -type f -print0 | LC_ALL=C sort -z)
 
 echo "  Removed $duplicates_removed duplicate files"
 

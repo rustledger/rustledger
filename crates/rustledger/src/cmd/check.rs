@@ -660,7 +660,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         let severity = if is_error { "error" } else { "warning" };
         // Same treatment as the literal-code sites; this one's code is
         // dynamic, so it needs saying explicitly.
-        let shown = rules.keep(&warning.code);
+        let shown = rules.keep(warning.code);
         if json_mode && shown {
             diagnostics.push(JsonDiagnostic {
                 file: main_file_str.clone(),

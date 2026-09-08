@@ -111,9 +111,14 @@ impl OfxImporter {
             && !directives.is_empty()
             && let Some(balance) = parse_statement_balance(content)
         {
+            // An empty `<CURDEF>` is `Some("")`, not `None`, so it has to be
+            // filtered rather than left to `unwrap_or`: otherwise the
+            // assertion carries an empty currency, which is not a currency.
+            // `build_transaction` rejects the same value for the same reason.
             let currency = transactions
                 .first()
                 .and_then(|t| t.statement_currency.as_deref())
+                .filter(|c| !c.trim().is_empty())
                 .unwrap_or(default_currency);
             directives.push(Directive::Balance(rustledger_core::Balance::new(
                 balance.assert_on,
@@ -368,10 +373,13 @@ fn fitid_link(fitid: &str) -> Option<String> {
         })
         .collect();
 
-    // An id that sanitizes to nothing (or to only separators) carries no
-    // information, and `^ofx-` alone would be a link every such transaction
-    // shares — worse than no link at all.
-    if cleaned.trim_matches('-').is_empty() {
+    // An id that sanitizes to only separators carries no information, and the
+    // resulting link would be one every such transaction shares — worse than
+    // no link at all. `-` is not the only separator that survives: `.`, `_`
+    // and `/` are all in the link charset, so `...` and `__/__` pass a
+    // `trim_matches('-')` check while meaning exactly as little. Require a
+    // character that actually identifies something.
+    if !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
         return None;
     }
     Some(format!("{FITID_LINK_PREFIX}{cleaned}"))
@@ -661,6 +669,34 @@ mod tests {
             .count()
     }
 
+    /// Copilot review on #2279: an empty `<CURDEF>` is `Some("")`, not `None`,
+    /// so it slipped past `unwrap_or` and produced an assertion whose currency
+    /// was the empty string.
+    #[test]
+    fn an_empty_curdef_falls_back_to_the_configured_currency() {
+        let src = "OFXHEADER:100\n<OFX><BANKMSGSRSV1><STMTRS><CURDEF>\n\
+             <BANKTRANLIST><STMTTRN><DTPOSTED>20240115<TRNAMT>-50.00<FITID>t1\
+             <NAME>C</STMTTRN></BANKTRANLIST>\n\
+             <LEDGERBAL><BALAMT>10.00</BALAMT><DTASOF>20240131</DTASOF></LEDGERBAL>\n\
+             </STMTRS></BANKMSGSRSV1></OFX>";
+
+        let result = OfxImporter
+            .extract_from_string(src, &ofx_cfg("Assets:Bank", "USD"))
+            .expect("import succeeds");
+        let Some(Directive::Balance(b)) = result
+            .directives
+            .iter()
+            .find(|d| matches!(d, Directive::Balance(_)))
+        else {
+            panic!("expected an assertion");
+        };
+        assert_eq!(
+            b.amount.currency.as_str(),
+            "USD",
+            "an empty CURDEF must not become an empty currency"
+        );
+    }
+
     // ---- LEDGERBAL -> balance assertion --------------------------------------
 
     fn statement_with_ledgerbal(balamt: &str, dtasof: &str) -> String {
@@ -910,7 +946,12 @@ mod tests {
     /// same link, which is worse than none.
     #[test]
     fn a_fitid_with_no_usable_characters_yields_no_link() {
-        for empty in ["", "   ", "***", "--", " - - "] {
+        // `.`, `_` and `/` are also in the link charset, so they survive
+        // sanitizing and a `-`-only check would let them through (Copilot
+        // review on #2279).
+        for empty in [
+            "", "   ", "***", "--", " - - ", "...", "__/__", "._-/", "///",
+        ] {
             assert_eq!(fitid_link(empty), None, "input {empty:?}");
         }
     }

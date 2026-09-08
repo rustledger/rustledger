@@ -351,7 +351,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             }
             LoadError::Io { path, source } => {
                 let path_str = path.display().to_string();
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0001");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: path_str,
                         line: 1,
@@ -366,7 +371,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(stdout, "error: failed to read {path_str}: {source}")?;
                 }
                 error_count += 1;
@@ -381,7 +386,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 // string prevents it from drifting out of sync with the
                 // library-level error.
                 let message = load_error.to_string();
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0002");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: cycle.first().cloned().unwrap_or_default(),
                         line: 1,
@@ -396,7 +406,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(stdout, "error: {message}")?;
                 }
                 error_count += 1;
@@ -407,7 +417,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 // filename"` substring the pta-standards conformance test
                 // asserts on cannot drift between the two.
                 let message = load_error.to_string();
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0004");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: path.clone(),
                         line: 1,
@@ -426,7 +441,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(stdout, "error: {message}")?;
                 }
                 error_count += 1;
@@ -435,7 +450,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 include_path,
                 base_dir,
             } => {
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0003");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: base_dir.display().to_string(),
                         line: 1,
@@ -454,7 +474,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(
                         stdout,
                         "error: path traversal not allowed: {} escapes {}",
@@ -466,7 +486,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             }
             LoadError::Decryption { path, message } => {
                 let path_str = path.display().to_string();
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0004");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: path_str,
                         line: 1,
@@ -481,7 +506,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(
                         stdout,
                         "error: failed to decrypt {}: {}",
@@ -492,7 +517,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 error_count += 1;
             }
             LoadError::GlobNoMatch { pattern } => {
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0005");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: file.display().to_string(),
                         line: 1,
@@ -509,7 +539,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(
                         stdout,
                         "error: include pattern \"{pattern}\" does not match any files"
@@ -518,7 +548,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 error_count += 1;
             }
             LoadError::GlobError { pattern, message } => {
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0006");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: file.display().to_string(),
                         line: 1,
@@ -535,7 +570,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(
                         stdout,
                         "error: failed to expand include pattern \"{pattern}\": {message}"
@@ -546,7 +581,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             LoadError::TooManyFiles { .. } => {
                 // Message lives once, on the variant's `#[error(...)]`.
                 let message = load_error.to_string();
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("E0007");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: file.display().to_string(),
                         line: 1,
@@ -561,7 +601,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         context: None,
                     });
                     parse_error_count += 1;
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(stdout, "error: {message}")?;
                 }
                 error_count += 1;
@@ -599,7 +639,10 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     for warning in &load_result.options.warnings {
         let is_error = !matches!(warning.code, "E7003" | "E7009");
         let severity = if is_error { "error" } else { "warning" };
-        if json_mode {
+        // Same treatment as the literal-code sites; this one's code is
+        // dynamic, so it needs saying explicitly.
+        let shown = rules.keep(&warning.code);
+        if json_mode && shown {
             diagnostics.push(JsonDiagnostic {
                 file: main_file_str.clone(),
                 line: 1,
@@ -616,7 +659,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             if is_error {
                 parse_error_count += 1;
             }
-        } else if !args.quiet {
+        } else if !args.quiet && shown {
             writeln!(stdout, "{severity}[{}]: {}", warning.code, warning.message)?;
         }
         if is_error {
@@ -786,7 +829,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         for plugin_path in &args.plugins {
             if let Err(e) = wasm_mgr.load(plugin_path) {
                 let msg = format!("failed to load WASM plugin {}: {e}", plugin_path.display());
-                if json_mode {
+                // Tally and filter like every other diagnostic, so
+                // --show-summary counts this and --exclude-rules can hide it.
+                // The count below is deliberately outside: hiding a
+                // diagnostic must not change the exit code.
+                let shown = rules.keep("PLUGIN");
+                if json_mode && shown {
                     diagnostics.push(JsonDiagnostic {
                         file: main_file_str.clone(),
                         line: 1,
@@ -800,7 +848,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                         hint: None,
                         context: None,
                     });
-                } else if !args.quiet {
+                } else if !args.quiet && shown {
                     writeln!(stdout, "error: {msg}")?;
                 }
                 error_count += 1;
@@ -814,7 +862,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                             rustledger_plugin::PluginErrorSeverity::Error => "error",
                             rustledger_plugin::PluginErrorSeverity::Warning => "warning",
                         };
-                        if json_mode {
+                        // Tally and filter like every other diagnostic, so
+                        // --show-summary counts this and --exclude-rules can hide it.
+                        // The count below is deliberately outside: hiding a
+                        // diagnostic must not change the exit code.
+                        let shown = rules.keep("PLUGIN");
+                        if json_mode && shown {
                             diagnostics.push(JsonDiagnostic {
                                 file: main_file_str.clone(),
                                 line: 1,
@@ -828,7 +881,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                                 hint: None,
                                 context: None,
                             });
-                        } else if !args.quiet {
+                        } else if !args.quiet && shown {
                             writeln!(stdout, "{sev}: {}", err.message)?;
                         }
                         match err.severity {
@@ -843,7 +896,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 }
                 Err(e) => {
                     let msg = format!("WASM plugin execution failed: {e}");
-                    if json_mode {
+                    // Tally and filter like every other diagnostic, so
+                    // --show-summary counts this and --exclude-rules can hide it.
+                    // The count below is deliberately outside: hiding a
+                    // diagnostic must not change the exit code.
+                    let shown = rules.keep("PLUGIN");
+                    if json_mode && shown {
                         diagnostics.push(JsonDiagnostic {
                             file: main_file_str.clone(),
                             line: 1,
@@ -857,7 +915,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                             hint: None,
                             context: None,
                         });
-                    } else if !args.quiet {
+                    } else if !args.quiet && shown {
                         writeln!(stdout, "error: {msg}")?;
                     }
                     error_count += 1;
@@ -909,7 +967,12 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 m.to_account.as_deref().unwrap_or("?"),
                 m.confidence,
             );
-            if json_mode {
+            // Tally and filter like every other diagnostic, so
+            // --show-summary counts this and --exclude-rules can hide it.
+            // The count below is deliberately outside: hiding a
+            // diagnostic must not change the exit code.
+            let shown = rules.keep("LINT-XFER");
+            if json_mode && shown {
                 diagnostics.push(JsonDiagnostic {
                     file: m
                         .from_filename
@@ -928,7 +991,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                     ),
                     context: None,
                 });
-            } else if !args.quiet {
+            } else if !args.quiet && shown {
                 let loc = format!(
                     "{}:{}",
                     m.from_filename.as_deref().unwrap_or("?"),
@@ -1104,6 +1167,39 @@ mod tests {
             format!("{excluded:?}"),
             failure,
             "a file that does not parse must never report success"
+        );
+    }
+
+    /// Second review pass on #2286: only the parse and validation loops were
+    /// tallied, so a load-level failure produced the contradiction
+    /// "✗ 1 error" followed by "No diagnostics.", and `--exclude-rules` could
+    /// not touch it. Partial filtering was the thing I had already refused to
+    /// ship for parse errors.
+    #[test]
+    fn load_level_errors_are_tallied_and_filterable() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.beancount");
+        let b = dir.path().join("b.beancount");
+        std::fs::write(&a, "include \"b.beancount\"\n").unwrap();
+        std::fs::write(&b, "include \"a.beancount\"\n").unwrap();
+
+        let (_, text) = check_exit(&a, &["--show-summary"]);
+        assert!(
+            text.contains("E0002"),
+            "an include cycle must reach the summary; got:\n{text}"
+        );
+        assert!(
+            !text.contains("No diagnostics"),
+            "summary must not contradict the error count; got:\n{text}"
+        );
+
+        let failure = format!("{:?}", ExitCode::from(1));
+        let (code, text) = check_exit(&a, &["--exclude-rules", "E0002"]);
+        assert!(!text.contains("Duplicate filename"), "excluded code shown");
+        assert_eq!(
+            format!("{code:?}"),
+            failure,
+            "an unreadable ledger must not report success"
         );
     }
 

@@ -161,6 +161,77 @@ pub struct Args {
     /// reported. Default 0.8 silences the noisy 0.7 floor.
     #[arg(long, default_value_t = 0.8)]
     pub lint_min_confidence: f64,
+
+    /// Print a count of diagnostics per rule code, most frequent first.
+    ///
+    /// Triage aid for a ledger with many findings: it says what to work on
+    /// without scrolling through every occurrence (#2282).
+    #[arg(long)]
+    pub show_summary: bool,
+
+    /// Report only these rule codes (comma-separated, e.g. `E2001,E1001`).
+    ///
+    /// Named `--include-rules` rather than `--rules` so later filters can be
+    /// `--include-<x>` without the first one having claimed the bare name.
+    #[arg(long, value_delimiter = ',', value_name = "CODES")]
+    pub include_rules: Vec<String>,
+
+    /// Report everything except these rule codes (comma-separated).
+    ///
+    /// Applied after `--include-rules`, so excluding a code that was also
+    /// included drops it: the narrower instruction wins.
+    #[arg(long, value_delimiter = ',', value_name = "CODES")]
+    pub exclude_rules: Vec<String>,
+}
+
+/// Which rule codes to report, and a tally of what was seen.
+///
+/// Filtering changes only what is *shown*: the exit code still reflects
+/// everything found, because `check` succeeding on a ledger with errors the
+/// user chose not to look at would be a lie (#2282).
+#[derive(Debug, Default)]
+struct RuleFilter {
+    include: Option<std::collections::HashSet<String>>,
+    exclude: std::collections::HashSet<String>,
+    /// Every code seen, before filtering. Counted per code for `--show-summary`.
+    seen: std::collections::BTreeMap<String, usize>,
+}
+
+impl RuleFilter {
+    fn new(args: &Args) -> Self {
+        let norm = |v: &[String]| -> std::collections::HashSet<String> {
+            v.iter()
+                .map(|c| c.trim().to_ascii_uppercase())
+                .filter(|c| !c.is_empty())
+                .collect()
+        };
+        Self {
+            include: if args.include_rules.is_empty() {
+                None
+            } else {
+                Some(norm(&args.include_rules))
+            },
+            exclude: norm(&args.exclude_rules),
+            seen: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Record a diagnostic and say whether it should be reported.
+    ///
+    /// The tally counts everything, filtered or not, so the summary can say
+    /// how much was hidden rather than only what survived.
+    fn keep(&mut self, code: &str) -> bool {
+        let code = code.to_ascii_uppercase();
+        *self.seen.entry(code.clone()).or_insert(0) += 1;
+        if self.exclude.contains(&code) {
+            return false;
+        }
+        self.include.as_ref().is_none_or(|inc| inc.contains(&code))
+    }
+
+    fn is_filtering(&self) -> bool {
+        self.include.is_some() || !self.exclude.is_empty()
+    }
 }
 
 /// Run the check command, writing all output to stdout.
@@ -197,6 +268,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     // Collect diagnostics for JSON output
     let json_mode = matches!(args.format, OutputFormat::Json);
     let mut diagnostics: Vec<JsonDiagnostic> = Vec::new();
+    let mut rules = RuleFilter::new(args);
 
     // Determine if colors should be used (TTY detection + NO_COLOR)
     let use_color = !json_mode && report::should_use_color();
@@ -224,6 +296,16 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             LoadError::ParseErrors { path, errors } => {
                 let source = std::fs::read_to_string(path).unwrap_or_default();
                 let path_str = path.display().to_string();
+
+                // Filter before rendering rather than after: the text path
+                // hands the whole batch to `report_parse_errors`, which has no
+                // way to skip individual entries.
+                let errors: Vec<_> = errors
+                    .iter()
+                    .filter(|e| rules.keep(&format!("P{:04}", e.kind_code())))
+                    .cloned()
+                    .collect();
+                let errors = &errors[..];
 
                 if json_mode {
                     for error in errors {
@@ -582,12 +664,19 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         if is_advisory_only_code(&err.code) {
             continue;
         }
+        // `keep` also tallies, so this must run for every non-advisory
+        // diagnostic even when no filter is active. It decides DISPLAY only:
+        // `error_count` below still counts a hidden error, because exiting 0
+        // on a ledger whose errors the user chose not to look at would report
+        // success for a broken file — and `--exclude-rules` in CI would then
+        // hide exactly what CI is for.
+        let shown = rules.keep(&err.code);
         let severity_str = match err.severity {
             rustledger_loader::ErrorSeverity::Error => "error",
             rustledger_loader::ErrorSeverity::Warning => "warning",
         };
 
-        if json_mode {
+        if json_mode && shown {
             // Compute end line/column from the error's byte span when
             // available, so multi-line directives (e.g. an unbalanced
             // transaction covering 3 lines) report a real end position
@@ -625,7 +714,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 }
                 _ => {}
             }
-        } else if !args.quiet {
+        } else if !args.quiet && shown {
             // When the error carries span+file_id and we can resolve the
             // source, render via miette so the user gets a snippet of the
             // offending directive (issue #901). Fall back to a one-line
@@ -862,6 +951,41 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         report::print_summary(error_count, warning_count, stdout, use_color)?;
     }
 
+    // Rule tally, most frequent first. Printed after the diagnostics so it is
+    // the last thing on screen, which is where a reader lands after scrolling.
+    // Suppressed in JSON mode: a consumer there has the codes already and can
+    // count them itself, and a second shape in the same document would be a
+    // schema change for no gain.
+    if args.show_summary && !json_mode && !args.quiet {
+        let mut rows: Vec<(&String, &usize)> = rules.seen.iter().collect();
+        // Count descending, then code ascending, so the order is stable rather
+        // than dependent on map iteration for equal counts.
+        rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+
+        if rows.is_empty() {
+            writeln!(stdout, "\nNo diagnostics.")?;
+        } else {
+            let total: usize = rows.iter().map(|(_, n)| **n).sum();
+            writeln!(stdout, "\nSummary ({total} total):")?;
+            let width = rows
+                .iter()
+                .map(|(_, n)| n.to_string().len())
+                .max()
+                .unwrap_or(1);
+            for (code, count) in rows {
+                writeln!(stdout, "  {count:>width$}  {code}")?;
+            }
+            // The tally counts what was found, not what was shown, so a filtered
+            // run would otherwise look like the filter had changed the ledger.
+            if rules.is_filtering() {
+                writeln!(
+                    stdout,
+                    "  (counts are before --include-rules/--exclude-rules)"
+                )?;
+            }
+        }
+    }
+
     if error_count > 0 {
         Ok(ExitCode::from(1))
     } else {
@@ -872,6 +996,171 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ledger with one E1001 (unopened account) and two E2001s.
+    fn ledger_with_mixed_errors() -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        let mut f = tempfile::Builder::new()
+            .suffix(".beancount")
+            .tempfile()
+            .unwrap();
+        f.write_all(
+            b"2020-01-01 open Assets:Bank USD\n\
+              2020-01-01 open Expenses:X USD\n\n\
+              2024-01-15 * \"a\"\n  Assets:Bank  -10.00 USD\n  Expenses:X\n\n\
+              2024-02-01 balance Assets:Bank  999.00 USD\n\
+              2024-03-01 balance Assets:Bank  888.00 USD\n\n\
+              2024-04-01 * \"unopened\"\n  Assets:Nope  1.00 USD\n  Expenses:X\n",
+        )
+        .unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    fn check_exit(path: &std::path::Path, extra: &[&str]) -> (ExitCode, String) {
+        let mut argv = vec!["check", path.to_str().unwrap()];
+        argv.extend_from_slice(extra);
+        let args = Args::parse_from(argv);
+        let mut out = Vec::new();
+        let code = run_with_writer(&args, &mut out).expect("check runs");
+        (code, String::from_utf8(out).unwrap())
+    }
+
+    /// #2282, the property that matters most: hiding a diagnostic must not
+    /// make the run succeed. `--exclude-rules` in CI would otherwise mask
+    /// exactly what CI is for. My first cut of this got it wrong — the filter
+    /// skipped the counting as well as the display, so excluding everything
+    /// exited 0 on a broken ledger.
+    #[test]
+    fn filtering_hides_diagnostics_without_changing_the_exit_code() {
+        let f = ledger_with_mixed_errors();
+        let failure = format!("{:?}", ExitCode::from(1));
+
+        let (unfiltered, text) = check_exit(f.path(), &[]);
+        assert_eq!(format!("{unfiltered:?}"), failure, "the ledger has errors");
+        assert!(text.contains("E2001") && text.contains("E1001"));
+
+        let (excluded, text) = check_exit(f.path(), &["--exclude-rules", "E2001"]);
+        assert!(!text.contains("E2001"), "excluded code must not be shown");
+        assert!(text.contains("E1001"), "other codes must survive");
+        assert_eq!(
+            format!("{excluded:?}"),
+            failure,
+            "hiding a diagnostic must not turn a failing check into a pass"
+        );
+
+        let (all_hidden, _) = check_exit(f.path(), &["--exclude-rules", "E2001,E1001"]);
+        assert_eq!(
+            format!("{all_hidden:?}"),
+            failure,
+            "hiding EVERY diagnostic must still fail"
+        );
+
+        let (included, text) = check_exit(f.path(), &["--include-rules", "E2001"]);
+        assert!(text.contains("E2001") && !text.contains("E1001"));
+        assert_eq!(format!("{included:?}"), failure);
+    }
+
+    /// The summary counts what was found, in descending order.
+    #[test]
+    fn show_summary_reports_counts_per_code() {
+        let f = ledger_with_mixed_errors();
+        let (_, text) = check_exit(f.path(), &["--show-summary"]);
+        let summary = text.split("Summary").nth(1).expect("a summary section");
+        let e2001 = summary.find("E2001").expect("E2001 counted");
+        let e1001 = summary.find("E1001").expect("E1001 counted");
+        assert!(
+            e2001 < e1001,
+            "two E2001s must sort above one E1001:\n{summary}"
+        );
+        assert!(summary.contains("3 total"), "got:\n{summary}");
+    }
+
+    /// Build `Args` with only the rule flags set, for the filter tests.
+    fn rule_args(include: &[&str], exclude: &[&str]) -> Args {
+        let mut argv = vec!["check", "f.beancount"];
+        let inc = include.join(",");
+        let exc = exclude.join(",");
+        if !include.is_empty() {
+            argv.push("--include-rules");
+            argv.push(&inc);
+        }
+        if !exclude.is_empty() {
+            argv.push("--exclude-rules");
+            argv.push(&exc);
+        }
+        Args::parse_from(argv)
+    }
+
+    /// #2282: no flags means report everything, and the tally still counts.
+    #[test]
+    fn no_rule_flags_keeps_everything() {
+        let mut f = RuleFilter::new(&rule_args(&[], &[]));
+        assert!(f.keep("E2001"));
+        assert!(f.keep("P0012"));
+        assert!(!f.is_filtering());
+        assert_eq!(f.seen.get("E2001"), Some(&1));
+    }
+
+    #[test]
+    fn include_rules_keeps_only_those_codes() {
+        let mut f = RuleFilter::new(&rule_args(&["E2001"], &[]));
+        assert!(f.keep("E2001"));
+        assert!(!f.keep("E1001"));
+        assert!(f.is_filtering());
+    }
+
+    #[test]
+    fn exclude_rules_drops_those_codes() {
+        let mut f = RuleFilter::new(&rule_args(&[], &["E2001"]));
+        assert!(!f.keep("E2001"));
+        assert!(f.keep("E1001"));
+    }
+
+    /// Excluding a code that was also included drops it: the narrower
+    /// instruction wins, rather than the order of the flags deciding.
+    #[test]
+    fn exclude_beats_include_for_the_same_code() {
+        let mut f = RuleFilter::new(&rule_args(&["E2001", "E1001"], &["E2001"]));
+        assert!(!f.keep("E2001"));
+        assert!(f.keep("E1001"));
+    }
+
+    /// Codes are written uppercase everywhere, but nobody should have to know
+    /// that when typing a flag.
+    #[test]
+    fn rule_codes_are_case_insensitive() {
+        let mut f = RuleFilter::new(&rule_args(&["e2001"], &[]));
+        assert!(f.keep("E2001"));
+        assert!(f.keep("e2001"));
+        assert!(!f.keep("E1001"));
+    }
+
+    /// The tally counts what was FOUND, not what was shown, so `--show-summary`
+    /// with a filter still says how much exists.
+    #[test]
+    fn the_tally_counts_filtered_out_diagnostics() {
+        let mut f = RuleFilter::new(&rule_args(&[], &["E2001"]));
+        assert!(!f.keep("E2001"));
+        assert!(!f.keep("E2001"));
+        assert!(f.keep("E1001"));
+        assert_eq!(
+            f.seen.get("E2001"),
+            Some(&2),
+            "hidden diagnostics still count"
+        );
+        assert_eq!(f.seen.get("E1001"), Some(&1));
+    }
+
+    /// Whitespace and empty entries in a comma list must not become a rule
+    /// nobody can match, which would silently drop every diagnostic.
+    #[test]
+    fn blank_and_padded_entries_are_ignored() {
+        let args = Args::parse_from(["check", "f.beancount", "--include-rules", " E2001 ,, "]);
+        let mut f = RuleFilter::new(&args);
+        assert!(f.keep("E2001"));
+        assert!(!f.keep("E1001"));
+    }
 
     #[test]
     fn test_json_diagnostic_phase_field_serializes() {

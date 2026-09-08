@@ -341,3 +341,31 @@ push-aur:
     else
         echo "Aborted"
     fi
+
+# ============================================================================
+# NIX
+# ============================================================================
+
+# Refresh flake.nix's npmDepsHash after a vscode lockfile change
+nix-refresh-vscode-hash:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `buildNpmPackage` pins the hash of the vendored npm dependency tree, so
+    # any change to packages/vscode/package-lock.json breaks
+    # `nix build .#vscode-extension` with a fixed-output mismatch. CI does this
+    # automatically on pull requests (.github/workflows/vscode-npm-deps-hash.yml);
+    # this is the same repair by hand.
+    computed=$(nix shell nixpkgs#prefetch-npm-deps \
+        -c prefetch-npm-deps packages/vscode/package-lock.json 2>/dev/null | tail -1)
+    case "$computed" in
+        sha256-*) ;;
+        *) echo "prefetch-npm-deps produced no hash: '$computed'" >&2; exit 1 ;;
+    esac
+    pinned=$(grep -oE 'npmDepsHash = "[^"]+"' flake.nix | head -1 | sed 's/.*"\(.*\)"/\1/')
+    if [ "$computed" = "$pinned" ]; then
+        echo "✓ npmDepsHash is already correct ($pinned)"
+        exit 0
+    fi
+    sed -i "s|npmDepsHash = \"[^\"]*\"|npmDepsHash = \"$computed\"|" flake.nix
+    grep -q "npmDepsHash = \"$computed\"" flake.nix
+    echo "✓ npmDepsHash $pinned -> $computed"

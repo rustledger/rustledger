@@ -1,0 +1,114 @@
+# Keep `flake.nix`'s `npmDepsHash` in step with the VS Code extension's
+# lockfile.
+#
+# `buildNpmPackage` pins the hash of the vendored npm dependency tree, so any
+# change to `packages/vscode/package-lock.json` invalidates it and the Nix
+# build fails with a fixed-output mismatch. Dependabot updates the lockfile and
+# has no way to know a Nix expression hashes it, so *every* npm bump in this
+# package landed red until somebody recomputed the hash by hand (#2109, #2202,
+# #2243). `build` requires that job, so those PRs could never merge unattended.
+#
+# This recomputes the hash and commits it to the pull request. It is separate
+# from the `VS Code Extension (Nix)` job on purpose: that job verifies, this one
+# repairs, and a verifier that silently rewrites what it is checking is worse
+# than one that fails.
+name: VS Code npmDepsHash
+
+on:
+  pull_request:
+    paths:
+      - packages/vscode/package-lock.json
+      - flake.nix
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vscode-npm-deps-hash-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    name: Refresh npmDepsHash
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to push the corrected hash back to the pull request branch.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Check out the PR branch itself rather than the merge commit, so a
+          # push goes back to the contributor's branch.
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Compare the pinned hash with the lockfile
+        id: hash
+        run: |
+          set -euo pipefail
+          # prefetch-npm-deps writes progress to stderr and the hash to stdout.
+          computed=$(nix shell nixpkgs#prefetch-npm-deps \
+            -c prefetch-npm-deps packages/vscode/package-lock.json 2>/dev/null | tail -1)
+          case "$computed" in
+            sha256-*) ;;
+            *)
+              echo "::error::prefetch-npm-deps produced no hash: '$computed'"
+              exit 1
+              ;;
+          esac
+
+          pinned=$(grep -oE 'npmDepsHash = "[^"]+"' flake.nix | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "computed=$computed" >> "$GITHUB_OUTPUT"
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          if [ "$computed" = "$pinned" ]; then
+            echo "matches=true" >> "$GITHUB_OUTPUT"
+            echo "npmDepsHash is already correct ($pinned)"
+          else
+            echo "matches=false" >> "$GITHUB_OUTPUT"
+            echo "npmDepsHash is stale: pinned $pinned, lockfile needs $computed"
+          fi
+
+      # Always report the correct value, so a pull request this job cannot push
+      # to (a fork) still says exactly what to change rather than leaving the
+      # contributor with a bare Nix hash mismatch.
+      - name: Report
+        if: steps.hash.outputs.matches == 'false'
+        run: |
+          {
+            echo "### npmDepsHash is stale"
+            echo
+            echo '`packages/vscode/package-lock.json` changed, so `flake.nix` needs:'
+            echo
+            echo '```nix'
+            echo 'npmDepsHash = "${{ steps.hash.outputs.computed }}";'
+            echo '```'
+            echo
+            echo 'Locally: `nix shell nixpkgs#prefetch-npm-deps -c prefetch-npm-deps packages/vscode/package-lock.json`'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit the refreshed hash
+        # Only a branch in this repository can be pushed to. A fork PR gets the
+        # summary above instead.
+        if: >-
+          steps.hash.outputs.matches == 'false' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          set -euo pipefail
+          sed -i 's|npmDepsHash = "[^"]*"|npmDepsHash = "${{ steps.hash.outputs.computed }}"|' flake.nix
+
+          # Belt and braces: a sed that matched nothing would otherwise commit
+          # an empty change and report success.
+          grep -q 'npmDepsHash = "${{ steps.hash.outputs.computed }}"' flake.nix
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add flake.nix
+          git commit \
+            -m "chore(nix): refresh vscode npmDepsHash for the updated lockfile" \
+            -m "packages/vscode/package-lock.json changed, which invalidates the fixed-output hash flake.nix pins over it. Recomputed automatically." \
+            -m "${{ steps.hash.outputs.pinned }} -> ${{ steps.hash.outputs.computed }}"
+          git push

@@ -24,6 +24,7 @@ use rustledger::config::Config;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::ExitCode as ProcessExitCode;
+use std::sync::OnceLock;
 
 const SCHEMA_VERSION: &str = "ag-rledger.v1";
 
@@ -334,16 +335,29 @@ fn flag_was_supplied(req: &agcli::CommandRequest<'_>, long: &str) -> bool {
     })
 }
 
-fn report_command(name: &'static str, description: &'static str) -> Command {
-    Command::new(name, description)
-        .usage(Box::leak(
+/// The usage string, built once.
+///
+/// `Command::usage` wants a `&'static str` and the report-specific part is
+/// computed from `REPORT_FLAGS`. Leaking a fresh `Box` per call would leak
+/// once for `report` and again for the `r` alias, in a binary that may be
+/// driven as a long-running agent process. A `OnceLock` gives the same
+/// `'static` lifetime with one allocation for the life of the process.
+fn report_usage() -> &'static str {
+    static USAGE: OnceLock<String> = OnceLock::new();
+    USAGE
+        .get_or_init(|| {
             format!(
                 "ag-rledger report [<file>] <report> [--file <file>] [--format <format>] \
-                 [--verbose] [-v]  |  report-specific flags — {}",
+             [--verbose] [-v]  |  report-specific flags \u{2014} {}",
                 report_flag_usage()
             )
-            .into_boxed_str(),
-        ))
+        })
+        .as_str()
+}
+
+fn report_command(name: &'static str, description: &'static str) -> Command {
+    Command::new(name, description)
+        .usage(report_usage())
         .allow_unknown_flags()
         .allow_extra_args()
         .default_next_action(NextAction::new(
@@ -1479,16 +1493,28 @@ mod tests {
                     "`{report}` reads no report-specific flags but appears in the usage string"
                 );
             } else {
-                assert!(
-                    usage.contains(&format!("{report}:")),
-                    "`{report}` reads flags but is missing from the usage string"
+                // Check the report's own segment, not the whole string. An
+                // earlier draft searched all of `usage`, so dropping
+                // `--account` from `balances` still passed on `journal`'s
+                // copy of it: the shared flags were unguarded, which is most
+                // of them.
+                let segment = usage
+                    .split("; ")
+                    .find(|seg| seg.starts_with(&format!("{report}: ")))
+                    .unwrap_or_else(|| {
+                        panic!("`{report}` reads flags but is missing from the usage string")
+                    });
+                let listed: Vec<&str> = segment
+                    .split_once(": ")
+                    .expect("segment is `report: flags`")
+                    .1
+                    .split(' ')
+                    .collect();
+                let expected: Vec<String> = flags.iter().map(|f| format!("--{f}")).collect();
+                assert_eq!(
+                    listed, expected,
+                    "`{report}`'s usage segment disagrees with REPORT_FLAGS"
                 );
-                for flag in *flags {
-                    assert!(
-                        usage.contains(&format!("--{flag}")),
-                        "`{report}` reads --{flag} but the usage string omits it"
-                    );
-                }
             }
         }
     }

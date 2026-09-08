@@ -1,0 +1,100 @@
+# Keep `flake.nix`'s `npmDepsHash` in step with the VS Code extension's
+# lockfile.
+#
+# `buildNpmPackage` pins the hash of the vendored npm dependency tree, so any
+# change to `packages/vscode/package-lock.json` invalidates it and the Nix
+# build fails with a fixed-output mismatch. Dependabot updates the lockfile and
+# has no way to know a Nix expression hashes it, so *every* npm bump in this
+# package landed red until somebody recomputed the hash by hand (#2109, #2202,
+# #2243). `build` requires that job, so those PRs could never merge unattended.
+#
+# This recomputes the hash and reports the value to fix. It is separate from the
+# `VS Code Extension (Nix)` job on purpose: that job verifies, this one
+# diagnoses, and a verifier that silently rewrites what it is checking is worse
+# than one that fails.
+#
+# It deliberately does NOT push the fix. Doing that needs `contents: write` in a
+# workflow that checks out pull-request code and runs a tool over an
+# attacker-controllable lockfile, which is the unsafe-checkout pattern CodeQL
+# flags and is worth avoiding for a one-line repair. Committing automatically
+# would need the two-stage `workflow_run` split, where the privileged half never
+# checks out untrusted code — worth doing only if this proves to be a real
+# nuisance in practice. `just nix-refresh-vscode-hash` is the one-command fix.
+name: VS Code npmDepsHash
+
+on:
+  pull_request:
+    paths:
+      - packages/vscode/package-lock.json
+      - flake.nix
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vscode-npm-deps-hash-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    name: Check npmDepsHash
+    runs-on: ubuntu-latest
+    steps:
+      # The default merge-commit checkout, with no token to push with: this job
+      # only reads the lockfile and reports.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Compare the pinned hash with the lockfile
+        id: hash
+        run: |
+          set -euo pipefail
+          # prefetch-npm-deps writes progress to stderr and the hash to stdout,
+          # so stderr is captured rather than discarded: a network, auth or
+          # parse failure would otherwise surface only as "produced no hash",
+          # which says nothing about why.
+          err=$(mktemp)
+          computed=$(nix shell nixpkgs#prefetch-npm-deps \
+            -c prefetch-npm-deps packages/vscode/package-lock.json 2>"$err" | tail -1) || true
+          case "$computed" in
+            sha256-*) ;;
+            *)
+              echo "::error::prefetch-npm-deps produced no hash. Its output follows."
+              sed 's/^/  /' "$err" >&2
+              exit 1
+              ;;
+          esac
+
+          pinned=$(grep -oE 'npmDepsHash = "[^"]+"' flake.nix | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "computed=$computed" >> "$GITHUB_OUTPUT"
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          if [ "$computed" = "$pinned" ]; then
+            echo "matches=true" >> "$GITHUB_OUTPUT"
+            echo "npmDepsHash is already correct ($pinned)"
+          else
+            echo "matches=false" >> "$GITHUB_OUTPUT"
+            echo "npmDepsHash is stale: pinned $pinned, lockfile needs $computed"
+          fi
+
+      # Always report the correct value, so a pull request this job cannot push
+      # to (a fork) still says exactly what to change rather than leaving the
+      # contributor with a bare Nix hash mismatch.
+      - name: Report the value to set
+        if: steps.hash.outputs.matches == 'false'
+        run: |
+          {
+            echo "### npmDepsHash is stale"
+            echo
+            echo '`packages/vscode/package-lock.json` changed, so `flake.nix` needs:'
+            echo
+            echo '```nix'
+            echo 'npmDepsHash = "${{ steps.hash.outputs.computed }}";'
+            echo '```'
+            echo
+            echo 'Or run `just nix-refresh-vscode-hash`, which edits flake.nix in place.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::flake.nix npmDepsHash is stale; set it to ${{ steps.hash.outputs.computed }}"
+          exit 1

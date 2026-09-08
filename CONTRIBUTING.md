@@ -28,6 +28,28 @@ cd packages/mcp-server
 npm install && npm run build
 ```
 
+### Updating VS Code extension dependencies
+
+`flake.nix` pins `npmDepsHash` over `packages/vscode/package-lock.json`, because
+`buildNpmPackage` hashes the vendored dependency tree. Any lockfile change
+invalidates it and `nix build .#vscode-extension` fails with a fixed-output
+mismatch, which is what the `VS Code Extension (Nix)` job reports.
+
+On a pull request, `.github/workflows/vscode-npm-deps-hash.yml` recomputes the
+hash and fails with the exact value to set, in the error and in the job summary.
+It reports rather than commits: pushing a fix would need write permission in a
+workflow that checks out pull-request code and runs a tool over its lockfile,
+which is a pattern worth avoiding for a one-line repair.
+
+To fix it by hand:
+
+```bash
+just nix-refresh-vscode-hash
+```
+
+This is why dependabot bumps to that package used to land red: it updates the
+lockfile and has no way to know a Nix expression hashes it.
+
 ## Git Workflow
 
 ### Branching Strategy

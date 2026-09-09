@@ -2665,7 +2665,9 @@ mod tests {
             let f = work.join(format!("f{n}.beancount"));
             let text = "2026-01-01 balance Assets:Cash 0.00 EUR\n".to_string();
             std::fs::write(&f, &text).expect("write file");
-            let uri: Uri = format!("file://{}", f.display()).parse().expect("uri");
+            // `format!("file://{}")` is not a URI on Windows: an absolute
+            // path there is `C:\...`, which does not parse.
+            let uri: Uri = crate::path_to_uri(&f).expect("file URI");
             state.on_did_open(lsp_types::DidOpenTextDocumentParams {
                 text_document: lsp_types::TextDocumentItem {
                     uri,
@@ -2699,7 +2701,7 @@ mod tests {
 
         // An edit is what could make a rejected root start including this
         // file, so the memo must not outlive one.
-        let changed: Uri = format!("file://{}", root.display()).parse().expect("uri");
+        let changed: Uri = crate::path_to_uri(&root).expect("file URI");
         state.on_did_change_watched_files(lsp_types::DidChangeWatchedFilesParams {
             changes: vec![lsp_types::FileEvent {
                 uri: changed,

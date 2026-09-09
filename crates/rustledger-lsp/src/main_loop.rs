@@ -1732,10 +1732,15 @@ impl MainLoopState {
         // `rustledger.journalFile` still wins. Deliberately `didOpen` only: the
         // same check on every `didChange` would reload the whole ledger while
         // an include path is still half-typed.
-        self.adopt_as_journal_if_it_has_includes(&uri);
-
-        // Bump revision (invalidates any in-flight requests)
+        // BEFORE the adoption below, not after. Adoption loads the whole
+        // ledger, which is much slower than the VFS write above, and a
+        // background request completing inside that window would compare an
+        // unchanged revision and be delivered as fresh while the world it was
+        // computed against had already been replaced. Invalidating first makes
+        // that window unreachable.
         self.bump_revision();
+
+        self.adopt_as_journal_if_it_has_includes(&uri);
 
         // Compute and publish diagnostics
         self.publish_diagnostics(&uri, &text);

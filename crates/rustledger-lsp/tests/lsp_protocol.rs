@@ -1036,13 +1036,21 @@ fn issue_2285_open_in_an_included_file_counts_without_a_journal_file() {
     let root_src = std::fs::read_to_string(&root_path).expect("read root");
     client.open_document(&root_uri, &root_src);
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Wait up to the hard deadline for the FIRST publish, then only for a
+    // short quiet window: draining to a fixed deadline would add that delay to
+    // every run of the suite.
+    let hard_deadline = Instant::now() + Duration::from_secs(15);
+    let quiet = Duration::from_millis(500);
     let mut publishes = 0usize;
     let mut offenders: Vec<lsp_types::Diagnostic> = Vec::new();
-    while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let Some(msg) = client.recv_with_timeout(remaining) else {
-            continue;
+    while Instant::now() < hard_deadline {
+        let wait = if publishes == 0 {
+            hard_deadline.saturating_duration_since(Instant::now())
+        } else {
+            quiet
+        };
+        let Some(msg) = client.recv_with_timeout(wait) else {
+            break;
         };
         if let lsp_server::Message::Notification(n) = msg
             && n.method == "textDocument/publishDiagnostics"

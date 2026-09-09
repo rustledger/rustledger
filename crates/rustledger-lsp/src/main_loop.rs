@@ -1750,10 +1750,21 @@ impl MainLoopState {
         // that window unreachable.
         self.bump_revision();
 
-        self.adopt_as_journal_if_it_has_includes(&uri);
+        let adopted = self.adopt_as_journal_if_it_has_includes(&uri);
 
-        // Compute and publish diagnostics
-        self.publish_diagnostics(&uri, &text);
+        if adopted {
+            // Adoption changes the ledger EVERY open document is validated
+            // against, not just this one. A user who opened a transactions
+            // file first saw its accounts reported unopened, and without this
+            // those diagnostics sat there uncorrected until the file was
+            // touched: the ledger knew better and the editor still said
+            // otherwise. Covers this document too, since it is in the VFS by
+            // now, so there is no separate publish for it.
+            self.revalidate_open_documents();
+        } else {
+            // Compute and publish diagnostics
+            self.publish_diagnostics(&uri, &text);
+        }
     }
 
     /// Adopt a just-opened file as the root journal when it declares includes
@@ -1771,12 +1782,14 @@ impl MainLoopState {
     /// still half-typed would otherwise be adopted on the strength of an
     /// include that led nowhere, and would then lock the session out of the
     /// real root for good.
-    fn adopt_as_journal_if_it_has_includes(&mut self, uri: &Uri) {
+    /// Returns whether a root was adopted, since that invalidates the
+    /// diagnostics of every already-open document, not just this one.
+    fn adopt_as_journal_if_it_has_includes(&mut self, uri: &Uri) -> bool {
         if self.journal_file.is_some() {
-            return;
+            return false;
         }
         let Ok(path) = uri_to_path(uri) else {
-            return;
+            return false;
         };
         let path = path.into_path_buf();
 
@@ -1831,7 +1844,7 @@ impl MainLoopState {
                     );
                     *self.ledger_state.write() = probe;
                     self.journal_file = Some(root);
-                    return;
+                    return true;
                 }
                 Ok(_) => {
                     tracing::debug!(
@@ -1847,6 +1860,7 @@ impl MainLoopState {
                 }
             }
         }
+        false
     }
 
     /// Handle textDocument/didChange notification.

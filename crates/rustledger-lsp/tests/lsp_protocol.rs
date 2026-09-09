@@ -1197,6 +1197,98 @@ fn issue_2285_an_unrelated_root_upward_is_not_adopted() {
     );
 }
 
+/// Adopting a root must correct the files that are ALREADY open.
+///
+/// A user opens their transactions file first and sees its accounts reported
+/// unopened, then opens the root to find out why. Adoption fires on that
+/// second open and fixes the ledger, but only the second file was
+/// republished, so the first sat there contradicting the ledger until it was
+/// touched. The wrong diagnostic is exactly the one the user went looking at
+/// the root to explain.
+#[test]
+fn issue_2285_adoption_corrects_documents_already_open() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let accounts_path = tmp.path().join("accounts.beancount");
+    let sub_path = tmp.path().join("txns.beancount");
+    // Deliberately NOT a name `discover_journal_upward` knows, so nothing is
+    // adopted until this root is opened explicitly.
+    let root_path = tmp.path().join("m1.beancount");
+
+    std::fs::write(
+        &accounts_path,
+        "2025-01-01 open Assets:Cash EUR\n2025-01-01 open Expenses:Food EUR\n",
+    )
+    .expect("write accounts");
+    std::fs::write(
+        &sub_path,
+        "2026-01-01 * \"lunch\"\n  Assets:Cash   -5 EUR\n  Expenses:Food  5 EUR\n",
+    )
+    .expect("write sub");
+    std::fs::write(
+        &root_path,
+        format!(
+            "include \"{}\"\ninclude \"{}\"\n",
+            include_name(&accounts_path),
+            include_name(&sub_path)
+        ),
+    )
+    .expect("write root");
+
+    let mut client = LspTestClient::spawn();
+    client.initialize();
+
+    let sub_uri = uri_for(&sub_path);
+    let sub_src = std::fs::read_to_string(&sub_path).expect("read sub");
+    client.open_document(&sub_uri, &sub_src);
+
+    // Single-file mode: the accounts really do look unopened from here. If
+    // this is ever empty the test has stopped exercising the correction.
+    let before = drain_e1001_for(&mut client, &sub_uri);
+    assert!(
+        !before.is_empty(),
+        "expected the pre-adoption false E1001s; the fixture no longer sets up the case"
+    );
+
+    let root_uri = uri_for(&root_path);
+    let root_src = std::fs::read_to_string(&root_path).expect("read root");
+    client.open_document(&root_uri, &root_src);
+
+    // The LAST word on the sub-file, not any publish: the stale set is still
+    // in the stream ahead of the corrected one.
+    let hard_deadline = Instant::now() + Duration::from_secs(15);
+    let quiet = Duration::from_millis(500);
+    let mut latest: Option<Vec<lsp_types::Diagnostic>> = None;
+    while Instant::now() < hard_deadline {
+        let wait = if latest.is_none() {
+            hard_deadline.saturating_duration_since(Instant::now())
+        } else {
+            quiet
+        };
+        let Some(msg) = client.recv_with_timeout(wait) else {
+            break;
+        };
+        if let lsp_server::Message::Notification(n) = msg
+            && n.method == "textDocument/publishDiagnostics"
+        {
+            let p: lsp_types::PublishDiagnosticsParams =
+                serde_json::from_value(n.params).expect("valid publishDiagnostics");
+            if same_file(&p.uri, &sub_uri) {
+                latest = Some(p.diagnostics);
+            }
+        }
+    }
+
+    let latest = latest.expect("the already-open file was never republished after adoption");
+    let unopened: Vec<_> = latest
+        .iter()
+        .filter(|d| matches!(&d.code, Some(lsp_types::NumberOrString::String(s)) if s == "E1001"))
+        .collect();
+    assert!(
+        unopened.is_empty(),
+        "an already-open file kept its pre-adoption diagnostics; got: {unopened:?}"
+    );
+}
+
 /// A root that will not load must not be adopted, because adoption is sticky.
 ///
 /// `journal_file.is_some()` is what stops a second adoption, so pinning it to

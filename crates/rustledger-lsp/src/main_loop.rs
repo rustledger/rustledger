@@ -1768,32 +1768,64 @@ impl MainLoopState {
         let Ok(path) = uri_to_path(uri) else {
             return;
         };
-        let (_text, parsed) = self.get_document_data(uri);
-        if parsed.includes.is_empty() {
-            return;
-        }
         let path = path.into_path_buf();
-        let loaded = {
-            let mut state = self.ledger_state.write();
-            state.load(&path)
-        };
-        match loaded {
-            Ok(files) if files.len() > 1 => {
-                tracing::info!(
-                    "Adopted {} as the root journal ({} files); it declares includes and none was configured",
-                    path.display(),
-                    files.len()
-                );
-                self.journal_file = Some(path);
-            }
-            Ok(_) => {
-                tracing::warn!(
-                    "Not adopting {} as a root journal: its includes resolved to nothing",
+
+        // Two ways to reach a root, in order of confidence.
+        //
+        // 1. The open file declares includes, so it IS a root, whatever it is
+        //    called. This is the reported case (#2285).
+        // 2. Otherwise look upward for a conventionally named root that turns
+        //    out to include this file. A user editing `ledger/2025-01.beancount`
+        //    hits the same wrong `E1001` as the reporter did, and that file
+        //    declares no includes of its own, so (1) cannot help it.
+        let (_text, parsed) = self.get_document_data(uri);
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if !parsed.includes.is_empty() {
+            candidates.push(path.clone());
+        }
+        if let Some(dir) = path.parent()
+            && let Some(found) = rustledger_loader::discover_journal_upward(dir)
+            && !candidates.contains(&found)
+        {
+            candidates.push(found);
+        }
+
+        for root in candidates {
+            // Load into a SCRATCH state, never straight into the shared one.
+            // A candidate that turns out not to qualify would otherwise leave
+            // the server holding a ledger it just decided not to use, with
+            // `journal_file` still None to say so -- two sources of truth
+            // disagreeing about which ledger is live.
+            let mut probe = crate::ledger_state::LedgerState::new();
+            let loaded = probe.load(&root);
+            match loaded {
+                // `files.len() > 1` because adoption is STICKY:
+                // `journal_file.is_some()` is what stops a second one. An
+                // unresolved include is not an `Err` -- the loader returns Ok
+                // with the failure recorded in `ledger.errors` -- so a file
+                // whose include is missing or still half-typed would otherwise
+                // be adopted on the strength of an include that led nowhere,
+                // and would lock the session out of the real root for good.
+                //
+                // `contains_file` because a root discovered upward is only
+                // this file's root if it actually reaches this file. An
+                // unrelated `main.beancount` further up the tree is not.
+                Ok(files) if files.len() > 1 && probe.contains_file(&path) => {
+                    tracing::info!(
+                        "Adopted {} as the root journal ({} files); none was configured",
+                        root.display(),
+                        files.len()
+                    );
+                    *self.ledger_state.write() = probe;
+                    self.journal_file = Some(root);
+                    return;
+                }
+                Ok(_) => tracing::debug!(
+                    "Not adopting {}: it does not resolve to a ledger containing {}",
+                    root.display(),
                     path.display()
-                );
-            }
-            Err(e) => {
-                tracing::warn!("Not adopting {} as a root journal: {e}", path.display());
+                ),
+                Err(e) => tracing::warn!("Not adopting {} as a root journal: {e}", root.display()),
             }
         }
     }

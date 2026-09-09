@@ -999,6 +999,148 @@ fn included_file_validation_errors_are_published() {
     );
 }
 
+/// Regression for #2285: in SINGLE-FILE mode (no `rustledger.journalFile`),
+/// an `open` directive living in an `include`d file must still count.
+///
+/// The reporter's case exactly: `rledger check` on the same file reports no
+/// errors while the LSP reports "Account Assets:Cash was never opened". A
+/// false error in the editor against a file the CLI calls clean is the worst
+/// shape of wrong: the tool contradicts itself, and the one the user is
+/// looking at is the one that is wrong.
+///
+/// Drains EVERY publish for the file rather than asserting on the first. The
+/// server may publish an empty set before the validated one, and breaking on
+/// that would satisfy "no E1001" without ever seeing the real answer.
+#[test]
+fn issue_2285_open_in_an_included_file_counts_without_a_journal_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root_path = tmp.path().join("m1.beancount");
+    let accounts_path = tmp.path().join("m1-accounts.beancount");
+
+    std::fs::write(&accounts_path, "2025-01-01 open Assets:Cash\n").expect("write accounts");
+    std::fs::write(
+        &root_path,
+        format!(
+            "include \"{}\"\n2026-01-01 balance Assets:Cash               0.00 EUR\n",
+            include_name(&accounts_path)
+        ),
+    )
+    .expect("write root");
+
+    // No journal file: single-file mode, the path most users follow and the
+    // one the reporter was on.
+    let mut client = LspTestClient::spawn();
+    client.initialize();
+
+    let root_uri = uri_for(&root_path);
+    let root_src = std::fs::read_to_string(&root_path).expect("read root");
+    client.open_document(&root_uri, &root_src);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut publishes = 0usize;
+    let mut offenders: Vec<lsp_types::Diagnostic> = Vec::new();
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Some(msg) = client.recv_with_timeout(remaining) else {
+            continue;
+        };
+        if let lsp_server::Message::Notification(n) = msg
+            && n.method == "textDocument/publishDiagnostics"
+        {
+            let p: lsp_types::PublishDiagnosticsParams =
+                serde_json::from_value(n.params).expect("valid publishDiagnostics");
+            if same_file(&p.uri, &root_uri) {
+                publishes += 1;
+                offenders.extend(p.diagnostics.into_iter().filter(|d| {
+                    matches!(&d.code, Some(lsp_types::NumberOrString::String(s)) if s == "E1001")
+                }));
+            }
+        }
+    }
+
+    assert!(publishes > 0, "no publishDiagnostics for the opened file");
+    assert!(
+        offenders.is_empty(),
+        "E1001 for an account opened in an included file; `rledger check` reports this file clean. got: {offenders:?}"
+    );
+}
+
+/// A root that will not load must not be adopted, because adoption is sticky.
+///
+/// `journal_file.is_some()` is what stops a second adoption, so pinning it to
+/// a path that failed to load would lock the session out of the real root for
+/// good: every later file would keep falling through to single-file mode and
+/// keep reporting #2285's false `E1001`.
+///
+/// Asserts a POSITIVE consequence of adoption rather than the absence of a
+/// diagnostic: the error in the unopened included file is published under its
+/// own URI, which can only happen once the ledger is loaded. An
+/// absence-assertion is satisfied by an empty publish and so cannot tell
+/// "clean" from "never checked" -- the first draft of this test passed with
+/// the guard removed for exactly that reason.
+#[test]
+fn issue_2285_a_failed_adoption_does_not_block_the_real_root() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let broken_path = tmp.path().join("broken.beancount");
+    std::fs::write(&broken_path, "include \"does-not-exist.beancount\"\n").expect("write broken");
+
+    let good_path = tmp.path().join("m1.beancount");
+    let included_path = tmp.path().join("m1-included.beancount");
+    std::fs::write(
+        &included_path,
+        "2025-01-01 open Assets:Cash USD\n         2025-01-01 open Expenses:Food USD\n         2025-02-01 * \"unbalanced in the include\"\n  \
+           Assets:Cash   -5 USD\n  \
+           Expenses:Food   3 USD\n",
+    )
+    .expect("write included");
+    std::fs::write(
+        &good_path,
+        format!("include \"{}\"\n", include_name(&included_path)),
+    )
+    .expect("write good");
+
+    let mut client = LspTestClient::spawn();
+    client.initialize();
+
+    // The unloadable one first, so it gets the chance to pin `journal_file`.
+    let broken_uri = uri_for(&broken_path);
+    let broken_src = std::fs::read_to_string(&broken_path).expect("read broken");
+    client.open_document(&broken_uri, &broken_src);
+
+    let good_uri = uri_for(&good_path);
+    let good_src = std::fs::read_to_string(&good_path).expect("read good");
+    client.open_document(&good_uri, &good_src);
+
+    // The include is never opened, so a diagnostic under its URI proves the
+    // ledger was loaded, which proves the real root was adopted.
+    let included_uri = uri_for(&included_path);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut seen: Vec<String> = Vec::new();
+    let mut found = false;
+    while Instant::now() < deadline && !found {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Some(msg) = client.recv_with_timeout(remaining) else {
+            break;
+        };
+        if let lsp_server::Message::Notification(n) = msg
+            && n.method == "textDocument/publishDiagnostics"
+        {
+            let p: lsp_types::PublishDiagnosticsParams =
+                serde_json::from_value(n.params).expect("valid publishDiagnostics");
+            seen.push(p.uri.as_str().to_string());
+            if same_file(&p.uri, &included_uri) && !p.diagnostics.is_empty() {
+                found = true;
+            }
+        }
+    }
+
+    assert!(
+        found,
+        "a failed adoption pinned `journal_file` and locked out the real root: \
+         no diagnostics for the unopened include {included_uri}; saw {seen:?}"
+    );
+}
+
 /// Companion to the above: once the error in the unopened included file is
 /// fixed, its diagnostics must be explicitly CLEARED (an empty publish), not
 /// left lingering in the client. Exercises `publish_cross_file_diagnostics`'s

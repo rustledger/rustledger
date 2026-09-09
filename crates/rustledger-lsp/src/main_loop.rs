@@ -1719,11 +1719,78 @@ impl MainLoopState {
                 .open(path.into_path_buf(), text.clone(), version);
         }
 
+        // A file that includes other files IS a root journal, whatever it is
+        // called (#2285). Discovery only recognizes the names in
+        // `COMMON_ROOT_NAMES`, so a ledger rooted at `m1.beancount` fell
+        // through to single-file mode, where nothing follows an `include` and
+        // every account opened in an included file read as never opened. The
+        // editor then reported `E1001` on a file `rledger check` calls clean,
+        // which is the worst shape of wrong: the tool contradicts itself, and
+        // the surface the user is looking at is the one that is wrong.
+        //
+        // Only when no journal is configured or discovered, so an explicit
+        // `rustledger.journalFile` still wins. Deliberately `didOpen` only: the
+        // same check on every `didChange` would reload the whole ledger while
+        // an include path is still half-typed.
+        self.adopt_as_journal_if_it_has_includes(&uri);
+
         // Bump revision (invalidates any in-flight requests)
         self.bump_revision();
 
         // Compute and publish diagnostics
         self.publish_diagnostics(&uri, &text);
+    }
+
+    /// Adopt a just-opened file as the root journal when it declares includes
+    /// and we have no journal yet.
+    ///
+    /// Loading is what makes an `open` in an included file visible to
+    /// validation, so this is the difference between a correct diagnostic and
+    /// a false one.
+    ///
+    /// Adoption is STICKY -- `journal_file.is_some()` is what stops a second
+    /// one -- so it only happens when the includes actually resolved, measured
+    /// by the loader reaching more than the root file itself. An unresolved
+    /// include is not an `Err`: the loader returns `Ok` with the failure
+    /// recorded in `ledger.errors`, so a file whose include is missing or
+    /// still half-typed would otherwise be adopted on the strength of an
+    /// include that led nowhere, and would then lock the session out of the
+    /// real root for good.
+    fn adopt_as_journal_if_it_has_includes(&mut self, uri: &Uri) {
+        if self.journal_file.is_some() {
+            return;
+        }
+        let Ok(path) = uri_to_path(uri) else {
+            return;
+        };
+        let (_text, parsed) = self.get_document_data(uri);
+        if parsed.includes.is_empty() {
+            return;
+        }
+        let path = path.into_path_buf();
+        let loaded = {
+            let mut state = self.ledger_state.write();
+            state.load(&path)
+        };
+        match loaded {
+            Ok(files) if files.len() > 1 => {
+                tracing::info!(
+                    "Adopted {} as the root journal ({} files); it declares includes and none was configured",
+                    path.display(),
+                    files.len()
+                );
+                self.journal_file = Some(path);
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    "Not adopting {} as a root journal: its includes resolved to nothing",
+                    path.display()
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Not adopting {} as a root journal: {e}", path.display());
+            }
+        }
     }
 
     /// Handle textDocument/didChange notification.

@@ -915,7 +915,8 @@ pub fn all_diagnostics(
         );
     }
 
-    // Emit option warnings (E7001–E7006).
+    // Emit option warnings (E7001–E7009), at the severity
+    // `OptionWarning::is_error` gives them.
     // In multi-file mode, use warnings from the loaded ledger (shown only in
     // the main file to avoid duplication). In single-file mode (no ledger),
     // validate options from the parse result so diagnostics still appear
@@ -1128,7 +1129,7 @@ pub(crate) fn ledger_diagnostics_multi(
                     MAX_VALIDATION_FILE_SIZE
                 );
             }
-            // Option warnings (E7001–E7006) are shown only in the main file to
+            // Option warnings (E7001–E7009) are shown only in the main file to
             // avoid duplication across open documents.
             if t.file_id == 0 {
                 for warning in ledger.options.warnings.as_slice() {

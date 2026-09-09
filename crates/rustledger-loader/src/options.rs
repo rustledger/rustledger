@@ -107,7 +107,7 @@ const READONLY_OPTIONS: &[&str] = &["filename"];
 /// Option validation warning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionWarning {
-    /// Warning code (E7001 through E7008).
+    /// Warning code (E7001 through E7009).
     pub code: &'static str,
     /// Warning message.
     pub message: String,
@@ -115,6 +115,36 @@ pub struct OptionWarning {
     pub option: String,
     /// Option value.
     pub value: String,
+}
+
+impl OptionWarning {
+    /// Whether this is a hard error rather than a warning.
+    ///
+    /// Lives on the warning, not in each consumer, because the consumers had
+    /// already drifted: `rledger check` reported `E7009` as a warning while
+    /// the LSP published the same code as an error, so one surface said the
+    /// file was fine and the other put a red squiggle on it (#2291).
+    ///
+    /// `E7001` (unknown option) and `E7002` (invalid value) are errors, which
+    /// matches `bean-check` exiting non-zero on both.
+    ///
+    /// `E7003` (duplicate non-repeatable option) is a WARNING, matching
+    /// `bean-check` (last value wins, exit 0), the loader, and `validate`. A
+    /// master ledger that includes self-contained sub-ledgers, each declaring
+    /// its own `option "title"` for standalone use, is a legitimate beancount
+    /// layout; erroring on it rejected that pattern (#1546).
+    ///
+    /// `E7009` (option in an included file is ignored) is a warning for the
+    /// same reason and about the same ledger: #1546's repro declares a title
+    /// in the master and in each sub-ledger, so once #2151 stopped the
+    /// included values from governing, that layout began reporting E7009.
+    /// Treating it as an error made the exact file #1546 was about exit
+    /// non-zero again. The unit tests all passed; only running the repro end
+    /// to end caught it.
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        !matches!(self.code, "E7003" | "E7009")
+    }
 }
 
 /// Beancount file options.
@@ -783,6 +813,36 @@ impl Options {
 
 #[cfg(test)]
 mod tests {
+
+    /// The one rule both `rledger check` and the LSP read (#2291).
+    ///
+    /// Enumerated rather than spot-checked: the bug was a consumer holding a
+    /// second, shorter copy of this list, and a test that only checked the two
+    /// warnings would not notice a code quietly moving out of the error class.
+    #[test]
+    fn only_e7003_and_e7009_are_warnings() {
+        let warn = |code: &'static str| OptionWarning {
+            code,
+            message: String::new(),
+            option: String::new(),
+            value: String::new(),
+        };
+
+        for code in ["E7003", "E7009"] {
+            assert!(
+                !warn(code).is_error(),
+                "{code} must stay a warning; `rledger check` exits 0 on it"
+            );
+        }
+        for code in [
+            "E7001", "E7002", "E7004", "E7005", "E7006", "E7007", "E7008",
+        ] {
+            assert!(
+                warn(code).is_error(),
+                "{code} must stay an error; `rledger check` exits non-zero on it"
+            );
+        }
+    }
     use super::*;
 
     #[test]

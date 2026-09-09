@@ -149,6 +149,19 @@ fn parse_result_to_plugins(
         .collect()
 }
 
+/// LSP severity for an option warning, from the one rule both surfaces share.
+///
+/// `rledger check` and the LSP each had their own idea of which `E70xx` codes
+/// were fatal, and they disagreed (#2291). The rule now lives on
+/// `OptionWarning`; this only translates it into the LSP's vocabulary.
+fn option_warning_severity(warning: &rustledger_loader::OptionWarning) -> DiagnosticSeverity {
+    if warning.is_error() {
+        DiagnosticSeverity::ERROR
+    } else {
+        DiagnosticSeverity::WARNING
+    }
+}
+
 /// Run validation on parsed directives and convert errors to LSP diagnostics.
 ///
 /// The `rledger check` pipeline is:
@@ -902,7 +915,8 @@ pub fn all_diagnostics(
         );
     }
 
-    // Emit option warnings (E7001–E7006).
+    // Emit option warnings (E7001–E7009), at the severity
+    // `OptionWarning::is_error` gives them.
     // In multi-file mode, use warnings from the loaded ledger (shown only in
     // the main file to avoid duplication). In single-file mode (no ledger),
     // validate options from the parse result so diagnostics still appear
@@ -941,7 +955,10 @@ pub fn all_diagnostics(
                     start: Position::new(0, 0),
                     end: Position::new(0, 0),
                 },
-                severity: Some(DiagnosticSeverity::ERROR),
+                // Not always an error: `rledger check` calls E7003 and E7009
+                // warnings, and publishing them as errors put a red squiggle
+                // on a file the CLI exits 0 on (#2291).
+                severity: Some(option_warning_severity(warning)),
                 code: Some(lsp_types::NumberOrString::String(warning.code.to_string())),
                 source: Some("rustledger".to_string()),
                 message: warning.message.clone(),
@@ -1112,7 +1129,7 @@ pub(crate) fn ledger_diagnostics_multi(
                     MAX_VALIDATION_FILE_SIZE
                 );
             }
-            // Option warnings (E7001–E7006) are shown only in the main file to
+            // Option warnings (E7001–E7009) are shown only in the main file to
             // avoid duplication across open documents.
             if t.file_id == 0 {
                 for warning in ledger.options.warnings.as_slice() {
@@ -1121,7 +1138,11 @@ pub(crate) fn ledger_diagnostics_multi(
                             start: Position::new(0, 0),
                             end: Position::new(0, 0),
                         },
-                        severity: Some(DiagnosticSeverity::ERROR),
+                        // Same rule as the single-file path above. This is
+                        // the SECOND site publishing option warnings, and
+                        // fixing only one would have left the multi-file path
+                        // still reporting warnings as errors.
+                        severity: Some(option_warning_severity(warning)),
                         code: Some(lsp_types::NumberOrString::String(warning.code.to_string())),
                         source: Some("rustledger".to_string()),
                         message: warning.message.clone(),
@@ -2441,6 +2462,131 @@ plugin "auto_accounts"
         assert!(
             !codes.iter().any(|c| c == "E1001"),
             "auto_accounts should still auto-generate opens. Got: {codes:?}"
+        );
+    }
+
+    /// Companion to the multi-file case: the SINGLE-FILE site, reached when
+    /// no ledger is loaded, must classify option warnings the same way.
+    ///
+    /// This is the second of the two sites. They are ~200 lines apart and
+    /// each has its own copy of the `Diagnostic` literal, which is how they
+    /// came to disagree with `rledger check` independently.
+    #[test]
+    fn single_file_option_warnings_carry_the_same_severity() {
+        // E7001, an error: an option that does not exist.
+        let src = "option \"nonsense_option\" \"x\"\n2024-01-01 open Assets:Cash\n";
+        let parsed = parse(src);
+        let diags = all_diagnostics(&parsed, src, None, None, None, &[], PositionEncoding::Utf16);
+        let e7001 = diags
+            .iter()
+            .find(|d| matches!(&d.code, Some(lsp_types::NumberOrString::String(c)) if c == "E7001"))
+            .expect("fixture must produce E7001");
+        assert_eq!(
+            e7001.severity,
+            Some(DiagnosticSeverity::ERROR),
+            "E7001 is an error to `rledger check`"
+        );
+
+        // E7003, a warning: a non-repeatable option set twice. `bean-check`
+        // takes the last value and exits 0, and so does `rledger check`.
+        let src =
+            "option \"title\" \"one\"\noption \"title\" \"two\"\n2024-01-01 open Assets:Cash\n";
+        let parsed = parse(src);
+        let diags = all_diagnostics(&parsed, src, None, None, None, &[], PositionEncoding::Utf16);
+        let e7003 = diags
+            .iter()
+            .find(|d| matches!(&d.code, Some(lsp_types::NumberOrString::String(c)) if c == "E7003"))
+            .expect("fixture must produce E7003");
+        assert_eq!(
+            e7003.severity,
+            Some(DiagnosticSeverity::WARNING),
+            "E7003 is a warning to `rledger check`, which exits 0 on it (#1546)"
+        );
+    }
+
+    /// #2291: option warnings must carry the severity `rledger check` gives
+    /// them, not a hardcoded ERROR.
+    ///
+    /// Covers the MULTI-FILE site. There are two places that publish option
+    /// warnings and they are far apart in this file; fixing one and leaving
+    /// the other would have left every included-file ledger still painting
+    /// `E7009` red, which is the exact ledger the code is about.
+    #[test]
+    fn option_warnings_carry_the_severity_check_gives_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("main.beancount");
+        // `title` in the include is ignored (E7009, a warning); the bogus
+        // option is E7001, an error.
+        std::fs::write(
+            dir.path().join("a.beancount"),
+            "option \"title\" \"sub\"\n2024-01-01 open Assets:A\n",
+        )
+        .expect("write a");
+        std::fs::write(
+            &main,
+            "option \"title\" \"root\"\noption \"nonsense_option\" \"x\"\ninclude \"a.beancount\"\n",
+        )
+        .expect("write main");
+
+        let mut ls = LedgerState::new();
+        ls.load(&main).expect("load multi-file ledger");
+        let files: Vec<(u16, Arc<str>)> = ls
+            .ledger()
+            .expect("ledger loaded")
+            .source_map
+            .files()
+            .iter()
+            .map(|f| (f.id as u16, f.source.clone()))
+            .collect();
+        let parses: Vec<ParseResult> = files.iter().map(|(_, s)| parse(s)).collect();
+        let targets: Vec<FileDiagTarget<'_>> = files
+            .iter()
+            .zip(&parses)
+            .map(|((fid, src), p)| FileDiagTarget {
+                file_id: *fid,
+                source: src,
+                parse: p,
+            })
+            .collect();
+
+        let per_file = ledger_diagnostics_multi(
+            &ls,
+            Some(0),
+            &parses[0],
+            &[],
+            &targets,
+            PositionEncoding::Utf16,
+        );
+
+        let severity_of = |code: &str| {
+            per_file
+                .iter()
+                .flatten()
+                .find(
+                    |d| matches!(&d.code, Some(lsp_types::NumberOrString::String(s)) if s == code),
+                )
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no {code} diagnostic; the fixture no longer produces it. got {:?}",
+                        per_file
+                            .iter()
+                            .flatten()
+                            .filter_map(|d| d.code.clone())
+                            .collect::<Vec<_>>()
+                    )
+                })
+                .severity
+        };
+
+        assert_eq!(
+            severity_of("E7009"),
+            Some(DiagnosticSeverity::WARNING),
+            "E7009 is a warning to `rledger check`, which exits 0 on it"
+        );
+        assert_eq!(
+            severity_of("E7001"),
+            Some(DiagnosticSeverity::ERROR),
+            "E7001 is an error to `rledger check`, which exits non-zero on it"
         );
     }
 

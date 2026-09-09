@@ -628,35 +628,20 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         }
     }
 
-    // All option warnings collected by `Options::set` (E7001 unknown option,
-    // E7002 invalid value, E7003 duplicate non-repeatable, E7004/E7005/E7006
-    // read-only and related) are surfaced here. Everything except E7003 is a
-    // hard error; E7003 is a warning (see below).
+    // All option warnings collected by `Options::set` are surfaced here.
+    // Which of them are fatal is `OptionWarning::is_error`, which is where the
+    // reasoning now lives too: why E7003 and E7009 are warnings, the #1546
+    // ledger that made it so, and what #2151 changed. It moved out of this
+    // file because the LSP and the WASM surface had each guessed differently
+    // and disagreed with what is printed here (#2291).
     //
-    // E7001/E7002 match beancount: `bean-check` exits non-zero on an unknown
-    // option or an invalid option value.
-    //
-    // E7003 (duplicate non-repeatable option) is a WARNING, not an error —
-    // matching `bean-check` (last value wins, exit 0), the loader, and
-    // `validate`. A master ledger that `include`s self-contained sub-ledgers,
-    // each declaring its own `option "title"` / `booking_method` / ... for
-    // standalone use, is a legitimate beancount layout; erroring on it rejected
-    // that pattern and disagreed with our own loader/`validate` (issue #1546).
-    // The value is already last-wins (the loader applies the latest). Pinned by
-    // `cli_commands_test::test_check_duplicate_option_warns`.
-    //
-    // E7009 (option in an included file is ignored) is a warning for the same
-    // reason, and the reason is the same LEDGER: #1546's repro declares a
-    // title in the master and in each sub-ledger. Once #2151 stopped the
-    // included values from governing, that layout started reporting E7009 —
-    // so leaving this list at E7003 alone made the exact file #1546 was about
-    // exit non-zero again. The unit tests all passed; only running its repro
-    // end to end caught it.
+    // Pinned by `cli_commands_test::test_check_duplicate_option_warns` and by
+    // `options::tests::only_e7003_and_e7009_are_warnings`.
     let main_file_str = file.display().to_string();
     let mut option_error_count = 0;
     let mut option_warning_count = 0;
     for warning in &load_result.options.warnings {
-        let is_error = !matches!(warning.code, "E7003" | "E7009");
+        let is_error = warning.is_error();
         let severity = if is_error { "error" } else { "warning" };
         // Same treatment as the literal-code sites; this one's code is
         // dynamic, so it needs saying explicitly.

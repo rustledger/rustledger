@@ -505,7 +505,33 @@ pub struct Ledger {
     editor_cache: editor::EditorCache,
 }
 
+/// Option warnings as WASM `Error`s, carrying the severity `rledger check`
+/// gives them.
+///
+/// A free function rather than an inline loop because its only caller is a
+/// `wasm_bindgen` entry point taking `JsValue`, which cannot be called from a
+/// native test. The mapping is the part that was wrong, so it lives where a
+/// test can reach it.
+///
+/// E7003 and E7009 are warnings to `check`, which exits 0 on them. They used
+/// to go out here as errors, under a comment claiming parity with `check` and
+/// the LSP, so a ledger the CLI called clean arrived carrying errors (#2291).
+fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) -> Vec<Error> {
+    warnings
+        .iter()
+        .map(|w| {
+            let text = format!("[{}] {}", w.code, w.message);
+            if w.is_error() {
+                Error::new(text)
+            } else {
+                Error::warning(text)
+            }
+        })
+        .collect()
+}
+
 #[wasm_bindgen]
+
 impl Ledger {
     /// Create a `Ledger` from multiple files with include resolution.
     ///
@@ -566,11 +592,7 @@ impl Ledger {
                 let directives: Vec<Directive> =
                     ledger.directives.into_iter().map(|s| s.value).collect();
                 let mut errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
-                // Include option warnings (E7001–E7006) so WASM consumers
-                // see the same diagnostics as `rledger check` and the LSP.
-                for w in &ledger.options.warnings {
-                    errors.push(Error::new(format!("[{}] {}", w.code, w.message)));
-                }
+                errors.extend(option_warnings_to_errors(&ledger.options.warnings));
                 let editor_cache = editor::EditorCache::from_directives(&directives);
 
                 Ok(Self {
@@ -723,5 +745,61 @@ impl Ledger {
             errors: payload.errors,
             editor_cache,
         })
+    }
+}
+
+#[cfg(test)]
+mod option_warning_severity_tests {
+    use super::*;
+    use crate::types::Severity;
+    use rustledger_loader::OptionWarning;
+
+    fn warn(code: &'static str) -> OptionWarning {
+        OptionWarning {
+            code,
+            message: "msg".to_string(),
+            option: "title".to_string(),
+            value: "v".to_string(),
+        }
+    }
+
+    /// #2291, third surface. `rledger check` exits 0 on E7003 and E7009, so a
+    /// ledger it calls clean must not arrive here carrying errors.
+    ///
+    /// The loop this replaced sent every option warning out as an `Error`,
+    /// under a comment claiming parity with `check` and the LSP: the claim
+    /// outlived the agreement.
+    #[test]
+    fn warnings_stay_warnings_and_errors_stay_errors() {
+        let mapped = option_warnings_to_errors(&[
+            warn("E7009"),
+            warn("E7003"),
+            warn("E7001"),
+            warn("E7002"),
+        ]);
+        let sev: Vec<_> = mapped.iter().map(|e| e.severity).collect();
+        assert_eq!(
+            sev,
+            vec![
+                Severity::Warning,
+                Severity::Warning,
+                Severity::Error,
+                Severity::Error
+            ],
+            "severity must follow OptionWarning::is_error, the rule `rledger check` reads"
+        );
+    }
+
+    /// The code stays visible in the message, which is how consumers identify
+    /// these today: `Error::code` is `None` on this path. Pinned so the
+    /// severity fix cannot quietly take the code away with it.
+    #[test]
+    fn the_code_is_still_in_the_message() {
+        let mapped = option_warnings_to_errors(&[warn("E7009")]);
+        assert!(
+            mapped[0].message.contains("E7009"),
+            "got {:?}",
+            mapped[0].message
+        );
     }
 }

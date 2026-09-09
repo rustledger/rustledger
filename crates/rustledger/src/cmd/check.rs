@@ -656,7 +656,10 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
     let mut option_error_count = 0;
     let mut option_warning_count = 0;
     for warning in &load_result.options.warnings {
-        let is_error = !matches!(warning.code, "E7003" | "E7009");
+        // `OptionWarning::is_error` owns this rule now; it used to live here
+        // and the LSP had its own idea (#2291). The reasoning, including why
+        // E7003 and E7009 are warnings, moved with it.
+        let is_error = warning.is_error();
         let severity = if is_error { "error" } else { "warning" };
         // Same treatment as the literal-code sites; this one's code is
         // dynamic, so it needs saying explicitly.

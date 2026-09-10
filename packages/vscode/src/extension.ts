@@ -5,9 +5,14 @@ import { tmpdir } from "os";
 import { dirname, join } from "path";
 import * as vscode from "vscode";
 import {
+  ExecuteCommandRequest,
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
+} from "vscode-languageclient/node";
+import type {
+  DynamicFeature,
+  StaticFeature,
 } from "vscode-languageclient/node";
 
 const INSTALL_URL =
@@ -24,6 +29,114 @@ const VSIX_ASSET_NAME = "rustledger-vscode.vsix";
 // `workspace_folders.first()` and holds one ledger, which is exactly right
 // once each process is given exactly one folder.
 const clients = new Map<string, LanguageClient>();
+
+// A client that does NOT register the server's commands globally.
+//
+// `rledger-lsp` advertises `executeCommandProvider`, and vscode-languageclient's
+// built-in ExecuteCommand feature answers by calling
+// `vscode.commands.registerCommand` for each id, with no existence check and no
+// `try`. Command ids come from the server, so every client's are identical by
+// construction: in a multi-root workspace the second client threw
+// `command 'rledger.insertDate' already exists` during `initializeFeatures` and
+// never connected, leaving that folder with no diagnostics at all (#2287).
+//
+// Declining the feature here, rather than guarding the registration, is what
+// lets the ids be registered ONCE and routed to the client that owns the
+// document (see `registerServerCommands`). Guarding would let the first
+// registration win and answer `showAccountBalance` from the wrong ledger.
+//
+// Keyed on the LSP method name rather than the feature's class: the class is an
+// implementation detail of the library, the method is protocol.
+class SingleCommandOwnerClient extends LanguageClient {
+  public override registerFeature(
+    feature: StaticFeature | DynamicFeature<unknown>,
+  ): void {
+    const method = (
+      feature as { registrationType?: { method?: string } }
+    ).registrationType?.method;
+    if (method === ExecuteCommandRequest.method) {
+      return;
+    }
+    super.registerFeature(feature as StaticFeature);
+  }
+}
+
+// The server-advertised commands, registered once for the window.
+//
+// Deliberately NOT torn down when a client stops. `rustledger.restartServer`
+// stops every client and starts new ones; re-registering on each restart would
+// reintroduce the collision this exists to avoid, and the handler resolves its
+// target client per invocation anyway.
+const serverCommands = new Map<string, vscode.Disposable>();
+
+// The client that owns `uri`, if any.
+function clientForUri(uri: vscode.Uri): LanguageClient | undefined {
+  return clients.get(rootFor(uri).root.toString());
+}
+
+// The document a command invocation is about.
+//
+// Mirrors the server's own precedence: `handle_execute_command_request` reads
+// `arguments[0].uri` when present and otherwise falls back. Following the same
+// order here means a code lens in an unfocused document still reaches the
+// client that owns THAT document rather than whichever editor happens to be
+// active.
+function commandTargetUri(args: unknown[]): vscode.Uri | undefined {
+  const first = args[0];
+  if (typeof first === "object" && first !== null) {
+    const candidate = (first as { uri?: unknown }).uri;
+    if (typeof candidate === "string") {
+      try {
+        return vscode.Uri.parse(candidate);
+      } catch {
+        // Fall through rather than giving up. A uri that will not parse says
+        // nothing about which ledger the user is in, and the active editor
+        // still does; returning undefined here would drop the command on
+        // whichever client happens to be first.
+      }
+    }
+  }
+  // Most invocations land here, and not only the ones with no argument at all:
+  // the `showAccountBalance` lens passes a bare account string, and
+  // format-on-save automation passes `{silent: true}` to `sortTransactions`.
+  return vscode.window.activeTextEditor?.document.uri;
+}
+
+// Register whatever commands `client` advertises, once per id per window.
+function registerServerCommands(client: LanguageClient): void {
+  const advertised =
+    client.initializeResult?.capabilities?.executeCommandProvider?.commands ??
+    [];
+  for (const command of advertised) {
+    if (serverCommands.has(command)) {
+      continue;
+    }
+    serverCommands.set(
+      command,
+      vscode.commands.registerCommand(command, async (...args: unknown[]) => {
+        const target = commandTargetUri(args);
+        // Falling back to ANY running client rather than the one that
+        // advertised the command: that client may since have been stopped by a
+        // restart or a removed folder, and a command that silently does nothing
+        // is worse than one answered by the only server there is.
+        const owner =
+          (target ? clientForUri(target) : undefined) ??
+          clients.values().next().value;
+        if (!owner) {
+          outputChannel?.appendLine(
+            `No rledger-lsp client for ${command}; is a ledger open?`,
+          );
+          return undefined;
+        }
+        return owner.sendRequest(ExecuteCommandRequest.type, {
+          command,
+          arguments: args,
+        });
+      }),
+    );
+    outputChannel?.appendLine(`Registered server command ${command}`);
+  }
+}
 // Created with `{ log: true }` below, so it's a LogOutputChannel — which is
 // also what vscode-languageclient v10's LanguageClientOptions.outputChannel
 // requires (v9 accepted a plain OutputChannel).
@@ -343,7 +456,7 @@ async function startClientForRootUncontended(
   // A distinct id per client: vscode-languageclient uses it for the output
   // channel and for `client.stop()` bookkeeping, and reusing one id across
   // clients makes the second silently shadow the first.
-  const client = new LanguageClient(
+  const client = new SingleCommandOwnerClient(
     `rustledger:${key}`,
     "rustledger",
     serverOptions,
@@ -364,6 +477,7 @@ async function startClientForRootUncontended(
     outputChannel?.appendLine(`Failed to start rledger-lsp for ${key}: ${error}`);
     return;
   }
+  registerServerCommands(client);
   outputChannel?.appendLine(
     `Started rledger-lsp for ${key}` +
       (journalFile ? ` (journalFile: ${journalFile})` : " (auto-discovery)"),
@@ -486,6 +600,15 @@ export async function activate(
     }),
   );
 
+  context.subscriptions.push({
+    dispose: () => {
+      for (const disposable of serverCommands.values()) {
+        disposable.dispose();
+      }
+      serverCommands.clear();
+    },
+  });
+
   context.subscriptions.push({ dispose: () => void stopAllClients() });
 
   await startClientsForOpenDocuments();
@@ -500,3 +623,19 @@ export async function activate(
 export async function deactivate(): Promise<void> {
   await stopAllClients();
 }
+
+// Internals exposed for `test/extension.test.cjs`.
+//
+// The bug this covers (#2287) only reproduces with two workspace folders in a
+// real extension host, which no headless run has. What IS testable is the
+// decision-making: which feature is declined, which client a command is routed
+// to, and that an id is registered once rather than once per client. The test
+// bundle stubs `vscode` and `vscode-languageclient/node`, so these exercise
+// this file's logic and not the library's.
+export const __test = {
+  SingleCommandOwnerClient,
+  registerServerCommands,
+  commandTargetUri,
+  clients,
+  serverCommands,
+};

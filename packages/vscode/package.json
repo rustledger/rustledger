@@ -2,7 +2,7 @@
   "name": "rustledger-vscode",
   "publisher": "rustledger",
   "displayName": "rustledger",
-  "description": "Beancount language support powered by rustledger — completions, diagnostics, formatting, and more",
+  "description": "Beancount language support powered by rustledger \u2014 completions, diagnostics, formatting, and more",
   "version": "0.1.0",
   "license": "GPL-3.0-only",
   "repository": {
@@ -116,7 +116,8 @@
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --minify",
     "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --watch",
-    "package": "npm run build && vsce package --no-dependencies -o rustledger-vscode.vsix"
+    "package": "npm run build && vsce package --no-dependencies -o rustledger-vscode.vsix",
+    "test": "esbuild src/extension.ts --bundle --outfile=out/extension.test.cjs --external:vscode --external:vscode-languageclient/node --format=cjs --platform=node && node --test test/*.test.cjs"
   },
   "dependencies": {
     "vscode-languageclient": "^10.1.1"

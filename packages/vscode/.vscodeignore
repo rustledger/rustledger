@@ -1,5 +1,7 @@
 .vscode/**
 src/**
+test/**
+out/extension.test.cjs
 node_modules/**
 tsconfig.json
 .vscodeignore

@@ -1205,32 +1205,36 @@ fn issue_2285_an_unrelated_root_upward_is_not_adopted() {
 /// republished, so the first sat there contradicting the ledger until it was
 /// touched. The wrong diagnostic is exactly the one the user went looking at
 /// the root to explain.
+///
+/// The root lives in a SIBLING directory, which is what keeps this reachable
+/// now that unconventionally named roots are discovered: the search walks
+/// ancestors, so a root beside the data directory rather than above it is
+/// still invisible until it is opened. An earlier fixture put the root one
+/// level up, and once discovery found it there was no "before" state left to
+/// correct; the test said so rather than passing vacuously.
 #[test]
 fn issue_2285_adoption_corrects_documents_already_open() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let accounts_path = tmp.path().join("accounts.beancount");
-    let sub_path = tmp.path().join("txns.beancount");
-    // Deliberately NOT a name `discover_journal_upward` knows, so nothing is
-    // adopted until this root is opened explicitly.
-    let root_path = tmp.path().join("m1.beancount");
+    let data = tmp.path().join("data");
+    let roots = tmp.path().join("roots");
+    std::fs::create_dir_all(&data).expect("mkdir data");
+    std::fs::create_dir_all(&roots).expect("mkdir roots");
 
     std::fs::write(
-        &accounts_path,
+        data.join("accounts.beancount"),
         "2025-01-01 open Assets:Cash EUR\n2025-01-01 open Expenses:Food EUR\n",
     )
     .expect("write accounts");
+    let sub_path = data.join("txns.beancount");
     std::fs::write(
         &sub_path,
         "2026-01-01 * \"lunch\"\n  Assets:Cash   -5 EUR\n  Expenses:Food  5 EUR\n",
     )
     .expect("write sub");
+    let root_path = roots.join("m1.beancount");
     std::fs::write(
         &root_path,
-        format!(
-            "include \"{}\"\ninclude \"{}\"\n",
-            include_name(&accounts_path),
-            include_name(&sub_path)
-        ),
+        "include \"../data/accounts.beancount\"\ninclude \"../data/txns.beancount\"\n",
     )
     .expect("write root");
 
@@ -1286,6 +1290,104 @@ fn issue_2285_adoption_corrects_documents_already_open() {
     assert!(
         unopened.is_empty(),
         "an already-open file kept its pre-adoption diagnostics; got: {unopened:?}"
+    );
+}
+
+/// A sub-file whose root is not conventionally named still finds it.
+///
+/// `discover_journal_upward` only knows `main.bean`, `ledger.beancount` and
+/// the rest, so the reporter's own root, `m1.beancount`, was invisible to it.
+/// Opening `ledger/2025-01.beancount` under such a ledger kept reporting
+/// accounts as never opened: the same #2285 error, for everyone whose root
+/// happens to be called something else.
+#[test]
+fn a_sub_file_finds_an_unconventionally_named_root() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sub_dir = tmp.path().join("ledger");
+    std::fs::create_dir_all(&sub_dir).expect("mkdir");
+
+    std::fs::write(
+        tmp.path().join("accounts.beancount"),
+        "2025-01-01 open Assets:Cash EUR\n2025-01-01 open Expenses:Food EUR\n",
+    )
+    .expect("write accounts");
+    let sub_path = sub_dir.join("2025-01.beancount");
+    std::fs::write(
+        &sub_path,
+        "2026-01-01 * \"lunch\"\n  Assets:Cash   -5 EUR\n  Expenses:Food  5 EUR\n",
+    )
+    .expect("write sub");
+    // Deliberately a name no discovery list contains.
+    std::fs::write(
+        tmp.path().join("m1.beancount"),
+        "include \"accounts.beancount\"\ninclude \"ledger/2025-01.beancount\"\n",
+    )
+    .expect("write root");
+
+    let mut client = LspTestClient::spawn();
+    client.initialize();
+
+    let sub_uri = uri_for(&sub_path);
+    let sub_src = std::fs::read_to_string(&sub_path).expect("read sub");
+    client.open_document(&sub_uri, &sub_src);
+
+    let offenders = drain_e1001_for(&mut client, &sub_uri);
+    assert!(
+        offenders.is_empty(),
+        "E1001 under a root named `m1.beancount`; got: {offenders:?}"
+    );
+}
+
+/// Probing a root against one file must not disqualify it for another.
+///
+/// Whether a root qualifies depends on the file being opened, so the answer
+/// cannot be cached as a flat "rejected". It was, and the result was that a
+/// root probed while looking for one file could never be adopted for any
+/// other, including for ITSELF: open a scratch file first and the real ledger
+/// stayed broken for the rest of the session.
+#[test]
+fn a_root_probed_for_one_file_is_still_adoptable_for_another() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("accounts.beancount"),
+        "2025-01-01 open Assets:Cash EUR\n2025-01-01 open Expenses:Food EUR\n",
+    )
+    .expect("write accounts");
+    let txns = tmp.path().join("txns.beancount");
+    std::fs::write(
+        &txns,
+        "2026-01-01 * \"lunch\"\n  Assets:Cash   -5 EUR\n  Expenses:Food  5 EUR\n",
+    )
+    .expect("write txns");
+    std::fs::write(
+        tmp.path().join("m1.beancount"),
+        "include \"accounts.beancount\"\ninclude \"txns.beancount\"\n",
+    )
+    .expect("write root");
+
+    // Not part of that ledger, and opened first, so the root is probed against
+    // it and found not to reach it.
+    let scratch = tmp.path().join("scratch.beancount");
+    std::fs::write(&scratch, "2026-03-01 balance Assets:Other 0.00 EUR\n").expect("write scratch");
+
+    let mut client = LspTestClient::spawn();
+    client.initialize();
+
+    let scratch_uri = uri_for(&scratch);
+    let scratch_src = std::fs::read_to_string(&scratch).expect("read scratch");
+    client.open_document(&scratch_uri, &scratch_src);
+    // Its account really is unopened, so this is correct and only here to make
+    // sure the probe has happened before the next open.
+    let _ = drain_e1001_for(&mut client, &scratch_uri);
+
+    let txns_uri = uri_for(&txns);
+    let txns_src = std::fs::read_to_string(&txns).expect("read txns");
+    client.open_document(&txns_uri, &txns_src);
+
+    let offenders = drain_e1001_for(&mut client, &txns_uri);
+    assert!(
+        offenders.is_empty(),
+        "a root probed against an unrelated file first was never adoptable again; got: {offenders:?}"
     );
 }
 

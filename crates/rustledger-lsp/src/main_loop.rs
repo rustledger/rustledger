@@ -1835,9 +1835,9 @@ impl MainLoopState {
             }
         }
 
-        // `contains_file` canonicalizes; the loader canonicalizes what it
-        // records, so comparing canonical-to-canonical is what makes a cached
-        // answer agree with a freshly probed one.
+        // Canonical on both sides. `LedgerState::load` canonicalizes every
+        // path it records, so the target has to be canonicalized too or a uri
+        // carrying `..` or a symlink would miss a set that does contain it.
         let canonical_target = path.canonicalize().unwrap_or_else(|_| path.clone());
 
         for root in candidates {

@@ -96,10 +96,12 @@ pub fn discover_include_roots_upward(target: &Path) -> Vec<PathBuf> {
         let Some(current) = dir else {
             break;
         };
+        // An unreadable directory holds no candidates, which is not the same
+        // as there being none above it. Stopping here would let one directory
+        // the user cannot read hide their actual root, so carry on upward.
         let Ok(entries) = std::fs::read_dir(current) else {
-            // An unreadable directory is not an error worth failing an editor
-            // over; it just holds no candidates.
-            break;
+            dir = current.parent();
+            continue;
         };
 
         // Sorted so the answer does not depend on directory order, which
@@ -135,8 +137,65 @@ pub fn discover_include_roots_upward(target: &Path) -> Vec<PathBuf> {
 /// which ones are worth loading properly, and being wrong in the permissive
 /// direction only costs one load that the caller then rejects. Being wrong in
 /// the other direction would hide the real root.
+///
+/// Chunked, because the answer is usually NO and a no costs a full read
+/// however it is spelled. Reading the file into a `String` allocates the whole
+/// of the ledger next door, and reading it a line at a time was measurably
+/// worse again: one buffer reused across chunks beats both. The overlap is
+/// what keeps a match split across a chunk boundary from being missed.
 fn declares_an_include(path: &Path) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|text| text.contains("include"))
+    use std::io::Read;
+
+    const NEEDLE: &[u8] = b"include";
+    const CHUNK: usize = 256 * 1024;
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = vec![0u8; CHUNK + NEEDLE.len()];
+    let mut carry = 0usize;
+    loop {
+        let read = match file.read(&mut buf[carry..]) {
+            Ok(0) => return false,
+            Ok(n) => n,
+            // A read error is not an opinion about the file's contents.
+            Err(_) => return false,
+        };
+        let end = carry + read;
+        if contains_needle(&buf[..end], NEEDLE) {
+            return true;
+        }
+        // Keep the tail so `inclu|de` across a boundary still matches.
+        let keep = NEEDLE.len() - 1;
+        if end > keep {
+            buf.copy_within(end - keep..end, 0);
+            carry = keep;
+        } else {
+            carry = end;
+        }
+    }
+}
+
+/// `haystack.windows(n).any(..)` for a fixed needle, without building a slice
+/// per position.
+///
+/// Anchoring on the first byte and only then comparing is what closes the gap
+/// with `str::contains`, whose optimized search this is standing in for. The
+/// naive form measured at four times the cost over a megabyte of ledger, which
+/// is a file this reads in full every time the answer is no.
+fn contains_needle(haystack: &[u8], needle: &[u8]) -> bool {
+    let Some((&first, _)) = needle.split_first() else {
+        return true;
+    };
+    let mut at = 0;
+    while let Some(offset) = haystack[at..].iter().position(|&b| b == first) {
+        let start = at + offset;
+        if haystack[start..].starts_with(needle) {
+            return true;
+        }
+        at = start + 1;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -216,6 +275,49 @@ mod tests {
             "the nearer root must come first; got {found:?}"
         );
         assert!(found.contains(&outer));
+    }
+
+    /// The line-at-a-time scan must not stop before it reaches the include.
+    ///
+    /// Short-circuiting is the point of reading this way, and a scan that
+    /// gave up early would silently drop roots whose includes sit below a
+    /// header comment or a block of options, which is where they usually are.
+    #[test]
+    fn finds_an_include_that_is_not_on_the_first_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("txns.beancount");
+        fs::write(&target, "\n").expect("write target");
+
+        let mut body = String::new();
+        body.push_str(";; a long header comment\n".repeat(500).as_str());
+        body.push_str("option \"title\" \"Ledger\"\n");
+        body.push_str("include \"txns.beancount\"\n");
+        let root = dir.path().join("late.beancount");
+        fs::write(&root, body).expect("write root");
+
+        assert!(
+            discover_include_roots_upward(&target).contains(&root),
+            "an include below a header must still be found"
+        );
+    }
+
+    /// Bytes that are not UTF-8 must not panic or be reported as a root.
+    #[test]
+    fn a_non_utf8_file_is_not_a_candidate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("txns.beancount");
+        fs::write(&target, "\n").expect("write target");
+        fs::write(
+            dir.path().join("binary.beancount"),
+            [0xff, 0xfe, 0x00, 0x01],
+        )
+        .expect("write binary");
+
+        assert_eq!(
+            discover_include_roots_upward(&target),
+            Vec::<PathBuf>::new(),
+            "unreadable bytes are not an include"
+        );
     }
 
     /// The walk is bounded. Without a cap, opening a scratch file would read

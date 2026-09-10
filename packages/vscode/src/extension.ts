@@ -89,10 +89,16 @@ function commandTargetUri(args: unknown[]): vscode.Uri | undefined {
       try {
         return vscode.Uri.parse(candidate);
       } catch {
-        return undefined;
+        // Fall through rather than giving up. A uri that will not parse says
+        // nothing about which ledger the user is in, and the active editor
+        // still does; returning undefined here would drop the command on
+        // whichever client happens to be first.
       }
     }
   }
+  // Most invocations land here, and not only the ones with no argument at all:
+  // the `showAccountBalance` lens passes a bare account string, and
+  // format-on-save automation passes `{silent: true}` to `sortTransactions`.
   return vscode.window.activeTextEditor?.document.uri;
 }
 

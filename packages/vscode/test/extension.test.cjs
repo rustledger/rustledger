@@ -155,6 +155,60 @@ test("an argument uri beats the active editor", () => {
   assert.equal(target.fsPath, "/w/ledger-b/y.beancount");
 });
 
+test("the real argument shapes route by the active editor", async () => {
+  reset();
+  const a = clientFor("/w/ledger-a", COMMANDS);
+  const b = clientFor("/w/ledger-b", COMMANDS);
+  vscode.workspace.workspaceFolders = [
+    { uri: vscode.Uri.file("/w/ledger-a") },
+    { uri: vscode.Uri.file("/w/ledger-b") },
+  ];
+  registerServerCommands(a);
+  registerServerCommands(b);
+  vscode.__harness.setActive(vscode.Uri.file("/w/ledger-b/ledger/2025-01.beancount"));
+
+  // What the server actually sends. `showAccountBalance`'s code lens passes a
+  // bare account string (code_lens.rs), and format-on-save automation passes
+  // `{silent: true}` to `sortTransactions` (execute_command.rs). Neither is an
+  // object carrying a uri, so both must fall through to the active editor
+  // rather than being treated as a target or as no target at all.
+  await vscode.__harness.registered.get("rledger.showAccountBalance")("Assets:Cash");
+  await vscode.__harness.registered.get("rledger.sortTransactions")({ silent: true });
+
+  assert.equal(a.sent.length, 0, "the unfocused ledger's server must not answer");
+  assert.equal(b.sent.length, 2);
+  assert.deepEqual(
+    b.sent.map((s) => s.params.command),
+    ["rledger.showAccountBalance", "rledger.sortTransactions"],
+  );
+  assert.deepEqual(
+    b.sent[0].params.arguments,
+    ["Assets:Cash"],
+    "the argument must reach the server unchanged",
+  );
+});
+
+test("an unparsable uri argument still falls back to the active editor", async () => {
+  reset();
+  const a = clientFor("/w/ledger-a", COMMANDS);
+  const b = clientFor("/w/ledger-b", COMMANDS);
+  vscode.workspace.workspaceFolders = [
+    { uri: vscode.Uri.file("/w/ledger-a") },
+    { uri: vscode.Uri.file("/w/ledger-b") },
+  ];
+  registerServerCommands(a);
+  registerServerCommands(b);
+  vscode.__harness.setActive(vscode.Uri.file("/w/ledger-b/x.beancount"));
+
+  await vscode.__harness.registered.get("rledger.insertDate")({ uri: "not a uri" });
+
+  assert.equal(
+    b.sent.length,
+    1,
+    "a uri that will not parse must not cost the routing; the active editor still knows",
+  );
+});
+
 test("a stopped owner falls back to a running client rather than doing nothing", async () => {
   reset();
   const a = clientFor("/w/ledger-a", COMMANDS);

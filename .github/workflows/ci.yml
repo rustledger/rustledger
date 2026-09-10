@@ -332,6 +332,15 @@ jobs:
       - name: Typecheck, build and package
         working-directory: packages/vscode
         run: npm run package
+      # The extension had no tests at all until #2287, whose bug (every client
+      # registering the same server-advertised command ids, so the second threw
+      # and never connected) is invisible to `tsc` and to the bundler. The
+      # harness stubs `vscode` and `vscode-languageclient`, and the stub
+      # reproduces the real throw, so a regression fails here rather than in a
+      # user's multi-root workspace.
+      - name: Test
+        working-directory: packages/vscode
+        run: npm test
 
   example-plugins:
     name: Example Plugins

@@ -1829,7 +1829,19 @@ impl MainLoopState {
         {
             candidates.push(found);
         }
-        for found in rustledger_loader::discover_include_roots_upward(&path) {
+        let by_include = rustledger_loader::discover_include_roots_upward(&path);
+        if by_include.len() == rustledger_loader::MAX_CANDIDATES {
+            // Saying so, because the alternative is a wrong diagnostic that
+            // looks ordinary: if the real root was the one dropped, this file
+            // is validated alone and reports its accounts as never opened.
+            tracing::warn!(
+                "root search for {} hit the {}-candidate cap; if its root is missing, \
+                 set `rustledger.journalFile`",
+                path.display(),
+                rustledger_loader::MAX_CANDIDATES
+            );
+        }
+        for found in by_include {
             if !candidates.contains(&found) {
                 candidates.push(found);
             }

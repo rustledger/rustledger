@@ -62,7 +62,7 @@ pub use cache::{
 };
 pub use dedup::{reintern_directives, reintern_plain_directives};
 pub use discover::{
-    COMMON_ROOT_NAMES, discover_include_roots_upward, discover_journal_file,
+    COMMON_ROOT_NAMES, MAX_CANDIDATES, discover_include_roots_upward, discover_journal_file,
     discover_journal_upward,
 };
 pub use options::{OptionWarning, Options};

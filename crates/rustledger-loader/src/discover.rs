@@ -70,7 +70,12 @@ const MAX_LEVELS: usize = 8;
 /// Each one costs the caller a full ledger load to test, so the cap is what
 /// keeps a directory holding many ledgers from turning one file-open into a
 /// long stall. Nearest first, so the cap drops the least likely candidates.
-const MAX_CANDIDATES: usize = 16;
+///
+/// Public because a truncated search can only end in a wrong answer that
+/// looks like an ordinary one: the file's real root was dropped and it is
+/// validated alone, reporting accounts as never opened with nothing to say
+/// why. A caller that gets exactly this many candidates should say so.
+pub const MAX_CANDIDATES: usize = 16;
 
 /// Files that might be the root of the ledger containing `target`, nearest
 /// first.
@@ -298,6 +303,64 @@ mod tests {
         assert!(
             discover_include_roots_upward(&target).contains(&root),
             "an include below a header must still be found"
+        );
+    }
+
+    /// An `include` straddling a chunk boundary must still be found.
+    ///
+    /// The scan reads a fixed chunk at a time and carries the last few bytes
+    /// forward for exactly this. Nothing else exercises that carry, and an
+    /// off-by-one in it fails silently: the root is simply never offered, and
+    /// the user gets #2285's wrong diagnostic back with no clue why.
+    ///
+    /// Sweeps a window of offsets rather than computing where the boundary
+    /// falls. The first draft placed the word at `CHUNK - n`, which is not the
+    /// boundary at all (the buffer is a chunk plus the needle), so the word
+    /// landed inside the first read every time and the case passed with the
+    /// carry removed entirely. A sweep cannot be wrong about the arithmetic
+    /// because it does not do any.
+    #[test]
+    fn finds_an_include_split_across_a_chunk_boundary() {
+        const CHUNK: usize = 256 * 1024;
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        for offset in (CHUNK - 8)..(CHUNK + 32) {
+            let root = dir.path().join("root.beancount");
+            let mut body = ";".repeat(offset);
+            body.push_str("include \"txns.beancount\"\n");
+            fs::write(&root, &body).expect("write root");
+
+            assert!(
+                declares_an_include(&root),
+                "`include` starting at byte {offset} was missed; \
+                 the chunk carry does not cover this alignment"
+            );
+        }
+    }
+
+    /// The candidate cap is exact, so a caller can tell saturation from a
+    /// directory that simply holds that many ledgers.
+    ///
+    /// Nothing else pins the number, and a cap that quietly returned one more
+    /// or one fewer would make the caller's "did we truncate" check wrong in
+    /// the direction that stays silent.
+    #[test]
+    fn returns_at_most_max_candidates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("txns.beancount");
+        fs::write(&target, "\n").expect("write target");
+        for i in 0..(MAX_CANDIDATES + 5) {
+            fs::write(
+                dir.path().join(format!("root{i:03}.beancount")),
+                "include \"txns.beancount\"\n",
+            )
+            .expect("write root");
+        }
+
+        assert_eq!(
+            discover_include_roots_upward(&target).len(),
+            MAX_CANDIDATES,
+            "the cap must be exact for the caller's saturation check to mean anything"
         );
     }
 

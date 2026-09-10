@@ -338,6 +338,41 @@ mod tests {
         }
     }
 
+    /// Candidates from one directory come out in a defined order.
+    ///
+    /// The caller takes the first candidate that reaches the file, so an
+    /// order that varied by filesystem would mean two machines adopting
+    /// different roots for the same tree. `read_dir` makes no ordering
+    /// promise and ext4 with `dir_index` really does return hash order.
+    ///
+    /// Honest about its reach: on a filesystem that happens to enumerate in
+    /// order this passes with the sort removed, which is exactly what
+    /// happened when the sort was mutated away here. It bites where it
+    /// matters and is worth having for that, but it is not proof on this
+    /// machine.
+    #[test]
+    fn candidates_from_one_directory_are_ordered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("txns.beancount");
+        fs::write(&target, "\n").expect("write target");
+        // Created in reverse, so creation order is not the expected order.
+        for name in ["zulu", "mike", "alpha"] {
+            fs::write(
+                dir.path().join(format!("{name}.beancount")),
+                "include \"txns.beancount\"\n",
+            )
+            .expect("write root");
+        }
+
+        let found = discover_include_roots_upward(&target);
+        let mut expected = found.clone();
+        expected.sort();
+        assert_eq!(
+            found, expected,
+            "candidates from one directory must be sorted, whatever `read_dir` returns"
+        );
+    }
+
     /// The candidate cap is exact, so a caller can tell saturation from a
     /// directory that simply holds that many ledgers.
     ///
@@ -385,6 +420,12 @@ mod tests {
 
     /// The walk is bounded. Without a cap, opening a scratch file would read
     /// every beancount file between it and the filesystem root.
+    ///
+    /// Tests that a bound EXISTS, not that it is eight: the fixture is built
+    /// from `MAX_LEVELS`, so it moves with the constant and passes at any
+    /// value. Removing the bound altogether does fail it. Nothing depends on
+    /// the exact number, unlike `MAX_CANDIDATES`, which a caller compares
+    /// against and which is pinned separately.
     #[test]
     fn stops_walking_up_after_max_levels() {
         let dir = tempfile::tempdir().expect("tempdir");

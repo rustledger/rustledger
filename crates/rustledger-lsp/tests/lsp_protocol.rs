@@ -1391,6 +1391,67 @@ fn a_root_probed_for_one_file_is_still_adoptable_for_another() {
     );
 }
 
+/// A master ledger beats a nested sub-ledger that also reaches the file.
+///
+/// A master that includes self-contained sub-ledgers, each usable on its own,
+/// is a legitimate beancount layout (#1546). Both roots reach the file, so the
+/// order candidates are tried in decides which one answers, and the master is
+/// the one that gives complete cross-file validation: adopting the inner
+/// ledger validates against a partial one and reports accounts the master
+/// opens as never opened, which is #2285 again by another route.
+///
+/// The ordering that produces this is by source, conventional names before
+/// include-declaring files, rather than by distance. `discover_journal_upward`
+/// documents "nearest wins" for its own search and this deliberately does not
+/// extend that across sources, because nearest and most-complete point in
+/// opposite directions here.
+#[test]
+fn a_master_ledger_beats_a_nested_sub_ledger() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sub = tmp.path().join("sub");
+    std::fs::create_dir_all(&sub).expect("mkdir");
+
+    std::fs::write(
+        tmp.path().join("accounts.beancount"),
+        "2025-01-01 open Assets:Cash EUR\n",
+    )
+    .expect("write accounts");
+    let txns = sub.join("txns.beancount");
+    std::fs::write(
+        &txns,
+        "2026-01-01 * \"x\"\n  Assets:Cash   -5 EUR\n  Expenses:Food  5 EUR\n",
+    )
+    .expect("write txns");
+
+    // The master opens BOTH accounts.
+    std::fs::write(
+        tmp.path().join("main.beancount"),
+        "2025-01-01 open Expenses:Food EUR\n         include \"accounts.beancount\"\ninclude \"sub/txns.beancount\"\n",
+    )
+    .expect("write master");
+    // The nested root opens only one, so adopting it leaves the other
+    // reported as never opened.
+    std::fs::write(
+        sub.join("m1.beancount"),
+        "include \"../accounts.beancount\"\ninclude \"txns.beancount\"\n",
+    )
+    .expect("write nested");
+
+    let mut client = LspTestClient::spawn();
+    client.initialize();
+
+    let txns_uri = uri_for(&txns);
+    let txns_src = std::fs::read_to_string(&txns).expect("read txns");
+    client.open_document(&txns_uri, &txns_src);
+
+    let offenders = drain_e1001_for(&mut client, &txns_uri);
+    assert!(
+        offenders.is_empty(),
+        "the nested sub-ledger answered instead of the master, so an account \
+         the master opens reads as never opened; got: {offenders:?}"
+    );
+}
+
 /// A root that will not load must not be adopted, because adoption is sticky.
 ///
 /// `journal_file.is_some()` is what stops a second adoption, so pinning it to

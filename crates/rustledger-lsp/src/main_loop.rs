@@ -1818,6 +1818,16 @@ impl MainLoopState {
         // Ordered by confidence and by cost, and every candidate still has to
         // prove it reaches this file, so a wider net does not mean a wronger
         // answer.
+        //
+        // By SOURCE rather than by distance, which matters when more than one
+        // root reaches the file. A master ledger including self-contained
+        // sub-ledgers is a legitimate layout (#1546), and there the master is
+        // the better answer even though the sub-ledger's own root is nearer:
+        // the master gives complete cross-file validation, while the inner one
+        // reports accounts the master opens as never opened. So this
+        // deliberately does not extend `discover_journal_upward`'s
+        // "nearest wins" across sources; nearest and most-complete point in
+        // opposite directions here.
         let (_text, parsed) = self.get_document_data(uri);
         let mut candidates: Vec<PathBuf> = Vec::new();
         if !parsed.includes.is_empty() {

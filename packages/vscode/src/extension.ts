@@ -5,11 +5,13 @@ import { tmpdir } from "os";
 import { dirname, join } from "path";
 import * as vscode from "vscode";
 import {
-  DynamicFeature,
   ExecuteCommandRequest,
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
+} from "vscode-languageclient/node";
+import type {
+  DynamicFeature,
   StaticFeature,
 } from "vscode-languageclient/node";
 

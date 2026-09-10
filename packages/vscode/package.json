@@ -117,7 +117,7 @@
     "build": "npm run typecheck && esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --minify",
     "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --watch",
     "package": "npm run build && vsce package --no-dependencies -o rustledger-vscode.vsix",
-    "test": "node_modules/.bin/esbuild src/extension.ts --bundle --outfile=out/extension.test.cjs --external:vscode --external:vscode-languageclient/node --format=cjs --platform=node && node --test test/*.test.cjs"
+    "test": "esbuild src/extension.ts --bundle --outfile=out/extension.test.cjs --external:vscode --external:vscode-languageclient/node --format=cjs --platform=node && node --test test/*.test.cjs"
   },
   "dependencies": {
     "vscode-languageclient": "^10.1.1"

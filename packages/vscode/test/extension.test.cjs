@@ -28,6 +28,12 @@ Module._load = function (request, parent, isMain) {
   return originalLoad.call(this, request, parent, isMain);
 };
 
+// Global patch, so it has to come back off: another test file added later
+// would otherwise inherit these stubs and fail somewhere far from the cause.
+test.after(() => {
+  Module._load = originalLoad;
+});
+
 const vscode = require(STUB_VSCODE);
 const { __test } = require(path.join(__dirname, "..", "out", "extension.test.cjs"));
 const { SingleCommandOwnerClient, registerServerCommands, commandTargetUri, clients, serverCommands } = __test;

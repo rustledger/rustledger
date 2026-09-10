@@ -525,10 +525,12 @@ pub struct Ledger {
 /// `code` and `phase` are set rather than left `None` (#2297). The code used
 /// to survive only as an `[E7009] ` prefix on the message, which meant a
 /// consumer wanting to branch on it had to parse it back out of the text that
-/// `Error::code` exists to save them from reading. `parse` is the phase
-/// `rledger check` reports for these, so the two surfaces now describe the
-/// same warning the same way, prefix included: it is gone from the message,
-/// which is what the CLI has always emitted.
+/// `Error::code` exists to save them from reading.
+///
+/// Two changes, then. The code moves into the `code` field, and `phase`
+/// becomes `"parse"`, which is what `rledger check` reports for these. The
+/// prefix is dropped from the message, so the text now matches the CLI's for
+/// the same warning exactly.
 fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) -> Vec<Error> {
     warnings
         .iter()

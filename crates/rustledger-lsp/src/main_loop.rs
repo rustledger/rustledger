@@ -228,15 +228,23 @@ pub struct MainLoopState {
     pub position_encoding: crate::handlers::utils::PositionEncoding,
     /// Full ledger state (loaded from journal file if configured).
     pub ledger_state: SharedLedgerState,
-    /// Roots already probed and found not to be this session's root.
+    /// What each candidate root was found to reach, once probed.
     ///
-    /// Probing costs a full ledger load, and the search runs on every
-    /// `didOpen` until a root is adopted, so without this a stray
-    /// `main.beancount` over an unrelated ledger is re-loaded and re-rejected
-    /// once per file the user opens. Cleared whenever a watched `.beancount`
-    /// file changes, since an edit is what could make a rejected root start
-    /// including this file.
-    rejected_roots: std::collections::HashSet<PathBuf>,
+    /// Probing costs a full ledger load and the search runs on every `didOpen`
+    /// until a root is adopted, so a stray `main.beancount` over an unrelated
+    /// ledger would otherwise be re-loaded once per file the user opens.
+    ///
+    /// The value is what makes this correct rather than merely fast. A flat
+    /// "rejected" set was wrong: whether a root qualifies depends on the file
+    /// being opened, so a root rejected while looking for one file could never
+    /// be adopted for another, including for ITSELF. Caching the file set
+    /// instead answers per target from one load. `None` records the answers
+    /// that are target-independent: it would not load, or its includes
+    /// resolved to nothing.
+    ///
+    /// Cleared whenever a watched `.beancount` file changes, since an edit is
+    /// what could make a root start including a file it did not before.
+    probed_roots: HashMap<PathBuf, Option<std::collections::HashSet<PathBuf>>>,
     /// Path to the journal file (if configured).
     pub journal_file: Option<PathBuf>,
     /// Channel for receiving results from background tasks.
@@ -316,7 +324,7 @@ impl MainLoopState {
             // initialize (e.g., in tests) gets the spec-safe value.
             position_encoding: crate::handlers::utils::PositionEncoding::Utf16,
             ledger_state,
-            rejected_roots: std::collections::HashSet::new(),
+            probed_roots: HashMap::new(),
             journal_file,
             task_sender,
             task_receiver,
@@ -1801,6 +1809,25 @@ impl MainLoopState {
         //    out to include this file. A user editing `ledger/2025-01.beancount`
         //    hits the same wrong `E1001` as the reporter did, and that file
         //    declares no includes of its own, so (1) cannot help it.
+        // 3. Failing that, any nearby file that declares an `include` at all.
+        //    Discovery by name cannot see a root called `m1.beancount`, which
+        //    is the reporter's own root, so without this the sub-files of any
+        //    unconventionally named ledger keep reporting accounts as never
+        //    opened.
+        //
+        // Ordered by confidence and by cost, and every candidate still has to
+        // prove it reaches this file, so a wider net does not mean a wronger
+        // answer.
+        //
+        // By SOURCE rather than by distance, which matters when more than one
+        // root reaches the file. A master ledger including self-contained
+        // sub-ledgers is a legitimate layout (#1546), and there the master is
+        // the better answer even though the sub-ledger's own root is nearer:
+        // the master gives complete cross-file validation, while the inner one
+        // reports accounts the master opens as never opened. So this
+        // deliberately does not extend `discover_journal_upward`'s
+        // "nearest wins" across sources; nearest and most-complete point in
+        // opposite directions here.
         let (_text, parsed) = self.get_document_data(uri);
         let mut candidates: Vec<PathBuf> = Vec::new();
         if !parsed.includes.is_empty() {
@@ -1812,52 +1839,92 @@ impl MainLoopState {
         {
             candidates.push(found);
         }
+        let by_include = rustledger_loader::discover_include_roots_upward(&path);
+        if by_include.len() == rustledger_loader::MAX_CANDIDATES {
+            // Saying so, because the alternative is a wrong diagnostic that
+            // looks ordinary: if the real root was the one dropped, this file
+            // is validated alone and reports its accounts as never opened.
+            tracing::warn!(
+                "root search for {} hit the {}-candidate cap; if its root is missing, \
+                 set `rustledger.journalFile`",
+                path.display(),
+                rustledger_loader::MAX_CANDIDATES
+            );
+        }
+        for found in by_include {
+            if !candidates.contains(&found) {
+                candidates.push(found);
+            }
+        }
+
+        // Canonical on both sides. `LedgerState::load` canonicalizes every
+        // path it records, so the target has to be canonicalized too or a uri
+        // carrying `..` or a symlink would miss a set that does contain it.
+        let canonical_target = path.canonicalize().unwrap_or_else(|_| path.clone());
 
         for root in candidates {
-            if self.rejected_roots.contains(&root) {
-                continue;
-            }
-            // Load into a SCRATCH state, never straight into the shared one.
-            // A candidate that turns out not to qualify would otherwise leave
-            // the server holding a ledger it just decided not to use, with
-            // `journal_file` still None to say so -- two sources of truth
-            // disagreeing about which ledger is live.
-            let mut probe = crate::ledger_state::LedgerState::new();
-            let loaded = probe.load(&root);
-            match loaded {
+            let reach = if let Some(cached) = self.probed_roots.get(&root) {
+                cached.clone()
+            } else {
+                // Load into a SCRATCH state, never straight into the shared
+                // one. A candidate that turns out not to qualify would
+                // otherwise leave the server holding a ledger it just decided
+                // not to use, with `journal_file` still None to say so: two
+                // sources of truth disagreeing about which ledger is live.
+                let mut probe = crate::ledger_state::LedgerState::new();
                 // `files.len() > 1` because adoption is STICKY:
                 // `journal_file.is_some()` is what stops a second one. An
                 // unresolved include is not an `Err` -- the loader returns Ok
                 // with the failure recorded in `ledger.errors` -- so a file
                 // whose include is missing or still half-typed would otherwise
-                // be adopted on the strength of an include that led nowhere,
-                // and would lock the session out of the real root for good.
-                //
-                // `contains_file` because a root discovered upward is only
-                // this file's root if it actually reaches this file. An
-                // unrelated `main.beancount` further up the tree is not.
-                Ok(files) if files.len() > 1 && probe.contains_file(&path) => {
+                // be adopted on the strength of an include that led nowhere.
+                let reach = match probe.load(&root) {
+                    Ok(files) if files.len() > 1 => Some(files),
+                    Ok(_) => {
+                        tracing::debug!(
+                            "Not adopting {}: its includes resolved to nothing",
+                            root.display()
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!("Not adopting {} as a root journal: {e}", root.display());
+                        None
+                    }
+                };
+                self.probed_roots.insert(root.clone(), reach.clone());
+                // Already loaded, so commit this one rather than loading again.
+                if reach
+                    .as_ref()
+                    .is_some_and(|files| files.contains(&canonical_target))
+                {
                     tracing::info!(
-                        "Adopted {} as the root journal ({} files); none was configured",
-                        root.display(),
-                        files.len()
+                        "Adopted {} as the root journal; none was configured",
+                        root.display()
                     );
                     *self.ledger_state.write() = probe;
                     self.journal_file = Some(root);
                     return true;
                 }
-                Ok(_) => {
-                    tracing::debug!(
-                        "Not adopting {}: it does not resolve to a ledger containing {}",
-                        root.display(),
-                        path.display()
+                continue;
+            };
+
+            // Cache hit. It reaches this file, so load it for real: the probe
+            // that produced the cached answer was dropped with its state.
+            if reach.is_some_and(|files| files.contains(&canonical_target)) {
+                let mut state = crate::ledger_state::LedgerState::new();
+                if state.load(&root).is_ok() {
+                    tracing::info!(
+                        "Adopted {} as the root journal (cached reach); none was configured",
+                        root.display()
                     );
-                    self.rejected_roots.insert(root);
+                    *self.ledger_state.write() = state;
+                    self.journal_file = Some(root);
+                    return true;
                 }
-                Err(e) => {
-                    tracing::warn!("Not adopting {} as a root journal: {e}", root.display());
-                    self.rejected_roots.insert(root);
-                }
+                // It loaded a moment ago and does not now. Treat the cache as
+                // stale rather than trusting it.
+                self.probed_roots.remove(&root);
             }
         }
         false
@@ -1965,7 +2032,7 @@ impl MainLoopState {
         // exactly what could add the `include` that makes it this file's root
         // after all, so the memo does not outlive one.
         if should_revalidate {
-            self.rejected_roots.clear();
+            self.probed_roots.clear();
         }
 
         // Re-validate open documents once after processing all changes
@@ -2644,7 +2711,7 @@ mod tests {
         assert_eq!(handler, "custom failure");
     }
 
-    /// A root rejected once must not be probed again for every file opened.
+    /// A root probed once must not be re-loaded for every file opened.
     ///
     /// Probing costs a full ledger load, and the upward search runs on every
     /// `didOpen` until something is adopted, so a stray `main.beancount` over
@@ -2693,19 +2760,29 @@ mod tests {
         };
 
         open(&mut state, 1);
-        let after_first = state.rejected_roots.len();
+        let after_first = state.probed_roots.len();
         open(&mut state, 2);
         open(&mut state, 3);
 
         assert_eq!(
             after_first, 1,
-            "the unrelated root should have been probed and rejected once"
+            "the unrelated root should have been probed exactly once"
         );
         assert_eq!(
-            state.rejected_roots.len(),
+            state.probed_roots.len(),
             1,
-            "later opens re-probed instead of consulting the memo: {:?}",
-            state.rejected_roots
+            "later opens re-probed instead of consulting the cache: {:?}",
+            state.probed_roots.keys().collect::<Vec<_>>()
+        );
+        // It loaded fine, it just does not reach these files. Recording that
+        // as a flat rejection is what made a root unadoptable for ITSELF.
+        assert!(
+            state
+                .probed_roots
+                .get(&root)
+                .expect("the root must be in the cache")
+                .is_some(),
+            "a root that loads must cache what it reaches, not a bare rejection"
         );
         assert!(
             state.journal_file.is_none(),
@@ -2713,8 +2790,8 @@ mod tests {
             state.journal_file
         );
 
-        // An edit is what could make a rejected root start including this
-        // file, so the memo must not outlive one.
+        // An edit is what could make a root start including a file it did
+        // not before, so the cache must not outlive one.
         let changed: Uri = crate::path_to_uri(&root).expect("file URI");
         state.on_did_change_watched_files(lsp_types::DidChangeWatchedFilesParams {
             changes: vec![lsp_types::FileEvent {
@@ -2723,9 +2800,9 @@ mod tests {
             }],
         });
         assert!(
-            state.rejected_roots.is_empty(),
-            "a watched-file change must retire the memo: {:?}",
-            state.rejected_roots
+            state.probed_roots.is_empty(),
+            "a watched-file change must retire the cache: {:?}",
+            state.probed_roots.keys().collect::<Vec<_>>()
         );
 
         let _ = std::fs::remove_dir_all(&dir);

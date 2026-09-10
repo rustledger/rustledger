@@ -29,7 +29,6 @@ Module._load = function (request, parent, isMain) {
 };
 
 const vscode = require(STUB_VSCODE);
-const { LanguageClient, ExecuteCommandRequest } = require(STUB_CLIENT);
 const { __test } = require(path.join(__dirname, "..", "out", "extension.test.cjs"));
 const { SingleCommandOwnerClient, registerServerCommands, commandTargetUri, clients, serverCommands } = __test;
 

@@ -181,6 +181,46 @@ def latest_scheduled_run(workflow: str) -> dict | None:
     return max(runs, key=lambda r: r["createdAt"])
 
 
+def scheduled_runs_since(workflow: str, since: datetime) -> int:
+    """How many scheduled runs of `workflow` exist since `since`, counted server-side.
+
+    This is the second opinion the stale verdict is checked against, and it is
+    deliberately a DIFFERENT question than `latest_scheduled_run` asks. That one
+    fetches a page and picks the newest from it, so it is only ever as good as
+    the page it was handed; every false alarm so far (2026-09-03, -09-08, -09-11,
+    all on `bench.yml`) came from a page whose newest entry was weeks old while
+    the cron had in fact fired that morning. Taking the max instead of the first
+    element, then asking twice, did not stop it — both retries can be handed the
+    same lagged page, and a max over stale rows is still stale.
+
+    `total_count` with a `created>=` filter has no such dependence: no ordering,
+    no pagination, no "newest of what I was given". It answers "did it fire in
+    the window" directly, which is the only thing the stale claim rests on.
+
+    Note the filter is date-granular, so the window is up to a day wider than
+    asked. That errs toward NOT claiming staleness, which is the right direction
+    for a report whose credibility is the thing being protected.
+    """
+    day = since.strftime("%Y-%m-%d")
+    raw = gh(
+        "api",
+        f"repos/{REPO}/actions/workflows/{workflow}/runs"
+        f"?event=schedule&created=%3E%3D{day}&per_page=1",
+        "--jq", ".total_count",
+        tolerate_missing=True,
+    )
+    # A tolerated 404 is "no such workflow / never run", which is genuinely zero
+    # runs in the window rather than a failed check.
+    if not raw.strip():
+        return 0
+    try:
+        return int(raw.strip())
+    except ValueError as e:
+        # Same reasoning as the run listing: an answer that will not parse must
+        # not be read as "no runs", because that is the input to the stale claim.
+        raise GhError(f"unparsable total_count: {raw.strip()[:80]!r}") from e
+
+
 def later_successful_manual_run(workflow: str, after: datetime) -> dict | None:
     """A `workflow_dispatch` run of `workflow` that succeeded after `after`.
 
@@ -386,6 +426,67 @@ def self_test() -> int:
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} an empty answer still reports no runs, not a failed check")
 
+    # --- the cross-check that decides whether a stale verdict is published ---
+    #
+    # This is the part that would have stopped all three `bench.yml` false
+    # alarms, so it is checked in both directions: it must suppress a wrong
+    # stale claim, and it must NOT suppress a right one.
+    now_t = datetime(2026, 9, 11, 12, 30, tzinfo=timezone.utc)
+
+    gh = stub("5")
+    claim, note = confirm_stale("bench.yml", "daily", now_t, timedelta(days=16))
+    ok = claim is False and "not claimed stale" in note
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} a contradicting count suppresses the stale claim")
+
+    gh = stub("0")
+    claim, _ = confirm_stale("dead.yml", "daily", now_t, timedelta(days=16))
+    ok = claim is True
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} an agreeing count still reports a genuinely dead cron")
+
+    # The count query is the whole second opinion, so its SHAPE is the thing
+    # worth pinning: filtered to scheduled runs, and to the staleness window.
+    # A regression dropping either flag would count every run ever and silence
+    # the report permanently -- failing open, in the direction nobody notices.
+    seen_args.clear()
+    gh = stub("3")
+    confirm_stale("bench.yml", "daily", now_t, timedelta(days=16))
+    argv = seen_args[-1] if seen_args else ()
+    url = next((a for a in argv if "actions/workflows" in a), "")
+    for fragment, label in [
+        ("bench.yml", "the workflow it was asked about"),
+        ("event=schedule", "scheduled runs only"),
+        ("created=%3E%3D2026-09-08", "the staleness window, not all time"),
+    ]:
+        ok = fragment in url
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} count query names {label}")
+
+    # An unreachable cross-check must not become an assertion in either
+    # direction: not a stale claim, and not a clean bill of health.
+    def raiser(*_a: object, **_k: object) -> str:
+        raise GhError("HTTP 502")
+
+    gh = raiser
+    with contextlib.redirect_stdout(io.StringIO()):
+        claim, note = confirm_stale("bench.yml", "daily", now_t, timedelta(days=16))
+    ok = claim is False and "could not be fetched" in note
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} an unreachable cross-check claims nothing")
+
+    # A count that will not parse is the same hazard as an unparsable listing:
+    # read as zero it would CONFIRM a false stale claim, which is worse than
+    # not checking at all.
+    gh = stub("<!DOCTYPE html>")
+    try:
+        scheduled_runs_since("bench.yml", now_t - timedelta(days=3))
+        ok = False
+    except GhError:
+        ok = True
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} an unparsable count raises rather than confirming stale")
+
     gh = real_gh
     time.sleep = real_sleep  # type: ignore[assignment]
     if failures:
@@ -393,6 +494,47 @@ def self_test() -> int:
         return 1
     print("nightly-health self-test: all cases passed")
     return 0
+
+
+def confirm_stale(
+    workflow: str, period: str, now: datetime, age: timedelta | None
+) -> tuple[bool, str]:
+    """Second-opinion a stale verdict. Returns (claim_it, note_if_not).
+
+    The run listing has now produced three false stale reports, so its verdict
+    alone is not enough to publish. A count that contradicts it means the cron
+    is alive and the listing was wrong, which is the case actually observed; a
+    count that agrees turns a single lookup into two independent ones.
+
+    A cross-check that cannot be reached decides nothing either way, so it lands
+    in "could not be checked" rather than becoming an assertion about the cron.
+    That is the same call the surrounding code already makes for an unanswered
+    listing, and it is the safer one: this report has three false alarms on
+    record and no missed dead cron.
+    """
+    window = STALENESS[period]
+    try:
+        recent = scheduled_runs_since(workflow, now - window)
+    except GhError as e:
+        print(f"::error::could not confirm staleness of {workflow}: {e}")
+        return False, (
+            f"- `{workflow}` ({period}) — looks stale, but the confirming count "
+            f"could not be fetched ({e}), so nothing is claimed"
+        )
+
+    if recent > 0:
+        observed = (
+            "no scheduled run at all" if age is None
+            else f"its newest scheduled run {age.days}d old"
+        )
+        print(f"::warning::{workflow}: listing said stale, count says {recent} recent run(s)")
+        return False, (
+            f"- `{workflow}` ({period}) — **not claimed stale**: the run listing "
+            f"reported {observed}, but {recent} scheduled run(s) exist in the last "
+            f"{window.days}d. The listing was wrong, not the cron "
+            f"(see `scheduled_runs_since`)"
+        )
+    return True, ""
 
 
 def main() -> int:
@@ -430,7 +572,11 @@ def main() -> int:
             unchecked.append(f"- `{wf}` ({period}) — could not be checked: {e}")
             continue
         if run is None:
-            stale.append(f"- `{wf}` ({period}) — no scheduled run found at all")
+            confirmed, note = confirm_stale(wf, period, now, None)
+            if confirmed:
+                stale.append(f"- `{wf}` ({period}) — no scheduled run found at all")
+            else:
+                unchecked.append(note)
             continue
         created = datetime.fromisoformat(run["createdAt"].replace("Z", "+00:00"))
         age = now - created
@@ -447,10 +593,14 @@ def main() -> int:
             continue
 
         if age > STALENESS[period]:
-            stale.append(
-                f"- `{wf}` ({period}) — last scheduled run {age.days}d ago "
-                f"([{concl}]({run['url']}))"
-            )
+            confirmed, note = confirm_stale(wf, period, now, age)
+            if confirmed:
+                stale.append(
+                    f"- `{wf}` ({period}) — last scheduled run {age.days}d ago "
+                    f"([{concl}]({run['url']}))"
+                )
+            else:
+                unchecked.append(note)
         elif concl != "success":
             entry = f"- `{wf}` ({period}) — last scheduled run **{concl}** ([log]({run['url']}))"
             try:

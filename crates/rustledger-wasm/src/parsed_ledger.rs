@@ -845,6 +845,42 @@ mod option_warning_severity_tests {
         );
     }
 
+    /// The cache must carry option diagnostics, or a cached ledger reports
+    /// clean where a fresh one reports E7001.
+    ///
+    /// `from_cache` restores `parse_errors` verbatim and re-parses the source
+    /// only for editor spans, so nothing downstream would re-derive these. The
+    /// cross-version case is handled by the `CACHE_VERSION` 21 bump; this pins
+    /// the round-trip itself, which is what makes the bump sufficient.
+    #[test]
+    fn option_diagnostics_survive_the_cache_round_trip() {
+        let src = "option \"nonsense_option\" \"x\"\n2024-01-01 open Assets:Cash USD\n";
+        let fresh = ParsedLedger::new(src);
+        let restored =
+            ParsedLedger::from_cache(&fresh.serialize().expect("serialize"), src).expect("restore");
+
+        let codes = |p: &ParsedLedger| -> Vec<String> {
+            p.parse_errors
+                .iter()
+                .filter_map(|e| e.code.clone())
+                .collect()
+        };
+        assert!(
+            codes(&fresh).contains(&"E7001".to_string()),
+            "precondition: a fresh parse reports it"
+        );
+        assert_eq!(
+            codes(&restored),
+            codes(&fresh),
+            "a restored ledger must report what a fresh one does"
+        );
+        assert_eq!(
+            restored.is_valid(),
+            fresh.is_valid(),
+            "and must agree on validity"
+        );
+    }
+
     /// End-to-end on the surface JS actually calls. `rledger check` errors and
     /// exits 1 on this source; `new ParsedLedger(src)` used to report a clean
     /// ledger, because the loader's E7001 was dropped before anyone could read

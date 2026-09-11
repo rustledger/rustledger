@@ -107,7 +107,15 @@ use crate::types::{Error, LedgerOptions};
 /// carrying a second juxtaposed number, is diagnosed rather than partly read
 /// and partly discarded (#2193). Loader v35. Same shape as v19: the archived
 /// directive is identical and the diagnostic is what a stale blob would hide.
-pub const CACHE_VERSION: u32 = 20;
+/// v21: an invalid option is diagnosed on the single-source entry points
+/// (#2299). Loader v35, unchanged -- this one is ours alone. Same shape as v19
+/// and v20 again: the archived directives are identical, and what a stale blob
+/// hides is the diagnostic. `from_cache` restores `parse_errors` verbatim and
+/// re-parses the source only for editor spans, so it never re-derives them.
+/// Measured on a pre-fix blob at v20, which this build accepted: `isValid()`
+/// came back true with no codes where a fresh parse of the same source returns
+/// false with E7001 -- the fix silently did not apply to any cached ledger.
+pub const CACHE_VERSION: u32 = 21;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

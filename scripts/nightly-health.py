@@ -26,7 +26,9 @@ import contextlib
 import io
 import json
 import re
+import os
 import subprocess
+import tempfile
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -100,7 +102,15 @@ def cadence(cron: str) -> str:
 def scheduled_workflows() -> dict[str, str]:
     """Map workflow filename -> cadence, for every workflow with a `schedule:`."""
     out: dict[str, str] = {}
-    for path in sorted(Path(".github/workflows").glob("*.yml")):
+    # Both extensions. Actions accepts `.yaml`, and a `*.yml`-only glob does not
+    # report a `.yaml` workflow as unchecked — it never learns the file exists,
+    # so the workflow is absent from every section including "Healthy". A
+    # scheduled job silently outside the monitor is the worst outcome this
+    # script has, and the repo happening to use `.yml` today is not a guarantee.
+    paths = sorted(
+        [*Path(".github/workflows").glob("*.yml"), *Path(".github/workflows").glob("*.yaml")]
+    )
+    for path in paths:
         text = path.read_text()
         # Deliberately a regex rather than a YAML parse: `on:` parses as the
         # boolean True in YAML 1.1, which has bitten this repo's own tooling.
@@ -114,7 +124,16 @@ def scheduled_workflows() -> dict[str, str]:
         ]
         crons = [c for c in crons if c]
         if crons:
-            out[path.name] = cadence(crons[0])
+            # The TIGHTEST cadence among all of them, not the first one written.
+            # A workflow with both a weekly and a daily cron was classified by
+            # whichever came first in the file: a daily job read as weekly gets a
+            # 17-day threshold, so its daily cron can die and keep firing weekly
+            # for a fortnight before anything is said. Taking the shortest window
+            # also makes that partial death detectable — runs arriving weekly do
+            # not satisfy a daily schedule, and now the report can say so.
+            out[path.name] = min(
+                (cadence(c) for c in crons), key=lambda period: STALENESS[period]
+            )
     return out
 
 
@@ -665,6 +684,47 @@ def self_test() -> int:
     )
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} going green clears the marker before closing the issue")
+
+    # --- the derivation, which decides what is monitored AT ALL ---
+    #
+    # A workflow missing from here is not reported as unchecked; it is absent
+    # from every section, "Healthy" included, so nothing says it stopped being
+    # watched. That is the quietest failure this script has, and both cases
+    # below were live until this change.
+    cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as tmp:
+        wf_dir = Path(tmp) / ".github" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "daily.yml").write_text(
+            "on:\n  schedule:\n    - cron: '0 2 * * *'\n"
+        )
+        # Actions accepts `.yaml`; a `*.yml`-only glob never learns it exists.
+        (wf_dir / "other.yaml").write_text(
+            "on:\n  schedule:\n    - cron: '0 4 * * *'\n"
+        )
+        # Weekly written first, daily second. Classified by the first cron, the
+        # daily one gets a 17-day window and can die for a fortnight unremarked.
+        (wf_dir / "both.yml").write_text(
+            "on:\n  schedule:\n    - cron: '0 5 * * 1'\n    - cron: '0 6 * * *'\n"
+        )
+        try:
+            os.chdir(tmp)
+            found = scheduled_workflows()
+        finally:
+            os.chdir(cwd)
+
+    ok = "other.yaml" in found
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} a .yaml workflow is monitored, not silently skipped")
+
+    ok = found.get("both.yml") == "daily"
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} a multi-cron workflow takes its tightest cadence "
+          f"(got {found.get('both.yml')})")
+
+    ok = found.get("daily.yml") == "daily" and len(found) == 3
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} every scheduled file is found ({len(found)} of 3)")
 
     gh = real_gh
     time.sleep = real_sleep  # type: ignore[assignment]

@@ -14,7 +14,7 @@ use rustledger_parser::ParseResult as ParserResult;
 use crate::cache;
 use crate::convert::directive_to_json;
 use crate::editor;
-use crate::helpers::{has_fatal, load_and_book, run_validation, to_js};
+use crate::helpers::{has_fatal, load_and_book, option_warnings_to_errors, run_validation, to_js};
 #[cfg(feature = "plugins")]
 use crate::types::PluginResult;
 use crate::types::{Error, FormatResult, LedgerOptions, PadResult, QueryResult};
@@ -209,15 +209,21 @@ impl ParsedLedger {
     #[wasm_bindgen(constructor)]
     pub fn new(source: &str) -> Self {
         let load = load_and_book(source);
+        // Before merging option diagnostics in: `run_validation` gates on
+        // `load.errors`, and an invalid option must not stop a ledger's real
+        // validation errors from being reported (#2299).
         let validation_errors = run_validation(&load);
         let editor_cache = editor::EditorCache::new(source, &load.parse_result);
+
+        let mut parse_errors = load.errors;
+        parse_errors.extend(load.option_errors);
 
         Self {
             source: source.to_string(),
             parse_result: load.parse_result,
             directives: load.directives,
             options: load.options,
-            parse_errors: load.errors,
+            parse_errors,
             validation_errors,
             editor_cache,
         }
@@ -508,42 +514,6 @@ pub struct Ledger {
     errors: Vec<Error>,
     /// Editor cache for cross-file completions.
     editor_cache: editor::EditorCache,
-}
-
-/// Option warnings as WASM `Error`s, carrying the severity `rledger check`
-/// gives them.
-///
-/// A free function rather than an inline loop because its only caller is a
-/// `wasm_bindgen` entry point taking `JsValue`, which cannot be called from a
-/// native test. The mapping is the part that was wrong, so it lives where a
-/// test can reach it.
-///
-/// E7003 and E7009 are warnings to `check`, which exits 0 on them. They used
-/// to go out here as errors, under a comment claiming parity with `check` and
-/// the LSP, so a ledger the CLI called clean arrived carrying errors (#2291).
-///
-/// `code` and `phase` are set rather than left `None` (#2297). The code used
-/// to survive only as an `[E7009] ` prefix on the message, which meant a
-/// consumer wanting to branch on it had to parse it back out of the text that
-/// `Error::code` exists to save them from reading.
-///
-/// Two changes, then. The code moves into the `code` field, and `phase` is
-/// set from `OptionWarning::phase`, the same source `rledger check` reads, so
-/// the two cannot drift the way the severity rule did. The prefix is dropped
-/// from the message, so the text now matches the CLI's for the same warning
-/// exactly.
-fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) -> Vec<Error> {
-    warnings
-        .iter()
-        .map(|w| {
-            let base = if w.is_error() {
-                Error::new(w.message.clone())
-            } else {
-                Error::warning(w.message.clone())
-            };
-            base.with_code(w.code).with_phase(w.phase())
-        })
-        .collect()
 }
 
 #[wasm_bindgen]
@@ -873,6 +843,57 @@ mod option_warning_severity_tests {
         assert!(
             !broken.is_valid(),
             "E7001 is an error; the ledger must not read as valid"
+        );
+    }
+
+    /// End-to-end on the surface JS actually calls. `rledger check` errors and
+    /// exits 1 on this source; `new ParsedLedger(src)` used to report a clean
+    /// ledger, because the loader's E7001 was dropped before anyone could read
+    /// it (#2299).
+    #[test]
+    fn an_invalid_option_is_visible_through_the_constructor() {
+        let src = "option \"nonsense_option\" \"x\"\n2024-01-01 open Assets:Cash USD\n";
+        let parsed = ParsedLedger::new(src);
+
+        assert!(
+            parsed
+                .parse_errors
+                .iter()
+                .any(|e| e.code.as_deref() == Some("E7001")),
+            "E7001 must be reported; got {:?}",
+            parsed
+                .parse_errors
+                .iter()
+                .map(|e| (&e.code, e.severity))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !parsed.is_valid(),
+            "E7001 is an error, so the ledger must not read as valid — \
+             `rledger check` exits 1 on this source"
+        );
+    }
+
+    /// And the option error must not cost the ledger its real diagnostics:
+    /// `run_validation` is gated on `load.errors`, so an option folded in
+    /// there would silently swallow the undefined-account error below.
+    #[test]
+    fn an_invalid_option_does_not_hide_a_real_validation_error() {
+        let src = "option \"nonsense_option\" \"x\"\n\
+2024-01-01 open Assets:Cash USD\n\
+2024-01-02 * \"p\"\n  Assets:Cash 1 USD\n  Assets:NeverOpened -1 USD\n";
+        let parsed = ParsedLedger::new(src);
+
+        assert!(
+            parsed
+                .parse_errors
+                .iter()
+                .any(|e| e.code.as_deref() == Some("E7001")),
+            "precondition: the option error is reported"
+        );
+        assert!(
+            !parsed.validation_errors.is_empty(),
+            "the undefined-account error must survive alongside E7001"
         );
     }
 

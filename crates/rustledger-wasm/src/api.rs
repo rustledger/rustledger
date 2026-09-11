@@ -13,6 +13,7 @@ use rustledger_parser::parse as parse_beancount;
 use crate::convert::{directive_to_json, value_to_cell};
 use crate::helpers::{
     extract_options, has_fatal, load_and_book, parse_error_to_wasm, run_validation, to_js,
+    validate_option_tuples,
 };
 #[cfg(feature = "completions")]
 use crate::types::{CompletionJson, CompletionResultJson};
@@ -88,11 +89,17 @@ pub fn parse(source: &str) -> Result<JsValue, JsError> {
     let result = parse_beancount(source);
     let lookup = LineLookup::new(source);
 
-    let errors: Vec<Error> = result
+    let mut errors: Vec<Error> = result
         .errors
         .iter()
         .map(|e| parse_error_to_wasm(e, &lookup, None))
         .collect();
+
+    // This entry point never builds a loader `Options`, so nothing here used to
+    // raise E7001/E7002 and an invalid option was invisible (#2299). Validating
+    // the tuples is option-only work — no IO, no booking — so `parse` stays as
+    // cheap as its name promises.
+    errors.extend(validate_option_tuples(&result.options));
 
     // Extract options from parsed result
     let options = extract_options(&result.options);
@@ -117,9 +124,12 @@ pub fn parse(source: &str) -> Result<JsValue, JsError> {
 #[wasm_bindgen(js_name = "validateSource")]
 pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
     let load = load_and_book(source);
+    // `run_validation` first: it gates on `load.errors`, and an invalid option
+    // must not stop a ledger's real validation errors from being found (#2299).
     let validation_errors = run_validation(&load);
     let mut errors = load.errors;
     errors.extend(validation_errors);
+    errors.extend(load.option_errors);
 
     let result = ValidationResult {
         // Warnings do not invalidate a ledger (matching `rledger check`, which

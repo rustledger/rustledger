@@ -70,6 +70,17 @@ pub struct ProcessedLedger {
     pub directives: Vec<Directive>,
     pub options: LedgerOptions,
     pub errors: Vec<Error>,
+    /// Option diagnostics (E7001, E7002, E7003, E7009, ...), kept apart from
+    /// `errors` on purpose.
+    ///
+    /// `errors` is what [`has_fatal`] gates on, and that gate means "the
+    /// directive stream is unsound to work with" — a parse or booking failure.
+    /// An invalid option does not make directives unsound, so folding these in
+    /// here would make [`run_validation`] skip, and a ledger with a typo'd
+    /// option would silently stop reporting its real validation errors (the
+    /// exact drop #2292 fixed for plugin warnings). Surfaces that *report*
+    /// diagnostics merge this in; surfaces that gate on soundness do not.
+    pub option_errors: Vec<Error>,
     /// Raw parse result, needed by editor features and `ParsedLedger`.
     pub parse_result: ParserResult,
     pub lookup: LineLookup,
@@ -94,11 +105,13 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             .collect();
 
         let options = extract_options(&parse_result.options);
+        let option_errors = validate_option_tuples(&parse_result.options);
 
         return ProcessedLedger {
             directives: Vec::new(),
             options,
             errors,
+            option_errors,
             parse_result,
             lookup,
         };
@@ -113,10 +126,12 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
         Ok(raw) => raw,
         Err(e) => {
             let options = extract_options(&parse_result.options);
+            let option_errors = validate_option_tuples(&parse_result.options);
             return ProcessedLedger {
                 directives: Vec::new(),
                 options,
                 errors: vec![Error::new(format!("Load error: {e}"))],
+                option_errors,
                 parse_result,
                 lookup,
             };
@@ -125,6 +140,11 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
 
     // Extract options before process() consumes raw
     let options = extract_loader_options(&raw.options);
+    // Same, for the warnings `Options::set` raised while building them. The
+    // loader ran, so these already exist — the single-source path used to drop
+    // them on the floor here, which is why E7001/E7002 were invisible on every
+    // entry point built on this function (#2299).
+    let option_errors = option_warnings_to_errors(&raw.options.warnings);
 
     // Run the shared processing pipeline:
     // sort → synth-plugins → book → regular-plugins → finalize
@@ -146,6 +166,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 directives,
                 options,
                 errors,
+                option_errors,
                 parse_result,
                 lookup,
             }
@@ -154,6 +175,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             directives: Vec::new(),
             options,
             errors: vec![Error::new(format!("Processing error: {e}"))],
+            option_errors,
             parse_result,
             lookup,
         },
@@ -249,6 +271,63 @@ pub fn account_types_from_raw(
         }
     }
     at
+}
+
+/// Option warnings as WASM [`Error`]s, carrying the severity, code, and phase
+/// `rledger check` gives them.
+///
+/// Severity, code, and phase are all read off the warning rather than decided
+/// here — `is_error()`, `code`, `phase()` — because each one, when a surface
+/// decided it locally instead, drifted:
+///
+/// - E7003 and E7009 are warnings to `check`, which exits 0 on them. They used
+///   to go out from here as errors, under a comment claiming parity with
+///   `check` and the LSP, so a ledger the CLI called clean arrived carrying
+///   errors (#2291). `is_error` moved onto the warning in #2292.
+/// - The code used to survive only as an `[E7009] ` prefix on the message, so a
+///   consumer wanting to branch on it had to parse it back out of the text that
+///   [`Error::code`] exists to save them from reading (#2297). It moved into the
+///   `code` field, and the prefix was dropped, so the message text now matches
+///   the CLI's for the same warning exactly.
+/// - `phase` was then written as a `"parse"` literal on each surface, which is
+///   the same shape one field over; it moved onto `phase()` in #2298.
+///
+/// Shared, finally, rather than copied: this used to be a private function in
+/// `parsed_ledger.rs` serving only the multi-file path, which is why the
+/// single-source path had nothing to call and reported no option diagnostics at
+/// all (#2299).
+///
+/// [`OptionWarning`]: rustledger_loader::OptionWarning
+pub fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) -> Vec<Error> {
+    warnings
+        .iter()
+        .map(|w| {
+            let base = if w.is_error() {
+                Error::new(w.message.clone())
+            } else {
+                Error::warning(w.message.clone())
+            };
+            base.with_code(w.code).with_phase(w.phase())
+        })
+        .collect()
+}
+
+/// Validate raw parsed `option` tuples and return the resulting diagnostics.
+///
+/// For entry points that never build a loader [`Options`] — `parse()`, and the
+/// early-return paths of [`load_and_book`] where loading did not get far enough
+/// to produce one. Running the keys and values through [`Options::set`] is what
+/// raises E7001/E7002, and it is cheap: no file IO, no booking, no plugins, so
+/// a syntax-only entry point stays syntax-only in cost.
+///
+/// [`Options`]: rustledger_loader::Options
+/// [`Options::set`]: rustledger_loader::Options::set
+pub fn validate_option_tuples(options: &[(String, String, rustledger_parser::Span)]) -> Vec<Error> {
+    let mut opts = rustledger_loader::Options::new();
+    for (key, value, _span) in options {
+        opts.set(key, value);
+    }
+    option_warnings_to_errors(&opts.warnings)
 }
 
 pub fn extract_options(options: &[(String, String, rustledger_parser::Span)]) -> LedgerOptions {
@@ -379,5 +458,94 @@ mod account_types_tests {
         assert_eq!(at.assets, "Assets"); // untouched types keep defaults
         assert!(at.is_credit_normal("Revenue:Sales"));
         assert!(!at.is_credit_normal("Income:Sales")); // renamed away
+    }
+}
+
+#[cfg(test)]
+mod option_diagnostic_tests {
+    use super::*;
+
+    /// An invalid option, plus a posting to an account that was never opened.
+    /// The second is a genuine validation error, and it is what proves the
+    /// first does not suppress it.
+    const BAD_OPTION_AND_BAD_ACCOUNT: &str = "option \"nonsense_option\" \"x\"\n\
+2024-01-01 open Assets:Cash USD\n\
+2024-01-02 * \"p\"\n  Assets:Cash 1 USD\n  Assets:NeverOpened -1 USD\n";
+
+    const BAD_OPTION: &str = "option \"nonsense_option\" \"x\"\n\
+2024-01-01 open Assets:Cash USD\n";
+
+    fn codes(errors: &[Error]) -> Vec<&str> {
+        errors.iter().filter_map(|e| e.code.as_deref()).collect()
+    }
+
+    /// The bug: the loader raised E7001 and `load_and_book` dropped it, so
+    /// every single-source entry point built on it reported a clean ledger
+    /// where `rledger check` errors and exits 1 (#2299).
+    #[test]
+    fn load_and_book_surfaces_the_option_error_the_loader_raised() {
+        let load = load_and_book(BAD_OPTION);
+        assert!(
+            codes(&load.option_errors).contains(&"E7001"),
+            "E7001 must reach the caller, got {:?}",
+            load.option_errors
+        );
+    }
+
+    /// The trap in the obvious fix. `run_validation` skips when
+    /// `has_fatal(&load.errors)`, so folding option errors into `errors` would
+    /// make a typo'd option silently swallow every real validation error —
+    /// the same drop #2292 fixed for plugin warnings.
+    #[test]
+    fn an_invalid_option_does_not_suppress_validation() {
+        let load = load_and_book(BAD_OPTION_AND_BAD_ACCOUNT);
+        assert!(
+            codes(&load.option_errors).contains(&"E7001"),
+            "precondition: the option error is reported"
+        );
+        assert!(
+            !run_validation(&load).is_empty(),
+            "the undefined-account error must still be found; an invalid \
+             option does not make the directive stream unsound"
+        );
+    }
+
+    /// `parse()` never builds a loader `Options`, so it needs its own call to
+    /// `Options::set` rather than warnings to read off a `LoadResult`.
+    #[test]
+    fn validate_option_tuples_raises_on_an_unknown_option() {
+        let parsed = parse_beancount(BAD_OPTION);
+        let errors = validate_option_tuples(&parsed.options);
+        assert!(codes(&errors).contains(&"E7001"), "got {errors:?}");
+    }
+
+    #[test]
+    fn validate_option_tuples_is_quiet_on_a_valid_option() {
+        let parsed = parse_beancount("option \"title\" \"My Ledger\"\n");
+        assert!(
+            validate_option_tuples(&parsed.options).is_empty(),
+            "a valid option must not produce a diagnostic"
+        );
+    }
+
+    /// The two paths reach the warnings differently — `parse()` recomputes
+    /// them, `load_and_book` reads what the loader already produced — so the
+    /// thing worth pinning is that they agree.
+    #[test]
+    fn both_paths_report_the_same_option_diagnostics() {
+        let recomputed = validate_option_tuples(&parse_beancount(BAD_OPTION).options);
+        let from_loader = load_and_book(BAD_OPTION).option_errors;
+
+        let seen = |errors: &[Error]| -> Vec<(Option<String>, String, Severity)> {
+            errors
+                .iter()
+                .map(|e| (e.code.clone(), e.message.clone(), e.severity))
+                .collect()
+        };
+        assert_eq!(
+            seen(&recomputed),
+            seen(&from_loader),
+            "recomputing the option warnings must match what the loader raised"
+        );
     }
 }

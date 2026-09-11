@@ -823,10 +823,14 @@ def main() -> int:
             body += [
                 "", "### Suspected stale (unconfirmed — first sighting)",
                 "",
+                # Explicit `+` rather than adjacent literals: every element here
+                # is its own markdown line, so a missing comma would silently
+                # merge two of them instead of failing. Matches the `unchecked`
+                # section below.
                 "Seen once. Every false alarm this reporter has filed was transient, "
-                "so one sighting is not stated as fact: if the next run agrees these "
-                "move to **Stale**, and if it does not they disappear on their own. "
-                "Nothing needs doing about an entry here yet.",
+                + "so one sighting is not stated as fact: if the next run agrees these "
+                + "move to **Stale**, and if it does not they disappear on their own. "
+                + "Nothing needs doing about an entry here yet.",
                 *suspected,
             ]
         if unchecked:

@@ -521,16 +521,27 @@ pub struct Ledger {
 /// E7003 and E7009 are warnings to `check`, which exits 0 on them. They used
 /// to go out here as errors, under a comment claiming parity with `check` and
 /// the LSP, so a ledger the CLI called clean arrived carrying errors (#2291).
+///
+/// `code` and `phase` are set rather than left `None` (#2297). The code used
+/// to survive only as an `[E7009] ` prefix on the message, which meant a
+/// consumer wanting to branch on it had to parse it back out of the text that
+/// `Error::code` exists to save them from reading.
+///
+/// Two changes, then. The code moves into the `code` field, and `phase` is
+/// set from `OptionWarning::phase`, the same source `rledger check` reads, so
+/// the two cannot drift the way the severity rule did. The prefix is dropped
+/// from the message, so the text now matches the CLI's for the same warning
+/// exactly.
 fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) -> Vec<Error> {
     warnings
         .iter()
         .map(|w| {
-            let text = format!("[{}] {}", w.code, w.message);
-            if w.is_error() {
-                Error::new(text)
+            let base = if w.is_error() {
+                Error::new(w.message.clone())
             } else {
-                Error::warning(text)
-            }
+                Error::warning(w.message.clone())
+            };
+            base.with_code(w.code).with_phase(w.phase())
         })
         .collect()
 }
@@ -800,16 +811,28 @@ mod option_warning_severity_tests {
         );
     }
 
-    /// The code stays visible in the message, which is how consumers identify
-    /// these today: `Error::code` is `None` on this path. Pinned so the
-    /// severity fix cannot quietly take the code away with it.
+    /// The code reaches consumers as a FIELD, not as message text (#2297).
+    ///
+    /// This case used to pin the `[E7009] ` prefix, because that prefix was
+    /// the only place the code survived and #2292 could have dropped it by
+    /// accident. The code now has a field of its own, so the guard moves to
+    /// the field rather than being deleted: something still has to fail if a
+    /// future change stops carrying it.
+    ///
+    /// The message is asserted NOT to repeat it, which is what makes the
+    /// WASM text identical to the CLI's for the same warning.
     #[test]
-    fn the_code_is_still_in_the_message() {
+    fn the_code_travels_in_its_own_field() {
         let mapped = option_warnings_to_errors(&[warn("E7009")]);
-        assert!(
-            mapped[0].message.contains("E7009"),
-            "got {:?}",
-            mapped[0].message
+        assert_eq!(mapped[0].code.as_deref(), Some("E7009"));
+        assert_eq!(
+            mapped[0].phase.as_deref(),
+            Some("parse"),
+            "`rledger check` reports these under the parse phase"
+        );
+        assert_eq!(
+            mapped[0].message, "msg",
+            "the message must carry the text alone; the code has a field now"
         );
     }
 

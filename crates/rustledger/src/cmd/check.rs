@@ -654,7 +654,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 end_line: 1,
                 end_column: 1,
                 severity: severity.to_string(),
-                phase: "parse".to_string(),
+                phase: warning.phase().to_string(),
                 code: warning.code.to_string(),
                 message: warning.message.clone(),
                 hint: None,

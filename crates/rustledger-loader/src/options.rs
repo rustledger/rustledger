@@ -145,6 +145,21 @@ impl OptionWarning {
     pub fn is_error(&self) -> bool {
         !matches!(self.code, "E7003" | "E7009")
     }
+
+    /// The processing phase these belong to.
+    ///
+    /// Here for the same reason as [`is_error`](Self::is_error): both surfaces
+    /// that report option warnings were choosing it independently, each with
+    /// its own `"parse"` literal, and a series of bugs in this family (#2291,
+    /// #2297) all came from one surface deciding something about a diagnostic
+    /// that the other decided differently.
+    ///
+    /// `parse` because options are read while the file is being loaded, before
+    /// anything is booked or validated.
+    #[must_use]
+    pub const fn phase(&self) -> &'static str {
+        "parse"
+    }
 }
 
 /// Beancount file options.
@@ -813,6 +828,22 @@ impl Options {
 
 #[cfg(test)]
 mod tests {
+
+    /// The phase both surfaces report for option warnings.
+    ///
+    /// Pinned because two consumers read it and the point of moving it here
+    /// was that neither should be choosing it. A change to the value should
+    /// have to be deliberate.
+    #[test]
+    fn option_warnings_are_reported_in_the_parse_phase() {
+        let warning = OptionWarning {
+            code: "E7009",
+            message: String::new(),
+            option: String::new(),
+            value: String::new(),
+        };
+        assert_eq!(warning.phase(), "parse");
+    }
 
     /// The one rule both `rledger check` and the LSP read (#2291).
     ///

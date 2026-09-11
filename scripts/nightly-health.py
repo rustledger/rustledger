@@ -549,14 +549,23 @@ def self_test() -> int:
 
     gh = boom
     with contextlib.redirect_stdout(io.StringIO()):
-        ok = previous_report_body() == ""
+        ok = tracking_issue() is None
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} an unreadable previous report yields no suspicions")
 
     gh = stub("not json")
-    ok = previous_report_body() == ""
+    ok = tracking_issue() is None
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} an unparsable issue list yields no suspicions")
+
+    # A marker must not outlive the condition it records. The issue keeps its
+    # body when closed, so a reopened one carrying last month's suspicions would
+    # let a single sighting escalate to a stated fact.
+    kept = f"{MARKER}\n\nthe report text\n\n---\n\n{SUSPECT_MARKER} bench.yml -->"
+    cleared = clear_suspects(kept)
+    ok = previous_suspects(cleared) == set() and "the report text" in cleared
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} closing clears the marker but keeps the report")
 
     # --- escalation, end to end through main() ---
     #
@@ -619,6 +628,44 @@ def self_test() -> int:
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} a cleared marker starts the count over")
 
+    # ...and the same thing through main(), because testing `clear_suspects` on
+    # its own leaves the WIRING unpinned: drop the edit call before the close
+    # and every isolated case above still passes.
+    closed: dict[str, str] = {}
+
+    def fake_green(*args: str, **_kw: object) -> str:
+        a = list(args)
+        if a[0] == "issue" and a[1] == "list":
+            return json.dumps([{
+                "number": 1, "title": ISSUE_TITLE,
+                "body": f"{MARKER}\n\nthe report text\n\n---\n\n{SUSPECT_MARKER} bench.yml -->",
+            }])
+        if a[0] == "issue":
+            closed.setdefault("ops", "")
+            closed["ops"] += a[1] + ","
+            if a[1] == "edit" and "--body" in a:
+                closed["body"] = a[a.index("--body") + 1]
+            return "u"
+        if a[0] == "run" and a[1] == "list":
+            return json.dumps([{
+                "conclusion": "success", "status": "completed",
+                "createdAt": "2026-09-11T06:42:00Z", "databaseId": 1, "url": "u",
+            }])
+        if a[0] == "api":
+            return "4"
+        return ""
+
+    gh = fake_green
+    with contextlib.redirect_stdout(io.StringIO()):
+        main()
+    ok = (
+        previous_suspects(closed.get("body", "")) == set()
+        and "the report text" in closed.get("body", "")
+        and "close" in closed.get("ops", "")
+    )
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} going green clears the marker before closing the issue")
+
     gh = real_gh
     time.sleep = real_sleep  # type: ignore[assignment]
     if failures:
@@ -648,12 +695,39 @@ def previous_suspects(body: str) -> set[str]:
     return set()
 
 
-def previous_report_body() -> str:
-    """The open tracking issue's body, or "" if there is none or it cannot be read.
+def clear_suspects(body: str) -> str:
+    """Blank the suspicion marker in `body`, leaving the rest of the report intact.
 
-    Deliberately swallows every failure. This is the input to a SOFTENING step;
-    losing it costs one night's escalation, while raising here would take down a
-    report that is otherwise fine.
+    Written when the report goes green and the issue is closed. Without it the
+    marker outlives the condition it records: a closed issue keeps whatever was
+    suspected weeks ago, and reopening it makes the NEXT first sighting escalate
+    straight to a stated fact — the "seen twice, a day apart" rule defeated by a
+    sighting seen once, a month apart.
+
+    The report text is left alone. It is the record of what was wrong, and the
+    closing comment is not a reason to erase it.
+    """
+    out = [
+        f"{SUSPECT_MARKER}  -->" if line.strip().startswith(SUSPECT_MARKER) else line
+        for line in body.splitlines()
+    ]
+    return "\n".join(out)
+
+
+def tracking_issue() -> dict | None:
+    """The open tracking issue, or None if there is none or it cannot be read.
+
+    ONE lookup, used both to read the previous run's suspicions and to decide
+    where this run's report goes. It used to be two identical queries at
+    opposite ends of `main`, which is a drift hazard with a silent failure: if
+    the two ever disagreed about which issue is the tracking issue, suspicions
+    would be read from one and written to another, no suspicion would ever match
+    the next night, and nothing would escalate again. That fails toward never
+    stating a fact, which is the direction nobody notices.
+
+    Deliberately swallows every failure. The caller treats None as "no prior
+    suspicions", which costs one night's escalation; raising here would take
+    down a report that is otherwise fine.
     """
     try:
         raw = gh(
@@ -662,8 +736,8 @@ def previous_report_body() -> str:
         )
         issues = [i for i in json.loads(raw) if MARKER in (i.get("body") or "")]
     except (GhError, json.JSONDecodeError):
-        return ""
-    return (issues[0].get("body") or "") if issues else ""
+        return None
+    return issues[0] if issues else None
 
 
 def confirm_stale(
@@ -717,7 +791,8 @@ def main() -> int:
 
     # Read BEFORE the loop: a stale verdict is only published as fact if the
     # previous run reached the same verdict.
-    prior = previous_suspects(previous_report_body())
+    issue = tracking_issue()
+    prior = previous_suspects((issue or {}).get("body") or "")
     suspects_now: list[str] = []
 
     workflows = scheduled_workflows()
@@ -864,25 +939,21 @@ def main() -> int:
     # failing scheduled workflow for nobody to notice. The table has already
     # been printed at this point, so the diagnosis survives either way.
     try:
-        existing = gh(
-            "issue", "list", "--repo", REPO, "--state", "open",
-            "--search", ISSUE_TITLE, "--json", "number,title,body", "--limit", "20",
-        )
-        try:
-            issues = [i for i in json.loads(existing) if MARKER in (i.get("body") or "")]
-        except json.JSONDecodeError:
-            issues = []
-
         if problems:
-            if issues:
-                num = str(issues[0]["number"])
+            if issue:
+                num = str(issue["number"])
                 gh("issue", "edit", num, "--repo", REPO, "--body", text)
                 print(f"\nupdated issue #{num}: {len(problems)} problem(s)")
             else:
                 url = gh("issue", "create", "--repo", REPO, "--title", ISSUE_TITLE, "--body", text).strip()
                 print(f"\nopened {url}: {len(problems)} problem(s)")
-        elif issues:
-            num = str(issues[0]["number"])
+        elif issue:
+            num = str(issue["number"])
+            # Clear the marker BEFORE closing. A closed issue keeps its body,
+            # and a reopened one carrying last month's suspicions would let a
+            # single sighting escalate to a stated fact.
+            gh("issue", "edit", num, "--repo", REPO,
+               "--body", clear_suspects(issue.get("body") or ""))
             gh("issue", "comment", num, "--repo", REPO, "--body",
                "All scheduled workflows are green again. Closing automatically.")
             gh("issue", "close", num, "--repo", REPO)

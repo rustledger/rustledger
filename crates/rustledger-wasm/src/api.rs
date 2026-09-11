@@ -13,6 +13,7 @@ use rustledger_parser::parse as parse_beancount;
 use crate::convert::{directive_to_json, value_to_cell};
 use crate::helpers::{
     extract_options, has_fatal, load_and_book, parse_error_to_wasm, run_validation, to_js,
+    validate_option_tuples,
 };
 #[cfg(feature = "completions")]
 use crate::types::{CompletionJson, CompletionResultJson};
@@ -88,11 +89,17 @@ pub fn parse(source: &str) -> Result<JsValue, JsError> {
     let result = parse_beancount(source);
     let lookup = LineLookup::new(source);
 
-    let errors: Vec<Error> = result
+    let mut errors: Vec<Error> = result
         .errors
         .iter()
         .map(|e| parse_error_to_wasm(e, &lookup, None))
         .collect();
+
+    // This entry point never builds a loader `Options`, so nothing here used to
+    // raise E7001/E7002 and an invalid option was invisible (#2299). Validating
+    // the tuples is option-only work — no IO, no booking — so `parse` stays as
+    // cheap as its name promises.
+    errors.extend(validate_option_tuples(&result.options));
 
     // Extract options from parsed result
     let options = extract_options(&result.options);
@@ -117,8 +124,10 @@ pub fn parse(source: &str) -> Result<JsValue, JsError> {
 #[wasm_bindgen(js_name = "validateSource")]
 pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
     let load = load_and_book(source);
+    // `run_validation` first: it gates on `load.errors`, and an invalid option
+    // must not stop a ledger's real validation errors from being found (#2299).
     let validation_errors = run_validation(&load);
-    let mut errors = load.errors;
+    let mut errors = load.reported_errors();
     errors.extend(validation_errors);
 
     let result = ValidationResult {
@@ -147,14 +156,14 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
-            errors: load.errors,
+            errors: load.reported_errors(),
         };
         return to_js(&result);
     }
 
     // Carry any non-fatal load warnings through every result path so callers
     // still see them alongside (or instead of) query output.
-    let warnings = load.errors;
+    let warnings = load.reported_errors();
 
     // Parse the query
     let query = match parse_query(query_str) {
@@ -269,13 +278,13 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
         let result = PadResult {
             directives: Vec::new(),
             padding_transactions: Vec::new(),
-            errors: load.errors,
+            errors: load.reported_errors(),
         };
         return to_js(&result);
     }
 
     // Carry non-fatal load warnings through to the result.
-    let mut errors = load.errors;
+    let mut errors = load.reported_errors();
 
     // Process pads
     let pad_result = process_pads(&load.directives);
@@ -344,13 +353,13 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> Result<JsValue, JsError> {
     if has_fatal(&load.errors) {
         let result = PluginResult {
             directives: Vec::new(),
-            errors: load.errors,
+            errors: load.reported_errors(),
         };
         return to_js(&result);
     }
 
     // Carry non-fatal load warnings through every result path.
-    let warnings = load.errors;
+    let warnings = load.reported_errors();
 
     // Find and run the plugin
     let registry = NativePluginRegistry::global();

@@ -107,7 +107,30 @@ use crate::types::{Error, LedgerOptions};
 /// carrying a second juxtaposed number, is diagnosed rather than partly read
 /// and partly discarded (#2193). Loader v35. Same shape as v19: the archived
 /// directive is identical and the diagnostic is what a stale blob would hide.
-pub const CACHE_VERSION: u32 = 20;
+/// v21: an invalid option is diagnosed on the single-source entry points
+/// (#2299). Loader v35, unchanged -- this one is ours alone. Same shape as v19
+/// and v20 again: the archived directives are identical, and what a stale blob
+/// hides is the diagnostic. `from_cache` restores `parse_errors` verbatim and
+/// re-parses the source only for editor spans, so it never re-derives them.
+/// Measured on a pre-fix blob at v20, which this build accepted: `isValid()`
+/// came back true with no codes where a fresh parse of the same source returns
+/// false with E7001 -- the fix silently did not apply to any cached ledger.
+///
+/// v21 carries a debt that is not its own, which is the more useful half of
+/// this entry. #2291/#2292 (option-warning SEVERITY), #2297/#2298 (its code
+/// and phase, and the `[E7009] ` prefix dropped from the message text) each
+/// changed the CONTENT of a cached error list and none of them touched this
+/// file. `Ledger::is_valid` is `!has_fatal(&self.errors)` over exactly that
+/// restored list, so a blob written before them decides validity by the rules
+/// those PRs replaced. Measured on the same input, a duplicated option:
+///
+///   this build     E7003 Warning  code Some("E7003")  isValid=true
+///   pre-#2291 blob E7003 Error    code None           isValid=false
+///
+/// which is the #2291 bug served back out of the cache -- a ledger `rledger
+/// check` exits 0 on, reported invalid. Those three bumps are owed and this
+/// one pays them, so the range v20 -> v21 covers more than #2299 alone.
+pub const CACHE_VERSION: u32 = 21;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -160,6 +183,10 @@ pub struct ParsedLedgerPayload {
     pub directives: Vec<Directive>,
     pub options: LedgerOptions,
     pub parse_errors: Vec<Error>,
+    /// Option diagnostics, archived apart from `parse_errors` because the
+    /// restored ledger gates its operations on that list and must not refuse
+    /// a query over an invalid option.
+    pub option_errors: Vec<Error>,
     pub validation_errors: Vec<Error>,
 }
 
@@ -512,6 +539,7 @@ option "operating_currency" "USD"
             directives: processed.directives.clone(),
             options: processed.options.clone(),
             parse_errors: Vec::new(),
+            option_errors: Vec::new(),
             validation_errors: Vec::new(),
         };
 
@@ -602,6 +630,7 @@ option "operating_currency" "USD"
             directives: Vec::new(),
             options: LedgerOptions::default(),
             parse_errors: Vec::new(),
+            option_errors: Vec::new(),
             validation_errors: Vec::new(),
         })
         .unwrap();

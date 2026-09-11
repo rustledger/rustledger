@@ -845,6 +845,55 @@ mod option_warning_severity_tests {
         );
     }
 
+    /// The multi-file class caches the same diagnostics and decides validity
+    /// off the restored list, so it needs the round-trip pinned too.
+    ///
+    /// `Ledger::is_valid` is `!has_fatal(&self.errors)`, reading exactly what
+    /// `from_cache` handed back. Severity is the field that decides it, and
+    /// severity is what #2291 changed without bumping `CACHE_VERSION` — so a
+    /// round-trip that silently altered it would reproduce that bug from cache.
+    #[test]
+    fn ledger_option_diagnostics_survive_the_cache_round_trip() {
+        let warning = Error::warning("Option \"title\" specified twice".to_string())
+            .with_code("E7003")
+            .with_phase("parse");
+        let fatal = Error::new("Invalid option \"nonsense_option\"".to_string())
+            .with_code("E7001")
+            .with_phase("parse");
+
+        for (label, errors, expect_valid) in [
+            ("warning only", vec![warning.clone()], true),
+            ("with an error", vec![warning, fatal], false),
+        ] {
+            let ledger = Ledger {
+                directives: Vec::new(),
+                options: LedgerOptions::default(),
+                account_types: rustledger_core::AccountTypes::default(),
+                errors,
+                editor_cache: editor::EditorCache::from_directives(&[]),
+            };
+            let restored =
+                Ledger::from_cache(&ledger.serialize().expect("serialize")).expect("restore");
+
+            let shape = |l: &Ledger| -> Vec<(Option<String>, Severity)> {
+                l.errors
+                    .iter()
+                    .map(|e| (e.code.clone(), e.severity))
+                    .collect()
+            };
+            assert_eq!(
+                shape(&restored),
+                shape(&ledger),
+                "{label}: code and severity must both survive the round trip"
+            );
+            assert_eq!(
+                restored.is_valid(),
+                expect_valid,
+                "{label}: validity is decided off the restored list"
+            );
+        }
+    }
+
     /// The cache must carry option diagnostics, or a cached ledger reports
     /// clean where a fresh one reports E7001.
     ///

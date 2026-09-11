@@ -115,6 +115,21 @@ use crate::types::{Error, LedgerOptions};
 /// Measured on a pre-fix blob at v20, which this build accepted: `isValid()`
 /// came back true with no codes where a fresh parse of the same source returns
 /// false with E7001 -- the fix silently did not apply to any cached ledger.
+///
+/// v21 carries a debt that is not its own, which is the more useful half of
+/// this entry. #2291/#2292 (option-warning SEVERITY), #2297/#2298 (its code
+/// and phase, and the `[E7009] ` prefix dropped from the message text) each
+/// changed the CONTENT of a cached error list and none of them touched this
+/// file. `Ledger::is_valid` is `!has_fatal(&self.errors)` over exactly that
+/// restored list, so a blob written before them decides validity by the rules
+/// those PRs replaced. Measured on the same input, a duplicated option:
+///
+///   this build     E7003 Warning  code Some("E7003")  isValid=true
+///   pre-#2291 blob E7003 Error    code None           isValid=false
+///
+/// which is the #2291 bug served back out of the cache -- a ledger `rledger
+/// check` exits 0 on, reported invalid. Those three bumps are owed and this
+/// one pays them, so the range v20 -> v21 covers more than #2299 alone.
 pub const CACHE_VERSION: u32 = 21;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

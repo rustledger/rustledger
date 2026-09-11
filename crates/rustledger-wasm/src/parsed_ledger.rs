@@ -194,7 +194,18 @@ pub struct ParsedLedger {
     /// Ledger options.
     options: LedgerOptions,
     /// Parse errors.
+    /// Parse and booking errors — the *soundness* list.
+    ///
+    /// Every operation gate below reads this and only this. An entry here means
+    /// the directive stream could not be built, so running a query over it
+    /// would be answering with data that does not exist.
     parse_errors: Vec<Error>,
+    /// Option diagnostics (E7001, E7003, ...), kept out of `parse_errors` for
+    /// the same reason they are kept out of `ProcessedLedger::errors`: an
+    /// invalid option does not make the directive stream unsound, so it must
+    /// not stop a query from running. Reported by `isValid`, `getErrors`, and
+    /// `getParseErrors`; invisible to the gates.
+    option_errors: Vec<Error>,
     /// Validation errors.
     validation_errors: Vec<Error>,
     /// Cached editor data (accounts, currencies, payees, line index).
@@ -215,14 +226,13 @@ impl ParsedLedger {
         let validation_errors = run_validation(&load);
         let editor_cache = editor::EditorCache::new(source, &load.parse_result);
 
-        let parse_errors = load.reported_errors();
-
         Self {
             source: source.to_string(),
             parse_result: load.parse_result,
             directives: load.directives,
             options: load.options,
-            parse_errors,
+            parse_errors: load.errors,
+            option_errors: load.option_errors,
             validation_errors,
             editor_cache,
         }
@@ -236,13 +246,16 @@ impl ParsedLedger {
     /// warning-severity validation entry used to read as invalid here (#2291).
     #[wasm_bindgen(js_name = "isValid")]
     pub fn is_valid(&self) -> bool {
-        !has_fatal(&self.parse_errors) && !has_fatal(&self.validation_errors)
+        !has_fatal(&self.parse_errors)
+            && !has_fatal(&self.option_errors)
+            && !has_fatal(&self.validation_errors)
     }
 
     /// Get all errors (parse + validation).
     #[wasm_bindgen(js_name = "getErrors")]
     pub fn get_errors(&self) -> Result<JsValue, JsError> {
         let mut all_errors = self.parse_errors.clone();
+        all_errors.extend(self.option_errors.clone());
         all_errors.extend(self.validation_errors.clone());
         to_js(&all_errors)
     }
@@ -250,7 +263,11 @@ impl ParsedLedger {
     /// Get parse errors only.
     #[wasm_bindgen(js_name = "getParseErrors")]
     pub fn get_parse_errors(&self) -> Result<JsValue, JsError> {
-        to_js(&self.parse_errors)
+        // Option diagnostics carry `phase: "parse"`, so they belong in the
+        // parse-phase view even though the gates must not see them.
+        let mut errors = self.parse_errors.clone();
+        errors.extend(self.option_errors.clone());
+        to_js(&errors)
     }
 
     /// Get validation errors only.
@@ -436,6 +453,7 @@ impl ParsedLedger {
             directives: self.directives.clone(),
             options: self.options.clone(),
             parse_errors: self.parse_errors.clone(),
+            option_errors: self.option_errors.clone(),
             validation_errors: self.validation_errors.clone(),
         };
         cache::serialize_parsed(&payload).map_err(|e| JsError::new(&e))
@@ -468,6 +486,7 @@ impl ParsedLedger {
             directives: payload.directives,
             options: payload.options,
             parse_errors: payload.parse_errors,
+            option_errors: payload.option_errors,
             validation_errors: payload.validation_errors,
             editor_cache,
         })
@@ -897,10 +916,13 @@ mod option_warning_severity_tests {
     /// The cache must carry option diagnostics, or a cached ledger reports
     /// clean where a fresh one reports E7001.
     ///
-    /// `from_cache` restores `parse_errors` verbatim and re-parses the source
-    /// only for editor spans, so nothing downstream would re-derive these. The
-    /// cross-version case is handled by the `CACHE_VERSION` 21 bump; this pins
-    /// the round-trip itself, which is what makes the bump sufficient.
+    /// `from_cache` restores the archived diagnostics verbatim and re-parses
+    /// the source only for editor spans, so nothing downstream re-derives
+    /// them. The cross-version case is handled by the `CACHE_VERSION` 21 bump;
+    /// this pins the round-trip itself, which is what makes the bump
+    /// sufficient. Both lists are checked: option diagnostics must come back,
+    /// and they must come back in `option_errors` rather than leaking into the
+    /// soundness list the operation gates read.
     #[test]
     fn option_diagnostics_survive_the_cache_round_trip() {
         let src = "option \"nonsense_option\" \"x\"\n2024-01-01 open Assets:Cash USD\n";
@@ -908,25 +930,72 @@ mod option_warning_severity_tests {
         let restored =
             ParsedLedger::from_cache(&fresh.serialize().expect("serialize"), src).expect("restore");
 
-        let codes = |p: &ParsedLedger| -> Vec<String> {
-            p.parse_errors
-                .iter()
-                .filter_map(|e| e.code.clone())
-                .collect()
+        let codes = |errors: &[Error]| -> Vec<String> {
+            errors.iter().filter_map(|e| e.code.clone()).collect()
         };
         assert!(
-            codes(&fresh).contains(&"E7001".to_string()),
+            codes(&fresh.option_errors).contains(&"E7001".to_string()),
             "precondition: a fresh parse reports it"
         );
         assert_eq!(
-            codes(&restored),
-            codes(&fresh),
+            codes(&restored.option_errors),
+            codes(&fresh.option_errors),
             "a restored ledger must report what a fresh one does"
+        );
+        assert!(
+            restored.parse_errors.is_empty(),
+            "and must not restore them into the list the operation gates read"
         );
         assert_eq!(
             restored.is_valid(),
             fresh.is_valid(),
             "and must agree on validity"
+        );
+    }
+
+    /// A warning-only ledger must still be operable.
+    ///
+    /// `rledger check` exits 0 on a duplicated option (E7003 is a warning), and
+    /// `isValid()` agrees. But `query`, `format`, `expandPads`, and `runPlugin`
+    /// gate on `!parse_errors.is_empty()` — an emptiness test, which is exactly
+    /// what #2291 replaced in `is_valid` and did not replace here. Routing
+    /// option diagnostics through that list made every one of those operations
+    /// refuse to run on a ledger reporting itself valid.
+    #[test]
+    fn a_warning_only_option_does_not_disable_operations() {
+        let src = "option \"title\" \"a\"\noption \"title\" \"b\"\n\
+2024-01-01 open Assets:Cash USD\n";
+        let parsed = ParsedLedger::new(src);
+
+        assert!(
+            parsed
+                .option_errors
+                .iter()
+                .any(|e| e.code.as_deref() == Some("E7003")),
+            "precondition: the fixture raises the warning"
+        );
+        assert!(parsed.is_valid(), "a warning-only ledger is valid");
+        assert!(
+            parsed.parse_errors.is_empty(),
+            "the gates read `parse_errors`; an option warning must not land \
+             there or every operation refuses to run while isValid() says true"
+        );
+    }
+
+    /// And an option ERROR must not disable them either: it does not make the
+    /// directive stream unsound, which is the only thing those gates mean.
+    /// `api::query` already behaves this way, so `ParsedLedger::query` doing
+    /// otherwise would be the same operation answering two ways.
+    #[test]
+    fn an_invalid_option_does_not_disable_operations() {
+        let src = "option \"nonsense_option\" \"x\"\n2024-01-01 open Assets:Cash USD\n";
+        let parsed = ParsedLedger::new(src);
+
+        assert!(!parsed.is_valid(), "precondition: E7001 makes it invalid");
+        assert!(
+            parsed.parse_errors.is_empty(),
+            "an invalid option is reported, but the directives are sound and \
+             a query over them must still run"
         );
     }
 
@@ -941,12 +1010,12 @@ mod option_warning_severity_tests {
 
         assert!(
             parsed
-                .parse_errors
+                .option_errors
                 .iter()
                 .any(|e| e.code.as_deref() == Some("E7001")),
             "E7001 must be reported; got {:?}",
             parsed
-                .parse_errors
+                .option_errors
                 .iter()
                 .map(|e| (&e.code, e.severity))
                 .collect::<Vec<_>>()
@@ -970,7 +1039,7 @@ mod option_warning_severity_tests {
 
         assert!(
             parsed
-                .parse_errors
+                .option_errors
                 .iter()
                 .any(|e| e.code.as_deref() == Some("E7001")),
             "precondition: the option error is reported"

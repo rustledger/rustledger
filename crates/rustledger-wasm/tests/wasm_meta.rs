@@ -336,3 +336,98 @@ fn custom_directive_values_exposed_1168() {
         "TRUE arg must surface as a JS boolean inside `value`",
     );
 }
+
+/// The JS wire contract for an invalid option on the single-source entry
+/// points (#2299).
+///
+/// `parse` and `validateSource` are `wasm_bindgen` functions returning
+/// `JsValue`, so no native unit test can reach them: the helper and
+/// `ParsedLedger` tests would all still pass with either merge deleted. This
+/// is the only place the reported repro is actually pinned, and it belongs
+/// here rather than in `wasm.rs`, which is browser-only and skipped in CI.
+#[wasm_bindgen_test]
+fn invalid_option_reaches_js_from_parse_2299() {
+    let source = "option \"nonsense_option\" \"x\"\n2024-01-01 open Assets:Cash USD\n";
+
+    let result = rustledger_wasm::parse(source).expect("parse should not throw");
+    let errors = get_field(&result, "errors");
+    assert_eq!(
+        get_array_length(&errors),
+        1,
+        "an invalid option must be reported by `parse`"
+    );
+
+    let e = js_sys::Array::from(&errors).get(0);
+    assert_eq!(
+        get_field(&e, "code").as_string().as_deref(),
+        Some("E7001"),
+        "the code must arrive in the `code` field, not buried in the message"
+    );
+    assert_eq!(
+        get_field(&e, "severity").as_string().as_deref(),
+        Some("error"),
+        "E7001 is an error to `rledger check`, which exits 1 on this source"
+    );
+    assert_eq!(
+        get_field(&e, "phase").as_string().as_deref(),
+        Some("parse"),
+        "phase comes from `OptionWarning::phase`"
+    );
+}
+
+/// The same source through `validateSource`, which additionally has to report
+/// `valid: false` — the field a caller actually branches on.
+#[wasm_bindgen_test]
+fn invalid_option_reaches_js_from_validate_source_2299() {
+    let source = "option \"nonsense_option\" \"x\"\n2024-01-01 open Assets:Cash USD\n";
+
+    let result = rustledger_wasm::validate_source(source).expect("should not throw");
+    assert_eq!(
+        get_field(&result, "valid").as_bool(),
+        Some(false),
+        "a ledger the CLI exits 1 on must not validate clean"
+    );
+
+    let errors = js_sys::Array::from(&get_field(&result, "errors"));
+    let mut codes: Vec<String> = Vec::new();
+    for i in 0..errors.length() {
+        if let Some(c) = get_field(&errors.get(i), "code").as_string() {
+            codes.push(c);
+        }
+    }
+    assert!(
+        codes.iter().any(|c| c == "E7001"),
+        "E7001 must reach JS; got {codes:?}"
+    );
+}
+
+/// A duplicated option is a WARNING: `rledger check` exits 0 on it, so the
+/// ledger must validate clean while the diagnostic is still reported. This is
+/// the direction #2291 got wrong, pinned at the wire.
+#[wasm_bindgen_test]
+fn a_warning_option_still_validates_clean_2299() {
+    let source =
+        "option \"title\" \"a\"\noption \"title\" \"b\"\n2024-01-01 open Assets:Cash USD\n";
+
+    let result = rustledger_wasm::validate_source(source).expect("should not throw");
+    assert_eq!(
+        get_field(&result, "valid").as_bool(),
+        Some(true),
+        "a warning-only ledger is valid; `rledger check` exits 0 on it"
+    );
+
+    let errors = js_sys::Array::from(&get_field(&result, "errors"));
+    let mut found = false;
+    for i in 0..errors.length() {
+        let e = errors.get(i);
+        if get_field(&e, "code").as_string().as_deref() == Some("E7003") {
+            assert_eq!(
+                get_field(&e, "severity").as_string().as_deref(),
+                Some("warning"),
+                "E7003 is a warning (#2291)"
+            );
+            found = true;
+        }
+    }
+    assert!(found, "the warning must still be reported");
+}

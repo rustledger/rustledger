@@ -183,6 +183,10 @@ pub struct ParsedLedgerPayload {
     pub directives: Vec<Directive>,
     pub options: LedgerOptions,
     pub parse_errors: Vec<Error>,
+    /// Option diagnostics, archived apart from `parse_errors` because the
+    /// restored ledger gates its operations on that list and must not refuse
+    /// a query over an invalid option.
+    pub option_errors: Vec<Error>,
     pub validation_errors: Vec<Error>,
 }
 
@@ -535,6 +539,7 @@ option "operating_currency" "USD"
             directives: processed.directives.clone(),
             options: processed.options.clone(),
             parse_errors: Vec::new(),
+            option_errors: Vec::new(),
             validation_errors: Vec::new(),
         };
 
@@ -625,6 +630,7 @@ option "operating_currency" "USD"
             directives: Vec::new(),
             options: LedgerOptions::default(),
             parse_errors: Vec::new(),
+            option_errors: Vec::new(),
             validation_errors: Vec::new(),
         })
         .unwrap();

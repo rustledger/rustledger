@@ -846,6 +846,7 @@ option "operating_currency" "USD"
             directives: processed.directives.clone(),
             options: processed.options.clone(),
             parse_errors: Vec::new(),
+            option_errors: Vec::new(),
             validation_errors: Vec::new(),
         };
 

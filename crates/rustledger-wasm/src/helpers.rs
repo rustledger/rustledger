@@ -86,6 +86,29 @@ pub struct ProcessedLedger {
     pub lookup: LineLookup,
 }
 
+impl ProcessedLedger {
+    /// Everything a caller should be shown: load diagnostics plus option
+    /// diagnostics.
+    ///
+    /// Every surface that *reports* goes through here, and every surface that
+    /// *gates on soundness* reads [`ProcessedLedger::errors`] directly. Keeping
+    /// those two questions apart is the whole point of the split — see the
+    /// `option_errors` field docs for what folding them together breaks.
+    ///
+    /// It is a method rather than something each entry point assembles because
+    /// the alternative is what #2299 was: one surface deciding what a caller
+    /// sees while the next one decides differently. `query`, `expandPads`, and
+    /// `applyPlugin` each already carry non-fatal load warnings through every
+    /// result path; a second diagnostics channel they did not know to carry
+    /// would have left them silent on options while `validateSource` reported.
+    #[must_use]
+    pub fn reported_errors(&self) -> Vec<Error> {
+        let mut all = self.errors.clone();
+        all.extend(self.option_errors.iter().cloned());
+        all
+    }
+}
+
 /// Parse, book, and process a Beancount source string.
 ///
 /// This is the common entry point for all processing functions.
@@ -528,13 +551,20 @@ mod option_diagnostic_tests {
         );
     }
 
-    /// The two paths reach the warnings differently — `parse()` recomputes
-    /// them, `load_and_book` reads what the loader already produced — so the
-    /// thing worth pinning is that they agree.
+    /// The two paths reach the warnings differently — `parse()` recomputes them
+    /// through `Options::set`, `load_and_book` reads what the loader already
+    /// produced — so the thing worth pinning is that they agree, and for every
+    /// code rather than just the one in the bug report. E7002 in particular is
+    /// raised on a *value*, which is a different arm than E7001's unknown key.
     #[test]
-    fn both_paths_report_the_same_option_diagnostics() {
-        let recomputed = validate_option_tuples(&parse_beancount(BAD_OPTION).options);
-        let from_loader = load_and_book(BAD_OPTION).option_errors;
+    fn both_paths_agree_for_every_option_code() {
+        let cases: &[(&str, &str)] = &[
+            ("E7001", "option \"nonsense_option\" \"x\"\n"),
+            ("E7002", "option \"render_commas\" \"not_a_bool\"\n"),
+            ("E7003", "option \"title\" \"a\"\noption \"title\" \"b\"\n"),
+            ("E7004", "option \"allow_pipe_separator\" \"TRUE\"\n"),
+            ("none", "option \"title\" \"t\"\n"),
+        ];
 
         let seen = |errors: &[Error]| -> Vec<(Option<String>, String, Severity)> {
             errors
@@ -542,10 +572,51 @@ mod option_diagnostic_tests {
                 .map(|e| (e.code.clone(), e.message.clone(), e.severity))
                 .collect()
         };
-        assert_eq!(
-            seen(&recomputed),
-            seen(&from_loader),
-            "recomputing the option warnings must match what the loader raised"
+
+        for (expected, opt) in cases {
+            let src = format!("{opt}2024-01-01 open Assets:Cash USD\n");
+            let recomputed = validate_option_tuples(&parse_beancount(&src).options);
+            let from_loader = load_and_book(&src).option_errors;
+
+            assert_eq!(
+                seen(&recomputed),
+                seen(&from_loader),
+                "the recomputed option warnings must match what the loader \
+                 raised, for {expected}"
+            );
+            if *expected == "none" {
+                assert!(recomputed.is_empty(), "a valid option must be quiet");
+            } else {
+                assert!(
+                    codes(&recomputed).contains(expected),
+                    "fixture must actually raise {expected}; got {:?}",
+                    codes(&recomputed)
+                );
+            }
+        }
+    }
+
+    /// `reported_errors` is what every reporting surface reads and `errors` is
+    /// what every soundness gate reads. If option diagnostics ever leak into
+    /// the second, `run_validation` starts skipping; if they ever fall out of
+    /// the first, surfaces go silent again. Both directions, pinned.
+    #[test]
+    fn option_diagnostics_are_reported_but_do_not_gate() {
+        let load = load_and_book(BAD_OPTION);
+
+        assert!(
+            codes(&load.reported_errors()).contains(&"E7001"),
+            "reported_errors must carry the option error; got {:?}",
+            codes(&load.reported_errors())
+        );
+        assert!(
+            !codes(&load.errors).contains(&"E7001"),
+            "`errors` is the soundness gate's input and must NOT carry it; got {:?}",
+            codes(&load.errors)
+        );
+        assert!(
+            !has_fatal(&load.errors),
+            "an invalid option must not read as an unsound directive stream"
         );
     }
 }

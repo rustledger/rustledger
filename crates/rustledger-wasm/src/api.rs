@@ -127,9 +127,8 @@ pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
     // `run_validation` first: it gates on `load.errors`, and an invalid option
     // must not stop a ledger's real validation errors from being found (#2299).
     let validation_errors = run_validation(&load);
-    let mut errors = load.errors;
+    let mut errors = load.reported_errors();
     errors.extend(validation_errors);
-    errors.extend(load.option_errors);
 
     let result = ValidationResult {
         // Warnings do not invalidate a ledger (matching `rledger check`, which
@@ -157,14 +156,14 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
-            errors: load.errors,
+            errors: load.reported_errors(),
         };
         return to_js(&result);
     }
 
     // Carry any non-fatal load warnings through every result path so callers
     // still see them alongside (or instead of) query output.
-    let warnings = load.errors;
+    let warnings = load.reported_errors();
 
     // Parse the query
     let query = match parse_query(query_str) {
@@ -279,13 +278,13 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
         let result = PadResult {
             directives: Vec::new(),
             padding_transactions: Vec::new(),
-            errors: load.errors,
+            errors: load.reported_errors(),
         };
         return to_js(&result);
     }
 
     // Carry non-fatal load warnings through to the result.
-    let mut errors = load.errors;
+    let mut errors = load.reported_errors();
 
     // Process pads
     let pad_result = process_pads(&load.directives);
@@ -354,13 +353,13 @@ pub fn run_plugin(source: &str, plugin_name: &str) -> Result<JsValue, JsError> {
     if has_fatal(&load.errors) {
         let result = PluginResult {
             directives: Vec::new(),
-            errors: load.errors,
+            errors: load.reported_errors(),
         };
         return to_js(&result);
     }
 
     // Carry non-fatal load warnings through every result path.
-    let warnings = load.errors;
+    let warnings = load.reported_errors();
 
     // Find and run the plugin
     let registry = NativePluginRegistry::global();

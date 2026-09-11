@@ -215,8 +215,7 @@ impl ParsedLedger {
         let validation_errors = run_validation(&load);
         let editor_cache = editor::EditorCache::new(source, &load.parse_result);
 
-        let mut parse_errors = load.errors;
-        parse_errors.extend(load.option_errors);
+        let parse_errors = load.reported_errors();
 
         Self {
             source: source.to_string(),

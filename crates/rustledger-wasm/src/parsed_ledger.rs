@@ -527,10 +527,11 @@ pub struct Ledger {
 /// consumer wanting to branch on it had to parse it back out of the text that
 /// `Error::code` exists to save them from reading.
 ///
-/// Two changes, then. The code moves into the `code` field, and `phase`
-/// becomes `"parse"`, which is what `rledger check` reports for these. The
-/// prefix is dropped from the message, so the text now matches the CLI's for
-/// the same warning exactly.
+/// Two changes, then. The code moves into the `code` field, and `phase` is
+/// set from `OptionWarning::phase`, the same source `rledger check` reads, so
+/// the two cannot drift the way the severity rule did. The prefix is dropped
+/// from the message, so the text now matches the CLI's for the same warning
+/// exactly.
 fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) -> Vec<Error> {
     warnings
         .iter()
@@ -540,7 +541,7 @@ fn option_warnings_to_errors(warnings: &[rustledger_loader::OptionWarning]) -> V
             } else {
                 Error::warning(w.message.clone())
             };
-            base.with_code(w.code).with_phase("parse")
+            base.with_code(w.code).with_phase(w.phase())
         })
         .collect()
 }

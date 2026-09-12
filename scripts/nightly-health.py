@@ -26,7 +26,9 @@ import contextlib
 import io
 import json
 import re
+import os
 import subprocess
+import tempfile
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -36,6 +38,18 @@ REPO = "rustledger/rustledger"
 DEFAULT_BRANCH = "main"
 ISSUE_TITLE = "Scheduled workflow health"
 MARKER = "<!-- nightly-health -->"
+# Machine-readable list of workflows that looked stale on the PREVIOUS run.
+#
+# Every false alarm so far was transient: reported stale, correct again by hand
+# minutes later. Nothing transient survives a night, so a stale claim has to be
+# seen twice, a day apart, before it is stated as fact. The first sighting is
+# published as a SUSPICION, which is both honest and self-clearing -- if the
+# next run disagrees the entry simply disappears.
+#
+# This is the part that does not depend on knowing the mechanism. The
+# `created>=` count defeats one specific way the listing can lie; this defeats
+# any way it can lie briefly, which is every way observed so far.
+SUSPECT_MARKER = "<!-- suspect:"
 
 # Multiples of the nominal period before a workflow counts as stale. Generous
 # on purpose: a single skipped run is noise (runner outages, a quiet repo),
@@ -88,7 +102,15 @@ def cadence(cron: str) -> str:
 def scheduled_workflows() -> dict[str, str]:
     """Map workflow filename -> cadence, for every workflow with a `schedule:`."""
     out: dict[str, str] = {}
-    for path in sorted(Path(".github/workflows").glob("*.yml")):
+    # Both extensions. Actions accepts `.yaml`, and a `*.yml`-only glob does not
+    # report a `.yaml` workflow as unchecked — it never learns the file exists,
+    # so the workflow is absent from every section including "Healthy". A
+    # scheduled job silently outside the monitor is the worst outcome this
+    # script has, and the repo happening to use `.yml` today is not a guarantee.
+    paths = sorted(
+        [*Path(".github/workflows").glob("*.yml"), *Path(".github/workflows").glob("*.yaml")]
+    )
+    for path in paths:
         text = path.read_text()
         # Deliberately a regex rather than a YAML parse: `on:` parses as the
         # boolean True in YAML 1.1, which has bitten this repo's own tooling.
@@ -102,7 +124,16 @@ def scheduled_workflows() -> dict[str, str]:
         ]
         crons = [c for c in crons if c]
         if crons:
-            out[path.name] = cadence(crons[0])
+            # The TIGHTEST cadence among all of them, not the first one written.
+            # A workflow with both a weekly and a daily cron was classified by
+            # whichever came first in the file: a daily job read as weekly gets a
+            # 17-day threshold, so its daily cron can die and keep firing weekly
+            # for a fortnight before anything is said. Taking the shortest window
+            # also makes that partial death detectable — runs arriving weekly do
+            # not satisfy a daily schedule, and now the report can say so.
+            out[path.name] = min(
+                (cadence(c) for c in crons), key=lambda period: STALENESS[period]
+            )
     return out
 
 
@@ -179,6 +210,58 @@ def latest_scheduled_run(workflow: str) -> dict | None:
     if not runs:
         return None
     return max(runs, key=lambda r: r["createdAt"])
+
+
+def scheduled_runs_since(workflow: str, since: datetime) -> int:
+    """How many scheduled runs of `workflow` exist since `since`, counted server-side.
+
+    This is the second opinion the stale verdict is checked against, and it is
+    deliberately a DIFFERENT question than `latest_scheduled_run` asks. That one
+    fetches a page and picks the newest from it, so it is only ever as good as
+    the page it was handed; every false alarm so far (2026-09-03, -09-08, -09-11,
+    all on `bench.yml`) came from a page whose newest entry was weeks old while
+    the cron had in fact fired that morning. Taking the max instead of the first
+    element, then asking twice, did not stop it — both retries can be handed the
+    same lagged page, and a max over stale rows is still stale.
+
+    `total_count` with a `created>=` filter has no such dependence: no ordering,
+    no pagination, no "newest of what I was given". It answers "did it fire in
+    the window" directly, which is the only thing the stale claim rests on.
+
+    Be precise about how much that buys, because it is less than it looks.
+    `gh run list --workflow F --event schedule` resolves F to an id and then
+    GETs `/actions/workflows/<id>/runs?event=schedule`; this asks the SAME
+    endpoint with different parameters, so it is not an independent source. It
+    defeats a bad page — wrong order, wrong window, rows that should not be
+    newest — which is the only mechanism anyone has actually named. It does NOT
+    defeat a lagged view of the runs table, because a count computed against
+    that same lagged view would agree with the wrong answer.
+
+    That remaining hole is why the stale claim must also survive a night; see
+    `SUSPECT_MARKER`.
+
+    Note the filter is date-granular, so the window is up to a day wider than
+    asked. That errs toward NOT claiming staleness, which is the right direction
+    for a report whose credibility is the thing being protected.
+    """
+    day = since.strftime("%Y-%m-%d")
+    raw = gh(
+        "api",
+        f"repos/{REPO}/actions/workflows/{workflow}/runs"
+        f"?event=schedule&created=%3E%3D{day}&per_page=1",
+        "--jq", ".total_count",
+        tolerate_missing=True,
+    )
+    # A tolerated 404 is "no such workflow / never run", which is genuinely zero
+    # runs in the window rather than a failed check.
+    if not raw.strip():
+        return 0
+    try:
+        return int(raw.strip())
+    except ValueError as e:
+        # Same reasoning as the run listing: an answer that will not parse must
+        # not be read as "no runs", because that is the input to the stale claim.
+        raise GhError(f"unparsable total_count: {raw.strip()[:80]!r}") from e
 
 
 def later_successful_manual_run(workflow: str, after: datetime) -> dict | None:
@@ -386,6 +469,263 @@ def self_test() -> int:
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} an empty answer still reports no runs, not a failed check")
 
+    # --- the cross-check that decides whether a stale verdict is published ---
+    #
+    # This is the part that would have stopped all three `bench.yml` false
+    # alarms, so it is checked in both directions: it must suppress a wrong
+    # stale claim, and it must NOT suppress a right one.
+    now_t = datetime(2026, 9, 11, 12, 30, tzinfo=timezone.utc)
+
+    gh = stub("5")
+    claim, note = confirm_stale("bench.yml", "daily", now_t, timedelta(days=16))
+    ok = claim is False and "not claimed stale" in note
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} a contradicting count suppresses the stale claim")
+
+    gh = stub("0")
+    claim, _ = confirm_stale("dead.yml", "daily", now_t, timedelta(days=16))
+    ok = claim is True
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} an agreeing count still reports a genuinely dead cron")
+
+    # The count query is the whole second opinion, so its SHAPE is the thing
+    # worth pinning: filtered to scheduled runs, and to the staleness window.
+    # A regression dropping either flag would count every run ever and silence
+    # the report permanently -- failing open, in the direction nobody notices.
+    seen_args.clear()
+    gh = stub("3")
+    confirm_stale("bench.yml", "daily", now_t, timedelta(days=16))
+    argv = seen_args[-1] if seen_args else ()
+    url = next((a for a in argv if "actions/workflows" in a), "")
+    for fragment, label in [
+        ("bench.yml", "the workflow it was asked about"),
+        ("event=schedule", "scheduled runs only"),
+        ("created=%3E%3D2026-09-08", "the staleness window, not all time"),
+    ]:
+        ok = fragment in url
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} count query names {label}")
+
+    # An unreachable cross-check must not become an assertion in either
+    # direction: not a stale claim, and not a clean bill of health.
+    def raiser(*_a: object, **_k: object) -> str:
+        raise GhError("HTTP 502")
+
+    gh = raiser
+    with contextlib.redirect_stdout(io.StringIO()):
+        claim, note = confirm_stale("bench.yml", "daily", now_t, timedelta(days=16))
+    ok = claim is False and "could not be fetched" in note
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} an unreachable cross-check claims nothing")
+
+    # A count that will not parse is the same hazard as an unparsable listing:
+    # read as zero it would CONFIRM a false stale claim, which is worse than
+    # not checking at all.
+    gh = stub("<!DOCTYPE html>")
+    try:
+        scheduled_runs_since("bench.yml", now_t - timedelta(days=3))
+        ok = False
+    except GhError:
+        ok = True
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} an unparsable count raises rather than confirming stale")
+
+    # --- the suspicion round-trip ---
+    #
+    # A stale claim is only stated as fact if the PREVIOUS report already
+    # suspected it, so the marker this report writes must be readable by the
+    # next one. That is a round trip through an issue body, and if it breaks in
+    # either direction the failure is silent: an unreadable marker means every
+    # night is a first sighting and a real dead cron is never escalated.
+    roundtrip = [
+        ("two workflows", {"bench.yml", "fuzz.yml"}),
+        ("one workflow", {"bench.yml"}),
+        ("none, cleared", set()),
+    ]
+    for label, names in roundtrip:
+        rendered = f"{SUSPECT_MARKER} {','.join(sorted(names))} -->"
+        body = f"{MARKER}\n\nsome report text\n\n---\n\n{rendered}"
+        got = previous_suspects(body)
+        ok = got == names
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} suspicion marker round-trips ({label}): {got or '{}'}")
+
+    # A body with no marker at all is the pre-upgrade issue, and every body
+    # written before this change looks like that. It must read as "nothing
+    # suspected yet", not crash and not invent names.
+    ok = previous_suspects(f"{MARKER}\n\nold style report\n") == set()
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} a body with no marker reads as no suspicions")
+
+    ok = previous_suspects("") == set()
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} an empty body reads as no suspicions")
+
+    # A lost issue body must not promote a transient to a published fact. It
+    # yields no suspects, so everything starts over as a first sighting.
+    def boom(*_a: object, **_k: object) -> str:
+        raise GhError("HTTP 500")
+
+    gh = boom
+    with contextlib.redirect_stdout(io.StringIO()):
+        ok = tracking_issue() is None
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} an unreadable previous report yields no suspicions")
+
+    gh = stub("not json")
+    ok = tracking_issue() is None
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} an unparsable issue list yields no suspicions")
+
+    # A marker must not outlive the condition it records. The issue keeps its
+    # body when closed, so a reopened one carrying last month's suspicions would
+    # let a single sighting escalate to a stated fact.
+    kept = f"{MARKER}\n\nthe report text\n\n---\n\n{SUSPECT_MARKER} bench.yml -->"
+    cleared = clear_suspects(kept)
+    ok = previous_suspects(cleared) == set() and "the report text" in cleared
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} closing clears the marker but keeps the report")
+
+    # --- escalation, end to end through main() ---
+    #
+    # The pieces above are each checked in isolation, and that is not the same
+    # as checking the behavior: the round trip could work, `confirm_stale`
+    # could work, and main() could still put every entry in the wrong section.
+    # This drives the real main() over a stubbed API and reads the body it
+    # would publish, which is the only thing a person ever sees.
+    def report_body(prior_body: str) -> str:
+        written: dict[str, str] = {}
+
+        def fake(*args: str, **_kw: object) -> str:
+            a = list(args)
+            if a[0] == "issue" and a[1] == "list":
+                return json.dumps(
+                    [{"number": 1, "title": ISSUE_TITLE, "body": prior_body}]
+                ) if prior_body else "[]"
+            if a[0] == "issue":
+                if "--body" in a:
+                    written["body"] = a[a.index("--body") + 1]
+                return "https://example/1"
+            if a[0] == "run" and a[1] == "list":
+                wf = a[a.index("--workflow") + 1]
+                when = "2026-08-26T02:54:00Z" if wf == "bench.yml" else "2026-09-11T06:42:00Z"
+                return json.dumps([{
+                    "conclusion": "success", "status": "completed",
+                    "createdAt": when, "databaseId": 1, "url": "u",
+                }])
+            if a[0] == "api":
+                # The count AGREES that bench.yml really has not run, so the
+                # only thing holding the claim back is the one-night rule.
+                return "0" if "bench.yml" in a[1] else "4"
+            return ""
+
+        global gh
+        gh = fake
+        with contextlib.redirect_stdout(io.StringIO()):
+            main()
+        return written.get("body", "")
+
+    first = report_body("")
+    ok = "### Suspected stale" in first and "### Stale (no recent" not in first
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} a first sighting publishes a suspicion, not a stale claim")
+
+    ok = f"{SUSPECT_MARKER} bench.yml -->" in first
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} the first report records the suspicion for the next run")
+
+    second = report_body(first)
+    ok = "### Stale (no recent" in second and "### Suspected stale" not in second
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} a second sighting escalates to a stale claim")
+
+    # The escalation must be driven by the RECORDED suspicion, not by anything
+    # else in the body. Feeding back a report whose marker was cleared has to
+    # start the count over, or a cleared suspicion would silently stay armed.
+    ok = "### Suspected stale" in report_body(first.replace(
+        f"{SUSPECT_MARKER} bench.yml -->", f"{SUSPECT_MARKER}  -->"))
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} a cleared marker starts the count over")
+
+    # ...and the same thing through main(), because testing `clear_suspects` on
+    # its own leaves the WIRING unpinned: drop the edit call before the close
+    # and every isolated case above still passes.
+    closed: dict[str, str] = {}
+
+    def fake_green(*args: str, **_kw: object) -> str:
+        a = list(args)
+        if a[0] == "issue" and a[1] == "list":
+            return json.dumps([{
+                "number": 1, "title": ISSUE_TITLE,
+                "body": f"{MARKER}\n\nthe report text\n\n---\n\n{SUSPECT_MARKER} bench.yml -->",
+            }])
+        if a[0] == "issue":
+            closed.setdefault("ops", "")
+            closed["ops"] += a[1] + ","
+            if a[1] == "edit" and "--body" in a:
+                closed["body"] = a[a.index("--body") + 1]
+            return "u"
+        if a[0] == "run" and a[1] == "list":
+            return json.dumps([{
+                "conclusion": "success", "status": "completed",
+                "createdAt": "2026-09-11T06:42:00Z", "databaseId": 1, "url": "u",
+            }])
+        if a[0] == "api":
+            return "4"
+        return ""
+
+    gh = fake_green
+    with contextlib.redirect_stdout(io.StringIO()):
+        main()
+    ok = (
+        previous_suspects(closed.get("body", "")) == set()
+        and "the report text" in closed.get("body", "")
+        and "close" in closed.get("ops", "")
+    )
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} going green clears the marker before closing the issue")
+
+    # --- the derivation, which decides what is monitored AT ALL ---
+    #
+    # A workflow missing from here is not reported as unchecked; it is absent
+    # from every section, "Healthy" included, so nothing says it stopped being
+    # watched. That is the quietest failure this script has, and both cases
+    # below were live until this change.
+    cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as tmp:
+        wf_dir = Path(tmp) / ".github" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "daily.yml").write_text(
+            "on:\n  schedule:\n    - cron: '0 2 * * *'\n"
+        )
+        # Actions accepts `.yaml`; a `*.yml`-only glob never learns it exists.
+        (wf_dir / "other.yaml").write_text(
+            "on:\n  schedule:\n    - cron: '0 4 * * *'\n"
+        )
+        # Weekly written first, daily second. Classified by the first cron, the
+        # daily one gets a 17-day window and can die for a fortnight unremarked.
+        (wf_dir / "both.yml").write_text(
+            "on:\n  schedule:\n    - cron: '0 5 * * 1'\n    - cron: '0 6 * * *'\n"
+        )
+        try:
+            os.chdir(tmp)
+            found = scheduled_workflows()
+        finally:
+            os.chdir(cwd)
+
+    ok = "other.yaml" in found
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} a .yaml workflow is monitored, not silently skipped")
+
+    ok = found.get("both.yml") == "daily"
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} a multi-cron workflow takes its tightest cadence "
+          f"(got {found.get('both.yml')})")
+
+    ok = found.get("daily.yml") == "daily" and len(found) == 3
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} every scheduled file is found ({len(found)} of 3)")
+
     gh = real_gh
     time.sleep = real_sleep  # type: ignore[assignment]
     if failures:
@@ -395,12 +735,125 @@ def self_test() -> int:
     return 0
 
 
+def previous_suspects(body: str) -> set[str]:
+    """Workflows the previous report already suspected of being stale.
+
+    Parsed out of the tracking issue rather than kept in a state file: the issue
+    is already the reporter's memory between runs, and a file would have to live
+    somewhere a nightly job can write.
+
+    An unreadable or missing body yields an empty set, which means every
+    suspicion starts over. That direction is deliberate — it delays a true alarm
+    by one night, where the opposite would let a lost body promote a transient
+    straight to a published fact.
+    """
+    for line in body.splitlines():
+        line = line.strip()
+        if line.startswith(SUSPECT_MARKER):
+            inner = line[len(SUSPECT_MARKER):].rstrip(">").rstrip("-").strip()
+            return {w for w in (p.strip() for p in inner.split(",")) if w}
+    return set()
+
+
+def clear_suspects(body: str) -> str:
+    """Blank the suspicion marker in `body`, leaving the rest of the report intact.
+
+    Written when the report goes green and the issue is closed. Without it the
+    marker outlives the condition it records: a closed issue keeps whatever was
+    suspected weeks ago, and reopening it makes the NEXT first sighting escalate
+    straight to a stated fact — the "seen twice, a day apart" rule defeated by a
+    sighting seen once, a month apart.
+
+    The report text is left alone. It is the record of what was wrong, and the
+    closing comment is not a reason to erase it.
+    """
+    out = [
+        f"{SUSPECT_MARKER}  -->" if line.strip().startswith(SUSPECT_MARKER) else line
+        for line in body.splitlines()
+    ]
+    return "\n".join(out)
+
+
+def tracking_issue() -> dict | None:
+    """The open tracking issue, or None if there is none or it cannot be read.
+
+    ONE lookup, used both to read the previous run's suspicions and to decide
+    where this run's report goes. It used to be two identical queries at
+    opposite ends of `main`, which is a drift hazard with a silent failure: if
+    the two ever disagreed about which issue is the tracking issue, suspicions
+    would be read from one and written to another, no suspicion would ever match
+    the next night, and nothing would escalate again. That fails toward never
+    stating a fact, which is the direction nobody notices.
+
+    Deliberately swallows every failure. The caller treats None as "no prior
+    suspicions", which costs one night's escalation; raising here would take
+    down a report that is otherwise fine.
+    """
+    try:
+        raw = gh(
+            "issue", "list", "--repo", REPO, "--state", "open",
+            "--search", ISSUE_TITLE, "--json", "number,title,body", "--limit", "20",
+        )
+        issues = [i for i in json.loads(raw) if MARKER in (i.get("body") or "")]
+    except (GhError, json.JSONDecodeError):
+        return None
+    return issues[0] if issues else None
+
+
+def confirm_stale(
+    workflow: str, period: str, now: datetime, age: timedelta | None
+) -> tuple[bool, str]:
+    """Second-opinion a stale verdict. Returns (claim_it, note_if_not).
+
+    The run listing has now produced three false stale reports, so its verdict
+    alone is not enough to publish. A count that contradicts it means the cron
+    is alive and the listing was wrong, which is the case actually observed; a
+    count that agrees turns a single lookup into two independent ones.
+
+    A cross-check that cannot be reached decides nothing either way, so it lands
+    in "could not be checked" rather than becoming an assertion about the cron.
+    That is the same call the surrounding code already makes for an unanswered
+    listing, and it is the safer one: this report has three false alarms on
+    record and no missed dead cron.
+    """
+    window = STALENESS[period]
+    try:
+        recent = scheduled_runs_since(workflow, now - window)
+    except GhError as e:
+        print(f"::error::could not confirm staleness of {workflow}: {e}")
+        return False, (
+            f"- `{workflow}` ({period}) — looks stale, but the confirming count "
+            f"could not be fetched ({e}), so nothing is claimed"
+        )
+
+    if recent > 0:
+        observed = (
+            "no scheduled run at all" if age is None
+            else f"its newest scheduled run {age.days}d old"
+        )
+        print(f"::warning::{workflow}: listing said stale, count says {recent} recent run(s)")
+        return False, (
+            f"- `{workflow}` ({period}) — **not claimed stale**: the run listing "
+            f"reported {observed}, but {recent} scheduled run(s) exist in the last "
+            f"{window.days}d. The listing was wrong, not the cron "
+            f"(see `scheduled_runs_since`)"
+        )
+    return True, ""
+
+
 def main() -> int:
     now = datetime.now(timezone.utc)
     failing: list[str] = []
     stale: list[str] = []
+    suspected: list[str] = []
     unchecked: list[str] = []
     ok: list[str] = []
+
+    # Read BEFORE the loop: a stale verdict is only published as fact if the
+    # previous run reached the same verdict.
+    issue = tracking_issue()
+    prior = previous_suspects((issue or {}).get("body") or "")
+    suspects_now: list[str] = []
 
     workflows = scheduled_workflows()
     broken: list[str] = []
@@ -430,7 +883,13 @@ def main() -> int:
             unchecked.append(f"- `{wf}` ({period}) — could not be checked: {e}")
             continue
         if run is None:
-            stale.append(f"- `{wf}` ({period}) — no scheduled run found at all")
+            confirmed, note = confirm_stale(wf, period, now, None)
+            if not confirmed:
+                unchecked.append(note)
+                continue
+            suspects_now.append(wf)
+            entry = f"- `{wf}` ({period}) — no scheduled run found at all"
+            (stale if wf in prior else suspected).append(entry)
             continue
         created = datetime.fromisoformat(run["createdAt"].replace("Z", "+00:00"))
         age = now - created
@@ -447,10 +906,16 @@ def main() -> int:
             continue
 
         if age > STALENESS[period]:
-            stale.append(
-                f"- `{wf}` ({period}) — last scheduled run {age.days}d ago "
-                f"([{concl}]({run['url']}))"
-            )
+            confirmed, note = confirm_stale(wf, period, now, age)
+            if not confirmed:
+                unchecked.append(note)
+            else:
+                suspects_now.append(wf)
+                entry = (
+                    f"- `{wf}` ({period}) — last scheduled run {age.days}d ago "
+                    f"([{concl}]({run['url']}))"
+                )
+                (stale if wf in prior else suspected).append(entry)
         elif concl != "success":
             entry = f"- `{wf}` ({period}) — last scheduled run **{concl}** ([log]({run['url']}))"
             try:
@@ -476,7 +941,7 @@ def main() -> int:
             ok.append(f"`{wf}`")
         print(f"{wf:24} {period:8} {concl:12} {age.days}d ago")
 
-    problems = broken + failing + stale + unchecked
+    problems = broken + failing + stale + suspected + unchecked
     body = [MARKER, ""]
     if problems:
         body.append(f"{len(problems)} scheduled workflow(s) need attention, as of {now:%Y-%m-%d %H:%M} UTC.")
@@ -488,6 +953,20 @@ def main() -> int:
                 "",
                 "A cron that stops firing produces no failure, so these are the ones that hide.",
                 *stale,
+            ]
+        if suspected:
+            body += [
+                "", "### Suspected stale (unconfirmed — first sighting)",
+                "",
+                # Explicit `+` rather than adjacent literals: every element here
+                # is its own markdown line, so a missing comma would silently
+                # merge two of them instead of failing. Matches the `unchecked`
+                # section below.
+                "Seen once. Every false alarm this reporter has filed was transient, "
+                + "so one sighting is not stated as fact: if the next run agrees these "
+                + "move to **Stale**, and if it does not they disappear on their own. "
+                + "Nothing needs doing about an entry here yet.",
+                *suspected,
             ]
         if unchecked:
             # Previously these were counted in the total but had no section, so
@@ -506,6 +985,11 @@ def main() -> int:
         "", "---",
         "",
         "Maintained by `.github/workflows/nightly-health.yml`. Closes itself when everything is green.",
+        "",
+        # Read back by the next run to decide whether a suspicion has been seen
+        # twice. Written even when empty, so a cleared suspicion is recorded as
+        # cleared rather than as a body this reporter failed to parse.
+        f"{SUSPECT_MARKER} {','.join(sorted(suspects_now))} -->",
     ]
     text = "\n".join(body)
 
@@ -515,25 +999,21 @@ def main() -> int:
     # failing scheduled workflow for nobody to notice. The table has already
     # been printed at this point, so the diagnosis survives either way.
     try:
-        existing = gh(
-            "issue", "list", "--repo", REPO, "--state", "open",
-            "--search", ISSUE_TITLE, "--json", "number,title,body", "--limit", "20",
-        )
-        try:
-            issues = [i for i in json.loads(existing) if MARKER in (i.get("body") or "")]
-        except json.JSONDecodeError:
-            issues = []
-
         if problems:
-            if issues:
-                num = str(issues[0]["number"])
+            if issue:
+                num = str(issue["number"])
                 gh("issue", "edit", num, "--repo", REPO, "--body", text)
                 print(f"\nupdated issue #{num}: {len(problems)} problem(s)")
             else:
                 url = gh("issue", "create", "--repo", REPO, "--title", ISSUE_TITLE, "--body", text).strip()
                 print(f"\nopened {url}: {len(problems)} problem(s)")
-        elif issues:
-            num = str(issues[0]["number"])
+        elif issue:
+            num = str(issue["number"])
+            # Clear the marker BEFORE closing. A closed issue keeps its body,
+            # and a reopened one carrying last month's suspicions would let a
+            # single sighting escalate to a stated fact.
+            gh("issue", "edit", num, "--repo", REPO,
+               "--body", clear_suspects(issue.get("body") or ""))
             gh("issue", "comment", num, "--repo", REPO, "--body",
                "All scheduled workflows are green again. Closing automatically.")
             gh("issue", "close", num, "--repo", REPO)

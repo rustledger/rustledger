@@ -235,3 +235,75 @@ cargo llvm-cov --html
 - Don't add unnecessary error handling for impossible cases
 - Don't create abstractions for one-time operations
 - Don't add backwards-compatibility shims - just change the code
+
+## AI Commenting Policy
+
+**An AI assistant must not post a comment or reply into any Issue, Pull
+Request, or Discussion where a human other than the maintainer (`robcohen`) is
+involved.** It drafts the text to a file and hands over the path; the
+maintainer reads it and posts it himself.
+
+The point is that no AI-written text reaches another person under the
+maintainer's name without him having read it first.
+
+### Scope
+
+Every repository in the `rustledger` organization: `rustledger`, `rustfava`,
+`pta-standards`, `scoop-rustledger`, `homebrew-rustledger`, `oss-fuzz`, and
+`.github`.
+
+### What is still permitted
+
+| Action | Allowed | Why |
+|--------|---------|-----|
+| Commenting on a thread where `robcohen` is the only human | Yes | Nobody else is being written to |
+| Replying to and resolving a **bot** review thread | Yes | Bots are not people, and `main` requires conversation resolution — refusing to resolve would stall every PR |
+| Opening a new Issue | Yes | The restriction is comments and replies on existing threads |
+| Writing or editing a PR body / description | Yes | Same |
+| Commit messages, code, branches | Yes | These reach the maintainer through review before they reach anyone else |
+| Commenting on a thread any other human has touched | **No** | Draft it instead |
+
+### Checking before commenting
+
+Participation is checked, never assumed. Ask GitHub whether an account is a
+bot — `.user.type` and `is_bot` are authoritative — rather than matching on the
+name. The same reviewer appears as `Copilot` on one endpoint and
+`copilot-pull-request-reviewer[bot]` on another, so a name list silently
+misclassifies it as a person.
+
+```bash
+# Humans other than the maintainer involved in issue/PR <N>.
+# Empty output => the maintainer's alone => an AI may comment directly.
+#
+# `gh api` prints its error body to STDOUT on 404, and the two /pulls/
+# endpoints 404 for a plain issue — so each call is guarded by its exit status.
+# Without that, every issue looks like it has a participant named
+# `{"message":"Not Found"...}` and the check blocks on its own noise.
+others() {
+  repo="${1:-rustledger/rustledger}"; n="$2"
+  for ep in "issues/$n" "issues/$n/comments" "pulls/$n/comments" "pulls/$n/reviews"; do
+    case "$ep" in
+      "issues/$n") q='select(.user.type=="User") | .user.login' ;;
+      *)           q='.[] | select(.user.type=="User") | .user.login' ;;
+    esac
+    if out=$(gh api "repos/$repo/$ep" --jq "$q" 2>/dev/null); then
+      printf '%s\n' "$out"
+    fi
+  done | sort -u | grep -v '^robcohen$' | grep -v '^$'
+}
+```
+
+All four endpoints are needed. Issue comments and review-thread comments are
+separate APIs, and a human reviewer leaving an inline comment appears only in
+`pulls/<N>/comments` — exactly the case this policy exists for. The first call
+catches an issue opened by someone else that nobody has replied to yet.
+
+Verified against this repo: `#2300`, `#2302`, `#2303` return nothing (the
+maintainer plus bots), while `#1387` returns `bkuhn caesar`, `#923` returns
+`alensiljak`, and `#2264` / `#2295` return `petemounce`.
+
+### When the policy blocks a comment
+
+Write the intended comment to a file, then say plainly that it was not posted
+and where it is. Do not post a shortened version, and do not route the message
+through a bot thread.

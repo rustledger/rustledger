@@ -386,3 +386,77 @@ fn root_command_tree_is_self_documenting() {
     // command tree, plus our compatibility root field.
     assert_eq!(env["result"]["compatibility"]["engine"], "rustledger");
 }
+
+/// `build_extract_args` constructs `extract_cmd::Args` by hand, so it can
+/// reintroduce a default the clap definition no longer has — and a default
+/// overwrites an `importers.toml` entry's own value (#2304). Checked through
+/// the real binary in both directions: an omitted flag keeps the entry's
+/// value, and a passed flag replaces it.
+///
+/// Assertions read `result.stdout`. The envelope's `command` field echoes the
+/// command line, which contains the very values being checked, so matching
+/// against the whole envelope passes whether or not they were applied.
+#[test]
+fn extract_adapter_keeps_entry_values_and_lets_flags_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_fixture(
+        tmp.path(),
+        "stmt.csv",
+        "date;payee;amount\n2025-01-15;SKIPPED;-1.00\n2025-01-16;COFFEE;-3.00\n",
+    );
+    let config = write_fixture(
+        tmp.path(),
+        "importers.toml",
+        "[[importers]]\nname = \"card\"\naccount = \"Liabilities:Card\"\n\
+         currency = \"GBP\"\ndate_column = \"date\"\npayee_column = \"payee\"\n\
+         amount_column = \"amount\"\ndelimiter = \";\"\nskip_rows = 1\n",
+    );
+    let csv = csv.to_str().unwrap();
+    let config = config.to_str().unwrap();
+    let stdout = |extra: &[&str]| -> String {
+        let mut argv = vec!["extract", "--config", config, "--importer", "card"];
+        argv.extend_from_slice(extra);
+        argv.push(csv);
+        let (code, env) = run(&argv);
+        assert_eq!(code, 0, "extract failed: {env}");
+        env["result"]["stdout"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no result.stdout in envelope: {env}"))
+            .to_string()
+    };
+
+    // Omitted flags: every value comes from the entry.
+    let entry = stdout(&[]);
+    assert!(
+        entry.contains("Liabilities:Card"),
+        "entry account lost: {entry}"
+    );
+    assert!(
+        entry.contains("GBP") && !entry.contains("USD"),
+        "entry currency lost: {entry}"
+    );
+    assert!(entry.contains("COFFEE"), "entry delimiter lost: {entry}");
+    assert!(!entry.contains("SKIPPED"), "entry skip_rows lost: {entry}");
+
+    // Passed flags: each replaces the entry's value, including an explicit 0.
+    let flags = stdout(&[
+        "--account",
+        "Liabilities:FromFlag",
+        "--currency",
+        "EUR",
+        "--skip-rows",
+        "0",
+    ]);
+    assert!(
+        flags.contains("Liabilities:FromFlag"),
+        "--account did not override the entry: {flags}"
+    );
+    assert!(
+        flags.contains("EUR") && !flags.contains("GBP"),
+        "--currency did not override the entry: {flags}"
+    );
+    assert!(
+        flags.contains("SKIPPED"),
+        "--skip-rows 0 did not override the entry's 1: {flags}"
+    );
+}

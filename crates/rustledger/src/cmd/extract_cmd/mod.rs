@@ -1621,9 +1621,16 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
 
         let balance = rustledger_ops::reconcile::StatementBalance {
             date,
-            account: args.account_or_default(),
+            // The account and commodity the transactions actually went to,
+            // after the entry, flags, and any `--ledger` profile — not the raw
+            // flags. Reading `args` put the assertion on `Assets:Bank:Checking`
+            // in USD whenever an entry supplied the account and currency, an
+            // assertion that could never hold against the imported postings.
+            account: config.account,
             number: amount,
-            currency: args.currency_or_default(),
+            currency: config
+                .currency
+                .unwrap_or_else(|| args.currency_or_default()),
         };
         // `create_balance_directive` returns a core `Directive` directly now — no
         // `DirectiveWrapper` round-trip through `wrapper_to_directive`.
@@ -3321,6 +3328,57 @@ default_expense = "Expenses:Uncategorized"
         assert!(
             flagged.contains("Liabilities:FromFlag") && !flagged.contains("Liabilities:FromToml"),
             "--account must outrank the OFX entry's account; got:\n{flagged}"
+        );
+    }
+
+    /// `--balance` must assert against what the transactions were imported
+    /// into. It read the raw flags, so an entry naming `Liabilities:Card` in
+    /// GBP produced postings there and a balance on `Assets:Bank:Checking` in
+    /// USD; even with `--account`, the currency stayed USD.
+    #[test]
+    fn balance_uses_the_resolved_account_and_currency() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("stmt.csv");
+        std::fs::write(&csv, "date,payee,amount\n2025-01-16,COFFEE,-3.00\n").unwrap();
+        let config = dir.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            "[[importers]]\nname = \"card\"\naccount = \"Liabilities:Card\"\n\
+             currency = \"GBP\"\ndate_column = \"date\"\npayee_column = \"payee\"\n\
+             amount_column = \"amount\"\n",
+        )
+        .unwrap();
+        let run = |extra: &[&str]| {
+            let mut argv = vec![
+                "extract",
+                "--config",
+                config.to_str().unwrap(),
+                "--importer",
+                "card",
+                "--balance",
+                "10",
+                "--balance-date",
+                "2025-02-01",
+            ];
+            argv.extend_from_slice(extra);
+            argv.push(csv.to_str().unwrap());
+            let args = Args::parse_from(argv);
+            let mut out = Vec::new();
+            run_with_writer(&args, &csv, &mut out).expect("extract runs");
+            String::from_utf8(out).unwrap()
+        };
+
+        let from_entry = run(&[]);
+        assert!(
+            from_entry.contains("balance Liabilities:Card 10 GBP"),
+            "balance must use the entry's account and currency; got:\n{from_entry}"
+        );
+
+        let from_flags = run(&["--account", "Liabilities:FromFlag", "--currency", "EUR"]);
+        assert!(
+            from_flags.contains("balance Liabilities:FromFlag 10 EUR"),
+            "balance must follow the flags that won; got:\n{from_flags}"
         );
     }
 

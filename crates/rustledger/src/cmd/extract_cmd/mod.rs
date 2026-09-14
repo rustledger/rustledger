@@ -3382,6 +3382,155 @@ default_expense = "Expenses:Uncategorized"
         );
     }
 
+    /// The second entry path: `--config` without `--importer`, where the entry
+    /// is picked by `filename_pattern`. It builds through its own
+    /// `build_config_from_entry` call, and removing the flag merge there left
+    /// every other test passing.
+    #[test]
+    fn flags_override_a_filename_identified_entry() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("santander-stmt.csv");
+        std::fs::write(
+            &csv,
+            "date,payee,money_in,money_out\n\
+             2025-01-16,CASHBACK,3.00,\n\
+             2025-01-24,WAITROSE,,120.73\n\
+             2025-02-01,REFUND,5.00,\n",
+        )
+        .unwrap();
+        let config = dir.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            "[[importers]]\nname = \"santander\"\nfilename_pattern = \"santander-*.csv\"\n\
+             date_column = \"date\"\npayee_column = \"payee\"\n\
+             credit_column = \"money_in\"\ndebit_column = \"money_out\"\n\
+             currency = \"GBP\"\nskip_rows = 0\n",
+        )
+        .unwrap();
+
+        // No --importer: the entry has to be identified by its filename pattern.
+        let args = Args::parse_from([
+            "extract",
+            "--config",
+            config.to_str().unwrap(),
+            "--account",
+            "Liabilities:Santander:Credit",
+            "--invert-sign",
+            "--skip-rows",
+            "1",
+            csv.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        run_with_writer(&args, &csv, &mut out).expect("extract runs");
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(
+            text.contains("Liabilities:Santander:Credit"),
+            "--account must reach a filename-identified entry; got:\n{text}"
+        );
+        assert!(
+            !text.contains("CASHBACK"),
+            "--skip-rows 1 not applied; got:\n{text}"
+        );
+        assert!(
+            text.contains("120.73") && !text.contains("-120.73") && text.contains("-5.00"),
+            "--invert-sign not applied; got:\n{text}"
+        );
+    }
+
+    /// `--currency` outranks an OFX entry's currency, the same order the CSV
+    /// path uses. Observed through `--balance`, which takes the resolved
+    /// currency, so the check does not depend on what the OFX file declares.
+    #[test]
+    fn currency_flag_outranks_an_ofx_entry() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let qfx = cc_qfx(dir.path());
+        let config = dir.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            "[[importers]]\nname = \"card\"\ntype = \"ofx\"\n\
+             account = \"Liabilities:Card\"\ncurrency = \"USD\"\n",
+        )
+        .unwrap();
+        let run = |extra: &[&str]| {
+            let mut argv = vec![
+                "extract",
+                "--config",
+                config.to_str().unwrap(),
+                "--importer",
+                "card",
+                "--balance",
+                "10",
+                "--balance-date",
+                "2024-02-01",
+            ];
+            argv.extend_from_slice(extra);
+            argv.push(qfx.to_str().unwrap());
+            let args = Args::parse_from(argv);
+            let mut out = Vec::new();
+            run_with_writer(&args, &qfx, &mut out).expect("ofx extract runs");
+            String::from_utf8(out).unwrap()
+        };
+
+        let unflagged = run(&[]);
+        assert!(
+            unflagged.contains("balance Liabilities:Card 10 USD"),
+            "control: the entry's currency should apply without a flag; got:\n{unflagged}"
+        );
+
+        let flagged = run(&["--currency", "EUR"]);
+        assert!(
+            flagged.contains("balance Liabilities:Card 10 EUR"),
+            "--currency must outrank the OFX entry's currency; got:\n{flagged}"
+        );
+    }
+
+    /// A `--ledger` profile outranks `--account`, as documented: the `open`
+    /// directive is the account's declaration. Nothing tested it, so the
+    /// opposite order passed the whole suite.
+    #[test]
+    fn a_ledger_profile_outranks_the_account_flag() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("stmt.csv");
+        std::fs::write(&csv, "date,payee,amount\n2024-01-16,COFFEE,-3.00\n").unwrap();
+        let config = dir.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            "[[importers]]\nname = \"bank\"\ndate_column = \"date\"\n\
+             payee_column = \"payee\"\namount_column = \"amount\"\n",
+        )
+        .unwrap();
+        let ledger = dir.path().join("main.beancount");
+        std::fs::write(
+            &ledger,
+            "2024-01-01 open Liabilities:FromLedger USD\n  \
+             importer: \"bank\"\n  importer-pattern: \"*.csv\"\n",
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            "--config",
+            config.to_str().unwrap(),
+            "--ledger",
+            ledger.to_str().unwrap(),
+            "--account",
+            "Liabilities:FromFlag",
+            csv.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        run_with_writer(&args, &csv, &mut out).expect("extract runs");
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(
+            text.contains("Liabilities:FromLedger") && !text.contains("Liabilities:FromFlag"),
+            "the ledger profile's account must win over --account; got:\n{text}"
+        );
+    }
+
     fn cc_qfx(dir: &Path) -> PathBuf {
         let p = dir.join("card.qfx");
         std::fs::write(

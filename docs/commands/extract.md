@@ -280,8 +280,11 @@ amount_column = "Amount"
 # Date parsing
 date_format = "%Y-%m-%d"  # or "%m/%d/%Y", "%d.%m.%Y"
 
-# Skip header row
-skip_header = true
+# The file has NO header row. Columns must then be 0-based indices,
+# and the first row is read as data. Leave this out when the file has
+# a header: the header row is then read as column names, not imported.
+# (It is the same setting as `--no-header`, despite the name.)
+# skip_header = true
 
 # Invert amounts (for credit card statements)
 invert_amounts = true

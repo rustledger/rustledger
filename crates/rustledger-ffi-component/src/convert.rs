@@ -2559,8 +2559,9 @@ pub fn import_infer(_filename: &str, content: &[u8]) -> Result<String, String> {
 /// Extract directives from statement bytes using a declarative config entry.
 ///
 /// Mirrors the CLI's semantics: `currency` defaults to USD when the entry
-/// omits it (the schema's documented default — the CLI injects it via the
-/// `--currency` flag default), and non-UTF-8 content is decoded lossily so
+/// omits it (the schema's documented default — the CLI applies the same
+/// default when neither `--currency` nor the entry names one), and
+/// non-UTF-8 content is decoded lossily so
 /// a Latin-1 OFX 1.x download degrades to replacement characters in text
 /// fields instead of dead-ending a file `identify` just recognized.
 pub fn import_extract(

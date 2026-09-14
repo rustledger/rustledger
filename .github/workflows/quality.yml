@@ -22,7 +22,16 @@ jobs:
           toolchain: "1.96"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Check MSRV compatibility
-        run: cargo check --workspace --all-features
+        # rust-toolchain.toml pins the stable channel, and rustup's file override
+        # beats the toolchain installed above. A bare `cargo` here therefore ran the
+        # pinned stable (the log said "toolchain '1.97.0' is currently in use
+        # (overridden by rust-toolchain.toml)") and never checked 1.96 at all.
+        # RUSTUP_TOOLCHAIN outranks the file; `rustc --version` proves which ran.
+        env:
+          RUSTUP_TOOLCHAIN: "1.96"
+        run: |
+          rustc --version
+          cargo check --workspace --all-features
   # Security and license audit
   deny:
     name: Cargo Deny

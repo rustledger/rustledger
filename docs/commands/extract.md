@@ -296,6 +296,49 @@ default_expense = "Expenses:Unknown"
 "PAYROLL" = "Income:Salary"
 ```
 
+### Command-Line Flags and `importers.toml`
+
+A flag you pass outranks the matching key in the entry, which outranks the
+built-in default:
+
+```text
+built-in default  <  importers.toml entry  <  command-line flag
+```
+
+That lets one entry describe a bank's CSV layout while each file says which
+account it belongs to:
+
+```toml
+[[importers]]
+name = "santander"
+date_column = "date"
+payee_column = "payee"
+credit_column = "money_in"
+debit_column = "money_out"
+currency = "GBP"
+# no account, no invert_amounts: those differ per account
+```
+
+```bash
+rledger extract --importer santander --account Assets:Santander:Current current.csv
+rledger extract --importer santander --account Liabilities:Santander:Credit \
+  --invert-sign --skip-rows 1 credit.csv
+```
+
+Passing a flag is equivalent to writing its key in the entry — it goes
+through the same parsing and validation. Two names differ between the two:
+
+| Flag | `importers.toml` key |
+|------|----------------------|
+| `--invert-sign` | `invert_amounts = true` |
+| `--no-header` | `skip_header = true` |
+
+Boolean flags can only turn a setting on, so omitting `--invert-sign` leaves
+an entry's `invert_amounts = true` in force.
+
+A `--ledger` profile still outranks both for the account and currency: the
+`open` directive is the account's declaration.
+
 ### Enrichment Options
 
 The importer library supports additional enrichment features via the

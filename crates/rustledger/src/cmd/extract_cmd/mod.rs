@@ -64,8 +64,9 @@ use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use config::{
-    ConfigSource, ImportersFile, apply_column, build_config_from_entry, find_importers_config,
-    find_importers_config_with_source, find_matching_importers, load_importers_config,
+    ConfigSource, ImporterEntry, ImportersFile, apply_column, build_config_from_entry,
+    find_importers_config, find_importers_config_with_source, find_matching_importers,
+    load_importers_config,
 };
 // Used only by the WASM-importer-dir resolution path (gated below).
 #[cfg(feature = "python-plugin-wasm")]
@@ -122,28 +123,28 @@ pub struct Args {
     pub account: Option<String>,
 
     /// Currency for amounts (default: USD)
-    #[arg(short, long, default_value = "USD")]
-    pub currency: String,
+    #[arg(short, long)]
+    pub currency: Option<String>,
 
-    /// Date column name or index
-    #[arg(long, default_value = "Date")]
-    pub date_column: String,
+    /// Date column name or index (default: Date)
+    #[arg(long)]
+    pub date_column: Option<String>,
 
-    /// Date format (strftime-style)
-    #[arg(long, default_value = "%Y-%m-%d")]
-    pub date_format: String,
+    /// Date format, strftime-style (default: %Y-%m-%d)
+    #[arg(long)]
+    pub date_format: Option<String>,
 
-    /// Narration/description column name or index
-    #[arg(long, default_value = "Description")]
-    pub narration_column: String,
+    /// Narration/description column name or index (default: Description)
+    #[arg(long)]
+    pub narration_column: Option<String>,
 
     /// Payee column name (optional)
     #[arg(long)]
     pub payee_column: Option<String>,
 
-    /// Amount column name or index
-    #[arg(long, default_value = "Amount")]
-    pub amount_column: String,
+    /// Amount column name or index (default: Amount)
+    #[arg(long)]
+    pub amount_column: Option<String>,
 
     /// Per-row currency column name or index (optional). When set, each row's
     /// currency is read from this column instead of the single `--currency`.
@@ -166,13 +167,13 @@ pub struct Args {
     #[arg(long)]
     pub credit_column: Option<String>,
 
-    /// CSV delimiter
-    #[arg(long, default_value = ",")]
-    pub delimiter: char,
+    /// CSV delimiter (default: ,)
+    #[arg(long)]
+    pub delimiter: Option<char>,
 
-    /// Number of header rows to skip
-    #[arg(long, default_value = "0")]
-    pub skip_rows: usize,
+    /// Number of header rows to skip (default: 0)
+    #[arg(long)]
+    pub skip_rows: Option<usize>,
 
     /// Invert sign of amounts
     #[arg(long)]
@@ -633,6 +634,21 @@ fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTe
 /// unconfigured credit-card import wrong (#2256).
 const DEFAULT_ACCOUNT: &str = "Assets:Bank:Checking";
 
+/// Defaults for the CSV flags that have an `importers.toml` counterpart.
+///
+/// These used to be clap `default_value`s, which made an unset flag
+/// indistinguishable from one set to its default. That is harmless when the
+/// flags are the only source, and wrong the moment an entry is involved: a
+/// default nobody typed would overwrite `skip_rows = 1` or `currency = "GBP"`
+/// from the config. So the flags stay `None` until a value is needed, the same
+/// reasoning `DEFAULT_ACCOUNT` records for `--account` (#2304).
+const DEFAULT_CURRENCY: &str = "USD";
+const DEFAULT_DATE_COLUMN: &str = "Date";
+const DEFAULT_DATE_FORMAT: &str = "%Y-%m-%d";
+const DEFAULT_NARRATION_COLUMN: &str = "Description";
+const DEFAULT_AMOUNT_COLUMN: &str = "Amount";
+const DEFAULT_DELIMITER: char = ',';
+
 impl Args {
     /// The account to post to when nothing else supplies one.
     fn account_or_default(&self) -> String {
@@ -640,6 +656,115 @@ impl Args {
             .clone()
             .unwrap_or_else(|| DEFAULT_ACCOUNT.to_string())
     }
+
+    fn currency_or_default(&self) -> String {
+        self.currency
+            .clone()
+            .unwrap_or_else(|| DEFAULT_CURRENCY.to_string())
+    }
+
+    fn date_column_or_default(&self) -> String {
+        self.date_column
+            .clone()
+            .unwrap_or_else(|| DEFAULT_DATE_COLUMN.to_string())
+    }
+
+    fn date_format_or_default(&self) -> String {
+        self.date_format
+            .clone()
+            .unwrap_or_else(|| DEFAULT_DATE_FORMAT.to_string())
+    }
+
+    fn narration_column_or_default(&self) -> String {
+        self.narration_column
+            .clone()
+            .unwrap_or_else(|| DEFAULT_NARRATION_COLUMN.to_string())
+    }
+
+    fn amount_column_or_default(&self) -> String {
+        self.amount_column
+            .clone()
+            .unwrap_or_else(|| DEFAULT_AMOUNT_COLUMN.to_string())
+    }
+
+    fn delimiter_or_default(&self) -> char {
+        self.delimiter.unwrap_or(DEFAULT_DELIMITER)
+    }
+}
+
+/// An `importers.toml` entry with every flag the user actually passed laid
+/// over it.
+///
+/// Precedence is coded default, then the entry, then the command line — a
+/// flag you type outranks a file you wrote earlier. The entry path used to
+/// build from the entry alone, so `--account`, `--invert-sign`, `--skip-rows`
+/// and every column flag were accepted and then silently discarded whenever
+/// `--importer` or `--config` was in play (#2304). A shared entry for several
+/// accounts at one bank could not be told which account a file belonged to.
+///
+/// Merging at the entry rather than into the built config means a flag goes
+/// through exactly the parsing and validation its TOML key does, so passing
+/// `--date-column 3` and writing `date_column = 3` produce the same config.
+/// Boolean flags can only be switched on from the command line, so `false`
+/// means "not passed" and leaves the entry alone.
+///
+/// A `--ledger` profile still outranks both for account and currency; that is
+/// applied after this, on the built config.
+fn overlay_cli_args(entry: &ImporterEntry, args: &Args) -> ImporterEntry {
+    let text = |s: &String| toml::Value::String(s.clone());
+    let mut merged = entry.clone();
+    if let Some(v) = &args.account {
+        merged.account = Some(v.clone());
+    }
+    if let Some(v) = &args.currency {
+        merged.currency = Some(v.clone());
+    }
+    if let Some(v) = &args.date_column {
+        merged.date_column = Some(text(v));
+    }
+    if let Some(v) = &args.date_format {
+        merged.date_format = Some(v.clone());
+    }
+    if let Some(v) = &args.narration_column {
+        merged.narration_column = Some(text(v));
+    }
+    if let Some(v) = &args.payee_column {
+        merged.payee_column = Some(text(v));
+    }
+    if let Some(v) = &args.amount_column {
+        merged.amount_column = Some(text(v));
+    }
+    if let Some(v) = &args.currency_column {
+        merged.currency_column = Some(text(v));
+    }
+    if let Some(v) = &args.debit_column {
+        merged.debit_column = Some(text(v));
+    }
+    if let Some(v) = &args.credit_column {
+        merged.credit_column = Some(text(v));
+    }
+    if let Some(v) = &args.amount_locale {
+        merged.amount_locale = Some(v.clone());
+    }
+    if let Some(v) = &args.amount_format {
+        merged.amount_format = Some(v.clone());
+    }
+    if let Some(c) = args.delimiter {
+        merged.delimiter = Some(c.to_string());
+    }
+    if let Some(n) = args.skip_rows {
+        merged.skip_rows = Some(n);
+    }
+    if args.no_header {
+        merged.skip_header = Some(true);
+    }
+    if args.invert_sign {
+        merged.invert_amounts = Some(true);
+    }
+    if args.use_merchant_dict {
+        merged.use_merchant_dict = Some(true);
+    }
+    merged
 }
 
 /// The fields a non-CSV dispatcher can take from an `importers.toml` entry.
@@ -1120,12 +1245,12 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     // - CSV dispatcher: builds the full CsvConfig from
     //   --importer/--config/--auto/raw-args sources.
     let (config, fallback_accounts) = if dispatcher_needs_minimal_config {
-        // An entry's values are authoritative when one applies, matching
-        // `build_config_from_entry` on the CSV path — which builds purely
-        // from the entry and does not merge CLI arguments. Before #2260 this
-        // branch read CLI arguments only, so a configured OFX account was
-        // silently discarded and every posting landed on the `--account`
-        // default.
+        // A flag outranks the entry, which outranks the default — the same
+        // precedence the CSV path gets from `overlay_cli_args`, so the two
+        // dispatchers cannot disagree about whose value wins. This branch has
+        // dropped a value the user named both ways round: before #2260 it read
+        // CLI arguments only and discarded a configured OFX account; after it,
+        // the entry only, and discarded `--account` (#2304).
         // Suppressed when a profile applies: it already supplied the account,
         // so warning that we fell back to `--account` would be false.
         let entry = entry_for_minimal_config(
@@ -1141,8 +1266,8 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
         let named_account = profile
             .as_ref()
             .map(|p| p.account.clone())
-            .or_else(|| entry.as_ref().and_then(|e| e.account.clone()))
-            .or_else(|| args.account.clone());
+            .or_else(|| args.account.clone())
+            .or_else(|| entry.as_ref().and_then(|e| e.account.clone()));
 
         let cfg = rustledger_importer::ImporterConfig {
             // A `--ledger` profile wins over a TOML entry for these two:
@@ -1155,8 +1280,9 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 profile
                     .as_ref()
                     .and_then(|p| p.currency.clone())
+                    .or_else(|| args.currency.clone())
                     .or_else(|| entry.as_ref().and_then(|e| e.currency.clone()))
-                    .unwrap_or_else(|| args.currency.clone()),
+                    .unwrap_or_else(|| DEFAULT_CURRENCY.to_string()),
             ),
             importer_type: rustledger_importer::config::ImporterType::Csv(
                 rustledger_importer::config::CsvConfig::default(),
@@ -1229,7 +1355,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 importer_name,
                 config_path.display()
             );
-            build_config_from_entry(entry)?
+            build_config_from_entry(&overlay_cli_args(entry, args))?
         } else if args.config.is_some() {
             // Explicit --config without --importer: try auto-identification by filename
             let config_path = find_importers_config(args.config.as_deref())?
@@ -1257,7 +1383,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 entry.name,
                 config_path.display()
             );
-            build_config_from_entry(entry)?
+            build_config_from_entry(&overlay_cli_args(entry, args))?
         } else if args.auto {
             // Auto-detect CSV format
             let content = std::fs::read_to_string(file)
@@ -1300,17 +1426,17 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             }
             ImporterConfig {
                 account: args.account_or_default(),
-                currency: Some(args.currency.clone()),
+                currency: Some(args.currency_or_default()),
                 importer_type: rustledger_importer::config::ImporterType::Csv(csv_config),
             }
         } else {
             // No config file: build from CLI arguments
             let mut builder = ImporterConfig::csv()
                 .account(args.account_or_default())
-                .currency(&args.currency)
-                .date_format(&args.date_format)
-                .delimiter(args.delimiter)
-                .skip_rows(args.skip_rows)
+                .currency(args.currency_or_default())
+                .date_format(args.date_format_or_default())
+                .delimiter(args.delimiter_or_default())
+                .skip_rows(args.skip_rows.unwrap_or(0))
                 .invert_sign(args.invert_sign)
                 .skip_zero_amounts(!args.include_zero_amounts)
                 .has_header(!args.no_header)
@@ -1320,19 +1446,19 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             // `apply_column`), so headerless CSVs can be imported positionally.
             builder = apply_column(
                 builder,
-                &args.date_column,
+                &args.date_column_or_default(),
                 CsvConfigBuilder::date_column_index,
                 |b, n| b.date_column(n),
             );
             builder = apply_column(
                 builder,
-                &args.narration_column,
+                &args.narration_column_or_default(),
                 CsvConfigBuilder::narration_column_index,
                 |b, n| b.narration_column(n),
             );
             builder = apply_column(
                 builder,
-                &args.amount_column,
+                &args.amount_column_or_default(),
                 CsvConfigBuilder::amount_column_index,
                 |b, n| b.amount_column(n),
             );
@@ -1497,7 +1623,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             date,
             account: args.account_or_default(),
             number: amount,
-            currency: args.currency.clone(),
+            currency: args.currency_or_default(),
         };
         // `create_balance_directive` returns a core `Directive` directly now — no
         // `DirectiveWrapper` round-trip through `wrapper_to_directive`.
@@ -2940,6 +3066,261 @@ default_expense = "Expenses:Uncategorized"
         assert!(
             text.contains("Liabilities:FromLedger"),
             "the ledger account must win; got:\n{text}"
+        );
+    }
+
+    /// The reported shape (#2304): one entry describing a bank's CSV layout,
+    /// with the account, sign, and skipped rows supplied per file on the
+    /// command line. All three were accepted and silently discarded.
+    #[test]
+    fn flags_override_a_named_importer_entry() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("stmt.csv");
+        std::fs::write(
+            &csv,
+            "date,payee,money_in,money_out\n\
+             2025-01-16,CASHBACK,3.00,\n\
+             2025-01-24,WAITROSE,,120.73\n\
+             2025-02-01,REFUND,5.00,\n",
+        )
+        .unwrap();
+        let config = dir.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            "[[importers]]\nname = \"santander\"\ndate_column = \"date\"\n\
+             payee_column = \"payee\"\ncredit_column = \"money_in\"\n\
+             debit_column = \"money_out\"\ncurrency = \"GBP\"\nskip_rows = 0\n",
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            "--config",
+            config.to_str().unwrap(),
+            "--importer",
+            "santander",
+            "--account",
+            "Liabilities:Santander:Credit",
+            "--invert-sign",
+            "--skip-rows",
+            "1",
+            csv.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        run_with_writer(&args, &csv, &mut out).expect("extract runs");
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(
+            text.contains("Liabilities:Santander:Credit"),
+            "--account must reach the entry path; got:\n{text}"
+        );
+        assert!(
+            !text.contains("CASHBACK"),
+            "--skip-rows 1 must skip the first row; got:\n{text}"
+        );
+        // Both directions of --invert-sign: money out becomes positive on the
+        // account, money in becomes negative.
+        assert!(
+            text.contains("120.73") && !text.contains("-120.73"),
+            "--invert-sign must flip money out; got:\n{text}"
+        );
+        assert!(
+            text.contains("-5.00"),
+            "--invert-sign must flip money in; got:\n{text}"
+        );
+    }
+
+    /// The fix's trap. The flags used to carry clap defaults, so an unset
+    /// `--skip-rows` was `0` and an unset `--currency` was `USD`, and merging
+    /// them would overwrite what the entry says. Every formerly defaulted
+    /// field is set in the entry here, to a non-default value, with no flags.
+    #[test]
+    fn entry_values_survive_when_no_flag_is_passed() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("stmt.csv");
+        std::fs::write(
+            &csv,
+            "posted;who;in;out\n\
+             16/01/2025;CASHBACK;3.00;\n\
+             24/01/2025;WAITROSE;;120.73\n",
+        )
+        .unwrap();
+        let config = dir.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            "[[importers]]\nname = \"bank\"\naccount = \"Liabilities:FromToml\"\n\
+             currency = \"GBP\"\ndate_column = \"posted\"\ndate_format = \"%d/%m/%Y\"\n\
+             payee_column = \"who\"\ncredit_column = \"in\"\ndebit_column = \"out\"\n\
+             delimiter = \";\"\nskip_rows = 1\ninvert_amounts = true\n",
+        )
+        .unwrap();
+
+        let args = Args::parse_from([
+            "extract",
+            "--config",
+            config.to_str().unwrap(),
+            "--importer",
+            "bank",
+            csv.to_str().unwrap(),
+        ]);
+        let mut out = Vec::new();
+        run_with_writer(&args, &csv, &mut out).expect("extract runs");
+        let text = String::from_utf8(out).unwrap();
+
+        assert!(
+            text.contains("Liabilities:FromToml"),
+            "entry account lost:\n{text}"
+        );
+        assert!(
+            text.contains("GBP") && !text.contains("USD"),
+            "entry currency lost:\n{text}"
+        );
+        assert!(!text.contains("CASHBACK"), "entry skip_rows lost:\n{text}");
+        assert!(
+            text.contains("120.73") && !text.contains("-120.73"),
+            "entry invert_amounts lost:\n{text}"
+        );
+    }
+
+    /// A flag must behave exactly like writing its key in the entry — same
+    /// parsing, same validation, same resulting config — for every flag that
+    /// has a key. Compared on the built config rather than on output, so a
+    /// field that happens not to change this CSV's text still counts.
+    #[test]
+    fn passing_a_flag_matches_writing_its_key() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let base: Vec<(&str, &str)> = vec![
+            ("name", "\"b\""),
+            ("date_column", "\"Date\""),
+            ("amount_column", "\"Amount\""),
+        ];
+        let entry_from = |pairs: &[(&str, &str)], tag: &str| -> ImporterEntry {
+            let body = pairs.iter().fold(String::new(), |mut acc, (k, v)| {
+                acc.push_str(k);
+                acc.push_str(" = ");
+                acc.push_str(v);
+                acc.push('\n');
+                acc
+            });
+            let path = dir.path().join(format!("{tag}.toml"));
+            std::fs::write(&path, format!("[[importers]]\n{body}")).unwrap();
+            load_importers_config(&path).unwrap().importers.remove(0)
+        };
+        let built =
+            |entry: &ImporterEntry| format!("{:?}", build_config_from_entry(entry).unwrap());
+        let base_entry = entry_from(&base, "base");
+
+        // No flags at all: the overlay must leave every field alone.
+        let none = Args::parse_from(["extract", "f.csv"]);
+        assert_eq!(
+            built(&overlay_cli_args(&base_entry, &none)),
+            built(&base_entry),
+            "an overlay with no flags passed changed the entry's config"
+        );
+
+        let cases: &[(&[&str], (&str, &str))] = &[
+            (&["--account", "Assets:X"], ("account", "\"Assets:X\"")),
+            (&["--currency", "EUR"], ("currency", "\"EUR\"")),
+            (&["--date-column", "Posted"], ("date_column", "\"Posted\"")),
+            (&["--date-column", "2"], ("date_column", "2")),
+            (
+                &["--date-format", "%d/%m/%Y"],
+                ("date_format", "\"%d/%m/%Y\""),
+            ),
+            (
+                &["--narration-column", "Memo"],
+                ("narration_column", "\"Memo\""),
+            ),
+            (&["--payee-column", "Payee"], ("payee_column", "\"Payee\"")),
+            (
+                &["--amount-column", "Value"],
+                ("amount_column", "\"Value\""),
+            ),
+            (
+                &["--currency-column", "Ccy"],
+                ("currency_column", "\"Ccy\""),
+            ),
+            (&["--debit-column", "Out"], ("debit_column", "\"Out\"")),
+            (&["--credit-column", "In"], ("credit_column", "\"In\"")),
+            (
+                &["--amount-locale", "de_DE"],
+                ("amount_locale", "\"de_DE\""),
+            ),
+            (
+                &["--amount-format", "#,##0.00"],
+                ("amount_format", "\"#,##0.00\""),
+            ),
+            (&["--delimiter", ";"], ("delimiter", "\";\"")),
+            (&["--skip-rows", "3"], ("skip_rows", "3")),
+            (&["--no-header"], ("skip_header", "true")),
+            (&["--invert-sign"], ("invert_amounts", "true")),
+            (&["--use-merchant-dict"], ("use_merchant_dict", "true")),
+        ];
+        for (i, (flags, (key, value))) in cases.iter().enumerate() {
+            let mut argv = vec!["extract"];
+            argv.extend_from_slice(flags);
+            argv.push("f.csv");
+            let args = Args::parse_from(argv);
+
+            let mut keyed: Vec<(&str, &str)> =
+                base.iter().copied().filter(|(k, _)| k != key).collect();
+            keyed.push((key, value));
+            let keyed_entry = entry_from(&keyed, &format!("case{i}"));
+
+            assert_eq!(
+                built(&overlay_cli_args(&base_entry, &args)),
+                built(&keyed_entry),
+                "{flags:?} did not produce the same config as `{key} = {value}`"
+            );
+        }
+    }
+
+    /// The OFX path takes `account` from the entry too, and #2261 made it
+    /// match the CSV path. A flag has to outrank the entry there as well, or
+    /// the two dispatchers disagree again about whose value wins.
+    #[test]
+    fn account_flag_outranks_an_ofx_entry() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let qfx = cc_qfx(dir.path());
+        let config = dir.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            "[[importers]]\nname = \"card\"\ntype = \"ofx\"\n\
+             account = \"Liabilities:FromToml\"\ncurrency = \"USD\"\n",
+        )
+        .unwrap();
+        let run = |extra: &[&str]| {
+            let mut argv = vec![
+                "extract",
+                "--config",
+                config.to_str().unwrap(),
+                "--importer",
+                "card",
+            ];
+            argv.extend_from_slice(extra);
+            argv.push(qfx.to_str().unwrap());
+            let args = Args::parse_from(argv);
+            let mut out = Vec::new();
+            run_with_writer(&args, &qfx, &mut out).expect("ofx extract runs");
+            String::from_utf8(out).unwrap()
+        };
+
+        // Control first: without the flag the entry's account is used, so the
+        // assertion below cannot pass merely because the entry was ignored.
+        let unflagged = run(&[]);
+        assert!(
+            unflagged.contains("Liabilities:FromToml"),
+            "control: the entry's account should apply without a flag; got:\n{unflagged}"
+        );
+
+        let flagged = run(&["--account", "Liabilities:FromFlag"]);
+        assert!(
+            flagged.contains("Liabilities:FromFlag") && !flagged.contains("Liabilities:FromToml"),
+            "--account must outrank the OFX entry's account; got:\n{flagged}"
         );
     }
 

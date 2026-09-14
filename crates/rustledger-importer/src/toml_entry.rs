@@ -41,7 +41,7 @@ pub enum EntryFormat {
 /// Unknown keys are rejected. A silently-ignored key is indistinguishable
 /// from a working one, and `type = "ofx"` was accepted-and-ignored before
 /// this field existed (#2260).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImporterEntry {
     /// Name used to select this importer via --importer flag.

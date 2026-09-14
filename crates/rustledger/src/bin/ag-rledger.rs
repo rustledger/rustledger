@@ -919,11 +919,9 @@ fn build_doctor_command(
 fn build_extract_args(
     req: &agcli::CommandRequest<'_>,
 ) -> Result<rustledger::cmd::extract_cmd::Args, CommandError> {
-    let delimiter = flag(req, "delimiter", None)
-        .unwrap_or(",")
-        .chars()
-        .next()
-        .unwrap_or(',');
+    // Left `None` when unset, like `account` below: an unset flag must not
+    // overwrite an `importers.toml` entry's value with a default (#2304).
+    let delimiter = flag(req, "delimiter", None).and_then(|d| d.chars().next());
     Ok(rustledger::cmd::extract_cmd::Args {
         generate_completions: None,
         file: path_flag(req, "file", None).or_else(|| req.arg(0).map(PathBuf::from)),
@@ -933,22 +931,19 @@ fn build_extract_args(
         // Left as `None` when unset: extract distinguishes "not named" from
         // "named as the default" to refuse an unconfigured OFX import (#2256).
         account: string_flag(req, "account", Some("a")),
-        currency: string_flag(req, "currency", Some("c")).unwrap_or_else(|| "USD".to_string()),
-        date_column: string_flag(req, "date-column", None).unwrap_or_else(|| "Date".to_string()),
-        date_format: string_flag(req, "date-format", None)
-            .unwrap_or_else(|| "%Y-%m-%d".to_string()),
-        narration_column: string_flag(req, "narration-column", None)
-            .unwrap_or_else(|| "Description".to_string()),
+        currency: string_flag(req, "currency", Some("c")),
+        date_column: string_flag(req, "date-column", None),
+        date_format: string_flag(req, "date-format", None),
+        narration_column: string_flag(req, "narration-column", None),
         payee_column: string_flag(req, "payee-column", None),
-        amount_column: string_flag(req, "amount-column", None)
-            .unwrap_or_else(|| "Amount".to_string()),
+        amount_column: string_flag(req, "amount-column", None),
         currency_column: string_flag(req, "currency-column", None),
         amount_locale: string_flag(req, "amount-locale", None),
         amount_format: string_flag(req, "amount-format", None),
         debit_column: string_flag(req, "debit-column", None),
         credit_column: string_flag(req, "credit-column", None),
         delimiter,
-        skip_rows: parse_flag(req, "skip-rows", None, 0)?,
+        skip_rows: optional_parse_flag(req, "skip-rows", None)?,
         invert_sign: bool_flag(req, "invert-sign", None),
         include_zero_amounts: bool_flag(req, "include-zero-amounts", None),
         auto: bool_flag(req, "auto", None),

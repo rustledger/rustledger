@@ -653,9 +653,22 @@ jobs:
       # incidental dead-code — not a bench-compile problem. Cap lints to `warn`
       # so this job checks *compilation* only; clippy / `ci` lint the real
       # targets. A genuine compile error still fails (cap-lints affects lints).
+      #
+      # `cargo bench` inherits the release profile (`codegen-units = 1`, thin LTO)
+      # and adds `debug = true`. Nothing here RUNS the benches — PR Benchmarks
+      # builds `--release` and times it with hyperfine — so that optimization is
+      # pure cost: measured with 4 jobs as on this runner, it took 19m36s and
+      # peaked at 12.0 GB of system memory, and the runner was killed with
+      # "received a shutdown signal" / exit 143 on 9 of 15 runs on 2026-09-14
+      # (0 of the day's other 1,053 jobs). Compiling the same 17 bench
+      # executables with the settings below took 6m42s and peaked at 5.7 GB.
+      # Scoped to this step, so release builds and real benchmarks are untouched.
       - name: Compile all criterion benches (--no-run)
         env:
           RUSTFLAGS: "--cap-lints=warn"
+          CARGO_PROFILE_BENCH_LTO: "false"
+          CARGO_PROFILE_BENCH_CODEGEN_UNITS: "16"
+          CARGO_PROFILE_BENCH_DEBUG: "false"
         run: cargo bench --workspace --no-run
   # Slim-build ratchet (#1427/#867): `cargo install rustledger
   # --no-default-features` must stay wasmtime/cranelift-free so the minimal

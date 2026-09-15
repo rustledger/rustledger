@@ -354,39 +354,11 @@ user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2022-09-27"
 end = "2027-06-29"
 
-[[trusted.icu_collections]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2022-08-05"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
-
 [[trusted.icu_locale_core]]
 criteria = "safe-to-deploy"
 user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2025-02-26"
 end = "2027-06-29"
-
-[[trusted.icu_locale_core]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2024-11-23"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
-
-[[trusted.icu_locale_fallback]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2026-08-13"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
-
-[[trusted.icu_locale_fallback_data]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2026-08-13"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
 
 [[trusted.icu_normalizer]]
 criteria = "safe-to-deploy"
@@ -394,25 +366,11 @@ user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2021-04-29"
 end = "2027-06-29"
 
-[[trusted.icu_normalizer]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2022-08-05"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
-
 [[trusted.icu_normalizer_data]]
 criteria = "safe-to-deploy"
 user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2023-10-03"
 end = "2027-06-29"
-
-[[trusted.icu_normalizer_data]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2023-09-23"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
 
 [[trusted.icu_properties]]
 criteria = "safe-to-deploy"
@@ -420,52 +378,17 @@ user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2022-01-31"
 end = "2027-06-29"
 
-[[trusted.icu_properties]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2021-11-02"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
-
 [[trusted.icu_properties_data]]
 criteria = "safe-to-deploy"
 user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2023-10-03"
 end = "2027-06-29"
 
-[[trusted.icu_properties_data]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2023-09-23"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
-
 [[trusted.icu_provider]]
 criteria = "safe-to-deploy"
 user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2022-01-31"
 end = "2027-06-29"
-
-[[trusted.icu_provider]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2021-07-29"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
-
-[[trusted.icu_segmenter]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2022-08-05"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
-
-[[trusted.icu_segmenter_data]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2023-09-23"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
 
 [[trusted.id-arena]]
 criteria = "safe-to-deploy"
@@ -575,13 +498,6 @@ user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2021-02-23"
 end = "2027-06-29"
 
-[[trusted.litemap]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2021-08-27"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
-
 [[trusted.lock_api]]
 criteria = "safe-to-deploy"
 user-id = 2915 # Amanieu d'Antras (Amanieu)
@@ -672,13 +588,6 @@ user-id = 33035 # Taiki Endo (taiki-e)
 start = "2022-02-24"
 end = "2027-04-19"
 
-[[trusted.portable-atomic]]
-criteria = "safe-to-deploy"
-trusted-publisher = "github:taiki-e/portable-atomic"
-start = "2026-07-17"
-end = "2027-09-15"
-notes = "taiki-e's own repo; releases from 1.15 are published via crates.io trusted publishing."
-
 [[trusted.portable-atomic-util]]
 criteria = "safe-to-deploy"
 user-id = 33035 # Taiki Endo (taiki-e)
@@ -690,13 +599,6 @@ criteria = "safe-to-deploy"
 user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2024-11-23"
 end = "2027-06-29"
-
-[[trusted.potential_utf]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2026-08-13"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
 
 [[trusted.prettyplease]]
 criteria = "safe-to-deploy"
@@ -865,13 +767,6 @@ criteria = "safe-to-deploy"
 user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2021-01-14"
 end = "2027-06-29"
-
-[[trusted.tinystr]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2022-08-04"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
 
 [[trusted.tokio]]
 criteria = "safe-to-deploy"
@@ -1155,13 +1050,6 @@ user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2021-11-01"
 end = "2027-06-29"
 
-[[trusted.writeable]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2022-08-04"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
-
 [[trusted.yoke]]
 criteria = "safe-to-deploy"
 user-id = 1139 # Manish Goregaokar (Manishearth)
@@ -1192,13 +1080,6 @@ user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2023-10-03"
 end = "2027-06-29"
 
-[[trusted.zerotrie]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2023-09-23"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
-
 [[trusted.zerovec]]
 criteria = "safe-to-deploy"
 user-id = 1139 # Manish Goregaokar (Manishearth)
@@ -1210,13 +1091,6 @@ criteria = "safe-to-deploy"
 user-id = 1139 # Manish Goregaokar (Manishearth)
 start = "2021-12-11"
 end = "2027-06-29"
-
-[[trusted.zerovec-derive]]
-criteria = "safe-to-deploy"
-user-id = 128408 # Shane F. Carr (sffc)
-start = "2022-08-05"
-end = "2027-09-15"
-notes = "ICU4X (unicode-org/icu4x) co-maintainer; releases from 2.3 onward are published by sffc rather than Manishearth."
 
 [[trusted.zlib-rs]]
 criteria = "safe-to-deploy"

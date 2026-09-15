@@ -476,15 +476,38 @@ impl BookingEngine {
                         // nothing reads the mutation back, and this way
                         // nothing was copied to produce it. Both call the
                         // same planner inside `Inventory`.
+                        // A `{{T}}` reduction names its lot by the total, so match on T/|units|.
+                        // `CostSpec::matches` filters on `per_unit()`, which `CostNumber::Total`
+                        // does not have: left as-is the spec matches any lot in the currency,
+                        // and a wrong total books silently (#2325). The date stays a filter.
+                        let total_filter;
+                        let match_spec: &CostSpec = match cost_spec.number {
+                            Some(rustledger_core::CostNumber::Total { value: total })
+                                if !units.number.is_zero() =>
+                            {
+                                total_filter = CostSpec {
+                                    number: Some(rustledger_core::CostNumber::PerUnitFromTotal(
+                                        rustledger_core::BookedCost::new(
+                                            total / units.number.abs(),
+                                            total,
+                                            units.number,
+                                        ),
+                                    )),
+                                    ..cost_spec.clone()
+                                };
+                                &total_filter
+                            }
+                            _ => cost_spec,
+                        };
                         let booking_result = match working_inventories.get_mut(&posting.account) {
-                            Some(working) => working.reduce(units, Some(cost_spec), method),
+                            Some(working) => working.reduce(units, Some(match_spec), method),
                             // Indexing cannot panic here: reaching this arm
                             // means the enclosing `if let` bound `inv` from
                             // its `self.inventories` branch, so the account is
                             // present.
                             None => self.inventories[&posting.account].try_reduce(
                                 units,
-                                Some(cost_spec),
+                                Some(match_spec),
                                 method,
                             ),
                         }
@@ -645,7 +668,10 @@ impl BookingEngine {
                     // If not a reduction: fall through to augmentation code below
                 }
 
-                if let Some(rustledger_core::CostNumber::Total { value: total }) = cost_spec.number
+                let is_booked = booked_indices.contains(&idx);
+                if !is_booked
+                    && let Some(rustledger_core::CostNumber::Total { value: total }) =
+                        cost_spec.number
                 {
                     // Augmentation with total cost — convert to the
                     // post-booking `PerUnitFromTotal` shape:
@@ -1870,6 +1896,232 @@ mod tests {
             "Capital gain: {:?}",
             gain.proceeds.number - gain.cost_basis.number
         );
+    }
+
+    #[test]
+    fn test_book_reduction_with_total_cost_syntax() {
+        let mut engine = BookingEngine::new();
+
+        // Buy 2 CCCC at 50.00 USD each = 100.00 USD total
+        let buy = Transaction::new(date(2026, 1, 1), "Buy stock")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(2.0), "CCCC")).with_cost(
+                    CostSpec::empty()
+                        .with_number(rustledger_core::CostNumber::Total {
+                            value: dec!(100.00),
+                        })
+                        .with_currency("USD"),
+                ),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(-100.00), "USD"),
+            ));
+
+        let booked_buy = engine.book(&buy).unwrap();
+        engine.apply(&booked_buy.transaction).unwrap();
+
+        // Sell 2 CCCC by specifying the lot using total cost syntax without explicit date
+        let sell = Transaction::new(date(2026, 2, 1), "Sell stock")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-2.0), "CCCC")).with_cost(
+                    CostSpec::empty()
+                        .with_number(rustledger_core::CostNumber::Total {
+                            value: dec!(100.00),
+                        })
+                        .with_currency("USD"),
+                ),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(100.00), "USD"),
+            ));
+
+        // Before the fix, this would fail because the reduction's cost would be overwritten
+        // with a sale date (2026-02-01) date instead of preserving the acquisition date (2026-01-01),
+        // causing a "No matching lot" error when apply() tries to find it.
+        let booked_sell = engine.book(&sell).unwrap();
+
+        let sell_posting = &booked_sell.transaction.postings[0];
+        let cost = sell_posting.cost.as_ref().unwrap();
+
+        // The date on the cost should be the acquisition date (2026, 1, 1), not the sale date
+        assert_eq!(cost.date, Some(date(2026, 1, 1)));
+
+        engine.apply(&booked_sell.transaction).unwrap();
+    }
+
+    fn tc_total_cost(total: Decimal, on: Option<NaiveDate>) -> CostSpec {
+        CostSpec {
+            number: Some(rustledger_core::CostNumber::Total { value: total }),
+            currency: Some("USD".into()),
+            date: on,
+            label: None,
+            merge: false,
+        }
+    }
+
+    fn tc_per_unit_cost(value: Decimal) -> CostSpec {
+        CostSpec {
+            number: Some(rustledger_core::CostNumber::PerUnit { value }),
+            currency: Some("USD".into()),
+            date: None,
+            label: None,
+            merge: false,
+        }
+    }
+
+    fn tc_trade(
+        on: NaiveDate,
+        account: &str,
+        units: Decimal,
+        commodity: &str,
+        cost: CostSpec,
+        cash: Decimal,
+    ) -> Transaction {
+        Transaction::new(on, "trade")
+            .with_synthesized_posting(
+                Posting::new(account, Amount::new(units, commodity)).with_cost(cost),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(cash, "USD")))
+    }
+
+    fn tc_is_no_matching_lot(result: &Result<BookedTransaction, BookingError>) -> bool {
+        matches!(
+            result,
+            Err(BookingError::Inventory(AccountedBookingError {
+                error: rustledger_core::BookingError::NoMatchingLot { .. },
+                ..
+            }))
+        )
+    }
+
+    /// A `{{T}}` reduction names its lot by the total. A wrong total must not
+    /// match, dated, undated, or partial; the right one still books (#2325).
+    #[test]
+    fn test_book_total_cost_reduction_rejects_a_wrong_total() {
+        let mut engine = BookingEngine::new();
+        let buy = tc_trade(
+            date(2026, 1, 1),
+            "Assets:Stock",
+            dec!(2),
+            "W1",
+            tc_total_cost(dec!(100.00), None),
+            dec!(-100.00),
+        );
+        let booked = engine.book(&buy).unwrap();
+        engine.apply(&booked.transaction).unwrap();
+
+        for sell in [
+            tc_trade(
+                date(2026, 2, 1),
+                "Assets:Stock",
+                dec!(-2),
+                "W1",
+                tc_total_cost(dec!(90.00), None),
+                dec!(90.00),
+            ),
+            tc_trade(
+                date(2026, 2, 1),
+                "Assets:Stock",
+                dec!(-2),
+                "W1",
+                tc_total_cost(dec!(90.00), Some(date(2026, 1, 1))),
+                dec!(90.00),
+            ),
+            tc_trade(
+                date(2026, 2, 1),
+                "Assets:Stock",
+                dec!(-1),
+                "W1",
+                tc_total_cost(dec!(40.00), None),
+                dec!(40.00),
+            ),
+        ] {
+            let result = engine.book(&sell);
+            assert!(
+                tc_is_no_matching_lot(&result),
+                "a wrong total must not match the lot: {:?}",
+                result.as_ref().err()
+            );
+        }
+
+        for sell in [
+            tc_trade(
+                date(2026, 2, 1),
+                "Assets:Stock",
+                dec!(-1),
+                "W1",
+                tc_total_cost(dec!(50.00), None),
+                dec!(50.00),
+            ),
+            tc_trade(
+                date(2026, 2, 1),
+                "Assets:Stock",
+                dec!(-2),
+                "W1",
+                tc_total_cost(dec!(100.00), Some(date(2026, 1, 1))),
+                dec!(100.00),
+            ),
+        ] {
+            let result = engine.book(&sell);
+            assert!(
+                result.is_ok(),
+                "the right total must book: {:?}",
+                result.as_ref().err()
+            );
+        }
+    }
+
+    /// The same across lots: before the per-unit filter, a `{{T}}` sale that
+    /// spans several lots booked with any total at all (#2325).
+    #[test]
+    fn test_book_total_cost_reduction_across_lots_rejects_a_wrong_total() {
+        let mut engine = BookingEngine::new();
+        for day in [1, 2] {
+            let buy = tc_trade(
+                date(2026, 1, day),
+                "Assets:Fifo",
+                dec!(1),
+                "W3",
+                tc_per_unit_cost(dec!(50.00)),
+                dec!(-50.00),
+            );
+            let booked = engine.book(&buy).unwrap();
+            engine.apply(&booked.transaction).unwrap();
+        }
+
+        let wrong = tc_trade(
+            date(2026, 2, 1),
+            "Assets:Fifo",
+            dec!(-2),
+            "W3",
+            tc_total_cost(dec!(90.00), None),
+            dec!(90.00),
+        );
+        let result = engine.book(&wrong);
+        assert!(
+            tc_is_no_matching_lot(&result),
+            "a wrong total must not match across lots: {:?}",
+            result.as_ref().err()
+        );
+
+        let right = tc_trade(
+            date(2026, 2, 1),
+            "Assets:Fifo",
+            dec!(-2),
+            "W3",
+            tc_total_cost(dec!(100.00), None),
+            dec!(100.00),
+        );
+        let booked = engine
+            .book(&right)
+            .expect("the right total books across both lots");
+        engine.apply(&booked.transaction).unwrap();
+        let left = engine
+            .inventory(&"Assets:Fifo".into())
+            .map_or(Decimal::ZERO, |inv| inv.units("W3"));
+        assert_eq!(left, Decimal::ZERO);
     }
 
     #[test]

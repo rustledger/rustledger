@@ -142,7 +142,15 @@ use crate::types::{Error, LedgerOptions};
 /// diagnostic. #2322 shipped without this bump; it was missed in review, which
 /// concluded from truncated search output that `LedgerPayload` had no caller
 /// outside tests.
-pub const CACHE_VERSION: u32 = 22;
+/// v23: booking resolves a `{{T}}` reduction against the lot its total names
+/// (#2306, #2325). Loader v35, unchanged -- the loader archives parsed
+/// directives, and those did not move. The processed ones did: a dated
+/// `{{T, D}}` sale now books with the matched lot's per-unit cost instead of a
+/// `PerUnitFromTotal` rebuilt from the spec, an undated one books where it used
+/// to fail with "No matching lot", and a wrong total fails where it used to
+/// book. `ParsedLedger` and `Ledger` both archive booked directives and their
+/// errors, so a v22 blob would serve the old answer for all three.
+pub const CACHE_VERSION: u32 = 23;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

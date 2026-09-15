@@ -78,6 +78,25 @@ jobs:
                 --jq '.content' | base64 -d > "$file"
             fi
           done
+      - name: Fetch PR's supply-chain store
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+        # Regenerate against the PR's OWN store, not the base branch's. Starting
+        # from base silently discards anything the PR changed in supply-chain/:
+        # PR #2321 added [[trusted.*]] entries, and this job re-added the
+        # exemptions they replaced and pruned the publisher rows they needed from
+        # imports.lock, which then failed `cargo vet --locked` as misformatted. It
+        # reruns on every push, so the PR could not keep its own change.
+        # These are data files that cargo-vet parses; nothing here executes them.
+        # The job is already gated to dependabot and OWNER/MEMBER authors, who can
+        # write to supply-chain/ directly.
+        run: |
+          for f in audits.toml config.toml imports.lock; do
+            gh api "repos/$REPO/contents/supply-chain/$f?ref=$PR_SHA" \
+              --jq '.content' | base64 -d > "supply-chain/$f"
+          done
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
         with:

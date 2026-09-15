@@ -27,8 +27,13 @@ jobs:
     # workflow's own push, and re-triggering on it can cause an infinite
     # loop if the regen produces a no-op tree (see "Skip when nothing
     # actually changed" below for the structural fix).
+    # Same-repo PRs only. Every fetch below reads `repos/$REPO/contents/...?ref=PR_SHA`
+    # and the commit step updates `repos/$REPO/git/refs/heads/$BRANCH`, neither of
+    # which reaches a branch in a fork, so a maintainer's fork PR used to fail
+    # partway. Skip it up front instead.
     if: |
       github.actor != 'rustledger-bot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       (
         github.actor == 'dependabot[bot]' ||
         github.event.pull_request.author_association == 'OWNER' ||
@@ -110,6 +115,8 @@ jobs:
       - name: Commit and push changes
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # The commit that the store and Cargo.lock above were fetched from.
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
           # SECURITY: Pass via env vars to prevent shell injection from branch names
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
@@ -125,6 +132,14 @@ jobs:
             # Get the current commit SHA
             CURRENT_SHA=$(gh api "repos/$REPO/git/refs/heads/$BRANCH" --jq '.object.sha')
             echo "Current commit: $CURRENT_SHA"
+            # Everything above was fetched at the event's PR_SHA. If the branch has moved
+            # since (a newer push during this run), writing these files onto the new head
+            # would replace that commit's supply-chain/ with stale data. The newer push
+            # starts its own run, so leave the branch to it.
+            if [ "$CURRENT_SHA" != "$PR_SHA" ]; then
+              echo "Branch moved from $PR_SHA to $CURRENT_SHA during this run; skipping so the newer run applies"
+              exit 0
+            fi
 
             # Get the tree SHA from the current commit
             BASE_TREE=$(gh api "repos/$REPO/git/commits/$CURRENT_SHA" --jq '.tree.sha')

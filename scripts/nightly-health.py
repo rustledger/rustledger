@@ -318,6 +318,20 @@ def self_test() -> int:
     real_gh = gh
     sched = datetime(2026, 7, 26, 6, 0, tzinfo=timezone.utc)
 
+    # Fixtures that `main()` reads are timestamped RELATIVE TO NOW, because the
+    # staleness rule they exercise is relative to now. An absolute date here
+    # rots: the "going green clears the marker" case was written with a fresh
+    # run at 2026-09-11T06:42Z, which passed the 3-day daily threshold on
+    # 2026-09-14 and failed every night after, having tested nothing that
+    # changed (#2334). `sched` above and the ordering fixtures below are
+    # different -- they are compared against each other, never against now, so
+    # they do not rot and are left as written.
+    def ago(**kw: float) -> str:
+        return f"{datetime.now(timezone.utc) - timedelta(**kw):%Y-%m-%dT%H:%M:%SZ}"
+
+    fresh_run = ago(hours=1)
+    stale_run = ago(days=21)
+
     # The re-query delay is real time, and two cases below drive an empty first
     # answer. `.github/workflows/nightly-health.yml` runs `--self-test` every
     # night, so leaving it in spends 10s a night waiting for nothing.
@@ -608,7 +622,7 @@ def self_test() -> int:
                 return "https://example/1"
             if a[0] == "run" and a[1] == "list":
                 wf = a[a.index("--workflow") + 1]
-                when = "2026-08-26T02:54:00Z" if wf == "bench.yml" else "2026-09-11T06:42:00Z"
+                when = stale_run if wf == "bench.yml" else fresh_run
                 return json.dumps([{
                     "conclusion": "success", "status": "completed",
                     "createdAt": when, "databaseId": 1, "url": "u",
@@ -668,7 +682,7 @@ def self_test() -> int:
         if a[0] == "run" and a[1] == "list":
             return json.dumps([{
                 "conclusion": "success", "status": "completed",
-                "createdAt": "2026-09-11T06:42:00Z", "databaseId": 1, "url": "u",
+                "createdAt": fresh_run, "databaseId": 1, "url": "u",
             }])
         if a[0] == "api":
             return "4"

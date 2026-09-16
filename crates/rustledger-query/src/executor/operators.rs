@@ -4,9 +4,10 @@ use rust_decimal::Decimal;
 
 use crate::ast::{BinaryOp, BinaryOperator, UnaryOp, UnaryOperator};
 use crate::error::QueryError;
+use rustledger_core::NaiveDate;
 
 use super::Executor;
-use super::types::{Interval, PostingContext, Value};
+use super::types::{DayCount, Interval, PostingContext, Value};
 
 /// Whether `op` is an equality or ordering comparison — the operators for which
 /// a NULL operand yields SQL "UNKNOWN" (treated as not-matched).
@@ -38,6 +39,45 @@ const fn propagates_null(op: BinaryOperator) -> bool {
             | BinaryOperator::In
             | BinaryOperator::NotIn
     )
+}
+
+/// Apply `date ± n` when `n` names a count of days.
+///
+/// `None` means the operand is not a number at all, and ordinary arithmetic
+/// should decide instead -- which is what carries NULL propagation and the
+/// `date + date` / `date + 'x'` errors.
+fn date_plus_days(
+    date: NaiveDate,
+    other: &Value,
+    negate: bool,
+) -> Option<Result<Value, QueryError>> {
+    let overflow = || Err(QueryError::Evaluation("date overflow".to_string()));
+    match other.as_day_count() {
+        DayCount::Whole(n) => {
+            // `checked_neg` for the one value that cannot be negated, i64::MIN.
+            let days = if negate { n.checked_neg() } else { Some(n) };
+            Some(days.map_or_else(overflow, |d| shift_date(date, d)))
+        }
+        DayCount::Fraction => Some(Err(QueryError::Type(
+            "date arithmetic takes a whole number of days".to_string(),
+        ))),
+        DayCount::OutOfRange => Some(overflow()),
+        DayCount::NotNumeric => None,
+    }
+}
+
+/// Shift `date` by a whole number of days, forward or back.
+///
+/// Both ends are fallible: `try_days` rejects a span too large to build, and
+/// `checked_add` rejects a result outside the calendar's range. Neither
+/// panics, which a bare `+` on a span would.
+fn shift_date(date: NaiveDate, days: i64) -> Result<Value, QueryError> {
+    let span = jiff::Span::new()
+        .try_days(days)
+        .map_err(|_| QueryError::Evaluation("date overflow".to_string()))?;
+    date.checked_add(span)
+        .map(Value::Date)
+        .map_err(|_| QueryError::Evaluation("date overflow".to_string()))
 }
 
 impl Executor<'_> {
@@ -406,6 +446,19 @@ impl Executor<'_> {
                             .map(Value::Date)
                             .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
                     }
+                    // A plain number on either side of `+` is a count of days
+                    // (#2324): `2026-07-01 + 365` and `365 + 2026-07-01` both
+                    // give 2027-07-01, as bean-query does. `interval(365,
+                    // 'day')` remains the explicit spelling of the same shift.
+                    (Value::Date(d), other) | (other, Value::Date(d)) => {
+                        date_plus_days(*d, other, false).unwrap_or_else(|| {
+                            self.arithmetic_op(
+                                left,
+                                right,
+                                rustledger_core::checked_add_python_scale,
+                            )
+                        })
+                    }
                     // Checked so a value-range overflow yields NULL (like
                     // div-by-zero — see `arithmetic_op`) instead of panicking;
                     // `rust_decimal` panics on raw `+`/`-`/`*` overflow.
@@ -428,6 +481,22 @@ impl Executor<'_> {
                             .add_to_date(*d)
                             .map(Value::Date)
                             .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
+                    }
+                    // `date - date` is the count of days between them -- the
+                    // same answer `date_diff` gives, computed the same way so
+                    // the two cannot drift -- and `date - n` shifts back
+                    // (#2324). `n - date` stays an error, as in bean-query.
+                    (Value::Date(a), Value::Date(b)) => Ok(Value::Integer(i64::from(
+                        a.since(*b).unwrap_or_default().get_days(),
+                    ))),
+                    (Value::Date(d), other) => {
+                        date_plus_days(*d, other, true).unwrap_or_else(|| {
+                            self.arithmetic_op(
+                                left,
+                                right,
+                                rustledger_core::checked_sub_python_scale,
+                            )
+                        })
                     }
                     _ => self.arithmetic_op(left, right, rustledger_core::checked_sub_python_scale),
                 }

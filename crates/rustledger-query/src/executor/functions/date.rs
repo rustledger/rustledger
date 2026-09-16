@@ -5,7 +5,7 @@ use rustledger_core::NaiveDate;
 use crate::error::QueryError;
 
 use super::super::Executor;
-use super::super::types::{Interval, IntervalUnit, Value};
+use super::super::types::{DayCount, Interval, IntervalUnit, Value};
 
 /// strftime formats the one-arg `PARSE_DATE` tries (after ISO `FromStr`),
 /// covering numeric and month-name shapes — `%m-%d-%Y` first so ambiguous
@@ -169,24 +169,34 @@ impl Executor<'_> {
             }
         };
 
-        let second_arg = args[1].clone();
-        let result = match second_arg {
-            Value::Integer(days) => add_days(date, days)?,
-            Value::Number(n) => {
-                use rust_decimal::prelude::ToPrimitive;
-                let days = n.to_i64().ok_or_else(|| {
-                    QueryError::Type("DATE_ADD: days must be an integer".to_string())
-                })?;
-                add_days(date, days)?
-            }
+        let result = match &args[1] {
             Value::Interval(interval) => interval
                 .add_to_date(date)
                 .ok_or_else(|| QueryError::Evaluation("DATE_ADD: interval overflow".to_string()))?,
-            _ => {
-                return Err(QueryError::Type(
-                    "DATE_ADD: second argument must be an integer or interval".to_string(),
-                ));
-            }
+            // Same day-count rule as the `date + n` operator, so the function
+            // and the operator cannot answer one number two ways (#2324).
+            other => match other.as_day_count() {
+                DayCount::Whole(days) => add_days(date, days)?,
+                // This used to run `Decimal::to_i64`, which TRUNCATES: a call
+                // written `date_add(d, 0.5)` silently added no days at all,
+                // and `1.9` added one. bean-query refuses the call outright;
+                // saying why beats guessing which day the caller meant.
+                DayCount::Fraction => {
+                    return Err(QueryError::Type(
+                        "DATE_ADD: days must be a whole number of days".to_string(),
+                    ));
+                }
+                DayCount::OutOfRange => {
+                    return Err(QueryError::Evaluation(
+                        "DATE_ADD: day offset out of range".to_string(),
+                    ));
+                }
+                DayCount::NotNumeric => {
+                    return Err(QueryError::Type(
+                        "DATE_ADD: second argument must be an integer or interval".to_string(),
+                    ));
+                }
+            },
         };
 
         Ok(Value::Date(result))

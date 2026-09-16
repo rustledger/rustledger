@@ -972,6 +972,88 @@ fn test_convert_function() {
     }
 }
 
+/// `date ± n` takes a whole number of days on either side of `+`, and
+/// `date - date` counts the days between them (#2324). bean-query answers all
+/// of these; rledger used to refuse them and offer `date_add` / `interval`
+/// instead.
+#[test]
+fn test_date_day_arithmetic_operators() {
+    let directives = sample_directives();
+    let mut executor = Executor::new(&directives);
+
+    for (q, expected) in [
+        (
+            "SELECT date('2026-07-01') + 365",
+            Value::Date(date(2027, 7, 1)),
+        ),
+        (
+            "SELECT 365 + date('2026-07-01')",
+            Value::Date(date(2027, 7, 1)),
+        ),
+        (
+            "SELECT date('2026-07-01') - 365",
+            Value::Date(date(2025, 7, 1)),
+        ),
+        // A whole-valued decimal names a whole number of days. bean-query
+        // refuses this one (`add(date, decimal)`); answering it loses nothing.
+        (
+            "SELECT date('2026-07-01') + 30.0",
+            Value::Date(date(2026, 7, 31)),
+        ),
+        // The same answer `date_diff` gives, by construction.
+        (
+            "SELECT date('2026-07-01') - date('2026-06-01')",
+            Value::Integer(30),
+        ),
+    ] {
+        let query = parse(q).unwrap();
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.rows[0][0], expected, "{q}");
+    }
+}
+
+/// The shapes that stay errors: a date has day resolution, so a fraction has
+/// no answer to give, and `n - date` is not a date (#2324).
+#[test]
+fn test_date_day_arithmetic_refuses_what_it_should() {
+    let directives = sample_directives();
+    let mut executor = Executor::new(&directives);
+
+    for q in [
+        "SELECT date('2026-07-01') + 0.5",
+        "SELECT date('2026-07-01') - 0.5",
+        "SELECT 365 - date('2026-07-01')",
+        "SELECT date('2026-07-01') + date('2026-06-01')",
+    ] {
+        let query = parse(q).unwrap();
+        assert!(
+            executor.execute(&query).is_err(),
+            "{q} must be refused, not guessed at"
+        );
+    }
+}
+
+/// `DATE_ADD` truncated a fractional day count: `0.5` added no days at all and
+/// `1.9` added one, silently. It now refuses, by the same rule the operator
+/// uses, and still takes a whole-valued decimal (#2324).
+#[test]
+fn test_date_add_refuses_a_fractional_day_count() {
+    let directives = sample_directives();
+    let mut executor = Executor::new(&directives);
+
+    for q in [
+        "SELECT date_add(date('2026-07-01'), 0.5)",
+        "SELECT date_add(date('2026-07-01'), 1.9)",
+    ] {
+        let query = parse(q).unwrap();
+        assert!(executor.execute(&query).is_err(), "{q} must be refused");
+    }
+
+    let query = parse("SELECT date_add(date('2026-07-01'), 30.0)").unwrap();
+    let result = executor.execute(&query).unwrap();
+    assert_eq!(result.rows[0][0], Value::Date(date(2026, 7, 31)));
+}
+
 #[test]
 fn test_date_functions() {
     let directives = sample_directives();

@@ -14,6 +14,15 @@ on:
   schedule:
     - cron: '0 8 * * *'
   workflow_dispatch:
+  # A change to the script or to this file runs the SELF-TEST only (the live
+  # check is skipped below, so no token is used and no issue is written). Until
+  # this trigger existed, a broken self-test reached main and surfaced the next
+  # night: #2334 rotted on 2026-09-14 and was found two days later by reading
+  # the run history, not by CI.
+  pull_request:
+    paths:
+      - "scripts/nightly-health.py"
+      - ".github/workflows/nightly-health.yml"
 permissions:
   contents: read
   issues: write
@@ -33,7 +42,11 @@ jobs:
       # the same "results produced but never read" failure it exists to catch.
       - name: Self-test
         run: python3 scripts/nightly-health.py --self-test
+      # Skipped on pull requests: it reads the live API and writes the tracking
+      # issue, neither of which a PR should do. The self-test above is the part
+      # a PR needs, and it is the part that can regress.
       - name: Check scheduled workflows
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/nightly-health.py

@@ -102,6 +102,43 @@ fn main() {
         return;
     }
 
+    // Ask whether the wasm32 std is installed BEFORE building anything.
+    //
+    // The sub-cargo below discovers the same answer the expensive way: it
+    // compiles the fixture's whole dependency tree and only then fails on
+    // `error[E0463]: can't find crate for 'core'`. Every job that builds for
+    // another target pays for that on every run and logs 16 `cargo:warning=`
+    // lines around the failure -- `Downstream (rustfava)`, which builds the
+    // wasip2 component, has done so on every run (#2333). The outcome was
+    // never in doubt; only the cost was.
+    //
+    // `--print target-libdir` answers in milliseconds and, unlike
+    // `rustc --print target-list`, distinguishes "target known" from "std
+    // installed for it": it prints a path either way, so the path has to be
+    // probed rather than the exit status.
+    //
+    // This does not change what the e2e test sees. No sentinel is written on
+    // this path, exactly as when the build failed, so the test still skips
+    // locally and panics in CI.
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let std_installed = Command::new(&rustc)
+        .args([
+            "--print",
+            "target-libdir",
+            "--target",
+            "wasm32-unknown-unknown",
+        ])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .is_some_and(|out| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()).is_dir());
+    if !std_installed {
+        println!(
+            "cargo:warning=wasm32-unknown-unknown std not installed; skipping sample_stub fixture build (e2e test will skip locally, panic in CI). `rustup target add wasm32-unknown-unknown` to build it."
+        );
+        return;
+    }
+
     // Use a target dir under OUT_DIR so we don't pollute the
     // workspace target/ and so concurrent test runs don't fight.
     let target_dir = out_dir.join("sample_stub_target");

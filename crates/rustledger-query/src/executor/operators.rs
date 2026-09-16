@@ -4,9 +4,10 @@ use rust_decimal::Decimal;
 
 use crate::ast::{BinaryOp, BinaryOperator, UnaryOp, UnaryOperator};
 use crate::error::QueryError;
+use rustledger_core::NaiveDate;
 
 use super::Executor;
-use super::types::{Interval, PostingContext, Value};
+use super::types::{DayCount, Interval, PostingContext, Value};
 
 /// Whether `op` is an equality or ordering comparison — the operators for which
 /// a NULL operand yields SQL "UNKNOWN" (treated as not-matched).
@@ -38,6 +39,20 @@ const fn propagates_null(op: BinaryOperator) -> bool {
             | BinaryOperator::In
             | BinaryOperator::NotIn
     )
+}
+
+/// Shift `date` by a whole number of days, forward or back.
+///
+/// Both ends are fallible: `try_days` rejects a span too large to build, and
+/// `checked_add` rejects a result outside the calendar's range. Neither
+/// panics, which a bare `+` on a span would.
+fn shift_date(date: NaiveDate, days: i64) -> Result<Value, QueryError> {
+    let span = jiff::Span::new()
+        .try_days(days)
+        .map_err(|_| QueryError::Evaluation("date overflow".to_string()))?;
+    date.checked_add(span)
+        .map(Value::Date)
+        .map_err(|_| QueryError::Evaluation("date overflow".to_string()))
 }
 
 impl Executor<'_> {
@@ -406,6 +421,28 @@ impl Executor<'_> {
                             .map(Value::Date)
                             .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
                     }
+                    // A plain number on either side of `+` is a count of days
+                    // (#2324): `2026-07-01 + 365` and `365 + 2026-07-01` both
+                    // give 2027-07-01, as bean-query does. `interval(365,
+                    // 'day')` remains the explicit spelling of the same shift.
+                    (Value::Date(d), other) | (other, Value::Date(d)) => {
+                        match other.as_day_count() {
+                            DayCount::Whole(n) => shift_date(*d, n),
+                            DayCount::Fraction => Err(QueryError::Type(
+                                "date arithmetic takes a whole number of days".to_string(),
+                            )),
+                            DayCount::OutOfRange => {
+                                Err(QueryError::Evaluation("date overflow".to_string()))
+                            }
+                            // `date + date`, `date + 'x'`, NULL: let ordinary
+                            // arithmetic decide, NULL propagation included.
+                            DayCount::NotNumeric => self.arithmetic_op(
+                                left,
+                                right,
+                                rustledger_core::checked_add_python_scale,
+                            ),
+                        }
+                    }
                     // Checked so a value-range overflow yields NULL (like
                     // div-by-zero — see `arithmetic_op`) instead of panicking;
                     // `rust_decimal` panics on raw `+`/`-`/`*` overflow.
@@ -429,6 +466,30 @@ impl Executor<'_> {
                             .map(Value::Date)
                             .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
                     }
+                    // `date - date` is the count of days between them -- the
+                    // same answer `date_diff` gives, computed the same way so
+                    // the two cannot drift -- and `date - n` shifts back
+                    // (#2324). `n - date` stays an error, as in bean-query.
+                    (Value::Date(a), Value::Date(b)) => Ok(Value::Integer(i64::from(
+                        a.since(*b).unwrap_or_default().get_days(),
+                    ))),
+                    (Value::Date(d), other) => match other.as_day_count() {
+                        DayCount::Whole(n) => n
+                            .checked_neg()
+                            .ok_or_else(|| QueryError::Evaluation("date overflow".to_string()))
+                            .and_then(|back| shift_date(*d, back)),
+                        DayCount::Fraction => Err(QueryError::Type(
+                            "date arithmetic takes a whole number of days".to_string(),
+                        )),
+                        DayCount::OutOfRange => {
+                            Err(QueryError::Evaluation("date overflow".to_string()))
+                        }
+                        DayCount::NotNumeric => self.arithmetic_op(
+                            left,
+                            right,
+                            rustledger_core::checked_sub_python_scale,
+                        ),
+                    },
                     _ => self.arithmetic_op(left, right, rustledger_core::checked_sub_python_scale),
                 }
             }

@@ -385,6 +385,27 @@ WHERE date = 2024-01-15
 WHERE date >= 2024-01-01 AND date < 2024-04-01
 ```
 
+## Date Arithmetic
+
+A date takes a whole number of days on either side of `+`, and gives a date back:
+
+```sql
+WHERE date >= 2026-07-01 AND date < 2026-07-01 + 365
+SELECT 2026-07-01 - 30 AS a_month_earlier
+```
+
+Subtracting one date from another gives the number of days between them:
+
+```sql
+SELECT max(date) - min(date) AS days_covered
+```
+
+The count has to be whole. `2026-07-01 + 0.5` is an error rather than a guess,
+because a date has day resolution; a whole-valued decimal such as `30.0` is
+fine. `date_add(date, days)` spells the same shift as a function, and
+`date + interval(n, 'day')` spells it with the unit named -- `interval` also
+takes `week`, `month`, `quarter` and `year`.
+
 ## Tags and Links
 
 ### Filtering by Tag

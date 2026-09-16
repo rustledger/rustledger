@@ -88,6 +88,23 @@ impl Interval {
     }
 }
 
+/// How a value reads as a count of days in date arithmetic.
+///
+/// One rule, shared by the `date ± n` operators and `DATE_ADD`, so the two
+/// cannot answer the same number differently (#2324).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DayCount {
+    /// A whole number of days.
+    Whole(i64),
+    /// Numeric, but carrying a fraction. A date has day resolution, so
+    /// `date + 0.5` has no answer to give and must not be guessed at.
+    Fraction,
+    /// Whole, but outside the range a date can be shifted by.
+    OutOfRange,
+    /// Not a number; date arithmetic does not apply.
+    NotNumeric,
+}
+
 /// A value that can result from evaluating a BQL expression.
 ///
 /// Heavy variants (Inventory, Position, Metadata, Object) are boxed to reduce
@@ -132,6 +149,31 @@ pub enum Value {
 }
 
 impl Value {
+    /// Read this value as a count of days.
+    ///
+    /// bean-query accepts only its `int` type on either side of a date:
+    /// `date + 1.0` is `operator "add(date, decimal)" not supported` there.
+    /// This accepts any value that names a whole number of days, so
+    /// `date + 30.0` works as well as `date + 30` -- the meaning is
+    /// unambiguous and refusing it buys nothing. A genuine fraction is still
+    /// refused rather than truncated, which is what `DATE_ADD` used to do
+    /// silently: `date_add(d, 0.5)` added no days at all and `1.9` added one.
+    pub(crate) fn as_day_count(&self) -> DayCount {
+        use rust_decimal::prelude::ToPrimitive;
+
+        match self {
+            Self::Integer(n) => DayCount::Whole(*n),
+            Self::Number(n) => {
+                if n.fract() == Decimal::ZERO {
+                    n.to_i64().map_or(DayCount::OutOfRange, DayCount::Whole)
+                } else {
+                    DayCount::Fraction
+                }
+            }
+            _ => DayCount::NotNumeric,
+        }
+    }
+
     /// Compute a hash for this value.
     ///
     /// Note: This is not the standard Hash trait because some contained types

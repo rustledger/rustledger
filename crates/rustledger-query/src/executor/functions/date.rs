@@ -169,14 +169,13 @@ impl Executor<'_> {
             }
         };
 
-        let second_arg = args[1].clone();
-        let result = match second_arg {
+        let result = match &args[1] {
             Value::Interval(interval) => interval
                 .add_to_date(date)
                 .ok_or_else(|| QueryError::Evaluation("DATE_ADD: interval overflow".to_string()))?,
             // Same day-count rule as the `date + n` operator, so the function
             // and the operator cannot answer one number two ways (#2324).
-            ref other => match other.as_day_count() {
+            other => match other.as_day_count() {
                 DayCount::Whole(days) => add_days(date, days)?,
                 // This used to run `Decimal::to_i64`, which TRUNCATES: a call
                 // written `date_add(d, 0.5)` silently added no days at all,

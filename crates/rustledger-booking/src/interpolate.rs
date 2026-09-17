@@ -1565,17 +1565,28 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
             return Err(InterpolationError::NegativeInferredCost { currency, per_unit });
         }
 
+        // `try_new`, not `new`: a division that SUCCEEDS can still yield a
+        // per-unit that cannot reproduce the total, so checked arithmetic
+        // alone does not establish `BookedCost`'s invariant. With `units`
+        // near `Decimal::MAX` the quotient UNDERFLOWS — `-2.55 / 7.9e28` is
+        // ~-3.2e-29, below `rust_decimal`'s 1e-28 minimum — so `checked_div`
+        // returns `Some(0)`, `0 * 7.9e28` is 0, not -2.55, and `new`'s
+        // debug-assert fires. Checked ops guard the top of the range only;
+        // the constructor guards both ends (#2340). Computed BEFORE the
+        // posting is touched so the rejected case leaves it unmodified.
+        let booked = BookedCost::try_new(per_unit, total, units_number).map_err(|_| {
+            InterpolationError::Unrepresentable {
+                currency: currency.clone(),
+            }
+        })?;
+
         let existing = transaction.postings[idx]
             .cost
             .take()
             .map_or_else(CostSpec::empty, |boxed| *boxed);
         rollback.touch(transaction, idx);
         transaction.postings[idx].cost = Some(Box::new(CostSpec {
-            number: Some(CostNumber::PerUnitFromTotal(BookedCost::new(
-                per_unit,
-                total,
-                units_number,
-            ))),
+            number: Some(CostNumber::PerUnitFromTotal(booked)),
             currency: Some(currency.clone()),
             date: existing.date.or(Some(transaction.date)),
             label: existing.label,
@@ -2393,6 +2404,37 @@ mod tests {
             txn, before,
             "a transaction that failed to interpolate must read exactly as it \
              was passed in - it is merged back into the ledger and shown"
+        );
+    }
+
+    /// A cost solved from a residual can UNDERFLOW, and a division that
+    /// succeeded does not prove its result is usable.
+    ///
+    /// `total / |units|` with `units` at `Decimal::MAX` gives a quotient
+    /// below `rust_decimal`'s 1e-28 minimum, so `checked_div` returns
+    /// `Some(0)` — no overflow to catch — and that per-unit no longer
+    /// reproduces the total: `0 * 7.9e28` is `0`, not `2.55`.
+    /// `BookedCost::new` debug-asserts exactly that invariant, so the engine
+    /// has to construct through `try_new` and report instead of asserting.
+    ///
+    /// Found by the widened booking fuzzer (#2340); the crash input is kept
+    /// at `fuzz/regressions/fuzz_booking/booked-cost-underflow-2344`.
+    #[test]
+    fn an_inferred_cost_that_underflows_to_zero_is_reported_not_asserted() {
+        use rustledger_core::CostSpec;
+
+        let txn = Transaction::new(date(2024, 1, 15), "underflowing inferred cost")
+            .with_synthesized_posting(
+                Posting::new("Assets:Shares", Amount::new(Decimal::MAX, "SHARES"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-2.55), "USD")));
+
+        let err = interpolate(&txn)
+            .expect_err("a per-unit that cannot reproduce its total must not be booked");
+        assert!(
+            matches!(err, InterpolationError::Unrepresentable { .. }),
+            "expected the underflow to be reported, got {err:?}"
         );
     }
 

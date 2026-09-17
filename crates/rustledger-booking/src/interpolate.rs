@@ -1548,7 +1548,17 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
         // have; the solved cost is then rendered with it (`cost_number`).
         // The VALUE is untouched, so `BookedCost`'s
         // `per_unit x |units| == total` invariant still holds.
-        let per_unit = (total / units_number.abs()).normalize();
+        // Checked, like the six divisions in `book.rs` and `cost.rs` (#2327).
+        // This one was MISSED by that sweep: it grepped those two files for
+        // `/ units...abs()` and this path is in a third, so the pattern could
+        // not have found it. The widened booking fuzzer (#2340) reached it on
+        // its first run, which is the whole argument for widening it.
+        let per_unit = total
+            .checked_div(units_number.abs())
+            .ok_or_else(|| InterpolationError::Unrepresentable {
+                currency: currency.clone(),
+            })?
+            .normalize();
         if per_unit < Decimal::ZERO {
             // Beancount: "Cost is negative" — a lot cannot be acquired at a
             // negative cost (#1705 edge e14).
@@ -4475,5 +4485,35 @@ mod tests {
             }
             other => panic!("expected CannotInferCurrency, got {other:?}"),
         }
+    }
+    /// Solving a cost from a residual divides, and that division panicked.
+    ///
+    /// `total / units_number.abs()` had no check, so a residual far larger
+    /// than the unit count took the process down. #2327 fixed six divisions of
+    /// this class in `book.rs` and `cost.rs` and missed this one: its sweep
+    /// grepped those two files, and this lives in a third. The widened booking
+    /// fuzzer (#2340) reached it minutes into its first run, and the input it
+    /// found is kept at
+    /// `fuzz/regressions/fuzz_booking/interpolated-cost-division-overflow-2340`.
+    #[test]
+    fn interpolated_cost_reports_an_unrepresentable_quotient() {
+        use crate::book::BookingEngine;
+
+        // A cost-bearing posting with elided units forces the solver to derive
+        // a per-unit cost, and a residual of ~7.9e28 over 1e-28 units cannot be
+        // represented.
+        let tiny = Decimal::from_str_exact("0.0000000000000000000000000001").expect("fits");
+        let huge = Decimal::from_str_exact("79228162514264337593543950335").expect("Decimal::MAX");
+        let txn = Transaction::new(date(2026, 1, 1), "solve a cost")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(tiny, "W"))
+                    .with_cost(CostSpec::empty().with_currency("USD")),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(-huge, "USD")));
+
+        let engine = BookingEngine::new();
+        // The contract is "reports", not "returns Ok": either outcome is fine,
+        // a panic is not. Before the fix this line aborted the process.
+        let _ = engine.book_and_interpolate(&txn);
     }
 }

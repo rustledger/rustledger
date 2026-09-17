@@ -59,7 +59,15 @@ fn average_cost_from_positions(
         return Ok(None);
     }
 
-    Ok(Some((total_cost / total_units, cost_currency.unwrap())))
+    // Checked: the multiplication above was made checked by #1863 and the
+    // division beside it was left bare, which is the same miss #2327 repeated
+    // (#2340). `checked_div` also covers a zero divisor, which panics too.
+    let per_unit = total_cost.checked_div(total_units).ok_or_else(|| {
+        BookingError::Overflow(OverflowError {
+            currency: cost_currency.clone().unwrap_or_default(),
+        })
+    })?;
+    Ok(Some((per_unit, cost_currency.unwrap())))
 }
 
 /// A reduction computed from `&Inventory` but not yet applied.

@@ -655,7 +655,14 @@ impl BookingEngine {
                                 let Some(cost) = &m.cost else { continue };
                                 let lot_units = m.units.number.abs();
                                 // The lot's cost value (in the cost currency).
-                                let lot_value = lot_units * cost.number;
+                                // Checked like every other product here (#1863,
+                                // #2327): both factors are user-supplied, so
+                                // their product can leave the range where a bare
+                                // `*` PANICS. The fuzzer reaches these now (#2340).
+                                let lot_value =
+                                    lot_units.checked_mul(cost.number).ok_or_else(|| {
+                                        cost_overflow(&posting.account, Some(&cost.currency), units)
+                                    })?;
                                 // The reduction's sale value (in the sale-price currency).
                                 // A `Unit` (`@`) price is exact per unit. A `Total` (`@@`)
                                 // price is the EXACT pro-rata share `total × units /
@@ -667,10 +674,17 @@ impl BookingEngine {
                                 // the booking layer to the total's own scale both distorts
                                 // round-dollar totals and can drive the last lot negative.
                                 // The exact fractions match Python beancount.
+                                let overflow =
+                                    || cost_overflow(&posting.account, Some(&amt.currency), units);
                                 let sale_value = match price.kind {
-                                    rustledger_core::PriceKind::Unit => amt.number * lot_units,
+                                    rustledger_core::PriceKind::Unit => {
+                                        amt.number.checked_mul(lot_units).ok_or_else(overflow)?
+                                    }
                                     rustledger_core::PriceKind::Total if !total_units.is_zero() => {
-                                        amt.number * lot_units / total_units
+                                        amt.number
+                                            .checked_mul(lot_units)
+                                            .and_then(|v| v.checked_div(total_units))
+                                            .ok_or_else(overflow)?
                                     }
                                     rustledger_core::PriceKind::Total => Decimal::ZERO,
                                 };

@@ -826,11 +826,17 @@ pub fn normalize_prices(txn: &mut Transaction) {
         {
             let normalized = match price.amount.as_ref().and_then(IncompleteAmount::as_amount) {
                 Some(total_amount) if !units.number.is_zero() => {
-                    let per_unit = total_amount.number / units.number.abs();
-                    Some(PriceAnnotation::unit(Amount::new(
-                        per_unit,
-                        &total_amount.currency,
-                    )))
+                    // Checked (#2327 follow-up, found by the widened fuzzer in
+                    // #2340): a total far larger than the unit count makes this
+                    // quotient leave `Decimal`'s range, where a bare `/` PANICS.
+                    // `None` leaves the `@@` price as written, which is what the
+                    // zero-units arm below already does when it cannot convert.
+                    total_amount
+                        .number
+                        .checked_div(units.number.abs())
+                        .map(|per_unit| {
+                            PriceAnnotation::unit(Amount::new(per_unit, &total_amount.currency))
+                        })
                 }
                 Some(_) => None, // units.number is zero — leave alone
                 None => {

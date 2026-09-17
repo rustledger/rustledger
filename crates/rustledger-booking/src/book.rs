@@ -1857,6 +1857,60 @@ mod tests {
         eprintln!("Position cost: {:?}", pos.cost);
     }
 
+    /// The compound site (`{a # b}`) reaches the same underflow by a
+    /// different route: it sums `|units| * a + b` and divides that by
+    /// `|units|`, so `{0 # 2.55 USD}` over `Decimal::MAX` units lands on the
+    /// identical unusable quotient (#2340).
+    #[test]
+    fn an_augmenting_compound_cost_that_underflows_to_zero_is_reported() {
+        let engine = BookingEngine::new();
+
+        let cost = CostSpec::empty()
+            .with_number(rustledger_core::CostNumber::Compound {
+                per_unit: Decimal::ZERO,
+                total: dec!(2.55),
+            })
+            .with_currency("USD");
+        let buy = Transaction::new(date(2024, 1, 15), "compound cost over enormous units")
+            .with_synthesized_posting(
+                Posting::new("Assets:Shares", Amount::new(Decimal::MAX, "SHARES")).with_cost(cost),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-2.55), "USD")));
+
+        let err = engine
+            .book(&buy)
+            .expect_err("a compound cost that cannot be represented must not be booked");
+        assert!(
+            format!("{err}").to_lowercase().contains("range"),
+            "expected an unrepresentable-amount error, got {err:?}"
+        );
+    }
+
+    /// And the reduction filter: a `{{total}}` on a SALE is turned into a
+    /// per-unit lot-match filter before any lot is looked at, so the same
+    /// underflow is reachable with nothing in the inventory at all (#2340).
+    #[test]
+    fn a_reducing_total_cost_that_underflows_to_zero_is_reported() {
+        let engine = BookingEngine::new();
+
+        let cost = CostSpec::empty()
+            .with_number(rustledger_core::CostNumber::Total { value: dec!(2.55) })
+            .with_currency("USD");
+        let sell = Transaction::new(date(2024, 1, 15), "sell enormous units at a total cost")
+            .with_synthesized_posting(
+                Posting::new("Assets:Shares", Amount::new(-Decimal::MAX, "SHARES")).with_cost(cost),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(2.55), "USD")));
+
+        let err = engine
+            .book(&sell)
+            .expect_err("a lot filter that cannot be represented must not be built");
+        assert!(
+            format!("{err}").to_lowercase().contains("range"),
+            "expected an unrepresentable-amount error, got {err:?}"
+        );
+    }
+
     /// The augmentation site shares the underflow the fuzzer found on the
     /// interpolation site (#2340): `{{2.55 USD}}` over `Decimal::MAX` units
     /// derives a per-unit of 0, which cannot reproduce the 2.55 total.

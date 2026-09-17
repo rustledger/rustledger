@@ -151,6 +151,32 @@ pub enum InterpolationError {
     },
 }
 
+impl InterpolationError {
+    /// The account this failure is about, when it names one.
+    ///
+    /// Five of these variants are about a single posting and name its
+    /// account; the rest are about the transaction as a whole -- a balance
+    /// that does not reach zero, or several postings missing at once -- and
+    /// have no one posting to point at. Callers use this to place a
+    /// diagnostic on the offending posting rather than the whole directive
+    /// (#2330), and fall back to the directive when it returns `None`.
+    #[must_use]
+    pub const fn account(&self) -> Option<&rustledger_core::Account> {
+        match self {
+            Self::UnsolvableUnits { account, .. }
+            | Self::AmbiguousBarePriceCurrency { account, .. }
+            | Self::UnsolvablePrice { account, .. }
+            | Self::NegativeInferredPrice { account, .. }
+            | Self::CannotInferCurrency { account, .. } => Some(account),
+            Self::MultipleMissing { .. }
+            | Self::NegativeInferredCost { .. }
+            | Self::AmbiguousInferredCostCurrency { .. }
+            | Self::DoesNotBalance { .. }
+            | Self::Unrepresentable { .. } => None,
+        }
+    }
+}
+
 /// Result of interpolation.
 #[derive(Debug, Clone)]
 pub struct InterpolationResult {

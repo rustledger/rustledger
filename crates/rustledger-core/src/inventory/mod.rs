@@ -1563,11 +1563,12 @@ impl Inventory {
         // method is called twice per posting. So answer "cannot prove it",
         // which is the one direction this predicate is allowed to be wrong in.
         //
-        // Rare in practice: a cost-less currency has exactly one lot, so it can
-        // never be mixed. It takes two cost-bearing lots of opposite sign in
-        // one account and commodity — a long and a short held together — and
-        // the cost of a `false` is an `imbl` snapshot with O(1) structural
-        // sharing.
+        // Rare in practice: cost-less adds always merge, so a currency holds at
+        // most one cost-less lot and cost-less-only can never be mixed. It
+        // takes lots of opposite sign in one account and commodity — a long and
+        // a short held together, or a cost-less lot beside an opposite
+        // cost-bearing one — and the cost of a `false` is an `imbl` snapshot
+        // with O(1) structural sharing.
         let (positive_lots, negative_lots) = stats.counts.by_sign();
         if positive_lots > 0 && negative_lots > 0 {
             return false;

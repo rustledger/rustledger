@@ -390,22 +390,19 @@ impl BookingEngine {
                             .checked_mul(per_unit)
                             .and_then(|v| v.checked_add(total))
                             .ok_or_else(|| {
-                                convert_core_booking_error(
-                                    rustledger_core::BookingError::Overflow(
-                                        rustledger_core::OverflowError {
-                                            currency: cost_spec
-                                                .currency
-                                                .clone()
-                                                .unwrap_or_else(|| units.currency.clone()),
-                                        },
-                                    ),
-                                    &posting.account,
-                                )
+                                cost_overflow(&posting.account, cost_spec.currency.as_ref(), units)
+                            })?;
+                        // Checked for the same reason the multiplication above
+                        // is: the quotient can leave the range even when both
+                        // operands sit inside it (#2327).
+                        let combined_per_unit =
+                            combined.checked_div(units.number.abs()).ok_or_else(|| {
+                                cost_overflow(&posting.account, cost_spec.currency.as_ref(), units)
                             })?;
                         Some(CostSpec {
                             number: Some(rustledger_core::CostNumber::PerUnitFromTotal(
                                 rustledger_core::BookedCost::new(
-                                    combined / units.number.abs(),
+                                    combined_per_unit,
                                     combined,
                                     units.number,
                                 ),
@@ -485,10 +482,18 @@ impl BookingEngine {
                             Some(rustledger_core::CostNumber::Total { value: total })
                                 if !units.number.is_zero() =>
                             {
+                                let per_unit =
+                                    total.checked_div(units.number.abs()).ok_or_else(|| {
+                                        cost_overflow(
+                                            &posting.account,
+                                            cost_spec.currency.as_ref(),
+                                            units,
+                                        )
+                                    })?;
                                 total_filter = CostSpec {
                                     number: Some(rustledger_core::CostNumber::PerUnitFromTotal(
                                         rustledger_core::BookedCost::new(
-                                            total / units.number.abs(),
+                                            per_unit,
                                             total,
                                             units.number,
                                         ),
@@ -550,13 +555,30 @@ impl BookingEngine {
                                 // rounding loss from `(take * c) / take` on full-precision
                                 // total-cost lots (#2048).
                                 let matched_pos = booking_result.matched.first();
-                                let matched_cost = matched_pos
-                                    .and_then(|p| p.cost.as_ref())
-                                    .cloned()
-                                    .unwrap_or_else(|| {
-                                        let per_unit = cost_basis.number / units.number.abs();
-                                        Cost::new_calculated(per_unit, cost_basis.currency.clone())
-                                    });
+                                // The `else` is reached when the matched position
+                                // carries no cost of its own, and the quotient there
+                                // is checked like the other three (#2327): it can
+                                // leave `Decimal`'s range even though the basis and
+                                // the units each sit inside it. `unwrap_or_else`
+                                // cannot carry the error out of its closure, which is
+                                // why this is an `if let` rather than that.
+                                let matched_cost = if let Some(cost) =
+                                    matched_pos.and_then(|p| p.cost.as_ref()).cloned()
+                                {
+                                    cost
+                                } else {
+                                    let per_unit = cost_basis
+                                        .number
+                                        .checked_div(units.number.abs())
+                                        .ok_or_else(|| {
+                                            cost_overflow(
+                                                &posting.account,
+                                                Some(&cost_basis.currency),
+                                                units,
+                                            )
+                                        })?;
+                                    Cost::new_calculated(per_unit, cost_basis.currency.clone())
+                                };
 
                                 // Update posting with filled cost. Carry the
                                 // matched lot's label (as the date already is) so
@@ -684,7 +706,9 @@ impl BookingEngine {
                     if let Some(currency) = &cost_spec.currency
                         && !units.number.is_zero()
                     {
-                        let per_unit = total / units.number.abs();
+                        let per_unit = total.checked_div(units.number.abs()).ok_or_else(|| {
+                            cost_overflow(&posting.account, Some(currency), units)
+                        })?;
                         result.postings[idx].cost = Some(Box::new(CostSpec {
                             number: Some(rustledger_core::CostNumber::PerUnitFromTotal(
                                 rustledger_core::BookedCost::new(per_unit, total, units.number),
@@ -1474,6 +1498,31 @@ fn convert_core_booking_error(
     BookingError::Inventory(err.with_account(account.clone()))
 }
 
+/// The error for a cost whose per-unit value cannot be represented.
+///
+/// `total / |units|` leaves `Decimal`'s range (~7.9e28) when the total is large
+/// and the unit count small -- `79000000000000000000000000000 W {{...}}` over
+/// `0.0000000001` units needs 7.9e38. `rust_decimal`'s `Div` PANICS there, so
+/// an absurd but parseable ledger took the process down, and any host embedding
+/// the engine with it (#2327).
+///
+/// #1863 made the multiplication at one of these sites checked and left the
+/// division beside it bare; this names the currency the same way that fix does.
+fn cost_overflow(
+    account: &rustledger_core::Account,
+    cost_currency: Option<&rustledger_core::Currency>,
+    units: &rustledger_core::Amount,
+) -> BookingError {
+    convert_core_booking_error(
+        rustledger_core::BookingError::Overflow(rustledger_core::OverflowError {
+            currency: cost_currency
+                .cloned()
+                .unwrap_or_else(|| units.currency.clone()),
+        }),
+        account,
+    )
+}
+
 /// Book and interpolate a list of transactions.
 ///
 /// This processes transactions in order, tracking inventory to enable
@@ -2218,6 +2267,88 @@ mod tests {
             .inventory(&"Assets:Short".into())
             .map_or(Decimal::ZERO, |inv| inv.units("W5"));
         assert_eq!(left, Decimal::ZERO);
+    }
+
+    /// A total far larger than the unit count makes `total / |units|` leave
+    /// `Decimal`'s range. The division was bare where the multiplication beside
+    /// it had been made checked (#1863), so an absurd-but-parseable ledger
+    /// panicked the process instead of being diagnosed (#2327).
+    ///
+    /// `7.9e28` is just under `Decimal::MAX`; over `1e-10` units it needs
+    /// `7.9e38`, which does not fit.
+    fn tc_huge_total() -> Decimal {
+        Decimal::from_str_exact("79000000000000000000000000000").expect("fits in Decimal")
+    }
+
+    #[test]
+    fn test_book_augmentation_with_unrepresentable_per_unit_errors() {
+        let engine = BookingEngine::new();
+        let buy = tc_trade(
+            date(2026, 1, 1),
+            "Assets:Tiny",
+            Decimal::from_str_exact("0.0000000001").expect("fits"),
+            "W7",
+            tc_total_cost(tc_huge_total(), None),
+            dec!(-1.00),
+        );
+        let result = engine.book(&buy);
+        assert!(
+            result.is_err(),
+            "an unrepresentable per-unit cost must be reported, not panicked on"
+        );
+    }
+
+    #[test]
+    fn test_book_total_cost_reduction_with_unrepresentable_per_unit_errors() {
+        let mut engine = BookingEngine::new();
+        let tiny = Decimal::from_str_exact("0.0000000001").expect("fits");
+        let buy = tc_trade(
+            date(2026, 1, 1),
+            "Assets:Tiny",
+            tiny,
+            "W8",
+            tc_total_cost(dec!(1.00), None),
+            dec!(-1.00),
+        );
+        let booked = engine.book(&buy).expect("a sane total books");
+        engine.apply(&booked.transaction).unwrap();
+
+        let sell = tc_trade(
+            date(2026, 2, 1),
+            "Assets:Tiny",
+            -tiny,
+            "W8",
+            tc_total_cost(tc_huge_total(), None),
+            dec!(1.00),
+        );
+        let result = engine.book(&sell);
+        assert!(
+            result.is_err(),
+            "an unrepresentable per-unit filter must be reported, not panicked on"
+        );
+    }
+
+    #[test]
+    fn test_book_compound_cost_with_unrepresentable_per_unit_errors() {
+        let engine = BookingEngine::new();
+        let mut spec = tc_total_cost(dec!(0), None);
+        spec.number = Some(rustledger_core::CostNumber::Compound {
+            per_unit: dec!(0),
+            total: tc_huge_total(),
+        });
+        let buy = tc_trade(
+            date(2026, 1, 1),
+            "Assets:Tiny",
+            Decimal::from_str_exact("0.0000000001").expect("fits"),
+            "W9",
+            spec,
+            dec!(-1.00),
+        );
+        let result = engine.book(&buy);
+        assert!(
+            result.is_err(),
+            "an unrepresentable compound per-unit must be reported, not panicked on"
+        );
     }
 
     #[test]

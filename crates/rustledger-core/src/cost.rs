@@ -819,7 +819,13 @@ impl CostSpec {
                 if units.is_zero() {
                     return None;
                 }
-                total / units.abs()
+                // Checked for the same reason zero units are guarded above: the
+                // quotient can leave `Decimal`'s range when the total is large
+                // and the unit count small, where a bare `/` PANICS (#2327).
+                // `None` here means what it means for zero units -- there is no
+                // cost to resolve -- and the booking engine reports the overflow
+                // itself before any caller reaches this.
+                total.checked_div(units.abs())?
             }
             // Compound `{a # b}`: effective per-unit is (N*a + b)/N —
             // beancount's compound_amount. Same zero-units guard as Total.
@@ -827,7 +833,10 @@ impl CostSpec {
                 if units.is_zero() {
                     return None;
                 }
-                per_unit + total / units.abs()
+                // Both operations checked: the division for the reason above,
+                // and the addition because `a + b/N` can leave the range even
+                // when the quotient fits (#2327).
+                per_unit.checked_add(total.checked_div(units.abs())?)?
             }
             // Already booked: `b.per_unit == b.total / |units|` by
             // `BookedCost::new`'s invariant, so this is identical to

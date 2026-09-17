@@ -1,0 +1,48 @@
+; `{{total}}` reductions that must book, end to end (#2306, #2328).
+;
+; Verified against Python beancount 3.2.3: it accepts every transaction here
+; and leaves the same holdings.
+option "operating_currency" "USD"
+
+2026-01-01 open Assets:Pick
+2026-01-01 open Assets:Precision
+2026-01-01 open Assets:Short
+2026-01-01 open Assets:Cash
+2026-01-01 open Income:Gain
+
+; The total NAMES the lot: selling {{60.00}} takes the dear lot and leaves the
+; cheap one, which is not the lot the booking method would pick on its own.
+2026-01-01 * "buy cheap"
+  Assets:Pick   1 W {40.00 USD}
+  Assets:Cash
+
+2026-01-02 * "buy dear"
+  Assets:Pick   1 W {60.00 USD}
+  Assets:Cash
+
+2026-02-01 * "sell the dear lot by total"
+  Assets:Pick  -1 W {{60.00 USD}}
+  Assets:Cash   70.00 USD
+  Income:Gain
+
+; Full precision: 100.00/3 does not terminate, so a lossy round trip through
+; the per-unit value fails to match the lot it came from.
+2026-01-01 * "buy three for a hundred"
+  Assets:Precision   3 X {{100.00 USD}}
+  Assets:Cash
+
+2026-02-01 * "sell all three at the same total"
+  Assets:Precision  -3 X {{100.00 USD}}
+  Assets:Cash        110.00 USD
+  Income:Gain
+
+; Covering a short: the reduction has POSITIVE units, which is what the
+; `units.abs()` in the filter is for.
+2026-01-01 * "short two"
+  Assets:Short  -2 Y {{100.00 USD}}
+  Assets:Cash    100.00 USD
+
+2026-02-01 * "cover two at the same total"
+  Assets:Short   2 Y {{100.00 USD}}
+  Assets:Cash   -90.00 USD
+  Income:Gain

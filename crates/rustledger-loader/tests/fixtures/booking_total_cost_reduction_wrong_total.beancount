@@ -1,0 +1,24 @@
+; A `{{total}}` reduction whose total no lot has must NOT book (#2325, #2328).
+;
+; Before #2306 this booked silently against whatever lot the method picked,
+; reporting a cost basis the ledger never stated. Python beancount 3.2.3
+; rejects it with "No position matches".
+option "operating_currency" "USD"
+
+2026-01-01 open Assets:Brokerage
+2026-01-01 open Assets:Cash
+2026-01-01 open Income:Gain
+
+2026-01-01 * "buy lot one"
+  Assets:Brokerage   1 ABC {50.00 USD}
+  Assets:Cash
+
+2026-01-02 * "buy lot two"
+  Assets:Brokerage   1 ABC {50.00 USD}
+  Assets:Cash
+
+; Two lots at 50.00 each cost 100.00 together, not 90.00.
+2026-02-01 * "sell both, total written as 90.00"
+  Assets:Brokerage  -2 ABC {{90.00 USD}}
+  Assets:Cash        120.00 USD
+  Income:Gain

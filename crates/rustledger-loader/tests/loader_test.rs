@@ -2516,3 +2516,95 @@ fn test_units_number_without_currency_keeps_its_number_and_reports_imbalance() {
     );
     assert_eq!(units.currency, "USD");
 }
+
+// ============================================================================
+// `{{total}}` reductions, end to end (#2306, #2325, #2328)
+// ============================================================================
+//
+// The booking rule these exercise had unit tests in `rustledger-booking` and
+// nothing that loaded a ledger through parse -> book -> validate. The whole
+// repository held one `{{total}}` reduction fixture, and it runs under
+// `option "booking_method" "NONE"`, which skips reduction matching entirely --
+// so no corpus, parity or compatibility test covered a total-cost reduction
+// that actually matches a lot (#2328).
+//
+// Both fixtures were checked against Python beancount 3.2.3, which accepts the
+// first (leaving `1 W {40.00 USD, 2026-01-01}` in Assets:Pick, with
+// Assets:Precision and Assets:Short empty) and rejects the second with
+// "No position matches".
+
+/// Finds the per-unit cost and acquisition date a booked posting ended up with.
+fn booked_cost(
+    ledger: &rustledger_loader::Ledger,
+    narration: &str,
+    account: &str,
+) -> (rustledger_core::Decimal, Option<rustledger_core::NaiveDate>) {
+    for directive in &ledger.directives {
+        let rustledger_core::Directive::Transaction(txn) = &directive.value else {
+            continue;
+        };
+        if txn.narration.as_str() != narration {
+            continue;
+        }
+        for posting in &txn.postings {
+            if posting.account.as_str() != account {
+                continue;
+            }
+            let cost = posting
+                .cost
+                .as_ref()
+                .unwrap_or_else(|| panic!("{narration}: {account} posting has no cost"));
+            let per_unit = cost
+                .number
+                .and_then(|n| n.per_unit())
+                .unwrap_or_else(|| panic!("{narration}: cost carries no per-unit value"));
+            return (per_unit, cost.date);
+        }
+    }
+    panic!("no {account} posting in a transaction narrated {narration:?}");
+}
+
+/// A `{{total}}` sale books against the lot its total names, not the lot the
+/// booking method would otherwise pick.
+#[test]
+fn test_total_cost_reduction_books_the_lot_its_total_names() {
+    let path = fixtures_path("booking_total_cost_reduction.beancount");
+    let ledger = load(&path, &LoadOptions::default()).expect("should load and process");
+
+    assert!(
+        ledger.errors.is_empty(),
+        "beancount accepts every transaction in this fixture; got: {:?}",
+        ledger.errors,
+    );
+
+    // Two lots, 40.00 on 01-01 and 60.00 on 01-02. Selling `{{60.00 USD}}`
+    // must take the DEAR one: FIFO, the method that would otherwise decide,
+    // would have taken the cheap lot bought first.
+    let (per_unit, acquired) = booked_cost(&ledger, "sell the dear lot by total", "Assets:Pick");
+    assert_eq!(
+        per_unit,
+        rust_decimal_macros::dec!(60.00),
+        "the total named the 60.00 lot",
+    );
+    assert_eq!(
+        acquired,
+        Some(rustledger_core::naive_date(2026, 1, 2).expect("valid date")),
+        "and it carries that lot's acquisition date, which drives the \
+         short/long split in capgains",
+    );
+}
+
+/// A total no lot has must not book. Before #2306 it booked silently against
+/// whatever lot the method picked, reporting a basis the ledger never stated.
+#[test]
+fn test_total_cost_reduction_with_a_wrong_total_is_reported() {
+    let path = fixtures_path("booking_total_cost_reduction_wrong_total.beancount");
+    let ledger = load(&path, &LoadOptions::default()).expect("should load and process");
+
+    assert!(
+        ledger.errors.iter().any(|e| e.code == "BOOK"),
+        "two lots at 50.00 do not cost 90.00 together; beancount reports \
+         \"No position matches\" and so must we -- got errors: {:?}",
+        ledger.errors,
+    );
+}

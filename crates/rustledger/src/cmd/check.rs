@@ -91,24 +91,6 @@ pub struct JsonOutput {
     pub rule_summary: Option<std::collections::BTreeMap<String, usize>>,
 }
 
-/// Convert a byte offset to (line, column) in 1-based indexing.
-fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
-    let mut line = 1;
-    let mut col = 1;
-    for (i, ch) in source.char_indices() {
-        if i >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
-}
-
 /// Validate beancount files and report errors.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -341,8 +323,9 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                 if json_mode {
                     for error in errors {
                         let (start_line, start_col) =
-                            byte_offset_to_line_col(&source, error.span.start);
-                        let (end_line, end_col) = byte_offset_to_line_col(&source, error.span.end);
+                            rustledger_loader::line_col_in(&source, error.span.start);
+                        let (end_line, end_col) =
+                            rustledger_loader::line_col_in(&source, error.span.end);
                         diagnostics.push(JsonDiagnostic {
                             file: path_str.clone(),
                             line: start_line,
@@ -383,22 +366,23 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                     // Prefer the include site when present so JSON consumers
                     // land on the directive the user wrote, not line 1 of a
                     // missing target that never existed on disk.
-                    let (file, line, column, end_line, end_column) = if let Some(site) =
-                        include_site
-                    {
-                        if let Some(src) = load_result.source_map.get(site.file_id as usize) {
-                            // Character columns, like every other diagnostic
-                            // here (`byte_offset_to_line_col`); `line_col` counts
-                            // bytes, which disagrees on any non-ASCII line.
-                            let (sl, sc) = byte_offset_to_line_col(&src.source, site.span.start);
-                            let (el, ec) = byte_offset_to_line_col(&src.source, site.span.end);
-                            (site.file.display().to_string(), sl, sc, el, ec)
+                    let (file, line, column, end_line, end_column) =
+                        if let Some(site) = include_site {
+                            if let Some(src) = load_result.source_map.get(site.file_id as usize) {
+                                // Character columns, as everywhere else: since
+                                // #2341 `line_col_in` and `SourceFile::line_col`
+                                // are two surfaces of one rule, pinned to agree.
+                                let (sl, sc) =
+                                    rustledger_loader::line_col_in(&src.source, site.span.start);
+                                let (el, ec) =
+                                    rustledger_loader::line_col_in(&src.source, site.span.end);
+                                (site.file.display().to_string(), sl, sc, el, ec)
+                            } else {
+                                (site.file.display().to_string(), 1, 1, 1, 1)
+                            }
                         } else {
-                            (site.file.display().to_string(), 1, 1, 1, 1)
-                        }
-                    } else {
-                        (path_str.clone(), 1, 1, 1, 1)
-                    };
+                            (path_str.clone(), 1, 1, 1, 1)
+                        };
                     // With an include site, `file` names the including file, so the
                     // message has to carry the missing target or nothing does.
                     let message = if include_site.is_some() {

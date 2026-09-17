@@ -24,6 +24,36 @@ pub struct SourceFile {
     line_starts: std::sync::OnceLock<Vec<usize>>,
 }
 
+/// Line and column (1-based, the column in CHARACTERS) for a byte offset in
+/// `source`.
+///
+/// For callers holding only a `&str`. Parse errors are reported before a
+/// `SourceMap` exists, so they cannot use [`SourceFile::line_col`]; before
+/// #2341 `check.rs` carried its own copy of this and the two conventions
+/// disagreed on every non-ASCII line.
+///
+/// [`SourceFile::line_col`] answers the same question with a cached line-start
+/// table, which is what a file reporting thousands of diagnostics needs. The
+/// two strategies are pinned to agree by `char_columns_agree_between_surfaces`
+/// below; this one is the definition of the rule.
+#[must_use]
+pub fn line_col_in(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, ch) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
 impl SourceFile {
     /// Create a new source file.
     const fn new(id: usize, path: PathBuf, source: Arc<str>) -> Self {
@@ -45,6 +75,18 @@ impl SourceFile {
     }
 
     /// Get the line and column (1-based) for a byte offset.
+    ///
+    /// The column counts CHARACTERS, not bytes. It counted bytes until #2341,
+    /// which put two conventions in one `rledger check --format json` output:
+    /// the parse phase converted with a private character-counting helper in
+    /// `check.rs` while every validate-phase diagnostic came through here, so
+    /// on a line holding `Assets:Café` the two disagreed by one column per
+    /// extra byte and an editor placed the caret in the wrong place.
+    ///
+    /// Counting characters costs a walk of the line, not of the file: the line
+    /// is still found with the cached line-start table and `partition_point`,
+    /// and only the remainder of that one line is scanned. The helper this
+    /// replaced rescanned from byte 0 on every call.
     #[must_use]
     pub fn line_col(&self, offset: usize) -> (usize, usize) {
         // `partition_point`, not `rposition`: the table is sorted ascending,
@@ -56,7 +98,18 @@ impl SourceFile {
         let starts = self.line_starts();
         let line = starts.partition_point(|&start| start <= offset) - 1;
 
-        let col = offset - starts[line];
+        // Characters on this line that START before the offset -- the same
+        // rule `line_col_in` applies, and the reason this counts rather than
+        // slices. Slicing needs `offset` to be a character boundary, and an
+        // offset landing INSIDE a multi-byte character made `get` return
+        // `None`: the drift guard caught that answering column 1, which would
+        // have put a caret at the start of the line. Counting also handles an
+        // offset past the end without a panic.
+        let line_start = starts[line];
+        let col = self.source[line_start..]
+            .char_indices()
+            .take_while(|(i, _)| line_start + i < offset)
+            .count();
 
         (line + 1, col + 1)
     }
@@ -182,6 +235,34 @@ mod tests {
         assert_eq!(file.line_col(5), (1, 6)); // "1" in line 1
         assert_eq!(file.line_col(7), (2, 1)); // Start of line 2
         assert_eq!(file.line_col(14), (3, 1)); // Start of line 3
+    }
+
+    /// The two surfaces of the same rule must agree (#2341).
+    ///
+    /// `line_col_in` walks the string; `SourceFile::line_col` finds the line
+    /// with a cached table and then counts characters within it. Different
+    /// strategies, one answer -- including on the non-ASCII lines that made
+    /// the old byte-counting column wrong, on CRLF, and at offsets sitting on
+    /// and past the end.
+    #[test]
+    fn char_columns_agree_between_surfaces() {
+        for source in [
+            "2026-01-01 open Assets:Café\n  Assets:Café  -1 ABC\n",
+            "a\r\nb\r\n",
+            "ascii only\nsecond line\n",
+            "\u{1f600} emoji first\nthen ascii\n",
+            "no trailing newline",
+            "",
+        ] {
+            let file = SourceFile::new(0, std::path::PathBuf::from("t.beancount"), source.into());
+            for offset in 0..=source.len() + 2 {
+                assert_eq!(
+                    file.line_col(offset),
+                    line_col_in(source, offset),
+                    "offset {offset} in {source:?}",
+                );
+            }
+        }
     }
 
     #[test]

@@ -1880,9 +1880,17 @@ mod tests {
         let err = engine
             .book(&buy)
             .expect_err("a compound cost that cannot be represented must not be booked");
+        // On the VARIANT, not on a substring of the message. A message match
+        // is satisfied by any error that happens to use the word, including
+        // ones from a different failure entirely, and CLAUDE.md names that
+        // exact shape as a guard a future divergence cannot trip.
         assert!(
-            format!("{err}").to_lowercase().contains("range"),
-            "expected an unrepresentable-amount error, got {err:?}"
+            matches!(
+                &err,
+                BookingError::Inventory(e)
+                    if matches!(e.error, rustledger_core::BookingError::Overflow(_))
+            ),
+            "expected an inventory Overflow, got {err:?}"
         );
     }
 
@@ -1906,8 +1914,12 @@ mod tests {
             .book(&sell)
             .expect_err("a lot filter that cannot be represented must not be built");
         assert!(
-            format!("{err}").to_lowercase().contains("range"),
-            "expected an unrepresentable-amount error, got {err:?}"
+            matches!(
+                &err,
+                BookingError::Inventory(e)
+                    if matches!(e.error, rustledger_core::BookingError::Overflow(_))
+            ),
+            "expected an inventory Overflow, got {err:?}"
         );
     }
 
@@ -1933,8 +1945,12 @@ mod tests {
             .book(&buy)
             .expect_err("a per-unit that cannot reproduce its total must not be booked");
         assert!(
-            format!("{err}").to_lowercase().contains("range"),
-            "expected an unrepresentable-amount error, got {err:?}"
+            matches!(
+                &err,
+                BookingError::Inventory(e)
+                    if matches!(e.error, rustledger_core::BookingError::Overflow(_))
+            ),
+            "expected an inventory Overflow, got {err:?}"
         );
     }
 

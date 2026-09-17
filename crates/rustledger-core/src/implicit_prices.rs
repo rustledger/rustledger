@@ -85,10 +85,9 @@ pub fn extract_per_unit_price<T>(
             }
             // Zero units, or a quotient outside `Decimal`'s range where a bare
             // `/` would PANIC (#2340): fall through to cost, exactly as the
-            // zero-units case always has.
-            // Zero units + @@ → can't compute per-unit, fall through
-            // to cost. Currency is dropped along with the value, so the
-            // cost branch picks the cost's currency, not this one.
+            // zero-units case always has. The currency is dropped along with
+            // the value, so the cost branch picks the cost's currency, not
+            // this one.
         } else {
             return Some((amount, currency));
         }

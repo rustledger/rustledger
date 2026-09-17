@@ -59,15 +59,22 @@ fn average_cost_from_positions(
         return Ok(None);
     }
 
+    // Bound once, so the success and failure paths cannot disagree about an
+    // invariant the guard above already settled. The first draft read
+    // `unwrap_or_default()` here and `unwrap()` on the next line: the same
+    // impossible state would have panicked on one path and reported an
+    // overflow in the EMPTY currency on the other, which prints as a message
+    // with a blank where the commodity belongs.
+    let currency = cost_currency.expect("guarded by the is_none check above");
     // Checked: the multiplication above was made checked by #1863 and the
     // division beside it was left bare, which is the same miss #2327 repeated
     // (#2340). `checked_div` also covers a zero divisor, which panics too.
     let per_unit = total_cost.checked_div(total_units).ok_or_else(|| {
         BookingError::Overflow(OverflowError {
-            currency: cost_currency.clone().unwrap_or_default(),
+            currency: currency.clone(),
         })
     })?;
-    Ok(Some((per_unit, cost_currency.unwrap())))
+    Ok(Some((per_unit, currency)))
 }
 
 /// A reduction computed from `&Inventory` but not yet applied.

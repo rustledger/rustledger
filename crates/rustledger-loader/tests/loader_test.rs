@@ -2608,3 +2608,46 @@ fn test_total_cost_reduction_with_a_wrong_total_is_reported() {
         ledger.errors,
     );
 }
+
+/// A booking failure points at the posting that caused it (#2330).
+///
+/// Booking errors carried no location at all: `LedgerError::error("BOOK", ..)`
+/// set neither `location` nor `source_span`, though the `Spanned<Directive>`
+/// beside it had both. `rledger check --format json` therefore reported every
+/// one of them at line 1, column 1, so an editor drew the squiggle on the
+/// first line of the file. The text renderer hid it by appending the date and
+/// narration to the message, which is why it went unnoticed.
+///
+/// The expected line is read out of the fixture rather than hardcoded, so
+/// editing the fixture cannot leave this test asserting a stale number.
+#[test]
+fn test_booking_error_points_at_the_failing_posting() {
+    let path = fixtures_path("booking_total_cost_reduction_wrong_total.beancount");
+    let source = std::fs::read_to_string(&path).expect("fixture readable");
+    let expected_line = source
+        .lines()
+        .position(|l| l.contains("{{90.00 USD}}"))
+        .expect("the fixture still has the wrong-total posting")
+        + 1;
+
+    let ledger = load(&path, &LoadOptions::default()).expect("should load and process");
+    let booking_error = ledger
+        .errors
+        .iter()
+        .find(|e| e.code == "BOOK")
+        .expect("the wrong total must be reported");
+
+    let location = booking_error
+        .location
+        .as_ref()
+        .expect("a booking error must carry a location");
+    assert_eq!(
+        location.line, expected_line,
+        "the error must point at the posting that failed, not at line 1",
+    );
+    assert_eq!(location.file, path, "and name the file it is in");
+    assert!(
+        booking_error.source_span.is_some() && booking_error.file_id.is_some(),
+        "and carry a span, so a rich renderer can draw a snippet around it",
+    );
+}

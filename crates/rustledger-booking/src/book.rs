@@ -66,6 +66,23 @@ pub enum BookingError {
     },
 }
 
+impl BookingError {
+    /// The account this failure is about, when it names one.
+    ///
+    /// One place that knows which account each variant is about, so a
+    /// diagnostic can be placed on the posting that failed rather than on the
+    /// whole transaction (#2330). Interpolation delegates to its own accessor,
+    /// since only some of its variants are about a single posting.
+    #[must_use]
+    pub const fn account(&self) -> Option<&rustledger_core::Account> {
+        match self {
+            Self::Inventory(e) => Some(&e.account),
+            Self::NotBooked { account } => Some(account),
+            Self::Interpolation(e) => e.account(),
+        }
+    }
+}
+
 /// Result of booking a single transaction.
 #[derive(Debug, Clone)]
 pub struct BookedTransaction {

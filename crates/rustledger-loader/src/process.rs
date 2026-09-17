@@ -491,6 +491,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         tolerance_policy,
         &mut errors,
         options.collect_capital_gains.then_some(&mut capital_gains),
+        &raw.source_map,
     );
 
     let regular_applied = booked.apply_regular_plugins(
@@ -699,6 +700,7 @@ impl crate::Directives<crate::EarlyValidated> {
         tolerance_policy: rustledger_booking::TolerancePolicy,
         errors: &mut Vec<LedgerError>,
         gains: Option<&mut Vec<rustledger_booking::CapitalGain>>,
+        source_map: &SourceMap,
     ) -> (
         crate::Directives<crate::Booked>,
         crate::phase::FailedBookings,
@@ -709,6 +711,7 @@ impl crate::Directives<crate::EarlyValidated> {
             tolerance_policy,
             errors,
             gains,
+            source_map,
         );
         (
             crate::Directives::new_unchecked(booked),
@@ -893,6 +896,7 @@ fn run_booking(
     tolerance_policy: rustledger_booking::TolerancePolicy,
     errors: &mut Vec<LedgerError>,
     mut gains: Option<&mut Vec<rustledger_booking::CapitalGain>>,
+    source_map: &SourceMap,
 ) -> (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) {
     use rustledger_booking::BookingEngine;
 
@@ -911,6 +915,8 @@ fn run_booking(
     let mut failed_indices: Vec<usize> = Vec::new();
     for &i in &order {
         let spanned = &mut directives[i];
+        // Copied out before the mutable borrow of `spanned.value` below.
+        let (directive_span, file_id) = (spanned.span, spanned.file_id);
         if let Directive::Transaction(txn) = &mut spanned.value {
             // Applying is part of booking this transaction: an overflow there
             // must fail it, not merely warn. Otherwise the transaction counts
@@ -926,10 +932,39 @@ fn run_booking(
                     }
                 }
                 Err(e) => {
-                    errors.push(LedgerError::error(
+                    // Point at the posting the failure names, falling back to
+                    // the directive. Booking errors carried no location at
+                    // all before this: `rledger check --format json` placed
+                    // every one of them at line 1, column 1, so an editor put
+                    // the squiggle on the first line of the file (#2330). The
+                    // text renderer papered over it by appending the date and
+                    // narration to the message, which is why it went unnoticed.
+                    let span = e
+                        .account()
+                        .and_then(|account| {
+                            txn.postings
+                                .iter()
+                                .find(|p| &p.value.account == account)
+                                .map(|p| p.span)
+                        })
+                        .unwrap_or(directive_span);
+                    let mut err = LedgerError::error(
                         "BOOK",
                         format!("{} ({}, \"{}\")", e, txn.date, txn.narration),
-                    ));
+                    )
+                    .with_source_span((span.start, span.end), file_id);
+                    // Resolve to file/line/column the same way the validator
+                    // does, so CLI and LSP consumers need no lookup of their
+                    // own (the pattern from #901).
+                    if let Some(file) = source_map.get(file_id as usize) {
+                        let (line, column) = file.line_col(span.start);
+                        err = err.with_location(ErrorLocation {
+                            file: file.path.clone(),
+                            line,
+                            column,
+                        });
+                    }
+                    errors.push(err);
                     failed_indices.push(i);
                 }
             }

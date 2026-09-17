@@ -1144,6 +1144,19 @@ impl SignCounts {
         }
     }
 
+    /// Lot counts by sign, across both the cost-bearing and cost-less
+    /// buckets.
+    ///
+    /// `is_sign_positive` answers true for zero, matching every other
+    /// predicate here; a zero lot contributes no magnitude, so counting it as
+    /// positive only ever makes a caller more conservative.
+    const fn by_sign(self) -> (u32, u32) {
+        (
+            self.cost_positive.saturating_add(self.simple_positive),
+            self.cost_negative.saturating_add(self.simple_negative),
+        )
+    }
+
     /// `delta` is `i32` rather than `i64` so it feeds `saturating_add_signed`
     /// directly. The earlier `i64` version ended in `try_into().unwrap_or(0)`,
     /// which turns a caller mistake into a silent no-op — the one outcome that
@@ -1473,11 +1486,18 @@ impl Inventory {
     /// value is guaranteed not to overflow.
     ///
     /// `add` overflows at exactly two `checked_add`s: the per-currency running
-    /// total, and — for a cost-less position — the single merged lot that
-    /// `simple_index` points at. Both operands are bounded here against
-    /// `needed`, so a `true` answer means no sequence of adds whose magnitudes
-    /// sum to `needed` can overflow either, at any intermediate step: every
-    /// partial sum is bounded by the total.
+    /// total, and the lot the position MERGES into. Both operands are bounded
+    /// here against `needed`, so a `true` answer means no sequence of adds
+    /// whose magnitudes sum to `needed` can overflow either, at any
+    /// intermediate step: every partial sum is bounded by the total.
+    ///
+    /// The merge target used to be only the cost-less lot `simple_index`
+    /// names, and this doc said so. #2118 made cost-bearing lots merge as
+    /// well — `cost_index` finds a lot agreeing on cost, date and label — and
+    /// this predicate was not updated with it, so a cost-bearing lot at the
+    /// ceiling was invisible and `apply` skipped the snapshot it needed. That
+    /// reached `apply`'s "the guard is unsound" assertion, which is a plain
+    /// `assert!` and so a process abort in release (#2345).
     ///
     /// Conservative by construction — `false` only ever means "cannot prove
     /// it", never "will overflow". Callers use it to skip work that exists
@@ -1529,6 +1549,27 @@ impl Inventory {
             return true;
         };
         if !fits(stats.total) {
+            return false;
+        }
+        // `stats.total` bounds every individual lot ONLY when they all share a
+        // sign: then it is the sum of their magnitudes, so no lot can exceed
+        // it and the check above has already covered the merge target,
+        // whatever `add` picks. When signs are mixed the net understates them
+        // — `+MAX` and `-MAX` net to zero — and a lot sitting at the ceiling
+        // leaves no trace in it.
+        //
+        // There is no O(1) bound on the largest lot in that case (a cached max
+        // cannot be maintained through removals without a rescan), and this
+        // method is called twice per posting. So answer "cannot prove it",
+        // which is the one direction this predicate is allowed to be wrong in.
+        //
+        // Rare in practice: a cost-less currency has exactly one lot, so it can
+        // never be mixed. It takes two cost-bearing lots of opposite sign in
+        // one account and commodity — a long and a short held together — and
+        // the cost of a `false` is an `imbl` snapshot with O(1) structural
+        // sharing.
+        let (positive_lots, negative_lots) = stats.counts.by_sign();
+        if positive_lots > 0 && negative_lots > 0 {
             return false;
         }
         // Only a cost-less add merges, and `simple_slot` names the one lot it
@@ -2708,6 +2749,72 @@ mod tests {
     /// `add_headroom_for` treats `needed` as a magnitude, whatever sign it
     /// arrives with.
     ///
+    /// A cost-bearing lot at the ceiling must not be hidden by the net.
+    ///
+    /// #2118 made cost-bearing lots merge, which gave `add` a second
+    /// `checked_add` that `add_headroom_for` did not know about. Two opposite
+    /// lots net to zero, so the net-total test passed while the lot the next
+    /// add merges into sat at `Decimal::MAX`. `apply` then skipped its
+    /// snapshot and hit its own "the guard is unsound" assertion — a plain
+    /// `assert!`, so a process abort in release (#2345).
+    #[test]
+    fn add_headroom_for_does_not_let_the_net_hide_a_lot_at_the_ceiling() {
+        let mut inv = Inventory::new();
+        // Different costs, so these are two lots and not one.
+        inv.add(Position::with_cost(
+            Amount::new(Decimal::MAX, "CORP"),
+            Cost::new(Decimal::new(1, 2), "USD"),
+        ))
+        .expect("first lot fits");
+        inv.add(Position::with_cost(
+            Amount::new(-Decimal::MAX, "CORP"),
+            Cost::new(Decimal::new(2, 2), "USD"),
+        ))
+        .expect("second lot fits");
+
+        assert!(
+            !inv.add_headroom_for("CORP", Decimal::ONE),
+            "a lot is at the ceiling; the net being zero does not make room"
+        );
+
+        // And the add it was asked about really does fail, so the predicate is
+        // answering the question that matters rather than being cautious about
+        // nothing.
+        assert!(
+            inv.add(Position::with_cost(
+                Amount::new(Decimal::ONE, "CORP"),
+                Cost::new(Decimal::new(1, 2), "USD"),
+            ))
+            .is_err(),
+            "merging one more unit into the lot at MAX must overflow"
+        );
+    }
+
+    /// ...and the guard above is not simply `false` for everything.
+    ///
+    /// A predicate that stopped proving anything would satisfy the test above
+    /// and cost every caller its snapshot. Lots that share a sign are still
+    /// bounded by their own total, which is the case this method exists for.
+    #[test]
+    fn add_headroom_for_still_proves_room_for_same_sign_lots() {
+        let mut inv = Inventory::new();
+        inv.add(Position::with_cost(
+            Amount::new(Decimal::new(10, 0), "CORP"),
+            Cost::new(Decimal::new(1, 2), "USD"),
+        ))
+        .expect("fits");
+        inv.add(Position::with_cost(
+            Amount::new(Decimal::new(20, 0), "CORP"),
+            Cost::new(Decimal::new(2, 2), "USD"),
+        ))
+        .expect("fits");
+
+        assert!(
+            inv.add_headroom_for("CORP", Decimal::new(5, 0)),
+            "two small same-sign lots have room for five more units"
+        );
+    }
+
     /// A negative `needed` would make the internal sums smaller and return
     /// `true` where overflow is possible. `apply` would then skip the snapshot
     /// it needed, leaving a failing transaction's earlier postings applied —

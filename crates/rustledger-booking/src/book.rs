@@ -416,14 +416,21 @@ impl BookingEngine {
                             combined.checked_div(units.number.abs()).ok_or_else(|| {
                                 cost_overflow(&posting.account, cost_spec.currency.as_ref(), units)
                             })?;
+                        // `try_new`, not `new`: see the underflow case at
+                        // the head of this file's sibling site in
+                        // `interpolate.rs` (#2340) — a successful division
+                        // can still produce a per-unit that cannot
+                        // reproduce the total.
+                        let booked = rustledger_core::BookedCost::try_new(
+                            combined_per_unit,
+                            combined,
+                            units.number,
+                        )
+                        .map_err(|_| {
+                            cost_overflow(&posting.account, cost_spec.currency.as_ref(), units)
+                        })?;
                         Some(CostSpec {
-                            number: Some(rustledger_core::CostNumber::PerUnitFromTotal(
-                                rustledger_core::BookedCost::new(
-                                    combined_per_unit,
-                                    combined,
-                                    units.number,
-                                ),
-                            )),
+                            number: Some(rustledger_core::CostNumber::PerUnitFromTotal(booked)),
                             currency: cost_spec.currency.clone(),
                             // Date deliberately NOT defaulted to txn.date
                             // here: on a REDUCTION the spec date is a lot
@@ -507,13 +514,22 @@ impl BookingEngine {
                                             units,
                                         )
                                     })?;
+                                // `try_new`, not `new` (#2340).
+                                let booked = rustledger_core::BookedCost::try_new(
+                                    per_unit,
+                                    total,
+                                    units.number,
+                                )
+                                .map_err(|_| {
+                                    cost_overflow(
+                                        &posting.account,
+                                        cost_spec.currency.as_ref(),
+                                        units,
+                                    )
+                                })?;
                                 total_filter = CostSpec {
                                     number: Some(rustledger_core::CostNumber::PerUnitFromTotal(
-                                        rustledger_core::BookedCost::new(
-                                            per_unit,
-                                            total,
-                                            units.number,
-                                        ),
+                                        booked,
                                     )),
                                     ..cost_spec.clone()
                                 };
@@ -655,7 +671,14 @@ impl BookingEngine {
                                 let Some(cost) = &m.cost else { continue };
                                 let lot_units = m.units.number.abs();
                                 // The lot's cost value (in the cost currency).
-                                let lot_value = lot_units * cost.number;
+                                // Checked like every other product here (#1863,
+                                // #2327): both factors are user-supplied, so
+                                // their product can leave the range where a bare
+                                // `*` PANICS. The fuzzer reaches these now (#2340).
+                                let lot_value =
+                                    lot_units.checked_mul(cost.number).ok_or_else(|| {
+                                        cost_overflow(&posting.account, Some(&cost.currency), units)
+                                    })?;
                                 // The reduction's sale value (in the sale-price currency).
                                 // A `Unit` (`@`) price is exact per unit. A `Total` (`@@`)
                                 // price is the EXACT pro-rata share `total × units /
@@ -667,10 +690,17 @@ impl BookingEngine {
                                 // the booking layer to the total's own scale both distorts
                                 // round-dollar totals and can drive the last lot negative.
                                 // The exact fractions match Python beancount.
+                                let overflow =
+                                    || cost_overflow(&posting.account, Some(&amt.currency), units);
                                 let sale_value = match price.kind {
-                                    rustledger_core::PriceKind::Unit => amt.number * lot_units,
+                                    rustledger_core::PriceKind::Unit => {
+                                        amt.number.checked_mul(lot_units).ok_or_else(overflow)?
+                                    }
                                     rustledger_core::PriceKind::Total if !total_units.is_zero() => {
-                                        amt.number * lot_units / total_units
+                                        amt.number
+                                            .checked_mul(lot_units)
+                                            .and_then(|v| v.checked_div(total_units))
+                                            .ok_or_else(overflow)?
                                     }
                                     rustledger_core::PriceKind::Total => Decimal::ZERO,
                                 };
@@ -726,10 +756,14 @@ impl BookingEngine {
                         let per_unit = total.checked_div(units.number.abs()).ok_or_else(|| {
                             cost_overflow(&posting.account, Some(currency), units)
                         })?;
+                        // `try_new`, not `new` (#2340).
+                        let booked =
+                            rustledger_core::BookedCost::try_new(per_unit, total, units.number)
+                                .map_err(|_| {
+                                    cost_overflow(&posting.account, Some(currency), units)
+                                })?;
                         result.postings[idx].cost = Some(Box::new(CostSpec {
-                            number: Some(rustledger_core::CostNumber::PerUnitFromTotal(
-                                rustledger_core::BookedCost::new(per_unit, total, units.number),
-                            )),
+                            number: Some(rustledger_core::CostNumber::PerUnitFromTotal(booked)),
                             currency: Some(currency.clone()),
                             // Fill in transaction date if no date specified
                             date: cost_spec.date.or(Some(txn.date)),
@@ -1821,6 +1855,103 @@ mod tests {
         let pos = inv.positions().next().unwrap();
         assert!(pos.cost.is_some(), "Expected cost on position");
         eprintln!("Position cost: {:?}", pos.cost);
+    }
+
+    /// The compound site (`{a # b}`) reaches the same underflow by a
+    /// different route: it sums `|units| * a + b` and divides that by
+    /// `|units|`, so `{0 # 2.55 USD}` over `Decimal::MAX` units lands on the
+    /// identical unusable quotient (#2340).
+    #[test]
+    fn an_augmenting_compound_cost_that_underflows_to_zero_is_reported() {
+        let engine = BookingEngine::new();
+
+        let cost = CostSpec::empty()
+            .with_number(rustledger_core::CostNumber::Compound {
+                per_unit: Decimal::ZERO,
+                total: dec!(2.55),
+            })
+            .with_currency("USD");
+        let buy = Transaction::new(date(2024, 1, 15), "compound cost over enormous units")
+            .with_synthesized_posting(
+                Posting::new("Assets:Shares", Amount::new(Decimal::MAX, "SHARES")).with_cost(cost),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-2.55), "USD")));
+
+        let err = engine
+            .book(&buy)
+            .expect_err("a compound cost that cannot be represented must not be booked");
+        // On the VARIANT, not on a substring of the message. A message match
+        // is satisfied by any error that happens to use the word, including
+        // ones from a different failure entirely, and CLAUDE.md names that
+        // exact shape as a guard a future divergence cannot trip.
+        assert!(
+            matches!(
+                &err,
+                BookingError::Inventory(e)
+                    if matches!(e.error, rustledger_core::BookingError::Overflow(_))
+            ),
+            "expected an inventory Overflow, got {err:?}"
+        );
+    }
+
+    /// And the reduction filter: a `{{total}}` on a SALE is turned into a
+    /// per-unit lot-match filter before any lot is looked at, so the same
+    /// underflow is reachable with nothing in the inventory at all (#2340).
+    #[test]
+    fn a_reducing_total_cost_that_underflows_to_zero_is_reported() {
+        let engine = BookingEngine::new();
+
+        let cost = CostSpec::empty()
+            .with_number(rustledger_core::CostNumber::Total { value: dec!(2.55) })
+            .with_currency("USD");
+        let sell = Transaction::new(date(2024, 1, 15), "sell enormous units at a total cost")
+            .with_synthesized_posting(
+                Posting::new("Assets:Shares", Amount::new(-Decimal::MAX, "SHARES")).with_cost(cost),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(2.55), "USD")));
+
+        let err = engine
+            .book(&sell)
+            .expect_err("a lot filter that cannot be represented must not be built");
+        assert!(
+            matches!(
+                &err,
+                BookingError::Inventory(e)
+                    if matches!(e.error, rustledger_core::BookingError::Overflow(_))
+            ),
+            "expected an inventory Overflow, got {err:?}"
+        );
+    }
+
+    /// The augmentation site shares the underflow the fuzzer found on the
+    /// interpolation site (#2340): `{{2.55 USD}}` over `Decimal::MAX` units
+    /// derives a per-unit of 0, which cannot reproduce the 2.55 total.
+    /// `checked_div` sees nothing wrong — the quotient underflowed rather
+    /// than overflowed — so the construction itself has to be checked.
+    #[test]
+    fn an_augmenting_total_cost_that_underflows_to_zero_is_reported() {
+        let engine = BookingEngine::new();
+
+        let cost = CostSpec::empty()
+            .with_number(rustledger_core::CostNumber::Total { value: dec!(2.55) })
+            .with_currency("USD");
+        let buy = Transaction::new(date(2024, 1, 15), "total cost over enormous units")
+            .with_synthesized_posting(
+                Posting::new("Assets:Shares", Amount::new(Decimal::MAX, "SHARES")).with_cost(cost),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-2.55), "USD")));
+
+        let err = engine
+            .book(&buy)
+            .expect_err("a per-unit that cannot reproduce its total must not be booked");
+        assert!(
+            matches!(
+                &err,
+                BookingError::Inventory(e)
+                    if matches!(e.error, rustledger_core::BookingError::Overflow(_))
+            ),
+            "expected an inventory Overflow, got {err:?}"
+        );
     }
 
     #[test]

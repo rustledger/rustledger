@@ -1548,24 +1548,55 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
         // have; the solved cost is then rendered with it (`cost_number`).
         // The VALUE is untouched, so `BookedCost`'s
         // `per_unit x |units| == total` invariant still holds.
-        let per_unit = (total / units_number.abs()).normalize();
+        // Checked, like the six divisions in `book.rs` and `cost.rs` (#2327).
+        // This one was MISSED by that sweep: it grepped those two files for
+        // `/ units...abs()` and this path is in a third, so the pattern could
+        // not have found it. The widened booking fuzzer (#2340) reached it on
+        // its first run, which is the whole argument for widening it.
+        let per_unit = total
+            .checked_div(units_number.abs())
+            .ok_or_else(|| InterpolationError::Unrepresentable {
+                currency: currency.clone(),
+            })?
+            .normalize();
         if per_unit < Decimal::ZERO {
             // Beancount: "Cost is negative" — a lot cannot be acquired at a
             // negative cost (#1705 edge e14).
             return Err(InterpolationError::NegativeInferredCost { currency, per_unit });
         }
 
+        // `try_new`, not `new`: a division that SUCCEEDS can still yield a
+        // per-unit that cannot reproduce the total, so checked arithmetic
+        // alone does not establish `BookedCost`'s invariant. With `units`
+        // near `Decimal::MAX` the quotient UNDERFLOWS — `-2.55 / 7.9e28` is
+        // ~-3.2e-29, below `rust_decimal`'s 1e-28 minimum — so `checked_div`
+        // returns `Some(0)`, `0 * 7.9e28` is 0, not -2.55, and `new`'s
+        // debug-assert fires. Checked ops guard the top of the range only;
+        // the constructor guards both ends (#2340). Computed BEFORE the
+        // posting is touched so the rejected case leaves it unmodified.
+        let booked = BookedCost::try_new(per_unit, total, units_number).map_err(|_| {
+            InterpolationError::Unrepresentable {
+                currency: currency.clone(),
+            }
+        })?;
+
+        // `touch` BEFORE the `take`, not after. `Rollback::touch` clones the
+        // posting as it finds it and the first touch for an index wins, so
+        // snapshotting after the cost has already been taken records a
+        // posting with NO cost -- and `restore` then hands back
+        // `10 SHARES` where the author wrote `10 SHARES {EUR}`. A failed
+        // transaction is not discarded (`run_booking` sets it aside and
+        // `finalize` merges it back), so that erasure is shown to the user.
+        // Reachable whenever an earlier inference succeeds and a later one
+        // fails; the `{{T}}`-underflow rejection added above is one such
+        // later failure.
+        rollback.touch(transaction, idx);
         let existing = transaction.postings[idx]
             .cost
             .take()
             .map_or_else(CostSpec::empty, |boxed| *boxed);
-        rollback.touch(transaction, idx);
         transaction.postings[idx].cost = Some(Box::new(CostSpec {
-            number: Some(CostNumber::PerUnitFromTotal(BookedCost::new(
-                per_unit,
-                total,
-                units_number,
-            ))),
+            number: Some(CostNumber::PerUnitFromTotal(booked)),
             currency: Some(currency.clone()),
             date: existing.date.or(Some(transaction.date)),
             label: existing.label,
@@ -2383,6 +2414,85 @@ mod tests {
             txn, before,
             "a transaction that failed to interpolate must read exactly as it \
              was passed in - it is merged back into the ledger and shown"
+        );
+    }
+
+    /// A failure on the SECOND inferred cost must not erase the first one.
+    ///
+    /// The inferred-cost write took the existing spec out of the posting and
+    /// only then asked `Rollback` to snapshot it, so the snapshot recorded a
+    /// posting with no cost and `restore` handed back `10 SHARES` where the
+    /// author wrote `10 SHARES {EUR}`. Failed transactions are merged back
+    /// into the ledger and displayed, so the user saw a cost they never
+    /// removed silently vanish.
+    ///
+    /// This is the same invariant as
+    /// `a_failure_after_a_write_leaves_the_transaction_untouched`, on the
+    /// path that test does not reach.
+    #[test]
+    fn a_failed_second_inference_does_not_erase_the_first_postings_cost() {
+        use rustledger_core::CostSpec;
+
+        let mut txn = Transaction::new(date(2024, 1, 15), "second inference fails")
+            .with_synthesized_posting(
+                Posting::new("Assets:Shares", Amount::new(dec!(10), "SHARES"))
+                    .with_cost(CostSpec::empty().with_currency("EUR")),
+            )
+            .with_synthesized_posting(Posting::new("Assets:CashE", Amount::new(dec!(-900), "EUR")))
+            .with_synthesized_posting(
+                Posting::new("Assets:Bonds", Amount::new(Decimal::MAX, "BONDS"))
+                    .with_cost(CostSpec::empty().with_currency("USD")),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:CashU",
+                Amount::new(dec!(-2.55), "USD"),
+            ));
+        let before = txn.clone();
+
+        let tolerances: std::collections::HashMap<Currency, Decimal> =
+            std::collections::HashMap::new();
+        let err = interpolate_in_place(&mut txn, &tolerances)
+            .expect_err("the USD group's cost underflows and must be reported");
+        assert!(
+            matches!(err, InterpolationError::Unrepresentable { .. }),
+            "expected the underflow to be reported, got {err:?}"
+        );
+        assert_eq!(
+            txn, before,
+            "a transaction that failed to interpolate must read exactly as it \
+             was passed in - the first posting's cost currency is not ours to \
+             drop"
+        );
+    }
+
+    /// A cost solved from a residual can UNDERFLOW, and a division that
+    /// succeeded does not prove its result is usable.
+    ///
+    /// `total / |units|` with `units` at `Decimal::MAX` gives a quotient
+    /// below `rust_decimal`'s 1e-28 minimum, so `checked_div` returns
+    /// `Some(0)` — no overflow to catch — and that per-unit no longer
+    /// reproduces the total: `0 * 7.9e28` is `0`, not `2.55`.
+    /// `BookedCost::new` debug-asserts exactly that invariant, so the engine
+    /// has to construct through `try_new` and report instead of asserting.
+    ///
+    /// Found by the widened booking fuzzer (#2340); the crash input is kept
+    /// at `fuzz/regressions/fuzz_booking/booked-cost-underflow-2344`.
+    #[test]
+    fn an_inferred_cost_that_underflows_to_zero_is_reported_not_asserted() {
+        use rustledger_core::CostSpec;
+
+        let txn = Transaction::new(date(2024, 1, 15), "underflowing inferred cost")
+            .with_synthesized_posting(
+                Posting::new("Assets:Shares", Amount::new(Decimal::MAX, "SHARES"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-2.55), "USD")));
+
+        let err = interpolate(&txn)
+            .expect_err("a per-unit that cannot reproduce its total must not be booked");
+        assert!(
+            matches!(err, InterpolationError::Unrepresentable { .. }),
+            "expected the underflow to be reported, got {err:?}"
         );
     }
 
@@ -4475,5 +4585,35 @@ mod tests {
             }
             other => panic!("expected CannotInferCurrency, got {other:?}"),
         }
+    }
+    /// Solving a cost from a residual divides, and that division panicked.
+    ///
+    /// `total / units_number.abs()` had no check, so a residual far larger
+    /// than the unit count took the process down. #2327 fixed six divisions of
+    /// this class in `book.rs` and `cost.rs` and missed this one: its sweep
+    /// grepped those two files, and this lives in a third. The widened booking
+    /// fuzzer (#2340) reached it minutes into its first run, and the input it
+    /// found is kept at
+    /// `fuzz/regressions/fuzz_booking/interpolated-cost-division-overflow-2340`.
+    #[test]
+    fn interpolated_cost_reports_an_unrepresentable_quotient() {
+        use crate::book::BookingEngine;
+
+        // A cost-bearing posting with elided units forces the solver to derive
+        // a per-unit cost, and a residual of ~7.9e28 over 1e-28 units cannot be
+        // represented.
+        let tiny = Decimal::from_str_exact("0.0000000000000000000000000001").expect("fits");
+        let huge = Decimal::from_str_exact("79228162514264337593543950335").expect("Decimal::MAX");
+        let txn = Transaction::new(date(2026, 1, 1), "solve a cost")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(tiny, "W"))
+                    .with_cost(CostSpec::empty().with_currency("USD")),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(-huge, "USD")));
+
+        let engine = BookingEngine::new();
+        // The contract is "reports", not "returns Ok": either outcome is fine,
+        // a panic is not. Before the fix this line aborted the process.
+        let _ = engine.book_and_interpolate(&txn);
     }
 }

@@ -78,12 +78,16 @@ pub fn extract_per_unit_price<T>(
     // Priority 1: price annotation.
     if let Some((is_total, amount, currency)) = annotation {
         if is_total {
-            if !units_number.is_zero() {
-                return Some((amount / units_number.abs(), currency));
+            if !units_number.is_zero()
+                && let Some(per_unit) = amount.checked_div(units_number.abs())
+            {
+                return Some((per_unit, currency));
             }
-            // Zero units + @@ → can't compute per-unit, fall through
-            // to cost. Currency is dropped along with the value, so the
-            // cost branch picks the cost's currency, not this one.
+            // Zero units, or a quotient outside `Decimal`'s range where a bare
+            // `/` would PANIC (#2340): fall through to cost, exactly as the
+            // zero-units case always has. The currency is dropped along with
+            // the value, so the cost branch picks the cost's currency, not
+            // this one.
         } else {
             return Some((amount, currency));
         }
@@ -102,11 +106,21 @@ pub fn extract_per_unit_price<T>(
                 return Some((b.per_unit, currency));
             }
             Some(crate::CostNumber::Total { value: total }) if !units_number.is_zero() => {
-                return Some((total / units_number.abs(), currency));
+                // Checked for the same reason as the annotation above (#2340).
+                if let Some(per_unit) = total.checked_div(units_number.abs()) {
+                    return Some((per_unit, currency));
+                }
             }
             // Compound `{a # b}`: effective per-unit is a + b/|N|.
             Some(crate::CostNumber::Compound { per_unit, total }) if !units_number.is_zero() => {
-                return Some((per_unit + total / units_number.abs(), currency));
+                // Both operations checked: `a + b/N` can leave the range on the
+                // addition even when the quotient fits (#2340).
+                if let Some(effective) = total
+                    .checked_div(units_number.abs())
+                    .and_then(|q| per_unit.checked_add(q))
+                {
+                    return Some((effective, currency));
+                }
             }
             Some(crate::CostNumber::Total { value: _ } | crate::CostNumber::Compound { .. })
             | None => {}

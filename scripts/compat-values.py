@@ -186,6 +186,33 @@ def rledger_errors(binary: str, path: Path):
     text = proc.stdout + proc.stderr
     codes = set(re.findall(r"\b[A-Z]\d{4}\b", text))
     codes |= set(re.findall(r"(?:error|warning)\[([A-Z][A-Z_]+)\]", text))
+    # ...and the bare code line the GRAPHICAL renderer prints, which is what
+    # an error carrying a source span gets: a line holding only the code,
+    # followed by an indented `x message` and a snippet. Booking errors moved
+    # onto that path when they gained spans (#2330/#2342), and every one of
+    # them went silently unseen here: `BOOK` is not numbered, so
+    # `[A-Z]\d{4}` cannot match it, and there is no `error[...]` wrapper left
+    # to match either. Numbered codes kept working by luck -- `E2001` alone on
+    # a line still matches the first pattern -- which is why only the booking
+    # family broke.
+    #
+    # Anchored on the shape, not on "a line that looks shouty": the code line
+    # is followed (after an optional blank) by miette's `x <message>` marker.
+    # A bare uppercase word anywhere else in the output -- a commodity in a
+    # rendered snippet, say -- would otherwise be collected as a code and
+    # trip the stale-kind-table guard in the self-test.
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if not re.fullmatch(r"[A-Z][A-Z_]{2,}", line.strip()):
+            continue
+        # Both theme spellings of that marker. The CLI picks
+        # `GraphicalTheme::none()` when stdout is not a terminal, which is
+        # always the case under this harness, and that theme writes `x`.
+        # Accepting the unicode `×` too costs nothing and keeps this from
+        # re-breaking silently the way the original patterns did if the
+        # theme choice ever moves.
+        if any(re.match(r"\s*[x×] ", nxt) for nxt in lines[i + 1 : i + 3]):
+            codes.add(line.strip())
     return proc.returncode != 0, codes
 
 

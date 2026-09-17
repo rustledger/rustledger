@@ -1580,11 +1580,21 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
             }
         })?;
 
+        // `touch` BEFORE the `take`, not after. `Rollback::touch` clones the
+        // posting as it finds it and the first touch for an index wins, so
+        // snapshotting after the cost has already been taken records a
+        // posting with NO cost -- and `restore` then hands back
+        // `10 SHARES` where the author wrote `10 SHARES {EUR}`. A failed
+        // transaction is not discarded (`run_booking` sets it aside and
+        // `finalize` merges it back), so that erasure is shown to the user.
+        // Reachable whenever an earlier inference succeeds and a later one
+        // fails; the `{{T}}`-underflow rejection added above is one such
+        // later failure.
+        rollback.touch(transaction, idx);
         let existing = transaction.postings[idx]
             .cost
             .take()
             .map_or_else(CostSpec::empty, |boxed| *boxed);
-        rollback.touch(transaction, idx);
         transaction.postings[idx].cost = Some(Box::new(CostSpec {
             number: Some(CostNumber::PerUnitFromTotal(booked)),
             currency: Some(currency.clone()),
@@ -2404,6 +2414,54 @@ mod tests {
             txn, before,
             "a transaction that failed to interpolate must read exactly as it \
              was passed in - it is merged back into the ledger and shown"
+        );
+    }
+
+    /// A failure on the SECOND inferred cost must not erase the first one.
+    ///
+    /// The inferred-cost write took the existing spec out of the posting and
+    /// only then asked `Rollback` to snapshot it, so the snapshot recorded a
+    /// posting with no cost and `restore` handed back `10 SHARES` where the
+    /// author wrote `10 SHARES {EUR}`. Failed transactions are merged back
+    /// into the ledger and displayed, so the user saw a cost they never
+    /// removed silently vanish.
+    ///
+    /// This is the same invariant as
+    /// `a_failure_after_a_write_leaves_the_transaction_untouched`, on the
+    /// path that test does not reach.
+    #[test]
+    fn a_failed_second_inference_does_not_erase_the_first_postings_cost() {
+        use rustledger_core::CostSpec;
+
+        let mut txn = Transaction::new(date(2024, 1, 15), "second inference fails")
+            .with_synthesized_posting(
+                Posting::new("Assets:Shares", Amount::new(dec!(10), "SHARES"))
+                    .with_cost(CostSpec::empty().with_currency("EUR")),
+            )
+            .with_synthesized_posting(Posting::new("Assets:CashE", Amount::new(dec!(-900), "EUR")))
+            .with_synthesized_posting(
+                Posting::new("Assets:Bonds", Amount::new(Decimal::MAX, "BONDS"))
+                    .with_cost(CostSpec::empty().with_currency("USD")),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:CashU",
+                Amount::new(dec!(-2.55), "USD"),
+            ));
+        let before = txn.clone();
+
+        let tolerances: std::collections::HashMap<Currency, Decimal> =
+            std::collections::HashMap::new();
+        let err = interpolate_in_place(&mut txn, &tolerances)
+            .expect_err("the USD group's cost underflows and must be reported");
+        assert!(
+            matches!(err, InterpolationError::Unrepresentable { .. }),
+            "expected the underflow to be reported, got {err:?}"
+        );
+        assert_eq!(
+            txn, before,
+            "a transaction that failed to interpolate must read exactly as it \
+             was passed in - the first posting's cost currency is not ours to \
+             drop"
         );
     }
 

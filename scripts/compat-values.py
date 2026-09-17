@@ -205,9 +205,13 @@ def rledger_errors(binary: str, path: Path):
     for i, line in enumerate(lines):
         if not re.fullmatch(r"[A-Z][A-Z_]{2,}", line.strip()):
             continue
-        if any(
-            re.match(r"\s*x ", nxt) for nxt in lines[i + 1 : i + 3]
-        ):
+        # Both theme spellings of that marker. The CLI picks
+        # `GraphicalTheme::none()` when stdout is not a terminal, which is
+        # always the case under this harness, and that theme writes `x`.
+        # Accepting the unicode `×` too costs nothing and keeps this from
+        # re-breaking silently the way the original patterns did if the
+        # theme choice ever moves.
+        if any(re.match(r"\s*[x×] ", nxt) for nxt in lines[i + 1 : i + 3]):
             codes.add(line.strip())
     return proc.returncode != 0, codes
 

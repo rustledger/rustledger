@@ -45,6 +45,15 @@ on:
       - "crates/rustledger-query/**"
       - "crates/rustledger-returns/**"
       - "crates/rustledger-validate/**"
+      # Not crates, but the same build reads them: a lockfile bump changes the
+      # component even when no crate source does (a dependabot PR touching only
+      # Cargo.lock would otherwise never run this job), the workspace manifest
+      # carries the dependency versions, and rust-toolchain.toml decides the
+      # compiler -- rustup's file override beats the toolchain this workflow
+      # installs.
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
       - ".github/workflows/downstream.yml"
   workflow_dispatch:
 

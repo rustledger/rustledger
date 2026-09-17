@@ -29,6 +29,13 @@ from pathlib import Path
 COMPONENT = "rustledger-ffi-component"
 WORKFLOW = Path(".github/workflows/downstream.yml")
 
+# Inputs to the same `cargo build` that are not crate sources. A lockfile bump
+# changes the component with no crate touched at all, which is the shape of
+# every dependabot PR; the workspace manifest carries the dependency versions;
+# and rust-toolchain.toml decides the compiler, since rustup's file override
+# beats the toolchain the workflow installs.
+REQUIRED_FILES = ("Cargo.lock", "Cargo.toml", "rust-toolchain.toml")
+
 
 def workspace_closure(root: str) -> set[str]:
     """Workspace crates `root` is built from, including itself.
@@ -106,7 +113,8 @@ def main() -> int:
         for m in (re.fullmatch(r"crates/([a-z0-9-]+)/\*\*", e) for e in entries)
         if m
     }
-    missing = sorted(closure - covered)
+    missing_crates = sorted(closure - covered)
+    missing_files = [f for f in REQUIRED_FILES if f not in entries]
     stale = sorted(covered - closure)
 
     for crate in stale:
@@ -115,20 +123,31 @@ def main() -> int:
             f"depends on it; the job runs more often than it needs to"
         )
 
-    if missing:
+    if missing_crates:
         print(
             f"error: {COMPONENT} is built from {len(closure)} workspace crates and "
-            f"{WORKFLOW} covers {len(closure) - len(missing)} of them.\n"
+            f"{WORKFLOW} covers {len(closure) - len(missing_crates)} of them.\n"
             f"A change to one of these would not run Downstream (rustfava), and the "
             f"PR would show no row at all rather than a failing one:\n"
-            + "".join(f"    crates/{c}/**\n" for c in missing)
-            + "Add them to the `paths:` list, or drop the dependency."
+            + "".join(f"    {c}\n" for c in missing_crates)
         )
+
+    if missing_files:
+        print(
+            f"error: {WORKFLOW} does not watch "
+            + ", ".join(missing_files)
+            + ", which the same `cargo build` reads. A dependency bump changes the "
+            "component with no crate source touched at all, which is the shape of "
+            "every dependabot pull request."
+        )
+
+    if missing_crates or missing_files:
+        print("Add the paths above to the `paths:` list, or drop the dependency.")
         return 1
 
     print(
         f"ok: {WORKFLOW} covers all {len(closure)} workspace crates "
-        f"{COMPONENT} is built from"
+        f"{COMPONENT} is built from, plus {', '.join(REQUIRED_FILES)}"
     )
     return 0
 

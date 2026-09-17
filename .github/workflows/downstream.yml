@@ -24,17 +24,27 @@ name: Downstream (rustfava)
 on:
   pull_request:
     paths:
-      # The embedding surface itself...
+      # Every workspace crate the component is BUILT FROM, not a hand-picked
+      # subset. The subset is what drifted: this list named 8 crates while the
+      # component was built from 14, so a change to rustledger-plugin, -ops,
+      # -importer, -budget, -returns or -plugin-types never ran this job and
+      # showed no row on the PR at all -- which reads as "fine", not as "not
+      # run" (#2332). `scripts/check-downstream-paths.py` derives the set from
+      # `cargo metadata` and fails CI when this list falls behind it again.
+      - "crates/rustledger-booking/**"
+      - "crates/rustledger-budget/**"
+      - "crates/rustledger-core/**"
       - "crates/rustledger-ffi-component/**"
       - "crates/rustledger-ffi-wasi/**"
-      # ...and the engine crates whose behavior it exposes (the v0.17.x bugs
-      # lived in loader/booking/validate, not in the FFI glue).
-      - "crates/rustledger-core/**"
-      - "crates/rustledger-parser/**"
+      - "crates/rustledger-importer/**"
       - "crates/rustledger-loader/**"
-      - "crates/rustledger-booking/**"
-      - "crates/rustledger-validate/**"
+      - "crates/rustledger-ops/**"
+      - "crates/rustledger-parser/**"
+      - "crates/rustledger-plugin/**"
+      - "crates/rustledger-plugin-types/**"
       - "crates/rustledger-query/**"
+      - "crates/rustledger-returns/**"
+      - "crates/rustledger-validate/**"
       - ".github/workflows/downstream.yml"
   workflow_dispatch:
 

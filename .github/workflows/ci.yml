@@ -127,6 +127,25 @@ jobs:
           toolchain: 1.98.1 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
       - name: Verify release-publish CRATES array matches publishable crates
         run: python3 scripts/check-publish-crates.py
+  # Embedder coverage gate (#2332). `Downstream (rustfava)` is path-filtered,
+  # and its list fell six crates behind what the component is built from — so a
+  # change to one of them ran nothing and showed NO row on the PR, which reads
+  # as "fine" rather than as "not run". Derived from `cargo metadata` here so
+  # the list cannot drift again silently.
+  downstream-paths:
+    name: Downstream paths cover the embedder
+    runs-on: ubuntu-latest
+    # `cargo metadata` only, like publish-list above: no compilation, so the
+    # workflow-level sccache wrapper isn't needed here either.
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+        with:
+          toolchain: 1.98.1 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
+      - name: Verify Downstream's path filter covers the component's dependencies
+        run: python3 scripts/check-downstream-paths.py
   # Wire-format bindings freshness gate (ADR-0004, #1218 + #1232).
   # Regenerates all three artifacts from the Rust DTOs and fails if any
   # differs from the checked-in version:

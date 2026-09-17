@@ -35,31 +35,54 @@ struct FuzzAmount(Decimal);
 /// `Decimal::MAX`, its negation, the smallest representable magnitude, and the
 /// small integers that divide badly. A quotient of `MAX / 1e-28` is what an
 /// unchecked division panics on.
-const EDGE_VALUES: &[&str] = &[
-    "79228162514264337593543950335",
-    "-79228162514264337593543950335",
-    "0.0000000000000000000000000001",
-    "-0.0000000000000000000000000001",
-    "0",
-    "1",
-    "-1",
-    "3",
-    "0.1",
-];
+///
+/// Built from constructors rather than parsed from strings. A string table
+/// needs a fallback for the parse, and a typo in one entry would then disable
+/// that edge silently and forever -- the generator would keep reporting a
+/// clean run it was no longer capable of dirtying.
+fn edge_values() -> [Decimal; 9] {
+    [
+        Decimal::MAX,
+        -Decimal::MAX,
+        Decimal::new(1, 28),
+        Decimal::new(-1, 28),
+        Decimal::ZERO,
+        Decimal::ONE,
+        Decimal::NEGATIVE_ONE,
+        Decimal::new(3, 0),
+        Decimal::new(1, 1),
+    ]
+}
+
+/// The mantissa `Decimal` actually has: 96 bits.
+const MANTISSA_MASK: i128 = (1i128 << 96) - 1;
 
 impl<'a> Arbitrary<'a> for FuzzAmount {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let value = match u8::arbitrary(u)? % 8 {
             0 => {
-                let pick = usize::from(u8::arbitrary(u)?) % EDGE_VALUES.len();
-                Decimal::from_str_exact(EDGE_VALUES[pick]).unwrap_or(Decimal::ZERO)
+                let edges = edge_values();
+                let pick = usize::from(u8::arbitrary(u)?) % edges.len();
+                edges[pick]
             }
             // Anywhere in the domain: a full-width mantissa with any scale the
             // type allows. `try_from_i128_with_scale` rather than the
             // panicking constructor -- a generator that aborts the run is a
             // false finding, which is this target's worst outcome.
+            //
+            // The mantissa is MASKED to 96 bits first. Handing the function a
+            // raw `i128` looks like "the whole domain" and is not: it is
+            // representable with probability about 2^-31, measured at 0 of
+            // 200,000 draws, so every draw fell back to ZERO and this arm
+            // generated nothing at all. Masking makes it uniform over the
+            // mantissa range, which is what the arm was written to do.
             1 => {
-                let mantissa = i128::arbitrary(u)?;
+                let magnitude = i128::arbitrary(u)? & MANTISSA_MASK;
+                let mantissa = if bool::arbitrary(u)? {
+                    -magnitude
+                } else {
+                    magnitude
+                };
                 let scale = u32::from(u8::arbitrary(u)?) % 29;
                 Decimal::try_from_i128_with_scale(mantissa, scale).unwrap_or(Decimal::ZERO)
             }

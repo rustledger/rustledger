@@ -697,9 +697,18 @@ impl BookingEngine {
                                         amt.number.checked_mul(lot_units).ok_or_else(overflow)?
                                     }
                                     rustledger_core::PriceKind::Total if !total_units.is_zero() => {
-                                        amt.number
-                                            .checked_mul(lot_units)
-                                            .and_then(|v| v.checked_div(total_units))
+                                        // `prorate`, not a bare
+                                        // multiply-then-divide: the product
+                                        // leaves `Decimal`'s range long before
+                                        // the SHARE does, so a total price of
+                                        // 5e14 over 1e15 of 1e15 units has an
+                                        // ordinary answer of 5e14 and an
+                                        // intermediate of 5e29. This was a bare
+                                        // `*` that panicked until #2344 made it
+                                        // checked, and checked still refused a
+                                        // figure that is perfectly
+                                        // representable (#2346).
+                                        rustledger_core::prorate(amt.number, lot_units, total_units)
                                             .ok_or_else(overflow)?
                                     }
                                     rustledger_core::PriceKind::Total => Decimal::ZERO,

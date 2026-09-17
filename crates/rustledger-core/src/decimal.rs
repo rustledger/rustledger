@@ -84,6 +84,43 @@ pub fn checked_sub_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {
     Some(diff)
 }
 
+/// Split `value` in the ratio `num / den`, exactly where `Decimal` allows and
+/// approximately where it does not.
+///
+/// Multiply-before-divide is the point: `value * num / den` makes a set of
+/// shares that covers the whole sum back to exactly `value`, where
+/// dividing first and multiplying after leaves a residue on every share.
+/// Beancount splits this way and rledger matches it.
+///
+/// The catch is that the intermediate product leaves `Decimal`'s range long
+/// before the answer does. Splitting `5e14` over `1e15` of `1e15` gives an
+/// ordinary `5e14`, while `value * num` is `5e29` and overflows. So the
+/// product is tried first and a failure falls back to dividing first, which
+/// still answers — less exactly, at a scale where the residue cannot matter
+/// against 28 significant digits. Reporting an error for a share this
+/// representable would be a refusal to compute something computable.
+///
+/// Two callers derived this independently before it was shared: the budget
+/// accrual split (`rustledger-budget`, which saw the overflow above about
+/// `MAX/366`) and the per-lot pro-rata of a `@@` total price in
+/// `rustledger-booking`'s gains, where the second one was a bare `*` that
+/// PANICKED until #2344 made it checked and #2346 made it fall back. One
+/// function, so the next caller inherits both halves rather than the first.
+///
+/// # Returns
+///
+/// `None` when `den` is zero, or when neither order can represent the result.
+/// Callers map that to their own refusal; nothing here clamps or saturates,
+/// because a fabricated share presented as the user's own money is the
+/// failure this whole area exists to avoid.
+#[must_use]
+pub fn prorate(value: Decimal, num: Decimal, den: Decimal) -> Option<Decimal> {
+    value
+        .checked_mul(num)
+        .and_then(|product| product.checked_div(den))
+        .or_else(|| value.checked_div(den)?.checked_mul(num))
+}
+
 /// Divide with Python `decimal`'s scale rule.
 ///
 /// Python defines an *ideal exponent* for division: `exp(a) - exp(b)`, i.e.
@@ -455,5 +492,55 @@ mod tests {
             "a value too large to carry the target scale must keep its VALUE",
         );
         assert_eq!(sum.to_string(), near_max.to_string());
+    }
+
+    #[test]
+    fn prorate_multiplies_first_so_a_whole_share_stays_exact() {
+        // The reason multiply-before-divide is the primary order. Dividing
+        // first here gives 0.333...(28 digits), and multiplying that back by 3
+        // lands on 0.999...9 — a share of the WHOLE that is not the whole.
+        assert_eq!(
+            prorate(Decimal::ONE, Decimal::from(3), Decimal::from(3)),
+            Some(Decimal::ONE),
+            "the whole split into its own ratio must come back exactly"
+        );
+        assert_eq!(
+            prorate(Decimal::from(10), Decimal::from(3), Decimal::from(4)),
+            Some(Decimal::new(75, 1)),
+            "an exactly representable share must be exact"
+        );
+    }
+
+    #[test]
+    fn prorate_falls_back_when_only_the_intermediate_product_overflows() {
+        // 5e14 of 1e15 units out of 1e15: the share is an ordinary 5e14, and
+        // `value * num` is 5e29, well past Decimal::MAX (~7.9e28). Refusing
+        // here was #2346.
+        let value = Decimal::from_str_exact("500000000000000").expect("5e14");
+        let units = Decimal::from_str_exact("1000000000000000").expect("1e15");
+
+        assert!(
+            value.checked_mul(units).is_none(),
+            "the premise of this test is that the PRODUCT does not fit"
+        );
+        assert_eq!(
+            prorate(value, units, units),
+            Some(value),
+            "a representable share must be computed, not refused"
+        );
+    }
+
+    #[test]
+    fn prorate_refuses_rather_than_inventing_a_share() {
+        assert_eq!(
+            prorate(Decimal::ONE, Decimal::ONE, Decimal::ZERO),
+            None,
+            "a zero denominator has no share to report"
+        );
+        assert_eq!(
+            prorate(Decimal::MAX, Decimal::MAX, Decimal::new(1, 28)),
+            None,
+            "when neither order can represent the result, say so"
+        );
     }
 }

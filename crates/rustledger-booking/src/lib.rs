@@ -791,6 +791,18 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// this crate's gains (#2346). Both carried the divide-first fallback, so both
 /// carried the underflow.
 ///
+/// # Rounding and scale
+///
+/// The slow path rounds to nearest with ties away from zero, which is what
+/// `Decimal::from_str` does; `rust_decimal` arithmetic on the fast path breaks
+/// ties to even. They can only disagree on an exact tie at the 29th
+/// significant digit, one unit in the last place.
+///
+/// The fast path's SCALE follows `rust_decimal`, not Python's ideal exponent:
+/// `900 * 1 / 1000` gives `0.90` where Python gives `0.9`. That predates this
+/// function — it is what the two callers already computed — and it is visible
+/// only where a `Decimal` is emitted verbatim (capgains CSV and JSON).
+///
 /// # Returns
 ///
 /// `None` when `den` is zero, or when the correctly rounded result is outside

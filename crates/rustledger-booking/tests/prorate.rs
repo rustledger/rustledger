@@ -36,8 +36,15 @@ fn computes_a_share_whose_intermediate_product_overflows() {
     assert_eq!(share, value);
     // On the rendering, not just the value: `Decimal` equality ignores scale,
     // so `assert_eq!` alone passed while the first version returned
-    // `500000000000000.00` — two trailing zeros the division invented, which a
-    // capital-gains report would print.
+    // `500000000000000.00` — two trailing zeros its divide-first fallback
+    // invented. They would reach the capgains CSV and JSON exports, which emit
+    // the `Decimal` verbatim; TEXT renders through `DisplayContext` at display
+    // precision and would not show them.
+    //
+    // This pins the SLOW path only. The fast path is unchanged from before this
+    // function existed and follows `rust_decimal`'s scale, not Python's ideal
+    // exponent (`900 * 1 / 1000` gives `0.90` where Python gives `0.9`); that
+    // is a separate, pre-existing divergence.
     assert_eq!(share.to_string(), "500000000000000");
 }
 

@@ -40,11 +40,6 @@ fn computes_a_share_whose_intermediate_product_overflows() {
     // invented. They would reach the capgains CSV and JSON exports, which emit
     // the `Decimal` verbatim; TEXT renders through `DisplayContext` at display
     // precision and would not show them.
-    //
-    // This pins the SLOW path only. The fast path is unchanged from before this
-    // function existed and follows `rust_decimal`'s scale, not Python's ideal
-    // exponent (`900 * 1 / 1000` gives `0.90` where Python gives `0.9`); that
-    // is a separate, pre-existing divergence.
     assert_eq!(share.to_string(), "500000000000000");
 }
 
@@ -82,4 +77,49 @@ fn refuses_rather_than_inventing_a_share() {
         None,
         "a share beyond Decimal's range is refused, not clamped"
     );
+}
+
+/// Shares take Python's ideal-exponent scale, `value.scale() + num.scale() -
+/// den.scale()`, on the fast path (#2349).
+///
+/// Every expected string here was produced by Python's `decimal`, not written
+/// by hand. The first two are the cases `rust_decimal` got wrong on its own —
+/// its division keeps a non-minimal scale for an exact quotient — and the last
+/// two are cases where it already agreed, pinned so that a fix for the first
+/// pair cannot strip scale the user actually wrote.
+#[test]
+fn shares_take_pythons_ideal_exponent_scale() {
+    for (v, n, d, python) in [
+        ("900", "1", "1000", "0.9"),    // rust_decimal alone: 0.90
+        ("10", "3", "4", "7.5"),        // rust_decimal alone: 7.50
+        ("100.00", "1", "1", "100.00"), // ideal scale 2 is KEPT, not normalized away
+        ("1.50", "2", "3", "1.00"),
+    ] {
+        let share = prorate(dec(v), dec(n), dec(d)).expect("representable");
+        assert_eq!(share.to_string(), python, "{v} * {n} / {d}");
+    }
+}
+
+/// ...and so does the exact `BigDecimal` path, which cannot reach
+/// `checked_div_python_scale` because its product does not fit in a `Decimal`.
+///
+/// It gets there because `BigDecimal`'s division already follows the ideal
+/// exponent, not because of any correction applied afterwards. That is a
+/// property of a dependency, so it is pinned: a change of library, or a
+/// `normalize` added in the name of tidiness, would drop the two places Python
+/// keeps in the first case, and this is what would notice.
+#[test]
+fn the_exact_slow_path_takes_the_same_scale() {
+    let units = dec("1000000000000000"); // 1e15; each product below is 5e29
+    for (v, python) in [
+        ("500000000000000.00", "500000000000000.00"),
+        ("500000000000000", "500000000000000"),
+    ] {
+        assert!(
+            dec(v).checked_mul(units).is_none(),
+            "premise: the product overflows"
+        );
+        let share = prorate(dec(v), units, units).expect("representable");
+        assert_eq!(share.to_string(), python, "{v} * 1e15 / 1e15");
+    }
 }

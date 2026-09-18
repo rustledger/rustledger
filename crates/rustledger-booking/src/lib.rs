@@ -798,10 +798,14 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// ties to even. They can only disagree on an exact tie at the 29th
 /// significant digit, one unit in the last place.
 ///
-/// The fast path's SCALE follows `rust_decimal`, not Python's ideal exponent:
-/// `900 * 1 / 1000` gives `0.90` where Python gives `0.9`. That predates this
-/// function — it is what the two callers already computed — and it is visible
-/// only where a `Decimal` is emitted verbatim (capgains CSV and JSON).
+/// Both paths give the result Python's ideal-exponent scale, `value.scale() +
+/// num.scale() - den.scale()`: `900 * 1 / 1000` is `0.9`, not `rust_decimal`'s
+/// `0.90`, and `100.00 * 1 / 1` keeps its `100.00`. The fast path gets there
+/// through `checked_div_python_scale`; the exact path gets there because
+/// `BigDecimal` division already follows the ideal exponent. The fast path's
+/// scale was previously `rust_decimal`'s, which put invented trailing zeros
+/// into anything that emits a `Decimal` verbatim — the capgains CSV and JSON
+/// exports (#2349).
 ///
 /// # Returns
 ///
@@ -815,7 +819,15 @@ pub fn prorate(value: Decimal, num: Decimal, den: Decimal) -> Option<Decimal> {
     if den.is_zero() {
         return None;
     }
-    if let Some(share) = value.checked_mul(num).and_then(|p| p.checked_div(den)) {
+    // `checked_div_python_scale`, not `checked_div`: `rust_decimal` keeps a
+    // non-minimal scale for an exact quotient (`900 / 1000` is `0.90`), where
+    // Python reduces to the ideal exponent (`0.9`). The product's scale is
+    // already the sum of its factors', so this lands on Python's scale for the
+    // whole of `value * num / den` (#2349).
+    if let Some(share) = value
+        .checked_mul(num)
+        .and_then(|p| rustledger_core::checked_div_python_scale(p, den))
+    {
         return Some(share);
     }
     // Reached only when the product overflowed, so |value * num| > MAX and the
@@ -826,6 +838,13 @@ pub fn prorate(value: Decimal, num: Decimal, den: Decimal) -> Option<Decimal> {
     // (`5e+20`), which `Decimal::from_str` accepts today only by coincidence.
     // Parsing rounds to what `Decimal` can hold, and fails if the magnitude
     // cannot fit at all — which is exactly the `None` wanted.
+    //
+    // No scale correction here, deliberately: `BigDecimal`'s division already
+    // produces Python's ideal exponent — `100.00` keeps its places, `900/1000`
+    // comes out `0.9` — measured against Python's `decimal` on both the padding
+    // and stripping cases. Normalizing on top would be worse than redundant: on
+    // an inexact result that rounds to trailing zeros it would strip digits
+    // Python keeps.
     Decimal::from_str(&exact.to_plain_string()).ok()
 }
 

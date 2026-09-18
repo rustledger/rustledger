@@ -79,8 +79,8 @@ fn refuses_rather_than_inventing_a_share() {
     );
 }
 
-/// Shares take Python's ideal-exponent scale, `value.scale() + num.scale() -
-/// den.scale()`, on the fast path (#2349).
+/// EXACT shares take Python's ideal-exponent scale, `value.scale() +
+/// num.scale() - den.scale()`, on the fast path (#2349).
 ///
 /// Every expected string here was produced by Python's `decimal`, not written
 /// by hand. The first two are the cases `rust_decimal` got wrong on its own —
@@ -121,5 +121,50 @@ fn the_exact_slow_path_takes_the_same_scale() {
         );
         let share = prorate(dec(v), units, units).expect("representable");
         assert_eq!(share.to_string(), python, "{v} * 1e15 / 1e15");
+    }
+}
+
+/// An INEXACT share keeps `rust_decimal`'s precision, which is a deliberate
+/// deviation from Python and is pinned as one (CLAUDE.md, "Checklist for a
+/// deliberate Python deviation").
+///
+/// Python rounds these to its 28-significant-digit context; `rust_decimal`
+/// keeps up to 29. #2349's scale fix must not reach into them: the
+/// ideal-exponent step only strips trailing zeros, and an inexact
+/// `rust_decimal` quotient never has one. If this ever fails because someone
+/// switched to Python's 28-digit rounding, that is a behavior change to make on
+/// purpose, not a side effect to accept.
+#[test]
+fn inexact_shares_keep_rust_decimals_precision() {
+    for (v, n, d, rledger, python) in [
+        (
+            "100",
+            "1",
+            "3",
+            "33.333333333333333333333333333",
+            "33.33333333333333333333333333",
+        ),
+        (
+            "900",
+            "1",
+            "7",
+            "128.57142857142857142857142857",
+            "128.5714285714285714285714286",
+        ),
+        (
+            "10.00",
+            "1",
+            "3",
+            "3.3333333333333333333333333333",
+            "3.333333333333333333333333333",
+        ),
+    ] {
+        let share = prorate(dec(v), dec(n), dec(d)).expect("representable");
+        assert_eq!(share.to_string(), rledger, "{v} * {n} / {d}");
+        assert_ne!(
+            share.to_string(),
+            python,
+            "this pins the deviation, not agreement"
+        );
     }
 }

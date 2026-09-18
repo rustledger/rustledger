@@ -798,14 +798,23 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// ties to even. They can only disagree on an exact tie at the 29th
 /// significant digit, one unit in the last place.
 ///
-/// Both paths give the result Python's ideal-exponent scale, `value.scale() +
-/// num.scale() - den.scale()`: `900 * 1 / 1000` is `0.9`, not `rust_decimal`'s
-/// `0.90`, and `100.00 * 1 / 1` keeps its `100.00`. The fast path gets there
+/// For an EXACT quotient both paths give Python's ideal-exponent scale,
+/// `value.scale() + num.scale() - den.scale()`: `900 * 1 / 1000` is `0.9`, not
+/// `rust_decimal`'s `0.90`, and `100.00 * 1 / 1` keeps its `100.00`. The fast
+/// path gets there
 /// through `checked_div_python_scale`; the exact path gets there because
 /// `BigDecimal` division already follows the ideal exponent. The fast path's
 /// scale was previously `rust_decimal`'s, which put invented trailing zeros
 /// into anything that emits a `Decimal` verbatim — the capgains CSV and JSON
 /// exports (#2349).
+///
+/// An INEXACT quotient is a deliberate deviation, not covered by the above.
+/// Python rounds it to its 28-significant-digit context (`100 / 3` is
+/// `33.33333333333333333333333333`); `rust_decimal` keeps as many digits as its
+/// 96-bit mantissa holds, up to 29 (`33.333333333333333333333333333`). That is
+/// more precision, not less, and it is untouched by the ideal-exponent step:
+/// `rust_decimal` never emits a trailing zero on an inexact quotient (none in
+/// 210,563 measured), so there is nothing for the normalization to strip.
 ///
 /// # Returns
 ///
@@ -822,8 +831,9 @@ pub fn prorate(value: Decimal, num: Decimal, den: Decimal) -> Option<Decimal> {
     // `checked_div_python_scale`, not `checked_div`: `rust_decimal` keeps a
     // non-minimal scale for an exact quotient (`900 / 1000` is `0.90`), where
     // Python reduces to the ideal exponent (`0.9`). The product's scale is
-    // already the sum of its factors', so this lands on Python's scale for the
-    // whole of `value * num / den` (#2349).
+    // already the sum of its factors', so an exact share lands on Python's
+    // scale for the whole of `value * num / den` (#2349). An inexact one keeps
+    // `rust_decimal`'s precision; see the doc above.
     if let Some(share) = value
         .checked_mul(num)
         .and_then(|p| rustledger_core::checked_div_python_scale(p, den))

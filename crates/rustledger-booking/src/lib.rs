@@ -755,6 +755,68 @@ fn to_big(d: Decimal) -> BigDecimal {
     BigDecimal::from_str(&d.to_string()).expect("Decimal always produces valid decimal string")
 }
 
+/// Split `value` in the ratio `num / den`, correctly rounded.
+///
+/// Multiply-before-divide is the fast path, and the reason it comes first:
+/// `value * num / den` makes a set of shares covering the whole sum come back
+/// to exactly `value`, where dividing first leaves a residue on each share.
+/// Beancount splits this way and rledger matches it.
+///
+/// The catch is that the intermediate product leaves `Decimal`'s range long
+/// before the answer does. Splitting `5e14` over `1e15` of `1e15` gives an
+/// ordinary `5e14`, while `value * num` is `5e29`. Then the product is formed
+/// in `BigDecimal` instead, divided there, and rounded ONCE into `Decimal`.
+///
+/// # Why not divide first, which is what the first version did
+///
+/// Because every reordering underflows on some input, and an underflow does
+/// not fail — it returns a number. `2 * MAX / MAX` is `2`; dividing first gives
+/// `2 / MAX`, about `2.5e-29`, below `Decimal`'s `1e-28` floor, so it rounds to
+/// zero and the share comes back `Some(0)`. Dividing the OTHER operand first
+/// fails the same way on `MAX * 2 / MAX`. Choosing the larger numerator avoids
+/// the outright zero (both quotients cannot underflow at once while the
+/// product overflows) but still keeps as few as ~14 significant digits in the
+/// worst case. Exact-then-round keeps all of them, and only runs when the fast
+/// path could not.
+///
+/// This is the same underflow class as #2344, where a `checked_div` that
+/// SUCCEEDED returned a zero that could not reproduce its total. Checked
+/// arithmetic catches the top of the range; the bottom has to be designed
+/// out.
+///
+/// # Callers
+///
+/// Two derived this independently before it was shared: the budget accrual
+/// split (`rustledger-budget`) and the per-lot share of a `@@` total price in
+/// this crate's gains (#2346). Both carried the divide-first fallback, so both
+/// carried the underflow.
+///
+/// # Returns
+///
+/// `None` when `den` is zero, or when the correctly rounded result is outside
+/// `Decimal`'s range. Nothing clamps or saturates: a fabricated share presented
+/// as the user's own money is the failure this area exists to avoid.
+#[must_use]
+pub fn prorate(value: Decimal, num: Decimal, den: Decimal) -> Option<Decimal> {
+    use std::str::FromStr;
+
+    if den.is_zero() {
+        return None;
+    }
+    if let Some(share) = value.checked_mul(num).and_then(|p| p.checked_div(den)) {
+        return Some(share);
+    }
+    // Reached only when the product overflowed, so |value * num| > MAX and the
+    // share is at least MAX / |den| >= 1 in magnitude: there is no sub-1e-28
+    // result for the conversion below to flush to zero.
+    let exact = to_big(value) * to_big(num) / to_big(den);
+    // `to_plain_string`, not `Display`: `Display` switches to exponent form
+    // (`5e+20`), which `Decimal::from_str` accepts today only by coincidence.
+    // Parsing rounds to what `Decimal` can hold, and fails if the magnitude
+    // cannot fit at all — which is exactly the `None` wanted.
+    Decimal::from_str(&exact.to_plain_string()).ok()
+}
+
 /// Calculate the residual of a transaction using arbitrary-precision arithmetic.
 ///
 /// This mirrors [`calculate_residual`] but uses `BigDecimal` to avoid precision loss

@@ -763,7 +763,7 @@ impl Budgets {
                 // both live in `prorate`. This was the first of the two
                 // independent copies of that reasoning; the other was in
                 // `rustledger-booking`'s gains (#2346).
-                let seg = rustledger_core::prorate(b.amount, num, den)?;
+                let seg = rustledger_booking::prorate(b.amount, num, den)?;
                 total = total.checked_add(seg)?;
             }
             cursor = seg_end;

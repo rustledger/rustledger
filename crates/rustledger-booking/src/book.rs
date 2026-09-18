@@ -708,7 +708,7 @@ impl BookingEngine {
                                         // checked, and checked still refused a
                                         // figure that is perfectly
                                         // representable (#2346).
-                                        rustledger_core::prorate(amt.number, lot_units, total_units)
+                                        crate::prorate(amt.number, lot_units, total_units)
                                             .ok_or_else(overflow)?
                                     }
                                     rustledger_core::PriceKind::Total => Decimal::ZERO,

@@ -757,17 +757,13 @@ impl Budgets {
                 let num = Decimal::from(seg_days);
                 let den = Decimal::from(interval_days);
                 // Multiply-before-divide is what makes a fully covered interval
-                // come to exactly `amount`, but the product overflows `Decimal`
-                // once the declared amount exceeds about MAX/366 — and a budget
-                // amount comes from the ledger, which must never panic the CLI.
-                // Fall back to divide-first for those: the residue is irrelevant
-                // at that scale, and a slightly inexact number beats an abort.
-                let seg = match b.amount.checked_mul(num) {
-                    Some(product) => product.checked_div(den)?,
-                    // Multiply-before-divide overflows above about MAX/366;
-                    // divide-first still answers, less exactly, at that scale.
-                    None => b.amount.checked_div(den)?.checked_mul(num)?,
-                };
+                // come to exactly `amount`, and the fallback for when that
+                // product overflows — above about MAX/366 for a budget amount,
+                // which comes from the ledger and must never panic the CLI —
+                // both live in `prorate`. This was the first of the two
+                // independent copies of that reasoning; the other was in
+                // `rustledger-booking`'s gains (#2346).
+                let seg = rustledger_booking::prorate(b.amount, num, den)?;
                 total = total.checked_add(seg)?;
             }
             cursor = seg_end;

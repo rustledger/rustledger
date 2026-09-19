@@ -798,10 +798,10 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// ties to even. They can only disagree on an exact tie at the 29th
 /// significant digit, one unit in the last place.
 ///
-/// For an EXACT quotient both paths give Python's ideal-exponent scale,
-/// `value.scale() + num.scale() - den.scale()`: `900 * 1 / 1000` is `0.9`, not
-/// `rust_decimal`'s `0.90`, and `100.00 * 1 / 1` keeps its `100.00`. The fast
-/// path gets there
+/// For an EXACT quotient whose ideal scale is non-negative, both paths give
+/// Python's ideal-exponent scale, `value.scale() + num.scale() - den.scale()`:
+/// `900 * 1 / 1000` is `0.9`, not `rust_decimal`'s `0.90`, and
+/// `100.00 * 1 / 1` keeps its `100.00`. The fast path gets there
 /// through `checked_div_python_scale`; the exact path gets there because
 /// `BigDecimal` division already follows the ideal exponent. The fast path's
 /// scale was previously `rust_decimal`'s, which put invented trailing zeros
@@ -813,8 +813,15 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// `33.33333333333333333333333333`); `rust_decimal` keeps as many digits as its
 /// 96-bit mantissa holds, up to 29 (`33.333333333333333333333333333`). That is
 /// more precision, not less, and it is untouched by the ideal-exponent step:
-/// `rust_decimal` never emits a trailing zero on an inexact quotient (none in
-/// 210,563 measured), so there is nothing for the normalization to strip.
+/// `rust_decimal` never emits a trailing zero on an inexact quotient — none in
+/// 210,563 integer quotients and 103,207 with fractional operands measured —
+/// so there is nothing for the normalization to strip.
+///
+/// A NEGATIVE ideal scale is the other deliberate deviation. It arises when the
+/// divisor is finer than the dividend — a whole-number total split across
+/// fractional lots — and Python then switches to exponent form: `900 * 1 / 1.5`
+/// is `6.0E+2`. `rust_decimal` has no negative scale, so it writes `600`. Same
+/// value; and `600` is what a CSV or JSON consumer expects anyway.
 ///
 /// # Returns
 ///

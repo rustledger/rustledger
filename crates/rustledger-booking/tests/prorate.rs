@@ -168,3 +168,26 @@ fn inexact_shares_keep_rust_decimals_precision() {
         );
     }
 }
+
+/// A NEGATIVE ideal scale — a divisor finer than the dividend — is where Python
+/// switches to exponent form and `rust_decimal`, which has no negative scale,
+/// cannot follow. Pinned as a deliberate deviation.
+///
+/// This is not exotic: a whole-number `@@` total split across lots of `1` and
+/// `0.5` units divides by `1.5`. Python's `decimal` measured `6.0E+2` and
+/// `1.80E+3` for these; the values match, the representation cannot.
+#[test]
+fn a_negative_ideal_scale_is_written_out_not_in_exponent_form() {
+    for (v, n, d, rledger, python) in [
+        ("900", "1", "1.5", "600", "6.0E+2"),
+        ("900", "1", "0.5", "1800", "1.80E+3"),
+    ] {
+        let share = prorate(dec(v), dec(n), dec(d)).expect("representable");
+        assert_eq!(share.to_string(), rledger, "{v} * {n} / {d}");
+        assert_ne!(
+            share.to_string(),
+            python,
+            "this pins the deviation, not agreement"
+        );
+    }
+}

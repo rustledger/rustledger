@@ -750,9 +750,17 @@ pub fn calculate_residual(transaction: &Transaction) -> Option<FxHashMap<Currenc
 /// The precision loss only occurs during arithmetic, so converting before operations
 /// preserves full precision.
 fn to_big(d: Decimal) -> BigDecimal {
-    use std::str::FromStr;
-    // rust_decimal Display is exact; BigDecimal FromStr handles any decimal string
-    BigDecimal::from_str(&d.to_string()).expect("Decimal always produces valid decimal string")
+    // Built from the parts rather than a `to_string` / `from_str` round trip.
+    // A `Decimal` IS `mantissa * 10^-scale`, and `BigDecimal::new` takes exactly
+    // that, so this is the same value AND the same scale — measured identical
+    // on 500,010 decimals including `MAX`, `MIN`, `-0.00` and trailing-zero
+    // padded 18-place values. It matters for speed: `prorate`'s exact path
+    // converts four times per call, and formatting and re-parsing each was most
+    // of its cost on an 18-decimal token ledger (#2349 review).
+    BigDecimal::new(
+        bigdecimal::num_bigint::BigInt::from(d.mantissa()),
+        i64::from(d.scale()),
+    )
 }
 
 /// Split `value` in the ratio `num / den`, correctly rounded.
@@ -762,12 +770,15 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// to exactly `value`, where dividing first leaves a residue on each share.
 /// Beancount splits this way and rledger matches it.
 ///
-/// The catch is that the intermediate product leaves `Decimal`'s range long
-/// before the answer does. Splitting `5e14` over `1e15` of `1e15` gives an
-/// ordinary `5e14`, while `value * num` is `5e29`. Then the product is formed
-/// in `BigDecimal` instead, divided there, and rounded ONCE into `Decimal`.
+/// The catch is that the intermediate product can leave `Decimal` when the
+/// answer does not — at either end. At the top, splitting `5e14` over `1e15`
+/// of `1e15` gives an ordinary `5e14`, while `value * num` is `5e29`. At the
+/// bottom, `1e-16 * 1e-13` needs 29 decimal places, `checked_mul` rounds it to
+/// zero without failing, and the representable share `1e-19` would come back
+/// `Some(0)`. Whenever the product is not exact, it is formed in `BigDecimal`
+/// instead, divided there, and rounded ONCE into `Decimal`.
 ///
-/// # Why not divide first, which is what the first version did
+/// # Why not divide first, which is what the budget crate's copy did
 ///
 /// Because every reordering underflows on some input, and an underflow does
 /// not fail — it returns a number. `2 * MAX / MAX` is `2`; dividing first gives
@@ -777,7 +788,7 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// the outright zero (both quotients cannot underflow at once while the
 /// product overflows) but still keeps as few as ~14 significant digits in the
 /// worst case. Exact-then-round keeps all of them, and only runs when the fast
-/// path could not.
+/// path's product was not exact.
 ///
 /// This is the same underflow class as #2344, where a `checked_div` that
 /// SUCCEEDED returned a zero that could not reproduce its total. Checked
@@ -798,10 +809,38 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// ties to even. They can only disagree on an exact tie at the 29th
 /// significant digit, one unit in the last place.
 ///
-/// The fast path's SCALE follows `rust_decimal`, not Python's ideal exponent:
-/// `900 * 1 / 1000` gives `0.90` where Python gives `0.9`. That predates this
-/// function — it is what the two callers already computed — and it is visible
-/// only where a `Decimal` is emitted verbatim (capgains CSV and JSON).
+/// For an EXACT quotient whose ideal scale is non-negative, both paths give
+/// Python's ideal-exponent scale, `value.scale() + num.scale() - den.scale()`:
+/// `900 * 1 / 1000` is `0.9`, not `rust_decimal`'s `0.90`, and
+/// `100.00 * 1 / 1` keeps its `100.00`. The fast path gets there
+/// through `checked_div_python_scale`; the exact path gets there through
+/// `with_ideal_scale`, the same helper, because `BigDecimal` division does not
+/// reliably do it on its own. The fast path's
+/// scale was previously `rust_decimal`'s, which put invented trailing zeros
+/// into anything that emits a `Decimal` verbatim — the capgains CSV and JSON
+/// exports (#2349).
+///
+/// An INEXACT quotient is a deliberate deviation, not covered by the above.
+/// Python rounds it to its 28-significant-digit context (`100 / 3` is
+/// `33.33333333333333333333333333`); `rust_decimal` keeps as many digits as its
+/// 96-bit mantissa holds, up to 29 (`33.333333333333333333333333333`). That is
+/// more precision, not less, and it is untouched by the ideal-exponent step:
+/// `rust_decimal` never emits a trailing zero on an inexact quotient — none in
+/// 210,563 integer quotients and 103,207 with fractional operands measured —
+/// so there is nothing for the normalization to strip.
+///
+/// A NEGATIVE ideal scale is the other deliberate deviation. It arises when the
+/// divisor is finer than the dividend — a whole-number total split across
+/// fractional lots — and Python then switches to exponent form: `900 * 1 / 1.5`
+/// is `6.0E+2`. `rust_decimal` has no negative scale, so it writes `600`. Same
+/// value; and `600` is what a CSV or JSON consumer expects anyway.
+///
+/// An ideal scale ABOVE 28 — 18-decimal lots sold by a posting written with
+/// one place asks for `18 + 18 - 1 = 35` — is padded to at most
+/// `Decimal::MAX_SCALE`, the most a `Decimal` can validly hold. Python's own
+/// digit count there comes from its 28-digit context rounding the product
+/// before dividing, so the number of trailing zeros can differ; the value
+/// does not.
 ///
 /// # Returns
 ///
@@ -815,18 +854,54 @@ pub fn prorate(value: Decimal, num: Decimal, den: Decimal) -> Option<Decimal> {
     if den.is_zero() {
         return None;
     }
-    if let Some(share) = value.checked_mul(num).and_then(|p| p.checked_div(den)) {
+    // The fast path is taken only when the product is EXACT. `checked_mul`
+    // does not fail when the product needs more than 28 decimal places or more
+    // than 96 bits — it rounds and returns `Some` anyway, and at the bottom of
+    // the range that rounding is to ZERO: `1e-16 * 1e-13` becomes `0`, and the
+    // share `1e-19` comes back `Some(0)`. An exact product keeps the sum of its
+    // factors' scales (`rust_decimal` does not normalize), so a smaller scale
+    // is the tell. The check can reject an exact product whose trailing zeros
+    // were dropped to fit; that only costs the exact path's time.
+    //
+    // `checked_div_python_scale`, not `checked_div`: `rust_decimal` keeps a
+    // non-minimal scale for an exact quotient (`900 / 1000` is `0.90`), where
+    // Python reduces to the ideal exponent (`0.9`). With the product exact, its
+    // scale IS `value.scale() + num.scale()`, so an exact share lands on
+    // Python's scale for the whole of `value * num / den` (#2349). An inexact
+    // one keeps `rust_decimal`'s precision; see the doc above.
+    if let Some(share) = value
+        .checked_mul(num)
+        .filter(|p| p.scale() == value.scale() + num.scale())
+        .and_then(|p| rustledger_core::checked_div_python_scale(p, den))
+    {
         return Some(share);
     }
-    // Reached only when the product overflowed, so |value * num| > MAX and the
-    // share is at least MAX / |den| >= 1 in magnitude: there is no sub-1e-28
-    // result for the conversion below to flush to zero.
+    // Reached when the product overflowed, or was rounded to fit. Either way
+    // the exact product is formed here and divided, and the result is rounded
+    // once. A share genuinely below `Decimal`'s `1e-28` floor rounds to the
+    // nearest representable value (`6e-29` to `1e-28`, `1e-29` to `0`), which
+    // is correct rounding rather than the silent flush the fast path did.
     let exact = to_big(value) * to_big(num) / to_big(den);
     // `to_plain_string`, not `Display`: `Display` switches to exponent form
     // (`5e+20`), which `Decimal::from_str` accepts today only by coincidence.
     // Parsing rounds to what `Decimal` can hold, and fails if the magnitude
     // cannot fit at all — which is exactly the `None` wanted.
-    Decimal::from_str(&exact.to_plain_string()).ok()
+    //
+    let rounded = Decimal::from_str(&exact.to_plain_string()).ok()?;
+    // `BigDecimal`'s division does NOT reliably land on Python's ideal
+    // exponent. It does on small scales — `100.00` keeps its places, `900/1000`
+    // is `0.9` — but `0.500000000000000000 * 1.000000000000000000 /
+    // 2.000000000000000000`, an ordinary 18-decimal token split, comes out `0.25`
+    // where Python gives `0.250000000000000000`. So an EXACT share gets the
+    // ideal scale explicitly, through the same helper `checked_div_python_scale`
+    // uses. An inexact one is left as parsed: normalizing it could strip a
+    // trailing zero that is a significant rounded digit, which Python keeps.
+    if to_big(rounded) == exact {
+        let ideal_scale =
+            i64::from(value.scale()) + i64::from(num.scale()) - i64::from(den.scale());
+        return Some(rustledger_core::with_ideal_scale(rounded, ideal_scale));
+    }
+    Some(rounded)
 }
 
 /// Calculate the residual of a transaction using arbitrary-precision arithmetic.

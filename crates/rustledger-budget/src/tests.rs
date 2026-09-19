@@ -1076,3 +1076,43 @@ fn all_rejected_says_whether_the_warnings_survived_the_filter() {
     assert_eq!(hidden.empty, Some(Empty::AllRejected { shown: false }));
     assert!(hidden.errors.is_empty());
 }
+
+/// The accrued budget carries Python's ideal-exponent scale, because it is
+/// what `session.budget` hands an embedder verbatim (#2349).
+///
+/// Half of a 7-a-month budget over June's 30 days is `7 * 15 / 30`: exactly
+/// `3.5`, which `rust_decimal`'s own division renders `3.50`. The CLI budget
+/// report never shows the difference — it rounds to display precision — but
+/// the FFI serializes this `Decimal` with a plain `to_string()`, so the scale
+/// here IS the scale an embedder reads. Pinned at this level because the value
+/// is shaped here, and nothing downstream rounds it before the FFI boundary.
+#[test]
+fn the_accrued_budget_takes_pythons_scale_for_the_ffi() {
+    use rustledger_core::AccountTypes;
+    let b = Budgets::new(vec![budget(
+        d(2024, 1, 1),
+        "Expenses:Food",
+        Interval::Month,
+        7,
+    )]);
+    let cmp = b.compare(
+        &[],
+        &AccountTypes::default(),
+        d(2024, 6, 1),
+        d(2024, 6, 16),
+        false,
+        None,
+    );
+    let food = cmp
+        .rows
+        .iter()
+        .find(|r| r.account == "Expenses:Food")
+        .expect("the budgeted row must exist");
+    let budgeted = food.budgeted.expect("half a month is budgeted");
+    assert_eq!(budgeted, Decimal::new(35, 1), "7 * 15 / 30");
+    assert_eq!(
+        budgeted.to_string(),
+        "3.5",
+        "the scale an FFI embedder reads; rust_decimal alone gives `3.50`"
+    );
+}

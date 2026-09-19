@@ -575,3 +575,66 @@ fn ambiguous_strict_reduction_is_refused() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// A `@@` total split UNEVENLY across lots must carry Python's scale into the
+/// exports (#2349).
+///
+/// The fixture above splits `@@ 700` into `350 + 350`, an even split with no
+/// fraction, so it could not see what an uneven one does. Here `@@ 900` over
+/// 1 + 999 units gives shares of `0.9` and `899.1`. Before the fix
+/// `rust_decimal`'s division kept a non-minimal scale and the CSV and JSON
+/// read `0.90` and `899.10` — trailing zeros no input carried and Python's
+/// `decimal` does not produce. TEXT renders through `DisplayContext` at display
+/// precision, so only the verbatim exports showed it.
+#[test]
+fn an_uneven_total_price_split_carries_pythons_scale_into_the_exports() {
+    let bin = require_rledger!();
+    let f = write_fixture(
+        r#"option "booking_method" "FIFO"
+2024-01-01 open Assets:Stock  CORP
+2024-01-01 open Assets:Cash   USD
+2024-01-01 open Income:Gains  USD
+
+2024-01-02 * "lot A"
+  Assets:Stock   1 CORP {1 USD}
+  Assets:Cash   -1 USD
+2024-01-03 * "lot B"
+  Assets:Stock   999 CORP {1 USD}
+  Assets:Cash   -999 USD
+
+2024-06-01 * "sell both lots at one total price"
+  Assets:Stock  -1000 CORP {} @@ 900 USD
+  Assets:Cash    900 USD
+  Income:Gains
+"#,
+    );
+    let path = f.path().to_str().unwrap();
+
+    let csv = run(&bin, &["report", path, "capgains", "--format", "csv"]);
+    let rows: Vec<&str> = csv.lines().collect();
+    assert_eq!(
+        rows.get(1..),
+        Some(
+            &[
+                "2024-06-01,Assets:Stock,CORP,1,2024-01-02,151,short,USD,0.9,1,-0.1",
+                "2024-06-01,Assets:Stock,CORP,999,2024-01-03,150,short,USD,899.1,999,-99.9",
+            ][..]
+        ),
+        "{csv}"
+    );
+
+    let json = run(&bin, &["report", path, "capgains", "--format", "json"]);
+    for field in [
+        r#""proceeds": "0.9""#,
+        r#""proceeds": "899.1""#,
+        // The summary sums the shares, so it takes their scale too — `900.0`
+        // is exactly what Python's decimal gives for 0.9 + 899.1.
+        r#""proceeds": "900.0""#,
+    ] {
+        assert!(json.contains(field), "missing {field} in {json}");
+    }
+    assert!(
+        !json.contains(r#""0.90""#),
+        "invented trailing zero is back: {json}"
+    );
+}

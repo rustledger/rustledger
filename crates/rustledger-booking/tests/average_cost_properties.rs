@@ -35,16 +35,36 @@ fn positive_decimal() -> impl Strategy<Value = Decimal> {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 20_000, ..ProptestConfig::default() })]
 
+    /// `short` makes every lot's units negative, so the pool is a short one and
+    /// the reduction that closes it is positive. The ratio form divides two
+    /// negatives where the product form multiplies them, so the sign arrives by
+    /// a different route on each path; drawing only long pools left that
+    /// untested.
     #[test]
     fn average_cost_is_never_a_fabricated_zero_and_otherwise_unchanged(
-        lots in prop::collection::vec((positive_decimal(), positive_decimal()), 2..=5)
+        lots in prop::collection::vec((positive_decimal(), positive_decimal()), 2..=5),
+        short in any::<bool>(),
     ) {
+        let lots: Vec<(Decimal, Decimal)> = lots
+            .into_iter()
+            .map(|(u, c)| (if short { -u } else { u }, c))
+            .collect();
         let mut inv = Inventory::new();
         let mut total = Decimal::ZERO;
         for (units, cost) in &lots {
             prop_assume!(inv.add(Position::with_cost(Amount::new(*units, "TKN"), Cost::new(*cost, "ETH"))).is_ok());
             total = match total.checked_add(*units) { Some(t) => t, None => return Ok(()) };
         }
+        // Read the lots back from the inventory: `add` MERGES positions whose
+        // costs are equal in value even when their scales differ, so the
+        // function sees summed units where the draw had two lots, and their
+        // products round differently. Comparing against the draw made this test
+        // fail on a case that was not a bug.
+        let pooled: Vec<(Decimal, Decimal)> = inv
+            .positions()
+            .filter_map(|p| p.cost.as_ref().map(|c| (p.units.number, c.number)))
+            .collect();
+
         let Ok(r) = inv.reduce(&Amount::new(-total, "TKN"), None, BookingMethod::Average) else {
             return Ok(());
         };
@@ -53,19 +73,31 @@ proptest! {
         let got = got.expect("assumed");
 
         // 1. No fabricated zero.
-        let exact: BigDecimal = lots.iter().map(|(u, c)| big(*u) * big(*c)).sum::<BigDecimal>() / big(total);
+        let exact: BigDecimal = pooled.iter().map(|(u, c)| big(*u) * big(*c)).sum::<BigDecimal>() / big(total);
         if let Ok(want) = Decimal::from_str(&exact.to_plain_string()) {
             prop_assert!(!got.is_zero() || want.is_zero(), "fabricated zero; exact average {want}");
         }
 
         // 2. Otherwise identical to the old formula.
-        let sum = lots.iter().try_fold(Decimal::ZERO, |a, (u, c)| a.checked_add(u.checked_mul(*c)?));
-        let vanished = lots.iter().any(|(u, c)| u.checked_mul(*c).is_some_and(|p| p.is_zero()));
+        let sum = pooled.iter().try_fold(Decimal::ZERO, |a, (u, c)| a.checked_add(u.checked_mul(*c)?));
+        let vanished = pooled.iter().any(|(u, c)| u.checked_mul(*c).is_some_and(|p| p.is_zero()));
         if let Some(sum) = sum
             && !(sum.is_zero() && vanished)
             && let Some(old) = sum.checked_div(total)
         {
-            prop_assert_eq!(got, old, "outside the repair, the result must be the old formula's");
+            // Within one unit in the last place, not bit-for-bit: the function
+            // accumulates over the lots it matched in its own order, and the
+            // order a sum is built in decides its last digit. Asserting
+            // equality pinned that internal order and failed on a case that was
+            // not a bug. One ulp still catches a change of FORM — the widened
+            // trigger this guards against moves results by far more.
+            let ulp = BigDecimal::new(BigInt::from(1), i64::from(old.scale().max(got.scale())));
+            prop_assert!(
+                (big(got) - big(old)).abs() <= ulp,
+                "outside the repair, the result must be the old formula's: got {}, old {}",
+                got,
+                old
+            );
         }
     }
 }

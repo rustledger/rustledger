@@ -49,10 +49,16 @@ use crate::{Amount, Cost, CostSpec, Currency, Position};
 /// changed exactly the 145 fabricated zeros and nothing else.
 ///
 /// What it does NOT fix: a sum that lost digits without reaching zero is still
-/// imprecise in proportion (8,833 of those pools were off by more than 100
-/// units in the last place, as before). Fixing that needs exact arithmetic,
-/// and `rustledger-core` deliberately does not depend on `bigdecimal` — the
-/// published `rustledger-parser` uses this crate standalone.
+/// divided as-is, so the average is wrong in proportion — 37,914 of 400,000
+/// random pools of comparable small lots are off by more than 100 units in the
+/// last place, exactly as before this change (11,842 of 341,915 when the
+/// magnitudes span the whole range). Requiring the ratios to be
+/// well-conditioned as well as a product to have vanished would take the first
+/// figure to 326 and beat the old formula on both populations, at the price of
+/// 519 in 742,000 coming out slightly worse than it; exact arithmetic in
+/// `BigDecimal` dominates both and needs a dependency `rustledger-core` does
+/// not have — the published `rustledger-parser` uses this crate standalone.
+/// Measurements and the decision are in #2353.
 ///
 /// The booker computes the same quantity for a reduction whose first matched
 /// lot carries no cost of its own, by dividing an already-summed cost basis.

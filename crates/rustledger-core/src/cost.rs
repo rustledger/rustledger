@@ -559,6 +559,30 @@ impl BookedCost {
 }
 
 impl CostNumber {
+    /// The effective per-unit value of a compound cost `{a # b}` over `units`:
+    /// `a + b / |units|`.
+    ///
+    /// The ONE place this is computed. Beancount defines it as
+    /// `(N * a + b) / N`, and that is the form not to evaluate: `N * a` is an
+    /// intermediate product that `checked_mul` rounds to 28 decimal places
+    /// without failing, so for a small lot it becomes zero and the per-unit it
+    /// was headed for is lost — `1e-11` units at `{1e-18 # 0}` booked a cost of
+    /// `0` (#2351). `a + b / N` is the same value with no intermediate product.
+    /// `book.rs` had a copy computing it the other way, which is how the two
+    /// came apart; `CostSpec::resolve` and `implicit_prices` already used this
+    /// form.
+    ///
+    /// `None` for zero units (the per-unit is undefined), or when the quotient
+    /// or the sum leaves `Decimal`'s range — `a + b / N` can overflow on the
+    /// addition even when the quotient fits (#2327).
+    #[must_use]
+    pub fn compound_per_unit(per_unit: Decimal, total: Decimal, units: Decimal) -> Option<Decimal> {
+        if units.is_zero() {
+            return None;
+        }
+        per_unit.checked_add(total.checked_div(units.abs())?)
+    }
+
     /// Return the per-unit value if this number carries one.
     ///
     /// - [`Self::PerUnit`] → `Some(its Decimal)`
@@ -827,16 +851,12 @@ impl CostSpec {
                 // itself before any caller reaches this.
                 total.checked_div(units.abs())?
             }
-            // Compound `{a # b}`: effective per-unit is (N*a + b)/N —
-            // beancount's compound_amount. Same zero-units guard as Total.
+            // Compound `{a # b}`: beancount's compound_amount, `(N*a + b)/N`,
+            // evaluated as `a + b/N` so that no intermediate product can round
+            // to zero first (#2351). One implementation, shared with the booker
+            // and implicit prices.
             CostNumber::Compound { per_unit, total } => {
-                if units.is_zero() {
-                    return None;
-                }
-                // Both operations checked: the division for the reason above,
-                // and the addition because `a + b/N` can leave the range even
-                // when the quotient fits (#2327).
-                per_unit.checked_add(total.checked_div(units.abs())?)?
+                CostNumber::compound_per_unit(per_unit, total, units)?
             }
             // Already booked: `b.per_unit == b.total / |units|` by
             // `BookedCost::new`'s invariant, so this is identical to

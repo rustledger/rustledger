@@ -113,11 +113,11 @@ pub fn extract_per_unit_price<T>(
             }
             // Compound `{a # b}`: effective per-unit is a + b/|N|.
             Some(crate::CostNumber::Compound { per_unit, total }) if !units_number.is_zero() => {
-                // Both operations checked: `a + b/N` can leave the range on the
+                // The shared `a + b/N` (#2351), which checks both the quotient
+                // and the addition — `a + b/N` can leave the range on the
                 // addition even when the quotient fits (#2340).
-                if let Some(effective) = total
-                    .checked_div(units_number.abs())
-                    .and_then(|q| per_unit.checked_add(q))
+                if let Some(effective) =
+                    crate::CostNumber::compound_per_unit(per_unit, total, units_number)
                 {
                     return Some((effective, currency));
                 }

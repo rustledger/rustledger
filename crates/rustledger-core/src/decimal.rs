@@ -146,7 +146,16 @@ pub fn with_ideal_scale(quotient: Decimal, ideal_scale: i64) -> Decimal {
     // Minimal form first: this is what removes the EXTRA trailing zero in
     // `7 / 2 -> 3.50`. `normalize` never loses value.
     let mut result = quotient.normalize();
-    let target = ideal_scale.max(i64::from(result.scale()));
+    // Capped at `Decimal::MAX_SCALE`. `rescale` clamps only a ZERO to it; a
+    // nonzero value scales up until its 96-bit mantissa is full, straight past
+    // 28. `0.5` rescaled to 36 comes back with scale 29 — a `Decimal` that
+    // `rust_decimal`'s own `from_parts` panics on, and that a `serialize` /
+    // `deserialize` round trip silently turns into scale 28. `checked_div_
+    // python_scale` cannot ask for more than 28 (its ideal is a difference of
+    // two scales), but `prorate`'s `a * b / c` can ask for up to 56.
+    let target = ideal_scale
+        .max(i64::from(result.scale()))
+        .min(i64::from(Decimal::MAX_SCALE));
 
     // `rescale` takes u32 and is a no-op past the mantissa's capacity; the
     // clamp keeps a pathological ideal from wrapping on the cast.
@@ -217,6 +226,38 @@ pub fn round_dp_python(number: Decimal, dp: u32) -> Decimal {
 
 #[cfg(test)]
 mod tests {
+    /// `with_ideal_scale` must never produce a `Decimal` above
+    /// `Decimal::MAX_SCALE`, however large the ideal it is asked for.
+    ///
+    /// `rescale` does not enforce the limit for a nonzero value: `0.5` rescaled
+    /// to 36 comes back at scale 29, and `from_parts` rebuilding that value
+    /// from its own parts panics. The check below is that rebuild, so a
+    /// regression shows up as the panic a downstream caller would hit.
+    #[test]
+    fn with_ideal_scale_never_exceeds_max_scale() {
+        for (value, ideal) in [("0.5", 36i64), ("0.311728394506172839", 35), ("0.05", 56)] {
+            let got = with_ideal_scale(Decimal::from_str_exact(value).expect("literal"), ideal);
+            assert!(
+                got.scale() <= Decimal::MAX_SCALE,
+                "{value} at ideal {ideal}: scale {}",
+                got.scale()
+            );
+            let m = got.mantissa().unsigned_abs();
+            #[allow(clippy::cast_possible_truncation)]
+            let rebuilt = Decimal::from_parts(
+                m as u32,
+                (m >> 32) as u32,
+                (m >> 64) as u32,
+                got.is_sign_negative(),
+                got.scale(),
+            );
+            assert_eq!(
+                rebuilt, got,
+                "{value} must survive a rebuild from its own parts"
+            );
+        }
+    }
+
     use super::*;
     use rust_decimal_macros::dec;
     use std::str::FromStr;

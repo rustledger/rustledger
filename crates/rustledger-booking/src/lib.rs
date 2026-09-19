@@ -835,6 +835,13 @@ fn to_big(d: Decimal) -> BigDecimal {
 /// is `6.0E+2`. `rust_decimal` has no negative scale, so it writes `600`. Same
 /// value; and `600` is what a CSV or JSON consumer expects anyway.
 ///
+/// An ideal scale ABOVE 28 — 18-decimal lots sold by a posting written with
+/// one place asks for `18 + 18 - 1 = 35` — is padded to at most
+/// `Decimal::MAX_SCALE`, the most a `Decimal` can validly hold. Python's own
+/// digit count there comes from its 28-digit context rounding the product
+/// before dividing, so the number of trailing zeros can differ; the value
+/// does not.
+///
 /// # Returns
 ///
 /// `None` when `den` is zero, or when the correctly rounded result is outside

@@ -275,3 +275,36 @@ fn an_inexact_exact_path_share_keeps_its_rounded_digits() {
     let share = prorate(v, n, d).expect("representable");
     assert_eq!(share.to_string(), "0.2500000000025000002500000000");
 }
+
+/// A realistic path to an out-of-range scale, pinned end to end.
+///
+/// 18-decimal lots sold by a posting written with one decimal place
+/// (`-2.5 TKN`), at an ETH total under 1: the ideal scale is `18 + 18 - 1 =
+/// 35`. Without the cap in `with_ideal_scale` the share came back at scale 29,
+/// a value `rust_decimal`'s `from_parts` panics on. It is rebuilt from its own
+/// parts here because that is the operation that would panic downstream.
+#[test]
+fn a_huge_ideal_scale_yields_a_valid_decimal() {
+    let share = prorate(
+        dec("0.623456789012345678"),
+        dec("1.250000000000000000"),
+        dec("2.5"),
+    )
+    .expect("representable");
+    assert_eq!(share, dec("0.311728394506172839"), "value is exact");
+    assert!(
+        share.scale() <= Decimal::MAX_SCALE,
+        "scale {}",
+        share.scale()
+    );
+    let m = share.mantissa().unsigned_abs();
+    #[allow(clippy::cast_possible_truncation)]
+    let rebuilt = Decimal::from_parts(
+        m as u32,
+        (m >> 32) as u32,
+        (m >> 64) as u32,
+        false,
+        share.scale(),
+    );
+    assert_eq!(rebuilt, share);
+}

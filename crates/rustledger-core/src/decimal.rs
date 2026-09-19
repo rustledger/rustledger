@@ -116,11 +116,33 @@ pub fn checked_sub_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {
 #[must_use]
 pub fn checked_div_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {
     let quotient = a.checked_div(b)?;
-
     // `scale()` is u32; the ideal can be negative (a coarser dividend than
     // divisor), which simply means "no padding required".
     let ideal_scale = i64::from(a.scale()) - i64::from(b.scale());
+    Some(with_ideal_scale(quotient, ideal_scale))
+}
 
+/// Give a quotient Python's ideal-exponent scale: strip the trailing zeros the
+/// division invented, then pad back up to `ideal_scale`.
+///
+/// The second half of [`checked_div_python_scale`], split out for a caller that
+/// computed its quotient some other way: the exact `BigDecimal` path of
+/// `rustledger_booking::prorate`, whose product does not fit in a `Decimal` and
+/// so cannot be handed to the division above. One implementation, so the two
+/// cannot drift on what "ideal" means.
+///
+/// ONLY for an exact quotient. Normalizing an inexact one can strip a trailing
+/// zero that is a significant rounded digit, which Python keeps; the division
+/// above never meets that case because `rust_decimal` does not emit a trailing
+/// zero on an inexact quotient, so a caller with its own quotient must check
+/// exactness first.
+///
+/// `ideal_scale` is `dividend.scale() - divisor.scale()` for a plain division,
+/// or `a.scale() + b.scale() - c.scale()` for `a * b / c`, and may be negative
+/// (a coarser dividend than divisor), which means no padding. Never changes the
+/// value.
+#[must_use]
+pub fn with_ideal_scale(quotient: Decimal, ideal_scale: i64) -> Decimal {
     // Minimal form first: this is what removes the EXTRA trailing zero in
     // `7 / 2 -> 3.50`. `normalize` never loses value.
     let mut result = quotient.normalize();
@@ -133,7 +155,7 @@ pub fn checked_div_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {
     {
         result.rescale(target);
     }
-    Some(result)
+    result
 }
 
 /// Negate with Python `decimal`'s sign rule for zero.

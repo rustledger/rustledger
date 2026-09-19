@@ -103,24 +103,43 @@ fn shares_take_pythons_ideal_exponent_scale() {
 /// ...and so does the exact `BigDecimal` path, which cannot reach
 /// `checked_div_python_scale` because its product does not fit in a `Decimal`.
 ///
-/// It gets there because `BigDecimal`'s division already follows the ideal
-/// exponent, not because of any correction applied afterwards. That is a
-/// property of a dependency, so it is pinned: a change of library, or a
-/// `normalize` added in the name of tidiness, would drop the two places Python
-/// keeps in the first case, and this is what would notice.
+/// It gets there through `with_ideal_scale`, applied to an exact share. It does
+/// NOT get there on its own: `BigDecimal`'s division happens to land on the
+/// ideal exponent at small scales (the first two rows would pass without the
+/// helper), which is what a nine-case sample once suggested, but the third row
+/// — an ordinary 18-decimal token split — comes out `0.25` where Python gives
+/// `0.250000000000000000`. All expected values are Python's.
 #[test]
 fn the_exact_slow_path_takes_the_same_scale() {
-    let units = dec("1000000000000000"); // 1e15; each product below is 5e29
-    for (v, python) in [
-        ("500000000000000.00", "500000000000000.00"),
-        ("500000000000000", "500000000000000"),
+    for (v, n, d, python) in [
+        // Product 5e29: overflows.
+        (
+            "500000000000000.00",
+            "1000000000000000",
+            "1000000000000000",
+            "500000000000000.00",
+        ),
+        (
+            "500000000000000",
+            "1000000000000000",
+            "1000000000000000",
+            "500000000000000",
+        ),
+        // Product needs 36 decimal places: rounded, so not exact.
+        (
+            "0.500000000000000000",
+            "1.000000000000000000",
+            "2.000000000000000000",
+            "0.250000000000000000",
+        ),
     ] {
+        let product = dec(v).checked_mul(dec(n));
         assert!(
-            dec(v).checked_mul(units).is_none(),
-            "premise: the product overflows"
+            product.is_none_or(|p| p.scale() != dec(v).scale() + dec(n).scale()),
+            "premise: {v} * {n} cannot take the fast path"
         );
-        let share = prorate(dec(v), units, units).expect("representable");
-        assert_eq!(share.to_string(), python, "{v} * 1e15 / 1e15");
+        let share = prorate(dec(v), dec(n), dec(d)).expect("representable");
+        assert_eq!(share.to_string(), python, "{v} * {n} / {d}");
     }
 }
 
@@ -190,4 +209,69 @@ fn a_negative_ideal_scale_is_written_out_not_in_exponent_form() {
             "this pins the deviation, not agreement"
         );
     }
+}
+
+/// The bottom of the range, on the FAST path.
+///
+/// `checked_mul` does not fail when the product needs more than 28 decimal
+/// places; it rounds and returns `Some`, and for a small product that rounding
+/// is to zero. Before the exactness check these came back `Some(0)` — a
+/// representable share presented as nothing. The expected values are Python's
+/// `decimal` at 60 digits of precision. The second row is 18-decimal token
+/// dust, the shape an ERC-20 ledger produces.
+#[test]
+fn a_product_rounded_to_zero_does_not_become_a_zero_share() {
+    for (v, n, d, python) in [
+        (
+            "0.0000000000000001",
+            "0.0000000000001",
+            "0.0000000001",
+            "0.0000000000000000001",
+        ),
+        (
+            "0.000000000000000001",
+            "0.00000000001",
+            "0.00000000001",
+            "0.000000000000000001",
+        ),
+        (
+            "0.00000000000000015",
+            "0.0000000000001",
+            "0.0000000001",
+            "0.00000000000000000015",
+        ),
+    ] {
+        assert!(
+            dec(v).checked_mul(dec(n)).is_some_and(|p| p.is_zero()),
+            "premise: checked_mul silently rounds {v} * {n} to zero"
+        );
+        let share = prorate(dec(v), dec(n), dec(d)).expect("representable");
+        assert_eq!(share, dec(python), "{v} * {n} / {d}");
+        assert!(!share.is_zero());
+    }
+}
+
+/// The exact path gives only an EXACT share the ideal scale. An inexact one
+/// keeps its rounded digits, trailing zeros included.
+///
+/// `with_ideal_scale` normalizes first, which is right for an exact share and
+/// wrong for an inexact one: the zeros at the end of a rounded result are the
+/// rounding, not padding. About one inexact exact-path share in ten ends in a
+/// zero (1,978 of 19,997 measured on this shape). This one is correctly rounded
+/// at 28 places; Python, which rounds the product and then the quotient to 28
+/// significant digits, prints the same value at 27 (`0.250000000002500000250000000`).
+/// Without the exactness gate, `with_ideal_scale` normalizes it and re-pads to
+/// the ideal scale, giving `0.25000000000250000025000000000`: the same value,
+/// but its trailing zeros would then be padding rather than rounding, a claim
+/// of precision the computation never had.
+#[test]
+fn an_inexact_exact_path_share_keeps_its_rounded_digits() {
+    let (v, n, d) = (dec("1.000000000000000001"), dec("1.00000000001"), dec("4"));
+    assert!(
+        v.checked_mul(n)
+            .is_none_or(|p| p.scale() != v.scale() + n.scale()),
+        "premise: 18 + 11 decimal places cannot take the fast path"
+    );
+    let share = prorate(v, n, d).expect("representable");
+    assert_eq!(share.to_string(), "0.2500000000025000002500000000");
 }

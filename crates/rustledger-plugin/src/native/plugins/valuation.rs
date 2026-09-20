@@ -74,10 +74,63 @@ struct AccountConfig {
 /// Revisit only if core ever grows a value-denominated reduction — then
 /// this loop is the candidate call site. For unit-denominated needs, use
 /// `rustledger_core::Inventory`; do not extend this struct.
+/// A valuation price held as an exact ratio rather than as its quotient.
+///
+/// A derived price is frequently non-terminating: `1200 / 1125` is `16/15`,
+/// and `Decimal` can only keep 28 places of it. Dividing a cash amount BY
+/// that stored quotient then compounds the loss, so `400 / (16/15)` lands on
+/// `374.99999...` where the exact answer, `400 x 1125 / 1200`, is `375`.
+///
+/// Keeping the numerator and denominator defers the division to the last
+/// step, where [`rustledger_booking::prorate`] performs it multiply-first and
+/// escalates to `BigDecimal` when the intermediate product would not fit.
+/// Every value this plugin posts is then exact whenever the exact answer is
+/// representable, which for the fixtures in #2360 it always is: the prices
+/// repeat but the unit counts and gains do not.
+#[derive(Clone, Copy, Debug)]
+struct PriceRatio {
+    num: Decimal,
+    den: Decimal,
+}
+
+impl PriceRatio {
+    /// A price of 1, the state before any valuation directive.
+    const ONE: Self = Self {
+        num: Decimal::ONE,
+        den: Decimal::ONE,
+    };
+
+    /// `value x price`, exact where the result is representable.
+    fn multiply(self, value: Decimal) -> Option<Decimal> {
+        rustledger_booking::prorate(value, self.num, self.den)
+    }
+
+    /// `value / price`, which is `value x den / num`.
+    fn divide(self, value: Decimal) -> Option<Decimal> {
+        rustledger_booking::prorate(value, self.den, self.num)
+    }
+
+    /// The price as a single `Decimal`, for the annotations we emit.
+    ///
+    /// This is the one place the quotient is unavoidable: a `{cost}` or `@`
+    /// annotation is a number in the ledger text. It is used ONLY for those
+    /// annotations, never to derive a unit count or a gain.
+    fn to_decimal(self) -> Decimal {
+        // The denominator is the unit balance the price was derived from, and
+        // `process_valuation_assertion` refuses to let that reach zero, so the
+        // fallback is unreachable. It is `unwrap_or_default` rather than an
+        // expect because an annotation is not worth a panic; if it ever does
+        // fire, a zero cost annotation is visible in the output rather than
+        // silently folded into a computed number, since this value is used
+        // ONLY for annotations.
+        self.num.checked_div(self.den).unwrap_or_default()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CostLot {
     units: Decimal,
-    cost_per_unit: Decimal,
+    cost: PriceRatio,
     date: String,
 }
 
@@ -86,7 +139,7 @@ struct CostLot {
 struct AccountState {
     config: AccountConfig,
     lots: Vec<CostLot>,
-    last_price: Decimal,
+    last_price: PriceRatio,
     total_units: Decimal,
 }
 
@@ -95,7 +148,7 @@ impl AccountState {
         Self {
             config,
             lots: Vec::new(),
-            last_price: Decimal::ONE,
+            last_price: PriceRatio::ONE,
             total_units: Decimal::ZERO,
         }
     }
@@ -269,7 +322,7 @@ fn transform_transaction(
     _commodities_present: &mut HashSet<String>,
 ) -> (DirectiveWrapper, Vec<DirectiveWrapper>, Vec<PluginError>) {
     let mut new_directives: Vec<DirectiveWrapper> = Vec::new();
-    let errors: Vec<PluginError> = Vec::new();
+    let mut errors: Vec<PluginError> = Vec::new();
     let mut new_postings: Vec<PostingData> = Vec::new();
 
     for posting in &txn.postings {
@@ -289,8 +342,29 @@ fn transform_transaction(
             if let Some(ref price_annot) = posting.price
                 && price_annot.is_total
             {
+                // A total price over zero units has no per-unit price, and
+                // deriving one used to divide by zero and panic the process on
+                // an ordinary ledger. Upstream reaches the same input and
+                // reports a plugin error rather than crashing, so report too
+                // and leave the posting alone. Pre-existing on main; fixed here
+                // because it is the last bare division in this function and
+                // removing those is what this change is for.
+                if units_number.is_zero() {
+                    errors.push(PluginError {
+                        message: format!(
+                            "a total price on {} covers zero units, so it has \
+                             no per-unit price",
+                            posting.account
+                        ),
+                        source_file: directive.filename.clone(),
+                        line_number: directive.lineno,
+                        severity: PluginErrorSeverity::Error,
+                    });
+                    new_postings.push(posting.clone());
+                    continue;
+                }
                 // Handle @@ price annotation - generates 3 postings
-                let (postings, price_directive) = handle_total_price_posting(
+                let (postings, price_directive, total_price_errors) = handle_total_price_posting(
                     posting,
                     units_number,
                     &units.currency,
@@ -299,6 +373,7 @@ fn transform_transaction(
                     &directive.date,
                     directive,
                 );
+                errors.extend(total_price_errors);
                 if let Some(pd) = price_directive {
                     new_directives.push(pd);
                 }
@@ -316,7 +391,7 @@ fn transform_transaction(
                     data: DirectiveData::Price(PriceData {
                         currency: state.config.currency.clone(),
                         amount: AmountData {
-                            number: format_decimal(state.last_price),
+                            number: format_decimal(state.last_price.to_decimal()),
                             currency: units.currency.clone(),
                         },
                         metadata: vec![],
@@ -326,13 +401,38 @@ fn transform_transaction(
 
             if units_number > Decimal::ZERO {
                 // INFLOW: Convert to synthetic currency
-                let synthetic_units =
-                    round_up(units_number / state.last_price, MAPPED_CURRENCY_PRECISION);
+                // The unit count can be unavailable two ways: a price of
+                // zero, where the account was valued at nothing so no number
+                // of units accounts for an inflow of cash, and a count past
+                // `Decimal`'s ceiling, which a near-zero price reaches. Both
+                // used to panic in `units_number / state.last_price`
+                // ("Division by zero" and "Division overflowed").
+                //
+                // Report and leave the posting alone. Passing it through
+                // SILENTLY, which an earlier revision of this change did, is
+                // worse than the panic it replaced: the cash never enters the
+                // fund, the account is short by the whole purchase, and
+                // `rledger check` says "No errors found".
+                let Some(exact_units) = state.last_price.divide(units_number) else {
+                    errors.push(PluginError {
+                        message: format!(
+                            "{} cannot be converted to {}: the valuation price \
+                             is zero or the unit count is out of range",
+                            posting.account, state.config.currency
+                        ),
+                        source_file: directive.filename.clone(),
+                        line_number: directive.lineno,
+                        severity: PluginErrorSeverity::Error,
+                    });
+                    new_postings.push(posting.clone());
+                    continue;
+                };
+                let synthetic_units = round_up(exact_units, MAPPED_CURRENCY_PRECISION);
 
                 // Add to lots
                 state.lots.push(CostLot {
                     units: synthetic_units,
-                    cost_per_unit: state.last_price,
+                    cost: state.last_price,
                     date: directive.date.clone(),
                 });
                 state.total_units += synthetic_units;
@@ -346,7 +446,7 @@ fn transform_transaction(
                     }),
                     cost: Some(CostData {
                         number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
-                            value: format_decimal(state.last_price),
+                            value: format_decimal(state.last_price.to_decimal()),
                         }),
                         currency: Some(units.currency.clone()),
                         date: Some(directive.date.clone()),
@@ -429,17 +529,18 @@ fn handle_total_price_posting(
     price_annot: &PriceAnnotationData,
     state: &mut AccountState,
     date: &str,
-    _directive: &DirectiveWrapper,
-) -> (Vec<PostingData>, Option<DirectiveWrapper>) {
+    directive: &DirectiveWrapper,
+) -> (Vec<PostingData>, Option<DirectiveWrapper>, Vec<PluginError>) {
     let mut postings = Vec::new();
+    let mut errors: Vec<PluginError> = Vec::new();
 
     // Get the total price amount
     let Some(ref price_amount) = price_annot.amount else {
-        return (vec![posting.clone()], None);
+        return (vec![posting.clone()], None, errors);
     };
 
     let Ok(total_price) = price_amount.number.parse::<Decimal>() else {
-        return (vec![posting.clone()], None);
+        return (vec![posting.clone()], None, errors);
     };
 
     // Calculate per-unit price
@@ -482,12 +583,28 @@ fn handle_total_price_posting(
     });
 
     // 3. Synthetic currency posting
-    let synthetic_units = round_up(units_number / state.last_price, MAPPED_CURRENCY_PRECISION);
+    // Same reasoning as the plain inflow: an unavailable unit count is
+    // reported and the posting left alone, never silently dropped or filled
+    // with zero.
+    let Some(exact_units) = state.last_price.divide(units_number) else {
+        errors.push(PluginError {
+            message: format!(
+                "{} cannot be converted to {}: the valuation price is zero or \
+                 the unit count is out of range",
+                posting.account, state.config.currency
+            ),
+            source_file: directive.filename.clone(),
+            line_number: directive.lineno,
+            severity: PluginErrorSeverity::Error,
+        });
+        return (vec![posting.clone()], None, errors);
+    };
+    let synthetic_units = round_up(exact_units, MAPPED_CURRENCY_PRECISION);
 
     // Add to lots
     state.lots.push(CostLot {
         units: synthetic_units,
-        cost_per_unit: state.last_price,
+        cost: state.last_price,
         date: date.to_string(),
     });
     state.total_units += synthetic_units;
@@ -500,7 +617,7 @@ fn handle_total_price_posting(
         }),
         cost: Some(CostData {
             number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
-                value: format_decimal(state.last_price),
+                value: format_decimal(state.last_price.to_decimal()),
             }),
             currency: Some(units_currency.to_string()),
             date: Some(date.to_string()),
@@ -513,10 +630,30 @@ fn handle_total_price_posting(
         span: None,
     });
 
-    (postings, None)
+    (postings, None, errors)
 }
 
 /// Process FIFO sell and return postings and total `PnL`.
+/// The gain on `units` sold at `price` against a lot carried at `cost`.
+///
+/// Computed as `units x price - units x cost` rather than
+/// `(price - cost) x units`. The two are equal in exact arithmetic, but the
+/// subtraction-first form has to collapse both ratios to a single `Decimal`
+/// before multiplying, which is where #2360's dust came from. Each product
+/// here is taken multiply-first through [`PriceRatio::multiply`], so a
+/// representable gain comes out exact: the 2024-02-12 sale in
+/// `some_fund_example` is exactly 25, not `25.00000000000000000000000001`.
+fn lot_gain(price: PriceRatio, cost: PriceRatio, units: Decimal) -> Decimal {
+    // Both sides fail only on an unrepresentable product, never on a zero
+    // denominator (see `to_decimal`). They are taken together so that a
+    // failure on one side cannot leave the other standing as the whole gain,
+    // which would be a wrong number rather than a missing one.
+    match (price.multiply(units), cost.multiply(units)) {
+        (Some(proceeds), Some(basis)) => proceeds - basis,
+        _ => Decimal::ZERO,
+    }
+}
+
 fn process_fifo_sell(
     state: &mut AccountState,
     amount_to_sell: Decimal,
@@ -532,13 +669,16 @@ fn process_fifo_sell(
 
     while remaining > EPSILON && !state.lots.is_empty() {
         let lot = &mut state.lots[0];
-        let lot_value_at_current_price = lot.units * current_price;
+        // `multiply` divides by the unit balance the price was derived from,
+        // which `process_valuation_assertion` refuses to let reach zero, so
+        // the fallback needs an unrepresentable product rather than a missing
+        // denominator.
+        let lot_value_at_current_price = current_price.multiply(lot.units).unwrap_or(Decimal::ZERO);
 
         if lot_value_at_current_price <= remaining + EPSILON {
             // Sell entire lot
             let units_to_sell = lot.units;
-            let pnl = (current_price - lot.cost_per_unit) * units_to_sell;
-            total_pnl += pnl;
+            total_pnl += lot_gain(current_price, lot.cost, units_to_sell);
 
             // Round down for sells
             let rounded_units = round_down(units_to_sell, MAPPED_CURRENCY_PRECISION);
@@ -551,7 +691,7 @@ fn process_fifo_sell(
                 }),
                 cost: Some(CostData {
                     number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
-                        value: format_decimal(lot.cost_per_unit),
+                        value: format_decimal(lot.cost.to_decimal()),
                     }),
                     currency: Some(currency.to_string()),
                     date: Some(lot.date.clone()),
@@ -561,7 +701,7 @@ fn process_fifo_sell(
                 price: Some(PriceAnnotationData {
                     is_total: false,
                     amount: Some(AmountData {
-                        number: format_decimal(current_price),
+                        number: format_decimal(current_price.to_decimal()),
                         currency: currency.to_string(),
                     }),
                     number: None,
@@ -587,9 +727,8 @@ fn process_fifo_sell(
             state.lots.remove(0);
         } else {
             // Partial sell from this lot
-            let units_to_sell = remaining / current_price;
-            let pnl = (current_price - lot.cost_per_unit) * units_to_sell;
-            total_pnl += pnl;
+            let units_to_sell = current_price.divide(remaining).unwrap_or(Decimal::ZERO);
+            total_pnl += lot_gain(current_price, lot.cost, units_to_sell);
 
             let rounded_units = round_down(units_to_sell, MAPPED_CURRENCY_PRECISION);
 
@@ -601,7 +740,7 @@ fn process_fifo_sell(
                 }),
                 cost: Some(CostData {
                     number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
-                        value: format_decimal(lot.cost_per_unit),
+                        value: format_decimal(lot.cost.to_decimal()),
                     }),
                     currency: Some(currency.to_string()),
                     date: Some(lot.date.clone()),
@@ -611,7 +750,7 @@ fn process_fifo_sell(
                 price: Some(PriceAnnotationData {
                     is_total: false,
                     amount: Some(AmountData {
-                        number: format_decimal(current_price),
+                        number: format_decimal(current_price.to_decimal()),
                         currency: currency.to_string(),
                     }),
                     number: None,
@@ -701,9 +840,16 @@ fn process_valuation_assertion(
         return (new_directives, errors);
     }
 
-    // Calculate new price
-    let calculated_price = valuation_amount / last_balance;
-    state.last_price = calculated_price;
+    // Keep the price as the ratio it is. Collapsing `valuation_amount /
+    // last_balance` to a `Decimal` here is what #2360 traced the dust to: the
+    // quotient is often non-terminating, and every unit count and gain
+    // derived from it inherits the loss.
+    let new_price = PriceRatio {
+        num: valuation_amount,
+        den: last_balance,
+    };
+    let calculated_price = new_price.to_decimal();
+    state.last_price = new_price;
 
     // Create metadata for lastBalance and calculatedPrice
     let mut new_metadata = custom.metadata.clone();
@@ -830,6 +976,44 @@ mod tests {
     use super::*;
     use crate::types::*;
 
+    /// A derived price that does not terminate must not cost the values
+    /// derived from it their exactness (#2360).
+    ///
+    /// `1200 / 1125` is `16/15`. Dividing cash by the stored quotient is what
+    /// used to make a 400 USD withdrawal post `374.9999999` units and a gain
+    /// of `25.00000000000000000000000001`. Both exact answers are
+    /// representable, so both must come out exact.
+    #[test]
+    fn a_repeating_price_still_yields_exact_units_and_gain() {
+        let price = PriceRatio {
+            num: Decimal::from(1200),
+            den: Decimal::from(1125),
+        };
+        let cash = Decimal::from(400);
+
+        // The guard: going through the quotient does NOT recover 375, which is
+        // why the ratio is carried. Without this the test could pass on a
+        // build where the naive path happened to be exact too.
+        let naive = cash
+            .checked_div(price.to_decimal())
+            .expect("a quotient of the rounded price");
+        assert_ne!(
+            naive,
+            Decimal::from(375),
+            "dividing by the rounded price must be the lossy path this fixes"
+        );
+
+        // 400 / (1200/1125) == 400 * 1125 / 1200 == 375.
+        let units = price.divide(cash).expect("a representable unit count");
+        assert_eq!(units, Decimal::from(375));
+        assert_eq!(units.to_string(), "375", "exact, and with no dust tail");
+
+        // Selling those 375 units, carried at a cost of 1, gains exactly 25.
+        let gain = lot_gain(price, PriceRatio::ONE, units);
+        assert_eq!(gain, Decimal::from(25));
+        assert_eq!(gain.to_string(), "25", "exact, and with no dust tail");
+    }
+
     #[test]
     fn test_valuation_config_parsing() {
         let metadata = vec![
@@ -855,6 +1039,480 @@ mod tests {
         assert_eq!(config.pnl_account, "Income:Fund:PnL");
     }
 
+    /// The SELL call sites must keep the exactness, not just `PriceRatio`
+    /// itself (#2360).
+    ///
+    /// `a_repeating_price_still_yields_exact_units_and_gain` pins the helper in
+    /// isolation, which a sabotage check showed is not enough: reverting either
+    /// gain call site to `(price - cost) x units` on quotients, or the unit
+    /// count to `cash / price`, left all 330 tests green. This drives
+    /// `process_fifo_sell` so the call sites are covered too.
+    #[test]
+    fn a_sell_at_a_repeating_price_posts_exact_units_and_gain() {
+        let mut state = AccountState::new(AccountConfig {
+            account: "Assets:Fund:Total".to_string(),
+            currency: "FUND_USD".to_string(),
+            pnl_account: "Income:Fund:PnL".to_string(),
+        });
+        state.lots.push(CostLot {
+            units: Decimal::from(500),
+            cost: PriceRatio::ONE,
+            date: "2024-01-10".to_string(),
+        });
+        state.total_units = Decimal::from(500);
+        // 1200/1125 is 16/15: the quotient does not terminate.
+        state.last_price = PriceRatio {
+            num: Decimal::from(1200),
+            den: Decimal::from(1125),
+        };
+
+        let (postings, total_pnl) = process_fifo_sell(
+            &mut state,
+            Decimal::from(400),
+            "Assets:Fund:Total",
+            "USD",
+            &None,
+            &[],
+        );
+
+        // 400 / (1200/1125) is exactly 375, so the posting reports all seven
+        // places as zeros rather than `-374.9999999`.
+        let units = postings
+            .iter()
+            .filter_map(|p| p.units.as_ref())
+            .map(|a| a.number.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            units,
+            vec!["-375.0000000"],
+            "the sell posting must carry the exact unit count"
+        );
+
+        // The gain is exactly 25, with no dust tail in either direction.
+        assert_eq!(total_pnl, Decimal::from(25));
+        assert_eq!(total_pnl.to_string(), "25", "exact, and no dust tail");
+    }
+
+    // `lot_gain` and `PriceRatio::divide` are EXACT wherever the exact answer
+    // is representable, not merely on the fixture in #2360.
+    //
+    // The reference is integer arithmetic rather than a second decimal
+    // computation, so the test cannot agree with the code by sharing its
+    // rounding. With `price = a/b` and `cost = c/d`, choosing
+    // `units = b*d*k` makes every quantity an integer: proceeds are `a*d*k`,
+    // the basis is `c*b*k`, and the gain is exactly `k*(a*d - c*b)`. The same
+    // construction gives `divide` an integer answer, since `cash = a*k` buys
+    // exactly `b*k` units at `a/b`.
+    //
+    // What this does NOT claim: `lot_gain` subtracts two separately-rounded
+    // products, so where the exact gain is NOT representable it can sit up to
+    // about 5e-22 from the correctly-rounded value in this range. Measured
+    // over 400,000 random ratios: of the cases whose exact gain is
+    // representable, 6,158 of 6,158 came out exact, which is the property
+    // pinned here; of all cases, 84% differ from a single-rounding reference
+    // by that tiny amount. Computing the gain as one ratio would close that,
+    // at the cost of multiplying the two denominators.
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(4000))]
+        #[test]
+        fn exact_wherever_the_answer_is_representable(
+            a in 1i64..400, b in 1i64..400,
+            c in 1i64..400, d in 1i64..400,
+            k in 1i64..400,
+        ) {
+            let price = PriceRatio { num: Decimal::from(a), den: Decimal::from(b) };
+            let cost = PriceRatio { num: Decimal::from(c), den: Decimal::from(d) };
+            let units = Decimal::from(b * d * k);
+
+            // gain == k*(a*d - c*b), exactly.
+            let want_gain = Decimal::from(k * (a * d - c * b));
+            proptest::prop_assert_eq!(
+                lot_gain(price, cost, units),
+                want_gain,
+                "gain for price {}/{} cost {}/{} units {}",
+                a, b, c, d, units
+            );
+
+            // cash of a*k buys exactly b*k units at a price of a/b.
+            let cash = Decimal::from(a * k);
+            proptest::prop_assert_eq!(
+                price.divide(cash),
+                Some(Decimal::from(b * k)),
+                "units bought for {} at {}/{}",
+                cash, a, b
+            );
+
+            // and units*price is exact the other way round.
+            proptest::prop_assert_eq!(
+                price.multiply(Decimal::from(b * k)),
+                Some(Decimal::from(a * k)),
+                "value of {} units at {}/{}",
+                b * k, a, b
+            );
+        }
+    }
+
+    /// A unit count past `Decimal`'s ceiling is reported, not posted in the
+    /// original currency as though nothing happened.
+    ///
+    /// A near-zero valuation price makes `cash / price` overflow. On main that
+    /// panicked with "Division overflowed"; an earlier revision of this change
+    /// passed the posting through silently, which is worse, because the cash
+    /// never enters the fund and `rledger check` reports no errors at all.
+    #[test]
+    fn an_out_of_range_unit_count_is_reported_rather_than_dropped() {
+        let mut states = HashMap::new();
+        let mut state = AccountState::new(AccountConfig {
+            account: "Assets:Fund:Total".to_string(),
+            currency: "FUND_USD".to_string(),
+            pnl_account: "Income:Fund:PnL".to_string(),
+        });
+        state.lots.push(CostLot {
+            units: Decimal::ONE,
+            cost: PriceRatio::ONE,
+            date: "2024-01-01".to_string(),
+        });
+        state.total_units = Decimal::ONE;
+        // A price of 1e-20: buying 1e10 of it needs 1e30 units, past the
+        // 7.9e28 ceiling.
+        state.last_price = PriceRatio {
+            num: Decimal::ONE,
+            den: Decimal::from(10u64.pow(19)) * Decimal::TEN,
+        };
+        states.insert("Assets:Fund:Total".to_string(), state);
+
+        let directive = DirectiveWrapper {
+            directive_type: "transaction".to_string(),
+            date: "2024-01-12".to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Transaction(TransactionData {
+                flag: "*".to_string(),
+                payee: None,
+                narration: "buy".to_string(),
+                tags: vec![],
+                links: vec![],
+                metadata: vec![],
+                postings: vec![],
+            }),
+        };
+        let txn = TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "buy".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![PostingData {
+                account: "Assets:Fund:Total".to_string(),
+                units: Some(AmountData {
+                    number: "10000000000".to_string(),
+                    currency: "USD".to_string(),
+                }),
+                cost: None,
+                price: None,
+                flag: None,
+                metadata: vec![],
+                span: None,
+            }],
+        };
+
+        let mut commodities = HashSet::new();
+        let (transformed, _new, errors) =
+            transform_transaction(&directive, &txn, &mut states, &mut commodities);
+
+        assert_eq!(errors.len(), 1, "the failure must be reported: {errors:?}");
+        assert!(
+            errors[0].message.contains("out of range"),
+            "the message must name the cause: {}",
+            errors[0].message
+        );
+
+        // The posting is left alone rather than dropped or zeroed, and it is
+        // still in the ORIGINAL currency, which is why the error matters.
+        let DirectiveData::Transaction(out) = transformed.data else {
+            panic!("a transaction must stay a transaction");
+        };
+        assert_eq!(out.postings.len(), 1);
+        let units = out.postings[0].units.as_ref().expect("units");
+        assert_eq!(units.currency, "USD");
+        assert_eq!(units.number, "10000000000");
+    }
+
+    /// The `@@` inflow path must keep the exactness as well.
+    ///
+    /// `handle_total_price_posting` has its own `divide` call, and a sabotage
+    /// check found it uncovered while the plain inflow and both sell sites were
+    /// pinned. `1/3` is used for the same reason as in the plain-inflow test:
+    /// the quotient overshoots, so `round_up` cannot hide the difference.
+    #[test]
+    fn a_total_price_buy_at_a_repeating_price_records_an_exact_lot() {
+        let mut states = HashMap::new();
+        let mut state = AccountState::new(AccountConfig {
+            account: "Assets:Fund:Total".to_string(),
+            currency: "FUND_USD".to_string(),
+            pnl_account: "Income:Fund:PnL".to_string(),
+        });
+        state.lots.push(CostLot {
+            units: Decimal::from(10),
+            cost: PriceRatio::ONE,
+            date: "2024-01-01".to_string(),
+        });
+        state.total_units = Decimal::from(10);
+        state.last_price = PriceRatio {
+            num: Decimal::ONE,
+            den: Decimal::from(3),
+        };
+        states.insert("Assets:Fund:Total".to_string(), state);
+
+        let directive = DirectiveWrapper {
+            directive_type: "transaction".to_string(),
+            date: "2024-02-14".to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Transaction(TransactionData {
+                flag: "*".to_string(),
+                payee: None,
+                narration: "buy with a total price".to_string(),
+                tags: vec![],
+                links: vec![],
+                metadata: vec![],
+                postings: vec![],
+            }),
+        };
+        let txn = TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "buy with a total price".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![PostingData {
+                account: "Assets:Fund:Total".to_string(),
+                units: Some(AmountData {
+                    number: "1".to_string(),
+                    currency: "USD".to_string(),
+                }),
+                cost: None,
+                price: Some(PriceAnnotationData {
+                    is_total: true,
+                    amount: Some(AmountData {
+                        number: "5".to_string(),
+                        currency: "EUR".to_string(),
+                    }),
+                    number: None,
+                    currency: None,
+                }),
+                flag: None,
+                metadata: vec![],
+                span: None,
+            }],
+        };
+
+        let mut commodities = HashSet::new();
+        let (transformed, _new, errors) =
+            transform_transaction(&directive, &txn, &mut states, &mut commodities);
+        assert!(errors.is_empty(), "no errors: {errors:?}");
+
+        let DirectiveData::Transaction(out) = transformed.data else {
+            panic!("a transaction must stay a transaction");
+        };
+        // The `@@` path emits three postings; the synthetic one carries the
+        // unit count, and 1 USD at a price of 1/3 buys exactly 3 units.
+        let synthetic: Vec<&str> = out
+            .postings
+            .iter()
+            .filter_map(|p| p.units.as_ref())
+            .filter(|a| a.currency == "FUND_USD")
+            .map(|a| a.number.as_str())
+            .collect();
+        assert_eq!(
+            synthetic,
+            vec!["3.0000000"],
+            "the synthetic leg must be exact, not 3.0000001"
+        );
+
+        let lot = states["Assets:Fund:Total"]
+            .lots
+            .last()
+            .expect("the new lot");
+        assert_eq!(lot.units, Decimal::from(3), "the lot must not be inflated");
+    }
+
+    /// A total price over zero units is reported, not a panic.
+    ///
+    /// `total_price / units_number` was a bare division, so an ordinary ledger
+    /// carrying `0 USD @@ 100 EUR` on a mapped account took the whole process
+    /// down with "Division by zero". Upstream reaches the same input and
+    /// reports a plugin error, which is what we do now.
+    #[test]
+    fn a_total_price_over_zero_units_is_reported_rather_than_panicking() {
+        let mut states = HashMap::new();
+        let mut state = AccountState::new(AccountConfig {
+            account: "Assets:Fund:Total".to_string(),
+            currency: "FUND_USD".to_string(),
+            pnl_account: "Income:Fund:PnL".to_string(),
+        });
+        state.lots.push(CostLot {
+            units: Decimal::from(10),
+            cost: PriceRatio::ONE,
+            date: "2024-01-01".to_string(),
+        });
+        state.total_units = Decimal::from(10);
+        states.insert("Assets:Fund:Total".to_string(), state);
+
+        let directive = DirectiveWrapper {
+            directive_type: "transaction".to_string(),
+            date: "2024-02-12".to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Transaction(TransactionData {
+                flag: "*".to_string(),
+                payee: None,
+                narration: "zero units with @@".to_string(),
+                tags: vec![],
+                links: vec![],
+                metadata: vec![],
+                postings: vec![],
+            }),
+        };
+        let txn = TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "zero units with @@".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![PostingData {
+                account: "Assets:Fund:Total".to_string(),
+                units: Some(AmountData {
+                    number: "0".to_string(),
+                    currency: "USD".to_string(),
+                }),
+                cost: None,
+                price: Some(PriceAnnotationData {
+                    is_total: true,
+                    amount: Some(AmountData {
+                        number: "100".to_string(),
+                        currency: "EUR".to_string(),
+                    }),
+                    number: None,
+                    currency: None,
+                }),
+                flag: None,
+                metadata: vec![],
+                span: None,
+            }],
+        };
+
+        let mut commodities = HashSet::new();
+        // The assertion is that this RETURNS at all; a regression panics here.
+        let (_transformed, _new, errors) =
+            transform_transaction(&directive, &txn, &mut states, &mut commodities);
+
+        assert_eq!(errors.len(), 1, "one error, not a crash: {errors:?}");
+        assert!(
+            errors[0].message.contains("zero units"),
+            "the message must name the cause: {}",
+            errors[0].message
+        );
+    }
+
+    /// The INFLOW call site must keep the exactness too (#2360).
+    ///
+    /// Same reasoning as the sell test above: this is the site whose sabotage
+    /// went unnoticed by every other test.
+    #[test]
+    fn a_buy_at_a_repeating_price_records_an_exact_lot() {
+        let mut states = HashMap::new();
+        let mut state = AccountState::new(AccountConfig {
+            account: "Assets:Fund:Total".to_string(),
+            currency: "FUND_USD".to_string(),
+            pnl_account: "Income:Fund:PnL".to_string(),
+        });
+        // Non-empty, so the first-transaction price directive is not emitted
+        // and the assertions below see only the posting under test.
+        state.lots.push(CostLot {
+            units: Decimal::from(10),
+            cost: PriceRatio::ONE,
+            date: "2024-01-01".to_string(),
+        });
+        state.total_units = Decimal::from(10);
+        // 1/3, not 1200/1125. The quotient of 1200/1125 falls SHORT, and
+        // `round_up` lifts it back to the same seven-place value, so that price
+        // cannot tell the two paths apart — a sabotage check caught this test
+        // passing against the quotient path. A stored 1/3 goes the other way
+        // (`1 / 0.3333...3` is `3.0000000000000000000000000003`), and rounding
+        // that up credits `3.0000001` units for a purchase that buys exactly 3.
+        state.last_price = PriceRatio {
+            num: Decimal::ONE,
+            den: Decimal::from(3),
+        };
+        states.insert("Assets:Fund:Total".to_string(), state);
+
+        let directive = DirectiveWrapper {
+            directive_type: "transaction".to_string(),
+            date: "2024-02-12".to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Transaction(TransactionData {
+                flag: "*".to_string(),
+                payee: None,
+                narration: "buy".to_string(),
+                tags: vec![],
+                links: vec![],
+                metadata: vec![],
+                postings: vec![],
+            }),
+        };
+        let txn = TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "buy".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![PostingData {
+                account: "Assets:Fund:Total".to_string(),
+                units: Some(AmountData {
+                    number: "1".to_string(),
+                    currency: "USD".to_string(),
+                }),
+                cost: None,
+                price: None,
+                flag: None,
+                metadata: vec![],
+                span: None,
+            }],
+        };
+
+        let mut commodities = HashSet::new();
+        let (transformed, _new_directives, errors) =
+            transform_transaction(&directive, &txn, &mut states, &mut commodities);
+        assert!(errors.is_empty(), "no errors: {errors:?}");
+
+        let DirectiveData::Transaction(out) = transformed.data else {
+            panic!("a transaction must stay a transaction");
+        };
+        let numbers = out
+            .postings
+            .iter()
+            .filter_map(|p| p.units.as_ref())
+            .map(|a| a.number.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            numbers,
+            vec!["3.0000000"],
+            "1 USD at a price of 1/3 buys exactly 3 units, not 3.0000001"
+        );
+
+        let lot = states["Assets:Fund:Total"]
+            .lots
+            .last()
+            .expect("the new lot");
+        assert_eq!(lot.units, Decimal::from(3), "the lot must not be inflated");
+    }
+
     /// A partial sell must move the lot by exactly what it posted, so a later
     /// full sell closes the lot to zero instead of leaving a phantom residual.
     ///
@@ -878,12 +1536,15 @@ mod tests {
         });
         state.lots.push(CostLot {
             units: Decimal::from(500),
-            cost_per_unit: Decimal::ONE,
+            cost: PriceRatio::ONE,
             date: "2024-01-10".to_string(),
         });
         state.total_units = Decimal::from(500);
         // 1200/1125 — the price that produces a non-terminating quotient.
-        state.last_price = Decimal::from(1200) / Decimal::from(1125);
+        state.last_price = PriceRatio {
+            num: Decimal::from(1200),
+            den: Decimal::from(1125),
+        };
 
         let posted = |ps: &[PostingData]| -> Decimal {
             ps.iter()
@@ -904,7 +1565,10 @@ mod tests {
         let sold_first = posted(&first);
 
         // Sell everything that remains, at whatever price.
-        let remaining_value = state.total_units * state.last_price;
+        let remaining_value = state
+            .last_price
+            .multiply(state.total_units)
+            .expect("a representable remaining value");
         let (second, _) = process_fifo_sell(
             &mut state,
             remaining_value,
@@ -1016,26 +1680,29 @@ mod tests {
         // Add first lot at price 1.0
         state.lots.push(CostLot {
             units: Decimal::new(1000, 0),
-            cost_per_unit: Decimal::ONE,
+            cost: PriceRatio::ONE,
             date: "2024-01-10".to_string(),
         });
         state.total_units = Decimal::new(1000, 0);
 
         // Update price to 0.8
-        state.last_price = Decimal::new(8, 1);
+        state.last_price = PriceRatio {
+            num: Decimal::new(8, 1),
+            den: Decimal::ONE,
+        };
 
         // Add second lot at price 0.8
-        let second_units = Decimal::new(500, 0) / state.last_price; // 625
+        let second_units = state.last_price.divide(Decimal::new(500, 0)).expect("625"); // 625
         state.lots.push(CostLot {
             units: second_units,
-            cost_per_unit: state.last_price,
+            cost: state.last_price,
             date: "2024-01-13".to_string(),
         });
         state.total_units += second_units;
 
         assert_eq!(state.lots.len(), 2);
-        assert_eq!(state.lots[0].cost_per_unit, Decimal::ONE);
-        assert_eq!(state.lots[1].cost_per_unit, Decimal::new(8, 1));
+        assert_eq!(state.lots[0].cost.to_decimal(), Decimal::ONE);
+        assert_eq!(state.lots[1].cost.to_decimal(), Decimal::new(8, 1));
     }
 
     #[test]

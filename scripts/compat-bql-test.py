@@ -484,19 +484,16 @@ KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
     ("tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount", "last-balance-by-month"),
     ("tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount", "sum-number-by-currency"),
     ("tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount", "sum-position-by-account"),
-    # `order-by-expression` reaches both fixtures. Unlike the entries above it
-    # masks TWO causes at once, so it is spelled out rather than left implied:
-    # the 1e-7 drift documented here, AND the PnL dust in #2360, where our
-    # valuation plugin COMPUTES the PnL amount that upstream leaves to
-    # interpolation. Reproduced posting by posting on `some_fund_example`,
-    # where only three rows differ:
+    # `order-by-expression` reaches both fixtures.
     #
-    #   2024-02-12 Income:SomeFund:PnL    py -25.00        rs -25.00000000000000000000000001
-    #   2024-03-07 Assets:SomeFund:Total  py -656.2499999  rs -656.2500000
-    #   2024-03-07 Income:SomeFund:PnL    py -275.00000001 rs -274.9999998999999999999999999
-    #
-    # The middle row is this block's drift. The other two are #2360. When
-    # #2360 lands, these two entries should go stale and the gate will say so.
+    # It masked #2360's PnL dust as well as the drift until #2360 was fixed by
+    # holding the valuation price as a ratio. What remains is the drift plus
+    # the exactness difference below: upstream divides cash by a price it has
+    # already rounded, so its unit counts carry the loss where ours no longer
+    # do. On `some_fund_example` the PnL is now exactly `-25` and `-275`
+    # against bean-query's `-25.00` and `-275.00000001`, and on
+    # `cool_fund_example` the gain genuinely repeats (`50/1.1`), so ours is the
+    # correctly-rounded value where bean-query reports the tolerance-grid one.
     (
         "tests/compatibility/files/beancount-lazy-plugins/tests_data_cool_fund_example.beancount",
         "order-by-expression",
@@ -504,6 +501,26 @@ KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
     (
         "tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount",
         "order-by-expression",
+    ),
+    # These two became divergent when #2360 made our unit counts exact, and we
+    # are the more correct side. `400 / (1200/1125)` is exactly `375`, and the
+    # first lot of 500 then has exactly `125` left; bean-query divides by the
+    # ROUNDED price and lands on `374.9999999` and `125.0000001`. Verified against exact
+    # rational arithmetic, not just against each other:
+    #
+    #   position-by-date        py: -374.9999999  rs: -375.0000000
+    #   balance-running-assets  py:  125.0000001  rs:  125.0000000
+    #
+    # Filed under the RUST list per this list's convention: we are the side
+    # whose output differs from bean-query, and a flattering label would let a
+    # future genuine regression on these pairs hide.
+    (
+        "tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount",
+        "position-by-date",
+    ),
+    (
+        "tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount",
+        "balance-running-assets",
     ),
 
     # `capital_gains_classifier` RECOMPUTES the gain upstream; we reclassify

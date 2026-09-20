@@ -15,6 +15,27 @@ use super::{
 };
 use crate::{Amount, Cost, CostSpec, Currency, Position};
 
+/// Sum a pool's units, and say whether `checked_add` had to round to do it.
+///
+/// Every AVERAGE caller needs the pool total, and `weighted_average_cost` also
+/// needs to know whether that total is exact: dividing by a total that has
+/// already rounded is one rounding too many (#2363). An exact addition keeps the
+/// wider of its two scales, so a narrower result means the sum was reduced to
+/// fit. Measured here, in the one fold, so no caller walks the pool twice and
+/// all three callers agree on what "the total" is -- they used to compute it
+/// two different ways, one of them with `Decimal`'s panicking `Sum`.
+///
+/// `None` means the sum left `Decimal`'s range.
+fn pool_units<'a>(positions: impl IntoIterator<Item = &'a Position>) -> Option<(Decimal, bool)> {
+    positions
+        .into_iter()
+        .try_fold((Decimal::ZERO, true), |(acc, exact), p| {
+            let widest = acc.scale().max(p.units.number.scale());
+            let next = acc.checked_add(p.units.number)?;
+            Some((next, exact && next.scale() == widest))
+        })
+}
+
 /// Weighted-average cost of `positions` over `total_units`:
 /// `Σ units × cost / total_units`, taken over the positions that carry a cost.
 ///
@@ -62,10 +83,25 @@ use crate::{Amount, Cost, CostSpec, Currency, Position};
 fn weighted_average_cost(
     positions: &[&Position],
     total_units: Decimal,
+    total_units_exact: bool,
 ) -> Result<Option<(Decimal, Currency)>, BookingError> {
     let mut currency: Option<Currency> = None;
     let mut sum = Decimal::ZERO;
-    let mut all_exact = true;
+    // The DENOMINATOR can round as well: the caller builds `total_units` with
+    // `checked_add`, which reduces the scale to fit rather than failing, so a
+    // pool mixing 7.65e-13 with 7.9e13 hands us a total that is already off.
+    // The fast path's precondition is that the division is the only rounding,
+    // and a rounded divisor breaks it. The caller measures that while it sums,
+    // so the pool is not walked a second time for it (#2363).
+    //
+    // Honest about its reach: no pool has been found where THIS check alone
+    // changes the answer. Of 300,000 random pools, 1,857 would reach the fast
+    // path with an inexact denominator, and the two whose answer moved under an
+    // exact-rational model turned out to hold an inexact product in `Decimal`
+    // as well, so they escalate either way -- a tiny unit is what makes the
+    // total round, and a tiny unit times a cost tends to underflow. It stays
+    // because the precondition is either checked or it is not.
+    let mut all_exact = total_units_exact;
     for pos in positions {
         let Some(cost) = &pos.cost else { continue };
         match &currency {
@@ -122,12 +158,36 @@ fn weighted_average_cost(
             currency,
         )));
     }
+    // Divide by the denominator summed EXACTLY, not by the `total_units` the
+    // caller already rounded. Dividing an exact numerator by a rounded
+    // denominator is still one rounding too many: on the #2363 pool it lands 2
+    // units in the last place below the correctly-rounded average, and the
+    // exact total is not representable at all (39 significant digits), so it
+    // cannot be recovered from the argument.
+    // When the caller's total was exact it IS the exact denominator, and one
+    // conversion suffices; re-summing every position in `BigDecimal` cost 1.5%
+    // of `check` on an AVERAGE-heavy 18-decimal ledger, where every reduction
+    // escalates, to learn nothing new. Only a total that rounded is rebuilt.
+    let exact_total = if total_units_exact {
+        crate::to_bigdecimal(total_units)
+    } else {
+        positions
+            .iter()
+            .map(|p| crate::to_bigdecimal(p.units.number))
+            .sum::<bigdecimal::BigDecimal>()
+    };
+    // `BigDecimal` division by zero panics where `checked_div` reports. The
+    // argument being non-zero does not settle this: it is the ROUNDED sum, so
+    // the exact one is checked on its own.
+    if bigdecimal::num_traits::Zero::is_zero(&exact_total) {
+        return Err(overflow());
+    }
     let exact = positions
         .iter()
         .filter_map(|p| p.cost.as_ref().map(|c| (p.units.number, c.number)))
         .map(|(units, cost)| crate::to_bigdecimal(units) * crate::to_bigdecimal(cost))
         .sum::<bigdecimal::BigDecimal>()
-        / crate::to_bigdecimal(total_units);
+        / exact_total;
     // `to_plain_string`, not `Display`: `Display` switches to exponent form,
     // which `Decimal::from_str` accepts only by coincidence. Parsing rounds to
     // what a `Decimal` can hold and fails when the magnitude cannot fit at all,
@@ -859,10 +919,8 @@ impl Inventory {
             .filter(|p| p.units.currency == units.currency && !p.is_empty())
             .collect();
 
-        let total_units: Decimal = matching
-            .iter()
-            .try_fold(Decimal::ZERO, |acc, p| acc.checked_add(p.units.number))
-            .ok_or_else(|| {
+        let (total_units, total_units_exact) =
+            pool_units(matching.iter().copied()).ok_or_else(|| {
                 BookingError::Overflow(OverflowError {
                     currency: units.currency.clone(),
                 })
@@ -885,7 +943,7 @@ impl Inventory {
             });
         }
 
-        let avg = weighted_average_cost(&matching, total_units)?;
+        let avg = weighted_average_cost(&matching, total_units, total_units_exact)?;
         let cost_basis = avg
             .as_ref()
             .map(|(avg_cost, currency)| {
@@ -970,16 +1028,16 @@ impl Inventory {
                     .iter()
                     .filter(|p| p.units.currency == currency && p.cost.is_some())
                     .collect();
-                let total_units: Decimal = matching
-                    .iter()
-                    .try_fold(Decimal::ZERO, |acc, p| acc.checked_add(p.units.number))
+                let (total_units, total_units_exact) = pool_units(matching.iter().copied())
                     .ok_or_else(|| OverflowError {
                         currency: currency.clone(),
                     })?;
                 let avg = if total_units.is_zero() {
                     None
                 } else {
-                    weighted_average_cost(&matching, total_units).ok().flatten()
+                    weighted_average_cost(&matching, total_units, total_units_exact)
+                        .ok()
+                        .flatten()
                 };
                 (total_units, avg)
             };
@@ -1034,7 +1092,17 @@ impl Inventory {
             });
         }
 
-        let total_units: Decimal = matching.iter().map(|(_, p)| p.units.number).sum();
+        // Checked, like the other two callers. This used `Decimal`'s `Sum`,
+        // which panics on overflow ("Addition overflowed"). It is not reachable
+        // through the pipeline today, because `Inventory::add` refuses a lot that
+        // would carry the running total out of range, but it was the one AVERAGE
+        // total computed differently from the rest.
+        let (total_units, total_units_exact) = pool_units(matching.iter().map(|(_, p)| *p))
+            .ok_or_else(|| {
+                BookingError::Overflow(OverflowError {
+                    currency: units.currency.clone(),
+                })
+            })?;
         let reduction = units.number.abs();
 
         if reduction > total_units.abs() {
@@ -1046,7 +1114,7 @@ impl Inventory {
         }
 
         let matching_refs: Vec<&Position> = matching.iter().map(|(_, p)| *p).collect();
-        let pool = weighted_average_cost(&matching_refs, total_units)?
+        let pool = weighted_average_cost(&matching_refs, total_units, total_units_exact)?
             .map(|(number, currency)| Amount::new(number, currency));
 
         Ok(MergePlan {

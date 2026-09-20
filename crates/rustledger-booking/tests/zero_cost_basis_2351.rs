@@ -123,3 +123,49 @@ fn the_booker_and_resolve_agree_on_compound_per_unit() {
         assert_eq!(booked_cost.per_unit, resolved, "{units} {{{a} # {b}}}");
     }
 }
+
+/// A pool holding BOTH directions of the same commodity, through the exact
+/// escalation (#2353).
+///
+/// The property test draws pools whose lots share a sign, so this regime — a
+/// long lot and a short one averaged together — had no coverage, and it is
+/// where a weighted average is least intuitive: the numerator is a difference
+/// of products, not a sum of like terms. 18-decimal costs make every product
+/// need 36 places, so this goes through `BigDecimal` rather than the fast path.
+#[test]
+fn a_mixed_sign_pool_is_correctly_rounded_through_the_escalation() {
+    use bigdecimal::BigDecimal;
+    use rustledger_core::{Inventory, to_bigdecimal};
+
+    let (u1, c1) = (dec("1.234567890123456789"), dec("0.000000000000000002"));
+    let (u2, c2) = (dec("-0.234567890123456789"), dec("0.000000000000000003"));
+    assert!(
+        u1.checked_mul(c1)
+            .is_some_and(|p| p.scale() != u1.scale() + c1.scale()),
+        "premise: the product cannot be exact, so the escalation runs"
+    );
+
+    let mut inv = Inventory::new();
+    inv.add(Position::with_cost(
+        Amount::new(u1, "TKN"),
+        Cost::new(c1, "ETH"),
+    ))
+    .expect("long lot");
+    inv.add(Position::with_cost(
+        Amount::new(u2, "TKN"),
+        Cost::new(c2, "ETH"),
+    ))
+    .expect("short lot");
+    let total = u1 + u2;
+
+    let r = inv
+        .reduce(&Amount::new(-total, "TKN"), None, BookingMethod::Average)
+        .expect("the net pool reduces");
+    let got = r.matched[0].cost.as_ref().expect("an averaged lot").number;
+
+    let exact: BigDecimal = (to_bigdecimal(u1) * to_bigdecimal(c1)
+        + to_bigdecimal(u2) * to_bigdecimal(c2))
+        / to_bigdecimal(total);
+    let want = Decimal::from_str(&exact.to_plain_string()).expect("representable");
+    assert_eq!(got, want, "exact average of a long and a short lot");
+}

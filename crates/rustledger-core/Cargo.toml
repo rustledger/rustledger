@@ -28,6 +28,10 @@ fuzz = []
 
 [dependencies]
 rust_decimal = { workspace = true, features = ["serde", "maths"] }
+# Exact escalation for the weighted-average cost (#2353), the same tier the
+# balance validator uses for over-precise residuals (#1240). Already in the
+# workspace via rustledger-booking and rustledger-validate.
+bigdecimal = "0.4"
 rust_decimal_macros = "1.40"
 jiff = { workspace = true, features = ["serde"] }
 serde.workspace = true

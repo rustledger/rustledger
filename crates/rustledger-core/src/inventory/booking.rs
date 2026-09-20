@@ -21,58 +21,51 @@ use crate::{Amount, Cost, CostSpec, Currency, Position};
 /// Returns `(avg_cost_per_unit, cost_currency)`, `None` if no position has a
 /// cost, or `Err(CurrencyMismatch)` if their costs are in different currencies.
 ///
-/// # The one case that is repaired
+/// Correctly rounded, through two tiers — the shape the balance validator uses
+/// for an over-precise residual (#1240):
 ///
-/// `checked_mul` does not fail when a product needs more than 28 decimal places
+/// 1. **Fast**: the sum of products, divided. Taken only while every product is
+///    EXACT, which an exact product tells by keeping the sum of its factors'
+///    scales (`rust_decimal` does not normalize). That is every ordinary pool,
+///    and its result is unchanged to the last digit.
+/// 2. **Exact**: the same expression in `BigDecimal`, rounded once into a
+///    `Decimal`.
+///
+/// # Why the escalation, and why not a cheaper trick
+///
+/// `checked_mul` does not FAIL when a product needs more than 28 decimal places
 /// — it rounds, and a small enough product rounds to ZERO. Two lots of `1e-11`
-/// units at `1e-18` and `3e-18` have products `1e-29` and `3e-29`, both below
-/// the floor, so the sum was `0` and the pool booked at a zero average cost
-/// where it is `2e-18`: a zero cost basis on a real holding, every later sale
-/// of it reading as pure gain (#2351).
+/// units at `1e-18` and `3e-18` summed to `0`, so the pool booked at a zero
+/// average cost where it is `2e-18`: a zero cost basis on a real holding, every
+/// later sale of it reading as pure gain (#2351). Short of zero, a sum that
+/// keeps one or two digits is wrong in proportion (#2353).
 ///
-/// That signature — the sum is zero AND some product vanished from two nonzero
-/// factors — and only that one, is recomputed ratio-first,
-/// `Σ cost × (units / total_units)`, whose ratios are near 1 when the lots are.
-/// A zero sum from products that genuinely cancel (`2 + -2`) keeps its exact
-/// zero.
+/// Three `Decimal`-only alternatives were measured against an exact reference
+/// over ~257k pools spanning the whole range and ~300k pools of comparable
+/// small lots, counting results more than 100 units in the last place from
+/// correct:
 ///
-/// # Why only that one
+/// | | comparable small lots | whole range |
+/// |---|---|---|
+/// | products, divided (what this replaces) | 28,146 | 8,894 |
+/// | ratio form when a product vanished, if the ratios are well-conditioned | 215 | 8,348 |
+/// | incremental weighted mean (`avg += (c - avg) * u/Σu`) | 0 | 123,365 |
+/// | this: exact escalation | 0 | 0 |
 ///
-/// Measured against an exact `BigDecimal` reference over 256,574 random pools
-/// with magnitudes drawn from the whole `Decimal` range: taking the ratio form
-/// for EVERY inexact product was worse than the product form in 70% of cases.
-/// `rust_decimal` has 28 decimal PLACES, not 28 significant digits, so a small
-/// ratio keeps few digits and a large cost magnifies the loss — the product
-/// form is the more accurate of the two almost everywhere. Widening the trigger
-/// to "the sum is merely small" rescued more imprecise pools but made others
-/// worse (9 at `< 1e-20`, 1,066 at `< 1e-10`). The zero-and-vanished trigger
-/// changed exactly the 145 fabricated zeros and nothing else.
-///
-/// What it does NOT fix: a sum that lost digits without reaching zero is still
-/// divided as-is, so the average is wrong in proportion — 37,914 of 400,000
-/// random pools of comparable small lots are off by more than 100 units in the
-/// last place, exactly as before this change (11,842 of 341,915 when the
-/// magnitudes span the whole range). Requiring the ratios to be
-/// well-conditioned as well as a product to have vanished would take the first
-/// figure to 326 and beat the old formula on both populations, at the price of
-/// 519 in 742,000 coming out slightly worse than it; exact arithmetic in
-/// `BigDecimal` dominates both and needs a dependency `rustledger-core` does
-/// not have — the published `rustledger-parser` uses this crate standalone.
-/// Measurements and the decision are in #2353.
-///
-/// The booker computes the same quantity for a reduction whose first matched
-/// lot carries no cost of its own, by dividing an already-summed cost basis.
-/// It is not routed through here: that branch divides an unsigned basis by
-/// `|units|` while matched lots carry the inventory's sign, and it sums lots
-/// across cost currencies where this reports a mismatch. A mixed
-/// cost-less/costed pool did not reach that branch in testing.
+/// Every `Decimal`-only form wins one population and loses the other, because
+/// `rust_decimal` keeps 28 decimal PLACES, not 28 significant digits: a small
+/// product loses digits to the floor, and a small ratio loses them just the
+/// same. Only exact arithmetic is right on both, which is why this takes the
+/// dependency `rustledger-core` had avoided. Nothing new enters the workspace —
+/// `bigdecimal` is already here for #1240 — and the cost lands on a
+/// `rustledger-parser`-only consumer, which gains four crates on 65.
 fn weighted_average_cost(
     positions: &[&Position],
     total_units: Decimal,
 ) -> Result<Option<(Decimal, Currency)>, BookingError> {
     let mut currency: Option<Currency> = None;
     let mut sum = Decimal::ZERO;
-    let mut vanished = false;
+    let mut all_exact = true;
     for pos in positions {
         let Some(cost) = &pos.cost else { continue };
         match &currency {
@@ -85,45 +78,63 @@ fn weighted_average_cost(
             Some(_) => {}
             None => currency = Some(cost.currency.clone()),
         }
-        // Checked: the product needs the sum of its operands' digits, so it
-        // can leave range well below the ceiling (#1863).
-        let product = pos.units.number.checked_mul(cost.number).ok_or_else(|| {
+        let overflow = || {
             BookingError::Overflow(OverflowError {
                 currency: cost.currency.clone(),
             })
-        })?;
-        vanished |= product.is_zero() && !pos.units.number.is_zero() && !cost.number.is_zero();
-        sum = sum.checked_add(product).ok_or_else(|| {
-            BookingError::Overflow(OverflowError {
-                currency: cost.currency.clone(),
-            })
-        })?;
+        };
+        // Checked: the product needs the sum of its operands' digits, so it can
+        // leave range well below the ceiling (#1863).
+        let product = pos
+            .units
+            .number
+            .checked_mul(cost.number)
+            .ok_or_else(overflow)?;
+        all_exact &= product.scale() == pos.units.number.scale() + cost.number.scale();
+        // The SUM can round too, even when every product is exact: adding
+        // products of large magnitude overflows the 96-bit mantissa and
+        // `checked_add` reduces the scale to fit rather than failing. An exact
+        // addition keeps the larger of the two scales, so a smaller one is the
+        // tell — the same shape as the product check above. Missing this left
+        // the fast path on an inexact sum, two units in the last place from
+        // correct.
+        let widest = sum.scale().max(product.scale());
+        sum = sum.checked_add(product).ok_or_else(overflow)?;
+        all_exact &= sum.scale() == widest;
     }
     let Some(currency) = currency else {
         return Ok(None);
     };
-
-    if sum.is_zero() && vanished {
-        let ratio_form = positions
-            .iter()
-            .filter_map(|p| p.cost.as_ref().map(|c| (p.units.number, c.number)))
-            .try_fold(Decimal::ZERO, |acc, (units, cost)| {
-                acc.checked_add(cost.checked_mul(units.checked_div(total_units)?)?)
-            });
-        if let Some(avg) = ratio_form {
-            return Ok(Some((avg, currency)));
-        }
-    }
-
-    // Checked: the multiplication above was made checked by #1863 and the
-    // division beside it was left bare, which is the same miss #2327 repeated
-    // (#2340). `checked_div` also covers a zero divisor, which panics too.
-    let per_unit = sum.checked_div(total_units).ok_or_else(|| {
+    let overflow = || {
         BookingError::Overflow(OverflowError {
             currency: currency.clone(),
         })
-    })?;
-    Ok(Some((per_unit, currency)))
+    };
+    // Zero units leave the average undefined, and `BigDecimal` division by zero
+    // PANICS where `checked_div` reports, so this stays on the checked path.
+    if total_units.is_zero() {
+        return Err(overflow());
+    }
+    if all_exact {
+        // Every product exact, so the division is the only rounding.
+        return Ok(Some((
+            sum.checked_div(total_units).ok_or_else(overflow)?,
+            currency,
+        )));
+    }
+    let exact = positions
+        .iter()
+        .filter_map(|p| p.cost.as_ref().map(|c| (p.units.number, c.number)))
+        .map(|(units, cost)| crate::to_bigdecimal(units) * crate::to_bigdecimal(cost))
+        .sum::<bigdecimal::BigDecimal>()
+        / crate::to_bigdecimal(total_units);
+    // `to_plain_string`, not `Display`: `Display` switches to exponent form,
+    // which `Decimal::from_str` accepts only by coincidence. Parsing rounds to
+    // what a `Decimal` can hold and fails when the magnitude cannot fit at all,
+    // which is the overflow the checked path would have reported.
+    let rounded = <Decimal as core::str::FromStr>::from_str(&exact.to_plain_string())
+        .map_err(|_| overflow())?;
+    Ok(Some((rounded, currency)))
 }
 
 /// A reduction computed from `&Inventory` but not yet applied.

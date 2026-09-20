@@ -750,17 +750,10 @@ pub fn calculate_residual(transaction: &Transaction) -> Option<FxHashMap<Currenc
 /// The precision loss only occurs during arithmetic, so converting before operations
 /// preserves full precision.
 fn to_big(d: Decimal) -> BigDecimal {
-    // Built from the parts rather than a `to_string` / `from_str` round trip.
-    // A `Decimal` IS `mantissa * 10^-scale`, and `BigDecimal::new` takes exactly
-    // that, so this is the same value AND the same scale — measured identical
-    // on 500,010 decimals including `MAX`, `MIN`, `-0.00` and trailing-zero
-    // padded 18-place values. It matters for speed: `prorate`'s exact path
-    // converts four times per call, and formatting and re-parsing each was most
-    // of its cost on an 18-decimal token ledger (#2349 review).
-    BigDecimal::new(
-        bigdecimal::num_bigint::BigInt::from(d.mantissa()),
-        i64::from(d.scale()),
-    )
+    // The canonical conversion lives in core, shared with the weighted-average
+    // escalation (#2353); this crate's precise residual (#1240) uses the same
+    // one so the two cannot drift.
+    rustledger_core::to_bigdecimal(d)
 }
 
 /// Split `value` in the ratio `num / den`, correctly rounded.

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 6b42617200ea377ac01e9daa313d03b332e5056f8dabb875eee807934ddbed7e # shrinks to lots = [(0.00000001, 0.000000000000000000001), (0.00000000000001, 0.000000000000001)]
+cc 4cd6a6d5bb302b54cb0a0470db6cccf45811d6d0fdd60234cde6af8790546eb5 # shrinks to lots = [(0.00027, 293438634335698995207.0), (0.06, 1), (0.06563952, 0.72490)], short = false

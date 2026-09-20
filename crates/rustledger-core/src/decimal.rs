@@ -122,6 +122,23 @@ pub fn checked_div_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {
     Some(with_ideal_scale(quotient, ideal_scale))
 }
 
+/// Convert to `BigDecimal` for arithmetic `Decimal` cannot do exactly.
+///
+/// Built from the parts, not a `to_string` / `from_str` round trip: a `Decimal`
+/// IS `mantissa * 10^-scale` and `BigDecimal::new` takes exactly that, so this
+/// is the same value AND the same scale, measured identical on 500,010 decimals
+/// including `MAX`, `MIN`, `-0.00` and trailing-zero-padded 18-place values.
+///
+/// The ONE conversion: `rustledger_booking`'s precise residual (#1240) and this
+/// crate's weighted-average escalation (#2353) both go through it.
+#[must_use]
+pub fn to_bigdecimal(d: Decimal) -> bigdecimal::BigDecimal {
+    bigdecimal::BigDecimal::new(
+        bigdecimal::num_bigint::BigInt::from(d.mantissa()),
+        i64::from(d.scale()),
+    )
+}
+
 /// Give a quotient Python's ideal-exponent scale: strip the trailing zeros the
 /// division invented, then pad back up to `ideal_scale`.
 ///

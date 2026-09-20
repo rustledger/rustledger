@@ -319,6 +319,25 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
         "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
         "weight-by-date",
     ),
+    # `order-by-expression` reaches the same three fixtures. It arrives late
+    # only because the query postdates this block: it was added in #2215 (for
+    # #2177), by which time the pairs above were already pinned. Same grouping,
+    # nothing else: `SELECT number + 1` gives `-1399999` from bean-query
+    # against our `-1,399,999`, byte-identical once the separators come out.
+    # These were the last three of the seven unmasked mismatches that had a
+    # settled cause (#2358).
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_examples_example.beancount",
+        "order-by-expression",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_minimizegains_example.beancount",
+        "order-by-expression",
+    ),
+    (
+        "tests/compatibility/files/fava-investor/fava_investor_modules_tlh_example.beancount",
+        "order-by-expression",
+    ),
     # beancount/beanquery#275: position display truncates precision in
     # the ledger's display context. Affects any query that projects
     # `position` or sums it.

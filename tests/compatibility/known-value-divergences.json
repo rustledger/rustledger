@@ -49,6 +49,10 @@
   ],
   [
     "tests_data_some_fund_example.beancount",
+    "posting:Assets:SomeFund:Total 2024-02-12 number"
+  ],
+  [
+    "tests_data_some_fund_example.beancount",
     "posting:Assets:SomeFund:Total 2024-03-07 cost_date"
   ],
   [
@@ -61,15 +65,7 @@
   ],
   [
     "tests_data_some_fund_example.beancount",
-    "posting:Assets:SomeFund:Total 2024-03-07 price_number"
-  ],
-  [
-    "tests_data_some_fund_example.beancount",
     "posting:Income:SomeFund:PnL 2024-03-07 number"
-  ],
-  [
-    "tests_data_some_fund_example.beancount",
-    "price:SOME_FUND_USD 2024-03-05 price_number"
   ],
   [
     "tests_data_some_fund_example.beancount",

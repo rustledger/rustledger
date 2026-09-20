@@ -134,6 +134,15 @@ KNOWN_PYTHON_DIVERGENCES: set[tuple[str, str]] = {
         "tests/compatibility/files/beancount-portfolio-alloc/tests_test_inputs_missing_prices.beancount",
         "sum-number-by-currency",
     ),
+    # Same mechanism reaches `order-by-expression`. Reproduced directly:
+    # `11.7230 NESTHIGHER {{25.61 GBP, 2017-12-14}}` interpolates the
+    # balancing leg, and bean-query reports it as
+    # `-25.61000000000000000000000000` where we report `-25.61`. Equal values,
+    # beancount's re-derived total carrying the tail (#2358).
+    (
+        "tests/compatibility/files/beancount-portfolio-alloc/tests_test_inputs_missing_prices.beancount",
+        "order-by-expression",
+    ),
     # bean-query pads the amount INSIDE a cost brace, producing ragged output
     # that its own `Position.__str__` never emits:
     #
@@ -475,6 +484,27 @@ KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
     ("tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount", "last-balance-by-month"),
     ("tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount", "sum-number-by-currency"),
     ("tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount", "sum-position-by-account"),
+    # `order-by-expression` reaches both fixtures. Unlike the entries above it
+    # masks TWO causes at once, so it is spelled out rather than left implied:
+    # the 1e-7 drift documented here, AND the PnL dust in #2360, where our
+    # valuation plugin COMPUTES the PnL amount that upstream leaves to
+    # interpolation. Reproduced posting by posting on `some_fund_example`,
+    # where only three rows differ:
+    #
+    #   2024-02-12 Income:SomeFund:PnL    py -25.00        rs -25.00000000000000000000000001
+    #   2024-03-07 Assets:SomeFund:Total  py -656.2499999  rs -656.2500000
+    #   2024-03-07 Income:SomeFund:PnL    py -275.00000001 rs -274.9999998999999999999999999
+    #
+    # The middle row is this block's drift. The other two are #2360. When
+    # #2360 lands, these two entries should go stale and the gate will say so.
+    (
+        "tests/compatibility/files/beancount-lazy-plugins/tests_data_cool_fund_example.beancount",
+        "order-by-expression",
+    ),
+    (
+        "tests/compatibility/files/beancount-lazy-plugins/tests_data_some_fund_example.beancount",
+        "order-by-expression",
+    ),
 
     # `capital_gains_classifier` RECOMPUTES the gain upstream; we reclassify
     # the posting that was already interpolated.
@@ -507,6 +537,14 @@ KNOWN_RUST_DIVERGENCES: set[tuple[str, str]] = {
     (
         "tests/compatibility/files/reds-plugins/beancount_reds_plugins_capital_gains_classifier_example.long_short.beancount",
         "sum-number-by-currency",
+    ),
+    # Same recomputation reaches `order-by-expression`: `SELECT number + 1`
+    # gives `-49.00` from bean-query against our `-49`. Confirmed to be the
+    # plugin and not our interpolation by running the fixture with the plugin
+    # line removed, where beancount itself interpolates `-50` at scale 0.
+    (
+        "tests/compatibility/files/reds-plugins/beancount_reds_plugins_capital_gains_classifier_example.long_short.beancount",
+        "order-by-expression",
     ),
     # Posting ORDER after an elided posting is split across two currencies.
     # On `examples_simple_basic.beancount`:

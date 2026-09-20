@@ -32,7 +32,9 @@ jobs:
         with:
           toolchain: 1.98.1 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
       - name: Install cargo-vet
-        run: cargo install cargo-vet
+        # Same pin as cargo-vet-auto.yml: the two must agree on the parser, or
+        # one accepts a store the other rejects (#2355).
+        run: cargo install cargo-vet --version 0.10.2 --locked
       - name: Run cargo vet
         run: cargo vet --locked
   # Generate SBOM on push to main

@@ -107,9 +107,24 @@ jobs:
         with:
           toolchain: 1.98.1 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
       - name: Install cargo-vet
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
-        with:
-          tool: cargo-vet
+        # `cargo install`, not install-action, and PINNED — not for the usual
+        # reproducibility reason. Unversioned, install-action takes the newest
+        # GitHub RELEASE, which is v0.10.0 (2024-10-03), and 0.10.0 cannot parse
+        # a `trusted-publisher` trust entry: it reports `missing field user-id`
+        # and exits 255 before regenerating anything, which is what broke this
+        # job for every Cargo.lock PR after #2323 added three of them (mach2,
+        # pin-project-lite, portable-atomic). Those entries are correct — the
+        # versions we depend on are published through trusted publishing with no
+        # publishing user, so a `user-id` entry would match nothing — and 0.10.2
+        # (crates.io, 2026-01-13) vets this store successfully and suggests
+        # `cargo vet trust <crate> github:owner/repo` itself.
+        #
+        # install-action cannot deliver 0.10.2: its manifest lists only 0.10.0,
+        # and there is no GitHub release for 0.10.2 for its binstall fallback to
+        # find, so this builds from source. Same pin as supply-chain.yml; the two
+        # must agree on the parser or one accepts a store the other rejects.
+        # Bump deliberately (#2355).
+        run: cargo install cargo-vet --version 0.10.2 --locked
       - name: Regenerate exemptions
         run: cargo vet regenerate exemptions
       - name: Commit and push changes

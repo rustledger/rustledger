@@ -31,6 +31,9 @@ audit-as-crates-io = false
 [policy.rustledger-booking]
 audit-as-crates-io = false
 
+[policy.rustledger-budget]
+audit-as-crates-io = false
+
 [policy.rustledger-completion]
 audit-as-crates-io = false
 
@@ -49,6 +52,9 @@ audit-as-crates-io = false
 [policy.rustledger-lsp]
 audit-as-crates-io = false
 
+[policy.rustledger-ops]
+audit-as-crates-io = false
+
 [policy.rustledger-parser]
 audit-as-crates-io = false
 
@@ -59,6 +65,9 @@ audit-as-crates-io = false
 audit-as-crates-io = false
 
 [policy.rustledger-query]
+audit-as-crates-io = false
+
+[policy.rustledger-returns]
 audit-as-crates-io = false
 
 [policy.rustledger-validate]
@@ -681,10 +690,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.rustls-pki-types]]
 version = "1.15.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.rustls-webpki]]
-version = "0.103.15"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustversion]]

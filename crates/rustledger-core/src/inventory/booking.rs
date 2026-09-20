@@ -15,61 +15,110 @@ use super::{
 };
 use crate::{Amount, Cost, CostSpec, Currency, Position};
 
-/// Compute weighted-average cost from a set of positions.
+/// Weighted-average cost of `positions` over `total_units`:
+/// `Σ units × cost / total_units`, taken over the positions that carry a cost.
 ///
-/// Returns `(avg_cost_per_unit, cost_currency)` or `None` if no positions have cost info.
-/// Returns `Err(CurrencyMismatch)` if positions have costs in different currencies.
-fn average_cost_from_positions(
+/// Returns `(avg_cost_per_unit, cost_currency)`, `None` if no position has a
+/// cost, or `Err(CurrencyMismatch)` if their costs are in different currencies.
+///
+/// # The one case that is repaired
+///
+/// `checked_mul` does not fail when a product needs more than 28 decimal places
+/// — it rounds, and a small enough product rounds to ZERO. Two lots of `1e-11`
+/// units at `1e-18` and `3e-18` have products `1e-29` and `3e-29`, both below
+/// the floor, so the sum was `0` and the pool booked at a zero average cost
+/// where it is `2e-18`: a zero cost basis on a real holding, every later sale
+/// of it reading as pure gain (#2351).
+///
+/// That signature — the sum is zero AND some product vanished from two nonzero
+/// factors — and only that one, is recomputed ratio-first,
+/// `Σ cost × (units / total_units)`, whose ratios are near 1 when the lots are.
+/// A zero sum from products that genuinely cancel (`2 + -2`) keeps its exact
+/// zero.
+///
+/// # Why only that one
+///
+/// Measured against an exact `BigDecimal` reference over 256,574 random pools
+/// with magnitudes drawn from the whole `Decimal` range: taking the ratio form
+/// for EVERY inexact product was worse than the product form in 70% of cases.
+/// `rust_decimal` has 28 decimal PLACES, not 28 significant digits, so a small
+/// ratio keeps few digits and a large cost magnifies the loss — the product
+/// form is the more accurate of the two almost everywhere. Widening the trigger
+/// to "the sum is merely small" rescued more imprecise pools but made others
+/// worse (9 at `< 1e-20`, 1,066 at `< 1e-10`). The zero-and-vanished trigger
+/// changed exactly the 145 fabricated zeros and nothing else.
+///
+/// What it does NOT fix: a sum that lost digits without reaching zero is still
+/// divided as-is, so the average is wrong in proportion — 37,914 of 400,000
+/// random pools of comparable small lots are off by more than 100 units in the
+/// last place, exactly as before this change (11,842 of 341,915 when the
+/// magnitudes span the whole range). Requiring the ratios to be
+/// well-conditioned as well as a product to have vanished would take the first
+/// figure to 326 and beat the old formula on both populations, at the price of
+/// 519 in 742,000 coming out slightly worse than it; exact arithmetic in
+/// `BigDecimal` dominates both and needs a dependency `rustledger-core` does
+/// not have — the published `rustledger-parser` uses this crate standalone.
+/// Measurements and the decision are in #2353.
+///
+/// The booker computes the same quantity for a reduction whose first matched
+/// lot carries no cost of its own, by dividing an already-summed cost basis.
+/// It is not routed through here: that branch divides an unsigned basis by
+/// `|units|` while matched lots carry the inventory's sign, and it sums lots
+/// across cost currencies where this reports a mismatch. A mixed
+/// cost-less/costed pool did not reach that branch in testing.
+fn weighted_average_cost(
     positions: &[&Position],
     total_units: Decimal,
 ) -> Result<Option<(Decimal, Currency)>, BookingError> {
-    let mut total_cost = Decimal::ZERO;
-    let mut cost_currency: Option<Currency> = None;
-    let mut has_any_cost = false;
-
+    let mut currency: Option<Currency> = None;
+    let mut sum = Decimal::ZERO;
+    let mut vanished = false;
     for pos in positions {
-        if let Some(cost) = &pos.cost {
-            has_any_cost = true;
-            if let Some(ref cc) = cost_currency {
-                if *cc != cost.currency {
-                    return Err(BookingError::CurrencyMismatch {
-                        expected: cc.clone(),
-                        got: cost.currency.clone(),
-                    });
-                }
-            } else {
-                cost_currency = Some(cost.currency.clone());
+        let Some(cost) = &pos.cost else { continue };
+        match &currency {
+            Some(cc) if *cc != cost.currency => {
+                return Err(BookingError::CurrencyMismatch {
+                    expected: cc.clone(),
+                    got: cost.currency.clone(),
+                });
             }
-            // Checked: the product needs the sum of its operands' digits, so
-            // it can leave range well below the ceiling (#1863).
-            total_cost = pos
-                .units
-                .number
-                .checked_mul(cost.number)
-                .and_then(|v| total_cost.checked_add(v))
-                .ok_or_else(|| {
-                    BookingError::Overflow(OverflowError {
-                        currency: cost.currency.clone(),
-                    })
-                })?;
+            Some(_) => {}
+            None => currency = Some(cost.currency.clone()),
+        }
+        // Checked: the product needs the sum of its operands' digits, so it
+        // can leave range well below the ceiling (#1863).
+        let product = pos.units.number.checked_mul(cost.number).ok_or_else(|| {
+            BookingError::Overflow(OverflowError {
+                currency: cost.currency.clone(),
+            })
+        })?;
+        vanished |= product.is_zero() && !pos.units.number.is_zero() && !cost.number.is_zero();
+        sum = sum.checked_add(product).ok_or_else(|| {
+            BookingError::Overflow(OverflowError {
+                currency: cost.currency.clone(),
+            })
+        })?;
+    }
+    let Some(currency) = currency else {
+        return Ok(None);
+    };
+
+    if sum.is_zero() && vanished {
+        let ratio_form = positions
+            .iter()
+            .filter_map(|p| p.cost.as_ref().map(|c| (p.units.number, c.number)))
+            .try_fold(Decimal::ZERO, |acc, (units, cost)| {
+                acc.checked_add(cost.checked_mul(units.checked_div(total_units)?)?)
+            });
+        if let Some(avg) = ratio_form {
+            return Ok(Some((avg, currency)));
         }
     }
 
-    if !has_any_cost || cost_currency.is_none() {
-        return Ok(None);
-    }
-
-    // Bound once, so the success and failure paths cannot disagree about an
-    // invariant the guard above already settled. The first draft read
-    // `unwrap_or_default()` here and `unwrap()` on the next line: the same
-    // impossible state would have panicked on one path and reported an
-    // overflow in the EMPTY currency on the other, which prints as a message
-    // with a blank where the commodity belongs.
-    let currency = cost_currency.expect("guarded by the is_none check above");
     // Checked: the multiplication above was made checked by #1863 and the
     // division beside it was left bare, which is the same miss #2327 repeated
     // (#2340). `checked_div` also covers a zero divisor, which panics too.
-    let per_unit = total_cost.checked_div(total_units).ok_or_else(|| {
+    let per_unit = sum.checked_div(total_units).ok_or_else(|| {
         BookingError::Overflow(OverflowError {
             currency: currency.clone(),
         })
@@ -825,7 +874,7 @@ impl Inventory {
             });
         }
 
-        let avg = average_cost_from_positions(&matching, total_units)?;
+        let avg = weighted_average_cost(&matching, total_units)?;
         let cost_basis = avg
             .as_ref()
             .map(|(avg_cost, currency)| {
@@ -919,9 +968,7 @@ impl Inventory {
                 let avg = if total_units.is_zero() {
                     None
                 } else {
-                    average_cost_from_positions(&matching, total_units)
-                        .ok()
-                        .flatten()
+                    weighted_average_cost(&matching, total_units).ok().flatten()
                 };
                 (total_units, avg)
             };
@@ -988,7 +1035,7 @@ impl Inventory {
         }
 
         let matching_refs: Vec<&Position> = matching.iter().map(|(_, p)| *p).collect();
-        let pool = average_cost_from_positions(&matching_refs, total_units)?
+        let pool = weighted_average_cost(&matching_refs, total_units)?
             .map(|(number, currency)| Amount::new(number, currency));
 
         Ok(MergePlan {

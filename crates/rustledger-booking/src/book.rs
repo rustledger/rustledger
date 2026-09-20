@@ -409,13 +409,23 @@ impl BookingEngine {
                             .ok_or_else(|| {
                                 cost_overflow(&posting.account, cost_spec.currency.as_ref(), units)
                             })?;
-                        // Checked for the same reason the multiplication above
-                        // is: the quotient can leave the range even when both
-                        // operands sit inside it (#2327).
-                        let combined_per_unit =
-                            combined.checked_div(units.number.abs()).ok_or_else(|| {
-                                cost_overflow(&posting.account, cost_spec.currency.as_ref(), units)
-                            })?;
+                        // The per-unit from the shared `a + b/N`, NOT
+                        // `combined / N`. `combined` is fine as the total it
+                        // is — a final value, correctly rounded — but as the
+                        // dividend of a per-unit it is an intermediate product
+                        // `checked_mul` rounded to 28 places without failing:
+                        // `1e-11` units at `{1e-18 # 0}` made it zero and
+                        // booked a per-unit cost of `0` for `1e-18` (#2351).
+                        // This site was a copy of `CostSpec::resolve`'s logic
+                        // that had drifted into the unsafe form.
+                        let combined_per_unit = rustledger_core::CostNumber::compound_per_unit(
+                            per_unit,
+                            total,
+                            units.number,
+                        )
+                        .ok_or_else(|| {
+                            cost_overflow(&posting.account, cost_spec.currency.as_ref(), units)
+                        })?;
                         // `try_new`, not `new`: see the underflow case at
                         // the head of this file's sibling site in
                         // `interpolate.rs` (#2340) — a successful division

@@ -498,7 +498,7 @@ fn average_booking_nets_to_a_single_merged_lot() {
 #[test]
 fn a_same_transaction_short_realizes_identically() {
     let bin = require_rledger!();
-    let cases: [(&str, &str, &[(&str, &str)]); 3] = [
+    let cases: [(&str, &str, &[(&str, &str)]); 4] = [
         (
             "buy then sell past the buy",
             r#"option "booking_method" "STRICT"
@@ -551,6 +551,27 @@ fn a_same_transaction_short_realizes_identically() {
   Assets:Cash
 "#,
             &[("-10", "<no cost>"), ("10", "<no cost>"), ("6", "100")],
+        ),
+        (
+            // Booking merges the two held lots to 20 @ 110 and sells 4 from
+            // that pool; the buy at 130 joins only afterwards. Replayed
+            // posting by posting, the buy was merged in too: 21 @ 114.
+            "a buy ahead of a {*} sale",
+            r#"2020-01-01 open Assets:Broker AAPL "STRICT"
+2020-01-01 open Assets:Cash
+
+2020-01-01 * "lot a"
+  Assets:Broker  10 AAPL {100.00 USD}
+  Assets:Cash
+2020-01-02 * "lot b"
+  Assets:Broker  10 AAPL {120.00 USD}
+  Assets:Cash
+2020-01-03 * "buy, then merge-sell"
+  Assets:Broker   5 AAPL {130.00 USD}
+  Assets:Broker  -4 AAPL {*}
+  Assets:Cash
+"#,
+            &[("16", "110.00"), ("5", "130.00")],
         ),
     ];
 

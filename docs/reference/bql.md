@@ -81,7 +81,9 @@ Each row in a default `SELECT` is one posting from one transaction. The columns 
 | Column | Type | Description |
 |--------|------|-------------|
 | `balance` | Inventory? | Cumulative running total across `WHERE`-filtered postings (matches `bean-query`) |
-| `account_balance` | Inventory? | Per-account running balance, independent of `WHERE` |
+| `account_balance` | Inventory? | Per-account running balance, independent of `WHERE`. Within a transaction it follows booking: a sale never reduces a lot bought earlier in the same transaction (see below) |
+
+`account_balance` realizes lots through the booking engine, the same way `report balances` does. Booking reads each sale against the inventory before its transaction plus the transaction's earlier sales, never its purchases, so the row for a posting shows the account after the transaction's postings up to and including it, read that way. For an `AVERAGE` account or a `{*}` sale, a purchase written earlier in the same transaction therefore stays out of the pool the sale is taken from, matching the cost the journal books the sale at. `balance` is unaffected: it adds positions as `bean-query` does.
 
 **Source location columns**
 

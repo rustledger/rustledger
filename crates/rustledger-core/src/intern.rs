@@ -497,6 +497,24 @@ impl CurrencyInterner {
 mod tests {
     use super::*;
 
+    // #2365: until this test, the only coverage of the code below lived in
+    // `rustledger-booking`, which `cargo mutants --package rustledger-core`
+    // never runs, so the mutation gate reported it untested.
+
+    #[test]
+    fn interned_str_exposes_its_contents_through_as_ref() {
+        let s = InternedStr::new("Assets:Cash");
+        let r: &str = s.as_ref();
+        assert_eq!(r, "Assets:Cash");
+    }
+
+    #[test]
+    fn interned_str_from_a_string_ref_keeps_the_contents() {
+        let owned = String::from("USD");
+        let s = InternedStr::from(&owned);
+        assert_eq!(s.as_str(), "USD");
+    }
+
     #[test]
     fn test_interned_str_equality() {
         let s1 = InternedStr::new("hello");

@@ -909,6 +909,49 @@ impl fmt::Display for CostSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `compound_per_unit` had no test in this crate at all: its only coverage
+    // was in `rustledger-booking`, which `cargo mutants --package
+    // rustledger-core` never runs, so replacing the whole body with `None` or
+    // `Some(0)` survived the mutation gate (#2365).
+
+    #[test]
+    fn compound_per_unit_is_per_unit_plus_total_over_units() {
+        // {10 # 5} over 2 units: 10 + 5/2.
+        let got =
+            CostNumber::compound_per_unit(Decimal::from(10), Decimal::from(5), Decimal::from(2));
+        assert_eq!(got, Some(Decimal::new(125, 1)));
+    }
+
+    #[test]
+    fn compound_per_unit_takes_the_magnitude_of_the_units() {
+        // A reduction arrives with negative units; the per-unit cost does not flip.
+        let got =
+            CostNumber::compound_per_unit(Decimal::from(10), Decimal::from(5), Decimal::from(-2));
+        assert_eq!(got, Some(Decimal::new(125, 1)));
+    }
+
+    #[test]
+    fn compound_per_unit_of_a_small_lot_is_not_zero() {
+        // #2351: `(N*a + b) / N` rounded `N*a` to zero for a small lot. The
+        // `a + b/N` form keeps the per-unit exactly.
+        let per_unit = Decimal::new(1, 18);
+        let got = CostNumber::compound_per_unit(per_unit, Decimal::ZERO, Decimal::new(1, 11));
+        assert_eq!(got, Some(per_unit));
+    }
+
+    #[test]
+    fn compound_per_unit_is_undefined_for_zero_units() {
+        let got = CostNumber::compound_per_unit(Decimal::from(10), Decimal::from(5), Decimal::ZERO);
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn compound_per_unit_reports_an_addition_past_the_ceiling() {
+        // #2327: the quotient fits but the sum does not.
+        let got = CostNumber::compound_per_unit(Decimal::MAX, Decimal::from(1), Decimal::from(1));
+        assert_eq!(got, None);
+    }
     use rust_decimal_macros::dec;
 
     /// `total_for` must be exhaustive: every variant yields the correct

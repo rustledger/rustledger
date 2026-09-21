@@ -2816,6 +2816,96 @@ mod tests {
         );
     }
 
+    /// Lots that share a NEGATIVE sign are bounded by their own total too.
+    ///
+    /// The test above only covers long lots, so the mixed-sign guard written as
+    /// `positive_lots >= 0 && negative_lots > 0` -- refusing every short pool --
+    /// survived this crate's suite and was caught only from
+    /// `rustledger-booking` (#2365).
+    #[test]
+    fn add_headroom_for_still_proves_room_for_short_lots() {
+        let mut inv = Inventory::new();
+        inv.add(Position::with_cost(
+            Amount::new(Decimal::new(-10, 0), "CORP"),
+            Cost::new(Decimal::new(1, 2), "USD"),
+        ))
+        .expect("fits");
+        inv.add(Position::with_cost(
+            Amount::new(Decimal::new(-20, 0), "CORP"),
+            Cost::new(Decimal::new(2, 2), "USD"),
+        ))
+        .expect("fits");
+
+        assert!(
+            inv.add_headroom_for("CORP", Decimal::new(5, 0)),
+            "two small short lots have room for five more units"
+        );
+    }
+
+    /// With its caches missing, `add_headroom_for` must refuse rather than
+    /// report room it cannot prove.
+    ///
+    /// The caches are `#[serde(skip)]`; that state used to follow every
+    /// deserialization, and the guard exists because it once did. Deserializing
+    /// now goes through `InventoryWire` and rebuilds them, so the public API no
+    /// longer reaches this, and nothing covered the guard: removing it survived
+    /// every suite in the workspace (#2365). Built directly here instead. Past
+    /// the guard, a missing stats entry answers `true`, so this is the difference
+    /// between refusing and waving an unproven add through.
+    #[test]
+    fn add_headroom_for_refuses_when_its_caches_are_missing() {
+        let mut inv = Inventory::new();
+        inv.add(Position::with_cost(
+            Amount::new(Decimal::new(10, 0), "CORP"),
+            Cost::new(Decimal::new(1, 2), "USD"),
+        ))
+        .expect("fits");
+        inv.units_cache.clear();
+        assert!(
+            !inv.positions.is_empty(),
+            "the positions must survive the wipe"
+        );
+
+        assert!(
+            !inv.add_headroom_for("CORP", Decimal::new(5, 0)),
+            "an inventory whose caches are missing cannot prove headroom"
+        );
+    }
+
+    /// `is_reduced_by` falls back to the scan when its caches are missing.
+    ///
+    /// The same missing-caches state as the test above, and the same reason it
+    /// needs building by hand: the public API no longer reaches it. Here the
+    /// cost of skipping the guard is the one its comment names: an empty cache
+    /// reads as "not a reduction" for an inventory holding a matching lot, so a
+    /// sale books as an augmentation and silently creates a duplicate lot.
+    ///
+    /// Unlike its sibling, this guard's surviving mutant (`&&` -> `||`) is
+    /// equivalent: it only sends more calls down the scan, which is the ground
+    /// truth. What this pins is the guard itself (#2365).
+    #[test]
+    fn is_reduced_by_scans_when_its_caches_are_missing() {
+        let mut inv = Inventory::new();
+        inv.add(Position::with_cost(
+            Amount::new(Decimal::new(10, 0), "CORP"),
+            Cost::new(Decimal::new(1, 2), "USD"),
+        ))
+        .expect("fits");
+        inv.units_cache.clear();
+        assert!(
+            !inv.positions.is_empty(),
+            "the positions must survive the wipe"
+        );
+
+        assert!(
+            inv.is_reduced_by(
+                &Amount::new(Decimal::new(-5, 0), "CORP"),
+                ReductionScope::CostBearingOnly
+            ),
+            "a sale against a held lot is a reduction, caches or not"
+        );
+    }
+
     /// A negative `needed` would make the internal sums smaller and return
     /// `true` where overflow is possible. `apply` would then skip the snapshot
     /// it needed, leaving a failing transaction's earlier postings applied —

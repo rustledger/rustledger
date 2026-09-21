@@ -466,11 +466,22 @@ pub fn calculate_tolerances(
 }
 
 /// Update inventories with booking validation for each posting.
+///
+/// Reductions are applied in textual order and augmentations after all of
+/// them, the same walk as `BookingEngine::apply` (#2368). Booking classifies
+/// each posting against the inventory as it stood before the transaction,
+/// threaded with earlier REDUCTIONS only, so an augmentation earlier in the
+/// transaction never turns a later posting into a reduction. Adding it first
+/// would make `+10 X {100}` then `-20 X {100}` reduce 20 from 10 and fail,
+/// where booking (and beancount) open a short of 10. The walk in
+/// `BookingEngine::apply` documents the reasoning; change one and change the
+/// other.
 pub fn update_inventories(
     state: &mut LedgerState,
     txn: &Transaction,
     errors: &mut Vec<ValidationError>,
 ) {
+    let mut deferred: smallvec::SmallVec<[(&Posting, &Amount); 8]> = smallvec::SmallVec::new();
     for posting in &txn.postings {
         let Some(units) = posting.amount() else {
             continue;
@@ -495,18 +506,44 @@ pub fn update_inventories(
 
         if is_reduction {
             process_inventory_reduction(inv, posting, units, booking_method, txn, errors);
-        } else if let Err(e) = process_inventory_addition(inv, posting, units, txn) {
-            errors.push(
-                ValidationError::new(
-                    ErrorCode::ArithmeticOverflow,
-                    rustledger_core::BookingError::Overflow(e.clone())
-                        .with_account(posting.account.clone())
-                        .to_string(),
-                    txn.date,
-                )
-                .with_context(format!("currency: {}", e.currency)),
-            );
+        } else if deferred.is_empty() && posting.cost.is_none() {
+            // Nothing held back yet, so adding now keeps augmentations in
+            // textual order, and a cost-less position cannot make a later
+            // posting a reduction (`is_booking_reduction` counts cost-bearing
+            // positions only). Saves the second map lookup on the common
+            // cost-less posting.
+            push_addition_error(inv, posting, units, txn, errors);
+        } else {
+            deferred.push((posting, units));
         }
+    }
+
+    for (posting, units) in deferred {
+        if let Some(inv) = state.inventories.get_mut(&posting.account) {
+            push_addition_error(inv, posting, units, txn, errors);
+        }
+    }
+}
+
+/// Add `posting` to `inv`, reporting an overflow as a validation error.
+fn push_addition_error(
+    inv: &mut Inventory,
+    posting: &Posting,
+    units: &Amount,
+    txn: &Transaction,
+    errors: &mut Vec<ValidationError>,
+) {
+    if let Err(e) = process_inventory_addition(inv, posting, units, txn) {
+        errors.push(
+            ValidationError::new(
+                ErrorCode::ArithmeticOverflow,
+                rustledger_core::BookingError::Overflow(e.clone())
+                    .with_account(posting.account.clone())
+                    .to_string(),
+                txn.date,
+            )
+            .with_context(format!("currency: {}", e.currency)),
+        );
     }
 }
 

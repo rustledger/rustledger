@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc f95d469cec5dc2e9c0331eacf9cefb527a47e7c93c414beac86004121ad2ed1a # shrinks to method = Fifo, seeds = [101, 100], txns = [[SellAny { units: 1 }, SellMerged { units: 1 }]]
 cc 61f050b17b5d2a81402e4ba07450ba82b8d2b0fdb42819db83be9e9970182303 # shrinks to method = Strict, seeds = [100], txns = [[Buy { units: 1, cost: 101 }, SellMerged { units: 1 }]]
+cc e189f857a54d642779ded87e67822f857c8af5cb2eb2b2566d7ba6d5cf1df9c8 # shrinks to method = Strict, seeds = [100], txns = [[SellMerged { units: 7 }, SellAny { units: 2 }], [SellMerged { units: 7 }, SellMerged { units: 5 }, SellMerged { units: 2 }], [SellMerged { units: 7 }, SellAny { units: 1 }, SellAny { units: 7 }], [Buy { units: 1, cost: 101 }, SellAny { units: 2 }, SellAt { units: 1, cost: 100 }]]

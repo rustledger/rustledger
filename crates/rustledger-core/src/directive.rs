@@ -1639,6 +1639,21 @@ mod bool_vocabulary_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #2365: until this test, the only coverage of the code below lived in
+    // `rustledger-booking`, which `cargo mutants --package rustledger-core`
+    // never runs, so the mutation gate reported it untested.
+
+    #[test]
+    fn posting_amount_is_present_only_for_a_complete_amount() {
+        let full = Posting::new("Assets:Cash", Amount::new(Decimal::from(5), "USD"));
+        assert_eq!(full.amount(), Some(&Amount::new(Decimal::from(5), "USD")));
+        assert_eq!(
+            Posting::auto("Assets:Cash").amount(),
+            None,
+            "an elided amount has none"
+        );
+    }
     use rust_decimal_macros::dec;
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {

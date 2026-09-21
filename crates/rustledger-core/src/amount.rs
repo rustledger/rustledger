@@ -523,6 +523,27 @@ impl fmt::Display for IncompleteAmount {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #2365: until this test, the only coverage of the code below lived in
+    // `rustledger-booking`, which `cargo mutants --package rustledger-core`
+    // never runs, so the mutation gate reported it untested.
+
+    #[test]
+    fn as_amount_is_the_amount_only_when_it_is_complete() {
+        let complete = IncompleteAmount::Complete(Amount::new(Decimal::from(5), "USD"));
+        assert_eq!(
+            complete.as_amount(),
+            Some(&Amount::new(Decimal::from(5), "USD"))
+        );
+        assert_eq!(
+            IncompleteAmount::NumberOnly(Decimal::from(5)).as_amount(),
+            None
+        );
+        assert_eq!(
+            IncompleteAmount::CurrencyOnly("USD".into()).as_amount(),
+            None
+        );
+    }
     use rust_decimal_macros::dec;
 
     #[test]

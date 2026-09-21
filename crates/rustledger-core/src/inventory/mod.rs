@@ -2791,6 +2791,88 @@ mod tests {
         );
     }
 
+    // #2365: the undo log is how a failed transaction is reverted without
+    // copying the inventory, and until these tests nothing in this crate
+    // exercised it. Its only coverage lived in `rustledger-booking`, which
+    // `cargo mutants --package rustledger-core` never runs.
+
+    fn corp_lot(units: i64, cost_cents: i64) -> Position {
+        Position::with_cost(
+            Amount::new(Decimal::new(units, 0), "CORP"),
+            Cost::new(Decimal::new(cost_cents, 2), "USD"),
+        )
+    }
+
+    /// Rolling back restores the inventory exactly, for every kind of change a
+    /// transaction can make: a lot modified in place, a lot removed outright,
+    /// and a lot appended.
+    ///
+    /// The removal matters separately. Restoring a lot whose slot was
+    /// tombstoned has to increment the live count; getting that wrong leaves
+    /// the positions looking right while `len()` does not, so `len()` is
+    /// checked on its own.
+    #[test]
+    fn rollback_undo_restores_every_kind_of_change() {
+        let mut inv = Inventory::new();
+        inv.add(corp_lot(10, 1)).expect("fits");
+        inv.add(corp_lot(20, 2)).expect("fits");
+        let before: Vec<Position> = inv.positions().cloned().collect();
+        let len_before = inv.len();
+        assert!(!inv.undo_is_open());
+
+        inv.begin_undo();
+        assert!(inv.undo_is_open(), "begin_undo opens the log");
+        // FIFO: -15 removes the first lot entirely and takes 5 from the second.
+        inv.reduce(
+            &Amount::new(Decimal::new(-15, 0), "CORP"),
+            None,
+            BookingMethod::Fifo,
+        )
+        .expect("reduces");
+        inv.add(corp_lot(7, 3)).expect("fits");
+        assert_ne!(
+            inv.positions().cloned().collect::<Vec<_>>(),
+            before,
+            "the transaction really changed the inventory"
+        );
+
+        inv.rollback_undo();
+
+        assert!(!inv.undo_is_open(), "rollback closes the log");
+        let after: Vec<Position> = inv.positions().cloned().collect();
+        assert_eq!(after, before, "every lot is back as it was");
+        assert_eq!(inv.len(), len_before, "the live count is restored too");
+        assert_eq!(
+            inv.units("CORP"),
+            Decimal::new(30, 0),
+            "and the derived caches are rebuilt"
+        );
+    }
+
+    /// Committing keeps the transaction's changes and closes the log, so the
+    /// next log starts from the committed state rather than the original one.
+    #[test]
+    fn commit_undo_keeps_the_changes_and_closes_the_log() {
+        let mut inv = Inventory::new();
+        inv.add(corp_lot(10, 1)).expect("fits");
+
+        inv.begin_undo();
+        inv.add(corp_lot(5, 2)).expect("fits");
+        inv.commit_undo();
+
+        assert!(!inv.undo_is_open(), "commit closes the log");
+        assert_eq!(inv.units("CORP"), Decimal::new(15, 0));
+
+        inv.begin_undo();
+        inv.add(corp_lot(1, 3)).expect("fits");
+        inv.rollback_undo();
+        assert_eq!(
+            inv.units("CORP"),
+            Decimal::new(15, 0),
+            "a later rollback returns to the committed state, not the original"
+        );
+    }
+
     /// ...and the guard above is not simply `false` for everything.
     ///
     /// A predicate that stopped proving anything would satisfy the test above

@@ -318,27 +318,22 @@ fn a_failing_transaction_undoes_a_wildcard_merge() {
     );
 }
 
-/// A transaction that CREATES the lot it then fails to reduce must report an
-/// error, not panic.
-///
-/// `rollback_needed` decides up front whether to prepare a rollback. It used
-/// to ask whether each posting reduces something the account holds *at that
-/// moment* — a question the transaction itself can falsify:
+/// A transaction that creates a lot and then sells past it opens a short, as
+/// booking and beancount read it, rather than failing (#2368).
 ///
 /// ```text
 ///   Assets:Stock   10 X {100.00 USD}
 ///   Assets:Stock  -20 X {100.00 USD}
 /// ```
 ///
-/// Against an empty account that answered "no reduction", so nothing was
-/// prepared; the second posting then failed and `apply` hit its own "the guard
-/// is unsound" assertion. An ordinary bad ledger became a panic out of
-/// `rledger check`, on main as well as on this branch.
-///
-/// Carrying a cost spec is what makes a posting able to reduce, and that does
-/// not depend on state, so the transaction cannot falsify it.
+/// Booking classifies each posting against the inventory before the
+/// transaction, threaded with earlier reductions only, so against an empty
+/// account both postings are augmentations and the account ends at -10.
+/// `apply` used to add the buy first and then read the sale as a reduction
+/// of 20 from 10. Before that it panicked here instead (the rollback guard
+/// asked the same state-dependent question); see `has_reduction`.
 #[test]
-fn a_transaction_that_creates_and_then_oversells_a_lot_errors_rather_than_panicking() {
+fn a_transaction_that_creates_and_then_oversells_a_lot_opens_a_short() {
     let mut engine = BookingEngine::with_method(BookingMethod::Strict);
 
     let mut buy = Posting::new("Assets:Stock", amount("10", "X"));
@@ -350,25 +345,66 @@ fn a_transaction_that_creates_and_then_oversells_a_lot_errors_rather_than_panick
         .with_synthesized_posting(buy)
         .with_synthesized_posting(oversell);
 
-    let err = engine
+    engine
         .apply(&txn)
-        .expect_err("overselling the lot it just created must be an error");
-    assert!(
-        format!("{err:?}").contains("Insufficient") || format!("{err}").contains("not enough"),
-        "expected an insufficient-units error, got {err:?}",
-    );
+        .expect("booking reads this as two augmentations, so apply must too");
 
-    // And the buy must have been rolled back with it: a rejected transaction
-    // leaves nothing behind.
     let held: Vec<Decimal> = engine
         .inventories()
         .filter(|(account, _)| account.as_str() == "Assets:Stock")
         .flat_map(|(_, inv)| inv.positions())
         .map(|p| p.units.number)
         .collect();
+    assert_eq!(held, vec![Decimal::from(-10)]);
+}
+
+/// A reduction that fails after earlier postings changed state must report an
+/// error and leave nothing of the transaction behind, not panic.
+///
+/// The first sale succeeds against the held lot, so the second one fails
+/// against the 5 left. The buy of `Y` sits textually first but is an
+/// augmentation, which `apply` defers until every reduction has run, so it
+/// must not survive either.
+#[test]
+fn a_reduction_that_fails_after_earlier_postings_rolls_the_transaction_back() {
+    let mut engine = BookingEngine::with_method(BookingMethod::Strict);
+    let mut seed = Posting::new("Assets:Stock", amount("10", "X"));
+    seed.cost = Some(Box::new(spec("100.00", "USD", 1)));
+    engine
+        .apply(&Transaction::new(date(1), "seed").with_synthesized_posting(seed))
+        .expect("seeding a lot must apply");
+
+    let mut buy = Posting::new("Assets:Other", amount("1", "Y"));
+    buy.cost = Some(Box::new(spec("5.00", "USD", 2)));
+    let mut sell = Posting::new("Assets:Stock", amount("-5", "X"));
+    sell.cost = Some(Box::new(spec("100.00", "USD", 1)));
+    let mut oversell = Posting::new("Assets:Stock", amount("-20", "X"));
+    oversell.cost = Some(Box::new(spec("100.00", "USD", 1)));
+
+    let txn = Transaction::new(date(2), "buy, sell, oversell")
+        .with_synthesized_posting(buy)
+        .with_synthesized_posting(sell)
+        .with_synthesized_posting(oversell);
+
+    let err = engine
+        .apply(&txn)
+        .expect_err("selling 20 of the 5 left must be an error");
     assert!(
-        held.is_empty(),
-        "the rejected transaction left its buy applied: {held:?}",
+        format!("{err:?}").contains("Insufficient"),
+        "expected an insufficient-units error, got {err:?}",
+    );
+
+    let held: Vec<(String, Decimal)> = engine
+        .inventories()
+        .flat_map(|(account, inv)| {
+            inv.positions()
+                .map(move |p| (account.to_string(), p.units.number))
+        })
+        .collect();
+    assert_eq!(
+        held,
+        vec![("Assets:Stock".to_string(), Decimal::from(10))],
+        "the rejected transaction left part of itself applied",
     );
 }
 

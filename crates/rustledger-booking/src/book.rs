@@ -1054,19 +1054,41 @@ impl BookingEngine {
             inv.reduce(units, posting.cost.as_deref(), method)
                 .map_err(|e| convert_core_booking_error(e, &posting.account))?;
         } else {
-            // Add to inventory via the canonical cost-resolve shared with the Late
-            // validator, `build_balances`, and the query engine (see
-            // `CostSpec::resolve`). `apply`'s callers book first, which fills the
-            // inferred currency into `cost_spec.currency`; direct-`apply` tests use
-            // explicit-currency fixtures, which need no inference.
-            inv.add(Position::from_posting(units, posting.cost.as_deref(), date))
-                .map_err(|e| {
-                    convert_core_booking_error(
-                        rustledger_core::BookingError::Overflow(e),
-                        &posting.account,
-                    )
-                })?;
+            return self.augment_posting(posting, date);
         }
+        Ok(())
+    }
+
+    /// Add one booked posting as a new position, without asking whether it
+    /// reduces anything.
+    ///
+    /// The augmentation half of [`Self::realize_posting`], split out so
+    /// [`Self::apply`] can add a posting it already knows is an augmentation.
+    /// Asking again against live state is what went wrong in #2368.
+    fn augment_posting(
+        &mut self,
+        posting: &Posting,
+        date: rustledger_core::NaiveDate,
+    ) -> Result<(), BookingError> {
+        let Some(IncompleteAmount::Complete(units)) = &posting.units else {
+            return Err(BookingError::NotBooked {
+                account: posting.account.clone(),
+            });
+        };
+        let inv =
+            std::sync::Arc::make_mut(self.inventories.entry(posting.account.clone()).or_default());
+        // Add to inventory via the canonical cost-resolve shared with the Late
+        // validator, `build_balances`, and the query engine (see
+        // `CostSpec::resolve`). `apply`'s callers book first, which fills the
+        // inferred currency into `cost_spec.currency`; direct-`apply` tests use
+        // explicit-currency fixtures, which need no inference.
+        inv.add(Position::from_posting(units, posting.cost.as_deref(), date))
+            .map_err(|e| {
+                convert_core_booking_error(
+                    rustledger_core::BookingError::Overflow(e),
+                    &posting.account,
+                )
+            })?;
         Ok(())
     }
 
@@ -1130,17 +1152,19 @@ impl BookingEngine {
                 return false;
             }
             // Deliberately NOT `is_booking_reduction` against the CURRENT
-            // inventory. That asks whether this posting reduces something the
-            // account holds *now*, and a transaction can create the very lot a
-            // later posting then fails to reduce:
+            // inventory. `apply` classifies each posting against the state
+            // its earlier reductions left, not the state before the
+            // transaction, so an answer read from state before it runs can be
+            // falsified mid-transaction. It once was:
             //
             //     Assets:Stock   10 X {100.00 USD}
             //     Assets:Stock  -20 X {100.00 USD}
             //
             // Against an empty account that answered "no reduction", so no
-            // rollback was prepared — and then the second posting failed and
-            // the engine hit its own "the guard is unsound" assertion, turning
-            // an ordinary bad ledger into a panic out of `rledger check`.
+            // rollback was prepared; `apply` then added the buy first, the
+            // second posting failed, and the engine hit its own "the guard is
+            // unsound" assertion. (That shape is now a valid short sale of 10,
+            // as booking and beancount read it, #2368, but the lesson holds.)
             //
             // Carrying a cost spec is what makes a posting able to reduce, and
             // that does not depend on state, so it cannot be falsified by the
@@ -1305,44 +1329,49 @@ impl BookingEngine {
         let mut touched: rustc_hash::FxHashSet<&rustledger_core::Account> =
             rustc_hash::FxHashSet::default();
 
-        // Apply this transaction's cost-bearing REDUCTIONS before its other
-        // postings (#2070).
+        // Decide each posting exactly as `book` did, then realize it the same
+        // way (#2070, #2368).
         //
-        // `book` decides every posting against the inventory as it stood before
-        // the transaction, threaded with that transaction's earlier reductions
-        // and NOTHING else — the same rule beancount's `book_reductions`
-        // follows, for the same reason it states: an augmentation's cost may
-        // still need interpolation, so it is not a resolvable position yet.
+        // `book` walks a transaction in TEXTUAL order against the inventory as
+        // it stood before the transaction, threaded with that transaction's
+        // earlier REDUCTIONS. It never adds an augmentation to that view: a buy
+        // is invisible to every later posting of the same transaction, and so
+        // is a short opened by a sale that ran past the end of its lot.
         //
-        // `apply` mutated in posting order, so a buy earlier in the transaction
-        // was already in the account when a later reduction ran. For a spec
-        // naming a concrete lot that changes nothing — the lot is found either
-        // way. For the two that RE-DERIVE a pool, `AVERAGE` and `{*}`, it moves
-        // the pool, and the engine then disagreed with the journal about cost
-        // basis. Silently: `book_apply_agreement` shrinks it to holding 40 @
-        // 100, then buying 1 @ 101 and `{*}`-selling 1 in one transaction.
+        // So this walks in textual order too, and applies a reduction the
+        // moment it is found while holding every augmentation back until the
+        // walk is done. Live state during the walk is then exactly `book`'s
+        // view -- the pre-transaction inventory plus the reductions so far --
+        // so each classification is `book`'s by construction, not by argument.
+        // Holding augmentations back is also what keeps a re-derived pool
+        // (`AVERAGE`, `{*}`) from seeing the same transaction's buys, which is
+        // why reductions went first in the first place (#2070).
         //
-        // Classifying against the PRE-transaction inventory (rather than
-        // threading, as `book` does) decides ORDER only. `realize_posting`
-        // classifies each posting itself against live state, so a posting
-        // sorted into the wrong bucket still does the right thing; and the
-        // disagreement can only run one way, since threading removes units and
-        // so can only make a posting look less like a reduction. Reductions
-        // keep their relative order, which is what a second reduction on one
-        // account depends on.
-        // Classified ONCE, into a bitmask rather than two vectors: a
-        // transaction has a handful of postings, and this path is hot enough
-        // that #2061/#2067 exist to keep allocations out of it.
+        // What this replaced classified every posting against the untouched
+        // pre-transaction inventory to ORDER them, then let each posting ask
+        // live state again as it ran. Its justification was that threading
+        // "can only make a posting look less like a reduction". That is false
+        // once a reduction exhausts a lot and the next sale opens a short: the
+        // short is an opposite-sign position `book` never sees, and a buy in
+        // the same transaction then looked to `apply` like a reduction of it.
+        // Holding 2 @ 100, `+9 @101, -2 @100, -2 @100` booked, and then `apply`
+        // failed on the buy's own lot. A randomized comparison with lots small
+        // enough to exhaust inside one transaction found that and further
+        // shapes of the same divergence; the 40-unit property almost never
+        // reached any of them.
         //
-        // `realize_posting` asks the same predicate again, which is not waste to
-        // eliminate: it asks about LIVE state, deliberately, so that a posting
-        // reclassifies as the transaction proceeds. This asks about the
-        // pre-transaction state, which is the question `book` answered. Sharing
-        // one answer between them would reintroduce the divergence. The call is
-        // a hash lookup either way — `is_reduced_by` has read per-currency sign
-        // counts since #2062, not scanned positions.
-        let mut reduces: u64 = 0;
-        for (i, posting) in txn.postings.iter().enumerate().take(64) {
+        // The validator's inventory pass (`update_inventories` in
+        // rustledger-validate) walks the same way for the same reason; change
+        // one and change the other.
+        // With no cost spec anywhere, no posting can reduce, so adding each as
+        // it comes is already `book`'s order and the second pass is skipped.
+        // Only then: a cost-less position is invisible to the classification,
+        // but not to execution. `AVERAGE` pools every position of the
+        // currency, cost-less ones included, so a cost-less buy added ahead of
+        // an `AVERAGE` sale in the same transaction would move its basis.
+        let any_cost = txn.postings.iter().any(|p| p.cost.is_some());
+        let mut deferred: smallvec::SmallVec<[usize; 8]> = smallvec::SmallVec::new();
+        for (i, posting) in txn.postings.iter().enumerate() {
             let is_reduction = posting.cost.is_some()
                 && posting.amount().is_some_and(|units| {
                     self.inventories.get(&posting.account).is_some_and(|inv| {
@@ -1353,47 +1382,32 @@ impl BookingEngine {
                         )
                     })
                 });
-            if is_reduction {
-                reduces |= 1 << i;
+            if !is_reduction {
+                if any_cost {
+                    deferred.push(i);
+                    continue;
+                }
+                if let Err(e) = self.augment_posting(posting, txn.date) {
+                    assert!(
+                        recording,
+                        "rollback_needed() returned false but posting application \
+                         failed ({e}): the guard is unsound and the earlier \
+                         postings of this transaction cannot be rolled back"
+                    );
+                    rollback(self, txn, &created);
+                    return Err(e);
+                }
+                continue;
             }
-        }
-        // A transaction with more than 64 postings keeps source order beyond
-        // the 64th. Ordering is an optimization of WHICH state a re-derived
-        // pool sees, not a correctness requirement for the postings themselves,
-        // so degrading to source order is safe — and `realize_posting` still
-        // classifies each posting itself.
-        let reduces_first = (0..txn.postings.len()).filter(|i| *i < 64 && reduces & (1 << i) != 0);
-        let then_the_rest = (0..txn.postings.len()).filter(|i| *i >= 64 || reduces & (1 << i) == 0);
-
-        for posting in reduces_first.chain(then_the_rest).map(|i| &txn.postings[i]) {
-            // EVERY posting failure aborts the transaction and rolls back —
-            // overflow and failed reduction alike (#1987).
-            //
-            // A failed reduction used to be `debug_assert!` then ignored. That
-            // meant the two build profiles disagreed about what happens to a
-            // user's ledger: debug PANICKED (`report balances` exited 101 on an
-            // ambiguous STRICT match), while release dropped the reduction and
-            // carried on — reporting 20 AAPL for an account holding 15. A
-            // silently over-stated holding is the worse of the two, and it was
-            // the one real users got.
-            //
-            // The precondition is unchanged and still documented: `apply` wants
-            // booked input. What changed is that violating it is now reported
-            // instead of being asserted in one profile and ignored in the
-            // other. Callers already handle this — `book()` records the error
-            // and marks the transaction failed, the wasm entry point checks
-            // `is_ok()`, and the CLI refuses to derive a figure at all.
-            // A carried `{*}` re-executes the merge (#2068), so verify the
-            // pool it will build against the one booking recorded BEFORE
-            // anything mutates. Checked here rather than per-posting for
-            // two reasons: `replay_posting` replays a FILTERED transaction
-            // stream for the query executor, where a different pool is the
-            // correct answer and not a defect; and a precondition that
-            // reports after mutating would depend on rollback to stay honest.
-            //
-            // Per posting rather than as a pre-pass over the transaction: an
-            // earlier posting of this same transaction can legitimately change
-            // the pool a later `{*}` sees.
+            // EVERY posting failure aborts the transaction and rolls back --
+            // overflow and failed reduction alike (#1987). A carried `{*}`
+            // re-executes the merge (#2068), so the pool it will build is
+            // checked against booking's record before this account first
+            // mutates. Here rather than inside `realize_posting` because
+            // `replay_posting` replays a FILTERED stream for the query
+            // executor, where a different pool is correct; and per posting
+            // rather than as a pre-pass because an earlier posting of this
+            // transaction can legitimately change the pool a later `{*}` sees.
             let checked = if touched.contains(&posting.account) {
                 Ok(())
             } else {
@@ -1401,14 +1415,27 @@ impl BookingEngine {
             };
             touched.insert(&posting.account);
             if let Err(e) = checked.and_then(|()| self.realize_posting(posting, txn.date)) {
-                // `snapshot` is `Some` whenever this arm is reachable:
-                // `rollback_needed` covers every way this can fail. Overflow
-                // and a failed reduction were the original two; `NotBooked` is
-                // a third, and both predicates already return `true` for a
-                // posting with no amount — deliberately, since an unfilled
-                // posting means booking did not complete. Restoring
-                // nothing would be silent corruption — precisely the bug being
-                // fixed — so a violated guard must be loud rather than quiet.
+                assert!(
+                    recording,
+                    "rollback_needed() returned false but posting application \
+                     failed ({e}): the guard is unsound and the earlier \
+                     postings of this transaction cannot be rolled back"
+                );
+                rollback(self, txn, &created);
+                return Err(e);
+            }
+        }
+        for posting in deferred.into_iter().map(|i| &txn.postings[i]) {
+            let checked = if touched.contains(&posting.account) {
+                Ok(())
+            } else {
+                self.verify_merge_precondition(posting)
+            };
+            touched.insert(&posting.account);
+            // Added, not re-asked: live state now holds the reductions and any
+            // shorts they opened, which `book` never saw when it decided this
+            // was an augmentation.
+            if let Err(e) = checked.and_then(|()| self.augment_posting(posting, txn.date)) {
                 assert!(
                     recording,
                     "rollback_needed() returned false but posting application \

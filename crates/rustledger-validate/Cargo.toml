@@ -35,6 +35,7 @@ thiserror.workspace = true
 jiff.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
+smallvec.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

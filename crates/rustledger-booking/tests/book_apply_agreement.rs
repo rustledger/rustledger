@@ -191,11 +191,27 @@ fn posting_for(leg: &Leg) -> Posting {
 /// A transaction that fails to book is SKIPPED, not applied — an unbookable
 /// ledger is a different failure and says nothing about this invariant.
 fn run(method: BookingMethod, seeds: &[u32], txns: &[Vec<Leg>]) -> (Totals, Totals) {
+    run_sized(method, 40, seeds, txns)
+}
+
+/// [`run`] with the seed lots' size as a parameter.
+///
+/// 40-unit seeds make a lot hard to exhaust inside one transaction, which is
+/// the shape #2368 needs: a sale that empties a lot, a further sale that opens
+/// a short, and a buy in the same transaction. The 40-unit property reached it
+/// so rarely that 24,576 fresh cases did not find it once. Small seeds make it
+/// common.
+fn run_sized(
+    method: BookingMethod,
+    seed_units: u32,
+    seeds: &[u32],
+    txns: &[Vec<Leg>],
+) -> (Totals, Totals) {
     let mut engine = BookingEngine::with_method(method);
     let mut journal = Totals::new();
 
     for (i, cost) in seeds.iter().enumerate() {
-        let mut buy = Posting::new(ACCOUNT, Amount::new(Decimal::from(40), CURRENCY));
+        let mut buy = Posting::new(ACCOUNT, Amount::new(Decimal::from(seed_units), CURRENCY));
         buy.cost = Some(Box::new(per_unit(*cost)));
         let txn = Transaction::new(date(u32::try_from(i).unwrap_or(0) + 1), "seed")
             .with_synthesized_posting(buy);
@@ -261,6 +277,138 @@ proptest! {
                 "cost basis disagrees for {} under {:?} by {}\n  journal {} vs engine {}\n                   seeds: {:?}\n  txns: {:?}",
                 currency, method, (*j_basis - e_basis).abs(), j_basis, e_basis, seeds, txns,
             );
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2048))]
+
+    /// The same agreement, with lots small enough to exhaust inside one
+    /// transaction (#2368).
+    ///
+    /// `apply` runs reductions before augmentations. A reduction that empties a
+    /// lot and a further sale that opens a short leave live state holding a
+    /// position `book` never sees, because `book` adds nothing to its working
+    /// copy. A buy in the same transaction then looked like a reduction of that
+    /// short to `apply` and failed on its own lot. With 40-unit seeds that shape
+    /// almost never came up; with 1 to 5 units it is routine.
+    #[test]
+    #[ignore = "finds two further book/apply disagreements, #2378; un-ignore once both are fixed"]
+    fn the_engine_agrees_when_a_transaction_exhausts_a_lot(
+        method in prop::sample::select(vec![
+            BookingMethod::Strict,
+            BookingMethod::Fifo,
+            BookingMethod::Lifo,
+            BookingMethod::Average,
+        ]),
+        seed_units in 1u32..6,
+        seeds in prop::collection::vec(100u32..104, 1..3),
+        txns in prop::collection::vec(
+            prop::collection::vec(leg_strategy(), 1..5),
+            1..4,
+        ),
+    ) {
+        let (journal, engine) = run_sized(method, seed_units, &seeds, &txns);
+        for (currency, (j_units, j_basis)) in &journal {
+            let (e_units, e_basis) = engine
+                .get(currency)
+                .copied()
+                .unwrap_or((Decimal::ZERO, Decimal::ZERO));
+            prop_assert_eq!(j_units, &e_units, "unit counts disagree for {}", currency);
+            prop_assert!(
+                within_rounding_residue(*j_basis, e_basis),
+                "cost basis disagrees for {}: journal {} engine {}",
+                currency, j_basis, e_basis
+            );
+        }
+    }
+}
+
+/// A transaction that sells a lot out and keeps selling, alongside a buy, must
+/// apply as it booked (#2368).
+///
+/// Holding 2 @ 100, the second sale finds the lot empty and opens a short. `book`
+/// never sees that short, so it books the buy as an augmentation. `apply` used to
+/// run the reductions first and then ask live state again, where the short made
+/// the buy look like a reduction of it: `NoMatchingLot` on the buy's own lot.
+/// Every shape here failed on every method before the fix, including E5, where
+/// the buy is written last.
+#[test]
+fn a_transaction_that_sells_past_a_lot_applies_as_it_booked() {
+    let shapes: [(&str, Vec<Leg>); 3] = [
+        (
+            "buy, sell at, sell at",
+            vec![
+                Leg::Buy {
+                    units: 9,
+                    cost: 101,
+                },
+                Leg::SellAt {
+                    units: 2,
+                    cost: 100,
+                },
+                Leg::SellAt {
+                    units: 2,
+                    cost: 100,
+                },
+            ],
+        ),
+        (
+            "buy, sell any, sell at",
+            vec![
+                Leg::Buy {
+                    units: 9,
+                    cost: 101,
+                },
+                Leg::SellAny { units: 2 },
+                Leg::SellAt {
+                    units: 2,
+                    cost: 100,
+                },
+            ],
+        ),
+        (
+            "sell at, sell at, buy",
+            vec![
+                Leg::SellAt {
+                    units: 2,
+                    cost: 100,
+                },
+                Leg::SellAt {
+                    units: 2,
+                    cost: 100,
+                },
+                Leg::Buy {
+                    units: 9,
+                    cost: 101,
+                },
+            ],
+        ),
+    ];
+    for method in [
+        BookingMethod::Strict,
+        BookingMethod::Fifo,
+        BookingMethod::Lifo,
+        BookingMethod::Average,
+    ] {
+        for (name, legs) in &shapes {
+            // `run_sized` panics if a booked transaction fails to apply.
+            let (journal, engine) = run_sized(method, 2, &[100], std::slice::from_ref(legs));
+            for (currency, (j_units, j_basis)) in &journal {
+                let (e_units, e_basis) = engine
+                    .get(currency)
+                    .copied()
+                    .unwrap_or((Decimal::ZERO, Decimal::ZERO));
+                assert_eq!(
+                    *j_units, e_units,
+                    "{method:?}, {name}: unit counts disagree"
+                );
+                assert!(
+                    within_rounding_residue(*j_basis, e_basis),
+                    "{method:?}, {name}: cost basis disagrees: journal {j_basis} engine {e_basis}"
+                );
+            }
         }
     }
 }

@@ -3626,6 +3626,7 @@ dependencies = [
  "rustledger-core",
  "rustledger-parser",
  "serde_json",
+ "smallvec",
  "tempfile",
  "thiserror 2.0.20",
 ]

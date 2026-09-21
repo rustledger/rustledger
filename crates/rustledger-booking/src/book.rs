@@ -977,11 +977,18 @@ impl BookingEngine {
     ///   booking decided is authoritative, and a disagreement is a defect:
     ///   #2068 and #2070 were both this, and [`Self::apply`]'s `{*}`
     ///   precondition exists to catch a third.
-    /// - **Replay a filtered subset** — this method. The query executor feeds
-    ///   it whatever transactions a `WHERE` clause left, and asks what the
-    ///   inventory would be if only those existed. Under AVERAGE or `{*}` that
-    ///   is a genuinely different pool, and answering it with the whole
-    ///   ledger's pool is the bug (#1985).
+    /// - **Replay a filtered subset** — this method, and the whole-transaction
+    ///   [`Self::replay_transaction`] / [`Self::begin_replay`] the query
+    ///   executor now uses. They take whatever transactions a filter left, and
+    ///   ask what the inventory would be if only those existed. Under AVERAGE
+    ///   or `{*}` that is a genuinely different pool, and answering it with the
+    ///   whole ledger's pool is the bug (#1985).
+    ///
+    /// Prefer the transaction-level replays. This one applies a single
+    /// posting against live state, so replaying a transaction's postings
+    /// through it one by one misreads a transaction that sells past a lot it
+    /// touches: a later posting can read as a reduction `book` never made
+    /// (#2380). Kept for callers replaying a single posting on purpose.
     ///
     /// So re-derivation here is the FEATURE, not a shortcut, and the
     /// disagreement [`Self::apply`] refuses to tolerate is exactly what this
@@ -1057,6 +1064,77 @@ impl BookingEngine {
             return self.augment_posting(posting, date);
         }
         Ok(())
+    }
+
+    /// Where the booking-order walk puts one posting (#2368).
+    ///
+    /// `book` reads each posting against the inventory before the transaction
+    /// plus that transaction's earlier REDUCTIONS, never its augmentations. A
+    /// walk that applies each reduction as it is reached and holds every
+    /// augmentation back until the end therefore has `book`'s view in live
+    /// state at every step, and this question, asked of live state, gets
+    /// `book`'s answer. [`Self::apply`] and [`TransactionReplay`] both walk
+    /// through it, so they cannot drift apart.
+    ///
+    /// `any_cost` is whether any posting of the transaction carries a cost
+    /// spec. Without one nothing can reduce, so each posting can be added as
+    /// it comes ([`WalkStep::AddNow`]). Only then: a cost-less position does
+    /// not change the classification, but `AVERAGE` pools it, so adding one
+    /// ahead of an `AVERAGE` sale would move that sale's basis.
+    fn walk_step(&self, posting: &Posting, any_cost: bool) -> WalkStep {
+        let is_reduction = posting.cost.is_some()
+            && posting.amount().is_some_and(|units| {
+                self.inventories.get(&posting.account).is_some_and(|inv| {
+                    inv.is_booking_reduction(
+                        units,
+                        posting.cost.as_deref(),
+                        self.method_for(&posting.account),
+                    )
+                })
+            });
+        if is_reduction {
+            WalkStep::Reduce
+        } else if any_cost {
+            WalkStep::Defer
+        } else {
+            WalkStep::AddNow
+        }
+    }
+
+    /// Start replaying `txn` one posting at a time, in the order `book` read
+    /// it.
+    ///
+    /// For a caller that needs the state between postings, as the query
+    /// executor's per-posting `account_balance` column does. A caller that
+    /// only needs the state after the whole transaction wants
+    /// [`Self::replay_transaction`].
+    ///
+    /// Like [`Self::replay_posting`] this is a *replay*: it runs no `{*}`
+    /// precondition and no rollback, because a filtered stream legitimately
+    /// meets a different pool than booking recorded (#1985). Unlike it, the
+    /// postings are applied in `book`'s order rather than one at a time
+    /// against live state, which misreads a transaction that sells past a lot
+    /// it touches (#2380).
+    pub fn begin_replay<'e, 't>(&'e mut self, txn: &'t Transaction) -> TransactionReplay<'e, 't> {
+        TransactionReplay {
+            any_cost: txn.postings.iter().any(|p| p.cost.is_some()),
+            engine: self,
+            txn,
+            next: 0,
+            deferred: smallvec::SmallVec::new(),
+        }
+    }
+
+    /// Replay a whole booked transaction in the order `book` read it.
+    ///
+    /// See [`Self::begin_replay`].
+    ///
+    /// # Errors
+    ///
+    /// Any [`BookingError`] a posting's reduction or addition reports; the
+    /// postings before it stay applied, as with [`Self::replay_posting`].
+    pub fn replay_transaction(&mut self, txn: &Transaction) -> Result<(), BookingError> {
+        self.begin_replay(txn).finish()
     }
 
     /// Add one booked posting as a new position, without asking whether it
@@ -1362,59 +1440,38 @@ impl BookingEngine {
         //
         // The validator's inventory pass (`update_inventories` in
         // rustledger-validate) walks the same way for the same reason; change
-        // one and change the other.
-        // With no cost spec anywhere, no posting can reduce, so adding each as
-        // it comes is already `book`'s order and the second pass is skipped.
-        // Only then: a cost-less position is invisible to the classification,
-        // but not to execution. `AVERAGE` pools every position of the
-        // currency, cost-less ones included, so a cost-less buy added ahead of
-        // an `AVERAGE` sale in the same transaction would move its basis.
+        // one and change the other. [`TransactionReplay`], which the query
+        // executor replays through, shares [`Self::walk_step`] with this loop.
         let any_cost = txn.postings.iter().any(|p| p.cost.is_some());
         let mut deferred: smallvec::SmallVec<[usize; 8]> = smallvec::SmallVec::new();
         for (i, posting) in txn.postings.iter().enumerate() {
-            let is_reduction = posting.cost.is_some()
-                && posting.amount().is_some_and(|units| {
-                    self.inventories.get(&posting.account).is_some_and(|inv| {
-                        inv.is_booking_reduction(
-                            units,
-                            posting.cost.as_deref(),
-                            self.method_for(&posting.account),
-                        )
-                    })
-                });
-            if !is_reduction {
-                if any_cost {
+            let result = match self.walk_step(posting, any_cost) {
+                WalkStep::Defer => {
                     deferred.push(i);
                     continue;
                 }
-                if let Err(e) = self.augment_posting(posting, txn.date) {
-                    assert!(
-                        recording,
-                        "rollback_needed() returned false but posting application \
-                         failed ({e}): the guard is unsound and the earlier \
-                         postings of this transaction cannot be rolled back"
-                    );
-                    rollback(self, txn, &created);
-                    return Err(e);
+                WalkStep::AddNow => self.augment_posting(posting, txn.date),
+                WalkStep::Reduce => {
+                    // EVERY posting failure aborts the transaction and rolls
+                    // back -- overflow and failed reduction alike (#1987). A
+                    // carried `{*}` re-executes the merge (#2068), so the pool
+                    // it will build is checked against booking's record before
+                    // this account first mutates. Here rather than inside
+                    // `realize_posting` because a filtered replay for the query
+                    // executor legitimately meets a different pool; and per
+                    // posting rather than as a pre-pass because an earlier
+                    // posting of this transaction can legitimately change the
+                    // pool a later `{*}` sees.
+                    let checked = if touched.contains(&posting.account) {
+                        Ok(())
+                    } else {
+                        self.verify_merge_precondition(posting)
+                    };
+                    touched.insert(&posting.account);
+                    checked.and_then(|()| self.realize_posting(posting, txn.date))
                 }
-                continue;
-            }
-            // EVERY posting failure aborts the transaction and rolls back --
-            // overflow and failed reduction alike (#1987). A carried `{*}`
-            // re-executes the merge (#2068), so the pool it will build is
-            // checked against booking's record before this account first
-            // mutates. Here rather than inside `realize_posting` because
-            // `replay_posting` replays a FILTERED stream for the query
-            // executor, where a different pool is correct; and per posting
-            // rather than as a pre-pass because an earlier posting of this
-            // transaction can legitimately change the pool a later `{*}` sees.
-            let checked = if touched.contains(&posting.account) {
-                Ok(())
-            } else {
-                self.verify_merge_precondition(posting)
             };
-            touched.insert(&posting.account);
-            if let Err(e) = checked.and_then(|()| self.realize_posting(posting, txn.date)) {
+            if let Err(e) = result {
                 assert!(
                     recording,
                     "rollback_needed() returned false but posting application \
@@ -1720,6 +1777,125 @@ pub fn book(directives: &[Directive], method: BookingMethod) -> LedgerBookResult
     }
 
     LedgerBookResult { booked, failed }
+}
+
+/// One step of the booking-order walk; see [`BookingEngine::walk_step`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkStep {
+    /// A reduction: apply it now, as `book` did.
+    Reduce,
+    /// An augmentation in a transaction that carries a cost: hold it back
+    /// until every reduction has run.
+    Defer,
+    /// An augmentation in a transaction with no cost anywhere: nothing can
+    /// reduce, so add it now.
+    AddNow,
+}
+
+/// A transaction being replayed one posting at a time, in `book`'s order.
+///
+/// Created by [`BookingEngine::begin_replay`]. Call [`Self::advance`] once per
+/// posting, in order, reading [`Self::account_snapshot`] between them, then
+/// [`Self::finish`]. After posting `i` the snapshot is the state the whole
+/// walk would reach over postings `0..=i`: the reductions among them applied,
+/// plus the augmentations among them, which the engine itself only adds at
+/// the end.
+#[must_use = "a replay applies its held-back augmentations only in `finish`"]
+pub struct TransactionReplay<'e, 't> {
+    engine: &'e mut BookingEngine,
+    txn: &'t Transaction,
+    any_cost: bool,
+    next: usize,
+    deferred: smallvec::SmallVec<[usize; 8]>,
+}
+
+impl TransactionReplay<'_, '_> {
+    /// Replay the next posting of the transaction.
+    ///
+    /// # Errors
+    ///
+    /// A reduction that finds no lot to reduce, or an addition that
+    /// overflows. Nothing is rolled back.
+    ///
+    /// # Panics
+    ///
+    /// If every posting has already been advanced.
+    pub fn advance(&mut self) -> Result<(), BookingError> {
+        let i = self.next;
+        let posting = &self.txn.postings[i];
+        self.next += 1;
+        match self.engine.walk_step(posting, self.any_cost) {
+            WalkStep::Reduce => self.engine.realize_posting(posting, self.txn.date),
+            WalkStep::AddNow => self.engine.augment_posting(posting, self.txn.date),
+            WalkStep::Defer => {
+                self.deferred.push(i);
+                Ok(())
+            }
+        }
+    }
+
+    /// `account`'s inventory as of the postings advanced so far, counting
+    /// the augmentations still held back.
+    ///
+    /// Shares the engine's copy when nothing is held back for `account`,
+    /// which is every account of a transaction with no reduction after an
+    /// augmentation; otherwise builds one.
+    ///
+    /// # Errors
+    ///
+    /// [`BookingError::Inventory`] carrying an overflow, if adding a
+    /// held-back augmentation overflows.
+    pub fn account_snapshot(
+        &self,
+        account: &rustledger_core::Account,
+    ) -> Result<Option<std::sync::Arc<Inventory>>, BookingError> {
+        let mut pending = self
+            .deferred
+            .iter()
+            .map(|&i| &self.txn.postings[i])
+            .filter(|p| &p.account == account)
+            .peekable();
+        let base = self.engine.inventory_snapshot(account);
+        if pending.peek().is_none() {
+            return Ok(base);
+        }
+        let mut inv = base.map_or_else(Inventory::new, |shared| (*shared).clone());
+        for posting in pending {
+            // An unfilled posting fails in `finish`; it adds nothing here.
+            if let Some(units) = posting.amount() {
+                inv.add(Position::from_posting(
+                    units,
+                    posting.cost.as_deref(),
+                    self.txn.date,
+                ))
+                .map_err(|e| {
+                    convert_core_booking_error(
+                        rustledger_core::BookingError::Overflow(e),
+                        &posting.account,
+                    )
+                })?;
+            }
+        }
+        Ok(Some(std::sync::Arc::new(inv)))
+    }
+
+    /// Replay any postings not yet advanced, then add the held-back
+    /// augmentations.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::advance`], and [`BookingError::NotBooked`] for an
+    /// augmentation whose units booking never filled.
+    pub fn finish(mut self) -> Result<(), BookingError> {
+        while self.next < self.txn.postings.len() {
+            self.advance()?;
+        }
+        for &i in &self.deferred {
+            self.engine
+                .augment_posting(&self.txn.postings[i], self.txn.date)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

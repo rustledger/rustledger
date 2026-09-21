@@ -708,11 +708,9 @@ impl<'a> Executor<'a> {
                         // and don't touch the cumulative balance — these postings
                         // didn't make it past the FROM filter.
                         if needs_account_balance {
-                            for posting in &txn.postings {
-                                engine
-                                    .replay_posting(posting, txn.date)
-                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-                            }
+                            engine
+                                .replay_transaction(txn)
+                                .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                         }
                         continue;
                     }
@@ -733,6 +731,20 @@ impl<'a> Executor<'a> {
                     }
                 }
 
+                // Replayed in the order `book` read the transaction, not one
+                // posting at a time against live state: a transaction that
+                // sells past a lot it touches reads differently the second way,
+                // and `BALANCES` then failed on ledgers `check` accepts
+                // (#2380). A posting's `account_balance` is the state the walk
+                // reaches over the postings up to and including it.
+                let mut replay = needs_account_balance.then(|| engine.begin_replay(txn));
+                let snapshot = |replay: &Option<rustledger_booking::TransactionReplay<'_, '_>>,
+                                account: &rustledger_core::Account| {
+                    replay.as_ref().map_or(Ok(None), |r| {
+                        r.account_snapshot(account)
+                            .map_err(|e| QueryError::Evaluation(e.to_string()))
+                    })
+                };
                 for (i, posting) in txn.postings.iter().enumerate() {
                     // Update the account-level running balance regardless of
                     // whether this posting passes WHERE — `account_balance`
@@ -750,9 +762,9 @@ impl<'a> Executor<'a> {
                     let resolved = needs_balance
                         .then(|| resolve_position(posting, txn.date))
                         .flatten();
-                    if needs_account_balance {
-                        engine
-                            .replay_posting(posting, txn.date)
+                    if let Some(replay) = replay.as_mut() {
+                        replay
+                            .advance()
                             .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                     }
 
@@ -812,7 +824,7 @@ impl<'a> Executor<'a> {
                         // between here and there, so the deferred value is the
                         // same one.
                         account_balance: if needs_account_balance && where_reads_account_balance {
-                            engine.inventory_snapshot(&posting.account)
+                            snapshot(&replay, &posting.account)?
                         } else {
                             None
                         },
@@ -842,7 +854,7 @@ impl<'a> Executor<'a> {
                     // it is one of the few that will actually be read.
                     if output_reads_account_balance {
                         if ctx.account_balance.is_none() {
-                            ctx.account_balance = engine.inventory_snapshot(&posting.account);
+                            ctx.account_balance = snapshot(&replay, &posting.account)?;
                         }
                     } else {
                         // The filter has had its look. Dropping the snapshot
@@ -852,6 +864,11 @@ impl<'a> Executor<'a> {
                         ctx.account_balance = None;
                     }
                     postings.push(ctx);
+                }
+                if let Some(replay) = replay {
+                    replay
+                        .finish()
+                        .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                 }
             }
         }

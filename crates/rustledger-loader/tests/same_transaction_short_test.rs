@@ -98,3 +98,65 @@ fn selling_a_lot_out_then_past_it_opens_a_short() {
         ],
     );
 }
+
+/// A cost-less buy written ahead of an `AVERAGE` sale in the same transaction
+/// stays out of that sale's pool, as `book` read it.
+///
+/// Booking sells 4 of the 10 @ 100 and only then adds the 10 cost-less units,
+/// leaving 6 @ 100 beside them. The next sale pools all 16 against a basis of
+/// 600, so it books at 37.50. Adding the cost-less units first put them in the
+/// first sale's pool, left 16 @ 50, and booked the next sale at 50.
+#[test]
+fn a_cost_less_buy_does_not_join_an_average_sale_in_its_own_transaction() {
+    let mut f = tempfile::Builder::new()
+        .prefix("same-txn-average-")
+        .suffix(".beancount")
+        .tempfile()
+        .expect("create tempfile");
+    f.write_all(
+        br#"2020-01-01 open Assets:Stock X "AVERAGE"
+2020-01-01 open Assets:Cash
+2020-01-01 open Equity:Open
+
+2020-01-02 * "seed"
+  Assets:Stock  10 X {100 USD}
+  Assets:Cash  -1000 USD
+
+2020-01-03 * "cost-less units in, then an average sale"
+  Assets:Stock   10 X
+  Equity:Open   -10 X
+  Assets:Stock  -4 X {}
+  Assets:Cash
+
+2020-01-04 * "read the pool back"
+  Assets:Stock  -2 X {}
+  Assets:Cash
+"#,
+    )
+    .expect("write fixture");
+    let ledger = load(f.path(), &LoadOptions::default()).expect("the ledger loads");
+    assert!(ledger.errors.is_empty(), "got {:?}", ledger.errors);
+
+    let read_back = ledger
+        .directives
+        .iter()
+        .filter_map(|d| match &d.value {
+            Directive::Transaction(txn) if txn.narration.as_str() == "read the pool back" => {
+                Some(txn)
+            }
+            _ => None,
+        })
+        .flat_map(|txn| txn.postings.iter())
+        .find(|p| p.account.as_str() == "Assets:Stock")
+        .expect("the read-back sale");
+    let booked = Position::from_posting(
+        read_back.amount().expect("booked"),
+        read_back.cost.as_deref(),
+        rustledger_core::NaiveDate::default(),
+    );
+    assert_eq!(
+        booked.cost.map(|c| c.number),
+        Some(Decimal::new(3750, 2)),
+        "the pool the next sale saw included the cost-less buy",
+    );
+}

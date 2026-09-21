@@ -1363,6 +1363,13 @@ impl BookingEngine {
         // The validator's inventory pass (`update_inventories` in
         // rustledger-validate) walks the same way for the same reason; change
         // one and change the other.
+        // With no cost spec anywhere, no posting can reduce, so adding each as
+        // it comes is already `book`'s order and the second pass is skipped.
+        // Only then: a cost-less position is invisible to the classification,
+        // but not to execution. `AVERAGE` pools every position of the
+        // currency, cost-less ones included, so a cost-less buy added ahead of
+        // an `AVERAGE` sale in the same transaction would move its basis.
+        let any_cost = txn.postings.iter().any(|p| p.cost.is_some());
         let mut deferred: smallvec::SmallVec<[usize; 8]> = smallvec::SmallVec::new();
         for (i, posting) in txn.postings.iter().enumerate() {
             let is_reduction = posting.cost.is_some()
@@ -1376,16 +1383,10 @@ impl BookingEngine {
                     })
                 });
             if !is_reduction {
-                if !(deferred.is_empty() && posting.cost.is_none()) {
+                if any_cost {
                     deferred.push(i);
                     continue;
                 }
-                // Nothing held back yet, so adding now keeps augmentations in
-                // textual order, and a cost-less position cannot make a later
-                // posting a reduction or move a `{*}` pool (both count
-                // cost-bearing positions only), so the account is not marked
-                // touched either. Spares the common cost-less posting the
-                // second pass.
                 if let Err(e) = self.augment_posting(posting, txn.date) {
                     assert!(
                         recording,
@@ -1446,6 +1447,16 @@ impl BookingEngine {
             }
         }
 
+        // Committed: drop the logs and compact the touched accounts.
+        // Compaction moved here from `reduce` because it renumbers slots, which
+        // an open undo log refers to — this is the one point where no log is
+        // open and no rollback can still be required.
+        //
+        // Skipped entirely when nothing was recorded. Only a reduction creates
+        // tombstones, `add` never does, and any reduction makes
+        // `rollback_needed` true — so `!recording` means this transaction left
+        // nothing to compact and nothing to commit. Without the guard, ledgers
+        // that never book a cost spec pay a per-posting map lookup for nothing.
         if !recording {
             return Ok(());
         }

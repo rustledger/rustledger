@@ -481,6 +481,7 @@ pub fn update_inventories(
     txn: &Transaction,
     errors: &mut Vec<ValidationError>,
 ) {
+    let any_cost = txn.postings.iter().any(|p| p.cost.is_some());
     let mut deferred: smallvec::SmallVec<[(&Posting, &Amount); 8]> = smallvec::SmallVec::new();
     for posting in &txn.postings {
         let Some(units) = posting.amount() else {
@@ -506,13 +507,12 @@ pub fn update_inventories(
 
         if is_reduction {
             process_inventory_reduction(inv, posting, units, booking_method, txn, errors);
-        } else if deferred.is_empty() && posting.cost.is_none() {
-            // Nothing held back yet, so adding now keeps augmentations in
-            // textual order, and a cost-less position cannot make a later
-            // posting a reduction (`is_booking_reduction` counts cost-bearing
-            // positions only). Saves the second map lookup on the common
-            // cost-less posting.
-            push_addition_error(inv, posting, units, txn, errors);
+        } else if !any_cost {
+            // No cost spec anywhere, so nothing can reduce and textual order
+            // is `book`'s order; saves the second map lookup. Not for a
+            // cost-less posting in general: `AVERAGE` pools cost-less
+            // positions too, so adding one ahead of a sale moves its basis.
+            add_posting(inv, posting, units, txn, errors);
         } else {
             deferred.push((posting, units));
         }
@@ -520,13 +520,13 @@ pub fn update_inventories(
 
     for (posting, units) in deferred {
         if let Some(inv) = state.inventories.get_mut(&posting.account) {
-            push_addition_error(inv, posting, units, txn, errors);
+            add_posting(inv, posting, units, txn, errors);
         }
     }
 }
 
 /// Add `posting` to `inv`, reporting an overflow as a validation error.
-fn push_addition_error(
+fn add_posting(
     inv: &mut Inventory,
     posting: &Posting,
     units: &Amount,

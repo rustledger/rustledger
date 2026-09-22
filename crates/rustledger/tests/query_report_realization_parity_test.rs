@@ -498,7 +498,7 @@ fn average_booking_nets_to_a_single_merged_lot() {
 #[test]
 fn a_same_transaction_short_realizes_identically() {
     let bin = require_rledger!();
-    let cases: [(&str, &str, &[(&str, &str)]); 4] = [
+    let cases: [(&str, &str, &[(&str, &str)]); 5] = [
         (
             "buy then sell past the buy",
             r#"option "booking_method" "STRICT"
@@ -572,6 +572,26 @@ fn a_same_transaction_short_realizes_identically() {
   Assets:Cash
 "#,
             &[("16", "110.00"), ("5", "130.00")],
+        ),
+        (
+            // A short bought back in its own transaction nets the lot to
+            // zero. It used to stay as a `0 AAPL {100}` lot that still
+            // counted as held: the next sale read as reducing it and failed
+            // with `No matching lot`, and `report balances` listed the empty
+            // lot (#2378). bean-query answers -1 AAPL {100 USD}.
+            "a short bought back in its own transaction",
+            r#"option "booking_method" "STRICT"
+2020-01-01 open Assets:Broker
+2020-01-01 open Assets:Cash
+
+2020-01-02 * "short 5 and buy 5 back"
+  Assets:Broker  -5 AAPL {100 USD}
+  Assets:Broker   5 AAPL {100 USD}
+2020-01-03 * "sell 1 at 100"
+  Assets:Broker  -1 AAPL {100 USD}
+  Assets:Cash   100 USD
+"#,
+            &[("-1", "100")],
         ),
     ];
 

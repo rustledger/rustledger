@@ -590,6 +590,26 @@ impl BookingEngine {
                                     }
                                     expanded.push(new_posting);
                                 }
+                                // STRICT books a multi-lot match only when it takes
+                                // EVERY lot the spec matches, and `apply` re-selects
+                                // each of these postings by its spec. A lot with no
+                                // date (a `{*}` or AVERAGE pool) gets a spec whose
+                                // missing date is a wildcard, so it also matches the
+                                // dated lots at the same cost, and STRICT refuses the
+                                // choice (#2378). Put it last: by then the dated lots
+                                // it would collide with are gone, and it is the only
+                                // lot left at that cost. The other methods re-select
+                                // with the same ordering `book` used, so a wildcard
+                                // date lands on the same lot and they keep the
+                                // consumption order.
+                                if matches!(
+                                    method,
+                                    BookingMethod::Strict | BookingMethod::StrictWithSize
+                                ) {
+                                    expanded.sort_by_key(|p| {
+                                        p.cost.as_ref().is_some_and(|c| c.date.is_none())
+                                    });
+                                }
                                 expansions.push((idx, expanded));
                                 booked_indices.insert(idx);
                             } else if let Some(cost_basis) = &booking_result.cost_basis {

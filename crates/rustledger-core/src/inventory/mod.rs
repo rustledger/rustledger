@@ -800,6 +800,11 @@ impl PositionStore {
         }
     }
 
+    /// Whether this is the contiguous `Owned` backing.
+    const fn is_owned(&self) -> bool {
+        matches!(self, Self::Owned(_))
+    }
+
     /// Switch to contiguous storage, cloning if not already `Owned`.
     ///
     /// `reduce` calls this, which ALSO discharges the uniqueness requirement
@@ -1111,9 +1116,12 @@ struct CurrencyStats {
 
 /// How many positions of a currency fall in each (sign, cost-bearing) bucket.
 ///
-/// Buckets keyed on `Decimal::is_sign_positive`, which is the exact predicate
-/// [`Inventory::is_reduced_by`] uses — note it answers `true` for zero, and
-/// the scan it replaces counted empty positions too, so this must as well.
+/// Buckets keyed on `Decimal::is_sign_positive`, which is the predicate
+/// [`Inventory::is_reduced_by`] uses. A lot whose units are zero is in no
+/// bucket: it holds nothing, so nothing can reduce it. Beancount never keeps
+/// one at all. Counting it as positive made a sale after a same-cost short and
+/// buy-back netted to zero read as a reduction of the empty lot, which then
+/// failed with `No matching lot` (#2378).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct SignCounts {
     /// Cost-bearing lots whose units are sign-positive.
@@ -1147,9 +1155,8 @@ impl SignCounts {
     /// Lot counts by sign, across both the cost-bearing and cost-less
     /// buckets.
     ///
-    /// `is_sign_positive` answers true for zero, matching every other
-    /// predicate here; a zero lot contributes no magnitude, so counting it as
-    /// positive only ever makes a caller more conservative.
+    /// A zero lot is in neither count; it contributes no magnitude, so
+    /// leaving it out cannot loosen a bound.
     const fn by_sign(self) -> (u32, u32) {
         (
             self.cost_positive.saturating_add(self.simple_positive),
@@ -1161,12 +1168,15 @@ impl SignCounts {
     /// directly. The earlier `i64` version ended in `try_into().unwrap_or(0)`,
     /// which turns a caller mistake into a silent no-op — the one outcome that
     /// leaves the counts wrong with nothing to show for it.
-    fn bump(&mut self, has_cost: bool, is_positive: bool, delta: i32) {
+    fn bump(&mut self, has_cost: bool, units: Decimal, delta: i32) {
         debug_assert!(
             delta == 1 || delta == -1,
             "counts move one lot at a time; {delta} means a caller lost track",
         );
-        let slot = match (has_cost, is_positive) {
+        if units.is_zero() {
+            return;
+        }
+        let slot = match (has_cost, units.is_sign_positive()) {
             (true, true) => &mut self.cost_positive,
             (true, false) => &mut self.cost_negative,
             (false, true) => &mut self.simple_positive,
@@ -1644,6 +1654,7 @@ impl Inventory {
     fn is_reduced_by_scan(&self, units: &Amount, scope: ReductionScope) -> bool {
         self.positions.iter().any(|pos| {
             pos.units.currency == units.currency
+                && !pos.units.number.is_zero()
                 && pos.units.number.is_sign_positive() != units.number.is_sign_positive()
                 && match scope {
                     ReductionScope::AllPositions => true,
@@ -1808,18 +1819,16 @@ impl Inventory {
 
         // Bucket changes, worked out before touching the cache so the whole
         // update lands in ONE lookup below. A cost-less merge can flip the
-        // lot's sign (adding -8 to a +3 lot), which moves it between buckets;
-        // `is_sign_positive` answers true for zero, matching the predicate
-        // `is_reduced_by` uses.
+        // lot's sign (adding -8 to a +3 lot), which moves it between buckets,
+        // and a merge that nets to zero takes it out of them: a zero lot holds
+        // nothing and is in no bucket (#2378).
         let vacated = merge_idx.map(|idx| {
             let lot = &self.positions[idx];
-            (lot.cost.is_some(), lot.units.number.is_sign_positive())
+            (lot.cost.is_some(), lot.units.number)
         });
         let occupied = (
             position.cost.is_some(),
-            merged_units
-                .unwrap_or(position.units.number)
-                .is_sign_positive(),
+            merged_units.unwrap_or(position.units.number),
         );
 
         // ONE mutable lookup for the total AND the counts. `add` runs once per
@@ -1831,8 +1840,8 @@ impl Inventory {
         // an owned key.
         if let Some(stats) = self.units_cache.get_mut(&position.units.currency) {
             stats.total = new_cached;
-            if let Some((had_cost, was_positive)) = vacated {
-                stats.counts.bump(had_cost, was_positive, -1);
+            if let Some((had_cost, had_units)) = vacated {
+                stats.counts.bump(had_cost, had_units, -1);
             }
             stats.counts.bump(occupied.0, occupied.1, 1);
         } else {
@@ -1869,8 +1878,24 @@ impl Inventory {
                 position.cost.is_none(),
                 "a merge target must match the incoming lot's cost-ness",
             );
-            self.positions[idx].units.number =
-                merged_units.expect("merged_units is Some whenever merge_idx is");
+            let merged = merged_units.expect("merged_units is Some whenever merge_idx is");
+            // A lot netted to zero holds nothing; beancount drops it, and so
+            // does this, or `report balances` lists `0 X {100 USD}` beside the
+            // real holdings (#2378). The counts already left it out above.
+            //
+            // Cost-bearing lots only, on the `Owned` backing only. A cost-less
+            // position has always stayed at zero and been hidden by consumers,
+            // and dropping it would leave a tombstone every time a cash account
+            // passes through zero. A `Shared` store is BQL's running `balance`,
+            // where every full-lot sale nets a lot to zero: removing there
+            // shifts every later slot and would need an O(lots) rebuild each
+            // time, or a copy that undoes #1086.
+            if merged.is_zero() && position.cost.is_some() && self.positions.is_owned() {
+                self.cost_index_remove(idx);
+                self.positions.remove(idx);
+                return Ok(());
+            }
+            self.positions[idx].units.number = merged;
             return Ok(());
         }
 
@@ -2094,9 +2119,9 @@ impl Inventory {
         // to satisfy the borrow checker — costs an `Arc` bump per currency plus
         // the lot's label on EVERY add, and this runs on the hot path.
         let has_cost = position.cost.is_some();
-        let is_positive = position.units.number.is_sign_positive();
+        let units = position.units.number;
         if let Some(stats) = self.units_cache.get_mut(&position.units.currency) {
-            stats.counts.bump(has_cost, is_positive, delta);
+            stats.counts.bump(has_cost, units, delta);
         }
         // No entry means no lots of this currency have been counted yet, which
         // only happens before `add` records the total. `add` inserts the entry
@@ -2309,8 +2334,7 @@ impl Inventory {
                 .units_cache
                 .entry(pos.units.currency.clone())
                 .or_default();
-            slot.counts
-                .bump(pos.cost.is_some(), pos.units.number.is_sign_positive(), 1);
+            slot.counts.bump(pos.cost.is_some(), pos.units.number, 1);
             slot.total = crate::decimal::checked_add_python_scale(slot.total, pos.units.number)
                 .ok_or_else(|| OverflowError {
                     currency: pos.units.currency.clone(),
@@ -3382,12 +3406,21 @@ mod tests {
         assert_eq!(inv.units("AAPL"), dec!(10));
 
         // A negative of the same identity nets into the lot: interchangeable
-        // positions are one position (#2118). The lot is left at zero units
-        // rather than removed, which `units()` already accounted for.
+        // positions are one position (#2118). Netted to zero, the lot is
+        // removed, as beancount removes it. It used to stay at zero units,
+        // still counted as a positive holding, so a later sale read as reducing
+        // it and failed with `No matching lot` (#2378).
         inv.add(Position::with_cost(Amount::new(dec!(-10), "AAPL"), cost))
             .expect("fixture fits in Decimal");
-        assert_eq!(inv.len(), 1, "same identity nets into one position");
+        assert_eq!(inv.len(), 0, "a lot netted to zero is removed");
         assert_eq!(inv.units("AAPL"), dec!(0));
+        assert!(
+            !inv.is_reduced_by(
+                &Amount::new(dec!(-1), "AAPL"),
+                ReductionScope::CostBearingOnly
+            ),
+            "nothing is held, so nothing can be reduced",
+        );
     }
 
     /// A deserialized inventory must report the same scale as one built by
@@ -3622,7 +3655,11 @@ mod tests {
         // are unchanged either way; what changes is that the result no longer
         // depends on which inventory a lot came from.
         inv1.merge(&inv2).expect("fixture fits in Decimal");
-        assert_eq!(inv1.len(), 1, "the same identity is one position");
+        assert_eq!(
+            inv1.len(),
+            0,
+            "the same identity nets to zero and is removed"
+        );
         assert_eq!(inv1.units("AAPL"), dec!(0));
     }
 
@@ -5205,14 +5242,12 @@ mod tests {
              untested",
         );
 
-        // A SHORT lot covered to exactly zero. This is the only shape where a
-        // reduction changes a lot's bucket: `is_sign_positive` answers TRUE
-        // for zero, so a negative lot reaching 0 moves from the negative
-        // bucket to the positive one in the instant before it is removed.
-        // Skipping the reclassify then decrements the wrong bucket and leaves
-        // the index claiming a short lot that no longer exists. A long lot
-        // cannot show this — it is capped at zero from above and never leaves
-        // the positive bucket.
+        // A SHORT lot covered to exactly zero. A lot reaching 0 leaves its
+        // bucket in the instant before it is removed (a zero lot is in none,
+        // #2378), so the negative bucket must be decremented then, not after.
+        // Skipping the reclassify leaves the index claiming a short lot that
+        // no longer exists. (This used to be a move to the POSITIVE bucket,
+        // when zero counted as positive; the hazard is the same.)
         let mut short = Inventory::new();
         short
             .add(Position::with_cost(

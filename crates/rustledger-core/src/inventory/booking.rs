@@ -2463,6 +2463,30 @@ mod reduction_tests {
             "the long is untouched"
         );
 
+        // Tidying touches only this currency: an emptied STK position goes, a
+        // zero position of another currency stays where it was.
+        let mut tidy = Inventory::new();
+        tidy.add(lot(5, 102, 1)).expect("fits");
+        tidy.add(Position::simple(Amount::new(d(3), "STK")))
+            .expect("fits");
+        tidy.add(Position::simple(Amount::new(d(-3), "STK")))
+            .expect("fits");
+        tidy.add(Position::simple(Amount::new(d(4), "USD")))
+            .expect("fits");
+        tidy.add(Position::simple(Amount::new(d(-4), "USD")))
+            .expect("fits");
+        tidy.reduce(&Amount::new(d(-1), "STK"), None, BookingMethod::Average)
+            .expect("the long pool has 5");
+        let zero = |c: &str| {
+            tidy.positions()
+                .any(|p| p.units.currency == c && p.is_empty())
+        };
+        assert!(
+            !zero("STK"),
+            "the emptied STK position is dropped with the pool"
+        );
+        assert!(zero("USD"), "another currency's positions are left alone");
+
         // More than the side holds is refused against that side's size.
         let err = mixed()
             .reduce(&Amount::new(d(3), "STK"), None, BookingMethod::Average)

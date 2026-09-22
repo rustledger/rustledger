@@ -1960,6 +1960,51 @@ mod tests {
         rustledger_core::naive_date(year, month, day).unwrap()
     }
 
+    /// Only STRICT moves an undated lot; FIFO keeps its consumption order
+    /// (#2378).
+    ///
+    /// FIFO takes a `{*}` pool before a dated lot at the same cost here, and
+    /// `apply` re-selects with that same ordering, so there is nothing to fix.
+    /// Moving the pool would only change the booked posting order.
+    #[test]
+    fn fifo_keeps_an_undated_pool_where_it_consumed_it() {
+        let mut engine = BookingEngine::with_method(BookingMethod::Fifo);
+        let spec = |merge: bool| CostSpec {
+            number: (!merge).then_some(rustledger_core::CostNumber::PerUnit { value: dec!(100) }),
+            currency: (!merge).then(|| "USD".into()),
+            merge,
+            ..CostSpec::default()
+        };
+        let leg = |n: i64, spec: CostSpec| {
+            Posting::new("Assets:Stock", Amount::new(Decimal::from(n), "X")).with_cost(spec)
+        };
+        let mut run = |day: u32, legs: Vec<Posting>| {
+            let txn = legs.into_iter().fold(
+                Transaction::new(date(2020, 1, day), "t"),
+                Transaction::with_synthesized_posting,
+            );
+            let booked = engine.book(&txn).expect("books").transaction;
+            engine.apply(&booked).expect("applies");
+            booked
+        };
+        run(1, vec![leg(2, spec(false))]);
+        run(2, vec![leg(2, spec(false))]);
+        run(3, vec![leg(-1, spec(true))]);
+        run(4, vec![leg(4, spec(false))]);
+        let sale = run(5, vec![leg(-7, CostSpec::default())]);
+
+        let dated: Vec<bool> = sale
+            .postings
+            .iter()
+            .map(|p| p.cost.as_deref().is_some_and(|c| c.date.is_some()))
+            .collect();
+        assert_eq!(
+            dated,
+            vec![false, true],
+            "FIFO sells the pool first, and keeps it first"
+        );
+    }
+
     /// An undated lot moves only past a dated lot at its own cost (#2378).
     #[test]
     fn undated_lots_move_only_past_a_dated_twin() {

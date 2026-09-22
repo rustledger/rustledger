@@ -119,6 +119,19 @@ See [Plugins Reference](../reference/plugins.md) for full list.
    them separate lots in both engines. Tracked in
    [#2118](https://github.com/rustledger/rustledger/issues/2118).
 
+1. **Adding to one side of a long-and-short holding**: if an account holds a
+   commodity both long and short, a posting whose cost names a lot of its
+   own sign adds to that side as a new lot, dated the transaction date.
+   Holding `-2 X {101 USD}` and `5 X {102 USD}`, buying `3 X {102 USD}` gives
+   a separate `3 X {102 USD}` lot. Python beancount's lot matching ignores
+   sign, so it merges those units into the existing 102 lot, which gives them
+   that lot's older acquisition date, and it rejects the same posting (`Not
+   enough lots to reduce`) when the quantity is larger than that lot. Units
+   and cost basis agree; the lot date, and whether the ledger is accepted,
+   can differ. A cost that matches no lot on either side is rejected by
+   both, as is a posting that names only a lot date or label. Tracked in
+   [#2384](https://github.com/rustledger/rustledger/issues/2384).
+
 ## Migration Steps
 
 ### 1. Install rustledger

@@ -174,6 +174,15 @@ mod sort;
 mod system_tables;
 mod window;
 
+/// Position count from which a row's retained `account_balance` is replaced
+/// by [`Inventory::detached_snapshot`] (#2383). Below it there is nothing to
+/// shed, and a detached copy of every one-position cash balance measured
+/// about 260 bytes per row larger (+11% on the 20k multicurrency ledger).
+/// Thresholds 2 to 4 measured alike: the multicurrency, simple and tagged
+/// ledgers flat, `money` and `erc20` about 20% smaller, a FIFO ledger holding
+/// hundreds of lots 2.35x smaller. 4 is the most conservative of them.
+const DETACH_ACCOUNT_BALANCE_AT: usize = 4;
+
 /// Default column names for `SELECT *` wildcard expansion.
 /// This must match the order of values pushed in `evaluate_row()`.
 pub const WILDCARD_COLUMNS: &[&str] =
@@ -855,6 +864,27 @@ impl<'a> Executor<'a> {
                     if output_reads_account_balance {
                         if ctx.account_balance.is_none() {
                             ctx.account_balance = snapshot(&replay, &posting.account)?;
+                        }
+                        // Kept for output, so detach a large one: a compact,
+                        // indexless copy of its positions rather than the
+                        // engine's own `Arc`. Holding the engine's made its next
+                        // change to this account deep-copy the whole booking
+                        // inventory, tombstones and lot index included, once
+                        // per row: about 430 bytes per lot, 28 GB on a
+                        // 20k-transaction FIFO ledger (#2383). Dropping the
+                        // `Arc` also returns the engine's copy to unique
+                        // ownership. A small inventory has nothing to shed and
+                        // measured slightly larger detached, so it keeps the
+                        // shared `Arc` as before.
+                        if ctx
+                            .account_balance
+                            .as_ref()
+                            .is_some_and(|inv| inv.len() >= DETACH_ACCOUNT_BALANCE_AT)
+                        {
+                            ctx.account_balance = ctx
+                                .account_balance
+                                .take()
+                                .map(|inv| std::sync::Arc::new(inv.detached_snapshot()));
                         }
                     } else {
                         // The filter has had its look. Dropping the snapshot

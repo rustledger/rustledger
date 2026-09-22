@@ -501,7 +501,12 @@ impl BookingEngine {
                     // currency; the reduction below still matches as written.
                     let method = self.method_for(&posting.account);
                     let classify_spec;
-                    let classify_as = if cost_spec.currency.is_some() {
+                    // Nothing to fill for a spec naming no per-unit cost
+                    // either: the own-side rule never applies to one, and `{}`
+                    // is how most sales are written, so it must stay cheap.
+                    let classify_as = if cost_spec.currency.is_some()
+                        || cost_spec.number.and_then(|n| n.per_unit()).is_none()
+                    {
                         cost_spec
                     } else {
                         classify_spec = CostSpec {
@@ -845,14 +850,18 @@ impl BookingEngine {
                     // Must agree with the classification above, or a posting
                     // booked as an augmentation would be left undated.
                     let is_reduction = self.inventories.get(&posting.account).is_some_and(|inv| {
-                        inv.is_booking_reduction(
-                            units,
-                            Some(&CostSpec {
+                        let method = self.method_for(&posting.account);
+                        // Cloned only to fill a missing currency, which is rare:
+                        // this runs for every cost-bearing augmentation.
+                        if cost_spec.currency.is_some() {
+                            inv.is_booking_reduction(units, Some(cost_spec), method)
+                        } else {
+                            let filled = CostSpec {
                                 currency: inferred_currency.clone(),
                                 ..cost_spec.clone()
-                            }),
-                            self.method_for(&posting.account),
-                        )
+                            };
+                            inv.is_booking_reduction(units, Some(&filled), method)
+                        }
                     });
 
                     // Fill in date for augmentations only (not reductions)

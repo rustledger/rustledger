@@ -1726,6 +1726,21 @@ impl Inventory {
     /// ([`Self::is_reduced_by`] with [`ReductionScope::CostBearingOnly`]). This
     /// gate was previously written byte-for-byte in both crates and the #1182 fix
     /// had to be applied twice.
+    ///
+    /// One exception, when the account holds lots of BOTH signs: a spec that
+    /// matches none of the opposite-sign lots but does match a lot of the
+    /// posting's own sign is an augmentation (#2384). Holding a short at 101
+    /// and a long at 102, `+3 X {102 USD}` adds to the long side; it reduces
+    /// nothing. Without the exception it was classed a reduction by the short
+    /// and failed with `No matching lot`. A spec that matches no lot at all is
+    /// still a reduction and still fails, which is what catches a mistyped
+    /// cost, and it is what beancount does too.
+    ///
+    /// Deliberately not beancount's answer for the exceptional shape.
+    /// Beancount's lot matching ignores sign, so it "reduces" the long lot by
+    /// a positive amount: the units merge into it and take its acquisition
+    /// date, backdating them. This books a new lot at the transaction date,
+    /// with the same units and cost basis.
     #[must_use]
     pub fn is_booking_reduction(
         &self,
@@ -1733,9 +1748,90 @@ impl Inventory {
         cost: Option<&CostSpec>,
         method: BookingMethod,
     ) -> bool {
-        method != BookingMethod::None
-            && cost.is_some()
-            && self.is_reduced_by(units, ReductionScope::CostBearingOnly)
+        let Some(spec) = cost else {
+            return false;
+        };
+        if method == BookingMethod::None {
+            return false;
+        }
+        // One cache lookup answers both questions: is there an opposite-sign
+        // lot at all, and is there an own-sign one (without which the
+        // exception cannot apply, so the common single-sided account never
+        // scans). An unbuilt cache falls back to the scan definitions.
+        let positive = units.number.is_sign_positive();
+        let (opposite, own) = match self.units_cache.get(&units.currency) {
+            Some(stats) => (
+                stats
+                    .counts
+                    .opposite(positive, ReductionScope::CostBearingOnly)
+                    > 0,
+                stats
+                    .counts
+                    .opposite(!positive, ReductionScope::CostBearingOnly)
+                    > 0,
+            ),
+            None if !self.units_cache.is_empty() => (false, false),
+            None => (
+                self.is_reduced_by_scan(units, ReductionScope::CostBearingOnly),
+                true,
+            ),
+        };
+        debug_assert_eq!(
+            opposite,
+            self.is_reduced_by_scan(units, ReductionScope::CostBearingOnly),
+            "the cached sign counts disagree with a scan of positions",
+        );
+        opposite && !(own && self.adds_to_its_own_side(units, spec))
+    }
+
+    /// Whether `spec` matches a lot of `units`' own sign and no lot of the
+    /// opposite sign; see [`Self::is_booking_reduction`].
+    ///
+    /// O(lots) of the currency. The caller gates it on the account holding
+    /// cost-bearing lots of both signs, the only case it can be `true`.
+    fn adds_to_its_own_side(&self, units: &Amount, spec: &CostSpec) -> bool {
+        // `{*}` is an operation on the whole pool (#2068), never this shape.
+        //
+        // And only a spec that NAMES a per-unit cost: that cost is what says
+        // "the own side". A spec of only a date or a label has nothing left to
+        // compare once those are set aside below, so it would match every
+        // own-side lot, and a mistyped lot date on a sale would silently open
+        // a new position dated with the typo, where beancount (and this, for a
+        // single-sided account) refuses it. `{}` never gets here usefully
+        // either: it matches the opposite side.
+        if spec.merge || spec.number.and_then(|n| n.per_unit()).is_none() {
+            return false;
+        }
+        let positive = units.number.is_sign_positive();
+        // The two sides are matched differently, because a spec's date and
+        // label mean different things on each. Against the OPPOSITE side the
+        // spec is a reduction filter, date and label included. Against the
+        // posting's own side it is an augmentation, where the date is the new
+        // lot's acquisition date, not a filter, so only the cost is compared.
+        // Booking fills that date in (`{102 USD}` books as `{102 USD,
+        // <txn date>}`), and `apply` asks this again of the booked posting:
+        // comparing the date would make the booked augmentation match nothing
+        // and read as a failed reduction.
+        let by_cost = CostSpec {
+            date: None,
+            label: None,
+            ..spec.clone()
+        };
+        let mut own_side_match = false;
+        for lot in self.positions.iter() {
+            if lot.units.currency != units.currency
+                || lot.cost.is_none()
+                || lot.units.number.is_zero()
+            {
+                continue;
+            }
+            if lot.units.number.is_sign_positive() == positive {
+                own_side_match = own_side_match || lot.matches_cost_spec(&by_cost);
+            } else if lot.matches_cost_spec(spec) {
+                return false;
+            }
+        }
+        own_side_match
     }
 
     /// Get the total book value (cost basis) for a currency.
@@ -3721,6 +3817,154 @@ mod tests {
             ),
             "the zero lot left behind holds nothing",
         );
+    }
+
+    /// A cost that matches only lots of the posting's own sign adds to that
+    /// side; one that matches an opposite lot, or nothing, still reduces
+    /// (#2384).
+    #[test]
+    fn a_cost_matching_only_its_own_side_is_an_augmentation() {
+        let d = date(2020, 1, 1);
+        let lot = |n: Decimal, cost: Decimal| {
+            Position::with_cost(Amount::new(n, "X"), Cost::new(cost, "USD").with_date(d))
+        };
+        let spec = |cost: Decimal| {
+            CostSpec::empty()
+                .with_number(crate::CostNumber::PerUnit { value: cost })
+                .with_currency("USD")
+        };
+        let reduces = |inv: &Inventory, n: Decimal, spec: &CostSpec| {
+            inv.is_booking_reduction(&Amount::new(n, "X"), Some(spec), BookingMethod::Strict)
+        };
+
+        // A short at 101 and a long at 102.
+        let mut mixed = Inventory::new();
+        mixed.add(lot(dec!(-2), dec!(101))).expect("fits");
+        mixed.add(lot(dec!(5), dec!(102))).expect("fits");
+        assert!(
+            !reduces(&mixed, dec!(3), &spec(dec!(102))),
+            "a buy at the long's cost adds to it"
+        );
+        assert!(
+            !reduces(&mixed, dec!(-1), &spec(dec!(101))),
+            "a sale at the short's cost adds to it"
+        );
+        // The same buy as booking leaves it, with its acquisition date filled
+        // in: `apply` asks again of this form and must get the same answer.
+        let booked = CostSpec {
+            date: Some(date(2020, 1, 5)),
+            ..spec(dec!(102))
+        };
+        assert!(
+            !reduces(&mixed, dec!(3), &booked),
+            "the booked form still adds"
+        );
+        assert!(
+            reduces(&mixed, dec!(1), &spec(dec!(101))),
+            "covering the short still reduces"
+        );
+        assert!(
+            reduces(&mixed, dec!(-1), &CostSpec::default()),
+            "`{{}}` matches the opposite side"
+        );
+
+        // Only one side held: a cost that matches nothing still reduces, so a
+        // mistyped cost fails rather than opening a position.
+        let mut long = Inventory::new();
+        long.add(lot(dec!(10), dec!(100))).expect("fits");
+        assert!(
+            reduces(&long, dec!(-5), &spec(dec!(101))),
+            "a mistyped sale still reduces"
+        );
+        let mut short = Inventory::new();
+        short.add(lot(dec!(-2), dec!(101))).expect("fits");
+        assert!(
+            reduces(&short, dec!(3), &spec(dec!(102))),
+            "no lot at 102 on either side"
+        );
+
+        // Both sides at one cost: the opposite side wins, a cover.
+        let mut both = Inventory::new();
+        both.add(lot(dec!(5), dec!(102))).expect("fits");
+        both.add(Position::with_cost(
+            Amount::new(dec!(-2), "X"),
+            Cost::new(dec!(102), "USD").with_date(date(2020, 1, 2)),
+        ))
+        .expect("fits");
+        assert!(
+            reduces(&both, dec!(1), &spec(dec!(102))),
+            "matches the short, so covers it"
+        );
+
+        // A spec naming no cost stays a reduction even on a mixed account, so
+        // a mistyped lot date or label still fails instead of opening a
+        // position. The short at 101 is the only own-side lot here.
+        let date_only = CostSpec {
+            date: Some(date(2020, 1, 9)),
+            ..CostSpec::empty()
+        };
+        assert!(
+            reduces(&mixed, dec!(-1), &date_only),
+            "a date-only sale still reduces"
+        );
+        let label_only = CostSpec::empty().with_label("typo");
+        assert!(
+            reduces(&mixed, dec!(-1), &label_only),
+            "a label-only sale still reduces"
+        );
+
+        // On the own side a label is the new lot's, like its date, so it is
+        // not compared: a buy labeled "new" still adds beside a long labeled
+        // "old".
+        let mut labeled = Inventory::new();
+        labeled.add(lot(dec!(-2), dec!(101))).expect("fits");
+        labeled
+            .add(Position::with_cost(
+                Amount::new(dec!(5), "X"),
+                Cost::new(dec!(102), "USD").with_date(d).with_label("old"),
+            ))
+            .expect("fits");
+        assert!(
+            !reduces(&labeled, dec!(3), &spec(dec!(102)).with_label("new")),
+            "the buy's own label does not stop it adding to the long side",
+        );
+
+        // Only lots of the posting's own commodity, with a cost and units,
+        // are its side. A long of another commodity at 102 is not; nor is an
+        // X lot netted to zero at 102, which a shared store keeps (#2378).
+        let mut other_commodity = Inventory::new();
+        other_commodity.add(lot(dec!(-2), dec!(101))).expect("fits");
+        other_commodity.add(lot(dec!(5), dec!(100))).expect("fits");
+        other_commodity
+            .add(Position::with_cost(
+                Amount::new(dec!(5), "Y"),
+                Cost::new(dec!(102), "USD").with_date(d),
+            ))
+            .expect("fits");
+        assert!(
+            reduces(&other_commodity, dec!(3), &spec(dec!(102))),
+            "a Y lot at 102 is not X's own side",
+        );
+        let mut zero = Inventory::new_shared();
+        zero.add(lot(dec!(-2), dec!(101))).expect("fits");
+        zero.add(lot(dec!(5), dec!(100))).expect("fits");
+        zero.add(lot(dec!(5), dec!(102))).expect("fits");
+        zero.add(lot(dec!(-5), dec!(102))).expect("fits");
+        assert!(
+            zero.positions().any(|p| p.units.number.is_zero()),
+            "the fixture must hold the zero lot, or this proves nothing",
+        );
+        assert!(
+            reduces(&zero, dec!(3), &spec(dec!(102))),
+            "a lot netted to zero at 102 holds nothing to add beside",
+        );
+
+        // NONE never reduces, whatever the spec.
+        assert!(!mixed.is_booking_reduction(
+            &Amount::new(dec!(1), "X"),
+            Some(&spec(dec!(101))),
+            BookingMethod::None
+        ));
     }
 
     #[test]

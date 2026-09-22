@@ -337,6 +337,44 @@ untagged posting is `FALSE`, again in both tools.
 Pinned by `crates/rustledger-query/tests/null_comparison_test.rs` (issue
 #2213).
 
+### 14. Adding to One Side of a Long-and-Short Holding
+
+When an account holds a commodity both long and short, a posting whose cost
+names a lot of its own sign adds a new lot on that side, dated the transaction
+date:
+
+```beancount
+2020-01-01 * "a short at 101, a long at 102"
+  Assets:Stock  -2 X {101 USD}
+  Assets:Stock   5 X {102 USD}
+  Assets:Cash  -308 USD
+
+2020-01-05 * "buy 3 more at 102"
+  Assets:Stock   3 X {102 USD}
+  Assets:Cash  -306 USD
+```
+
+| | holdings after the buy |
+|---|---|
+| rustledger | `-2 X {101, 2020-01-01}`, `5 X {102, 2020-01-01}`, `3 X {102, 2020-01-05}` |
+| Python beancount | `-2 X {101, 2020-01-01}`, `8 X {102, 2020-01-01}` |
+
+Python's lot matching ignores sign. The account holds a short, so it treats
+the buy as a reduction, matches the long 102 lot, and "reduces" that lot by a
+positive amount, which grows it: the three units take the 2020-01-01
+acquisition date. It also rejects the same posting, with `Not enough lots to
+reduce`, when the quantity is larger than that lot. rustledger keeps the
+purchase's own date, and accepts it whatever its size. Units and cost basis
+agree.
+
+Both reject a cost that matches no lot on either side (`-5 X {101 USD}` while
+holding only `10 X {100 USD}`), so a mistyped cost still fails, and so does a
+posting that names only a lot date or label.
+
+Pinned by `crates/rustledger-loader/tests/mixed_sign_holdings_test.rs` and the
+core test `a_cost_matching_only_its_own_side_is_an_augmentation` (issue
+#2384).
+
 ## BQL Query Compatibility
 
 BQL (Beancount Query Language) compatibility was tested with 11 standard queries on 50 files:

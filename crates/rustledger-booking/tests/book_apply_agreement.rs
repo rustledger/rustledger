@@ -490,6 +490,54 @@ fn the_disagreements_found_after_2368_apply_as_booked() {
     }
 }
 
+/// Holding a short and a long, a buy at the long's cost books and applies as
+/// an augmentation (#2384).
+///
+/// `book` classifies against the unbooked `{102}`; `apply` asks again of the
+/// booked posting, whose acquisition date booking has filled in. Matching the
+/// long side on that date made `apply` read the booked augmentation as a
+/// reduction of nothing. The property cannot find this: a transaction `book`
+/// refuses is skipped, and before the fix `book` refused it.
+#[test]
+fn a_buy_at_a_long_side_cost_applies_as_it_booked_beside_a_short() {
+    let txns = vec![
+        // Sell the 2 held and 2 more, and buy 3 at 102, in one transaction:
+        // every posting after the first is an augmentation, so this leaves a
+        // short of 2 at 100 beside a long of 3 at 102. (Opening the long in a
+        // later transaction would be refused: a cost matching no lot on
+        // either side still fails, as in beancount.)
+        vec![
+            Leg::SellAt {
+                units: 2,
+                cost: 100,
+            },
+            Leg::SellAt {
+                units: 2,
+                cost: 100,
+            },
+            Leg::Buy {
+                units: 3,
+                cost: 102,
+            },
+        ],
+        // More at 102: matches only the long side.
+        vec![Leg::Buy {
+            units: 1,
+            cost: 102,
+        }],
+    ];
+    // `run_sized` panics if a booked transaction fails to apply.
+    let (journal, engine) = run_sized(BookingMethod::Strict, 2, &[100], &txns);
+    let (j_units, j_basis) = journal[CURRENCY];
+    let (e_units, e_basis) = engine[CURRENCY];
+    assert_eq!(j_units, e_units, "unit counts disagree");
+    assert!(
+        within_rounding_residue(j_basis, e_basis),
+        "cost basis: {j_basis} vs {e_basis}"
+    );
+    assert_eq!(e_units, Decimal::from(2), "-2 short, +3 and +1 long");
+}
+
 /// The comparison can report DIRTY.
 ///
 /// A green property run is worth nothing until the comparison is shown to fail

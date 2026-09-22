@@ -10,7 +10,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustledger_core::{
     AccountedBookingError, Amount, BookingMethod, Cost, CostSpec, Decimal, Directive,
-    IncompleteAmount, Inventory, Position, Posting, ReductionScope, Transaction,
+    IncompleteAmount, Inventory, Position, Posting, Transaction,
 };
 use thiserror::Error;
 
@@ -486,9 +486,36 @@ impl BookingEngine {
                     // user's stated total — producing a phantom
                     // E3001 imbalance for ledgers that round-trip
                     // cleanly through Python beancount.
+                    // The canonical predicate, not a re-derivation of it: it
+                    // carries the NONE gate and the #2384 own-side exception,
+                    // and `apply`, the validator and the query replay ask the
+                    // same one.
+                    //
+                    // Asked with the cost currency this posting will be booked
+                    // with, filled in the way the augmentation branch below
+                    // fills it. `apply` asks again of the booked posting; a
+                    // missing currency is a wildcard here and a fixed one
+                    // there, so classifying `{102}` against a 102 EUR lot and
+                    // then booking it as `{102 USD}` made the two disagree
+                    // (#2384 review). Only the classification sees the filled
+                    // currency; the reduction below still matches as written.
                     let method = self.method_for(&posting.account);
-                    let is_reduction = method != BookingMethod::None
-                        && inv.is_reduced_by(units, ReductionScope::CostBearingOnly);
+                    let classify_spec;
+                    // Nothing to fill for a spec naming no per-unit cost
+                    // either: the own-side rule never applies to one, and `{}`
+                    // is how most sales are written, so it must stay cheap.
+                    let classify_as = if cost_spec.currency.is_some()
+                        || cost_spec.number.and_then(|n| n.per_unit()).is_none()
+                    {
+                        cost_spec
+                    } else {
+                        classify_spec = CostSpec {
+                            currency: inferred_cost_currency(posting, cost_spec, txn),
+                            ..cost_spec.clone()
+                        };
+                        &classify_spec
+                    };
+                    let is_reduction = inv.is_booking_reduction(units, Some(classify_as), method);
 
                     if is_reduction {
                         // Use reduce (not try_reduce) to actually update the working inventory.
@@ -816,24 +843,25 @@ impl BookingEngine {
                 if !booked_indices.contains(&idx) && cost_spec.number.is_some() {
                     // Cost spec has a number but may be missing date or currency
                     // Fill in missing parts from price annotation, other postings, and transaction date
-                    let inferred_currency = cost_spec.currency.clone().or_else(|| {
-                        // First try price annotation on this posting.
-                        // `kind` (Unit vs Total) doesn't change the currency,
-                        // so it's irrelevant here — we just want whatever
-                        // currency the price names, complete or incomplete.
-                        posting
-                                .price
-                                .as_ref()
-                                .and_then(|p| p.amount.as_ref())
-                                .and_then(|inc| inc.currency().map(Into::into))
-                                // Then try inferring from other postings in the transaction
-                                .or_else(|| crate::infer_cost_currency_from_postings(txn))
-                    });
+                    let inferred_currency = inferred_cost_currency(posting, cost_spec, txn);
 
                     // Check if this is a reduction (opposite sign exists in inventory)
                     // Reductions get their date from matched lot, augmentations get txn date
+                    // Must agree with the classification above, or a posting
+                    // booked as an augmentation would be left undated.
                     let is_reduction = self.inventories.get(&posting.account).is_some_and(|inv| {
-                        inv.is_reduced_by(units, ReductionScope::CostBearingOnly)
+                        let method = self.method_for(&posting.account);
+                        // Cloned only to fill a missing currency, which is rare:
+                        // this runs for every cost-bearing augmentation.
+                        if cost_spec.currency.is_some() {
+                            inv.is_booking_reduction(units, Some(cost_spec), method)
+                        } else {
+                            let filled = CostSpec {
+                                currency: inferred_currency.clone(),
+                                ..cost_spec.clone()
+                            };
+                            inv.is_booking_reduction(units, Some(&filled), method)
+                        }
                     });
 
                     // Fill in date for augmentations only (not reductions)
@@ -1796,6 +1824,31 @@ pub fn book(directives: &[Directive], method: BookingMethod) -> LedgerBookResult
     }
 
     LedgerBookResult { booked, failed }
+}
+
+/// The cost currency an augmentation of `posting` is booked with: the spec's
+/// own, else the currency its price names, else one inferred from the other
+/// postings of `txn`.
+///
+/// One function for both places `book` needs it, the augmentation's fill-in
+/// and the reduction-or-augmentation question asked before it, so the two
+/// cannot infer differently (#2384 review).
+fn inferred_cost_currency(
+    posting: &Posting,
+    cost_spec: &CostSpec,
+    txn: &Transaction,
+) -> Option<rustledger_core::Currency> {
+    cost_spec.currency.clone().or_else(|| {
+        // `kind` (Unit vs Total) doesn't change the currency, so it's
+        // irrelevant here: whatever currency the price names, complete or
+        // incomplete.
+        posting
+            .price
+            .as_ref()
+            .and_then(|p| p.amount.as_ref())
+            .and_then(|inc| inc.currency().map(Into::into))
+            .or_else(|| crate::infer_cost_currency_from_postings(txn))
+    })
 }
 
 /// Move each undated lot's posting in a STRICT expansion to just after the

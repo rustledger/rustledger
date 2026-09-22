@@ -15,6 +15,21 @@ use super::{
 };
 use crate::{Amount, Cost, CostSpec, Currency, Position};
 
+/// Which lots ordered selection may draw from.
+///
+/// A reduction written with a cost spec, even `{}`, sells only lots held at
+/// cost: a cost-less position has no basis to sell it at (#2396). NONE booking
+/// is the exception. It performs no lot matching at all and drains whatever
+/// the account holds, cost-less positions included, so it asks for `Any`
+/// rather than reaching them through `{}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LotScope {
+    /// Only lots held at cost, matched by the spec: every booking method.
+    CostHeld,
+    /// Cost-less positions too: NONE's drain.
+    Any,
+}
+
 /// Sum a pool's units, and say whether `checked_add` had to round to do it.
 ///
 /// Every AVERAGE caller needs the pool total, and `weighted_average_cost` also
@@ -644,7 +659,18 @@ impl Inventory {
         spec: &CostSpec,
         order: LotOrder,
     ) -> Result<BookingResult, BookingError> {
-        let (result, updates) = self.plan_ordered(units, spec, order)?;
+        self.reduce_ordered_in(units, spec, order, LotScope::CostHeld)
+    }
+
+    /// [`Self::reduce_ordered`] over a chosen set of lots; see [`LotScope`].
+    fn reduce_ordered_in(
+        &mut self,
+        units: &Amount,
+        spec: &CostSpec,
+        order: LotOrder,
+        scope: LotScope,
+    ) -> Result<BookingResult, BookingError> {
+        let (result, updates) = self.plan_ordered_in(units, spec, order, scope)?;
         self.commit_updates(&updates);
         Ok(result)
     }
@@ -661,6 +687,17 @@ impl Inventory {
         units: &Amount,
         spec: &CostSpec,
         order: LotOrder,
+    ) -> Result<(BookingResult, SmallVec<[(usize, Decimal); 1]>), BookingError> {
+        self.plan_ordered_in(units, spec, order, LotScope::CostHeld)
+    }
+
+    /// [`Self::plan_ordered`] over a chosen set of lots; see [`LotScope`].
+    fn plan_ordered_in(
+        &self,
+        units: &Amount,
+        spec: &CostSpec,
+        order: LotOrder,
+        scope: LotScope,
     ) -> Result<(BookingResult, SmallVec<[(usize, Decimal); 1]>), BookingError> {
         let mut remaining = units.number.abs();
         let mut matched: MatchedLots = SmallVec::new();
@@ -705,7 +742,10 @@ impl Inventory {
                 p.units.currency == units.currency
                     && !p.is_empty()
                     && p.units.number.signum() != units.number.signum()
-                    && p.matches_cost_spec(spec)
+                    && match scope {
+                        LotScope::CostHeld => p.matches_cost_spec(spec),
+                        LotScope::Any => p.cost.is_none() || p.matches_cost_spec(spec),
+                    }
             })
         };
 
@@ -874,9 +914,9 @@ impl Inventory {
                 self.cost_index_remove(idx);
                 self.positions.remove(idx);
                 // Removal leaves a tombstone, so no surviving lot is
-                // renumbered and only the entry naming this lot has to go. An
-                // empty cost spec matches a cost-less position, so ordered
-                // selection can drain one and this map can name it.
+                // renumbered and only the entry naming this lot has to go.
+                // NONE's drain (`LotScope::Any`) can empty a cost-less
+                // position, so this map can name it.
                 self.units_cache
                     .values_mut()
                     .filter(|stats| stats.simple_slot == Some(idx))
@@ -919,8 +959,15 @@ impl Inventory {
         // account holding both a long and a short, a sale from the long side
         // averaged the short into its basis, and the short vanished into the
         // merged remainder (#2393). The other side is not touched.
+        //
+        // And only lots held at cost (#2396). A cost-less position has no
+        // basis: counted into `total_units` but not the numerator, it pulled
+        // the average down as if it cost nothing (10 at 100 plus 10 cost-less
+        // units booked a sale at 50), and the pooled remainder then gave those
+        // units a cost they never had. They stay out, untouched.
         let on_reduced_side = |p: &Position| {
             p.units.currency == units.currency
+                && p.cost.is_some()
                 && !p.is_empty()
                 && p.units.number.is_sign_positive() != units.number.is_sign_positive()
         };
@@ -1245,7 +1292,12 @@ impl Inventory {
             // simple position.
             let sign = units.number.signum();
             let consumed = Amount::new(available * sign, units.currency.clone());
-            let result = self.reduce_ordered(&consumed, &CostSpec::default(), LotOrder::Date)?;
+            let result = self.reduce_ordered_in(
+                &consumed,
+                &CostSpec::default(),
+                LotOrder::Date,
+                LotScope::Any,
+            )?;
             self.add(Position::simple(Amount::new(
                 (requested - available) * sign,
                 units.currency.clone(),
@@ -1254,7 +1306,7 @@ impl Inventory {
         }
 
         // Reduce positions proportionally (simplified: just reduce first matching)
-        self.reduce_ordered(units, &CostSpec::default(), LotOrder::Date)
+        self.reduce_ordered_in(units, &CostSpec::default(), LotOrder::Date, LotScope::Any)
     }
 
     /// Reduce from a specific lot.
@@ -1350,9 +1402,10 @@ impl Inventory {
             //
             // Nothing shifted: removal leaves a tombstone, so every
             // surviving lot keeps its slot. Only the entry naming the removed
-            // lot has to go — and it CAN name it, because an empty cost spec
-            // matches a cost-less position (`matches_cost_spec`:
-            // `(None, true) => true`), so STRICT can select and drain one.
+            // lot has to go. It names a lot only if that lot is cost-less.
+            // Since #2396 a cost spec, even `{}`, no longer matches one, so
+            // STRICT never drains one here; the clear stays because it is the
+            // invariant `simple_index` needs, whoever empties the lot.
             //
             // Before tombstones this also decremented the later entries to
             // follow the shift. Keeping that now would renumber indices that

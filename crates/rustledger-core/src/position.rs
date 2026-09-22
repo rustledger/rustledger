@@ -121,14 +121,19 @@ impl Position {
 
     /// Check if this position matches a cost specification.
     ///
-    /// Returns `true` if:
-    /// - Both have no cost, or
-    /// - The position's cost matches the spec
+    /// Returns `true` only for a position held at cost whose cost the spec
+    /// matches; an empty spec (`{}`) matches every such position.
+    ///
+    /// A position held without a cost never matches, not even `{}` (#2396).
+    /// It has no basis, so a reduction written with a cost spec cannot sell
+    /// it: letting `{}` match made AVERAGE average it in as if it cost
+    /// nothing, and FIFO and STRICT fail on a ledger beancount accepts.
+    /// Beancount's reduction matching likewise skips positions not held at
+    /// cost.
     #[must_use]
     pub fn matches_cost_spec(&self, spec: &CostSpec) -> bool {
         match (&self.cost, spec.is_empty()) {
-            (None, true) => true,
-            (None, false) => false,
+            (None, _) => false,
             // A spec that constrains nothing matches every lot, so skip the
             // field-by-field walk. `matches` returns `true` for an all-`None`
             // spec by construction, which makes this a short-circuit rather

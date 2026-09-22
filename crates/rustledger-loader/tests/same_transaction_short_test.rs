@@ -100,12 +100,15 @@ fn selling_a_lot_out_then_past_it_opens_a_short() {
 }
 
 /// A cost-less buy written ahead of an `AVERAGE` sale in the same transaction
-/// stays out of that sale's pool, as `book` read it.
+/// stays out of that sale's pool, and out of every later one.
 ///
-/// Booking sells 4 of the 10 @ 100 and only then adds the 10 cost-less units,
-/// leaving 6 @ 100 beside them. The next sale pools all 16 against a basis of
-/// 600, so it books at 37.50. Adding the cost-less units first put them in the
-/// first sale's pool, left 16 @ 50, and booked the next sale at 50.
+/// Booking sells 4 of the 10 @ 100, leaving 6 @ 100 beside the 10 cost-less
+/// units. A cost-less position has no basis, so no AVERAGE pool counts it
+/// (#2396): the next sale is from the 6 @ 100 and books at 100. This test
+/// first pinned 37.50, the pool of all 16 against a basis of 600, which
+/// treated the cost-less units as if they cost nothing. Before that (#2379),
+/// adding them ahead of the first sale put them in its pool too and booked
+/// the next sale at 50.
 #[test]
 fn a_cost_less_buy_does_not_join_an_average_sale_in_its_own_transaction() {
     let mut f = tempfile::Builder::new()
@@ -156,7 +159,7 @@ fn a_cost_less_buy_does_not_join_an_average_sale_in_its_own_transaction() {
     );
     assert_eq!(
         booked.cost.map(|c| c.number),
-        Some(Decimal::new(3750, 2)),
-        "the pool the next sale saw included the cost-less buy",
+        Some(Decimal::from(100)),
+        "the pool the next sale saw included the cost-less units",
     );
 }

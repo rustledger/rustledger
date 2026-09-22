@@ -913,10 +913,21 @@ impl Inventory {
     ///   and no differential test could see it. The internal parity guard
     ///   (`query_report_realization_parity_test`) is what caught it.
     pub(super) fn reduce_average(&mut self, units: &Amount) -> Result<BookingResult, BookingError> {
+        // The pool is the SIDE being reduced: the lots whose sign is opposite
+        // the reduction's, as every other method matches (`plan_merge` says
+        // so for `{*}`). It used to be every lot of the currency, so on an
+        // account holding both a long and a short, a sale from the long side
+        // averaged the short into its basis, and the short vanished into the
+        // merged remainder (#2393). The other side is not touched.
+        let on_reduced_side = |p: &Position| {
+            p.units.currency == units.currency
+                && !p.is_empty()
+                && p.units.number.is_sign_positive() != units.number.is_sign_positive()
+        };
         let matching: Vec<&Position> = self
             .positions
             .iter()
-            .filter(|p| p.units.currency == units.currency && !p.is_empty())
+            .filter(|p| on_reduced_side(p))
             .collect();
 
         let (total_units, total_units_exact) =
@@ -981,9 +992,11 @@ impl Inventory {
 
         let new_units = total_units + units.number;
 
-        // Remove all positions of this currency
-        self.positions
-            .retain(|p| p.units.currency != units.currency);
+        // Remove the reduced side, and any emptied lot of this currency;
+        // leave the other side as it was.
+        self.positions.retain(|p| {
+            !(on_reduced_side(p) || (p.units.currency == units.currency && p.is_empty()))
+        });
 
         // Add back the remainder (if non-zero) at the average cost, so a later
         // reduction sees the correct basis instead of a costless position.
@@ -2390,6 +2403,98 @@ mod reduction_tests {
         assert_eq!(r.matched[0].units.number, dec!(-5));
         // Short pool shrinks from -10 to -5.
         assert_eq!(i.units("STK"), dec!(-5));
+    }
+
+    /// AVERAGE pools only the side a reduction takes from (#2393).
+    ///
+    /// Holding a long of 5 at 102 and a short of 2 at 101, a sale of 2 comes
+    /// from the long pool at 102 and leaves the short alone. Pooling every
+    /// lot booked it at (510 - 202) / 3 = 102.67 and left `1 X {102.67}`, the
+    /// short gone; a sale of 4 was refused as "available 3".
+    #[test]
+    fn reduce_average_pools_only_the_side_it_reduces() {
+        let mixed = || {
+            let mut i = Inventory::new();
+            i.add(lot(5, 102, 1)).expect("fits");
+            i.add(lot(-2, 101, 1)).expect("fits");
+            i
+        };
+        let lots = |i: &Inventory| {
+            let mut v: Vec<(Decimal, Decimal)> = i
+                .positions()
+                .map(|p| (p.units.number, p.cost.as_ref().expect("cost").number))
+                .collect();
+            v.sort();
+            v
+        };
+
+        // A sale takes from the long pool only.
+        let mut sold = mixed();
+        let r = sold
+            .reduce(&Amount::new(d(-2), "STK"), None, BookingMethod::Average)
+            .expect("the long pool has 5");
+        assert_eq!(
+            r.cost_basis.map(|a| a.number),
+            Some(d(204)),
+            "2 at the long pool's 102"
+        );
+        assert_eq!(
+            lots(&sold),
+            vec![(d(-2), d(101)), (d(3), d(102))],
+            "the short is untouched"
+        );
+
+        // The whole long side is available, not the net of both sides.
+        let mut sold_more = mixed();
+        sold_more
+            .reduce(&Amount::new(d(-4), "STK"), None, BookingMethod::Average)
+            .expect("4 of a long 5, not 'available 3'");
+        assert_eq!(lots(&sold_more), vec![(d(-2), d(101)), (d(1), d(102))]);
+
+        // A cover takes from the short pool only.
+        let mut covered = mixed();
+        let r = covered
+            .reduce(&Amount::new(d(1), "STK"), None, BookingMethod::Average)
+            .expect("the short pool has 2");
+        assert_eq!(r.cost_basis.map(|a| a.number), Some(d(101)));
+        assert_eq!(
+            lots(&covered),
+            vec![(d(-1), d(101)), (d(5), d(102))],
+            "the long is untouched"
+        );
+
+        // Tidying touches only this currency: an emptied STK position goes, a
+        // zero position of another currency stays where it was.
+        let mut tidy = Inventory::new();
+        tidy.add(lot(5, 102, 1)).expect("fits");
+        tidy.add(Position::simple(Amount::new(d(3), "STK")))
+            .expect("fits");
+        tidy.add(Position::simple(Amount::new(d(-3), "STK")))
+            .expect("fits");
+        tidy.add(Position::simple(Amount::new(d(4), "USD")))
+            .expect("fits");
+        tidy.add(Position::simple(Amount::new(d(-4), "USD")))
+            .expect("fits");
+        tidy.reduce(&Amount::new(d(-1), "STK"), None, BookingMethod::Average)
+            .expect("the long pool has 5");
+        let zero = |c: &str| {
+            tidy.positions()
+                .any(|p| p.units.currency == c && p.is_empty())
+        };
+        assert!(
+            !zero("STK"),
+            "the emptied STK position is dropped with the pool"
+        );
+        assert!(zero("USD"), "another currency's positions are left alone");
+
+        // More than the side holds is refused against that side's size.
+        let err = mixed()
+            .reduce(&Amount::new(d(3), "STK"), None, BookingMethod::Average)
+            .expect_err("the short pool has only 2");
+        assert!(
+            matches!(err, super::BookingError::InsufficientUnits { available, .. } if available == d(2)),
+            "got {err:?}",
+        );
     }
 
     #[test]

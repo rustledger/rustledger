@@ -800,6 +800,19 @@ impl PositionStore {
         }
     }
 
+    /// The live positions, in slot order, in a fresh `Owned` store with no
+    /// tombstones and no undo log.
+    fn dense_copy(&self) -> Self {
+        let entries: Vec<Option<Position>> = self.iter().cloned().map(Some).collect();
+        let live = entries.len();
+        Self::Owned(Slots {
+            entries,
+            live,
+            undo: None,
+            undo_seen: rustc_hash::FxHashSet::default(),
+        })
+    }
+
     /// Whether this is the contiguous `Owned` backing.
     const fn is_owned(&self) -> bool {
         matches!(self, Self::Owned(_))
@@ -1015,6 +1028,17 @@ pub struct Inventory {
     /// and cloned per BQL output row.
     #[serde(skip)]
     ordered_index: Option<Box<OrderedIndex>>,
+    /// `cost_index` is neither built nor maintained, and every lookup that
+    /// would use it scans instead.
+    ///
+    /// Set only by [`Self::detached_snapshot`], for values that are read far
+    /// more than they are changed (a BQL row's `account_balance`), where the
+    /// index would be most of the memory (#2383). Explicit rather than "the
+    /// map is empty", because an empty map is also a legitimately complete
+    /// index, and `add` must not start filling in a partial one that a lookup
+    /// would then trust.
+    #[serde(skip)]
+    indexless: bool,
     /// Whether an undo log is open. Not serialized; a transaction never spans
     /// a round trip.
     #[serde(skip)]
@@ -1235,6 +1259,7 @@ impl TryFrom<InventoryWire> for Inventory {
             units_cache: FxHashMap::default(),
             cost_index: FxHashMap::default(),
             ordered_index: None,
+            indexless: false,
             undo_open: false,
             #[cfg(debug_assertions)]
             undo_witness: None,
@@ -1428,6 +1453,31 @@ impl Inventory {
         f(&mut dense);
         self.positions = PositionStore::Owned(Slots::from_live(dense));
         self.rebuild_index();
+    }
+
+    /// A compact copy of this inventory, for a value that is read far more
+    /// than it is changed, such as a BQL row's `account_balance`.
+    ///
+    /// A plain clone of a booking inventory copies its tombstoned slots and
+    /// its per-lot `cost_index`, together about 4x the positions themselves;
+    /// held once per output row, that put a 20k-transaction FIFO query past
+    /// 28 GB (#2383). This keeps the live positions in a dense `Owned` store
+    /// and the `units_cache` that `add` and `units()` depend on, and marks the
+    /// copy indexless: lot lookups scan, and `add` finds its merge target by
+    /// scanning, so no index can ever be left partial. Still a complete,
+    /// ordinary inventory to read, clone, `add` to or `reduce`, only slower to
+    /// change.
+    ///
+    /// O(live lots).
+    #[must_use]
+    pub fn detached_snapshot(&self) -> Self {
+        let mut copy = Self {
+            positions: self.positions.dense_copy(),
+            indexless: true,
+            ..Self::default()
+        };
+        copy.rebuild_index();
+        copy
     }
 
     /// An inventory whose positions are structurally SHARED.
@@ -1795,6 +1845,14 @@ impl Inventory {
                     .and_then(|s| s.simple_slot)
             },
             |cost| {
+                if self.indexless {
+                    // No index to consult: the same test, over every lot.
+                    return self.positions.iter_slots().find_map(|(i, p)| {
+                        (p.units.currency == position.units.currency
+                            && p.cost.as_ref() == Some(cost))
+                        .then_some(i)
+                    });
+                }
                 let key = cost_key(&position)?;
                 self.cost_index.get(&key)?.iter().copied().find(|&i| {
                     self.positions
@@ -1922,7 +1980,9 @@ impl Inventory {
         // picked a different lot than the scan.
         let ordering = position.units.currency.clone();
         let slot = self.positions.push_slot(position);
-        if let Some(key) = key {
+        if let Some(key) = key
+            && !self.indexless
+        {
             self.cost_index.entry(key).or_default().push(slot);
         }
         self.ordered_index_insert(&ordering, slot);
@@ -2087,7 +2147,7 @@ impl Inventory {
         // always correct, and answering from an index that is missing entries
         // is NOT: the lot would never reach the predicate. Falling back keeps
         // the only failure mode the harmless one.
-        if self.cost_index.is_empty() {
+        if self.indexless || self.cost_index.is_empty() {
             return None;
         }
         let number = spec.number.and_then(|n| n.per_unit())?;
@@ -2298,7 +2358,7 @@ impl Inventory {
         // per-row clone — the O(rows x lots) blow-up that #1086 is about and
         // that the shared backing exists to avoid. Snapshots keep an empty map
         // and clone it for free.
-        let index_costs = matches!(self.positions, PositionStore::Owned(_));
+        let index_costs = matches!(self.positions, PositionStore::Owned(_)) && !self.indexless;
 
         for (idx, pos) in self.positions.iter_slots() {
             if index_costs {
@@ -5776,6 +5836,67 @@ mod tests {
     /// Nothing else in the suite would notice: the index is invisible in
     /// results, and no instruction profile here runs BQL. So it is asserted
     /// directly, on the representation.
+    /// A detached snapshot carries no lot index and never grows a partial
+    /// one (#2383).
+    ///
+    /// It holds its lots with an empty `cost_index`. If `add` then indexed
+    /// only the new lot, a reduction naming an OLD lot's cost would find a
+    /// non-empty index without it, trust it, and report no matching lot.
+    #[test]
+    fn a_detached_snapshot_stays_complete_when_changed() {
+        let d = date(2024, 1, 1);
+        let lot = |n: Decimal, cost: Decimal| {
+            Position::with_cost(Amount::new(n, "AAPL"), Cost::new(cost, "USD").with_date(d))
+        };
+        let mut booking = Inventory::new();
+        for cost in [dec!(100), dec!(110), dec!(120)] {
+            booking.add(lot(dec!(10), cost)).expect("fits");
+        }
+        booking
+            .reduce(
+                &Amount::new(dec!(-10), "AAPL"),
+                Some(
+                    &CostSpec::empty()
+                        .with_number(crate::CostNumber::PerUnit { value: dec!(110) })
+                        .with_currency("USD"),
+                ),
+                BookingMethod::Strict,
+            )
+            .expect("drains the 110 lot");
+
+        let mut snap = booking.detached_snapshot();
+        assert_eq!(snap, booking, "same positions");
+        assert_eq!(snap.units("AAPL"), dec!(20));
+        assert!(snap.cost_index.is_empty(), "no lot index is copied");
+        assert!(matches!(snap.positions, PositionStore::Owned(_)));
+
+        // Same identity merges, as on any inventory; a new one is added.
+        snap.add(lot(dec!(5), dec!(100))).expect("fits");
+        snap.add(lot(dec!(1), dec!(130))).expect("fits");
+        assert_eq!(snap.len(), 3, "the 100 lot merged, the 130 lot was added");
+        assert!(
+            snap.cost_index.is_empty(),
+            "add must not start a partial index"
+        );
+        assert_eq!(snap.units("AAPL"), dec!(26));
+
+        // The reduction a partial index would get wrong: an OLD lot, by cost,
+        // on a clone (which must inherit the flag).
+        let mut clone = snap.clone();
+        clone
+            .reduce(
+                &Amount::new(dec!(-10), "AAPL"),
+                Some(
+                    &CostSpec::empty()
+                        .with_number(crate::CostNumber::PerUnit { value: dec!(120) })
+                        .with_currency("USD"),
+                ),
+                BookingMethod::Strict,
+            )
+            .expect("the 120 lot is still found");
+        assert_eq!(clone.units("AAPL"), dec!(16));
+    }
+
     #[test]
     fn a_shared_snapshot_carries_no_cost_index() {
         let mut shared = Inventory::new_shared();

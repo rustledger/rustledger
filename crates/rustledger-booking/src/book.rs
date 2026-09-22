@@ -10,7 +10,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustledger_core::{
     AccountedBookingError, Amount, BookingMethod, Cost, CostSpec, Decimal, Directive,
-    IncompleteAmount, Inventory, Position, Posting, ReductionScope, Transaction,
+    IncompleteAmount, Inventory, Position, Posting, Transaction,
 };
 use thiserror::Error;
 
@@ -486,9 +486,12 @@ impl BookingEngine {
                     // user's stated total — producing a phantom
                     // E3001 imbalance for ledgers that round-trip
                     // cleanly through Python beancount.
+                    // The canonical predicate, not a re-derivation of it: it
+                    // carries the NONE gate and the #2384 own-side exception,
+                    // and `apply`, the validator and the query replay ask the
+                    // same one.
                     let method = self.method_for(&posting.account);
-                    let is_reduction = method != BookingMethod::None
-                        && inv.is_reduced_by(units, ReductionScope::CostBearingOnly);
+                    let is_reduction = inv.is_booking_reduction(units, Some(cost_spec), method);
 
                     if is_reduction {
                         // Use reduce (not try_reduce) to actually update the working inventory.
@@ -832,8 +835,14 @@ impl BookingEngine {
 
                     // Check if this is a reduction (opposite sign exists in inventory)
                     // Reductions get their date from matched lot, augmentations get txn date
+                    // Must agree with the classification above, or a posting
+                    // booked as an augmentation would be left undated.
                     let is_reduction = self.inventories.get(&posting.account).is_some_and(|inv| {
-                        inv.is_reduced_by(units, ReductionScope::CostBearingOnly)
+                        inv.is_booking_reduction(
+                            units,
+                            Some(cost_spec),
+                            self.method_for(&posting.account),
+                        )
                     });
 
                     // Fill in date for augmentations only (not reductions)

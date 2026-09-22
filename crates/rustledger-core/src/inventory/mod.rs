@@ -3629,6 +3629,40 @@ mod tests {
         assert_eq!(inv.units("AAPL"), dec!(15));
     }
 
+    /// A `Shared` store keeps a lot netted to zero, and a later merge still
+    /// finds the lot after it.
+    ///
+    /// `add` removes a zero-netted cost lot only on the `Owned` backing
+    /// (#2378). Removing from an imbl `Vector` shifts every later slot, while
+    /// `cost_index` still names the old ones, so the next add of the lot that
+    /// moved would miss it and open a second lot beside it.
+    #[test]
+    fn a_shared_store_keeps_a_zero_lot_so_later_merges_still_land() {
+        let d = date(2024, 1, 1);
+        let at = |n: Decimal, cost: Decimal| {
+            Position::with_cost(Amount::new(n, "AAPL"), Cost::new(cost, "USD").with_date(d))
+        };
+        let mut inv = Inventory::new_shared();
+        inv.add(at(dec!(10), dec!(100))).expect("fits");
+        inv.add(at(dec!(5), dec!(120))).expect("fits");
+        inv.add(at(dec!(-10), dec!(100))).expect("fits");
+        inv.add(at(dec!(1), dec!(120))).expect("fits");
+
+        let at_120: Vec<Decimal> = inv
+            .positions()
+            .filter(|p| p.cost.as_ref().is_some_and(|c| c.number == dec!(120)))
+            .map(|p| p.units.number)
+            .collect();
+        assert_eq!(at_120, vec![dec!(6)], "the 120 lot must absorb the buy");
+        assert!(
+            !inv.is_reduced_by(
+                &Amount::new(dec!(1), "AAPL"),
+                ReductionScope::CostBearingOnly
+            ),
+            "the zero lot left behind holds nothing",
+        );
+    }
+
     #[test]
     fn test_merge_nets_the_same_identity() {
         // Was `test_merge_keeps_lots_separate`. See #2118: interchangeable

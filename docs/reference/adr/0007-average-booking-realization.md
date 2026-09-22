@@ -70,6 +70,26 @@ hledger: the pool is rewritten, the journal is not).
   rolling-state assertion problems. If cost-aware balance assertions are added
   later, their interaction with the rolling average must be revisited.
 
+## Amendment: one pool per side (#2393)
+
+"All lots of a commodity share one running cost" holds while an account is on
+one side. An account can hold a long and a short in the same commodity, and
+pooling both sides was wrong: holding 5 at 102 and a short of 2 at 101, a sale
+of 2 was booked at 102.67 instead of 102, the short vanished into the merged
+remainder, and a cover of the short at 95 reported a loss of 8 instead of a
+gain of 6. The surveyed systems model a single position, so they are silent on
+this; the rule follows from the other booking methods and `{*}`, which all
+match only lots of the opposite sign.
+
+So an AVERAGE reduction pools the SIDE it takes from, the lots whose sign is
+opposite the reduction's, and leaves the other side unchanged. A single-sided
+account, the case this ADR was written for, is unaffected.
+
+`merge_average` (the `sum(position)` realization above) is not changed. It
+merges a sum of postings, where every sale is already a negative lot at the
+pool's cost, so sign cannot separate sales from shorts; on a mixed account
+that view is still wrong, tracked in #2394.
+
 ## Prior art
 
 - hledger `SPEC-lots` — single running pool; pool cost rewritten on acquisition.

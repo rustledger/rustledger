@@ -1791,7 +1791,15 @@ impl Inventory {
     /// cost-bearing lots of both signs, the only case it can be `true`.
     fn adds_to_its_own_side(&self, units: &Amount, spec: &CostSpec) -> bool {
         // `{*}` is an operation on the whole pool (#2068), never this shape.
-        if spec.merge {
+        //
+        // And only a spec that NAMES a per-unit cost: that cost is what says
+        // "the own side". A spec of only a date or a label has nothing left to
+        // compare once those are set aside below, so it would match every
+        // own-side lot, and a mistyped lot date on a sale would silently open
+        // a new position dated with the typo, where beancount (and this, for a
+        // single-sided account) refuses it. `{}` never gets here usefully
+        // either: it matches the opposite side.
+        if spec.merge || spec.number.and_then(|n| n.per_unit()).is_none() {
             return false;
         }
         let positive = units.number.is_sign_positive();
@@ -3886,6 +3894,23 @@ mod tests {
         assert!(
             reduces(&both, dec!(1), &spec(dec!(102))),
             "matches the short, so covers it"
+        );
+
+        // A spec naming no cost stays a reduction even on a mixed account, so
+        // a mistyped lot date or label still fails instead of opening a
+        // position. The short at 101 is the only own-side lot here.
+        let date_only = CostSpec {
+            date: Some(date(2020, 1, 9)),
+            ..CostSpec::empty()
+        };
+        assert!(
+            reduces(&mixed, dec!(-1), &date_only),
+            "a date-only sale still reduces"
+        );
+        let label_only = CostSpec::empty().with_label("typo");
+        assert!(
+            reduces(&mixed, dec!(-1), &label_only),
+            "a label-only sale still reduces"
         );
 
         // NONE never reduces, whatever the spec.

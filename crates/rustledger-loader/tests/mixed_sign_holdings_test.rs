@@ -136,3 +136,35 @@ fn a_mistyped_cost_still_fails() {
         ledger.errors,
     );
 }
+
+/// A sale naming only a lot date, on an account holding both sides, still
+/// fails when no lot has that date (review of #2384).
+///
+/// The own-side exception compares cost only, setting the date aside, because
+/// on the own side the date is an acquisition date. A spec with no cost has
+/// nothing left to compare and would match every own-side lot: here the cash
+/// leg implies the short's cost, so the typo booked as a new short lot dated
+/// with the mistyped date. Beancount refuses it.
+#[test]
+fn a_mistyped_lot_date_still_fails_on_a_mixed_account() {
+    let ledger = load_source(&format!(
+        r#"{HEADER}
+2020-01-01 * "a long at 100 and a short at 101"
+  Assets:Stock  10 X {{100 USD}}
+  Assets:Stock  -2 X {{101 USD}}
+  Assets:Cash  -798 USD
+
+2020-01-05 * "sell 1, naming a lot date nothing has"
+  Assets:Stock  -1 X {{2020-01-09}}
+  Assets:Cash   101 USD
+"#
+    ));
+    assert!(
+        ledger
+            .errors
+            .iter()
+            .any(|e| format!("{e:?}").contains("No matching lot")),
+        "a lot date matching nothing must be refused; got {:?}",
+        ledger.errors,
+    );
+}

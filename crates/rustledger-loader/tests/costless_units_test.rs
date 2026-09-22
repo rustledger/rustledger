@@ -12,7 +12,7 @@ use rustledger_core::{Decimal, Directive, Position};
 use rustledger_loader::{LoadOptions, load};
 use std::io::Write;
 
-fn ledger(method: &str) -> String {
+fn ledger_with_sale(method: &str, spec: &str) -> String {
     format!(
         r#"2020-01-01 open Assets:Stock X "{method}"
 2020-01-01 open Assets:Cash
@@ -28,7 +28,7 @@ fn ledger(method: &str) -> String {
   Equity:Transfer
 
 2020-01-04 * "sell 4 at 110"
-  Assets:Stock  -4 X {{}} @ 110 USD
+  Assets:Stock  -4 X {spec} @ 110 USD
   Assets:Cash   440 USD
   Income:PnL
 "#
@@ -37,13 +37,23 @@ fn ledger(method: &str) -> String {
 
 #[test]
 fn a_cost_spec_sale_leaves_cost_less_units_alone_under_every_method() {
-    for method in ["AVERAGE", "FIFO", "LIFO", "HIFO", "STRICT"] {
+    // `{*}` merges the pool it sells from, so it must leave the cost-less
+    // units out of the merge the same way.
+    let cases = [
+        ("AVERAGE", "{}"),
+        ("FIFO", "{}"),
+        ("LIFO", "{}"),
+        ("HIFO", "{}"),
+        ("STRICT", "{}"),
+        ("STRICT", "{*}"),
+    ];
+    for (method, spec) in cases {
         let mut f = tempfile::Builder::new()
             .prefix("costless-")
             .suffix(".beancount")
             .tempfile()
             .expect("create tempfile");
-        f.write_all(ledger(method).as_bytes())
+        f.write_all(ledger_with_sale(method, spec).as_bytes())
             .expect("write fixture");
         let options = LoadOptions {
             collect_capital_gains: true,
@@ -52,16 +62,16 @@ fn a_cost_spec_sale_leaves_cost_less_units_alone_under_every_method() {
         let ledger = load(f.path(), &options).expect("the ledger loads");
         assert!(
             ledger.errors.is_empty(),
-            "{method}: got {:?}",
+            "{method} {spec}: got {:?}",
             ledger.errors
         );
 
         let gains = &ledger.capital_gains;
-        assert_eq!(gains.len(), 1, "{method}: one disposal: {gains:?}");
+        assert_eq!(gains.len(), 1, "{method} {spec}: one disposal: {gains:?}");
         assert_eq!(
             gains[0].cost_basis.number,
             Decimal::from(400),
-            "{method}: 4 sold from the lot at 100",
+            "{method} {spec}: 4 sold from the lot at 100",
         );
 
         // What the account holds afterwards: the booked postings' units by
@@ -98,7 +108,7 @@ fn a_cost_spec_sale_leaves_cost_less_units_alone_under_every_method() {
                 (Decimal::from(10), None),
                 (Decimal::from(6), Some(Decimal::from(100))),
             ],
-            "{method}: the cost-less units are untouched",
+            "{method} {spec}: the cost-less units are untouched",
         );
     }
 }

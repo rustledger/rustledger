@@ -1134,11 +1134,18 @@ impl Inventory {
     fn plan_merge(&self, units: &Amount) -> Result<MergePlan, BookingError> {
         // Only merge lots with opposite sign (same as other reduce methods).
         // This prevents accidentally netting long and short positions.
+        //
+        // And only lots held at cost (#2396): a cost-less position has no
+        // basis to merge into the pool. Counted in, it diluted the average as
+        // if it cost nothing (10 at 100 plus 10 cost-less units merged to 20
+        // at 50) and gave those units a cost they never had. They stay as
+        // they are, as `matches_cost_spec` leaves them for every other method.
         let matching: Vec<(usize, &Position)> = self
             .positions
             .iter_slots()
             .filter(|(_, p)| {
                 p.units.currency == units.currency
+                    && p.cost.is_some()
                     && !p.is_empty()
                     && p.units.number.is_sign_positive() != units.number.is_sign_positive()
             })

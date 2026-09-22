@@ -590,6 +590,25 @@ impl BookingEngine {
                                     }
                                     expanded.push(new_posting);
                                 }
+                                // STRICT books a multi-lot match only when it takes
+                                // EVERY lot the spec matches, and `apply` re-selects
+                                // each of these postings by its spec. A lot with no
+                                // date (a `{*}` or AVERAGE pool) gets a spec whose
+                                // missing date is a wildcard, so it also matches a
+                                // dated lot at the same cost, and STRICT refuses the
+                                // choice (#2378). Move it to just after the last such
+                                // lot: by then they are gone and it is the only lot
+                                // left at its cost. Only when one exists, so every
+                                // sale that already applied keeps its posting order.
+                                // The other methods re-select with the same ordering
+                                // `book` used, so a wildcard date lands on the same
+                                // lot there.
+                                if matches!(
+                                    method,
+                                    BookingMethod::Strict | BookingMethod::StrictWithSize
+                                ) {
+                                    sell_undated_lots_after_their_dated_twins(&mut expanded);
+                                }
                                 expansions.push((idx, expanded));
                                 booked_indices.insert(idx);
                             } else if let Some(cost_basis) = &booking_result.cost_basis {
@@ -1779,6 +1798,39 @@ pub fn book(directives: &[Directive], method: BookingMethod) -> LedgerBookResult
     LedgerBookResult { booked, failed }
 }
 
+/// Move each undated lot's posting in a STRICT expansion to just after the
+/// last dated posting at the same cost; see its call site in `book` (#2378).
+///
+/// Postings with no dated twin stay where they are, so an expansion that could
+/// not collide keeps its order exactly.
+fn sell_undated_lots_after_their_dated_twins<P: std::ops::Deref<Target = Posting>>(
+    expanded: &mut Vec<P>,
+) {
+    let cost_of = |p: &Posting| {
+        p.cost
+            .as_deref()
+            .map(|c| (c.number.and_then(|n| n.per_unit()), c.currency.clone()))
+    };
+    let undated = |p: &Posting| p.cost.as_deref().is_some_and(|c| c.date.is_none());
+    let mut i = 0;
+    while i < expanded.len() {
+        if undated(&expanded[i]) {
+            let cost = cost_of(&expanded[i]);
+            let last_twin = (i + 1..expanded.len())
+                .rev()
+                .find(|&j| !undated(&expanded[j]) && cost_of(&expanded[j]) == cost);
+            if let Some(j) = last_twin {
+                // Lands at `j`, past every twin; `i` now holds the next
+                // posting, so do not advance.
+                let moved = expanded.remove(i);
+                expanded.insert(j, moved);
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
 /// One step of the booking-order walk; see [`BookingEngine::walk_step`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WalkStep {
@@ -1906,6 +1958,99 @@ mod tests {
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         rustledger_core::naive_date(year, month, day).unwrap()
+    }
+
+    /// Only STRICT moves an undated lot; FIFO keeps its consumption order
+    /// (#2378).
+    ///
+    /// FIFO takes a `{*}` pool before a dated lot at the same cost here, and
+    /// `apply` re-selects with that same ordering, so there is nothing to fix.
+    /// Moving the pool would only change the booked posting order.
+    #[test]
+    fn fifo_keeps_an_undated_pool_where_it_consumed_it() {
+        let mut engine = BookingEngine::with_method(BookingMethod::Fifo);
+        let spec = |merge: bool| CostSpec {
+            number: (!merge).then_some(rustledger_core::CostNumber::PerUnit { value: dec!(100) }),
+            currency: (!merge).then(|| "USD".into()),
+            merge,
+            ..CostSpec::default()
+        };
+        let leg = |n: i64, spec: CostSpec| {
+            Posting::new("Assets:Stock", Amount::new(Decimal::from(n), "X")).with_cost(spec)
+        };
+        let mut run = |day: u32, legs: Vec<Posting>| {
+            let txn = legs.into_iter().fold(
+                Transaction::new(date(2020, 1, day), "t"),
+                Transaction::with_synthesized_posting,
+            );
+            let booked = engine.book(&txn).expect("books").transaction;
+            engine.apply(&booked).expect("applies");
+            booked
+        };
+        run(1, vec![leg(2, spec(false))]);
+        run(2, vec![leg(2, spec(false))]);
+        run(3, vec![leg(-1, spec(true))]);
+        run(4, vec![leg(4, spec(false))]);
+        let sale = run(5, vec![leg(-7, CostSpec::default())]);
+
+        let dated: Vec<bool> = sale
+            .postings
+            .iter()
+            .map(|p| p.cost.as_deref().is_some_and(|c| c.date.is_some()))
+            .collect();
+        assert_eq!(
+            dated,
+            vec![false, true],
+            "FIFO sells the pool first, and keeps it first"
+        );
+    }
+
+    /// An undated lot moves only past a dated lot at its own cost (#2378).
+    #[test]
+    fn undated_lots_move_only_past_a_dated_twin() {
+        let lot = |n: i64, cost: i64, day: Option<u32>| {
+            let mut p = Posting::new("Assets:Stock", Amount::new(Decimal::from(n), "X"));
+            p.cost = Some(Box::new(CostSpec {
+                number: Some(rustledger_core::CostNumber::PerUnit {
+                    value: Decimal::from(cost),
+                }),
+                currency: Some("USD".into()),
+                date: day.map(|d| date(2020, 1, d)),
+                label: None,
+                merge: false,
+            }));
+            Box::new(p)
+        };
+        let order = |v: &[Box<Posting>]| -> Vec<(i64, bool)> {
+            v.iter()
+                .map(|p| {
+                    let c = p.cost.as_deref().unwrap();
+                    (
+                        i64::try_from(c.number.unwrap().per_unit().unwrap().mantissa()).unwrap(),
+                        c.date.is_some(),
+                    )
+                })
+                .collect()
+        };
+
+        // No twin at the pool's cost: untouched, as main booked it.
+        let mut no_twin = vec![lot(-3, 110, None), lot(-4, 130, Some(5))];
+        sell_undated_lots_after_their_dated_twins(&mut no_twin);
+        assert_eq!(order(&no_twin), vec![(110, false), (130, true)]);
+
+        // A twin: the pool lands just after it, ahead of the unrelated lot.
+        let mut twin = vec![
+            lot(-1, 100, None),
+            lot(-5, 100, Some(10)),
+            lot(-2, 120, Some(11)),
+        ];
+        sell_undated_lots_after_their_dated_twins(&mut twin);
+        assert_eq!(order(&twin), vec![(100, true), (100, false), (120, true)]);
+
+        // Already after its twin: untouched.
+        let mut done = vec![lot(-5, 100, Some(10)), lot(-1, 100, None)];
+        sell_undated_lots_after_their_dated_twins(&mut done);
+        assert_eq!(order(&done), vec![(100, true), (100, false)]);
     }
 
     #[test]

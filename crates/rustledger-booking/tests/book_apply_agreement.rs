@@ -294,7 +294,6 @@ proptest! {
     /// short to `apply` and failed on its own lot. With 40-unit seeds that shape
     /// almost never came up; with 1 to 5 units it is routine.
     #[test]
-    #[ignore = "finds two further book/apply disagreements, #2378; un-ignore once both are fixed"]
     fn the_engine_agrees_when_a_transaction_exhausts_a_lot(
         method in prop::sample::select(vec![
             BookingMethod::Strict,
@@ -409,6 +408,84 @@ fn a_transaction_that_sells_past_a_lot_applies_as_it_booked() {
                     "{method:?}, {name}: cost basis disagrees: journal {j_basis} engine {e_basis}"
                 );
             }
+        }
+    }
+}
+
+/// The two disagreements the small-lot property found once #2368 was fixed
+/// apply as they booked (#2378).
+///
+/// 1. A `{*}` merge leaves its pool undated. STRICT later sells every lot at
+///    that cost, and `book` splits the sale per lot; the undated lot's spec
+///    carries no date, which as a filter means "any date", so it also matched
+///    the dated lot and `apply` refused with `AmbiguousMatch`. The undated
+///    lot's posting now comes last, when it is the only lot left at its cost.
+/// 2. Under AVERAGE, a short and a buy-back of the same lot netted to a
+///    zero-unit lot that stayed in the inventory and still counted as a
+///    holding, so the next sale read as reducing it. A zero lot now counts for
+///    nothing, and a cost lot netted to zero is removed, as beancount does.
+#[test]
+fn the_disagreements_found_after_2368_apply_as_booked() {
+    let cases: [(&str, BookingMethod, u32, &[u32], Vec<Vec<Leg>>); 2] = [
+        (
+            "undated {*} pool sold with a dated lot at its cost",
+            BookingMethod::Strict,
+            5,
+            &[100],
+            vec![
+                vec![
+                    Leg::SellMerged { units: 2 },
+                    Leg::Buy {
+                        units: 1,
+                        cost: 100,
+                    },
+                    Leg::Buy {
+                        units: 4,
+                        cost: 100,
+                    },
+                    Leg::SellAny { units: 2 },
+                ],
+                vec![Leg::SellAny { units: 6 }],
+            ],
+        ),
+        (
+            "short and buy-back netted to a zero lot",
+            BookingMethod::Average,
+            2,
+            &[100, 100],
+            vec![
+                vec![
+                    Leg::SellAny { units: 4 },
+                    Leg::SellAt {
+                        units: 5,
+                        cost: 100,
+                    },
+                    Leg::SellAny { units: 1 },
+                    Leg::Buy {
+                        units: 5,
+                        cost: 100,
+                    },
+                ],
+                vec![Leg::SellAt {
+                    units: 1,
+                    cost: 100,
+                }],
+            ],
+        ),
+    ];
+    for (name, method, seed_units, seeds, txns) in &cases {
+        // `run_sized` panics if a booked transaction fails to apply.
+        let (journal, engine) = run_sized(*method, *seed_units, seeds, txns);
+        for (currency, (j_units, j_basis)) in &journal {
+            let (e_units, e_basis) = engine
+                .get(currency)
+                .copied()
+                .unwrap_or((Decimal::ZERO, Decimal::ZERO));
+            assert_eq!(*j_units, e_units, "{name}: unit counts disagree");
+            assert!(
+                within_rounding_residue(*j_basis, e_basis),
+                "{name}: cost basis disagrees: journal {j_basis} engine {e_basis}"
+            );
         }
     }
 }

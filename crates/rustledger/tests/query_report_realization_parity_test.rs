@@ -498,7 +498,7 @@ fn average_booking_nets_to_a_single_merged_lot() {
 #[test]
 fn a_same_transaction_short_realizes_identically() {
     let bin = require_rledger!();
-    let cases: [(&str, &str, &[(&str, &str)]); 5] = [
+    let cases: [(&str, &str, &[(&str, &str)]); 6] = [
         (
             "buy then sell past the buy",
             r#"option "booking_method" "STRICT"
@@ -592,6 +592,27 @@ fn a_same_transaction_short_realizes_identically() {
   Assets:Cash   100 USD
 "#,
             &[("-1", "100")],
+        ),
+        (
+            // AVERAGE pools only the side a sale takes from (#2393): the sale
+            // comes from the long pool at 102 and the short stays. Pooling
+            // both sides left `1 AAPL {102.67}`.
+            "an average sale beside a short",
+            r#"2020-01-01 open Assets:Broker AAPL "AVERAGE"
+2020-01-01 open Assets:Cash
+2020-01-01 open Income:PnL
+
+2020-01-01 * "a short at 101 and a long at 102"
+  Assets:Broker  -2 AAPL {101 USD}
+  Assets:Broker   5 AAPL {102 USD}
+  Assets:Cash  -308 USD
+
+2020-01-05 * "sell 2 from the long pool"
+  Assets:Broker  -2 AAPL {} @ 110 USD
+  Assets:Cash   220 USD
+  Income:PnL
+"#,
+            &[("-2", "101"), ("3", "102")],
         ),
     ];
 

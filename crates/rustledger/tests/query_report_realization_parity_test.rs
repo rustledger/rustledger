@@ -486,3 +486,118 @@ fn average_booking_nets_to_a_single_merged_lot() {
         "a negative holding is the #1985 shape and must not return: {query:?}"
     );
 }
+
+/// A transaction that sells past a lot it touches realizes identically on
+/// both surfaces, and as beancount reads it (#2380).
+///
+/// `report balances` realizes through `BookingEngine::apply`, which walks a
+/// transaction in the order `book` read it (#2368). `BALANCES` replayed one
+/// posting at a time against live state instead, so a later posting of the
+/// same transaction could read as a reduction `book` never made, and the query
+/// refused ledgers `check` accepts. Expected holdings are `bean-query`'s.
+#[test]
+fn a_same_transaction_short_realizes_identically() {
+    let bin = require_rledger!();
+    let cases: [(&str, &str, &[(&str, &str)]); 4] = [
+        (
+            "buy then sell past the buy",
+            r#"option "booking_method" "STRICT"
+2020-01-01 open Assets:Broker
+2020-01-01 open Assets:Cash
+
+2020-01-02 * "buy 10, sell 20"
+  Assets:Broker   10 AAPL {100.00 USD}
+  Assets:Broker  -20 AAPL {100.00 USD}
+  Assets:Cash   1000.00 USD
+"#,
+            &[("-10", "100.00")],
+        ),
+        (
+            "sell a lot out, then past it",
+            r#"option "booking_method" "STRICT"
+2020-01-01 open Assets:Broker
+2020-01-01 open Assets:Cash
+
+2020-01-01 * "seed"
+  Assets:Broker   2 AAPL {100 USD}
+  Assets:Cash  -200 USD
+
+2020-01-13 * "buy 9 at 101, then sell 2 at 100 twice"
+  Assets:Broker   9 AAPL {101 USD}
+  Assets:Broker  -2 AAPL {100 USD}
+  Assets:Broker  -2 AAPL {100 USD}
+  Assets:Cash   -509 USD
+"#,
+            &[("-2", "100"), ("9", "101")],
+        ),
+        (
+            // No beancount answer (it has no AVERAGE); booking's is 6 @ 100
+            // beside the 10 cost-less units, which join the pool only after
+            // the sale. `aapl_lots` reads every AAPL row, so the equity
+            // leg's -10 is listed too.
+            "cost-less units ahead of an average sale",
+            r#"2020-01-01 open Assets:Broker AAPL "AVERAGE"
+2020-01-01 open Assets:Cash
+2020-01-01 open Equity:Open
+
+2020-01-02 * "seed"
+  Assets:Broker  10 AAPL {100 USD}
+  Assets:Cash  -1000 USD
+
+2020-01-03 * "cost-less units in, then an average sale"
+  Assets:Broker   10 AAPL
+  Equity:Open    -10 AAPL
+  Assets:Broker  -4 AAPL {}
+  Assets:Cash
+"#,
+            &[("-10", "<no cost>"), ("10", "<no cost>"), ("6", "100")],
+        ),
+        (
+            // Booking merges the two held lots to 20 @ 110 and sells 4 from
+            // that pool; the buy at 130 joins only afterwards. Replayed
+            // posting by posting, the buy was merged in too: 21 @ 114.
+            "a buy ahead of a {*} sale",
+            r#"2020-01-01 open Assets:Broker AAPL "STRICT"
+2020-01-01 open Assets:Cash
+
+2020-01-01 * "lot a"
+  Assets:Broker  10 AAPL {100.00 USD}
+  Assets:Cash
+2020-01-02 * "lot b"
+  Assets:Broker  10 AAPL {120.00 USD}
+  Assets:Cash
+2020-01-03 * "buy, then merge-sell"
+  Assets:Broker   5 AAPL {130.00 USD}
+  Assets:Broker  -4 AAPL {*}
+  Assets:Cash
+"#,
+            &[("16", "110.00"), ("5", "130.00")],
+        ),
+    ];
+
+    let mut wrong: Vec<String> = Vec::new();
+    for (name, source, expected) in cases {
+        let f = write_fixture(source);
+        let path = f.path().to_str().unwrap();
+        // Per case, not `run`'s panic: a refusal is one wrong answer among
+        // the cases, and the others should still be checked.
+        let lots = |args: &[&str]| {
+            let out = Command::new(&bin).args(args).output().expect("run rledger");
+            if out.status.success() {
+                Ok(aapl_lots(&String::from_utf8_lossy(&out.stdout)))
+            } else {
+                Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+            }
+        };
+        let q = lots(&["query", path, "BALANCES"]);
+        let r = lots(&["report", path, "balances", "--no-pager"]);
+        let want: Vec<(String, String)> = expected
+            .iter()
+            .map(|(u, c)| ((*u).to_owned(), (*c).to_owned()))
+            .collect();
+        if q != Ok(Some(want.clone())) || r != Ok(Some(want.clone())) {
+            wrong.push(format!("{name}: query={q:?} report={r:?} want={want:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}

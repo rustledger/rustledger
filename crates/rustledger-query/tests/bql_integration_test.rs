@@ -11268,3 +11268,73 @@ fn test_pivot_by_first_column_is_the_row_key() {
         );
     }
 }
+
+/// `account_balance` follows the order `book` read a transaction in (#2380).
+///
+/// Holding 2 @ 100, one transaction buys 9 @ 101 and sells 2 @ 100 twice.
+/// `book` reads the first sale as reducing the held lot and the second as
+/// opening a short, because the buy is invisible to both. Replaying one
+/// posting at a time read the second sale as a reduction of nothing and the
+/// query failed. Each row now shows the walk's state over the postings up to
+/// and including it: the buy counted, the sales as `book` classified them.
+#[test]
+fn account_balance_reads_a_same_transaction_short_as_booked() {
+    let lot = |n: rust_decimal::Decimal, cost: rust_decimal::Decimal| {
+        Posting::new("Assets:Brokerage", Amount::new(n, "AAPL")).with_cost(
+            CostSpec::empty()
+                .with_number(rustledger_core::CostNumber::PerUnit { value: cost })
+                .with_currency("USD"),
+        )
+    };
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Brokerage")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 1), "seed")
+                .with_synthesized_posting(lot(dec!(2), dec!(100)))
+                .with_synthesized_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-200), "USD"),
+                )),
+        ),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 13), "buy 9, sell 2 twice")
+                .with_synthesized_posting(lot(dec!(9), dec!(101)))
+                .with_synthesized_posting(lot(dec!(-2), dec!(100)))
+                .with_synthesized_posting(lot(dec!(-2), dec!(100)))
+                .with_synthesized_posting(Posting::new(
+                    "Equity:Opening",
+                    Amount::new(dec!(-509), "USD"),
+                )),
+        ),
+    ];
+    let result = execute_query(
+        r#"SELECT account_balance WHERE account = "Assets:Brokerage""#,
+        &directives,
+    );
+    let rows: Vec<Vec<(rust_decimal::Decimal, Option<rust_decimal::Decimal>)>> = result
+        .rows
+        .iter()
+        .map(|row| {
+            let Value::Inventory(inv) = &row[0] else {
+                panic!("expected an inventory, got {:?}", row[0]);
+            };
+            let mut lots: Vec<_> = inv
+                .position_list()
+                .iter()
+                .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+                .collect();
+            lots.sort();
+            lots
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            vec![(dec!(2), Some(dec!(100)))],
+            vec![(dec!(2), Some(dec!(100))), (dec!(9), Some(dec!(101)))],
+            vec![(dec!(9), Some(dec!(101)))],
+            vec![(dec!(-2), Some(dec!(100))), (dec!(9), Some(dec!(101)))],
+        ],
+    );
+}

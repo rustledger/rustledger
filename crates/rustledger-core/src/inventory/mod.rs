@@ -3913,6 +3913,52 @@ mod tests {
             "a label-only sale still reduces"
         );
 
+        // On the own side a label is the new lot's, like its date, so it is
+        // not compared: a buy labeled "new" still adds beside a long labeled
+        // "old".
+        let mut labeled = Inventory::new();
+        labeled.add(lot(dec!(-2), dec!(101))).expect("fits");
+        labeled
+            .add(Position::with_cost(
+                Amount::new(dec!(5), "X"),
+                Cost::new(dec!(102), "USD").with_date(d).with_label("old"),
+            ))
+            .expect("fits");
+        assert!(
+            !reduces(&labeled, dec!(3), &spec(dec!(102)).with_label("new")),
+            "the buy's own label does not stop it adding to the long side",
+        );
+
+        // Only lots of the posting's own commodity, with a cost and units,
+        // are its side. A long of another commodity at 102 is not; nor is an
+        // X lot netted to zero at 102, which a shared store keeps (#2378).
+        let mut other_commodity = Inventory::new();
+        other_commodity.add(lot(dec!(-2), dec!(101))).expect("fits");
+        other_commodity.add(lot(dec!(5), dec!(100))).expect("fits");
+        other_commodity
+            .add(Position::with_cost(
+                Amount::new(dec!(5), "Y"),
+                Cost::new(dec!(102), "USD").with_date(d),
+            ))
+            .expect("fits");
+        assert!(
+            reduces(&other_commodity, dec!(3), &spec(dec!(102))),
+            "a Y lot at 102 is not X's own side",
+        );
+        let mut zero = Inventory::new_shared();
+        zero.add(lot(dec!(-2), dec!(101))).expect("fits");
+        zero.add(lot(dec!(5), dec!(100))).expect("fits");
+        zero.add(lot(dec!(5), dec!(102))).expect("fits");
+        zero.add(lot(dec!(-5), dec!(102))).expect("fits");
+        assert!(
+            zero.positions().any(|p| p.units.number.is_zero()),
+            "the fixture must hold the zero lot, or this proves nothing",
+        );
+        assert!(
+            reduces(&zero, dec!(3), &spec(dec!(102))),
+            "a lot netted to zero at 102 holds nothing to add beside",
+        );
+
         // NONE never reduces, whatever the spec.
         assert!(!mixed.is_booking_reduction(
             &Amount::new(dec!(1), "X"),

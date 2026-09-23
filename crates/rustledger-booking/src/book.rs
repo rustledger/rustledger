@@ -3963,6 +3963,33 @@ mod tests {
         txn.postings.iter().any(|p| p.units.is_none())
     }
 
+    /// #2386: `for_ledger` takes the ledger's default for accounts with no
+    /// declared method and each `open`'s own method for its account. The
+    /// default is the point: `new()` would give FIFO, and realizing a
+    /// NONE-booked ledger with it fails.
+    #[test]
+    fn for_ledger_uses_the_ledger_default_and_each_opens_method() {
+        let opens = [
+            Directive::Open(rustledger_core::Open::new(date(2024, 1, 1), "Assets:Plain")),
+            Directive::Open(
+                rustledger_core::Open::new(date(2024, 1, 1), "Assets:Fifo").with_booking("FIFO"),
+            ),
+        ];
+        let engine = BookingEngine::for_ledger(BookingMethod::None, opens.iter());
+        assert_eq!(
+            engine.method_for(&"Assets:Plain".into()),
+            BookingMethod::None
+        );
+        assert_eq!(
+            engine.method_for(&"Assets:Fifo".into()),
+            BookingMethod::Fifo
+        );
+        assert_eq!(
+            engine.method_for(&"Assets:Unopened".into()),
+            BookingMethod::None
+        );
+    }
+
     #[test]
     fn book_interpolates_elided_posting_and_preserves_order() {
         use rustledger_core::Open;

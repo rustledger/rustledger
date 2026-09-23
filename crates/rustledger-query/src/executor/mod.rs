@@ -203,6 +203,13 @@ pub(crate) struct PostingScan<'a> {
 
 impl<'a> Executor<'a> {
     /// Create a new executor with the given directives.
+    ///
+    /// Two settings default to what a ledger with no options would have, and
+    /// a host with a loaded `rustledger_loader::Ledger` should pass its own:
+    /// [`Self::set_account_types`] (`name_*` renames) and
+    /// [`Self::set_booking_method`] (`Ledger::booking_method`, STRICT when
+    /// unset). Without the second, `BALANCES` and `account_balance` refuse a
+    /// ledger booked under a global NONE or AVERAGE method (#2386).
     pub fn new(directives: &'a [Directive]) -> Self {
         let price_db = crate::price::PriceDatabase::from_directives(directives);
 

@@ -1454,16 +1454,14 @@ pub fn validation_options_from_options(
         .with_infer_tolerance_from_cost(options.infer_tolerance_from_cost)
         .with_tolerance_multiplier(options.inferred_tolerance_multiplier)
         .with_inferred_tolerance_default(options.inferred_tolerance_default.clone())
-        // File-level `option "booking_method"`. `build_validation_options`
-        // overrides this with the *effective* method (which also honors the
-        // API-level `LoadOptions` default); callers without that override — the
-        // LSP — get the file option, keeping editor diagnostics aligned with
-        // `check` for booking-sensitive balance checks.
+        // The effective method, by the one rule `process` uses, against the
+        // default `LoadOptions` (callers without a `LoadOptions` of their own,
+        // the LSP, load with it). `build_validation_options` overrides this
+        // with the effective method for the caller's `LoadOptions`. The LSP
+        // books with this value too, so it must not be a second copy of the
+        // rule that could drift from `check` (#2386).
         .with_default_booking_method(
-            options
-                .booking_method
-                .parse()
-                .unwrap_or(BookingMethod::Strict),
+            options.effective_booking_method(LoadOptions::default().booking_method),
         )
 }
 

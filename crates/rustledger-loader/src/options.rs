@@ -282,9 +282,10 @@ impl Options {
     /// (`LoadOptions::booking_method`).
     ///
     /// One rule for every consumer. Booking resolved it this way, but the
-    /// engines that realize balances afterwards (`report`, BQL, the LSP) were
-    /// built on the STRICT default and never saw the option, so a global
-    /// `NONE` ledger booked by `check` failed in `report balances` (#2386).
+    /// engines that realize balances afterwards never saw the option: `report`
+    /// and BQL replayed with `BookingEngine::new()`'s FIFO and the LSP booked
+    /// with STRICT, so a global `NONE` ledger that `check` accepted failed in
+    /// `report balances` (#2386).
     #[must_use]
     pub fn effective_booking_method(
         &self,

@@ -205,9 +205,9 @@ impl BookingEngine {
     /// declare no method, and each `open`'s declared method for its own.
     ///
     /// `default` must be the ledger's effective method (the loader's
-    /// `Ledger::booking_method`), not the engine's STRICT default: under a
-    /// global `option "booking_method" "NONE"`, a sale at a cost no lot has is
-    /// booked as an augmentation, and a STRICT replay reads it as a reduction
+    /// `Ledger::booking_method`), not [`Self::new`]'s FIFO: under a global
+    /// `option "booking_method" "NONE"`, a sale at a cost no lot has is booked
+    /// as an augmentation, and a FIFO or STRICT replay reads it as a reduction
     /// and fails (#2386). The one constructor for every such consumer, so
     /// they cannot drift apart again.
     #[must_use]

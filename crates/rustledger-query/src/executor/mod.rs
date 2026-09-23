@@ -263,10 +263,11 @@ impl<'a> Executor<'a> {
     /// `Ledger::booking_method`), the default for accounts that declare none.
     ///
     /// `BALANCES` and `account_balance` realize the booked ledger through a
-    /// booking engine, which needs the same default booking used. Left at
-    /// STRICT, a ledger booked under `option "booking_method" "NONE"` fails:
-    /// a sale at a cost no lot has was booked as an augmentation, and a STRICT
-    /// replay reads it as a reduction (#2386).
+    /// booking engine, which needs the same default booking used. Unset, it
+    /// is STRICT, the loader's own default, and a ledger booked under
+    /// `option "booking_method" "NONE"` fails: a sale at a cost no lot has was
+    /// booked as an augmentation, and a STRICT replay reads it as a reduction
+    /// (#2386).
     pub const fn set_booking_method(&mut self, booking_method: rustledger_core::BookingMethod) {
         self.booking_method = booking_method;
     }
@@ -710,7 +711,7 @@ impl<'a> Executor<'a> {
         // only reads `Open` directives, so the order is irrelevant and this is
         // the same registration, one pass earlier.
         // The default is the ledger's effective booking method, the one the
-        // loader booked with (#2386), not a hardcoded STRICT.
+        // loader booked with (#2386), not `BookingEngine::new()`'s FIFO.
         let mut engine = rustledger_booking::BookingEngine::for_ledger(
             self.booking_method,
             directive_iter.iter().map(|(_, d)| *d),

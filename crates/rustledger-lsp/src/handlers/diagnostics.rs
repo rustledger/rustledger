@@ -305,10 +305,9 @@ pub(crate) fn run_ledger_validation(
 
     // Run booking/interpolation on transactions before validation.
     // This fills in missing amounts (auto-balancing) so validation sees the complete picture.
-    // The engine books with the ledger's default method, as `rledger check` does.
     //
-    // The tolerance knobs come along too. Since #2034 interpolation quantizes
-    // a solved amount against the transaction's balance tolerance, so an
+    // The engine is built from the validator's own options. First the
+    // tolerance knobs: since #2034 interpolation quantizes a solved amount against the transaction's balance tolerance, so an
     // engine left on beancount's defaults would round a ledger that sets
     // `tolerance_multiplier` / `infer_tolerance_from_cost` /
     // `inferred_tolerance_default` differently from `rledger check` — the
@@ -316,11 +315,11 @@ pub(crate) fn run_ledger_validation(
     // These are the very options the validator below is handed, so booking
     // and validation cannot disagree about the tolerance either.
     //
-    // And the default booking method: the file's `option "booking_method"`,
+    // And the default booking method, the file's `option "booking_method"`,
     // which `build_validation_options_from_*` already resolved for the
-    // validator. A hardcoded STRICT booked a global-NONE ledger's sale at a
-    // new cost as a failed reduction, a diagnostic `rledger check` does not
-    // give (#2386).
+    // validator, so the editor books as `rledger check` does.
+    // A hardcoded STRICT booked a global-NONE ledger's sale at a new cost as a
+    // failed reduction, a diagnostic `check` does not give (#2386).
     let mut booking_engine = BookingEngine::with_method(validation_options.default_booking_method)
         .with_tolerance_policy(rustledger_booking::TolerancePolicy {
             multiplier: validation_options.tolerance_multiplier,

@@ -204,6 +204,9 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
     executor.set_account_types(crate::helpers::account_types_from_raw(
         &load.parse_result.options,
     ));
+    executor.set_booking_method(crate::helpers::booking_method_from_raw(
+        &load.parse_result.options,
+    ));
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result
@@ -847,6 +850,7 @@ fn query_with_filesystem(
     // architectural rule.
     // Grab the configured account types before `ledger` fields are moved.
     let account_types = ledger.options.to_account_types();
+    let booking_method = ledger.booking_method;
     let booked_directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
     let directives = merge_with_padding(&booked_directives);
 
@@ -866,6 +870,7 @@ fn query_with_filesystem(
     // Execute query
     let mut executor = Executor::new(&directives);
     executor.set_account_types(account_types);
+    executor.set_booking_method(booking_method);
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result

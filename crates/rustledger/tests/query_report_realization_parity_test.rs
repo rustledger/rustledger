@@ -294,6 +294,104 @@ fn surfaces(method: &str) -> (Vec<(String, String)>, Vec<(String, String)>) {
     )
 }
 
+/// [`two_lot_fixture`] with the method set ledger-wide by
+/// `option "booking_method"` instead of on the account's `open`.
+fn two_lot_fixture_global(method: &str) -> String {
+    format!(
+        "option \"booking_method\" \"{method}\"\n{}",
+        two_lot_fixture(method).replacen(&format!(" \"{method}\""), "", 1),
+    )
+}
+
+/// Every `(units, cost)` pair BQL and the report give for `source`.
+fn both_surfaces(source: &str, label: &str) -> [Vec<(String, String)>; 2] {
+    let bin = common::rledger_binary().expect("binary present");
+    let f = write_fixture(source);
+    let path = f.path().to_str().unwrap();
+    let q = run(&bin, &["query", path, "BALANCES"]);
+    let r = run(&bin, &["report", path, "balances", "--no-pager"]);
+    [
+        aapl_lots(&q).unwrap_or_else(|| panic!("BQL reported no AAPL for {label}:\n{q}")),
+        aapl_lots(&r).unwrap_or_else(|| panic!("report reported no AAPL for {label}:\n{r}")),
+    ]
+}
+
+/// #2386: a method set by `option "booking_method"` must realize exactly as
+/// the same method set on the account.
+///
+/// The loader booked with the effective method either way, but both surfaces
+/// then realized with a booking engine whose default was hardcoded. So a
+/// per-account method was replayed faithfully and a global one was not:
+/// global AVERAGE and global NONE failed with "No matching lot" on both
+/// surfaces, while their per-account twins answered. Comparing the two
+/// spellings of one ledger catches that for every method, including one
+/// added later, without having to know which methods the default happens to
+/// agree with.
+#[test]
+fn a_global_booking_method_realizes_like_a_per_account_one() {
+    let _ = require_rledger!();
+    let mut disagreed: Vec<String> = Vec::new();
+
+    // The STRICT pair is absent because this fixture's `{}` sale across two
+    // lots is ambiguous under it, and both surfaces refuse (pinned by
+    // `strict_ambiguity_makes_both_surfaces_refuse`).
+    for method in ["FIFO", "LIFO", "HIFO", "NONE", "AVERAGE"] {
+        let global = two_lot_fixture_global(method);
+        assert!(
+            global.contains("option \"booking_method\"")
+                && !global.contains(&format!("open Assets:Broker \"{method}\"")),
+            "fixture must set {method} ledger-wide only:\n{global}"
+        );
+        let [account_q, account_r] = both_surfaces(&two_lot_fixture(method), method);
+        let [global_q, global_r] = both_surfaces(&global, method);
+        if [&account_r, &global_q, &global_r]
+            .iter()
+            .any(|s| **s != account_q)
+        {
+            disagreed.push(format!(
+                "{method}: account query={account_q:?} report={account_r:?}; \
+                 global query={global_q:?} report={global_r:?}"
+            ));
+        }
+    }
+
+    assert!(
+        disagreed.is_empty(),
+        "a ledger-wide booking method realizes differently from the same \
+         method on the account — a realization engine is not defaulting to \
+         the ledger's effective method:\n{}",
+        disagreed.join("\n"),
+    );
+}
+
+/// #2386, the reported shape: under a global NONE, a sale at a cost no lot
+/// has is booked as a new negative lot (beancount 3.2.3 holds
+/// `5 AAPL {150.00}` and `-2 AAPL {90.00}`), and both surfaces must say so
+/// rather than replaying it as a STRICT reduction that finds no lot.
+#[test]
+fn global_none_realizes_a_sale_at_a_new_cost_as_its_own_lot() {
+    let _ = require_rledger!();
+    let source = r#"option "booking_method" "NONE"
+2024-01-01 open Assets:Broker
+2024-01-01 open Assets:Cash
+
+2024-01-05 * "buy"
+  Assets:Broker   5 AAPL {150.00 USD}
+  Assets:Cash  -750.00 USD
+
+2024-06-10 * "sell at a cost no lot has"
+  Assets:Broker   -2 AAPL {90.00 USD}
+  Assets:Cash    180.00 USD
+"#;
+    let expected = vec![
+        ("-2".to_owned(), "90.00".to_owned()),
+        ("5".to_owned(), "150.00".to_owned()),
+    ];
+    let [query, report] = both_surfaces(source, "global NONE");
+    assert_eq!(query, expected, "BQL BALANCES");
+    assert_eq!(report, expected, "report balances");
+}
+
 /// Every booking method must realize identically on both surfaces.
 ///
 /// FIFO, LIFO, HIFO, NONE and — since #1985 — AVERAGE. One test rather than

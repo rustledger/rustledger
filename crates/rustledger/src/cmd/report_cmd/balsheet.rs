@@ -10,6 +10,7 @@ use std::io::Write;
 /// Generate a balance sheet report (Assets, Liabilities, Equity).
 pub(super) fn report_balsheet<W: Write>(
     directives: &[Directive],
+    booking_method: rustledger_core::BookingMethod,
     account_types: &rustledger_core::AccountTypes,
     ctx: &DisplayContext,
     format: &OutputFormat,
@@ -26,7 +27,7 @@ pub(super) fn report_balsheet<W: Write>(
     // ledger with `option "name_assets" "Activa"` must still fill the
     // balance sheet), never by hardcoded root prefixes.
     use rustledger_core::AccountTypeKind as K;
-    for (account, inv) in super::account_balances(directives)? {
+    for (account, inv) in super::account_balances(directives, booking_method)? {
         let section = match account_types.kind(&account) {
             Some(K::Assets) => &mut assets,
             Some(K::Liabilities) => &mut liabilities,

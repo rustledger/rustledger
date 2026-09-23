@@ -353,6 +353,25 @@ pub fn validate_option_tuples(options: &[(String, String, rustledger_parser::Spa
     option_warnings_to_errors(&opts.warnings)
 }
 
+/// The effective booking method of a single-source ledger, read from its raw
+/// option tuples: `option "booking_method"` when set, else STRICT (the
+/// `LoadOptions` default every wasm entry point books with).
+///
+/// For entry points that keep the parse result but not the loader's
+/// `Ledger::booking_method` (`ParsedLedger`, including `fromCache`). Going
+/// through [`rustledger_loader::Options`] rather than matching the key here
+/// keeps the parse and last-wins rules the loader's, so a query realizes with
+/// the method the ledger was booked with (#2386).
+pub fn booking_method_from_raw(
+    options: &[(String, String, rustledger_parser::Span)],
+) -> rustledger_core::BookingMethod {
+    let mut opts = rustledger_loader::Options::new();
+    for (key, value, _span) in options {
+        opts.set(key, value);
+    }
+    opts.effective_booking_method(LoadOptions::default().booking_method)
+}
+
 pub fn extract_options(options: &[(String, String, rustledger_parser::Span)]) -> LedgerOptions {
     let mut ledger_options = LedgerOptions::default();
 

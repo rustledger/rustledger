@@ -53,6 +53,7 @@ pub(super) fn run_interactive(
     source_map: &SourceMap,
     display_context: &DisplayContext,
     account_types: &rustledger_core::AccountTypes,
+    booking_method: rustledger_core::BookingMethod,
     // The balance checker's difference per FAILING assertion, backing
     // `#balances.discrepancy` (#2180). Computed once for the session, since
     // the ledger does not change between prompts.
@@ -100,6 +101,7 @@ pub(super) fn run_interactive(
         args,
         display_context.clone(),
         account_types.clone(),
+        booking_method,
         balance_discrepancies.to_vec(),
     );
 

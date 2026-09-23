@@ -276,6 +276,29 @@ impl Default for Options {
 }
 
 impl Options {
+    /// The ledger-wide booking method: the file's `option "booking_method"`
+    /// when the file set it (an `include`d file cannot, see `set_scoped`) and
+    /// it parses, otherwise `default`, the embedder's own choice
+    /// (`LoadOptions::booking_method`).
+    ///
+    /// One rule for every consumer. Booking resolved it this way, but the
+    /// engines that realize balances afterwards (`report`, BQL, the LSP) were
+    /// built on the STRICT default and never saw the option, so a global
+    /// `NONE` ledger booked by `check` failed in `report balances` (#2386).
+    #[must_use]
+    pub fn effective_booking_method(
+        &self,
+        default: rustledger_core::BookingMethod,
+    ) -> rustledger_core::BookingMethod {
+        if self.set_options.contains("booking_method") {
+            self.booking_method.parse().unwrap_or(default)
+        } else {
+            default
+        }
+    }
+}
+
+impl Options {
     /// Create new options with defaults.
     #[must_use]
     pub fn new() -> Self {

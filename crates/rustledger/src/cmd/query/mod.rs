@@ -272,6 +272,7 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
             &source_map,
             &display_context,
             &ledger.options.to_account_types(),
+            ledger.booking_method,
             &balance_discrepancies,
             args,
         );
@@ -283,6 +284,7 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
         args,
         display_context,
         ledger.options.to_account_types(),
+        ledger.booking_method,
         balance_discrepancies,
     );
     if let Some(ref output_path) = settings.output_file {
@@ -304,6 +306,9 @@ struct ShellSettings {
     /// Config-aware account types from the loaded ledger (L5: `POSSIGN` /
     /// `ACCOUNT_SORTKEY` must honor `name_*` renames like beanquery).
     account_types: rustledger_core::AccountTypes,
+    /// The ledger's effective booking method, the default `BALANCES` and
+    /// `account_balance` realize with (#2386).
+    booking_method: rustledger_core::BookingMethod,
     /// The balance checker's computed difference per FAILING assertion,
     /// keyed by `(date, account, currency)`. Backs `#balances.discrepancy`.
     balance_discrepancies: Vec<(
@@ -320,6 +325,7 @@ impl ShellSettings {
         args: &Args,
         display_context: DisplayContext,
         account_types: rustledger_core::AccountTypes,
+        booking_method: rustledger_core::BookingMethod,
         balance_discrepancies: Vec<(
             rustledger_core::NaiveDate,
             String,
@@ -335,6 +341,7 @@ impl ShellSettings {
             output_file: args.output.clone(),
             display_context,
             account_types,
+            booking_method,
             balance_discrepancies,
         }
     }

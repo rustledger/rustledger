@@ -454,6 +454,9 @@ struct LoadedReport {
     /// uses — instead of raw `Decimal` `Display`, whose precision is an
     /// artifact of booking arithmetic rather than ledger convention (U4).
     display_context: rustledger_core::DisplayContext,
+    /// The ledger's effective booking method (`Ledger::booking_method`), the
+    /// default the balance reports realize with (#2386).
+    booking_method: rustledger_core::BookingMethod,
     /// The ledger's `operating_currency` option values, in declaration order.
     /// The returns report uses the first as the default reporting currency
     /// (overridable with `--currency`); other reports ignore it.
@@ -573,6 +576,7 @@ fn load(
     let display_context = ledger.display_context.clone();
     let operating_currency = ledger.options.operating_currency.clone();
     let capital_gains = ledger.capital_gains;
+    let booking_method = ledger.booking_method;
     let directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
 
     Ok(LoadedReport {
@@ -581,6 +585,7 @@ fn load(
         account_types,
         balance_view,
         display_context,
+        booking_method,
         operating_currency,
     })
 }
@@ -622,6 +627,7 @@ fn render<W: io::Write>(
         Report::Balances { account } => {
             balances::report_balances(
                 balance_input,
+                loaded.booking_method,
                 account.as_deref(),
                 &display_context,
                 format,
@@ -631,6 +637,7 @@ fn render<W: io::Write>(
         Report::Balsheet => {
             balsheet::report_balsheet(
                 balance_input,
+                loaded.booking_method,
                 &loaded.account_types,
                 &display_context,
                 format,
@@ -640,6 +647,7 @@ fn render<W: io::Write>(
         Report::Income => {
             income::report_income(
                 balance_input,
+                loaded.booking_method,
                 &loaded.account_types,
                 &display_context,
                 format,
@@ -853,6 +861,7 @@ fn render<W: io::Write>(
 /// report rather than render a clamped figure.
 pub(super) fn account_balances(
     directives: &[rustledger_core::Directive],
+    booking_method: rustledger_core::BookingMethod,
 ) -> anyhow::Result<std::collections::BTreeMap<rustledger_core::Account, rustledger_core::Inventory>>
 {
     use rustledger_core::Directive;
@@ -861,8 +870,11 @@ pub(super) fn account_balances(
     // booking method) — the same logic the loader's book phase uses, not a
     // re-implementation. The input directives are already booked (costs
     // resolved, interpolations applied), which is `apply`'s precondition.
-    let mut engine = rustledger_booking::BookingEngine::new();
-    engine.register_account_methods(directives.iter());
+    //
+    // With the ledger's own default method, not STRICT: under a global
+    // `option "booking_method" "NONE"` a STRICT replay reads a booked
+    // augmentation as a reduction and fails (#2386).
+    let mut engine = rustledger_booking::BookingEngine::for_ledger(booking_method, directives);
     for directive in directives {
         if let Directive::Transaction(txn) = directive {
             engine.apply(txn)?;

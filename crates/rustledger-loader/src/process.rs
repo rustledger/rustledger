@@ -182,6 +182,16 @@ pub struct Ledger {
     pub errors: Vec<LedgerError>,
     /// Display context for formatting numbers.
     pub display_context: DisplayContext,
+    /// The ledger-wide booking method booking used: the file's
+    /// `option "booking_method"` if set, else `LoadOptions::booking_method`
+    /// (see [`Options::effective_booking_method`]). Per-account methods from
+    /// `open` directives override it for their account.
+    ///
+    /// Anything that realizes balances from [`Self::directives`] must build
+    /// its engine with this default, or it replays a ledger booked one way
+    /// with another method (#2386); see
+    /// `rustledger_booking::BookingEngine::for_ledger`.
+    pub booking_method: rustledger_core::BookingMethod,
     /// Realized capital gains/losses, one per disposed tax lot, captured during
     /// the loader's single canonical booking pass (in booking order, with the
     /// ledger's own method, before `@@` normalization). Consumers — e.g. the
@@ -518,6 +528,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         source_map: raw.source_map,
         errors,
         display_context: raw.display_context,
+        booking_method: effective_booking_method,
         capital_gains,
         balance_discrepancies,
     })
@@ -533,15 +544,7 @@ fn resolve_effective_booking_method(
     raw: &LoadResult,
     options: &LoadOptions,
 ) -> rustledger_core::BookingMethod {
-    let file_set = raw.options.set_options.contains("booking_method");
-    if file_set {
-        raw.options
-            .booking_method
-            .parse()
-            .unwrap_or(options.booking_method)
-    } else {
-        options.booking_method
-    }
+    raw.options.effective_booking_method(options.booking_method)
 }
 
 // ============================================================================

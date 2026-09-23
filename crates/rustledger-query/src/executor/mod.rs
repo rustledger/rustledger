@@ -118,6 +118,9 @@ pub struct Executor<'a> {
     /// the standard five; hosts with a loaded `Ledger` set it via
     /// [`Executor::set_account_types`].
     account_types: rustledger_core::AccountTypes,
+    /// The ledger's effective booking method, the default `BALANCES` and
+    /// `account_balance` realize with; see [`Executor::set_booking_method`].
+    booking_method: rustledger_core::BookingMethod,
     /// Cache for compiled regex patterns (`RwLock` for thread-safe parallel execution).
     // `Arc<Regex>`, not `Regex`: the `~`/`!~` operators look the regex up per
     // row, and cloning a `Regex` gives the clone a fresh, empty lazy-DFA cache
@@ -238,6 +241,7 @@ impl<'a> Executor<'a> {
             target_currency: None,
             query_date: jiff::Zoned::now().date(),
             account_types: rustledger_core::AccountTypes::default(),
+            booking_method: rustledger_core::BookingMethod::Strict,
             regex_cache: RwLock::new(FxHashMap::default()),
             account_info,
             commodity_meta,
@@ -253,6 +257,18 @@ impl<'a> Executor<'a> {
     /// roots the way beanquery does.
     pub fn set_account_types(&mut self, account_types: rustledger_core::AccountTypes) {
         self.account_types = account_types;
+    }
+
+    /// Set the ledger's effective booking method (the loader's
+    /// `Ledger::booking_method`), the default for accounts that declare none.
+    ///
+    /// `BALANCES` and `account_balance` realize the booked ledger through a
+    /// booking engine, which needs the same default booking used. Left at
+    /// STRICT, a ledger booked under `option "booking_method" "NONE"` fails:
+    /// a sale at a cost no lot has was booked as an augmentation, and a STRICT
+    /// replay reads it as a reduction (#2386).
+    pub const fn set_booking_method(&mut self, booking_method: rustledger_core::BookingMethod) {
+        self.booking_method = booking_method;
     }
 
     /// Supply the balance checker's computed differences, one per FAILING
@@ -361,6 +377,7 @@ impl<'a> Executor<'a> {
             target_currency: None,
             query_date: jiff::Zoned::now().date(),
             account_types: rustledger_core::AccountTypes::default(),
+            booking_method: rustledger_core::BookingMethod::Strict,
             regex_cache: RwLock::new(FxHashMap::default()),
             account_info,
             commodity_meta,
@@ -676,7 +693,6 @@ impl<'a> Executor<'a> {
         // `replay_posting` is the same decision `report balances` realizes
         // through, which is the point: two realizations of one ledger is the
         // duplication registry's realization family, and this was the drift.
-        let mut engine = rustledger_booking::BookingEngine::new();
         // Single cumulative running balance across WHERE-filtered postings in
         // iteration order. This is the bean-query `balance` semantic: a snapshot
         // of "everything selected so far" rather than a per-account view.
@@ -693,7 +709,12 @@ impl<'a> Executor<'a> {
         // stream a second time — Copilot's catch. `register_account_methods`
         // only reads `Open` directives, so the order is irrelevant and this is
         // the same registration, one pass earlier.
-        engine.register_account_methods(directive_iter.iter().map(|(_, d)| *d));
+        // The default is the ledger's effective booking method, the one the
+        // loader booked with (#2386), not a hardcoded STRICT.
+        let mut engine = rustledger_booking::BookingEngine::for_ledger(
+            self.booking_method,
+            directive_iter.iter().map(|(_, d)| *d),
+        );
 
         // Resolve a posting to a Position that preserves cost basis when present.
         // The single cost-resolve lives in `Position::from_posting`, shared with

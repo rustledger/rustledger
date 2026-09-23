@@ -701,6 +701,9 @@ fn test_file_level_booking_method_applied() {
         booking_errors.is_empty(),
         "expected no BOOK errors under file-level FIFO, got: {booking_errors:?}"
     );
+    // And the ledger reports the method it booked with, so consumers that
+    // realize balances again default to it too (#2386).
+    assert_eq!(ledger.booking_method, rustledger_core::BookingMethod::Fifo);
 }
 
 #[test]
@@ -723,6 +726,16 @@ fn test_api_booking_method_used_when_file_does_not_set_option() {
         ledger.errors.is_empty(),
         "unexpected errors: {:?}",
         ledger.errors
+    );
+    assert_eq!(
+        ledger.booking_method,
+        rustledger_core::BookingMethod::Fifo,
+        "with no file option, the API-level method is the effective one (#2386)"
+    );
+    let default = load(&path, &LoadOptions::default()).expect("should load and process");
+    assert_eq!(
+        default.booking_method,
+        rustledger_core::BookingMethod::Strict
     );
 }
 

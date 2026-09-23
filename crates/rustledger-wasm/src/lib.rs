@@ -900,6 +900,7 @@ option "operating_currency" "EUR"
             directives: processed.directives.clone(),
             options: processed.options.clone(),
             account_type_names: Vec::new(),
+            booking_method: "STRICT".to_string(),
             errors: Vec::new(),
         };
 

@@ -201,6 +201,25 @@ impl BookingEngine {
         self.account_methods.insert(account, method);
     }
 
+    /// An engine for realizing a booked ledger: `default` for accounts that
+    /// declare no method, and each `open`'s declared method for its own.
+    ///
+    /// `default` must be the ledger's effective method (the loader's
+    /// `Ledger::booking_method`), not the engine's STRICT default: under a
+    /// global `option "booking_method" "NONE"`, a sale at a cost no lot has is
+    /// booked as an augmentation, and a STRICT replay reads it as a reduction
+    /// and fails (#2386). The one constructor for every such consumer, so
+    /// they cannot drift apart again.
+    #[must_use]
+    pub fn for_ledger<'a, I>(default: BookingMethod, directives: I) -> Self
+    where
+        I: IntoIterator<Item = &'a rustledger_core::Directive>,
+    {
+        let mut engine = Self::with_method(default);
+        engine.register_account_methods(directives);
+        engine
+    }
+
     /// Scan a sequence of directives and register any per-account booking
     /// methods found on `open` directives. Open directives whose booking
     /// method is absent or fails to parse are silently ignored (they fall

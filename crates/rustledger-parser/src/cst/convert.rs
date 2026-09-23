@@ -2136,34 +2136,46 @@ impl TokenView for &rowan::GreenTokenData {
 /// without one test failing. That is the drift this module's `TokenView` doc
 /// says it exists to prevent, in the one place it had not been applied.
 ///
-/// The rule: the flag is decided by the first non-whitespace, non-opener token
-/// after an opener (`*` means merge, anything else means not). A `*` elsewhere
-/// is the multiplication operator, as in `{500 * 2 USD}`, and a pass that
-/// re-arms on later openers flips the flag on malformed input where it must not.
+/// The rule: a `*` is the merge marker when it begins a cost COMPONENT, that
+/// is, when the previous non-whitespace token is the opener or a comma. The
+/// cost is a comma-separated list of components (number, currency, date,
+/// label, `*`), and beancount's grammar accepts `*` as any of them, so
+/// `{100.00 USD, *}` and `{2020-01-01, *}` are merges exactly as `{*}` is
+/// (#2329). A `*` after a number or a closing parenthesis is the
+/// multiplication operator, as in `{500 * 2 USD}`.
+///
+/// This used to be decided by the first token after the opener alone, so a
+/// trailing `*` was silently read as not-merge: the spec booked as a plain
+/// per-unit filter, a different operation, with no diagnostic.
+///
+/// Tokens before the first opener are ignored, as are later openers on
+/// malformed input: only the first opener starts the component list.
 #[derive(Default)]
 pub(in crate::cst) struct MergeFlag {
     past_opener: bool,
-    decided: bool,
+    /// Whether the previous non-whitespace token began a component: the
+    /// opener or a comma.
+    at_component_start: bool,
     merge: bool,
 }
 
 impl MergeFlag {
-    /// Feed the next token kind, in source order. Ignores everything once the
-    /// flag is decided.
+    /// Feed the next token kind, in source order.
     pub(in crate::cst) const fn feed(&mut self, kind: crate::SyntaxKind) {
         use crate::SyntaxKind as K;
-        if self.decided {
-            return;
-        }
         match kind {
-            K::L_BRACE | K::L_DOUBLE_BRACE | K::L_BRACE_HASH => self.past_opener = true,
             K::WHITESPACE => {}
-            K::STAR if self.past_opener => {
-                self.merge = true;
-                self.decided = true;
+            K::L_BRACE | K::L_DOUBLE_BRACE | K::L_BRACE_HASH if !self.past_opener => {
+                self.past_opener = true;
+                self.at_component_start = true;
             }
-            _ if self.past_opener => self.decided = true,
-            _ => {}
+            _ if !self.past_opener => {}
+            K::STAR if self.at_component_start => {
+                self.merge = true;
+                self.at_component_start = false;
+            }
+            K::COMMA => self.at_component_start = true,
+            _ => self.at_component_start = false,
         }
     }
 
@@ -5515,10 +5527,11 @@ mod tests {
         );
     }
 
-    /// The merge flag is decided by the first non-whitespace, non-opener token
-    /// after an opener. Each row pins one arm of that machine.
+    /// A `*` is the merge marker when it begins a component: the previous
+    /// non-whitespace token is the opener or a comma. Each row pins one arm of
+    /// that machine.
     #[test]
-    fn cost_spec_merge_flag_is_decided_by_the_first_token_after_an_opener() {
+    fn cost_spec_merge_flag_is_set_by_a_star_that_begins_a_component() {
         for (spec, expected, why) in [
             ("{*}", true, "bare star directly after the opener"),
             (
@@ -5529,8 +5542,21 @@ mod tests {
             ("{{*}}", true, "`{{` is an opener too"),
             (
                 "{2 USD, *}",
+                true,
+                "a star after a comma begins a component: a merge, as in beancount (#2329)",
+            ),
+            ("{2020-01-01, *}", true, "after a date component"),
+            ("{*, 2 USD}", true, "leading, before other components"),
+            ("{{2 USD, *}}", true, "inside `{{`"),
+            (
+                "{500 * 2 USD, *}",
+                true,
+                "multiplication, then a merge component",
+            ),
+            (
+                "{2 USD * 3, 4}",
                 false,
-                "the number decided it first; a later star cannot re-arm",
+                "a star after a number is multiplication",
             ),
             (
                 "{500 * 2 USD}",
@@ -5607,6 +5633,38 @@ mod tests {
             flag.is_merge(),
             "a token before the opener must not consume the decision"
         );
+
+        // A comma before the opener must not arm a component start either, or
+        // the star that follows it would read as a merge component.
+        let mut flag = MergeFlag::default();
+        for kind in [K::COMMA, K::STAR, K::L_BRACE, K::NUMBER, K::R_BRACE] {
+            flag.feed(kind);
+        }
+        assert!(
+            !flag.is_merge(),
+            "a comma before the opener must not make the next star a merge"
+        );
+    }
+
+    /// Only the FIRST opener starts the component list. A later brace on
+    /// malformed input is not an opener, so a star after it is not a merge
+    /// component (#2329 moved the rule from "first token" to "starts a
+    /// component", and this keeps it from re-arming mid-spec).
+    #[test]
+    fn merge_flag_ignores_a_later_opener() {
+        use crate::SyntaxKind as K;
+        let mut flag = MergeFlag::default();
+        for kind in [
+            K::L_BRACE,
+            K::NUMBER,
+            K::WHITESPACE,
+            K::CURRENCY,
+            K::L_BRACE,
+            K::STAR,
+        ] {
+            flag.feed(kind);
+        }
+        assert!(!flag.is_merge(), "`{{2 USD {{*` is not a merge");
     }
 
     /// Every diagnostic span in this module is built as `offset + bom_offset`,

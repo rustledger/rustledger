@@ -497,12 +497,17 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     cacheable, so replaying its v34 blob skips the parse that now
 ///     complains.
 ///
+/// v36: a `*` that begins a cost component anywhere in the list is the merge
+///     marker, so `{100.00 USD, *}` parses with `merge: true` (#2329). It used
+///     to parse as a plain per-unit spec, so a v35 blob of such a file would
+///     keep serving a plain spec and book it as a lot filter.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 35;
+pub const CACHE_VERSION: u32 = 36;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1258,7 +1263,7 @@ mod tests {
         // the byte arrays below still hold.
         // v35 (#2193) is the same shape for balance tolerances: new errors,
         // same archived `CostNumber` encoding.
-        const FIXTURE_VERSION: u32 = 35;
+        const FIXTURE_VERSION: u32 = 36;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1374,7 +1379,7 @@ mod tests {
         // is unchanged.
         // v35 (#2193) likewise adds errors on a balance tolerance and touches
         // no `MetaValue`; the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 35;
+        const FIXTURE_VERSION: u32 = 36;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

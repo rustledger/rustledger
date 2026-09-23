@@ -150,7 +150,15 @@ use crate::types::{Error, LedgerOptions};
 /// to fail with "No matching lot", and a wrong total fails where it used to
 /// book. `ParsedLedger` and `Ledger` both archive booked directives and their
 /// errors, so a v22 blob would serve the old answer for all three.
-pub const CACHE_VERSION: u32 = 23;
+/// v24: loader v36, the trailing `*` merge marker (#2329), which changes
+/// parsed directives. The same bump also covers booking changes merged since
+/// v23 without one, each of which changes the BOOKED directives and errors
+/// this cache archives: same-transaction shorts (#2368, #2379), zero-netted
+/// lots and undated pools (#2378, #2385), a cost naming only its own side
+/// (#2384, #2391), AVERAGE pooling one side (#2393, #2395), and cost-less
+/// units no longer matched by a cost spec (#2396, #2397). A v23 blob can
+/// serve the pre-fix answer for any of them.
+pub const CACHE_VERSION: u32 = 24;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -182,7 +190,7 @@ pub const CACHE_VERSION: u32 = 23;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 35;
+const LOADER_CACHE_VERSION_PIN: u32 = 36;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

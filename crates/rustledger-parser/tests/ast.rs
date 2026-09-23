@@ -490,8 +490,9 @@ fn amount_sign_typed_discriminators() {
 }
 
 #[test]
-fn cost_spec_is_merge_only_for_leading_star() {
-    // `{*}` — leading STAR is a merge marker.
+fn cost_spec_is_merge_for_a_star_component() {
+    // `{*}` — a STAR that begins a component is a merge marker, leading or
+    // after a comma (#2329); see `MergeFlag`.
     let f = parse(
         "2024-01-15 * \"x\"\n\
          \x20\x20Assets:Inv  10 HOOL {*}\n",
@@ -501,6 +502,17 @@ fn cost_spec_is_merge_only_for_leading_star() {
     };
     let cost = t.postings().next().unwrap().cost_spec().unwrap();
     assert!(cost.is_merge(), "leading STAR should be merge marker");
+
+    // A trailing component, through the red-tree accessor too.
+    let f = parse(
+        "2024-01-15 * \"x\"\n\
+         \x20\x20Assets:Inv  10 HOOL {100.00 USD, *}\n",
+    );
+    let Directive::Transaction(t) = single_directive(&f) else {
+        unreachable!()
+    };
+    let cost = t.postings().next().unwrap().cost_spec().unwrap();
+    assert!(cost.is_merge(), "a STAR after a comma is a merge component");
 }
 
 #[test]

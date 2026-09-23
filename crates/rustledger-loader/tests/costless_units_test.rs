@@ -1,0 +1,145 @@
+//! A reduction written with a cost spec, even `{}`, sells only lots held at
+//! cost; units held without a cost stay as they are (#2396).
+//!
+//! Holding 10 X at 100 and 10 X that arrived with no cost, selling 4 with
+//! `{}` sells 4 of the 100 lot, a gain of 40 at 110, under every method.
+//! When `{}` also matched cost-less positions, AVERAGE averaged them in as if
+//! they cost nothing (the sale at 50, a gain of 240, and the cost-less units
+//! left carrying a cost of 50), and FIFO and STRICT refused a ledger beancount
+//! accepts. Beancount's reduction matching skips positions not held at cost.
+
+use rustledger_core::{Decimal, Directive, Position};
+use rustledger_loader::{LoadOptions, load};
+use std::io::Write;
+
+fn ledger_with_sale(method: &str, spec: &str) -> String {
+    format!(
+        r#"2020-01-01 open Assets:Stock X "{method}"
+2020-01-01 open Assets:Cash
+2020-01-01 open Equity:Transfer
+2020-01-01 open Income:PnL
+
+2020-01-02 * "buy 10 at 100"
+  Assets:Stock  10 X {{100 USD}}
+  Assets:Cash  -1000 USD
+
+2020-01-03 * "10 units arrive with no cost stated"
+  Assets:Stock   10 X
+  Equity:Transfer
+
+2020-01-04 * "sell 4 at 110"
+  Assets:Stock  -4 X {spec} @ 110 USD
+  Assets:Cash   440 USD
+  Income:PnL
+"#
+    )
+}
+
+#[test]
+fn a_cost_spec_sale_leaves_cost_less_units_alone_under_every_method() {
+    // `{*}` merges the pool it sells from, so it must leave the cost-less
+    // units out of the merge the same way.
+    let cases = [
+        ("AVERAGE", "{}"),
+        ("FIFO", "{}"),
+        ("LIFO", "{}"),
+        ("HIFO", "{}"),
+        ("STRICT", "{}"),
+        ("STRICT", "{*}"),
+    ];
+    for (method, spec) in cases {
+        let mut f = tempfile::Builder::new()
+            .prefix("costless-")
+            .suffix(".beancount")
+            .tempfile()
+            .expect("create tempfile");
+        f.write_all(ledger_with_sale(method, spec).as_bytes())
+            .expect("write fixture");
+        let options = LoadOptions {
+            collect_capital_gains: true,
+            ..LoadOptions::default()
+        };
+        let ledger = load(f.path(), &options).expect("the ledger loads");
+        assert!(
+            ledger.errors.is_empty(),
+            "{method} {spec}: got {:?}",
+            ledger.errors
+        );
+
+        let gains = &ledger.capital_gains;
+        assert_eq!(gains.len(), 1, "{method} {spec}: one disposal: {gains:?}");
+        assert_eq!(
+            gains[0].cost_basis.number,
+            Decimal::from(400),
+            "{method} {spec}: 4 sold from the lot at 100",
+        );
+
+        // What the account holds afterwards: the booked postings' units by
+        // cost number. (By number, not full lot identity: an AVERAGE sale is
+        // booked at the undated pool, so it would not net against the dated
+        // buy as a lot.)
+        let mut by_cost: std::collections::BTreeMap<Option<Decimal>, Decimal> =
+            std::collections::BTreeMap::new();
+        for d in &ledger.directives {
+            if let Directive::Transaction(txn) = &d.value {
+                for p in txn
+                    .postings
+                    .iter()
+                    .filter(|p| p.account.as_str() == "Assets:Stock")
+                {
+                    let position = Position::from_posting(
+                        p.amount().expect("booked"),
+                        p.cost.as_deref(),
+                        txn.date,
+                    );
+                    *by_cost.entry(position.cost.map(|c| c.number)).or_default() +=
+                        position.units.number;
+                }
+            }
+        }
+        let held: Vec<(Decimal, Option<Decimal>)> = by_cost
+            .into_iter()
+            .filter(|(_, units)| !units.is_zero())
+            .map(|(cost, units)| (units, cost))
+            .collect();
+        assert_eq!(
+            held,
+            vec![
+                (Decimal::from(10), None),
+                (Decimal::from(6), Some(Decimal::from(100))),
+            ],
+            "{method} {spec}: the cost-less units are untouched",
+        );
+    }
+}
+
+/// Selling more than the lots held at cost is refused, not filled from the
+/// cost-less units: those have no basis, so no gain could be computed for
+/// them (#2396). Beancount refuses it too (`Not enough lots to reduce`).
+///
+/// Under AVERAGE this used to load: the 15 sold from a pool of 20 at 50, a
+/// basis invented from the cost-less units. FIFO, LIFO and STRICT refused it
+/// already, but for the wrong reason (interpolation, or an ambiguous match).
+#[test]
+fn a_sale_larger_than_the_cost_held_lots_is_refused() {
+    for method in ["AVERAGE", "FIFO", "LIFO", "STRICT"] {
+        let source = ledger_with_sale(method, "{}")
+            .replace("-4 X {} @ 110 USD", "-15 X {} @ 110 USD")
+            .replace("Assets:Cash   440 USD", "Assets:Cash   1650 USD");
+        assert!(source.contains("-15 X {}"), "the fixture edit must apply");
+        let mut f = tempfile::Builder::new()
+            .prefix("costless-over-")
+            .suffix(".beancount")
+            .tempfile()
+            .expect("create tempfile");
+        f.write_all(source.as_bytes()).expect("write fixture");
+        let ledger = load(f.path(), &LoadOptions::default()).expect("the ledger loads");
+        let messages: Vec<String> = ledger.errors.iter().map(|e| format!("{e:?}")).collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("InsufficientUnits") || m.contains("Not enough units")),
+            "{method}: selling 15 of 10 cost-held units must be refused as insufficient; got {messages:?}",
+        );
+    }
+}

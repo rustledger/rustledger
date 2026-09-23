@@ -1005,11 +1005,12 @@ pub struct Inventory {
     /// EVERY lot per units-currency, in the order FIFO consumes them: lot date
     /// ascending, ties broken by slot ascending.
     ///
-    /// Cost-LESS lots are in here too, and deliberately. An empty cost spec
-    /// matches one (`matches_cost_spec`: `(None, true) => true`), so ordered
-    /// selection can drain one — an index holding only cost-bearing lots chose
-    /// a different lot than the scan it replaced, which is what the
-    /// scan-equivalence test caught. `cost_index` is the map keyed on cost;
+    /// Cost-LESS lots are in here too, and deliberately. NONE's drain
+    /// (`LotScope::Any`) walks this index and can take one; an index holding
+    /// only cost-bearing lots chose a different lot than the scan it replaced,
+    /// which is what the scan-equivalence test caught. Every booking method
+    /// skips them in the walk: a cost spec, even `{}`, matches only lots held
+    /// at cost (#2396). `cost_index` is the map keyed on cost;
     /// this one is keyed on nothing but the commodity.
     ///
     /// `cost_index` cannot serve an under-specified spec — a bare `{}` names
@@ -2070,10 +2071,9 @@ impl Inventory {
         // This is O(1) and keeps all lots separate, matching Python beancount behavior.
         // Lot aggregation for display purposes is handled separately in query output.
         let key = cost_key(&position);
-        // Every position, not only cost-bearing ones: an empty cost spec
-        // matches a cost-less lot (`matches_cost_spec`: `(None, true)`), so
-        // ordered selection can drain one, and an index that omitted them
-        // picked a different lot than the scan.
+        // Every position, not only cost-bearing ones: NONE's drain
+        // (`LotScope::Any`) can take a cost-less lot, and an index that
+        // omitted them picked a different lot than the scan.
         let ordering = position.units.currency.clone();
         let slot = self.positions.push_slot(position);
         if let Some(key) = key
@@ -2189,8 +2189,9 @@ impl Inventory {
             // A cost-less lot counts as zero rather than as `None`. `None`
             // sorts BEFORE `Some`, which would put cost-less lots at the front
             // of a highest-cost-first walk — the opposite of where the
-            // `map_or(Decimal::ZERO, ..)` this replaces put them. An empty cost
-            // spec matches a cost-less position, so HIFO can reach one.
+            // `map_or(Decimal::ZERO, ..)` this replaces put them. HIFO no
+            // longer reaches one (a cost spec matches only lots held at cost,
+            // #2396), so this only fixes where they sort.
             LotOrder::CostDescending => {
                 OrderKey::CostDescending(-cost.map_or(Decimal::ZERO, |c| c.number))
             }
@@ -5769,14 +5770,11 @@ mod tests {
             Some(0)
         );
 
-        // An empty spec matches a cost-less lot (`matches_cost_spec`:
-        // `(None, true) => true`), so STRICT selects it and drains it.
-        inv.reduce(
-            &Amount::new(dec!(-50), "USD"),
-            Some(&CostSpec::default()),
-            BookingMethod::Strict,
-        )
-        .expect("drains the cost-less lot");
+        // NONE drains whatever the account holds, cost-less lots included.
+        // (This used STRICT `{}`, which matched a cost-less lot until #2396
+        // made a cost spec, even an empty one, match only lots held at cost.)
+        inv.reduce(&Amount::new(dec!(-50), "USD"), None, BookingMethod::None)
+            .expect("drains the cost-less lot");
 
         assert!(inv.positions().next().is_none(), "the lot is gone");
         assert_eq!(

@@ -543,8 +543,16 @@ fn replay_every_multi_currency_behavior() {
             let currency = params["currency"].as_str().expect("currency");
             let units = dec(&params["units"]);
             match action {
+                // The model's units carry no cost, but FIFO sells only lots
+                // held at cost (#2396), so each lot gets a nominal one. The
+                // invariant is about units per currency, which a cost does
+                // not change; identical lots merge (#2118), as the model's
+                // counts do.
                 "Add" => inv
-                    .add(Position::simple(Amount::new(units, currency)))
+                    .add(Position::with_cost(
+                        Amount::new(units, currency),
+                        Cost::new(Decimal::ONE, "COST"),
+                    ))
                     .expect("fixture fits in Decimal"),
                 "Reduce" => {
                     inv.reduce(&Amount::new(-units, currency), None, BookingMethod::Fifo)

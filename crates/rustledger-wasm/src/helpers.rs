@@ -365,11 +365,29 @@ pub fn validate_option_tuples(options: &[(String, String, rustledger_parser::Spa
 pub fn booking_method_from_raw(
     options: &[(String, String, rustledger_parser::Span)],
 ) -> rustledger_core::BookingMethod {
+    options_from_raw(options).effective_booking_method(LoadOptions::default().booking_method)
+}
+
+/// The `account_previous_*` accounts a single-source ledger's raw option
+/// tuples name, which `FROM ... OPEN ON` summarizes into (#2401). Read through
+/// the loader's [`rustledger_loader::Options`], like [`booking_method_from_raw`].
+pub fn summary_accounts_from_raw(
+    options: &[(String, String, rustledger_parser::Span)],
+) -> rustledger_query::executor::SummaryAccounts {
+    rustledger_query::executor::SummaryAccounts::from_options(&options_from_raw(options))
+}
+
+/// The loader's [`rustledger_loader::Options`] for raw option tuples, applied
+/// in order through [`rustledger_loader::Options::set`] so its parse and
+/// last-wins rules hold.
+fn options_from_raw(
+    options: &[(String, String, rustledger_parser::Span)],
+) -> rustledger_loader::Options {
     let mut opts = rustledger_loader::Options::new();
     for (key, value, _span) in options {
         opts.set(key, value);
     }
-    opts.effective_booking_method(LoadOptions::default().booking_method)
+    opts
 }
 
 pub fn extract_options(options: &[(String, String, rustledger_parser::Span)]) -> LedgerOptions {

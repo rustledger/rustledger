@@ -259,6 +259,16 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
         })
         .collect();
 
+    // One settings value for both modes, built from the loaded ledger.
+    let settings = ShellSettings::from_args(
+        args,
+        display_context,
+        ledger.options.to_account_types(),
+        ledger.booking_method,
+        rustledger_query::executor::SummaryAccounts::from_options(&ledger.options),
+        balance_discrepancies,
+    );
+
     let query_str = if !args.query.is_empty() {
         args.query.join(" ")
     } else if let Some(ref query_file) = args.query_file {
@@ -266,27 +276,11 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
             .with_context(|| format!("failed to read query file {}", query_file.display()))?
     } else {
         // Interactive mode
-        return interactive::run_interactive(
-            file,
-            &directives,
-            &source_map,
-            &display_context,
-            &ledger.options.to_account_types(),
-            ledger.booking_method,
-            &balance_discrepancies,
-            args,
-        );
+        return interactive::run_interactive(file, &directives, &source_map, settings);
     };
 
     // Batch query: no pager (matching Python bean-query behavior).
     // Pager is only used in interactive REPL mode.
-    let settings = ShellSettings::from_args(
-        args,
-        display_context,
-        ledger.options.to_account_types(),
-        ledger.booking_method,
-        balance_discrepancies,
-    );
     if let Some(ref output_path) = settings.output_file {
         let mut file = fs::File::create(output_path)
             .with_context(|| format!("failed to create output file {}", output_path.display()))?;
@@ -309,6 +303,9 @@ struct ShellSettings {
     /// The ledger's effective booking method, the default `BALANCES` and
     /// `account_balance` realize with (#2386).
     booking_method: rustledger_core::BookingMethod,
+    /// The ledger's `account_previous_*` accounts, which `FROM ... OPEN ON`
+    /// summarizes into (#2401).
+    summary_accounts: rustledger_query::executor::SummaryAccounts,
     /// The balance checker's computed difference per FAILING assertion,
     /// keyed by `(date, account, currency)`. Backs `#balances.discrepancy`.
     balance_discrepancies: Vec<(
@@ -326,6 +323,7 @@ impl ShellSettings {
         display_context: DisplayContext,
         account_types: rustledger_core::AccountTypes,
         booking_method: rustledger_core::BookingMethod,
+        summary_accounts: rustledger_query::executor::SummaryAccounts,
         balance_discrepancies: Vec<(
             rustledger_core::NaiveDate,
             String,
@@ -342,6 +340,7 @@ impl ShellSettings {
             display_context,
             account_types,
             booking_method,
+            summary_accounts,
             balance_discrepancies,
         }
     }

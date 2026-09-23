@@ -1,9 +1,9 @@
 //! Interactive REPL mode for BQL queries.
 
 use super::output::execute_query;
-use super::{Args, OutputFormat, SYSTEM_TABLES, ShellSettings};
+use super::{OutputFormat, SYSTEM_TABLES, ShellSettings};
 use anyhow::Result;
-use rustledger_core::{Directive, DisplayContext, Spanned};
+use rustledger_core::{Directive, Spanned};
 use rustledger_loader::SourceMap;
 use rustledger_query::parse as parse_query;
 use rustyline::error::ReadlineError;
@@ -51,20 +51,10 @@ pub(super) fn run_interactive(
     file: &PathBuf,
     directives: &[Spanned<Directive>],
     source_map: &SourceMap,
-    display_context: &DisplayContext,
-    account_types: &rustledger_core::AccountTypes,
-    booking_method: rustledger_core::BookingMethod,
-    // The balance checker's difference per FAILING assertion, backing
-    // `#balances.discrepancy` (#2180). Computed once for the session, since
-    // the ledger does not change between prompts.
-    balance_discrepancies: &[(
-        rustledger_core::NaiveDate,
-        String,
-        String,
-        rustledger_core::Decimal,
-        rustledger_core::Amount,
-    )],
-    args: &Args,
+    // Built by the caller from the loaded ledger: display context, account
+    // types, booking method, summary accounts and the balance checker's
+    // discrepancies, all fixed for the session.
+    mut settings: ShellSettings,
 ) -> Result<()> {
     let mut rl: Editor<(), DefaultHistory> = DefaultEditor::new()?;
 
@@ -96,14 +86,6 @@ pub(super) fn run_interactive(
         "Ready with {num_directives} directives ({num_postings} postings in {num_transactions} transactions)"
     );
     println!();
-
-    let mut settings = ShellSettings::from_args(
-        args,
-        display_context.clone(),
-        account_types.clone(),
-        booking_method,
-        balance_discrepancies.to_vec(),
-    );
 
     loop {
         let readline = rl.readline("beanquery> ");

@@ -34,6 +34,7 @@ pub(super) fn execute_query<W: Write>(
     let mut executor = Executor::new_with_sources(directives, source_map);
     executor.set_account_types(settings.account_types.clone());
     executor.set_booking_method(settings.booking_method);
+    executor.set_summary_accounts(settings.summary_accounts.clone());
     executor.set_balance_discrepancies(settings.balance_discrepancies.iter().cloned());
     let result = executor
         .execute(&query)

@@ -3,12 +3,14 @@
 //! Executes parsed BQL queries against a set of Beancount directives.
 
 mod functions;
+mod summarize;
 mod types;
 
+pub use summarize::SummaryAccounts;
 use types::AccountInfo;
 pub use types::{
-    Interval, IntervalUnit, PostingContext, QueryResult, Row, SourceLocation, Table, Value,
-    WindowContext,
+    Interval, IntervalUnit, PostingContext, QueryResult, Row, SourceLocation, Table,
+    TransactionRef, Value, WindowContext,
 };
 
 use parking_lot::RwLock;
@@ -121,6 +123,9 @@ pub struct Executor<'a> {
     /// The ledger's effective booking method, the default `BALANCES` and
     /// `account_balance` realize with; see [`Executor::set_booking_method`].
     booking_method: rustledger_core::BookingMethod,
+    /// The equity accounts `FROM ... OPEN ON` summarizes into; see
+    /// [`Executor::set_summary_accounts`].
+    summary_accounts: SummaryAccounts,
     /// Cache for compiled regex patterns (`RwLock` for thread-safe parallel execution).
     // `Arc<Regex>`, not `Regex`: the `~`/`!~` operators look the regex up per
     // row, and cloning a `Regex` gives the clone a fresh, empty lazy-DFA cache
@@ -249,6 +254,7 @@ impl<'a> Executor<'a> {
             query_date: jiff::Zoned::now().date(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
+            summary_accounts: SummaryAccounts::default(),
             regex_cache: RwLock::new(FxHashMap::default()),
             account_info,
             commodity_meta,
@@ -277,6 +283,13 @@ impl<'a> Executor<'a> {
     /// (#2386).
     pub const fn set_booking_method(&mut self, booking_method: rustledger_core::BookingMethod) {
         self.booking_method = booking_method;
+    }
+
+    /// Set the equity accounts `FROM ... OPEN ON` summarizes into, from the
+    /// ledger's `account_previous_*` options (see [`SummaryAccounts`]).
+    /// Defaults to beancount's names.
+    pub fn set_summary_accounts(&mut self, summary_accounts: SummaryAccounts) {
+        self.summary_accounts = summary_accounts;
     }
 
     /// Supply the balance checker's computed differences, one per FAILING
@@ -386,6 +399,7 @@ impl<'a> Executor<'a> {
             query_date: jiff::Zoned::now().date(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
+            summary_accounts: SummaryAccounts::default(),
             regex_cache: RwLock::new(FxHashMap::default()),
             account_info,
             commodity_meta,
@@ -734,201 +748,212 @@ impl<'a> Executor<'a> {
                 .map(|units| Position::from_posting(units, posting.cost.as_deref(), txn_date))
         };
 
-        for (directive_index, directive) in directive_iter {
-            if let Directive::Transaction(txn) = directive {
-                // Check FROM clause (transaction-level filter)
-                if let Some(from) = from {
-                    // Apply date filters
-                    if let Some(open_date) = from.open_on
-                        && txn.date < open_date
-                    {
-                        // Update per-account balances but don't include in results
-                        // and don't touch the cumulative balance — these postings
-                        // didn't make it past the FROM filter.
-                        if needs_account_balance {
-                            engine
-                                .replay_transaction(txn)
-                                .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-                        }
-                        continue;
-                    }
-                    // `close on D` is exclusive (matches bean-query): the books
-                    // are closed AT D, so a transaction stamped exactly on D is
-                    // not part of the closing period. Combined with `open on D`
-                    // being inclusive, the resulting range is `[open, close)`.
-                    if let Some(close_date) = from.close_on
-                        && txn.date >= close_date
-                    {
-                        continue;
-                    }
-                    // Apply filter expression
-                    if let Some(filter) = &from.filter
-                        && !self.evaluate_from_filter(filter, txn)?
-                    {
-                        continue;
-                    }
-                }
-
-                // Replayed in the order `book` read the transaction, not one
-                // posting at a time against live state: a transaction that
-                // sells past a lot it touches reads differently the second way,
-                // and `BALANCES` then failed on ledgers `check` accepts
-                // (#2380). A posting's `account_balance` is the state the walk
-                // reaches over the postings up to and including it.
-                let mut replay = needs_account_balance.then(|| engine.begin_replay(txn));
-                let snapshot = |replay: &Option<rustledger_booking::TransactionReplay<'_, '_>>,
-                                account: &rustledger_core::Account| {
-                    replay.as_ref().map_or(Ok(None), |r| {
-                        r.account_snapshot(account)
-                            .map_err(|e| QueryError::Evaluation(e.to_string()))
-                    })
-                };
-                for (i, posting) in txn.postings.iter().enumerate() {
-                    // Update the account-level running balance regardless of
-                    // whether this posting passes WHERE — `account_balance`
-                    // should always reflect the underlying ledger truth.
-                    // Skip the update entirely when the query doesn't read
-                    // account_balance (saves the `.clone()` + map probe per
-                    // posting; `Inventory::add` allocates internally so the
-                    // saving compounds across a long run).
-                    // Only `needs_balance` reads this now. Before #1985 the
-                    // per-account accumulation used it too, so it was
-                    // unconditional; `replay_posting` resolves the position
-                    // itself, so computing it here for a query that reads
-                    // neither column was a `Position::from_posting` per
-                    // posting for nothing. Copilot's catch.
-                    let resolved = needs_balance
-                        .then(|| resolve_position(posting, txn.date))
-                        .flatten();
-                    if let Some(replay) = replay.as_mut() {
-                        replay
-                            .advance()
-                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-                    }
-
-                    // Callers that only want the per-account totals (BALANCES, via
-                    // `build_balances_with_filter`) pass `collect_contexts = false`:
-                    // `account_balances` is already updated above, so skip building
-                    // and pushing a `PostingContext` (and its per-posting Inventory
-                    // clone) for every posting — a large-ledger CPU/memory win that
-                    // avoids materializing a stream BALANCES would just discard.
-                    if !collect_contexts {
-                        continue;
-                    }
-
-                    // Build the context with both balance views. The cumulative
-                    // snapshot is the running total *before* this posting; we
-                    // update it after WHERE passes so postings rejected by WHERE
-                    // don't pollute the cumulative. Cloning the cumulative
-                    // `Inventory` is the hot allocation — it grows monotonically
-                    // across the iteration, so a 22k-posting WHERE-filtered
-                    // query was producing ~3 clones × thousands of positions per
-                    // posting (issue #1080 — multi-GB WASM heap growth).
-                    //
-                    // `balance` and `account_balance` have asymmetric pre/post
-                    // semantics so they gate differently:
-                    //
-                    // * `balance` is refreshed post-WHERE below — its pre-WHERE
-                    //   slot only matters when the WHERE clause itself reads
-                    //   the column. For `SELECT balance FROM #postings` (no
-                    //   WHERE-time read), we skip the pre-WHERE clone entirely
-                    //   and let the post-WHERE refresh fill it. Saves one
-                    //   clone-per-posting versus the gating logic
-                    //   in the first cut of this fix (Copilot review on PR #1085).
-                    //
-                    // * `account_balance` is NOT refreshed post-WHERE —
-                    //   account_balances is updated *before* this block, so
-                    //   the value here is already the post-update running
-                    //   total. We populate it eagerly when `needs_account_balance`
-                    //   so SELECT / ORDER BY / HAVING / etc. can read it.
-                    let mut ctx = PostingContext {
-                        transaction: txn,
-                        posting_index: i,
-                        balance: if where_reads_balance {
-                            Some(cumulative_balance.clone())
-                        } else {
-                            None
-                        },
-                        // Snapshotting the account's inventory used to copy
-                        // every lot, for EVERY posting the FROM clause kept,
-                        // including the ones WHERE was about to reject. That is
-                        // O(rows x lots) — 0.11s / 0.39s / 3.31s for 1k / 2k /
-                        // 6k transactions, quadratic (#2086).
-                        //
-                        // Same treatment `balance` got in #1085: the pre-WHERE
-                        // copy is only observable when the WHERE clause itself
-                        // reads the column. Otherwise it is filled in below,
-                        // for surviving rows only. Nothing mutates the engine
-                        // between here and there, so the deferred value is the
-                        // same one.
-                        account_balance: if needs_account_balance && where_reads_account_balance {
-                            snapshot(&replay, &posting.account)?
-                        } else {
-                            None
-                        },
-                        directive_index: Some(directive_index),
-                    };
-
-                    // Check WHERE clause (posting-level filter)
-                    if let Some(where_expr) = where_clause
-                        && !self.evaluate_predicate(where_expr, &ctx)?
-                    {
-                        continue;
-                    }
-
-                    // WHERE passed: contribute this posting to the cumulative
-                    // balance and refresh the snapshot in ctx so SELECT sees
-                    // the post-update value. Both steps are no-ops when the
-                    // query doesn't read `balance`.
-                    if needs_balance {
-                        if let Some(pos) = resolved {
-                            cumulative_balance
-                                .add(pos)
-                                .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-                        }
-                        ctx.balance = Some(cumulative_balance.clone());
-                    }
-                    // The deferred half of the gate above: this row survived, so
-                    // it is one of the few that will actually be read.
-                    if output_reads_account_balance {
-                        if ctx.account_balance.is_none() {
-                            ctx.account_balance = snapshot(&replay, &posting.account)?;
-                        }
-                        // Kept for output, so detach a large one: a compact,
-                        // indexless copy of its positions rather than the
-                        // engine's own `Arc`. Holding the engine's made its next
-                        // change to this account deep-copy the whole booking
-                        // inventory, tombstones and lot index included, once
-                        // per row: about 430 bytes per lot, 28 GB on a
-                        // 20k-transaction FIFO ledger (#2383). Dropping the
-                        // `Arc` also returns the engine's copy to unique
-                        // ownership. A small inventory has nothing to shed and
-                        // measured slightly larger detached, so it keeps the
-                        // shared `Arc` as before.
-                        if ctx
-                            .account_balance
-                            .as_ref()
-                            .is_some_and(|inv| inv.len() >= DETACH_ACCOUNT_BALANCE_AT)
+        // `FROM ... OPEN ON`: beanquery replaces every transaction before the
+        // date with opening-balance summaries dated the day before (beancount's
+        // `summarize.open`), so the period's rows, its running `balance` and
+        // each `account_balance` start from what the ledger held (#2401). The
+        // summaries go through exactly the same filters and replay as any
+        // other transaction; the transactions they replace yield no rows.
+        let open_on = from.and_then(|f| f.open_on);
+        let summaries = match open_on {
+            Some(open) => self.open_summaries(open)?,
+            None => Vec::new(),
+        };
+        let stream =
+            summaries
+                .into_iter()
+                .map(|txn| (None, TransactionRef::Synthesized(txn)))
+                .chain(directive_iter.into_iter().filter_map(
+                    |(index, directive)| match directive {
+                        Directive::Transaction(txn)
+                            if open_on.is_none_or(|open| txn.date >= open) =>
                         {
-                            ctx.account_balance = ctx
-                                .account_balance
-                                .take()
-                                .map(|inv| std::sync::Arc::new(inv.detached_snapshot()));
+                            Some((Some(index), TransactionRef::Ledger(txn)))
                         }
-                    } else {
-                        // The filter has had its look. Dropping the snapshot
-                        // here returns the engine's `Arc` to unique ownership,
-                        // so the next posting on this account mutates in place
-                        // instead of copying every lot (#2086).
-                        ctx.account_balance = None;
-                    }
-                    postings.push(ctx);
+                        _ => None,
+                    },
+                ));
+        for (directive_index, txn) in stream {
+            // Check FROM clause (transaction-level filter). `OPEN ON` is not
+            // checked here: the stream below already starts at the open date,
+            // with the ledger before it summarized.
+            if let Some(from) = from {
+                // `close on D` is exclusive (matches bean-query): the books
+                // are closed AT D, so a transaction stamped exactly on D is
+                // not part of the closing period. Combined with `open on D`
+                // being inclusive, the resulting range is `[open, close)`.
+                if let Some(close_date) = from.close_on
+                    && txn.date >= close_date
+                {
+                    continue;
                 }
-                if let Some(replay) = replay {
+                // Apply filter expression
+                if let Some(filter) = &from.filter
+                    && !self.evaluate_from_filter(filter, &txn)?
+                {
+                    continue;
+                }
+            }
+
+            // Replayed in the order `book` read the transaction, not one
+            // posting at a time against live state: a transaction that
+            // sells past a lot it touches reads differently the second way,
+            // and `BALANCES` then failed on ledgers `check` accepts
+            // (#2380). A posting's `account_balance` is the state the walk
+            // reaches over the postings up to and including it.
+            let mut replay = needs_account_balance.then(|| engine.begin_replay(&txn));
+            let snapshot = |replay: &Option<rustledger_booking::TransactionReplay<'_, '_>>,
+                            account: &rustledger_core::Account| {
+                replay.as_ref().map_or(Ok(None), |r| {
+                    r.account_snapshot(account)
+                        .map_err(|e| QueryError::Evaluation(e.to_string()))
+                })
+            };
+            for (i, posting) in txn.postings.iter().enumerate() {
+                // Update the account-level running balance regardless of
+                // whether this posting passes WHERE — `account_balance`
+                // should always reflect the underlying ledger truth.
+                // Skip the update entirely when the query doesn't read
+                // account_balance (saves the `.clone()` + map probe per
+                // posting; `Inventory::add` allocates internally so the
+                // saving compounds across a long run).
+                // Only `needs_balance` reads this now. Before #1985 the
+                // per-account accumulation used it too, so it was
+                // unconditional; `replay_posting` resolves the position
+                // itself, so computing it here for a query that reads
+                // neither column was a `Position::from_posting` per
+                // posting for nothing. Copilot's catch.
+                let resolved = needs_balance
+                    .then(|| resolve_position(posting, txn.date))
+                    .flatten();
+                if let Some(replay) = replay.as_mut() {
                     replay
-                        .finish()
+                        .advance()
                         .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                 }
+
+                // Callers that only want the per-account totals (BALANCES, via
+                // `build_balances_with_filter`) pass `collect_contexts = false`:
+                // `account_balances` is already updated above, so skip building
+                // and pushing a `PostingContext` (and its per-posting Inventory
+                // clone) for every posting — a large-ledger CPU/memory win that
+                // avoids materializing a stream BALANCES would just discard.
+                if !collect_contexts {
+                    continue;
+                }
+
+                // Build the context with both balance views. The cumulative
+                // snapshot is the running total *before* this posting; we
+                // update it after WHERE passes so postings rejected by WHERE
+                // don't pollute the cumulative. Cloning the cumulative
+                // `Inventory` is the hot allocation — it grows monotonically
+                // across the iteration, so a 22k-posting WHERE-filtered
+                // query was producing ~3 clones × thousands of positions per
+                // posting (issue #1080 — multi-GB WASM heap growth).
+                //
+                // `balance` and `account_balance` have asymmetric pre/post
+                // semantics so they gate differently:
+                //
+                // * `balance` is refreshed post-WHERE below — its pre-WHERE
+                //   slot only matters when the WHERE clause itself reads
+                //   the column. For `SELECT balance FROM #postings` (no
+                //   WHERE-time read), we skip the pre-WHERE clone entirely
+                //   and let the post-WHERE refresh fill it. Saves one
+                //   clone-per-posting versus the gating logic
+                //   in the first cut of this fix (Copilot review on PR #1085).
+                //
+                // * `account_balance` is NOT refreshed post-WHERE —
+                //   account_balances is updated *before* this block, so
+                //   the value here is already the post-update running
+                //   total. We populate it eagerly when `needs_account_balance`
+                //   so SELECT / ORDER BY / HAVING / etc. can read it.
+                let mut ctx = PostingContext {
+                    transaction: txn.clone(),
+                    posting_index: i,
+                    balance: if where_reads_balance {
+                        Some(cumulative_balance.clone())
+                    } else {
+                        None
+                    },
+                    // Snapshotting the account's inventory used to copy
+                    // every lot, for EVERY posting the FROM clause kept,
+                    // including the ones WHERE was about to reject. That is
+                    // O(rows x lots) — 0.11s / 0.39s / 3.31s for 1k / 2k /
+                    // 6k transactions, quadratic (#2086).
+                    //
+                    // Same treatment `balance` got in #1085: the pre-WHERE
+                    // copy is only observable when the WHERE clause itself
+                    // reads the column. Otherwise it is filled in below,
+                    // for surviving rows only. Nothing mutates the engine
+                    // between here and there, so the deferred value is the
+                    // same one.
+                    account_balance: if needs_account_balance && where_reads_account_balance {
+                        snapshot(&replay, &posting.account)?
+                    } else {
+                        None
+                    },
+                    directive_index,
+                };
+
+                // Check WHERE clause (posting-level filter)
+                if let Some(where_expr) = where_clause
+                    && !self.evaluate_predicate(where_expr, &ctx)?
+                {
+                    continue;
+                }
+
+                // WHERE passed: contribute this posting to the cumulative
+                // balance and refresh the snapshot in ctx so SELECT sees
+                // the post-update value. Both steps are no-ops when the
+                // query doesn't read `balance`.
+                if needs_balance {
+                    if let Some(pos) = resolved {
+                        cumulative_balance
+                            .add(pos)
+                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                    }
+                    ctx.balance = Some(cumulative_balance.clone());
+                }
+                // The deferred half of the gate above: this row survived, so
+                // it is one of the few that will actually be read.
+                if output_reads_account_balance {
+                    if ctx.account_balance.is_none() {
+                        ctx.account_balance = snapshot(&replay, &posting.account)?;
+                    }
+                    // Kept for output, so detach a large one: a compact,
+                    // indexless copy of its positions rather than the
+                    // engine's own `Arc`. Holding the engine's made its next
+                    // change to this account deep-copy the whole booking
+                    // inventory, tombstones and lot index included, once
+                    // per row: about 430 bytes per lot, 28 GB on a
+                    // 20k-transaction FIFO ledger (#2383). Dropping the
+                    // `Arc` also returns the engine's copy to unique
+                    // ownership. A small inventory has nothing to shed and
+                    // measured slightly larger detached, so it keeps the
+                    // shared `Arc` as before.
+                    if ctx
+                        .account_balance
+                        .as_ref()
+                        .is_some_and(|inv| inv.len() >= DETACH_ACCOUNT_BALANCE_AT)
+                    {
+                        ctx.account_balance = ctx
+                            .account_balance
+                            .take()
+                            .map(|inv| std::sync::Arc::new(inv.detached_snapshot()));
+                    }
+                } else {
+                    // The filter has had its look. Dropping the snapshot
+                    // here returns the engine's `Arc` to unique ownership,
+                    // so the next posting on this account mutates in place
+                    // instead of copying every lot (#2086).
+                    ctx.account_balance = None;
+                }
+                postings.push(ctx);
+            }
+            if let Some(replay) = replay {
+                replay
+                    .finish()
+                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
             }
         }
 
@@ -1011,7 +1036,7 @@ impl<'a> Executor<'a> {
                     };
                 };
                 Ok(Value::Boolean(
-                    self.entry_has_account(ctx.transaction, pattern)?,
+                    self.entry_has_account(&ctx.transaction, pattern)?,
                 ))
             }
             // Aggregates evaluate to Null per row; real aggregation happens in

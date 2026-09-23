@@ -28,6 +28,7 @@ fn execute_query(
     query_str: &str,
     account_types: rustledger_core::AccountTypes,
     booking_method: rustledger_core::BookingMethod,
+    summary_accounts: rustledger_query::executor::SummaryAccounts,
 ) -> Result<JsValue, JsError> {
     use crate::convert::value_to_cell;
     use rustledger_query::{Executor, parse as parse_query};
@@ -58,6 +59,7 @@ fn execute_query(
     // so callers supply core AccountTypes from their construction source.
     executor.set_account_types(account_types);
     executor.set_booking_method(booking_method);
+    executor.set_summary_accounts(summary_accounts);
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result
@@ -313,6 +315,7 @@ impl ParsedLedger {
             query_str,
             crate::helpers::account_types_from_raw(&self.parse_result.options),
             crate::helpers::booking_method_from_raw(&self.parse_result.options),
+            crate::helpers::summary_accounts_from_raw(&self.parse_result.options),
         )
     }
 
@@ -535,6 +538,9 @@ pub struct Ledger {
     /// BQL realizes with (#2386). Persisted in the cache payload, like
     /// `account_types`.
     booking_method: rustledger_core::BookingMethod,
+    /// The `account_previous_*` accounts `FROM ... OPEN ON` summarizes into
+    /// (#2401). Persisted in the cache payload, like `account_types`.
+    summary_accounts: rustledger_query::executor::SummaryAccounts,
     /// Processing errors (load, booking, validation).
     errors: Vec<Error>,
     /// Editor cache for cross-file completions.
@@ -582,6 +588,7 @@ impl Ledger {
                     options: LedgerOptions::default(),
                     account_types: rustledger_core::AccountTypes::default(),
                     booking_method: LoadOptions::default().booking_method,
+                    summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
                     errors: vec![Error::new(format!("Load error: {e}"))],
                     editor_cache: editor::EditorCache::from_directives(&[]),
                 });
@@ -593,6 +600,8 @@ impl Ledger {
             operating_currencies: load_result.options.operating_currency.clone(),
         };
         let account_types = load_result.options.to_account_types();
+        let summary_accounts =
+            rustledger_query::executor::SummaryAccounts::from_options(&load_result.options);
 
         let load_options = LoadOptions {
             validate: true,
@@ -617,6 +626,7 @@ impl Ledger {
                     options,
                     account_types,
                     booking_method,
+                    summary_accounts,
                     errors,
                     editor_cache,
                 })
@@ -626,6 +636,7 @@ impl Ledger {
                 options,
                 account_types,
                 booking_method,
+                summary_accounts,
                 errors: vec![Error::new(format!("Processing error: {e}"))],
                 editor_cache: editor::EditorCache::from_directives(&[]),
             }),
@@ -676,6 +687,7 @@ impl Ledger {
             query_str,
             self.account_types.clone(),
             self.booking_method,
+            self.summary_accounts.clone(),
         )
     }
 
@@ -734,6 +746,11 @@ impl Ledger {
                 self.account_types.expenses.clone(),
             ],
             booking_method: self.booking_method.to_string(),
+            summary_account_names: vec![
+                self.summary_accounts.previous_balances.clone(),
+                self.summary_accounts.previous_earnings.clone(),
+                self.summary_accounts.previous_conversions.clone(),
+            ],
             errors: self.errors.clone(),
         };
         cache::serialize_ledger(&payload).map_err(|e| JsError::new(&e))
@@ -774,12 +791,25 @@ impl Ledger {
             .booking_method
             .parse()
             .unwrap_or(rustledger_core::BookingMethod::Strict);
+        let summary_accounts = match <[String; 3]>::try_from(payload.summary_account_names) {
+            Ok([previous_balances, previous_earnings, previous_conversions]) => {
+                rustledger_query::executor::SummaryAccounts {
+                    previous_balances,
+                    previous_earnings,
+                    previous_conversions,
+                }
+            }
+            // Wrong arity can only come from a hand-built blob, as for
+            // `account_types`; fall back to beancount's names.
+            Err(_) => rustledger_query::executor::SummaryAccounts::default(),
+        };
 
         Ok(Self {
             directives: payload.directives,
             options: payload.options,
             account_types,
             booking_method,
+            summary_accounts,
             errors: payload.errors,
             editor_cache,
         })
@@ -868,6 +898,7 @@ mod option_warning_severity_tests {
             options: LedgerOptions::default(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
+            summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7009")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
         };
@@ -886,6 +917,7 @@ mod option_warning_severity_tests {
             options: LedgerOptions::default(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
+            summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7001")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
         };
@@ -920,6 +952,7 @@ mod option_warning_severity_tests {
                 options: LedgerOptions::default(),
                 account_types: rustledger_core::AccountTypes::default(),
                 booking_method: rustledger_core::BookingMethod::Strict,
+                summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
                 errors,
                 editor_cache: editor::EditorCache::from_directives(&[]),
             };

@@ -68,7 +68,7 @@ fn run_both(
         .map(|lit_args| {
             let txn = scratch_txn();
             let ctx = PostingContext {
-                transaction: &txn,
+                transaction: (&txn).into(),
                 posting_index: 0,
                 balance: None,
                 account_balance: None,

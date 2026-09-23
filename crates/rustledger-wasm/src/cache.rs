@@ -161,7 +161,10 @@ use crate::types::{Error, LedgerOptions};
 /// v25: `LedgerPayload` gained `booking_method` (#2386), an archived LAYOUT
 /// change. Loader v36, unchanged: the loader already archives `set_options`,
 /// which is what its `Ledger::booking_method` is derived from.
-pub const CACHE_VERSION: u32 = 25;
+/// v26: `LedgerPayload` gained `summary_account_names` (#2401), another
+/// archived LAYOUT change. Loader v36, unchanged: the loader already archives
+/// the `account_previous_*` options they come from.
+pub const CACHE_VERSION: u32 = 26;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -237,6 +240,10 @@ pub struct LedgerPayload {
     /// under `option "booking_method" "NONE"` would replay as STRICT and
     /// refuse `BALANCES` (#2386). A string for the same reason as above.
     pub booking_method: String,
+    /// `[previous_balances, previous_earnings, previous_conversions]`, the
+    /// accounts `FROM ... OPEN ON` summarizes into (#2401). Plain strings for
+    /// the same reason as `account_type_names`.
+    pub summary_account_names: Vec<String>,
     pub errors: Vec<Error>,
 }
 
@@ -543,6 +550,11 @@ mod tests {
                 "Expenses".to_string(),
             ],
             booking_method: "NONE".to_string(),
+            summary_account_names: vec![
+                "Eigenkapital:Anfang".to_string(),
+                "Eigenkapital:Vorjahr".to_string(),
+                "Eigenkapital:Umrechnung".to_string(),
+            ],
             errors: vec![Error::new("a warning")],
         };
         let bytes = serialize_ledger(&payload).expect("serialize");
@@ -552,6 +564,14 @@ mod tests {
         assert_eq!(restored.options.operating_currencies, ["USD"]);
         assert_eq!(restored.options.title.as_deref(), Some("Test"));
         assert_eq!(restored.booking_method, "NONE");
+        assert_eq!(
+            restored.summary_account_names,
+            [
+                "Eigenkapital:Anfang",
+                "Eigenkapital:Vorjahr",
+                "Eigenkapital:Umrechnung"
+            ]
+        );
         assert_eq!(restored.errors.len(), 1);
     }
 
@@ -594,6 +614,7 @@ option "operating_currency" "USD"
             options: LedgerOptions::default(),
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
+            summary_account_names: Vec::new(),
             errors: Vec::new(),
         })
         .unwrap();
@@ -617,6 +638,7 @@ option "operating_currency" "USD"
             options: LedgerOptions::default(),
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
+            summary_account_names: Vec::new(),
             errors: Vec::new(),
         })
         .unwrap();
@@ -658,6 +680,7 @@ option "operating_currency" "USD"
             options: LedgerOptions::default(),
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
+            summary_account_names: Vec::new(),
             errors: Vec::new(),
         })
         .unwrap();
